@@ -298,15 +298,24 @@ fn root_only_projection_root_kind_matches_full_fold() {
 
 /// ARM-COVERAGE PARITY: the root-only projection ([`super::project_root_summary`])
 /// yields the IDENTICAL `root_kind` the full fold ([`fold_node`](super::super::fold_node)
-/// under [`RaisedFactsAlg`](super::RaisedFactsAlg)) does for the carrier / operator
-/// / leaf arms the earlier collapsed-intersection test does not enumerate —
-/// Reference, Conditional, both Mapped sub-cases, ConstructorType, Array, Alias,
-/// MergedDecl, RawFallback, Opaque, ImportType — on top of the object case.
+/// under [`RaisedFactsAlg`](super::RaisedFactsAlg)) does, enumerating EVERY
+/// `SemanticNodeData` arm with a non-trivial root mapping the earlier
+/// collapsed-intersection test does not — Reference, Conditional, both Mapped
+/// sub-cases, ConstructorType, Array, Alias, MergedDecl, RawFallback, Opaque (both
+/// the `_` and the `RecursiveRef` sub-arm), ImportType, Tuple, TemplateLiteral,
+/// Literal, Infer, TypeParam, SyntheticBinding, the three `Ref` carriers (DeclRef /
+/// InstantiationRef / BareRef), and VueMacroElements — on top of the object case.
+///
+/// SC-FIRST: arm-PRESENCE is COMPILER-sealed — `project_root_summary`'s match is
+/// wildcard-free, so the compiler already forces every `SemanticNodeData` arm to be
+/// handled; these cases verify per-arm root PARITY against the full fold, not mere
+/// presence.
 ///
 /// DISCRIMINATING: each parity `assert_eq!` compares the root-only verdict to the
 /// full-fold authority, so a mis-wired arm (a wrong `root_kind`, a Mapped sub-case
-/// that flips `value_is_semantic_miss`, a constant-collapse) FAILS; the trailing
-/// concrete anchors fail if the projection lost a distinct class.
+/// that flips `value_is_semantic_miss`, a `Ref`-carrier arm reverted to a plain
+/// leaf, a constant-collapse) FAILS; the trailing concrete anchors fail if the
+/// projection lost a distinct class.
 #[test]
 fn root_only_projection_matches_full_fold_across_all_arms() {
     use std::sync::Arc as StdArc;
@@ -316,8 +325,8 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
     use super::super::RaisedRootKind;
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::semantic_query::{
-        HashValue, MapperKey, MapperKind, OptionalityMod, PrimitiveKind, QueryError, ReadonlyMod,
-        SemanticNodeData, SurfaceView,
+        DeclIdentity, HashValue, MapperKey, MapperKind, NodeScopeId, OptionalityMod, PrimitiveKind,
+        QueryError, ReadonlyMod, SemanticNodeData, SurfaceView, SyntheticBindingId, TupleElement,
     };
     use crate::VerterHost;
 
@@ -380,6 +389,85 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
         contributors: StdArc::from(vec![open_obj].into_boxed_slice()),
     });
 
+    // Leaf / carrier arms the earlier collapsed-intersection test does not
+    // enumerate. Each raises identically under both the full fold and the
+    // root-only projection.
+    let literal = graph.intern_node(SemanticNodeData::Literal(
+        verter_type_expr::LiteralValue::String("lit".to_string()),
+    ));
+    let infer = graph.intern_node(SemanticNodeData::Infer {
+        name: StdArc::from("I"),
+    });
+    let template = graph.intern_node(SemanticNodeData::TemplateLiteral {
+        quasis: StdArc::from(vec![StdArc::from("q")].into_boxed_slice()),
+        expressions: StdArc::from(Vec::new().into_boxed_slice()),
+    });
+    let type_param = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: DeclIdentity {
+            canonical_id: StdArc::from("/p.ts"),
+            whole_hash: HashValue::default(),
+            decl_name: StdArc::from("Owner"),
+        },
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: StdArc::from("T"),
+    });
+    let synthetic = graph.intern_node(SemanticNodeData::SyntheticBinding {
+        id: SyntheticBindingId {
+            scope_canonical_id: StdArc::from("/p.ts"),
+            surface_kind: verter_type_expr::SyntheticCarrierSurfaceKind::SlotBinding,
+            slot_name: None,
+            binding_name: StdArc::from("b"),
+        },
+        value_node: 0,
+    });
+    // The three `Ref` carriers — each raises to a `TypeExpr::Ref`
+    // (`RaisedRootKind::Reference`).
+    let decl_ref = graph.intern_node(SemanticNodeData::DeclRef {
+        identity: DeclIdentity {
+            canonical_id: StdArc::from("/p.ts"),
+            whole_hash: HashValue::default(),
+            decl_name: StdArc::from("Foo"),
+        },
+    });
+    let instantiation_ref = graph.intern_node(SemanticNodeData::InstantiationRef {
+        base: DeclIdentity {
+            canonical_id: StdArc::from("/p.ts"),
+            whole_hash: HashValue::default(),
+            decl_name: StdArc::from("Gen"),
+        },
+        args: StdArc::from(vec![string].into_boxed_slice()),
+    });
+    let bare_ref = graph.intern_node(SemanticNodeData::new_bare_ref(
+        StdArc::from("Bare"),
+        NodeScopeId::Global,
+        StdArc::from(Vec::new().into_boxed_slice()),
+    ));
+    let tuple = graph.intern_node(SemanticNodeData::Tuple {
+        elements: StdArc::from(
+            vec![TupleElement {
+                label: None,
+                value: string,
+                optional: false,
+                rest: false,
+            }]
+            .into_boxed_slice(),
+        ),
+        readonly: false,
+    });
+    // VueMacroElements folds to the `VueMacroElementsPlaceholder` sentinel
+    // (root `Other`); the arm ignores the payload, so an empty
+    // `ResolvedElements::default()` exercises it.
+    let vue = graph.intern_node(SemanticNodeData::VueMacroElements(StdArc::new(
+        verter_compiler::utils::oxc::script::type_surface::ResolvedElements::default(),
+    )));
+    // The `Opaque(RecursiveRef)` sub-arm (distinct from the `_` Opaque conduit) —
+    // raises to a materialized/expanded leaf (root `Other`).
+    let recursive_ref = graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
+        name: StdArc::from("Rec"),
+    }));
+
     let mapped_with = |value_expr| {
         graph.intern_node(SemanticNodeData::Mapped {
             source: dummy,
@@ -432,6 +520,17 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
         ("mapped_miss", mapped_miss),
         ("mapped_nonmiss", mapped_nonmiss),
         ("open_obj", open_obj),
+        ("literal", literal),
+        ("infer", infer),
+        ("template", template),
+        ("type_param", type_param),
+        ("synthetic", synthetic),
+        ("decl_ref", decl_ref),
+        ("instantiation_ref", instantiation_ref),
+        ("bare_ref", bare_ref),
+        ("tuple", tuple),
+        ("vue", vue),
+        ("recursive_ref", recursive_ref),
     ] {
         assert_parity(label, node);
     }
@@ -460,6 +559,26 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
     assert_eq!(root_kind(merged), Some(RaisedRootKind::Object));
     assert_eq!(root_kind(array), Some(RaisedRootKind::Other));
     assert_eq!(root_kind(import), Some(RaisedRootKind::Other));
+    // The three `Ref` carriers classify `Reference` — a mis-wire reverting the
+    // reference arm to a plain leaf flips these to `Other` (and FAILS the
+    // `assert_parity` above, which compares against the full fold).
+    assert_eq!(root_kind(decl_ref), Some(RaisedRootKind::Reference));
+    assert_eq!(
+        root_kind(instantiation_ref),
+        Some(RaisedRootKind::Reference)
+    );
+    assert_eq!(root_kind(bare_ref), Some(RaisedRootKind::Reference));
+    // Leaf / non-root-mirror arms classify `Other` (still asserted against the
+    // full fold via `assert_parity` above; these pin the concrete class so a
+    // production mis-wire that flips any of them is caught).
+    assert_eq!(root_kind(literal), Some(RaisedRootKind::Other));
+    assert_eq!(root_kind(infer), Some(RaisedRootKind::Other));
+    assert_eq!(root_kind(template), Some(RaisedRootKind::Other));
+    assert_eq!(root_kind(type_param), Some(RaisedRootKind::Other));
+    assert_eq!(root_kind(synthetic), Some(RaisedRootKind::Other));
+    assert_eq!(root_kind(tuple), Some(RaisedRootKind::Other));
+    assert_eq!(root_kind(vue), Some(RaisedRootKind::Other));
+    assert_eq!(root_kind(recursive_ref), Some(RaisedRootKind::Other));
 }
 
 /// MALFORMED-CHILD `None` PARITY: a node with a DANGLING required child (a child
@@ -471,10 +590,14 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
 /// sides — pinning that root-only must NOT deep-walk member values.
 ///
 /// DISCRIMINATING: a mutation that drops the required-edge `?` from a root-only arm
-/// (e.g. KeyOf/Array/IndexedAccess/Conditional/Mapped/ConstructorType) makes that
-/// arm return `Some` while `fold_node` still returns `None`, failing the
+/// makes that arm return `Some` while `fold_node` still returns `None`, failing the
 /// `root_only.is_none()` assertion; a mutation that ADDED a member deep-walk would
-/// flip the object-member case to `None` and fail its `Some` assertion.
+/// flip the object-member case to `None` and fail its `Some` assertion. The corpus
+/// covers EVERY required edge ONE-AT-A-TIME so dropping any single `?` is caught:
+/// `KeyOf.base`, `Array.element`, `IndexedAccess.object` + a `TypeNode` index, EACH
+/// of the four `Conditional` operands (`check` / `extends` / `true_branch_ref` /
+/// `false_branch_ref`), `Mapped`'s source / value / OPTIONAL `name_remap`, and the
+/// `ConstructorType` signature.
 #[test]
 fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold() {
     use std::sync::Arc as StdArc;
@@ -545,6 +668,36 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
             }),
         ),
         (
+            "conditional.extends",
+            graph.intern_node(SemanticNodeData::Conditional {
+                check: present,
+                extends: dangling,
+                true_branch_ref: present,
+                false_branch_ref: present,
+                distributive: false,
+            }),
+        ),
+        (
+            "conditional.true_branch_ref",
+            graph.intern_node(SemanticNodeData::Conditional {
+                check: present,
+                extends: present,
+                true_branch_ref: dangling,
+                false_branch_ref: present,
+                distributive: false,
+            }),
+        ),
+        (
+            "conditional.false_branch_ref",
+            graph.intern_node(SemanticNodeData::Conditional {
+                check: present,
+                extends: present,
+                true_branch_ref: present,
+                false_branch_ref: dangling,
+                distributive: false,
+            }),
+        ),
+        (
             "mapped.value",
             graph.intern_node(SemanticNodeData::Mapped {
                 source: present,
@@ -556,6 +709,26 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
             graph.intern_node(SemanticNodeData::Mapped {
                 source: present,
                 mapper: mapper_with(dangling, present),
+            }),
+        ),
+        (
+            // The OPTIONAL name-remap edge: present source + value, dangling
+            // `name_remap`. `fold_node`'s Mapped arm `?`-propagates the folded
+            // name-remap, and `project_root_summary` mirrors it with
+            // `if let Some(remap) = mapper.name_remap { project_root_summary(..)? }`,
+            // so a dangling remap aborts BOTH to None.
+            "mapped.name_remap",
+            graph.intern_node(SemanticNodeData::Mapped {
+                source: present,
+                mapper: MapperKey {
+                    parameter_node: present,
+                    key_space: present,
+                    value_expr: present,
+                    optionality: OptionalityMod::Keep,
+                    readonly: ReadonlyMod::Keep,
+                    name_remap: Some(dangling),
+                    kind: MapperKind::Identity,
+                },
             }),
         ),
         (

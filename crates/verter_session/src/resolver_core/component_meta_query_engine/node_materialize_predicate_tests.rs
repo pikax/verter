@@ -642,86 +642,174 @@ fn admitted_carrier_mint_detector_discriminates_forge_from_no_admission_path() {
     );
 }
 
-/// Extract each `fn admit_<…>(…) -> … {` signature in `src` — the text from
-/// `fn admit_` up to the body-opening `{`. Used to assert the gated mint helpers
-/// take ONLY a node-bound witness and no free `SemanticNodeId` parameter. Scoped
-/// to the helper SIGNATURES (NOT the whole module, which legitimately names
-/// `SemanticNodeId` in the carrier struct + its `new` / `node` accessor).
-fn admit_fn_signatures(src: &str) -> Vec<String> {
-    let mut sigs = Vec::new();
-    let mut rest = src;
-    while let Some(pos) = rest.find("fn admit_") {
-        let after = &rest[pos..];
-        let brace = after.find('{').unwrap_or(after.len());
-        sigs.push(after[..brace].to_string());
-        rest = &after[brace..];
+/// Parse `src` (a `route_admission.rs` source) with `syn` and return, for each
+/// `fn admit_*` it defines, the fn name PAIRED with its EXACT parameter-TYPE list —
+/// each type rendered to tokens with all whitespace stripped, so
+/// `&RaisedNodeShapeFacts` normalises to `"&RaisedNodeShapeFacts"`. The list is
+/// keyed on parameter TYPES (NOT a textual `SemanticNodeId` substring scan), so
+/// ANY extra parameter — any name, any type, INCLUDING an alias of `SemanticNodeId`
+/// (`extra: NodeIdAlias`) — appears as an extra list entry the exact-param-list
+/// guard rejects, closing the alias evasion the substring scan missed.
+fn admit_fn_param_types(src: &str) -> Vec<(String, Vec<String>)> {
+    use quote::ToTokens;
+    let file = syn::parse_file(src).expect("route_admission.rs must parse as a syn::File");
+    let mut out = Vec::new();
+    for item in &file.items {
+        let syn::Item::Fn(item_fn) = item else {
+            continue;
+        };
+        let name = item_fn.sig.ident.to_string();
+        if !name.starts_with("admit_") {
+            continue;
+        }
+        let params: Vec<String> = item_fn
+            .sig
+            .inputs
+            .iter()
+            .map(|arg| match arg {
+                syn::FnArg::Typed(pat_type) => pat_type
+                    .ty
+                    .to_token_stream()
+                    .to_string()
+                    .split_whitespace()
+                    .collect::<String>(),
+                // A free `admit_*` mint helper has no receiver; a `self` param
+                // would itself be an unexpected signature, surfaced verbatim so
+                // the exact-list comparison rejects it.
+                syn::FnArg::Receiver(_) => "self".to_string(),
+            })
+            .collect();
+        out.push((name, params));
     }
-    sigs
+    out
 }
 
-/// NODE-BOUND admission signature guard: every `route_admission::admit_*` gated
-/// mint helper takes ONLY the node-bound witness (`RaisedNodeShapeFacts` /
-/// `NodeShapeEq`) and NO free `SemanticNodeId` parameter — so the carrier it mints
-/// is bound to `witness.node()` / `shape.node()` and a "node A's facts, node B's
-/// carrier" mispair is unrepresentable through the safe API.
+/// EXACT-PARAM-LIST admission signature guard: every `route_admission::admit_*`
+/// gated mint helper takes EXACTLY its expected node-bound-witness parameter list
+/// and NOTHING else — so ANY extra parameter (any name, any TYPE, including an
+/// alias of `SemanticNodeId`) fails. The carrier a helper mints is bound to
+/// `witness.node()` / `shape.node()`, so a "node A's facts, node B's carrier"
+/// mispair is unrepresentable through the safe API.
 ///
 /// GUARD-LOCAL SC-FIRST RECORD:
-/// - scanner_invariant: no `route_admission::admit_*` signature names
-///   `SemanticNodeId` (it takes only the node-bound witness).
-/// - scanner_justification: regression tripwire; the STRUCTURAL PRIMARY is the
-///   node-bound witness type itself — `admit_*` take only the witness, so a
-///   raw-node mispair is unrepresentable, and this scan only prevents a future
-///   re-introduction of a separate `node: SemanticNodeId` parameter.
+/// - scanner_invariant: each `route_admission::admit_*` has EXACTLY its expected
+///   parameter-TYPE list (the node-bound witness, plus `ProjectionMode` for the
+///   mode-aware arm) and no extra parameter.
+/// - scanner_justification: regression tripwire over the exact param lists. The
+///   STRUCTURAL PRIMARY is the witness TYPE itself + `E0451` (its private fields):
+///   `admit_*` take only the sealed node-bound witness, so a raw-node mispair is
+///   unrepresentable; this exact-list scan only prevents a future re-introduction
+///   of an extra parameter — and, unlike a textual `SemanticNodeId` substring
+///   scan, it also catches an ALIAS-typed extra param (`extra: NodeIdAlias`).
 /// - mechanism_ruling: r5-disposition-ruling (node-bound witness as the sole
 ///   cross-module admission input).
-/// - hardening_rounds: terminal seal — not a further-hardening pass; the
-///   node-bound witness type is the proof, and this scan is the literal backstop.
+/// - hardening_rounds: exact-param-list hardening of the prior textual
+///   `SemanticNodeId` substring scan (which an alias-typed param evaded); the
+///   witness TYPE + `E0451` stay the primary structural seal, this exact-list scan
+///   is the backstop.
 #[test]
 fn route_admission_admit_helpers_take_no_node_param() {
     const SRC: &str = include_str!("route_admission.rs");
-    let sigs = admit_fn_signatures(SRC);
+    let sigs = admit_fn_param_types(SRC);
     assert!(
         sigs.len() >= 4,
         "anti-vacuity: expected the four gated admit_* mint helpers, found {}",
         sigs.len()
     );
-    for sig in &sigs {
+    // Each helper's EXACT expected parameter-TYPE list (names elided — the gate is
+    // the type list, normalised whitespace-free).
+    let expected: &[(&str, &[&str])] = &[
+        ("admit_expanded_surface", &["&RaisedNodeShapeFacts"]),
+        ("admit_expanded_surface_changed", &["&NodeShapeEq"]),
+        (
+            "admit_mode_aware",
+            &["&RaisedNodeShapeFacts", "ProjectionMode"],
+        ),
+        ("admit_materialized", &["&RaisedNodeShapeFacts"]),
+    ];
+    // Every found admit_* must be a known helper with EXACTLY its expected param
+    // list — an extra param of ANY type/name (incl. an alias of SemanticNodeId)
+    // makes the actual list differ and FAILS here.
+    for (name, params) in &sigs {
+        let Some((_, exp)) = expected.iter().find(|(e, _)| e == name) else {
+            panic!(
+                "unexpected route_admission::{name} mint helper — not covered by the \
+                 exact-param-list guard; add it to `expected` with its sealed param list"
+            );
+        };
+        assert_eq!(
+            params.as_slice(),
+            *exp,
+            "route_admission::{name} must take EXACTLY {exp:?} and NOTHING else — any extra \
+             parameter (any name, any type, INCLUDING an alias of SemanticNodeId) re-opens the \
+             node-mispair forge vector. Found: {params:?}"
+        );
+    }
+    // Every expected helper is actually present (the corpus is not silently short).
+    for (name, _) in expected {
         assert!(
-            !sig.contains("SemanticNodeId"),
-            "route_admission::admit_* must take ONLY a node-bound witness \
-             (RaisedNodeShapeFacts / NodeShapeEq) and mint from witness.node() — a raw \
-             `SemanticNodeId` parameter re-opens the node-mispair forge vector. Offending \
-             signature: {sig}"
+            sigs.iter().any(|(n, _)| n == name),
+            "expected gated mint helper route_admission::{name} is missing"
         );
     }
 }
 
-/// Self-test for [`admit_fn_signatures`] + the node-param invariant: a re-added
-/// `node: SemanticNodeId` parameter is SEEN (the guard would FAIL), and the
-/// witness-only signature is clean (the guard PASSES) — so the guard discriminates
-/// the regression from the sealed shape.
+/// Self-test for [`admit_fn_param_types`] + the exact-param-list invariant. Proves
+/// the detector discriminates the sealed witness-only shape from BOTH a re-added
+/// `node: SemanticNodeId` parameter AND — the closure the retired textual
+/// `SemanticNodeId` substring scan MISSED — an ALIAS-typed extra parameter.
 #[test]
 fn admit_signature_node_param_detector_discriminates() {
-    let with_node = "pub(in x) fn admit_materialized(witness: &RaisedNodeShapeFacts, \
-                     node: SemanticNodeId) -> Option<AdmittedRouteProjectionNode> { body }";
-    let with = admit_fn_signatures(with_node);
-    assert_eq!(
-        with.len(),
-        1,
-        "exactly one admit_* signature in the fixture"
-    );
-    assert!(
-        with[0].contains("SemanticNodeId"),
-        "the detector MUST see a re-added `node: SemanticNodeId` parameter (guard would FAIL)",
-    );
-
+    // The sealed, witness-only shape: EXACTLY `[&RaisedNodeShapeFacts]` ⇒ the
+    // exact-list guard PASSES.
     let witness_only = "pub(in x) fn admit_materialized(witness: &RaisedNodeShapeFacts) \
                         -> Option<AdmittedRouteProjectionNode> { body }";
-    let clean = admit_fn_signatures(witness_only);
-    assert_eq!(clean.len(), 1);
+    let clean = admit_fn_param_types(witness_only);
+    assert_eq!(clean.len(), 1, "exactly one admit_* in the fixture");
+    assert_eq!(
+        clean[0].1.as_slice(),
+        ["&RaisedNodeShapeFacts"],
+        "the witness-only signature parses to the EXACT expected param list (guard PASSES)",
+    );
+
+    // (a) A re-added `node: SemanticNodeId` parameter — the exact list now has TWO
+    // entries, differing from the expected `[&RaisedNodeShapeFacts]` ⇒ guard FAILS.
+    let with_node = "pub(in x) fn admit_materialized(witness: &RaisedNodeShapeFacts, \
+                     node: SemanticNodeId) -> Option<AdmittedRouteProjectionNode> { body }";
+    let wn = admit_fn_param_types(with_node);
+    assert_eq!(
+        wn[0].1.as_slice(),
+        ["&RaisedNodeShapeFacts", "SemanticNodeId"],
+        "the detector SEES the re-added node param as a second list entry (guard FAILS)",
+    );
+    assert_ne!(
+        wn[0].1.as_slice(),
+        ["&RaisedNodeShapeFacts"],
+        "the node-param list differs from the expected sealed list",
+    );
+
+    // (b) An ALIAS-typed extra parameter (`extra: NodeIdAlias`, where
+    // `type NodeIdAlias = SemanticNodeId`). The exact-list detector SEES the second
+    // entry and the guard FAILS — even though the parameter's text contains NO
+    // literal `SemanticNodeId`, so the retired textual substring scan would have
+    // MISSED it. This is the new closure the exact-param-list hardening adds.
+    let with_alias = "pub(in x) fn admit_materialized(witness: &RaisedNodeShapeFacts, \
+                      extra: NodeIdAlias) -> Option<AdmittedRouteProjectionNode> { body }";
+    let wa = admit_fn_param_types(with_alias);
+    assert_eq!(
+        wa[0].1.as_slice(),
+        ["&RaisedNodeShapeFacts", "NodeIdAlias"],
+        "the exact-param-list detector SEES an ALIAS-typed extra param (guard FAILS)",
+    );
+    assert_ne!(
+        wa[0].1.as_slice(),
+        ["&RaisedNodeShapeFacts"],
+        "the alias-param list differs from the expected sealed list (guard FAILS)",
+    );
     assert!(
-        !clean[0].contains("SemanticNodeId"),
-        "the witness-only signature is clean (guard PASSES)",
+        !with_alias.contains("SemanticNodeId"),
+        "the retired textual `SemanticNodeId` substring scan would MISS the alias-typed param \
+         (it spells `NodeIdAlias`) — the exact-param-list approach is what closes this evasion",
     );
 }
 

@@ -1069,18 +1069,23 @@ fn signature_raises_to_function(
 /// win for a large object surface (an `Object` with N members raises to an
 /// `Object` root after an O(1) shallow check, not an O(tree) walk).
 ///
-/// `None` EXACTLY when [`fold_node`](super::fold_node) returns `None` for `node`.
-/// Both bottom out at `node_data_for(node)?`, and this projection propagates the
-/// SAME required-edge `?` aborts `fold_node` does — `Array.element`, `KeyOf.base`,
-/// `IndexedAccess.object` + a `TypeNode` `index`, every `Conditional` operand,
-/// `Mapped`'s source / value / name-remap, the `ConstructorType` signature, and
-/// the `Alias` / `MergedDecl` peel — while LEAVING object member values
-/// short-circuited (the full fold wraps a missing member as a sentinel, never
-/// `None`, so a root-only deep member walk would FALSELY diverge). The two
-/// therefore agree on `Some` / `None` for every node, INCLUDING a malformed node
-/// with a dangling required child (production-unreachable today; pinned by the
-/// malformed-child parity test). Root fields pinned equal to the full fold's by
-/// the parity test.
+/// Returns `None` when [`fold_node`](super::fold_node) returns `None` for `node`,
+/// on every WELL-FORMED node and on the dangling-required-child cases the
+/// malformed-child parity test covers. Both bottom out at `node_data_for(node)?`,
+/// and this projection propagates the SAME required-edge `?` aborts `fold_node`
+/// does — `Array.element`, `KeyOf.base`, `IndexedAccess.object` + a `TypeNode`
+/// `index`, every `Conditional` operand, `Mapped`'s source / value / name-remap,
+/// the `ConstructorType` signature, and the `Alias` / `MergedDecl` peel — while
+/// LEAVING object member values short-circuited (the full fold wraps a missing
+/// member as a sentinel, never `None`, so a root-only deep member walk would
+/// FALSELY diverge). The two therefore agree on `Some` / `None` for every
+/// well-formed node and for the dangling-required-child cases the parity test
+/// pins. ONE honest asymmetry, NOT an exact `None`-iff-`None` equivalence: a
+/// malformed / headless `TypeOf` carrier makes `fold_node` `.expect()`-panic on
+/// its missing head, whereas this root-only projection reads no head and returns
+/// `Some` — the projection is the strictly more lenient / safe side, so it never
+/// panics where the full fold would. Root fields pinned equal to the full fold's
+/// by the parity test.
 pub(super) fn project_root_summary(
     dispatch: &ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,

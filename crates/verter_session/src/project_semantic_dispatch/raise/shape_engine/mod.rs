@@ -364,7 +364,8 @@ impl RaisedShapeFacts {
 /// PAIRED with the `SemanticNodeId` they were computed for, in ONE sealed value.
 /// This is the SOLE cross-module input to the
 /// [`route_admission`](crate::resolver_core::component_meta_query_engine) carrier
-/// mint helpers, REPLACING the former separate `(facts, node)` arguments.
+/// mint helpers — each helper takes ONLY this witness and mints the carrier from
+/// `witness.node()`, never a free `(facts, node)` pair.
 ///
 /// SEALED + node-bound (the carrier-proof terminal): the FIELDS are PRIVATE and a
 /// value is constructed ONLY inside [`shape_engine`](self) (the node-domain fold's
