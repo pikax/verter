@@ -168,14 +168,17 @@ fn node_root_is_published_operator(
     use crate::project_semantic_dispatch::raise::node_root_is_semantic_miss_sentinel_with_dispatch;
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::semantic_query::SemanticNodeData;
+    use rustc_hash::FxHashSet;
 
-    fn walk(
-        dispatch: &ProjectSemanticDispatch<'_>,
-        node: crate::semantic_query::SemanticNodeId,
-        depth: u32,
-    ) -> bool {
-        const MAX_DEPTH: u32 = 32;
-        if depth >= MAX_DEPTH {
+    let dispatch = ProjectSemanticDispatch::new(ctx);
+    // Iterative visited-set walk of the `Alias` identity-hop chain (the node-domain
+    // peel the raise strips). The `visited` set follows an acyclic alias chain of
+    // ANY depth — matching the uncapped `TypeExpr` predicate's `Parenthesized` peel —
+    // and terminates on a node-graph cycle (a self- or mutually-referential `Alias`).
+    let mut visited: FxHashSet<crate::semantic_query::SemanticNodeId> = FxHashSet::default();
+    let mut node = node;
+    loop {
+        if !visited.insert(node) {
             return false;
         }
         let Some(data) = dispatch.graph().node_data(node) else {
@@ -183,13 +186,11 @@ fn node_root_is_published_operator(
         };
         match data.as_ref() {
             SemanticNodeData::Alias(inner) => {
-                let inner = *inner;
-                drop(data);
-                walk(dispatch, inner, depth + 1)
+                node = *inner;
             }
             SemanticNodeData::DeclRef { .. }
             | SemanticNodeData::InstantiationRef { .. }
-            | SemanticNodeData::BareRef(_) => true,
+            | SemanticNodeData::BareRef(_) => return true,
             SemanticNodeData::Mapped { mapper, .. } => {
                 // The mapped VALUE expression (`{ [K in S]: <value> }`) lives on the
                 // mapper key. `type_expr_root_is_published_operator` keeps a `Mapped`
@@ -201,19 +202,15 @@ fn node_root_is_published_operator(
                 // NOT the broad unmaterialised-sentinel set, to mirror the `TypeExpr`
                 // predicate exactly.
                 let value = mapper.value_expr;
-                drop(data);
-                !node_root_is_semantic_miss_sentinel_with_dispatch(dispatch, value)
+                return !node_root_is_semantic_miss_sentinel_with_dispatch(&dispatch, value);
             }
             SemanticNodeData::KeyOf { .. }
             | SemanticNodeData::IndexedAccess { .. }
             | SemanticNodeData::Conditional { .. }
-            | SemanticNodeData::TypeOf(_) => true,
-            _ => false,
+            | SemanticNodeData::TypeOf(_) => return true,
+            _ => return false,
         }
     }
-
-    let dispatch = ProjectSemanticDispatch::new(ctx);
-    walk(&dispatch, node, 0)
 }
 
 /// Whether `node`'s raised ROOT term is a `TypeOf` — the node-domain equivalent of
@@ -228,27 +225,29 @@ fn node_root_is_typeof(
     node: crate::semantic_query::SemanticNodeId,
 ) -> bool {
     use crate::semantic_query::SemanticNodeData;
+    use rustc_hash::FxHashSet;
 
-    fn walk(
-        ctx: &dyn crate::resolver_core::ResolverContext,
-        node: crate::semantic_query::SemanticNodeId,
-        depth: u32,
-    ) -> bool {
-        const MAX_DEPTH: u32 = 32;
-        if depth >= MAX_DEPTH {
+    // Iterative visited-set walk of the `Alias` identity-hop chain (the node-domain
+    // peel the raise strips). The `visited` set follows an acyclic alias chain of
+    // ANY depth and terminates on a node-graph cycle (a self- or mutually-referential
+    // `Alias`).
+    let mut visited: FxHashSet<crate::semantic_query::SemanticNodeId> = FxHashSet::default();
+    let mut node = node;
+    loop {
+        if !visited.insert(node) {
             return false;
         }
         let Some(data) = crate::project_semantic_dispatch::node_data_for(ctx, node) else {
             return false;
         };
         match data.as_ref() {
-            SemanticNodeData::Alias(inner) => walk(ctx, *inner, depth + 1),
-            SemanticNodeData::TypeOf(_) => true,
-            _ => false,
+            SemanticNodeData::Alias(inner) => {
+                node = *inner;
+            }
+            SemanticNodeData::TypeOf(_) => return true,
+            _ => return false,
         }
     }
-
-    walk(ctx, node, 0)
 }
 
 /// Node-domain mirror of [`type_expr_materialize_reduction_context`]: the EXACT
@@ -1468,6 +1467,66 @@ mod stabilizer_admission_tests {
             slot_warm(ctx, "/p.ts", typeof_node),
             "a deferred typeof carrier IS admitted warm (it re-resolves on demand — correct, \
              not the import-route-rail-less cached miss the rails refuse)",
+        );
+    }
+
+    /// DEPTH regression: `node_root_is_typeof` follows an `Alias` chain DEEPER than
+    /// the former fixed depth cap (32) to reach the `TypeOf` root. The visited-set
+    /// termination walks an acyclic chain of ANY depth.
+    ///
+    /// MUTATION-PROOF: reinstating a `MAX_DEPTH = 32` cap stops the walk before the
+    /// 40-deep `TypeOf` terminal, so `node_root_is_typeof` returns false instead of
+    /// true and the first assertion FAILS.
+    #[test]
+    fn node_root_is_typeof_walks_deep_alias_chain_without_depth_cutoff() {
+        let host = VerterHost::new_standalone(HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        });
+        let project = MetaProject::new(host);
+        project
+            .upsert_base("/p.ts", "export type Anchor = number\n")
+            .unwrap();
+        let session = project.open_session_batch().unwrap();
+        let _ = session.evaluate_types("/p.ts").unwrap();
+        let host = session.host();
+        let ctx: &dyn crate::resolver_core::ResolverContext = host;
+        let graph = ctx.project_type_store().semantic_graph();
+
+        // 40 > the former 32 cap.
+        const DEPTH: usize = 40;
+        let typeof_terminal = graph.intern_node(SemanticNodeData::new_typeof(
+            ValueRootKey {
+                scope: ScopeId {
+                    canonical_id: Arc::from("/p.ts"),
+                    local_scope: None,
+                },
+                name: Arc::from("definitelyMissingValue"),
+            },
+            Arc::from(Vec::new().into_boxed_slice()),
+            Arc::from(Vec::new().into_boxed_slice()),
+        ));
+        let mut deep_typeof = typeof_terminal;
+        for _ in 0..DEPTH {
+            deep_typeof = graph.intern_node(SemanticNodeData::Alias(deep_typeof));
+        }
+        assert!(
+            super::node_root_is_typeof(ctx, deep_typeof),
+            "node_root_is_typeof must follow a >32-deep alias chain to the TypeOf root \
+             (a reinstated MAX_DEPTH=32 stops short and returns false)",
+        );
+
+        // Anti-vacuity: a deep alias chain terminating in a NON-TypeOf root is not a
+        // typeof root (the visited-set walk reaches the terminal and rejects it).
+        let primitive_terminal =
+            graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let mut deep_primitive = primitive_terminal;
+        for _ in 0..DEPTH {
+            deep_primitive = graph.intern_node(SemanticNodeData::Alias(deep_primitive));
+        }
+        assert!(
+            !super::node_root_is_typeof(ctx, deep_primitive),
+            "a deep alias chain terminating in a non-TypeOf root is NOT a typeof root",
         );
     }
 }

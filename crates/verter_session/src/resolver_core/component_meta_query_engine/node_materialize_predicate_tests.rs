@@ -364,52 +364,92 @@ fn node_published_operator_mapped_suppresses_only_semantic_miss_value() {
     );
 }
 
-/// F4 carrier-contract guard: `materialize_member_node_to_type_expr` publishes a
-/// first-pass / stabilised member-surface node that is NOT a route/surface adapter's
-/// admitted node (it can be a `Miss`/`Recursive`/`Tainted` outcome), so it MUST mint
-/// the no-admission-claim `RegistryPublicationNode` carrier and route through
-/// `materialize_registry_publication_node` — NEVER forge `AdmittedRouteProjectionNode`
-/// (whose contract asserts a passed `materialized && expanded_surface` gate).
-/// DISCRIMINATING: the pre-fix body minted `AdmittedRouteProjectionNode::new(node)`,
-/// which the absence assertion rejects. Scoped to the one function via a
-/// balanced-brace body extractor so the genuine route-admission mints elsewhere in
-/// the file are not in scope.
+/// Count the `AdmittedRouteProjectionNode::new(` mint occurrences in `src`,
+/// ignoring `//`-comment lines (a doc / comment NAMING the carrier is not a mint).
+/// Shared detector for the broadened carrier-forging guard
+/// ([`registry_candidate_module_never_forges_route_admitted_carrier`]) and its
+/// self-test ([`admitted_carrier_mint_detector_discriminates_forge_from_no_admission_path`]).
+fn admitted_carrier_mint_count(src: &str) -> usize {
+    src.lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .map(|line| line.matches("AdmittedRouteProjectionNode::new").count())
+        .sum()
+}
+
+/// Carrier-contract guard (whole-module): the node-domain registry-candidate
+/// materialisation module (`node_materialize.rs`) holds first-pass / stabilised
+/// member-surface nodes that are NOT route/surface-adapter admitted nodes (each can
+/// be a `Miss`/`Recursive`/`Tainted`/degenerate outcome), so EVERY materialisation
+/// of such a node MUST route through the no-admission-claim `RegistryPublicationNode`
+/// carrier + the `materialize_registry_publication_node` sink — NEVER forge
+/// `AdmittedRouteProjectionNode` (whose contract asserts a passed
+/// `materialized && expanded_surface` route-admission gate). The genuine route-adapter
+/// admissions live in the route/surface adapter modules (`surface.rs` /
+/// `registry_decl.rs`), each minted only AFTER a node-domain
+/// `node_raised_shape_facts_with_dispatch(...).materialized[ && expanded_surface]`
+/// acceptance gate; they are architecturally NOT in this registry-candidate module.
+///
+/// DISCRIMINATING: an `owner_local_generic_alias_candidate` that minted
+/// `AdmittedRouteProjectionNode::new(node)` after only `node_raises_to_object_surface`
+/// (an object-ROOT structural check, weaker than the route-admission gate) is rejected
+/// by this WHOLE-MODULE absence assertion — broadened from a single-function-body scan
+/// so the forging class is structurally caught for EVERY site in the module, not just
+/// `materialize_member_node_to_type_expr`. The `admitted_carrier_mint_count` self-test
+/// proves the detector flags a forged mint and clears the no-admission carrier path.
 #[test]
-fn registry_publication_path_does_not_forge_route_admitted_carrier() {
+fn registry_candidate_module_never_forges_route_admitted_carrier() {
     const SRC: &str = include_str!("node_materialize.rs");
-
-    fn extract_fn_body(src: &str, fn_sig: &str) -> Option<String> {
-        let start = src.find(fn_sig)?;
-        let after = &src[start..];
-        let open = after.find('{')?;
-        let mut depth = 0usize;
-        for (i, b) in after.bytes().enumerate().skip(open) {
-            match b {
-                b'{' => depth += 1,
-                b'}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some(after[..=i].to_string());
-                    }
-                }
-                _ => {}
-            }
-        }
-        None
-    }
-
-    let body = extract_fn_body(SRC, "fn materialize_member_node_to_type_expr")
-        .expect("materialize_member_node_to_type_expr is present in source");
-    assert!(
-        body.contains("RegistryPublicationNode"),
-        "the registry publication path must mint the no-admission-claim \
-         RegistryPublicationNode carrier; body=\n{body}",
+    let forged = admitted_carrier_mint_count(SRC);
+    assert_eq!(
+        forged, 0,
+        "the node-domain registry-candidate module (node_materialize.rs) must NOT forge the \
+         route-admitted AdmittedRouteProjectionNode carrier for a held member-surface node — \
+         route every such node through the no-admission RegistryPublicationNode carrier + the \
+         materialize_registry_publication_node sink. Found {forged} forging mint(s).",
     );
+    // Anti-vacuity: the module DOES publish member-surface nodes through the
+    // no-admission carrier, so the absence above is a real property (never vacuous on
+    // an empty / renamed module).
     assert!(
-        !body.contains("AdmittedRouteProjectionNode"),
-        "the registry publication path must NOT forge the route-admitted \
-         AdmittedRouteProjectionNode carrier for an un-admitted member-surface node; \
-         body=\n{body}",
+        SRC.contains("RegistryPublicationNode"),
+        "anti-vacuity: the registry-candidate module must route member-surface nodes through \
+         the no-admission RegistryPublicationNode carrier",
+    );
+}
+
+/// Self-test for the [`admitted_carrier_mint_count`] detector the broadened
+/// carrier-forging guard depends on: a forged `AdmittedRouteProjectionNode::new(...)`
+/// mint is COUNTED (so the guard FAILS on it), the no-admission
+/// `materialize_member_node_to_type_expr` / `RegistryPublicationNode` path is NOT
+/// counted (the sanctioned shape passes), and a comment NAMING the carrier is NOT
+/// counted (no false positive on a doc reference).
+#[test]
+fn admitted_carrier_mint_detector_discriminates_forge_from_no_admission_path() {
+    // The exact pre-fix forging shape in a registry-candidate-shaped body.
+    let forged = "        if !node_raises_to_object_surface(ctx, node) { return None; }\n\
+                  \x20       let admitted = AdmittedRouteProjectionNode::new(node);\n\
+                  \x20       let ty = super::surface::materialize_route_projection_node(ctx, &admitted)?;\n";
+    assert_eq!(
+        admitted_carrier_mint_count(forged),
+        1,
+        "the detector MUST flag a forged AdmittedRouteProjectionNode::new mint",
+    );
+    // The sanctioned no-admission path — routes through the RegistryPublicationNode
+    // helper, no forged admitted carrier.
+    let sanctioned = "        if !node_raises_to_object_surface(ctx, node) { return None; }\n\
+                      \x20       let ty = materialize_member_node_to_type_expr(ctx, node)?;\n";
+    assert_eq!(
+        admitted_carrier_mint_count(sanctioned),
+        0,
+        "the sanctioned no-admission RegistryPublicationNode path is NOT a forge",
+    );
+    // A comment NAMING the carrier is not a mint (no false positive).
+    let comment =
+        "        // NOT AdmittedRouteProjectionNode::new — see the no-admission carrier.\n";
+    assert_eq!(
+        admitted_carrier_mint_count(comment),
+        0,
+        "a comment naming AdmittedRouteProjectionNode::new must NOT be counted as a forge",
     );
 }
 
@@ -497,5 +537,165 @@ fn member_path_leaf_facts_none_branch_reads_raw_route_expr() {
         (is_object, non_object_top, is_indexed),
         "Navigate lowering keeps the IndexedAccess shell, so lowered facts equal raw facts \
          (the divergence is unreachable for IndexedAccess routes)",
+    );
+}
+
+/// Build an `Alias`-chain `depth` hops deep terminating in `terminal`, interned in
+/// `graph` (each hop is a distinct `Alias(child)` node). Exercises the node-predicate
+/// walkers on a chain DEEPER than the former fixed depth cap so the visited-set
+/// termination is proven to walk an acyclic chain of ANY depth.
+fn deep_alias_chain(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    terminal: crate::semantic_query::SemanticNodeId,
+    depth: usize,
+) -> crate::semantic_query::SemanticNodeId {
+    use crate::semantic_query::SemanticNodeData;
+    let mut node = terminal;
+    for _ in 0..depth {
+        node = graph.intern_node(SemanticNodeData::Alias(node));
+    }
+    node
+}
+
+/// Build the TypeExpr-domain equivalent of [`deep_alias_chain`]: a `Parenthesized`
+/// chain `depth` deep terminating in `terminal`. `Parenthesized` is the identity hop
+/// the uncapped registry `TypeExpr` predicates peel, mirroring the node domain's
+/// `Alias` hop, so the two chains are parity inputs.
+fn deep_paren_chain(terminal: TypeExpr, depth: usize) -> TypeExpr {
+    let mut expr = terminal;
+    for _ in 0..depth {
+        expr = TypeExpr::Parenthesized(StdArc::new(expr));
+    }
+    expr
+}
+
+/// Build a `TypeExpr::IndexedAccess` leaf (`Foo["x"]`) — a non-object top-level /
+/// published-operator root for the parity comparisons.
+fn indexed_access_type_expr() -> TypeExpr {
+    TypeExpr::IndexedAccess {
+        object: StdArc::new(TypeExpr::named("Foo")),
+        index: StdArc::new(TypeExpr::string_literal("x")),
+    }
+}
+
+/// DEPTH regression: the object-surface / non-object-top node predicates walk an
+/// `Alias` chain DEEPER than the former fixed depth cap (32) and answer IDENTICALLY
+/// to the uncapped `TypeExpr` predicates on the equivalent `Parenthesized` chain.
+///
+/// MUTATION-PROOF: reinstating a `MAX_DEPTH = 32` cap cuts the node walk short of the
+/// 40-deep terminal, so the node predicate flips (object-surface false instead of
+/// true; non-object-top false instead of true) while the uncapped `TypeExpr`
+/// predicate stays true — the `assert_eq!`s then FAIL. The visited-set termination
+/// walks all 40 hops, so both sides agree.
+#[test]
+fn registry_object_surface_node_predicates_walk_deep_alias_chain_without_depth_cutoff() {
+    use crate::semantic_query::{IndexKey, QueryError, SemanticNodeData};
+
+    let project = open_host();
+    let session = project.open_session_batch().unwrap();
+    let _ = session.evaluate_types("/p.ts").unwrap();
+    let host = session.host();
+    let ctx: &dyn crate::resolver_core::ResolverContext = host;
+    let dispatch = ProjectSemanticDispatch::new(ctx);
+    let graph = ctx.project_type_store().semantic_graph();
+
+    // 40 > the former 32 cap: the visited-set walk must follow ALL hops.
+    const DEPTH: usize = 40;
+
+    // Chain A: Alias^DEPTH -> Object (discriminates explicit-object-surface).
+    let object_terminal = dispatch
+        .lower_type_expr_in_scope_with_mode(
+            "/p.ts",
+            &one_prop_object("a"),
+            ProjectionMode::Navigate,
+        )
+        .expect("object terminal lowers");
+    let deep_object_node = deep_alias_chain(graph, object_terminal, DEPTH);
+    let deep_object_expr = deep_paren_chain(one_prop_object("a"), DEPTH);
+
+    assert_eq!(
+        component_meta_registry_node_has_explicit_object_surface(ctx, deep_object_node),
+        component_meta_registry_has_explicit_object_surface(&deep_object_expr),
+        "explicit-object-surface NODE predicate must EQUAL the uncapped TypeExpr predicate on a \
+         >32-deep alias chain (a reinstated MAX_DEPTH=32 cuts the node walk short and flips it)",
+    );
+    // Discriminating direction: the uncapped answer IS true (terminal at depth DEPTH
+    // is an Object), so a depth-capped node walk (false) would diverge.
+    assert!(
+        component_meta_registry_node_has_explicit_object_surface(ctx, deep_object_node),
+        "the deep alias chain DOES reach the object surface (visited-set walks all {DEPTH} hops)",
+    );
+
+    // Chain B: Alias^DEPTH -> IndexedAccess (discriminates non-object-top).
+    let dummy = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
+    let indexed_terminal = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: dummy,
+        index: IndexKey::String(StdArc::from("x")),
+    });
+    let deep_indexed_node = deep_alias_chain(graph, indexed_terminal, DEPTH);
+    let deep_indexed_expr = deep_paren_chain(indexed_access_type_expr(), DEPTH);
+
+    assert_eq!(
+        component_meta_registry_node_has_non_object_top_level_surface(ctx, deep_indexed_node),
+        component_meta_registry_has_non_object_top_level_surface(&deep_indexed_expr),
+        "non-object-top-level NODE predicate must EQUAL the uncapped TypeExpr predicate on a \
+         >32-deep alias chain (a reinstated MAX_DEPTH=32 cuts the node walk short and flips it)",
+    );
+    assert!(
+        component_meta_registry_node_has_non_object_top_level_surface(ctx, deep_indexed_node),
+        "the deep alias chain DOES reach the non-object IndexedAccess root (all {DEPTH} hops)",
+    );
+}
+
+/// DEPTH regression: the second-pass reduction-context predicate (which drives the
+/// `node_root_is_published_operator` field walk) walks an `Alias` chain DEEPER than
+/// the former fixed depth cap (32) and answers IDENTICALLY to the uncapped `TypeExpr`
+/// reduction context on the equivalent `Parenthesized` chain.
+///
+/// MUTATION-PROOF: reinstating a `MAX_DEPTH = 32` cap stops the node walk before the
+/// 40-deep published-operator (`IndexedAccess`) root, so `node_root_is_published_operator`
+/// returns false and the Navigate reduction context flips from `Published(Navigate)`
+/// to `StructuralTransit(Navigate)` while the uncapped `TypeExpr` context stays
+/// `Published(Navigate)` — the `assert_eq!`s then FAIL.
+#[test]
+fn node_reduction_context_walks_deep_alias_chain_without_depth_cutoff() {
+    use crate::meta_resolve::materialize::{
+        node_materialize_reduction_context, type_expr_materialize_reduction_context,
+    };
+    use crate::semantic_query::{
+        IndexKey, ProjectionReductionContext, QueryError, SemanticNodeData,
+    };
+
+    let project = open_host();
+    let session = project.open_session_batch().unwrap();
+    let _ = session.evaluate_types("/p.ts").unwrap();
+    let host = session.host();
+    let ctx: &dyn crate::resolver_core::ResolverContext = host;
+    let graph = ctx.project_type_store().semantic_graph();
+
+    const DEPTH: usize = 40;
+
+    // Alias^DEPTH -> IndexedAccess: a published-operator root reached only after all
+    // DEPTH alias hops.
+    let dummy = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
+    let indexed_terminal = graph.intern_node(SemanticNodeData::IndexedAccess {
+        object: dummy,
+        index: IndexKey::String(StdArc::from("x")),
+    });
+    let deep_indexed_node = deep_alias_chain(graph, indexed_terminal, DEPTH);
+    let deep_indexed_expr = deep_paren_chain(indexed_access_type_expr(), DEPTH);
+
+    assert_eq!(
+        node_materialize_reduction_context(ctx, deep_indexed_node, ProjectionMode::Navigate),
+        type_expr_materialize_reduction_context(&deep_indexed_expr, ProjectionMode::Navigate),
+        "node reduction context must EQUAL the uncapped TypeExpr reduction context on a >32-deep \
+         alias chain (a reinstated MAX_DEPTH=32 flips Published(Navigate) to StructuralTransit)",
+    );
+    // Discriminating direction: the uncapped answer IS Published(Navigate) (the deep
+    // root is a published IndexedAccess operator).
+    assert_eq!(
+        node_materialize_reduction_context(ctx, deep_indexed_node, ProjectionMode::Navigate),
+        ProjectionReductionContext::published(ProjectionMode::Navigate),
+        "the deep alias chain root IS a published operator ⇒ Published(Navigate)",
     );
 }

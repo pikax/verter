@@ -15,10 +15,10 @@
 //! the first-pass `MaterializeStructureDb` node (`materialize_member_surface_to_node`)
 //! and, where stabilisable, REDUCE that node through the `ShapeCacheDb` member-node
 //! slot — never a raise-then-re-lower of a materialised value to recover facts.
+use rustc_hash::FxHashSet;
 use verter_type_expr::TypeExpr;
 
 use super::surface::projected_surface_to_type_expr;
-use super::AdmittedRouteProjectionNode;
 use super::ComponentMetaQueryEngine;
 use crate::project_semantic_dispatch::raise::node_raised_shape_facts_with_dispatch;
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
@@ -122,8 +122,15 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         if !node_raises_to_object_surface(ctx, node) {
             return None;
         }
-        let admitted = AdmittedRouteProjectionNode::new(node);
-        let type_expr = super::surface::materialize_route_projection_node(ctx, &admitted)?;
+        // `node_raises_to_object_surface` proves an OBJECT root only — a weaker
+        // structural check than a route/surface adapter's
+        // `materialized && expanded_surface` admission gate — so this instantiated
+        // node is NOT a route-admitted node. Materialise it through the
+        // no-admission-claim `RegistryPublicationNode` carrier +
+        // `materialize_registry_publication_node` sink (the shared registry
+        // publication helper), never by forging `AdmittedRouteProjectionNode` (whose
+        // contract asserts the passed route-admission gate).
+        let type_expr = materialize_member_node_to_type_expr(ctx, node)?;
         Some((type_expr, true))
     }
 
@@ -475,16 +482,18 @@ pub(crate) fn component_meta_registry_node_has_explicit_object_surface(
     node: SemanticNodeId,
 ) -> bool {
     use crate::semantic_query::SemanticNodeData;
-    // Depth-budgeted work-stack over the object-surface frontier (the `Alias`
-    // identity hop plus `Union` / `Intersection` arms). `MAX_DEPTH` bounds the
-    // traversal independently of graph shape: each frame carries its own depth, a
-    // budget-exhausted or data-less frame contributes `false` and is dropped, and
-    // the walk terminates because every pushed frame strictly increases depth
-    // toward the cap.
-    const MAX_DEPTH: u32 = 32;
-    let mut stack: Vec<(SemanticNodeId, u32)> = vec![(node, 0)];
-    while let Some((node, depth)) = stack.pop() {
-        if depth >= MAX_DEPTH {
+    // Visited-set work-stack over the object-surface frontier (the `Alias` identity
+    // hop plus `Union` / `Intersection` arms). The `visited` set bounds the
+    // traversal independently of graph shape: an already-visited node is skipped, so
+    // an acyclic chain of ANY depth is fully walked (matching the uncapped
+    // `TypeExpr` predicate), a node-graph cycle (the interned graph can cycle via a
+    // self-referential `Alias`) terminates, and a shared-subtree DAG is deduped
+    // (linear, not exponential). A data-less frame contributes `false` and is
+    // dropped.
+    let mut visited: FxHashSet<SemanticNodeId> = FxHashSet::default();
+    let mut stack: Vec<SemanticNodeId> = vec![node];
+    while let Some(node) = stack.pop() {
+        if !visited.insert(node) {
             continue;
         }
         let Some(data) = crate::project_semantic_dispatch::node_data_for(ctx, node) else {
@@ -494,9 +503,9 @@ pub(crate) fn component_meta_registry_node_has_explicit_object_surface(
             SemanticNodeData::Object(_)
             | SemanticNodeData::MergedDecl { .. }
             | SemanticNodeData::VueMacroElements(_) => return true,
-            SemanticNodeData::Alias(inner) => stack.push((*inner, depth + 1)),
+            SemanticNodeData::Alias(inner) => stack.push(*inner),
             SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
-                stack.extend(arms.iter().map(|arm| (*arm, depth + 1)));
+                stack.extend(arms.iter().copied());
             }
             _ => {}
         }
@@ -516,13 +525,16 @@ pub(crate) fn node_raises_to_object_surface(
 ) -> bool {
     use crate::semantic_query::SemanticNodeData;
     // The raise-to-object frontier follows only the `Alias` identity hop — a linear
-    // chain bounded by `MAX_DEPTH`. Each iteration advances one hop (strictly
-    // increasing `depth`), so the loop terminates at the object surface, a non-Alias
-    // node, a data-less node, or the depth cap (all yielding the final verdict).
-    const MAX_DEPTH: u32 = 32;
+    // chain. A visited set terminates the walk on a node-graph cycle (a self- or
+    // mutually-referential `Alias`) while still following an acyclic alias chain of
+    // ANY depth to the object surface (matching the uncapped raise), a non-Alias
+    // node, or a data-less node.
+    let mut visited: FxHashSet<SemanticNodeId> = FxHashSet::default();
     let mut node = node;
-    let mut depth = 0u32;
-    while depth < MAX_DEPTH {
+    loop {
+        if !visited.insert(node) {
+            return false;
+        }
         let Some(data) = crate::project_semantic_dispatch::node_data_for(ctx, node) else {
             return false;
         };
@@ -532,12 +544,10 @@ pub(crate) fn node_raises_to_object_surface(
             | SemanticNodeData::VueMacroElements(_) => return true,
             SemanticNodeData::Alias(inner) => {
                 node = *inner;
-                depth += 1;
             }
             _ => return false,
         }
     }
-    false
 }
 
 /// Node-domain mirror of `component_meta_registry_has_non_object_top_level_surface`
@@ -551,25 +561,26 @@ pub(crate) fn component_meta_registry_node_has_non_object_top_level_surface(
     node: SemanticNodeId,
 ) -> bool {
     use crate::semantic_query::SemanticNodeData;
-    // Depth-budgeted work-stack over the non-object top-level frontier (the `Alias`
-    // hop plus `Union` / `Intersection` arms). A `Union` / `Intersection` qualifies
-    // when any arm does NOT raise to a plain object OR any arm recursively
-    // qualifies; the two disjuncts are pure boolean reads, so checking the
-    // arm-raise disjunct in place and deferring the recursive disjunct onto the
-    // stack yields the same verdict as the short-circuit `||`. `MAX_DEPTH` bounds
-    // the traversal independently of graph shape, and every pushed frame strictly
-    // increases depth toward the cap, so the loop terminates.
-    const MAX_DEPTH: u32 = 32;
-    let mut stack: Vec<(SemanticNodeId, u32)> = vec![(node, 0)];
-    while let Some((node, depth)) = stack.pop() {
-        if depth >= MAX_DEPTH {
+    // Visited-set work-stack over the non-object top-level frontier (the `Alias` hop
+    // plus `Union` / `Intersection` arms). A `Union` / `Intersection` qualifies when
+    // any arm does NOT raise to a plain object OR any arm recursively qualifies; the
+    // two disjuncts are pure boolean reads, so checking the arm-raise disjunct in
+    // place and deferring the recursive disjunct onto the stack yields the same
+    // verdict as the short-circuit `||`. The `visited` set bounds the traversal
+    // independently of graph shape: an already-visited node is skipped, so an
+    // acyclic chain of ANY depth is walked (matching the uncapped `TypeExpr`
+    // predicate), a node-graph cycle terminates, and a shared-subtree DAG is deduped.
+    let mut visited: FxHashSet<SemanticNodeId> = FxHashSet::default();
+    let mut stack: Vec<SemanticNodeId> = vec![node];
+    while let Some(node) = stack.pop() {
+        if !visited.insert(node) {
             continue;
         }
         let Some(data) = crate::project_semantic_dispatch::node_data_for(ctx, node) else {
             continue;
         };
         match data.as_ref() {
-            SemanticNodeData::Alias(inner) => stack.push((*inner, depth + 1)),
+            SemanticNodeData::Alias(inner) => stack.push(*inner),
             SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
                 if arms
                     .iter()
@@ -577,7 +588,7 @@ pub(crate) fn component_meta_registry_node_has_non_object_top_level_surface(
                 {
                     return true;
                 }
-                stack.extend(arms.iter().map(|arm| (*arm, depth + 1)));
+                stack.extend(arms.iter().copied());
             }
             SemanticNodeData::DeclRef { .. }
             | SemanticNodeData::InstantiationRef { .. }
