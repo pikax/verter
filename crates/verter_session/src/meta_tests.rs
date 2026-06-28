@@ -21329,24 +21329,25 @@ defineProps<{
 }
 
 /// §1a DISCRIMINATION: the C5 route fixpoint
-/// (`solve_or_project_leaf_expr_until_stable`) converges in NODE DOMAIN — every
+/// (`solve_or_project_leaf_node_until_stable`) converges in NODE DOMAIN — every
 /// iteration projects through the node adapters and convergence compares
 /// successive admitted nodes by interned `RaisedShapeKey`
 /// (`route_projection_node_eq_to_expr` vs the input on iteration 1,
-/// `route_projection_nodes_eq` vs the prior node after), with the published
-/// `TypeExpr` materialised EXACTLY ONCE after convergence
-/// (`materialize_route_projection_node`).
+/// `route_projection_nodes_eq` vs the prior node after), and returns the
+/// converged NODE directly: NO `TypeExpr` is materialised inside the fixpoint at
+/// all — the sole publication materialise happens later, at the consumer's
+/// surface sink.
 ///
 /// The two C5 parity tests above pin the published OUTPUT, which a
 /// per-iteration-materialise fixpoint would ALSO satisfy (the node cursor and
 /// the legacy materialise-per-iteration cursor are behaviour-equivalent on the
 /// published surface). This test characterises the CONVERGENCE PATH itself, so
-/// it discriminates: it FAILS against the pre-change tree (the legacy loop calls
-/// the materialising `lower_and_project_to_expanded_via_host_threaded` bridge and
-/// converges with `if next == current`, a `==` compare on a materialised cursor)
-/// and PASSES against the node cursor. Re-introducing ANY per-iteration
-/// materialise — a materialising host-threaded bridge call, or a `==`/`!=`
-/// convergence compare — fails this test.
+/// it discriminates: it FAILS against a tree whose loop calls the materialising
+/// `lower_and_project_to_expanded_via_host_threaded` bridge or converges with
+/// `if next == current` (a `==` compare on a materialised cursor) and PASSES
+/// against the node cursor. Re-introducing ANY per-iteration materialise — a
+/// materialising host-threaded bridge call, or a `==`/`!=` convergence compare —
+/// fails this test.
 #[test]
 fn c5_route_fixpoint_converges_in_node_domain_not_per_iteration_materialize() {
     use std::collections::BTreeSet;
@@ -21364,7 +21365,7 @@ fn c5_route_fixpoint_converges_in_node_domain_not_per_iteration_materialize() {
     }
     impl<'ast> Visit<'ast> for C5Characterization {
         fn visit_impl_item_fn(&mut self, f: &'ast syn::ImplItemFn) {
-            let is_target = f.sig.ident == "solve_or_project_leaf_expr_until_stable";
+            let is_target = f.sig.ident == "solve_or_project_leaf_node_until_stable";
             if is_target {
                 self.found = true;
                 self.depth += 1;
@@ -21398,25 +21399,36 @@ fn c5_route_fixpoint_converges_in_node_domain_not_per_iteration_materialize() {
     // Anti-vacuity: the fixpoint fn must exist (a rename/removal must not pass).
     assert!(
         characterization.found,
-        "C5 fixpoint fn `solve_or_project_leaf_expr_until_stable` not found in route_keys.rs \
+        "C5 fixpoint fn `solve_or_project_leaf_node_until_stable` not found in route_keys.rs \
          (renamed/removed?) — the characterization must not vacuously pass"
     );
 
-    // POSITIVE — the node-domain projection + convergence + materialize-once path.
+    // POSITIVE — the node-domain projection + convergence path. The fixpoint
+    // returns the converged NODE; it does NOT materialise (no
+    // `materialize_route_projection_node` call) — the consumer materialises once.
     for ident in [
         "lower_and_project_to_expanded_node_via_host_threaded",
         "project_admitted_node_to_expanded_node_via_host_threaded",
         "route_projection_node_eq_to_expr",
         "route_projection_nodes_eq",
-        "materialize_route_projection_node",
     ] {
         assert!(
             characterization.called.contains(ident),
-            "C5 fixpoint must call `{ident}` (node-domain projection / convergence / \
-             materialize-once); calls seen: {:?}",
+            "C5 fixpoint must call `{ident}` (node-domain projection / convergence); calls seen: \
+             {:?}",
             characterization.called
         );
     }
+    // NEGATIVE — the fixpoint returns the node and does NOT materialise; the
+    // sole publication materialise happens at the consumer's surface sink.
+    assert!(
+        !characterization
+            .called
+            .contains("materialize_route_projection_node"),
+        "C5 fixpoint must NOT materialise inside the loop — it returns the converged NODE and the \
+         consumer materialises once at the surface sink; calls seen: {:?}",
+        characterization.called
+    );
 
     // NEGATIVE — no per-iteration `TypeExpr` materialise inside the loop.
     assert_eq!(

@@ -471,11 +471,6 @@ defineProps<Omit<SelectMenuProps<SelectMenuItem[]>, 'items'>>()
     );
 
     let mut query_engine = ComponentMetaQueryEngine::new(&host);
-    let expanded_target = crate::meta_resolve::instantiate_local_generic_ref_via_dispatch(
-        query_engine.ctx,
-        "/src/App.vue",
-        &target_expr,
-    );
     let projected_target = crate::meta_resolve::project_expr_surface_expr_node_via_host_threaded(
         &mut query_engine,
         "/src/App.vue",
@@ -490,7 +485,7 @@ defineProps<Omit<SelectMenuProps<SelectMenuItem[]>, 'items'>>()
 "/src/App.vue", &expr)
         .unwrap_or_else(|| {
             panic!(
-                "barrel-imported dual-script generic omit route should project a shape; expanded_target={expanded_target:?} projected_target={projected_target:?}"
+                "barrel-imported dual-script generic omit route should project a shape; projected_target={projected_target:?}"
             )
         });
     let member_names: std::collections::BTreeSet<_> = shape
@@ -1653,15 +1648,13 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
 /// keys (`route_keys.rs` `enumerate_member_surface_keys_via_route`, the
 /// `IndexedAccess { object: Ref<Args>, .. }` arm).
 ///
-/// Dispatch-coverage assertion (the prepared-substitution slow lane and
-/// its forbid guard have been DELETED): the dispatch-backed leaf
-/// stabiliser (`solve_or_project_prepared_member_leaf_expr`, called at
-/// the top of `enumerate_member_surface_keys_via_route`) must resolve the
-/// generic config's `['variants']['color']` surface to the concrete
-/// `{ primary; secondary }` object so the literal keys enumerate via the
-/// dispatch fast lane alone. The positive key assertion flips RED if the
-/// dispatch leaf stabiliser regresses on this generic-`Ref`
-/// indexed-access route.
+/// Dispatch-coverage assertion: the node-domain route-key enumeration
+/// (`enumerate_route_literal_keys` lowering + the shared dispatch keyspace
+/// enumerator's `KeyOf` producer) must resolve the generic config's
+/// `['variants']['color']` surface to the concrete `{ primary; secondary }`
+/// object so the literal keys enumerate via the shared dispatch fast lane
+/// alone. The positive key assertion flips RED if the dispatch keyspace
+/// reduction regresses on this generic-`Ref` indexed-access route.
 #[test]
 fn enumerate_route_literal_keys_generic_ref_indexed_access_stays_off_substitution_slow_lane() {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
@@ -1922,14 +1915,18 @@ type F<T> = <T>(x: T) => T
     // outer `T` bound to `string`.
     let expr = TypeExpr::named_with_args("F", vec![TypeExpr::Primitive(PrimitiveName::String)]);
 
-    let instantiated = crate::meta_resolve::instantiate_local_generic_ref_via_dispatch(
+    // Instantiate through the shared dispatch Expanded lowering (the same path
+    // the route-key leaf stabiliser drives): lower `F<string>` at Expanded so
+    // `build_instantiate` binds the outer `T -> string` and substitutes while
+    // lowering, then materialise the instantiated function body once.
+    let instantiated = crate::resolver_core::lower_and_project_to_expanded_published(
         query_engine.ctx,
         "/src/App.vue",
         &expr,
     )
     .expect(
         "F<string> over a function-typed generic alias should instantiate to the function body \
-         via the dispatch instantiation path",
+         via the shared dispatch instantiation path",
     );
 
     // The instantiated body is the function type. Its OWN `<T>` shadows
@@ -2097,12 +2094,11 @@ type Cond<T> = T extends number ? { value: T; label: string } : never
     );
 }
 
-/// Dispatch-coverage for the (now-deleted) route_keys.rs:465 generic-Ref
-/// indexed-access arm of `enumerate_member_surface_keys_via_route`.
-/// NON-structural generic alias body: a `Conditional`. Generic-Ref
-/// instantiation in that arm now goes through
-/// `instantiate_local_generic_ref_via_dispatch` (the prepared-substitution
-/// engine fallback that once routed it has been deleted).
+/// Dispatch-coverage for the generic-`Ref` indexed-access route-key source
+/// `keyof Cfg<...>['variants']['color']` over a NON-structural generic alias
+/// body (a `Conditional`). The instantiation + indexed-access navigation now
+/// run through the shared dispatch lowering + keyspace `KeyOf` producer, not a
+/// hand-rolled member-route walker.
 ///
 /// The structural-body coverage at this route is
 /// `enumerate_route_literal_keys_generic_ref_indexed_access_stays_off_substitution_slow_lane`
@@ -2285,6 +2281,345 @@ import type { Outer } from './cfg'
         std::collections::BTreeSet::from(["primary", "secondary"]),
         "alias-to-alias generic indexed-access key source should yield exactly the concrete \
          color keys, got {key_set:?}",
+    );
+}
+
+// =========================================================================
+// Differential-equivalence oracle for the node-domain route-key / member-key
+// enumeration. The NEW node path (`enumerate_route_literal_keys` lowering +
+// keyspace enumerator + the narrow admitted-surface member-name reader) must
+// equal the OLD materialise-then-walk path, field-for-field, on every input
+// class that reaches the route. The legacy oracle below is TEST-ONLY — it
+// reconstructs the retired `enumerate_route_literal_keys_inner` +
+// `enumerate_member_surface_keys_via_route` walkers over the MATERIALISED leaf
+// (`lower_and_project_to_expanded_published`, the same Expanded lower + project
+// + materialise the deleted leaf stabiliser performed) — never a production
+// shim.
+// =========================================================================
+
+/// TEST-ONLY copy of the retired `helpers::projected_surface_member_names`
+/// `TypeExpr` walker — the legacy oracle for the node-domain
+/// `enumerate_public_surface_member_names_from_admitted_node`.
+fn legacy_projected_surface_member_names(expr: &TypeExpr) -> Option<Vec<String>> {
+    match expr {
+        TypeExpr::Object(object) => {
+            let mut members = Vec::new();
+            for member in object.properties.iter() {
+                match member {
+                    ObjectMember::Property(property) if property.visibility.is_public() => {
+                        members.push(property.name.clone())
+                    }
+                    ObjectMember::Method(method) if method.visibility.is_public() => {
+                        members.push(method.name.clone())
+                    }
+                    _ => {}
+                }
+            }
+            members.sort();
+            members.dedup();
+            Some(members)
+        }
+        TypeExpr::Intersection(parts) | TypeExpr::Union(parts) => {
+            let mut members = Vec::new();
+            for part in parts.iter() {
+                members.extend(legacy_projected_surface_member_names(part)?);
+            }
+            members.sort();
+            members.dedup();
+            Some(members)
+        }
+        TypeExpr::Parenthesized(inner) => legacy_projected_surface_member_names(inner),
+        _ => None,
+    }
+}
+
+/// TEST-ONLY reconstruction of the retired route-literal-key enumeration over
+/// the MATERIALISED leaf. The leaf stabiliser is the surviving
+/// `lower_and_project_to_expanded_published`; the `keyof <surface>` arm projects
+/// the operand and reads its public member names exactly as the old
+/// `enumerate_member_surface_keys_via_route` did. A test oracle, never a shim.
+fn legacy_enumerate_route_literal_keys(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    scope: &str,
+    expr: &TypeExpr,
+    depth: usize,
+) -> Option<Vec<String>> {
+    use verter_type_expr::LiteralValue;
+    if depth >= 6 {
+        return None;
+    }
+    // The retired leaf stabiliser materialised an empty-path surface; the
+    // retired `enumerate_member_surface_keys_via_route` then hand-distributed an
+    // `X['m']['n']` indexed-access chain to its member surface. The path-precise
+    // Class-A projector navigates that chain, so the oracle falls back to it for
+    // an indexed-access source the empty-path materialise cannot reduce.
+    let materialise = |e: &TypeExpr| {
+        crate::resolver_core::lower_and_project_to_expanded_published(ctx, scope, e)
+            .or_else(|| crate::resolver_core::project_class_a_terminal_published(ctx, scope, e))
+    };
+    match expr {
+        TypeExpr::Literal(LiteralValue::String(value)) => Some(vec![value.clone()]),
+        TypeExpr::Union(types) => {
+            let mut keys = Vec::new();
+            for ty in types.iter() {
+                keys.extend(legacy_enumerate_route_literal_keys(
+                    ctx,
+                    scope,
+                    ty,
+                    depth + 1,
+                )?);
+            }
+            keys.sort();
+            keys.dedup();
+            Some(keys)
+        }
+        TypeExpr::Parenthesized(inner) => {
+            legacy_enumerate_route_literal_keys(ctx, scope, inner, depth + 1)
+        }
+        TypeExpr::KeyOf(inner) => {
+            let projected_inner = materialise(inner).unwrap_or_else(|| inner.as_ref().clone());
+            if let Some(keys) = legacy_projected_surface_member_names(&projected_inner) {
+                return Some(keys);
+            }
+            match &projected_inner {
+                TypeExpr::Intersection(parts) | TypeExpr::Union(parts) => {
+                    let mut keys = Vec::new();
+                    let mut any_enumerable = false;
+                    for part in parts.iter() {
+                        let arm = TypeExpr::KeyOf(Arc::new(part.clone()));
+                        if let Some(arm_keys) =
+                            legacy_enumerate_route_literal_keys(ctx, scope, &arm, depth + 1)
+                        {
+                            any_enumerable = true;
+                            keys.extend(arm_keys);
+                        }
+                    }
+                    if !any_enumerable {
+                        return None;
+                    }
+                    keys.sort();
+                    keys.dedup();
+                    Some(keys)
+                }
+                _ => None,
+            }
+        }
+        _ => {
+            let projected = materialise(expr)?;
+            if projected == *expr {
+                crate::resolver_core::component_meta_registry::component_meta_registry_string_literal_keys(
+                    &projected,
+                )
+            } else {
+                legacy_enumerate_route_literal_keys(ctx, scope, &projected, depth + 1)
+            }
+        }
+    }
+}
+
+/// Build the differential fixture: a `types.ts` covering every route-key input
+/// class plus an `App.vue` importing it, wired with import dependencies.
+fn differential_route_key_host() -> VerterHost {
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/src/types.ts".to_string(),
+        Arc::from(
+            r#"
+export type LiteralKeys = 'alpha' | 'beta'
+export type LiteralKeysAlias = LiteralKeys
+export interface Surface { one: number; two: string }
+export interface Variants { variants: { color: { primary: 1; secondary: 2 } } }
+export interface Left { l1: number; shared: string }
+export interface Right { r1: string; shared: string }
+export class WithPrivate {
+  publicProp: number
+  private secretProp: string
+  protected guardedProp: boolean
+}
+export interface IndexOnly { [key: string]: number }
+"#,
+        ),
+    );
+    ws.inject_file(
+        "/src/App.vue".to_string(),
+        Arc::from(
+            r#"<script lang="ts">
+import type { LiteralKeys, LiteralKeysAlias, Surface, Variants, Left, Right, WithPrivate, IndexOnly } from './types'
+</script>
+<template><div /></template>"#,
+        ),
+    );
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    assert!(host.ensure_loaded("/src/App.vue"));
+    host.set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    host
+}
+
+/// DIFFERENTIAL: `enumerate_route_literal_keys` (the node-domain lowering +
+/// keyspace enumerator + surface-member fallback) equals the legacy
+/// materialise-then-walk oracle on every route-key input class.
+#[test]
+fn enumerate_route_literal_keys_node_path_matches_legacy_materialise_oracle() {
+    let host = differential_route_key_host();
+    let _store_view = host.resolver_store_view_read().into_owned_view();
+    let mut engine = ComponentMetaQueryEngine::new(&host);
+
+    let keyof = |inner: TypeExpr| TypeExpr::KeyOf(Arc::new(inner));
+    let indexed = |object: TypeExpr, key: &str| TypeExpr::IndexedAccess {
+        object: Arc::new(object),
+        index: Arc::new(TypeExpr::string_literal(key)),
+    };
+
+    let cases: Vec<(&str, TypeExpr)> = vec![
+        // string-literal key union
+        (
+            "literal union",
+            TypeExpr::union(vec![
+                TypeExpr::string_literal("alpha"),
+                TypeExpr::string_literal("beta"),
+            ]),
+        ),
+        // alias to a literal-key union
+        ("alias to union", TypeExpr::named("LiteralKeys")),
+        // alias-to-alias to a literal-key union
+        ("alias to alias", TypeExpr::named("LiteralKeysAlias")),
+        // keyof an object surface
+        ("keyof object", keyof(TypeExpr::named("Surface"))),
+        // keyof X['variants']['color'] — the member-surface route
+        (
+            "keyof X['m']['n']",
+            keyof(indexed(
+                indexed(TypeExpr::named("Variants"), "variants"),
+                "color",
+            )),
+        ),
+        // keyof (A & B) intersection surface
+        (
+            "keyof intersection",
+            keyof(TypeExpr::Intersection(Arc::from(vec![
+                TypeExpr::named("Left"),
+                TypeExpr::named("Right"),
+            ]))),
+        ),
+        // keyof a class with public + private + protected members (public keyspace only)
+        ("keyof class", keyof(TypeExpr::named("WithPrivate"))),
+        // keyof an index-signature-only surface (no named members)
+        ("keyof index-only", keyof(TypeExpr::named("IndexOnly"))),
+        // unresolvable source → None / carrier-stop
+        ("keyof unresolvable", keyof(TypeExpr::named("DoesNotExist"))),
+    ];
+
+    for (label, case) in &cases {
+        let new_result = engine.enumerate_route_literal_keys("/src/App.vue", "/src/App.vue", case);
+        let old_result = legacy_enumerate_route_literal_keys(engine.ctx(), "/src/App.vue", case, 0);
+        assert_eq!(
+            new_result, old_result,
+            "node-path enumeration must equal the legacy materialise oracle for `{label}`",
+        );
+    }
+
+    // Anti-vacuity: the keyspace and member-surface routes actually enumerate
+    // (a tautological `None == None` differential would prove nothing).
+    assert_eq!(
+        engine.enumerate_route_literal_keys("/src/App.vue", "/src/App.vue", &cases[0].1),
+        Some(vec!["alpha".to_string(), "beta".to_string()]),
+        "the literal-union case must enumerate its keys",
+    );
+    assert_eq!(
+        engine.enumerate_route_literal_keys("/src/App.vue", "/src/App.vue", &cases[4].1),
+        Some(vec!["primary".to_string(), "secondary".to_string()]),
+        "the keyof X['variants']['color'] member-surface route must enumerate its keys",
+    );
+    // The class case enumerates ONLY the public member (private/protected excluded).
+    assert_eq!(
+        engine.enumerate_route_literal_keys("/src/App.vue", "/src/App.vue", &cases[6].1),
+        Some(vec!["publicProp".to_string()]),
+        "keyof a class enumerates the PUBLIC keyspace only",
+    );
+}
+
+/// DIFFERENTIAL: the narrow admitted-surface member-name reader
+/// (`enumerate_public_surface_member_names_from_admitted_node`) equals the
+/// legacy `projected_surface_member_names` oracle applied to the same node's
+/// materialised surface, across object / intersection / class / index-only.
+#[test]
+fn enumerate_public_surface_member_names_matches_legacy_projected_surface_oracle() {
+    let host = differential_route_key_host();
+    let _store_view = host.resolver_store_view_read().into_owned_view();
+    let mut engine = ComponentMetaQueryEngine::new(&host);
+
+    let surfaces: Vec<(&str, TypeExpr)> = vec![
+        ("object", TypeExpr::named("Surface")),
+        (
+            "intersection",
+            TypeExpr::Intersection(Arc::from(vec![
+                TypeExpr::named("Left"),
+                TypeExpr::named("Right"),
+            ])),
+        ),
+        ("class with private", TypeExpr::named("WithPrivate")),
+        ("index-only", TypeExpr::named("IndexOnly")),
+    ];
+
+    for (label, surface) in &surfaces {
+        let Some(node) = crate::meta_resolve::project_expr_surface_expr_node_via_host_threaded(
+            &mut engine,
+            "/src/App.vue",
+            surface,
+            crate::semantic_query::ProjectionMode::Expanded,
+            crate::semantic_query::ProjectionMode::Expanded,
+            crate::semantic_query::ReductionDemand::Published,
+        ) else {
+            // A surface that does not project (e.g. a bare index-signature
+            // surface with no named members) is a `None` on both sides.
+            continue;
+        };
+        let new_names = super::surface::enumerate_public_surface_member_names_from_admitted_node(
+            engine.ctx(),
+            &node,
+        );
+        let materialised = super::surface::materialize_route_projection_node(engine.ctx(), &node);
+        let old_names = materialised
+            .as_ref()
+            .and_then(legacy_projected_surface_member_names);
+        assert_eq!(
+            new_names, old_names,
+            "admitted-surface member-name reader must equal the legacy projected-surface oracle for `{label}`",
+        );
+    }
+
+    // Anti-vacuity: the public object surface enumerates exactly its public members.
+    let node = crate::meta_resolve::project_expr_surface_expr_node_via_host_threaded(
+        &mut engine,
+        "/src/App.vue",
+        &TypeExpr::named("WithPrivate"),
+        crate::semantic_query::ProjectionMode::Expanded,
+        crate::semantic_query::ProjectionMode::Expanded,
+        crate::semantic_query::ReductionDemand::Published,
+    )
+    .expect("the class surface should project");
+    assert_eq!(
+        super::surface::enumerate_public_surface_member_names_from_admitted_node(
+            engine.ctx(),
+            &node
+        ),
+        Some(vec!["publicProp".to_string()]),
+        "the admitted-surface reader must exclude private/protected members",
     );
 }
 
