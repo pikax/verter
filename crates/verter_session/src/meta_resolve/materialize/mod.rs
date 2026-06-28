@@ -39,5 +39,23 @@ pub(crate) use field_types::type_expr_has_package_backed_object_like_root_with_f
 // (`mint: pub(in crate::meta_resolve::materialize::field_types)`), so this
 // re-export does NOT widen who can mint — only who can name the type.
 pub(crate) use field_types::MetaResolveFieldTypesOutputCap;
+// Re-export the non-output member-shape-key capability TYPE so
+// `component_meta_caches` can name it in the registry member-value-node key
+// constructor's signature. Like the output-cap re-export above, the `new()`
+// CONSTRUCTOR stays sink-private (`mint: pub(in …::field_types)`), so this
+// widens only who can NAME the type, not who can mint it.
+pub(crate) use field_types::RegistryMemberShapeKeyCap;
+// The node-domain registry member-surface stabiliser + the stabilised-value
+// carrier: the node-first second pass that reduces a first-pass
+// `MaterializeStructureDb` node through the `ShapeCacheDb` member-node slot,
+// reproducing the `_until_stable_full` reduction context.
+pub(crate) use field_types::{
+    stabilize_registry_member_surface_node_with_shape_cache, RegistryMemberStabilizedValue,
+};
+// The reduction-context helper is consumed in production INTERNALLY by the
+// stabiliser (same module); only the node-vs-TypeExpr reduction-context parity
+// differential reaches it through this path.
+#[cfg(test)]
+pub(crate) use field_types::node_materialize_reduction_context;
 
 pub(crate) use macro_shapes::collect_type_expr_ref_names;

@@ -93,7 +93,8 @@ pub(crate) use dep_signature::{
 pub(crate) use dep_signature::accumulate_dispatch_dep_signature;
 pub(crate) use dispatch_helpers::{
     lower_and_project_to_expanded_node_via_host_threaded,
-    project_admitted_node_to_expanded_node_via_host_threaded, project_expr_class_a_via_dispatch,
+    project_admitted_node_to_expanded_node_via_host_threaded,
+    project_expr_class_a_node_via_dispatch_threaded, project_expr_class_a_via_dispatch,
     project_expr_class_a_via_dispatch_threaded, project_expr_surface_expr_node_via_host_threaded,
     project_expr_surface_shape_via_host_threaded, project_type_surface_expr_via_host_threaded,
 };
@@ -147,7 +148,6 @@ pub(crate) use macro_member_walk::{
 };
 pub(crate) use materialize::{
     collect_type_expr_ref_names, lowered_preserve_package_backed_symbolic_refs,
-    materialize_component_meta_type_expr_until_stable,
 };
 pub(crate) use origin_graph::build_origin_graph;
 pub(crate) use registry_materialize::{

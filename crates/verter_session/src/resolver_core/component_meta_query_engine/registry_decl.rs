@@ -450,6 +450,13 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// keys at `Expanded` (the terminal demand). `None` on a recursive /
     /// error Pick OR a node-core materialisation error — the caller then
     /// falls through to its registry-candidate path.
+    ///
+    /// The fact-bearing registry path now publishes through
+    /// [`Self::materialize_pick_member_surface_candidate`] (which also carries the
+    /// object-surface fact); this bare-`TypeExpr` demand form is retained as the
+    /// boundary-contract surface the `dispatch_helpers` demand-API contract test
+    /// pins (`(scope, symbol, members, nested) -> Option<TypeExpr>`, no node leaks).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn materialize_pick_member_surface(
         &mut self,
         scope_canonical_id: &str,
@@ -507,14 +514,34 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         base: crate::semantic_query::SemanticNodeId,
         nested_surface: bool,
     ) -> Option<verter_type_expr::TypeExpr> {
+        let materialised_id =
+            self.materialize_member_surface_to_node(scope_canonical_id, base, nested_surface)?;
+        // Publication sink: materialize into a sealed carrier and unwrap via
+        // the query-engine output capability.
+        let dispatch = ProjectSemanticDispatch::new(self.ctx);
+        let cap = MetaQueryRegistryOutputCap::new(&dispatch);
+        cap.materialize_output_type_expr(materialised_id)
+            .map(|raised| raised.into_type_expr(&cap))
+    }
+
+    /// First-pass (`MaterializeStructureDb`) node: the producing
+    /// `SemanticNodeId` the member surface materialises to, BEFORE the raise
+    /// to a `TypeExpr`. The node-domain shared core of
+    /// [`Self::materialize_member_surface_node_core`] (which raises this node)
+    /// AND the registry member-surface stabiliser (which REDUCES this node
+    /// directly through the `ShapeCacheDb` member-node slot — the node-first
+    /// second pass that never pays the raise + re-lower round-trip).
+    fn materialize_member_surface_to_node(
+        &mut self,
+        scope_canonical_id: &str,
+        base: crate::semantic_query::SemanticNodeId,
+        nested_surface: bool,
+    ) -> Option<crate::semantic_query::SemanticNodeId> {
         use crate::component_meta_materialize::{
             materialize_component_meta_structure, MaterializationScope, MaterializeOutcome,
             MaterializeRuntimeKey,
         };
-        use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-        use crate::semantic_query::ProjectionMode;
 
-        let dispatch = ProjectSemanticDispatch::new(self.ctx);
         // Publication demand per scope axis, shallow-by-default. The
         // TOP-LEVEL registry-symbol surface materialises at `Shallow` —
         // the interpretable one-level surface whose heritage arms merge
@@ -547,18 +574,13 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // outer `with_fact_tracer` scope both observe the
         // materialiser's dep graph.
         crate::meta_resolve::emit_dispatch_dep_signature_facts(self.ctx, &read.dep_signature);
-        let materialised_id = match read.value {
+        match read.value {
             MaterializeOutcome::Value(id)
             | MaterializeOutcome::Miss(id)
             | MaterializeOutcome::Recursive(id)
-            | MaterializeOutcome::Tainted(id) => id,
-            MaterializeOutcome::Error(_) => return None,
-        };
-        // Publication sink: materialize into a sealed carrier and unwrap via
-        // the query-engine output capability.
-        let cap = MetaQueryRegistryOutputCap::new(&dispatch);
-        cap.materialize_output_type_expr(materialised_id)
-            .map(|raised| raised.into_type_expr(&cap))
+            | MaterializeOutcome::Tainted(id) => Some(id),
+            MaterializeOutcome::Error(_) => None,
+        }
     }
 
     /// TEST-ONLY node-input reach for the handle-capable equivalence fixtures,
@@ -1379,6 +1401,789 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     .map(|_| AdmittedRouteProjectionNode::new(node))
             }
             _ => None,
+        }
+    }
+
+    // ===================================================================
+    // Node-first registry-candidate materialisation siblings.
+    //
+    // Each returns the published surface PAIRED with the node-domain
+    // object-surface fact, decided off the PRODUCING node — so the host-side
+    // registry loop carries a precomputed fact instead of inspecting the
+    // materialised value. Member surfaces materialise through the first-pass
+    // `MaterializeStructureDb` node (`materialize_member_surface_to_node`) and,
+    // where the old path stabilised, REDUCE that node through the `ShapeCacheDb`
+    // member-node slot (the node-first second pass) — never a raise-then-re-lower
+    // of a materialised value to recover facts.
+    // ===================================================================
+
+    /// Whole-surface registry candidate for `symbol` in `scope`: the node-domain
+    /// replacement for the former `project_type_surface_expr_via_host_threaded`
+    /// bridge. Projects the symbol's whole surface (the same budget-gated
+    /// `dispatch_projected_surface_with_node`), returns its `TypeExpr` plus the
+    /// producing node's object-surface fact.
+    pub(crate) fn materialize_registry_whole_surface_candidate(
+        &mut self,
+        scope_canonical_id: &str,
+        symbol_name: &str,
+    ) -> Option<(TypeExpr, bool)> {
+        if self.projection_op_budget_exhausted() {
+            return None;
+        }
+        let (surface, node) =
+            self.dispatch_projected_surface_with_node(scope_canonical_id, symbol_name)?;
+        let type_expr = projected_surface_to_type_expr(&surface)?;
+        let is_object = component_meta_registry_node_has_explicit_object_surface(self.ctx, node);
+        Some((type_expr, is_object))
+    }
+
+    /// Owner-local generic-alias substituted registry candidate: the relocated body
+    /// of the former host-side `owner_local_generic_alias_substituted_body_via_dispatch`.
+    /// Lowers the generic ref (Navigate), gates on the owner-local
+    /// `InstantiationRef` carrier + the prepared-decl reach constraints, runs the
+    /// shared `Instantiate` query, and gates the result NODE on raising EXACTLY to
+    /// an object surface (the node-domain replacement for
+    /// `matches!(raised, TypeExpr::Object(_))`) before materialising it ONCE.
+    pub(crate) fn owner_local_generic_alias_candidate(
+        &mut self,
+        scope_canonical_id: &str,
+        raw: &TypeExpr,
+    ) -> Option<(TypeExpr, bool)> {
+        use crate::project_semantic_dispatch::node_data_for;
+        use crate::semantic_query::{ProjectionReductionContext, SemanticNodeData};
+
+        let TypeExpr::Ref { type_arguments, .. } = raw else {
+            return None;
+        };
+        if type_arguments.is_empty() {
+            return None;
+        }
+        let ctx = self.ctx;
+        let dispatch = ProjectSemanticDispatch::new(ctx);
+        let navigate_context =
+            ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate);
+        let lowered = dispatch.lower_type_expr_in_scope_with_context(
+            scope_canonical_id,
+            raw,
+            navigate_context,
+        )?;
+        let lowered_data = node_data_for(ctx, lowered)?;
+        let SemanticNodeData::InstantiationRef { base, args } = lowered_data.as_ref() else {
+            return None;
+        };
+        if base.canonical_id.as_ref() != scope_canonical_id {
+            return None;
+        }
+        let prepared =
+            self.prepared_type_decl(base.canonical_id.as_ref(), base.decl_name.as_ref())?;
+        if prepared.type_parameters.len() < args.len() {
+            return None;
+        }
+        if !matches!(prepared.body, TypeExpr::Object(_)) {
+            return None;
+        }
+        let instantiate_prc =
+            ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate);
+        let node = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
+            base: dispatch.type_slot_for(
+                std::sync::Arc::clone(&base.canonical_id),
+                std::sync::Arc::clone(&base.decl_name),
+            ),
+            context: dispatch.instantiate_context_for(&base.canonical_id, instantiate_prc),
+            args: std::sync::Arc::clone(args),
+        }) {
+            QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
+            QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
+        };
+        if !node_raises_to_object_surface(ctx, node) {
+            return None;
+        }
+        let admitted = AdmittedRouteProjectionNode::new(node);
+        let type_expr = super::surface::materialize_route_projection_node(ctx, &admitted)?;
+        Some((type_expr, true))
+    }
+
+    /// Routed registry MEMBER surface (the per-member arm of a `Pick<…>` / member
+    /// path route): project `route_expr` to its surface NODE through the shared
+    /// class-A node dispatch, materialise its structure to the first-pass node, then
+    /// reduce that node ONCE through the `ShapeCacheDb` member-node stabiliser. The
+    /// no-poison selection is decided in the stabiliser on node-domain
+    /// `!RaisedShapeFacts.materialized` facts. Returns the chosen value paired with
+    /// its object-surface fact, carried untainted.
+    pub(crate) fn materialize_registry_routed_member_surface(
+        &mut self,
+        scope_canonical_id: &str,
+        route_expr: &TypeExpr,
+    ) -> RegistryMemberSurface {
+        let ctx = self.ctx;
+        let projected = crate::meta_resolve::project_expr_class_a_node_via_dispatch_threaded(
+            ctx,
+            Some(self),
+            scope_canonical_id,
+            route_expr,
+        );
+        let base_node = match projected {
+            Some(admitted) => Some(admitted.node()),
+            None => {
+                let dispatch = ProjectSemanticDispatch::new(ctx);
+                dispatch.lower_type_expr_in_scope_with_mode(
+                    scope_canonical_id,
+                    route_expr,
+                    ProjectionMode::Navigate,
+                )
+            }
+        };
+        let first_node = base_node.and_then(|base| {
+            self.materialize_member_surface_to_node(scope_canonical_id, base, true)
+        });
+        let Some(first_node) = first_node else {
+            // Neither projection nor a raw lowering yields a base, or the structure
+            // materialisation errored: best-effort single-pass route surface.
+            return self.materialize_registry_member_value(scope_canonical_id, route_expr);
+        };
+        let stabilized = crate::meta_resolve::materialize::stabilize_registry_member_surface_node_with_shape_cache(
+            ctx,
+            scope_canonical_id,
+            first_node,
+            ProjectionMode::Navigate,
+        );
+        self.registry_member_surface_from_stabilized(stabilized)
+    }
+
+    /// Unwrap a [`crate::meta_resolve::materialize::RegistryMemberStabilizedValue`]
+    /// into the published value + its object-surface fact: raise the chosen NODE
+    /// (the first-pass node for `First`, the stabilised node for `Stable`) ONCE at
+    /// the registered terminal sink, and read the object-surface fact off that SAME
+    /// node — no decision rides the raised value.
+    fn registry_member_surface_from_stabilized(
+        &self,
+        stabilized: crate::meta_resolve::materialize::RegistryMemberStabilizedValue,
+    ) -> RegistryMemberSurface {
+        use crate::meta_resolve::materialize::RegistryMemberStabilizedValue;
+        let ctx = self.ctx;
+        let node = match stabilized {
+            RegistryMemberStabilizedValue::First { node }
+            | RegistryMemberStabilizedValue::Stable { node } => node,
+        };
+        let value = materialize_member_node_to_type_expr(ctx, node).unwrap_or_else(|| {
+            TypeExpr::Object(std::sync::Arc::new(verter_type_expr::ObjectExpr {
+                properties: Vec::new(),
+            }))
+        });
+        let explicit_object_surface =
+            component_meta_registry_node_has_explicit_object_surface(ctx, node);
+        RegistryMemberSurface {
+            value,
+            explicit_object_surface,
+        }
+    }
+
+    /// Single-pass registry member value: lower `expr` (Navigate), materialise its
+    /// structure to the first-pass node, raise it, and pair it with its
+    /// object-surface fact (off the first-pass node). The Pick callable-descent-skip
+    /// path projects a package-backed raw leaf directly through this (no route
+    /// re-projection / stabilisation), and the routed sibling reuses it as the
+    /// best-effort fallback.
+    pub(crate) fn materialize_registry_member_value(
+        &mut self,
+        scope_canonical_id: &str,
+        expr: &TypeExpr,
+    ) -> RegistryMemberSurface {
+        let ctx = self.ctx;
+        let base = {
+            let dispatch = ProjectSemanticDispatch::new(ctx);
+            dispatch.lower_type_expr_in_scope_with_mode(
+                scope_canonical_id,
+                expr,
+                ProjectionMode::Navigate,
+            )
+        };
+        match base
+            .and_then(|b| self.materialize_member_surface_to_node(scope_canonical_id, b, true))
+        {
+            Some(first_node) => {
+                let value = materialize_member_node_to_type_expr(ctx, first_node)
+                    .unwrap_or_else(|| expr.clone());
+                let explicit_object_surface =
+                    component_meta_registry_node_has_explicit_object_surface(ctx, first_node);
+                RegistryMemberSurface {
+                    value,
+                    explicit_object_surface,
+                }
+            }
+            None => RegistryMemberSurface {
+                value: expr.clone(),
+                explicit_object_surface: false,
+            },
+        }
+    }
+
+    /// Builtin-Pick registry candidate fallback through the shared `Pick<base, keys>`
+    /// dispatch (the same single-dispatch path as [`Self::materialize_pick_member_surface`]):
+    /// resolve the Pick result node, materialise its structure to the first-pass
+    /// node, raise it, and pair it with the producing node's object-surface fact.
+    pub(crate) fn materialize_pick_member_surface_candidate(
+        &mut self,
+        scope_canonical_id: &str,
+        root_symbol: &str,
+        members: &[String],
+    ) -> Option<RegistryMemberSurface> {
+        let pick_node = {
+            let dispatch = ProjectSemanticDispatch::new(self.ctx);
+            let symbol_ref = TypeExpr::Ref {
+                name: std::sync::Arc::from(root_symbol),
+                type_arguments: std::sync::Arc::from(Vec::new().into_boxed_slice()),
+            };
+            let base = dispatch.lower_type_expr_in_scope_with_mode(
+                scope_canonical_id,
+                &symbol_ref,
+                ProjectionMode::Navigate,
+            )?;
+            let members_arc: Vec<std::sync::Arc<str>> = members
+                .iter()
+                .map(|s| std::sync::Arc::from(s.as_str()))
+                .collect();
+            match dispatch.execute_pick(base, &members_arc, ProjectionMode::Expanded) {
+                QueryResult::Value(id) => id,
+                QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
+            }
+        };
+        let first_node =
+            self.materialize_member_surface_to_node(scope_canonical_id, pick_node, true)?;
+        let value = materialize_member_node_to_type_expr(self.ctx, first_node)?;
+        let explicit_object_surface =
+            component_meta_registry_node_has_explicit_object_surface(self.ctx, first_node);
+        Some(RegistryMemberSurface {
+            value,
+            explicit_object_surface,
+        })
+    }
+
+    /// Project a member-path route expression to its leaf value PLUS the node-domain
+    /// reject/accept facts the registry member-path arm decides on
+    /// (`explicit_object_surface` / `non_object_top_level_surface` /
+    /// `is_indexed_access_shell`). The leaf is the former
+    /// `project_expr_class_a_via_dispatch(...).unwrap_or(route_expr)`; the three
+    /// facts replace the host-side `matches!` / `has_*_surface` decisions on the
+    /// materialised leaf, read off the leaf's projected node (no re-lower).
+    pub(crate) fn project_member_path_leaf_facts(
+        &mut self,
+        scope_canonical_id: &str,
+        route_expr: &TypeExpr,
+    ) -> (TypeExpr, bool, bool, bool) {
+        let ctx = self.ctx;
+        // The member-path leaf mirrors the NON-threaded `project_expr_class_a_via_dispatch`
+        // (engine = None / transient), so the node projection threads no engine.
+        let projected = crate::meta_resolve::project_expr_class_a_node_via_dispatch_threaded(
+            ctx,
+            None,
+            scope_canonical_id,
+            route_expr,
+        );
+        match projected {
+            Some(admitted) => {
+                let node = admitted.node();
+                let is_object = component_meta_registry_node_has_explicit_object_surface(ctx, node);
+                let non_object_top =
+                    component_meta_registry_node_has_non_object_top_level_surface(ctx, node);
+                let is_indexed = node_is_indexed_access_shell(ctx, node);
+                let leaf = super::surface::materialize_route_projection_node(ctx, &admitted)
+                    .unwrap_or_else(|| route_expr.clone());
+                (leaf, is_object, non_object_top, is_indexed)
+            }
+            None => {
+                // Projection failed: the leaf IS the raw `route_expr` (the original
+                // `.unwrap_or(route_expr)`). Lower it (symbolic-input pipeline feed)
+                // for facts.
+                let dispatch = ProjectSemanticDispatch::new(ctx);
+                let leaf_node = dispatch.lower_type_expr_in_scope_with_mode(
+                    scope_canonical_id,
+                    route_expr,
+                    ProjectionMode::Navigate,
+                );
+                let (is_object, non_object_top, is_indexed) = leaf_node
+                    .map(|node| {
+                        (
+                            component_meta_registry_node_has_explicit_object_surface(ctx, node),
+                            component_meta_registry_node_has_non_object_top_level_surface(
+                                ctx, node,
+                            ),
+                            node_is_indexed_access_shell(ctx, node),
+                        )
+                    })
+                    .unwrap_or((false, false, false));
+                (route_expr.clone(), is_object, non_object_top, is_indexed)
+            }
+        }
+    }
+
+    /// Refine an imported generic-alias Object surface member-by-member: the
+    /// relocated body of the former host-side `maybe_refine_imported_generic_alias_object`
+    /// closure. Each property re-projects `Ref{symbol}["<prop>"]` through the shared
+    /// class-A node dispatch in the OWNER scope (keeping only a node-materialised
+    /// projection with no semantic miss), raises it so the alias body's helper
+    /// carriers re-resolve in the DEFINING scope, then materialises + stabilises it
+    /// (node-domain no-poison). Returns the refined Object (a transformer — `source`
+    /// is returned unchanged when it is not an Object).
+    pub(crate) fn refine_imported_generic_alias_object_surface(
+        &mut self,
+        owner_scope: &str,
+        materialize_scope: &str,
+        symbol_name: &str,
+        source: &TypeExpr,
+    ) -> TypeExpr {
+        use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty};
+        let TypeExpr::Object(object) = source else {
+            return source.clone();
+        };
+        let ctx = self.ctx;
+        let mut properties: Vec<ObjectMember> = Vec::with_capacity(object.properties.len());
+        for member in object.properties.iter() {
+            let ObjectMember::Property(property) = member else {
+                properties.push(member.clone());
+                continue;
+            };
+            let route_expr =
+                registry_indexed_access_expr(symbol_name, std::slice::from_ref(&property.name));
+            // OWNER-scope projection NODE, kept only when it carries no semantic
+            // miss (node fact, mirroring the former `.filter(!contains_semantic_miss)`).
+            let projected = crate::meta_resolve::project_expr_class_a_node_via_dispatch_threaded(
+                ctx,
+                Some(self),
+                owner_scope,
+                &route_expr,
+            );
+            let refine_input: TypeExpr = match projected {
+                Some(admitted) => {
+                    let node = admitted.node();
+                    let has_miss = node_raised_shape_facts_with_dispatch(
+                        &ProjectSemanticDispatch::new(ctx),
+                        node,
+                    )
+                    .map(|facts| !facts.materialized)
+                    .unwrap_or(false);
+                    if has_miss {
+                        property.ty.clone()
+                    } else {
+                        // Raise the owner-scope projection (= the former
+                        // `project_class_a` `typed_projected`) through the registered
+                        // sink so the defining-scope pass re-resolves the alias body's
+                        // helper carriers.
+                        materialize_member_node_to_type_expr(ctx, node)
+                            .unwrap_or_else(|| property.ty.clone())
+                    }
+                }
+                None => property.ty.clone(),
+            };
+            // Pass 1 + pass 2 in the DEFINING (materialize) scope — the remaining
+            // carriers are the alias body's helper references, which resolve there.
+            let base = {
+                let dispatch = ProjectSemanticDispatch::new(ctx);
+                dispatch.lower_type_expr_in_scope_with_mode(
+                    materialize_scope,
+                    &refine_input,
+                    ProjectionMode::Navigate,
+                )
+            };
+            let ty = match base
+                .and_then(|b| self.materialize_member_surface_to_node(materialize_scope, b, true))
+            {
+                Some(first_node) => {
+                    let stabilized =
+                        crate::meta_resolve::materialize::stabilize_registry_member_surface_node_with_shape_cache(
+                            ctx,
+                            materialize_scope,
+                            first_node,
+                            ProjectionMode::Navigate,
+                        );
+                    self.registry_member_surface_from_stabilized(stabilized)
+                        .value
+                }
+                None => refine_input,
+            };
+            properties.push(ObjectMember::Property(ObjectProperty::with_visibility(
+                property.name.clone(),
+                ty,
+                property.optional,
+                property.readonly,
+                property.visibility,
+                property.spans,
+            )));
+        }
+        TypeExpr::Object(std::sync::Arc::new(ObjectExpr { properties }))
+    }
+}
+
+/// Module-private registry member-surface carrier: a materialised member value
+/// PAIRED with its node-domain object-surface fact (decided off the producing
+/// node). The ONLY value-bearing carrier crossing toward `host_manage` — no raw
+/// `SemanticNodeId` / `AdmittedRouteProjectionNode` leaves the query engine.
+pub(crate) struct RegistryMemberSurface {
+    pub(crate) value: TypeExpr,
+    pub(crate) explicit_object_surface: bool,
+}
+
+/// Build the registry indexed-access route expression `symbol['p0']['p1']…` from a
+/// member-name path — the module-local node-engine copy of the host-side
+/// `build_registry_indexed_access_expr` (pure `TypeExpr` construction).
+fn registry_indexed_access_expr(symbol_name: &str, path: &[String]) -> TypeExpr {
+    path.iter()
+        .fold(TypeExpr::named(symbol_name), |object, member| {
+            TypeExpr::IndexedAccess {
+                object: std::sync::Arc::new(object),
+                index: std::sync::Arc::new(TypeExpr::string_literal(member.clone())),
+            }
+        })
+}
+
+/// Node-domain mirror of `component_meta_registry_has_explicit_object_surface`
+/// applied to a node's RAISED root: an `Object` / `MergedDecl` / `VueMacroElements`
+/// (all raise to `TypeExpr::Object`), or a `Union` / `Intersection` carrying such
+/// an arm, following the `Alias` identity hop. Read off the producing node so a
+/// candidate's object-surface fact is decided in node domain instead of inspecting
+/// the materialised `TypeExpr`.
+pub(crate) fn component_meta_registry_node_has_explicit_object_surface(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    node: SemanticNodeId,
+) -> bool {
+    use crate::semantic_query::SemanticNodeData;
+    fn walk(
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        node: SemanticNodeId,
+        depth: u32,
+    ) -> bool {
+        const MAX_DEPTH: u32 = 32;
+        if depth >= MAX_DEPTH {
+            return false;
+        }
+        let Some(data) = crate::project_semantic_dispatch::node_data_for(ctx, node) else {
+            return false;
+        };
+        match data.as_ref() {
+            SemanticNodeData::Object(_)
+            | SemanticNodeData::MergedDecl { .. }
+            | SemanticNodeData::VueMacroElements(_) => true,
+            SemanticNodeData::Alias(inner) => walk(ctx, *inner, depth + 1),
+            SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
+                arms.iter().any(|arm| walk(ctx, *arm, depth + 1))
+            }
+            _ => false,
+        }
+    }
+    walk(ctx, node, 0)
+}
+
+/// Whether `node` raises EXACTLY to a `TypeExpr::Object` (an `Object` /
+/// `MergedDecl` / `VueMacroElements`, following the `Alias` hop) — the node-domain
+/// mirror of `matches!(raise(node), TypeExpr::Object(_))`. Unlike
+/// [`component_meta_registry_node_has_explicit_object_surface`], a `Union` /
+/// `Intersection` (which raises to a `Union` / `Intersection`, not a plain `Object`)
+/// is NOT an object root here.
+pub(crate) fn node_raises_to_object_surface(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    node: SemanticNodeId,
+) -> bool {
+    use crate::semantic_query::SemanticNodeData;
+    fn walk(
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        node: SemanticNodeId,
+        depth: u32,
+    ) -> bool {
+        const MAX_DEPTH: u32 = 32;
+        if depth >= MAX_DEPTH {
+            return false;
+        }
+        let Some(data) = crate::project_semantic_dispatch::node_data_for(ctx, node) else {
+            return false;
+        };
+        match data.as_ref() {
+            SemanticNodeData::Object(_)
+            | SemanticNodeData::MergedDecl { .. }
+            | SemanticNodeData::VueMacroElements(_) => true,
+            SemanticNodeData::Alias(inner) => walk(ctx, *inner, depth + 1),
+            _ => false,
+        }
+    }
+    walk(ctx, node, 0)
+}
+
+/// Node-domain mirror of `component_meta_registry_has_non_object_top_level_surface`
+/// applied to a node's RAISED root: a `Ref`-carrier (`DeclRef` / `InstantiationRef`
+/// / `BareRef`, raising to `TypeExpr::Ref`) / `IndexedAccess` / `Conditional` /
+/// `Mapped`, OR a `Union` / `Intersection` where any arm recursively qualifies or
+/// any arm does NOT raise to a plain `Object`. Arm-for-arm with the `TypeExpr`
+/// predicate (`KeyOf` / `TypeOf` and primitives/objects are NOT non-object roots).
+pub(crate) fn component_meta_registry_node_has_non_object_top_level_surface(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    node: SemanticNodeId,
+) -> bool {
+    use crate::semantic_query::SemanticNodeData;
+    fn walk(
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        node: SemanticNodeId,
+        depth: u32,
+    ) -> bool {
+        const MAX_DEPTH: u32 = 32;
+        if depth >= MAX_DEPTH {
+            return false;
+        }
+        let Some(data) = crate::project_semantic_dispatch::node_data_for(ctx, node) else {
+            return false;
+        };
+        match data.as_ref() {
+            SemanticNodeData::Alias(inner) => walk(ctx, *inner, depth + 1),
+            SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
+                arms.iter().any(|arm| walk(ctx, *arm, depth + 1))
+                    || arms
+                        .iter()
+                        .any(|arm| !node_raises_to_object_surface(ctx, *arm))
+            }
+            SemanticNodeData::DeclRef { .. }
+            | SemanticNodeData::InstantiationRef { .. }
+            | SemanticNodeData::BareRef(_)
+            | SemanticNodeData::IndexedAccess { .. }
+            | SemanticNodeData::Conditional { .. }
+            | SemanticNodeData::Mapped { .. } => true,
+            _ => false,
+        }
+    }
+    walk(ctx, node, 0)
+}
+
+/// Whether `node`'s top-level data is a deferred `IndexedAccess` shell — the
+/// node-domain mirror of `matches!(leaf, TypeExpr::IndexedAccess { .. })`.
+pub(crate) fn node_is_indexed_access_shell(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    node: SemanticNodeId,
+) -> bool {
+    use crate::semantic_query::SemanticNodeData;
+    crate::project_semantic_dispatch::node_data_for(ctx, node)
+        .is_some_and(|data| matches!(data.as_ref(), SemanticNodeData::IndexedAccess { .. }))
+}
+
+/// Raise a member-surface NODE to its published `TypeExpr` through the registered
+/// `materialize_route_projection_node` terminal sink — the materialisation happens
+/// INSIDE the sink (`materialize_published_node`), so the registry siblings hold no
+/// `into_type_expr` / `materialize_output_type_expr` mint of their own. The object
+/// fact is read off the node separately, so no semantic decision rides the raised
+/// value.
+fn materialize_member_node_to_type_expr(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    node: SemanticNodeId,
+) -> Option<TypeExpr> {
+    super::surface::materialize_route_projection_node(ctx, &AdmittedRouteProjectionNode::new(node))
+}
+
+#[cfg(test)]
+mod node_predicate_parity_tests {
+    use super::{
+        component_meta_registry_node_has_explicit_object_surface,
+        component_meta_registry_node_has_non_object_top_level_surface,
+        materialize_member_node_to_type_expr, node_raises_to_object_surface,
+    };
+    use crate::meta::MetaProject;
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::resolver_core::component_meta_registry::{
+        component_meta_registry_has_explicit_object_surface,
+        component_meta_registry_has_non_object_top_level_surface,
+    };
+    use crate::semantic_query::ProjectionMode;
+    use crate::types::{AnalysisLevel, HostConfig};
+    use crate::VerterHost;
+    use std::sync::Arc as StdArc;
+    use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, TypeExpr};
+
+    fn one_prop_object(name: &str) -> TypeExpr {
+        TypeExpr::Object(StdArc::new(ObjectExpr {
+            properties: vec![ObjectMember::Property(ObjectProperty::synthetic_public(
+                name.to_string(),
+                TypeExpr::string_literal("x"),
+                false,
+                false,
+            ))],
+        }))
+    }
+
+    fn open_host() -> StdArc<MetaProject> {
+        let host = VerterHost::new_standalone(HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        });
+        let project = MetaProject::new(host);
+        project
+            .upsert_base("/p.ts", "export type Anchor = number\n")
+            .unwrap();
+        project
+    }
+
+    /// PARITY: the node-domain registry object-surface predicates answer IDENTICALLY
+    /// to the `TypeExpr` predicates applied to the node's raised value (the exact
+    /// value the host-side registry loop publishes). A node-fact MUTATION breaks this:
+    /// dropping the `Union`/`Intersection` arm from
+    /// `component_meta_registry_node_has_explicit_object_surface`, or adding `KeyOf` to
+    /// `component_meta_registry_node_has_non_object_top_level_surface` (which the
+    /// `TypeExpr` predicate does NOT have), flips a `Union`/operator case below.
+    #[test]
+    fn registry_object_surface_node_predicates_mirror_type_expr_predicates_on_raised_value() {
+        let project = open_host();
+        let session = project.open_session_batch().unwrap();
+        let _ = session.evaluate_types("/p.ts").unwrap();
+        let host = session.host();
+        let ctx: &dyn crate::resolver_core::ResolverContext = host;
+        let dispatch = ProjectSemanticDispatch::new(ctx);
+
+        let cases: Vec<TypeExpr> = vec![
+            // Object surface.
+            one_prop_object("a"),
+            // Union carrying an object arm AND a non-object arm.
+            TypeExpr::Union(StdArc::from(vec![
+                one_prop_object("a"),
+                TypeExpr::string_literal("lit"),
+            ])),
+            // Intersection of two object arms (still an object surface).
+            TypeExpr::Intersection(StdArc::from(vec![
+                one_prop_object("a"),
+                one_prop_object("b"),
+            ])),
+            // A bare literal (non-object, non-ref).
+            TypeExpr::string_literal("solo"),
+            // A bare reference carrier to a missing name (raises to `Ref`).
+            TypeExpr::Ref {
+                name: StdArc::from("DefinitelyMissingType"),
+                type_arguments: StdArc::from(Vec::new().into_boxed_slice()),
+            },
+        ];
+
+        for expr in &cases {
+            let Some(node) = dispatch.lower_type_expr_in_scope_with_mode(
+                "/p.ts",
+                expr,
+                ProjectionMode::Navigate,
+            ) else {
+                continue;
+            };
+            let Some(raised) = materialize_member_node_to_type_expr(ctx, node) else {
+                continue;
+            };
+            assert_eq!(
+                component_meta_registry_node_has_explicit_object_surface(ctx, node),
+                component_meta_registry_has_explicit_object_surface(&raised),
+                "explicit-object-surface NODE predicate must mirror the TypeExpr predicate on the \
+                 raised value for {expr:?} (raised={raised:?})",
+            );
+            assert_eq!(
+                component_meta_registry_node_has_non_object_top_level_surface(ctx, node),
+                component_meta_registry_has_non_object_top_level_surface(&raised),
+                "non-object-top-level NODE predicate must mirror the TypeExpr predicate on the \
+                 raised value for {expr:?} (raised={raised:?})",
+            );
+        }
+    }
+
+    /// DISCRIMINATION: a `Union[Object, literal]` node exercises BOTH arms of the
+    /// node predicates — the object arm (`explicit_object_surface == true`) and the
+    /// non-object arm (`non_object_top_level == true`) — while
+    /// `node_raises_to_object_surface` is FALSE on the `Union` root (a `Union` does
+    /// not raise to a plain `Object`, the property that gates the owner-local arm). An
+    /// inline `Object` root inverts the non-object arm and IS an object-raising root.
+    /// Removing any arm flips one of these assertions.
+    #[test]
+    fn registry_node_predicates_discriminate_union_and_object_roots() {
+        let project = open_host();
+        let session = project.open_session_batch().unwrap();
+        let _ = session.evaluate_types("/p.ts").unwrap();
+        let host = session.host();
+        let ctx: &dyn crate::resolver_core::ResolverContext = host;
+        let dispatch = ProjectSemanticDispatch::new(ctx);
+
+        let union = TypeExpr::Union(StdArc::from(vec![
+            one_prop_object("a"),
+            TypeExpr::string_literal("lit"),
+        ]));
+        let union_node = dispatch
+            .lower_type_expr_in_scope_with_mode("/p.ts", &union, ProjectionMode::Navigate)
+            .expect("union lowers");
+        assert!(
+            component_meta_registry_node_has_explicit_object_surface(ctx, union_node),
+            "a Union with an Object arm IS an explicit object surface",
+        );
+        assert!(
+            component_meta_registry_node_has_non_object_top_level_surface(ctx, union_node),
+            "a Union with a non-object arm HAS a non-object top-level surface",
+        );
+        assert!(
+            !node_raises_to_object_surface(ctx, union_node),
+            "a Union root does NOT raise to a plain Object",
+        );
+
+        let object_node = dispatch
+            .lower_type_expr_in_scope_with_mode(
+                "/p.ts",
+                &one_prop_object("a"),
+                ProjectionMode::Navigate,
+            )
+            .expect("object lowers");
+        assert!(component_meta_registry_node_has_explicit_object_surface(
+            ctx,
+            object_node
+        ));
+        assert!(!component_meta_registry_node_has_non_object_top_level_surface(ctx, object_node));
+        assert!(
+            node_raises_to_object_surface(ctx, object_node),
+            "an inline Object root DOES raise to a plain Object",
+        );
+    }
+
+    /// PARITY (§6 published-operator-root trap): the node-domain second-pass
+    /// reduction context must EQUAL the `TypeExpr`-start context the former
+    /// `materialize_component_meta_type_expr_until_stable` computed on the SAME
+    /// surface (the node's raised value). A `node_root_is_published_operator`
+    /// mis-classification (e.g. treating a `Union`/`Object` root as a published
+    /// operator, or missing the `Ref`/`Mapped`/`IndexedAccess` carriers) silently
+    /// flips `StructuralTransit(Navigate)` ↔ `Published(Navigate)` and is caught here.
+    #[test]
+    fn node_reduction_context_mirrors_type_expr_reduction_context_on_raised_value() {
+        use crate::meta_resolve::materialize::{
+            node_materialize_reduction_context, type_expr_materialize_reduction_context,
+        };
+
+        let project = open_host();
+        let session = project.open_session_batch().unwrap();
+        let _ = session.evaluate_types("/p.ts").unwrap();
+        let host = session.host();
+        let ctx: &dyn crate::resolver_core::ResolverContext = host;
+        let dispatch = ProjectSemanticDispatch::new(ctx);
+
+        let cases: Vec<TypeExpr> = vec![
+            one_prop_object("a"),
+            TypeExpr::Union(StdArc::from(vec![
+                one_prop_object("a"),
+                TypeExpr::string_literal("lit"),
+            ])),
+            TypeExpr::string_literal("solo"),
+            TypeExpr::Ref {
+                name: StdArc::from("DefinitelyMissingType"),
+                type_arguments: StdArc::from(Vec::new().into_boxed_slice()),
+            },
+        ];
+
+        for expr in &cases {
+            let Some(node) = dispatch.lower_type_expr_in_scope_with_mode(
+                "/p.ts",
+                expr,
+                ProjectionMode::Navigate,
+            ) else {
+                continue;
+            };
+            let Some(raised) = materialize_member_node_to_type_expr(ctx, node) else {
+                continue;
+            };
+            assert_eq!(
+                node_materialize_reduction_context(ctx, node, ProjectionMode::Navigate),
+                type_expr_materialize_reduction_context(&raised, ProjectionMode::Navigate),
+                "node reduction context must mirror the TypeExpr reduction context on the raised \
+                 value for {expr:?} (raised={raised:?})",
+            );
         }
     }
 }

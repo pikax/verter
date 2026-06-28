@@ -130,10 +130,11 @@ mod surface;
 // (via `super::surface::`), compiler-enforcing the sink confinement.
 pub(crate) use surface::{
     lower_and_project_to_expanded_node, lower_and_project_to_expanded_published,
-    project_admitted_node_to_expanded_node, project_class_a_terminal_published,
-    project_expr_surface_expr_node, route_projection_node_eq_to_expr, route_projection_nodes_eq,
-    semantic_query_error_raw, type_expr_contains_semantic_miss,
-    type_expr_is_budget_exceeded_sentinel, AdmittedRouteProjectionNode,
+    project_admitted_node_to_expanded_node, project_class_a_terminal_node,
+    project_class_a_terminal_published, project_expr_surface_expr_node,
+    route_projection_node_eq_to_expr, route_projection_nodes_eq, semantic_query_error_raw,
+    type_expr_contains_semantic_miss, type_expr_is_budget_exceeded_sentinel,
+    AdmittedRouteProjectionNode,
 };
 // `type_expr_is_expanded_surface` and `type_expr_root_is_unmaterialized_sentinel`
 // survive only as `#[cfg(test)]` parity ORACLES the raised-shape suite compares

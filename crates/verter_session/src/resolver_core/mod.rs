@@ -87,8 +87,9 @@ pub use component_meta_query_engine::ComponentMetaQueryEngine;
 // `projected_expanded_shape_from_node` / the routed-surface methods).
 pub(crate) use component_meta_query_engine::{
     lower_and_project_to_expanded_node, lower_and_project_to_expanded_published,
-    project_admitted_node_to_expanded_node, project_class_a_terminal_published,
-    project_expr_surface_expr_node, type_expr_contains_semantic_miss, AdmittedRouteProjectionNode,
+    project_admitted_node_to_expanded_node, project_class_a_terminal_node,
+    project_class_a_terminal_published, project_expr_surface_expr_node,
+    type_expr_contains_semantic_miss, AdmittedRouteProjectionNode,
 };
 // `type_expr_root_is_unmaterialized_sentinel` survives only as the `#[cfg(test)]`
 // parity oracle for the node-domain root-sentinel fact (production reads

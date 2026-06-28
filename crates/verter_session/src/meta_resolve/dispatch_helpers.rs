@@ -610,6 +610,72 @@ pub(crate) fn project_expr_class_a_via_dispatch_threaded<'ctx>(
     crate::resolver_core::project_class_a_terminal_published(ctx, scope_canonical_id, expr)
 }
 
+/// Node-domain sibling of [`project_expr_class_a_via_dispatch_threaded`]: returns
+/// the admitted route/surface NODE instead of its materialised `TypeExpr`.
+///
+/// Mirrors the `TypeExpr` form ARM FOR ARM — the SAME scope-shadowing gate, the
+/// SAME registry route fast-path, the SAME primary/fallback order — but swaps the
+/// two host-threaded `*_expr_via_host_threaded` bridges for their node
+/// counterparts ([`project_route_surface_node_via_host_threaded`] /
+/// [`lower_and_project_to_expanded_node_via_host_threaded`]) and the pure-dispatch
+/// tail for [`crate::resolver_core::project_class_a_terminal_node`]. None of these
+/// materialises: the admitted node is published ONCE downstream at the registry
+/// sink, so the registry member-path / refine consumers compute their reject/accept
+/// facts off the projected node WITHOUT re-lowering a materialised leaf.
+pub(crate) fn project_expr_class_a_node_via_dispatch_threaded<'ctx>(
+    ctx: &'ctx dyn ResolverContext,
+    mut engine: Option<&mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>>,
+    scope_canonical_id: &str,
+    expr: &verter_type_expr::TypeExpr,
+) -> Option<crate::resolver_core::AdmittedRouteProjectionNode> {
+    use crate::resolver_core::{
+        component_meta_registry::{
+            component_meta_registry_public_indexed_access_route,
+            component_meta_registry_public_utility_route,
+        },
+        ComponentMetaQueryEngine,
+    };
+
+    // r15/F11 scope-shadowing gate — IDENTICAL to the `TypeExpr` form: a userland
+    // `type Pick`/`Omit`/chain-root shadow suppresses the registry fast-path so the
+    // bare-name walk resolves the userland declaration.
+    let shadowing = match engine.as_deref_mut() {
+        Some(e) => e.scope_shadowing_for_scope(scope_canonical_id),
+        None => std::sync::Arc::new(
+            crate::resolver_core::scope_shadowing::ScopeShadowing::from_host_scope(
+                ctx,
+                scope_canonical_id,
+            ),
+        ),
+    };
+    let route = component_meta_registry_public_indexed_access_route(expr)
+        .or_else(|| component_meta_registry_public_utility_route(expr))
+        .filter(|_| !route_outer_utility_is_shadowed(expr, &shadowing));
+    if let Some((root_symbol, route)) = route {
+        let mut transient_engine: Option<ComponentMetaQueryEngine<'_>> = None;
+        let engine_ref: &mut ComponentMetaQueryEngine<'_> = match engine {
+            Some(e) => e,
+            None => transient_engine.insert(ComponentMetaQueryEngine::new(ctx)),
+        };
+        if let Some(projected) = project_route_surface_node_via_host_threaded(
+            engine_ref,
+            scope_canonical_id,
+            &root_symbol,
+            &route,
+        ) {
+            return Some(projected);
+        }
+        if let Some(solved) = lower_and_project_to_expanded_node_via_host_threaded(
+            engine_ref,
+            scope_canonical_id,
+            expr,
+        ) {
+            return Some(solved);
+        }
+    }
+    crate::resolver_core::project_class_a_terminal_node(ctx, scope_canonical_id, expr)
+}
+
 /// decompose an IndexedAccess chain over literal-string
 /// indices into `(base_expr, path_segments)` so the dispatch helper can
 /// route through `ProjectPath { base, path, Expanded }` per CLAUDE.md

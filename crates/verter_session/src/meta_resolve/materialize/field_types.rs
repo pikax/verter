@@ -33,6 +33,32 @@ crate::project_semantic_dispatch::output_materialization::define_output_capabili
     mint: pub(in crate::meta_resolve::materialize::field_types)
 }
 
+/// Non-output capability authorising construction of a registry member-VALUE-NODE
+/// [`crate::component_meta_caches::ShapeCacheKey`] from a RAW `SemanticNodeId`.
+///
+/// It is deliberately NOT an [`crate::project_semantic_dispatch::output_materialization::OutputProjector`]:
+/// it carries no materialisation/unseal power — it cannot turn a node into a
+/// `TypeExpr`. Its sole purpose is to gate the member-value-node key constructor
+/// the same way [`crate::component_meta_caches::ShapeCacheKey::surface_member_value_whole_with_context`]
+/// gates that key behind a POLICY-ADMITTED `AdmittedPublishedMember` token, so an
+/// arbitrary `SemanticNodeId` cannot spread into the sealed member-shape subject.
+/// The registry member-surface stabiliser holds the producing node (the first-pass
+/// `MaterializeStructureDb` output) directly rather than a re-derived
+/// `AdmittedPublishedMember`, so it needs this distinct, narrower authorisation.
+///
+/// Constructor visible ONLY within `crate::meta_resolve::materialize::field_types`
+/// (a planted `RegistryMemberShapeKeyCap::new` outside this leaf is `E0624`), so
+/// no other module can route a raw node through the sealed key.
+pub(crate) struct RegistryMemberShapeKeyCap {
+    _seal: (),
+}
+
+impl RegistryMemberShapeKeyCap {
+    pub(in crate::meta_resolve::materialize::field_types) fn new() -> Self {
+        Self { _seal: () }
+    }
+}
+
 pub(crate) fn type_expr_materializer_context(
     mode: crate::semantic_query::ProjectionMode,
 ) -> crate::semantic_query::ProjectionReductionContext {
@@ -108,6 +134,234 @@ fn type_expr_root_is_published_operator(expr: &verter_type_expr::TypeExpr) -> bo
         | TypeExpr::Conditional { .. }
         | TypeExpr::TypeOf(_) => true,
         _ => false,
+    }
+}
+
+/// Node-domain mirror of [`type_expr_root_is_published_operator`] applied to a
+/// node's RAISED root term: is `node`'s root a published operator
+/// (`Ref`/`Mapped`-with-value/`KeyOf`/`IndexedAccess`/`Conditional`/`TypeOf`)?
+///
+/// Read off the producing node so the second-pass reduction context is decided
+/// without raising the first-pass surface to a `TypeExpr` and re-classifying it.
+/// Arm-for-arm with the `TypeExpr` predicate:
+///   - `Alias(inner)` ⇒ recurse — the node-domain identity hop (the `TypeExpr`
+///     predicate's `Parenthesized` peel); the raise strips it.
+///   - `DeclRef` / `InstantiationRef` / `BareRef` ⇒ true — they raise to
+///     `TypeExpr::Ref` (a surviving declared surface root).
+///   - `Mapped { value }` ⇒ true UNLESS the `value` raises to an unmaterialised
+///     miss placeholder (the node form of the `TypeExpr` predicate's
+///     `value == Unknown { raw == "semanticMiss" }` carrier check). The node
+///     sentinel recogniser is the established miss-placeholder authority; it is
+///     marginally broader than the single `"semanticMiss"` spelling, which only
+///     differs for a `Mapped` value raising to one of the OTHER sentinel spellings
+///     (e.g. an object-surface placeholder) — a shape the parity test pins.
+///   - `KeyOf` / `IndexedAccess` / `Conditional` / `TypeOf` ⇒ true.
+///   - everything else (`Object`/`Union`/`Intersection`/primitives/… and
+///     `ImportType`/`RawFallback`, which raise to non-`Ref` non-operator terms) ⇒
+///     false.
+fn node_root_is_published_operator(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    node: crate::semantic_query::SemanticNodeId,
+) -> bool {
+    use crate::project_semantic_dispatch::raise::node_root_is_unmaterialized_sentinel_with_dispatch;
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::semantic_query::SemanticNodeData;
+
+    fn walk(
+        dispatch: &ProjectSemanticDispatch<'_>,
+        node: crate::semantic_query::SemanticNodeId,
+        depth: u32,
+    ) -> bool {
+        const MAX_DEPTH: u32 = 32;
+        if depth >= MAX_DEPTH {
+            return false;
+        }
+        let Some(data) = dispatch.graph().node_data(node) else {
+            return false;
+        };
+        match data.as_ref() {
+            SemanticNodeData::Alias(inner) => {
+                let inner = *inner;
+                drop(data);
+                walk(dispatch, inner, depth + 1)
+            }
+            SemanticNodeData::DeclRef { .. }
+            | SemanticNodeData::InstantiationRef { .. }
+            | SemanticNodeData::BareRef(_) => true,
+            SemanticNodeData::Mapped { mapper, .. } => {
+                // The mapped VALUE expression (`{ [K in S]: <value> }`) lives on
+                // the mapper key. The `TypeExpr` predicate keeps a `Mapped` whose
+                // value is the miss placeholder as a carrier (false) and publishes
+                // one with an author-visible value (true).
+                let value = mapper.value_expr;
+                drop(data);
+                !node_root_is_unmaterialized_sentinel_with_dispatch(dispatch, value)
+            }
+            SemanticNodeData::KeyOf { .. }
+            | SemanticNodeData::IndexedAccess { .. }
+            | SemanticNodeData::Conditional { .. }
+            | SemanticNodeData::TypeOf(_) => true,
+            _ => false,
+        }
+    }
+
+    let dispatch = ProjectSemanticDispatch::new(ctx);
+    walk(&dispatch, node, 0)
+}
+
+/// Node-domain mirror of [`type_expr_materialize_reduction_context`]: the EXACT
+/// [`crate::semantic_query::ProjectionReductionContext`] the second stabilisation
+/// pass reduces a first-pass surface NODE under, given the caller's `mode`.
+///
+/// `Navigate` + a published-operator root ⇒ `Published(Navigate)` (the explicit
+/// narrowing IS consumer demand); every other `Navigate` reduces under
+/// `StructuralTransit(Navigate)`; other modes reduce under `Published(mode)`.
+/// Mirrors the `TypeExpr`-start materialiser so the registry member-surface
+/// stabiliser reduces under the SAME context `_until_stable_full` used to.
+pub(crate) fn node_materialize_reduction_context(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    node: crate::semantic_query::SemanticNodeId,
+    mode: crate::semantic_query::ProjectionMode,
+) -> crate::semantic_query::ProjectionReductionContext {
+    if matches!(mode, crate::semantic_query::ProjectionMode::Navigate)
+        && node_root_is_published_operator(ctx, node)
+    {
+        crate::semantic_query::ProjectionReductionContext::published(mode)
+    } else {
+        type_expr_materializer_context(mode)
+    }
+}
+
+/// The node-first second-pass result: the registry member surface AFTER the
+/// graph-native stabilisation reduce, already no-poison-selected against the
+/// first pass.
+///
+/// - [`Self::First`] — the stabilisation INTRODUCED an unmaterialised miss the
+///   first-pass surface did not carry (an owner-scope reduction miss on a
+///   foreign-file carrier is "no reduction available here", not "unknown"), so
+///   the FIRST-pass surface node wins. The caller materialises `node` once.
+/// - [`Self::Stable`] — the stabilised carrier wins (the common path). The caller
+///   unwraps `carrier` once.
+///
+/// Both variants carry the chosen NODE + its [`RaisedShapeFacts`] so the candidate
+/// sibling raises that node ONCE at a registered terminal sink and reads downstream
+/// facts (object-surface, miss) off the SAME node it publishes, never by re-deciding
+/// on the materialised `TypeExpr`. (The reduce's `MaterializedOutputTypeExpr` carrier
+/// is consumed inside the stabiliser — its `dep_signature` is emitted there and its
+/// node is the `Stable.node`; re-raising that node at the sink reproduces the
+/// carrier's value byte-for-byte without a non-sink `into_type_expr`.)
+pub(crate) enum RegistryMemberStabilizedValue {
+    First {
+        node: crate::semantic_query::SemanticNodeId,
+    },
+    Stable {
+        node: crate::semantic_query::SemanticNodeId,
+    },
+}
+
+/// Second stabilisation pass for a registry member surface, node-first.
+///
+/// `first_node` is the FIRST pass (`MaterializeStructureDb`) surface node. This
+/// reduces it ONCE through the graph-native
+/// [`reduce_member_value_graph_native_with_context`] reducer behind the host-owned
+/// [`crate::component_meta_caches::ShapeCacheDb`] member-VALUE-node slot (keyed by
+/// [`crate::component_meta_caches::ShapeCacheKey::registry_member_value_node_whole_with_context`]
+/// under the EXACT [`node_materialize_reduction_context`]), reproducing
+/// [`materialize_component_meta_type_expr_until_stable_full`]'s reduction context +
+/// cache-admission rails — but WITHOUT lowering the first-pass surface back to a
+/// `TypeExpr` and re-reducing it (the regression this redo removes). The reducer
+/// reuses the settled `first_node` directly.
+///
+/// No-poison (tri-state): the stabilisation result is kept UNLESS it introduced an
+/// unmaterialised miss the first pass did not carry — decided on the node-domain
+/// `!RaisedShapeFacts.materialized` fact off each node, NEVER on the materialised
+/// `TypeExpr`. `None` facts (raise could not compute) are NOT collapsed to "no
+/// miss": the first pass wins ONLY when the stabilised root is CONFIDENTLY a miss
+/// AND the first-pass root is CONFIDENTLY miss-free.
+pub(crate) fn stabilize_registry_member_surface_node_with_shape_cache(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    scope_canonical_id: &str,
+    first_node: crate::semantic_query::SemanticNodeId,
+    mode: crate::semantic_query::ProjectionMode,
+) -> RegistryMemberStabilizedValue {
+    use crate::project_semantic_dispatch::raise::node_raised_shape_facts_with_dispatch;
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use std::sync::Arc;
+
+    let dispatch = ProjectSemanticDispatch::new(ctx);
+    let first_facts = node_raised_shape_facts_with_dispatch(&dispatch, first_node);
+
+    // The reduction context the second pass runs under — keyed onto the slot so a
+    // stored value (reduced under this context) is only served to a consumer that
+    // reduces under the SAME context.
+    let reduction_context = node_materialize_reduction_context(ctx, first_node, mode);
+    let cap = RegistryMemberShapeKeyCap::new();
+    let key =
+        crate::component_meta_caches::ShapeCacheKey::registry_member_value_node_whole_with_context(
+            Arc::<str>::from(scope_canonical_id),
+            &cap,
+            first_node,
+            reduction_context,
+        );
+
+    // Stabilise: peek the ShapeCacheDb member-node slot, else cold-reduce the
+    // first-pass node once through the graph-native reducer and admit.
+    let stabilized = {
+        let cache = ctx.project_type_store().shape_cache_db();
+        if let Some(cached) = cache.peek(&key, ctx) {
+            emit_dispatch_dep_signature_facts(ctx, cached.dep_signature());
+            cached
+        } else {
+            let materialized = reduce_member_value_graph_native_with_context(
+                ctx,
+                scope_canonical_id,
+                first_node,
+                reduction_context,
+            );
+            // A GENUINE-partial reduce (budget-tripped contributing read) must NOT
+            // warm the shared slot — refused admission, the no-poison invariant.
+            if crate::cache_runtime::refuse_result_cache_admission_if_partial(
+                materialized.result_is_partial(),
+            ) {
+                materialized
+            } else {
+                let observed_scope = ctx.observe_materialize_scope(scope_canonical_id);
+                let materialized_for_closure = materialized.clone();
+                let admitted = cache.get_or_compute(&key, ctx, move || {
+                    let scope_obs = observed_scope?;
+                    let parse_fact = scope_obs.syntactic_export_set.clone()?;
+                    match crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo(
+                        &scope_obs,
+                        parse_fact,
+                        materialized_for_closure.dep_signature(),
+                    ) {
+                        crate::cache_runtime::SignatureAdmission::Cacheable(sig) => {
+                            Some((materialized_for_closure, sig.facts))
+                        }
+                        crate::cache_runtime::SignatureAdmission::NonCacheable(_) => None,
+                    }
+                });
+                admitted.unwrap_or(materialized)
+            }
+        }
+    };
+
+    // The stabilised NODE is the reduced carrier's node; a reduce that settled no
+    // node falls back to the first-pass node (a degenerate reduce ⇒ publish the
+    // first pass). The carrier itself is dropped here — its dep_signature was
+    // emitted above, and the candidate sibling re-raises this node at a registered
+    // sink to reproduce its value.
+    let stable_node = stabilized.node_id().unwrap_or(first_node);
+    let stable_facts = node_raised_shape_facts_with_dispatch(&dispatch, stable_node);
+
+    // No-poison (tri-state): keep the FIRST-pass surface only when the stabilised
+    // root is CONFIDENTLY a miss AND the first-pass root is CONFIDENTLY miss-free.
+    let stable_has_miss = stable_facts.map(|f| !f.materialized);
+    let first_has_miss = first_facts.map(|f| !f.materialized);
+    if stable_has_miss == Some(true) && first_has_miss == Some(false) {
+        RegistryMemberStabilizedValue::First { node: first_node }
+    } else {
+        RegistryMemberStabilizedValue::Stable { node: stable_node }
     }
 }
 

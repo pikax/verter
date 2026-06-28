@@ -309,7 +309,8 @@ defineProps<{ modelValue?: ModelValue<R> }>()
         &raw_body,
         "/src/App.vue",
         &mut query_engine,
-    );
+    )
+    .0;
 
     let verter_type_expr::TypeExpr::Conditional {
         true_type,
@@ -9288,7 +9289,8 @@ defineProps<{ a: LocalLeaf; b: FromPkg }>()
             &pkg_ref,
             "/Owner.vue",
             &mut engine,
-        );
+        )
+        .0;
         assert_eq!(
             materialized_pkg, pkg_ref,
             "package-backed Ref must short-circuit unchanged; \
@@ -9309,7 +9311,8 @@ defineProps<{ a: LocalLeaf; b: FromPkg }>()
             &local_ref,
             "/Owner.vue",
             &mut engine,
-        );
+        )
+        .0;
         // Local Ref should project through the surface API; since
         // LocalLeaf is a real interface, project_type_surface_expr
         // returns the Object surface, so materialized_local must NOT

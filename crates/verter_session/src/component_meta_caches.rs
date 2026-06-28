@@ -1135,6 +1135,21 @@ impl MemberShapeNodeSubject {
         Self(member.member().value)
     }
 
+    /// Sanctioned construction from a RAW producing `SemanticNodeId`, gated by
+    /// the non-output [`crate::meta_resolve::materialize::RegistryMemberShapeKeyCap`]
+    /// (mintable only in the field-types materialiser). The registry member-surface
+    /// stabiliser holds the first-pass `MaterializeStructureDb` node directly
+    /// rather than a re-derived `AdmittedPublishedMember`; the capability proves
+    /// the caller is that materialiser, keeping the rule "no arbitrary raw
+    /// `SemanticNodeId` reaches the sealed member-shape subject" intact without
+    /// abusing the publication-admitted token.
+    fn from_registry_node(
+        _cap: &crate::meta_resolve::materialize::RegistryMemberShapeKeyCap,
+        node: crate::semantic_query::SemanticNodeId,
+    ) -> Self {
+        Self(node)
+    }
+
     /// Test-only construction from a raw `&SurfaceMember`. The cache-rail
     /// key-identity tests (`query_db_self_root_tests`) build keys directly from
     /// synthetic members to assert the subject collapses siblings sharing
@@ -1451,6 +1466,30 @@ impl ShapeCacheKey {
             subject: ShapeSubject::MemberValueNode {
                 scope,
                 node: MemberShapeNodeSubject::from_surface_member(member),
+            },
+            demand: ShapeDemand::whole_subject_with_context(terminal_context),
+        }
+    }
+
+    /// Construct a member-value-subject whole-subject key from a RAW producing
+    /// `SemanticNodeId` under an explicit [`ProjectionReductionContext`], gated by
+    /// the non-output [`crate::meta_resolve::materialize::RegistryMemberShapeKeyCap`].
+    /// Preserves the EXACT `ShapeSubject::MemberValueNode` /
+    /// `ShapeDemand::whole_subject_with_context` semantics of
+    /// [`Self::surface_member_value_whole_with_context`] — sibling registry members
+    /// whose first-pass node is the same settled graph node collapse onto each
+    /// other's warm hits — without requiring an `AdmittedPublishedMember` (the
+    /// registry stabiliser already holds the producing node directly).
+    pub(crate) fn registry_member_value_node_whole_with_context(
+        scope: Arc<str>,
+        cap: &crate::meta_resolve::materialize::RegistryMemberShapeKeyCap,
+        node: crate::semantic_query::SemanticNodeId,
+        terminal_context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Self {
+        Self {
+            subject: ShapeSubject::MemberValueNode {
+                scope,
+                node: MemberShapeNodeSubject::from_registry_node(cap, node),
             },
             demand: ShapeDemand::whole_subject_with_context(terminal_context),
         }
