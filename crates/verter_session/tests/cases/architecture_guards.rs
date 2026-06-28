@@ -1982,7 +1982,9 @@ mod resolver_core_recursion {
     use std::path::{Path, PathBuf};
 
     use syn::visit::Visit;
-    use syn::{Attribute, Expr, ExprCall, ExprMethodCall, ImplItemFn, ItemFn, ItemMod, Meta};
+    use syn::{
+        Attribute, Expr, ExprCall, ExprMethodCall, ImplItemFn, ItemFn, ItemImpl, ItemMod, Meta,
+    };
     use walkdir::WalkDir;
 
     use super::workspace_root;
@@ -2483,6 +2485,24 @@ mod resolver_core_recursion {
                 self.cfg_test_depth += 1;
             }
             syn::visit::visit_item_mod(self, m);
+            if entered_test {
+                self.cfg_test_depth -= 1;
+            }
+        }
+
+        // A `#[cfg(test)] impl Foo { fn bar() { … } }` block carries the cfg
+        // gate on the impl, not on each method, so `visit_impl_item_fn`'s
+        // per-method attr check never sees it. Track cfg(test) at the impl level
+        // too — mirrors the `visit_item_mod` handling above so test-only methods
+        // (e.g. a `#[cfg(test)]` differential oracle) are skipped exactly like
+        // any other cfg(test) code, the same intent the `cfg_test_depth` rail
+        // already encodes for mods and fns.
+        fn visit_item_impl(&mut self, i: &'ast ItemImpl) {
+            let entered_test = has_cfg_test(&i.attrs);
+            if entered_test {
+                self.cfg_test_depth += 1;
+            }
+            syn::visit::visit_item_impl(self, i);
             if entered_test {
                 self.cfg_test_depth -= 1;
             }

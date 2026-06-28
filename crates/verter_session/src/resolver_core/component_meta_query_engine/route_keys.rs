@@ -15,6 +15,7 @@
 use verter_type_expr::TypeExpr;
 
 use super::helpers::{is_builtin_name, strip_parens_expr};
+use super::surface::RouteKeyspaceNode;
 use super::{AdmittedRouteProjectionNode, ComponentMetaQueryEngine, PreparedProjectionContext};
 
 /// The route fixpoint's cursor. The FIRST iteration projects the input
@@ -51,7 +52,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// `TypeExpr` materialise), then enumerates NODE-DOMAIN:
     ///
     /// 1. PRIMARY — the SINGLE shared dispatch keyspace enumerator
-    ///    ([`super::surface::enumerate_keyspace_names_from_admitted_node`] →
+    ///    ([`super::surface::enumerate_keyspace_names_from_keyspace_node`] →
     ///    `key_names_from_keyspace_node`, the same enumerator the `Pick` /
     ///    `Omit` dispatch reducers consume). It owns the key-TYPE reduction:
     ///    literal unions, alias-to-union, `keyof X`, `keyof X['m']['n']`,
@@ -71,12 +72,11 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let context = PreparedProjectionContext {
             decl_scope: resolution_scope_canonical_id.to_string(),
             arg_scope: active_scope_canonical_id.to_string(),
-            chain_scopes: self.projection_chain_scopes.clone(),
         };
         // PRIMARY: lower the key-source and enumerate its keyspace.
         if let Some(node) = self.lower_route_key_source_node(&context, expr) {
             if let Some(keys) =
-                super::surface::enumerate_keyspace_names_from_admitted_node(self.ctx(), &node)
+                super::surface::enumerate_keyspace_names_from_keyspace_node(self.ctx(), &node)
             {
                 return Some(keys);
             }
@@ -94,47 +94,26 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         None
     }
 
-    /// Lower a route-key SOURCE expression to a keyspace NODE under the route-key
-    /// [`PreparedProjectionContext`], for the shared dispatch keyspace enumerator
-    /// (which re-evaluates the node under structural-transit + the `KeyOf`
-    /// producer). No surface gate: a `keyof` / `IndexedAccess` keyspace carrier is
-    /// preserved so the enumerator can reduce it.
-    ///
-    /// - split-scope generic `Ref` (`decl_scope != arg_scope`, non-empty chain):
-    ///   resolve the NAME in `decl_scope`, lower the args in `arg_scope` (chain
-    ///   fallback for `typeof`), dispatch `Instantiate` with NODE args.
-    /// - otherwise: lower in `arg_scope` at `Expanded`.
+    /// Lower a route-key SOURCE expression to a keyspace NODE in `arg_scope` at
+    /// `Expanded`, for the shared dispatch keyspace enumerator (which re-evaluates
+    /// the node under structural-transit + the `KeyOf` producer). NO admission
+    /// gate: a `keyof` / `IndexedAccess` keyspace carrier is INTENTIONALLY
+    /// preserved un-admitted so the enumerator can reduce it — hence the distinct
+    /// [`RouteKeyspaceNode`] carrier (never [`AdmittedRouteProjectionNode`], whose
+    /// `materialized && expanded_surface` invariant a keyspace carrier does not
+    /// satisfy).
     fn lower_route_key_source_node(
         &mut self,
         context: &PreparedProjectionContext,
         expr: &TypeExpr,
-    ) -> Option<AdmittedRouteProjectionNode> {
-        if context.decl_scope != context.arg_scope && !context.chain_scopes.is_empty() {
-            if let TypeExpr::Ref {
-                name,
-                type_arguments,
-            } = strip_parens_expr(expr)
-            {
-                if !type_arguments.is_empty() {
-                    if let Some(node) = self.instantiate_split_scope_ref(
-                        &context.decl_scope,
-                        &context.arg_scope,
-                        &context.chain_scopes,
-                        name.as_ref(),
-                        type_arguments,
-                    ) {
-                        return Some(node);
-                    }
-                }
-            }
-        }
+    ) -> Option<RouteKeyspaceNode> {
         let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(self.ctx);
         let lowered = dispatch.lower_type_expr_in_scope_with_mode(
             &context.arg_scope,
             expr,
             crate::semantic_query::ProjectionMode::Expanded,
         )?;
-        Some(AdmittedRouteProjectionNode::new(lowered))
+        Some(RouteKeyspaceNode::new(lowered))
     }
 
     pub(crate) fn project_direct_utility_surface_shape(
@@ -305,12 +284,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// - bare `Ref { name, [] }`: try `decl_scope` (helper-body-internal
     ///   reference), fall back to `arg_scope`.
     /// - `TypeOf(value_ref)`: `arg_scope` first (caller-scoped value table),
-    ///   then `decl_scope`, then the outer `chain_scopes` (the value reference
-    ///   may be visible only in an outer helper scope).
-    /// - `Ref { name, [args..] }`: resolve the NAME in `decl_scope`, lower
-    ///   `type_arguments` in `arg_scope` (chain fallback for `typeof`), then
-    ///   dispatch `Instantiate` with NODE args
-    ///   ([`Self::instantiate_split_scope_ref`]) — no reconstructed `TypeExpr`.
+    ///   then `decl_scope`.
+    /// - `Ref { name, [args..] }`: try `decl_scope` (helper declaration
+    ///   registry), then `arg_scope` (direct import).
     /// - compound shapes (`IndexedAccess`, `Conditional`, `Mapped`, `KeyOf`,
     ///   etc.): the two-scope retry (`arg_scope`, then `decl_scope` when the
     ///   expr references a prepared `decl_scope` symbol).
@@ -321,7 +297,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     ) -> Option<StableRouteLeafNode> {
         let decl_scope = context.decl_scope.clone();
         let arg_scope = context.arg_scope.clone();
-        let chain_scopes = context.chain_scopes.clone();
 
         if decl_scope == arg_scope {
             return self.stabilise_route_leaf_node(&arg_scope, expr);
@@ -342,8 +317,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 self.stabilise_route_leaf_node(&arg_scope, expr)
             }
             TypeExpr::TypeOf(_) => {
-                // `typeof value_ref`: caller-scoped first, then the decl scope,
-                // then the outer declaration chain scopes.
+                // `typeof value_ref`: caller-scoped first, then the decl scope.
                 let arg_first = self.stabilise_route_leaf_node(&arg_scope, expr);
                 if let Some(leaf) = arg_first {
                     if !leaf.eq_to_input {
@@ -355,22 +329,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         return Some(leaf);
                     }
                 }
-                for chain_scope in &chain_scopes {
-                    if chain_scope == &decl_scope || chain_scope == &arg_scope {
-                        continue;
-                    }
-                    if let Some(leaf) = self.stabilise_route_leaf_node(chain_scope, expr) {
-                        if !leaf.eq_to_input {
-                            return Some(leaf);
-                        }
-                    }
-                }
                 arg_first
             }
-            TypeExpr::Ref {
-                name,
-                type_arguments,
-            } => {
+            TypeExpr::Ref { .. } => {
                 // `Ref { name, [args..] }`: helper instantiation. Try decl_scope
                 // (helper declaration registry), then arg_scope (direct import).
                 let decl_first = self.stabilise_route_leaf_node(&decl_scope, expr);
@@ -383,24 +344,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 if let Some(leaf) = arg_result {
                     if !leaf.eq_to_input {
                         return Some(leaf);
-                    }
-                }
-                // Split-scope NODE instantiation: the ref NAME belongs to one
-                // scope and a `typeof` argument to another. Resolve the name in
-                // decl_scope, lower each arg in arg_scope (chain fallback for
-                // `typeof`), then dispatch `Instantiate` with NODE args — no
-                // reconstructed `TypeExpr::Ref`.
-                if !chain_scopes.is_empty() {
-                    if let Some(node) = self.instantiate_split_scope_ref(
-                        &decl_scope,
-                        &arg_scope,
-                        &chain_scopes,
-                        name.as_ref(),
-                        type_arguments,
-                    ) {
-                        let eq_to_input =
-                            super::route_projection_node_eq_to_expr(self.ctx(), &node, expr);
-                        return Some(StableRouteLeafNode { node, eq_to_input });
                     }
                 }
                 arg_result.or(decl_first)
@@ -430,100 +373,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let node = self.solve_or_project_leaf_node_until_stable(scope_canonical_id, expr)?;
         let eq_to_input = super::route_projection_node_eq_to_expr(self.ctx(), &node, expr);
         Some(StableRouteLeafNode { node, eq_to_input })
-    }
-
-    /// Split-scope generic-`Ref` instantiation: resolve the ref NAME in
-    /// `decl_scope`, lower each `type_argument` in `arg_scope` (chain-scope
-    /// fallback for `typeof` args), then dispatch `Instantiate` with NODE args
-    /// ([`super::surface::instantiate_split_scope_route_node`]). Returns the
-    /// admitted node, or `None` when the name does not resolve, an argument
-    /// cannot lower, or the instantiation gate rejects. Shared by the keyspace
-    /// lowering ([`Self::lower_route_key_source_node`]) and the leaf stabiliser's
-    /// `Ref { name, [args..] }` scope-dispatch arm.
-    fn instantiate_split_scope_ref(
-        &mut self,
-        decl_scope: &str,
-        arg_scope: &str,
-        chain_scopes: &[String],
-        name: &str,
-        type_arguments: &[TypeExpr],
-    ) -> Option<AdmittedRouteProjectionNode> {
-        let declaration = self.resolve_type_declaration(decl_scope, name);
-        let target_canonical = if declaration.canonical_source.is_empty() {
-            decl_scope.to_string()
-        } else {
-            declaration.canonical_source.clone()
-        };
-        let resolved_name = if declaration.resolved_name.is_empty() {
-            name.to_string()
-        } else {
-            declaration.resolved_name.clone()
-        };
-        let mut arg_nodes = Vec::with_capacity(type_arguments.len());
-        for arg in type_arguments {
-            arg_nodes.push(self.lower_route_arg_with_chain_fallback(
-                arg_scope,
-                decl_scope,
-                chain_scopes,
-                arg,
-            )?);
-        }
-        super::surface::instantiate_split_scope_route_node(
-            self.ctx(),
-            &target_canonical,
-            &resolved_name,
-            &arg_nodes,
-        )
-    }
-
-    /// Lower one split-scope type argument to a NODE: in `arg_scope` first; for
-    /// a `typeof` argument whose `arg_scope` lowering leaves the shape unchanged
-    /// (the value is not visible there), retry in each outer `chain_scope` until
-    /// one resolves it. The node-domain replacement for the former
-    /// `solve_or_project_leaf_expr_until_stable(chain_scope, arg)` pre-resolution
-    /// that fed a reconstructed `TypeExpr::Ref`.
-    fn lower_route_arg_with_chain_fallback(
-        &mut self,
-        arg_scope: &str,
-        decl_scope: &str,
-        chain_scopes: &[String],
-        arg: &TypeExpr,
-    ) -> Option<crate::semantic_query::SemanticNodeId> {
-        use crate::project_semantic_dispatch::raise::node_raised_shape_for_eq_with_dispatch;
-        use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-        use crate::semantic_query::ProjectionMode;
-
-        let dispatch = ProjectSemanticDispatch::new(self.ctx);
-        let lowered = dispatch.lower_type_expr_in_scope_with_mode(
-            arg_scope,
-            arg,
-            ProjectionMode::Expanded,
-        )?;
-        // Only a `typeof` argument can need an outer scope: an arg_scope lowering
-        // that raises to the SAME shape as the input arg did not resolve the
-        // value there, so retry in each chain scope.
-        if matches!(arg, TypeExpr::TypeOf(_))
-            && node_raised_shape_for_eq_with_dispatch(&dispatch, lowered, arg)
-                .is_none_or(|shape| shape.eq_to_expr)
-        {
-            for chain_scope in chain_scopes {
-                if chain_scope == arg_scope || chain_scope == decl_scope {
-                    continue;
-                }
-                if let Some(chain_node) = dispatch.lower_type_expr_in_scope_with_mode(
-                    chain_scope,
-                    arg,
-                    ProjectionMode::Expanded,
-                ) {
-                    if node_raised_shape_for_eq_with_dispatch(&dispatch, chain_node, arg)
-                        .is_some_and(|shape| !shape.eq_to_expr)
-                    {
-                        return Some(chain_node);
-                    }
-                }
-            }
-        }
-        Some(lowered)
     }
 
     /// Fixed-point driver: repeatedly stabilise a leaf `TypeExpr` in
@@ -753,6 +602,446 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             // declaration name within it.
             | TypeExpr::SyntheticSlotBinding(_)
             | TypeExpr::Unknown { .. } => false,
+        }
+    }
+}
+
+// ===========================================================================
+// TEST-ONLY faithful reconstruction of the retired pre-node-domain route-key
+// walker — the differential ORACLE the node-domain `enumerate_route_literal_keys`
+// is proved against.
+//
+// Recovered branch-for-branch from `git show 0810933b9` (the pre-conversion
+// tree): the retired `enumerate_route_literal_keys_inner` recursive `TypeExpr`
+// key-algebra (depth limit 4, the whole-`KeyOf` step-2, union all-or-nothing,
+// intersection/union arm accumulation) and the retired
+// `enumerate_member_surface_keys_via_route` `keyof X['m']['n']` hand-distributor
+// (depth limit 8, object member lookup, conditional / typeof / intersection /
+// union / nested-indexed-access distribution).
+//
+// The retired materialised leaf stabiliser `solve_or_project_prepared_member_leaf_expr`
+// is reconstructed as the SURVIVING node fixpoint
+// (`solve_or_project_leaf_node_until_stable`) + the surface-sink materialise —
+// the EXACT computation the retired stabiliser performed (the conversion only
+// moved the single materialise to the sink). It deliberately NEVER routes through
+// the node-domain key/member enumerators the differential is proving
+// (`key_names_from_keyspace_node` /
+// `enumerate_public_surface_member_names_from_admitted_node`), so a regression in
+// either of those production paths changes the node-domain result WITHOUT moving
+// this oracle — the differential fails and discriminates.
+// ===========================================================================
+
+/// TEST-ONLY faithful copy of the retired
+/// `helpers::projected_surface_member_names` `TypeExpr` walker — the legacy
+/// public-keyspace member-name reader both the route-key walker and the
+/// member-name differential read.
+#[cfg(test)]
+pub(super) fn legacy_projected_surface_member_names(expr: &TypeExpr) -> Option<Vec<String>> {
+    use verter_type_expr::ObjectMember;
+
+    match expr {
+        TypeExpr::Object(object) => {
+            let mut members = Vec::new();
+            for member in object.properties.iter() {
+                match member {
+                    ObjectMember::Property(property) if property.visibility.is_public() => {
+                        members.push(property.name.clone())
+                    }
+                    ObjectMember::Method(method) if method.visibility.is_public() => {
+                        members.push(method.name.clone())
+                    }
+                    _ => {}
+                }
+            }
+            members.sort();
+            members.dedup();
+            Some(members)
+        }
+        TypeExpr::Intersection(parts) | TypeExpr::Union(parts) => {
+            let mut members = Vec::new();
+            for part in parts.iter() {
+                members.extend(legacy_projected_surface_member_names(part)?);
+            }
+            members.sort();
+            members.dedup();
+            Some(members)
+        }
+        TypeExpr::Parenthesized(inner) => legacy_projected_surface_member_names(inner),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+impl ComponentMetaQueryEngine<'_> {
+    /// TEST-ONLY reconstruction of the retired materialised leaf stabiliser
+    /// `solve_or_project_prepared_member_leaf_expr` for the differential's
+    /// same-scope input class: the SURVIVING node fixpoint
+    /// ([`Self::solve_or_project_leaf_node_until_stable`]) + the one surface-sink
+    /// materialise. The node-domain conversion only relocated the materialise to
+    /// the sink, so this returns the EXACT `TypeExpr` the retired stabiliser did.
+    fn legacy_materialised_leaf(&mut self, scope: &str, expr: &TypeExpr) -> Option<TypeExpr> {
+        let node = self.solve_or_project_leaf_node_until_stable(scope, expr)?;
+        super::surface::materialize_route_projection_node(self.ctx(), &node)
+    }
+
+    /// TEST-ONLY faithful reconstruction of the retired
+    /// `enumerate_route_literal_keys_inner` recursive route-key walker (depth
+    /// limit 4). Branch order recovered verbatim from `0810933b9`.
+    pub(super) fn legacy_enumerate_route_literal_keys(
+        &mut self,
+        scope: &str,
+        expr: &TypeExpr,
+        depth: usize,
+    ) -> Option<Vec<String>> {
+        use verter_type_expr::LiteralValue;
+
+        if depth >= 4 {
+            return None;
+        }
+
+        match expr {
+            TypeExpr::Literal(LiteralValue::String(value)) => Some(vec![value.clone()]),
+            TypeExpr::Union(types) => {
+                let mut keys = Vec::new();
+                for ty in types.iter() {
+                    keys.extend(self.legacy_enumerate_route_literal_keys(scope, ty, depth + 1)?);
+                }
+                keys.sort();
+                keys.dedup();
+                Some(keys)
+            }
+            TypeExpr::Parenthesized(inner) => {
+                self.legacy_enumerate_route_literal_keys(scope, inner, depth + 1)
+            }
+            TypeExpr::KeyOf(inner) => {
+                // (1) `keyof X['member']` nested indexed-access → member-surface route.
+                if let TypeExpr::IndexedAccess { object, index } = inner.as_ref() {
+                    if let TypeExpr::Literal(LiteralValue::String(member_name)) = index.as_ref() {
+                        if let Some(keys) = self.legacy_enumerate_member_surface_keys_via_route(
+                            scope,
+                            object,
+                            member_name,
+                            depth + 1,
+                        ) {
+                            return Some(keys);
+                        }
+                    }
+                }
+                // (2) whole-`KeyOf` step-2: stabilise the WHOLE `keyof` expr first;
+                //     if it advanced, recurse on the projection. THIS is the step
+                //     the pre-fix oracle omitted — it makes `keyof (A | B)` reduce
+                //     to the common-keys answer instead of the union of arm keys.
+                if let Some(projected_expr) = self
+                    .legacy_materialised_leaf(scope, expr)
+                    .filter(|projected| projected != expr)
+                {
+                    return self.legacy_enumerate_route_literal_keys(
+                        scope,
+                        &projected_expr,
+                        depth + 1,
+                    );
+                }
+                // (3) project the OPERAND and read its public member names.
+                let projected_inner = self
+                    .legacy_materialised_leaf(scope, inner)
+                    .unwrap_or_else(|| inner.as_ref().clone());
+                if let Some(keys) = legacy_projected_surface_member_names(&projected_inner) {
+                    return Some(keys);
+                }
+                // (4) intersection/union operand → accumulate enumerable
+                //     `keyof part` arms (an all-or-nothing `?` would lose
+                //     enumerable keys from one arm when another is unresolvable).
+                match &projected_inner {
+                    TypeExpr::Intersection(parts) | TypeExpr::Union(parts) => {
+                        let mut keys = Vec::new();
+                        let mut any_enumerable = false;
+                        for part in parts.iter() {
+                            let arm = TypeExpr::KeyOf(std::sync::Arc::new(part.clone()));
+                            if let Some(arm_keys) =
+                                self.legacy_enumerate_route_literal_keys(scope, &arm, depth + 1)
+                            {
+                                any_enumerable = true;
+                                keys.extend(arm_keys);
+                            }
+                        }
+                        if !any_enumerable {
+                            return None;
+                        }
+                        keys.sort();
+                        keys.dedup();
+                        Some(keys)
+                    }
+                    _ => None,
+                }
+            }
+            _ => {
+                let projected = self.legacy_materialised_leaf(scope, expr)?;
+                if projected == *expr {
+                    crate::resolver_core::component_meta_registry::component_meta_registry_string_literal_keys(
+                        &projected,
+                    )
+                } else {
+                    self.legacy_enumerate_route_literal_keys(scope, &projected, depth + 1)
+                }
+            }
+        }
+    }
+
+    /// TEST-ONLY faithful reconstruction of the retired
+    /// `enumerate_member_surface_keys_via_route` `keyof X['m']['n']`
+    /// hand-distributor (depth limit 8). Recovered from `0810933b9`. The one
+    /// deviation is the `IndexedAccess`-of-`Ref` arm: the retired
+    /// `instantiate_local_generic_ref_via_dispatch` helper it called was deleted
+    /// in the conversion, so the generic-ref body is re-expanded through the
+    /// surviving shared-dispatch leaf stabiliser (net-equivalent: expand the body,
+    /// re-apply the index) — an arm the differential fixture does not reach.
+    fn legacy_enumerate_member_surface_keys_via_route(
+        &mut self,
+        scope: &str,
+        expr: &TypeExpr,
+        member_name: &str,
+        depth: usize,
+    ) -> Option<Vec<String>> {
+        use verter_type_expr::ObjectMember;
+
+        if depth >= 8 {
+            return None;
+        }
+
+        let projected_expr = self
+            .legacy_materialised_leaf(scope, expr)
+            .unwrap_or_else(|| expr.clone());
+
+        match &projected_expr {
+            TypeExpr::Object(object) => {
+                // Public-keyspace member lookup: `keyof X['member']` reaches a
+                // member's surface only when that member is on `X`'s PUBLIC
+                // surface (TS rejects external indexed access of a non-public
+                // class member), exactly as `keyof X` excludes non-public members.
+                let member_ty = object.properties.iter().find_map(|member| match member {
+                    ObjectMember::Property(property)
+                        if property.name == member_name && property.visibility.is_public() =>
+                    {
+                        Some(property.ty.clone())
+                    }
+                    ObjectMember::Method(method)
+                        if method.name == member_name && method.visibility.is_public() =>
+                    {
+                        Some(TypeExpr::Function(std::sync::Arc::new(
+                            method.function.clone(),
+                        )))
+                    }
+                    _ => None,
+                })?;
+                let projected_member = self
+                    .legacy_materialised_leaf(scope, &member_ty)
+                    .unwrap_or(member_ty);
+                legacy_projected_surface_member_names(&projected_member)
+            }
+            TypeExpr::Intersection(parts) | TypeExpr::Union(parts) => {
+                let mut keys = Vec::new();
+                let mut any_enumerable = false;
+                for part in parts.iter() {
+                    if let Some(arm_keys) = self.legacy_enumerate_member_surface_keys_via_route(
+                        scope,
+                        part,
+                        member_name,
+                        depth + 1,
+                    ) {
+                        any_enumerable = true;
+                        keys.extend(arm_keys);
+                    }
+                }
+                if !any_enumerable {
+                    return None;
+                }
+                keys.sort();
+                keys.dedup();
+                Some(keys)
+            }
+            TypeExpr::Conditional {
+                true_type,
+                false_type,
+                ..
+            } => {
+                let mut keys = Vec::new();
+                for branch in [true_type.as_ref(), false_type.as_ref()] {
+                    if let Some(branch_keys) = self.legacy_enumerate_member_surface_keys_via_route(
+                        scope,
+                        branch,
+                        member_name,
+                        depth + 1,
+                    ) {
+                        keys.extend(branch_keys);
+                    }
+                }
+                if keys.is_empty() {
+                    None
+                } else {
+                    keys.sort();
+                    keys.dedup();
+                    Some(keys)
+                }
+            }
+            TypeExpr::TypeOf(value_ref) => {
+                // Resolve the value root via the dispatch-aligned bare-name
+                // resolver + ctx `prepared_value_decl` directly (mirrors
+                // `build_typeof`), then enumerate over its object shape /
+                // type annotation.
+                let scope_payload = self.scope_payload_for_scope(scope);
+                let root_name = value_ref.path.first()?;
+                let root_identity =
+                    crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+                        self.ctx,
+                        scope,
+                        scope_payload.as_deref(),
+                        root_name,
+                    )?;
+                let prepared_value = self
+                    .ctx
+                    .prepared_value_decl(&root_identity.canonical_id, &root_identity.symbol_name)
+                    .or_else(|| {
+                        if root_identity.canonical_id.is_empty() {
+                            return None;
+                        }
+                        let target = self.ctx.resolve_value_export_target(
+                            &root_identity.canonical_id,
+                            &root_identity.symbol_name,
+                        )?;
+                        if target.canonical_id == root_identity.canonical_id
+                            && target.name == root_identity.symbol_name
+                        {
+                            return None;
+                        }
+                        self.ctx
+                            .prepared_value_decl(&target.canonical_id, &target.name)
+                    })?;
+
+                if let Some(object_shape) = prepared_value.object_shape.as_ref() {
+                    let object_expr = TypeExpr::Object(std::sync::Arc::new(object_shape.clone()));
+                    return self.legacy_enumerate_member_surface_keys_via_route(
+                        scope,
+                        &object_expr,
+                        member_name,
+                        depth + 1,
+                    );
+                }
+                if let Some(type_annotation) = prepared_value.type_annotation.as_ref() {
+                    return self.legacy_enumerate_member_surface_keys_via_route(
+                        scope,
+                        type_annotation,
+                        member_name,
+                        depth + 1,
+                    );
+                }
+                None
+            }
+            TypeExpr::Parenthesized(inner) => self.legacy_enumerate_member_surface_keys_via_route(
+                scope,
+                inner,
+                member_name,
+                depth + 1,
+            ),
+            TypeExpr::IndexedAccess { object, index } => match object.as_ref() {
+                TypeExpr::Intersection(parts) | TypeExpr::Union(parts) => {
+                    let parts = std::sync::Arc::clone(parts);
+                    let mut keys = Vec::new();
+                    let mut any_enumerable = false;
+                    for arm in parts.iter() {
+                        let arm_indexed = TypeExpr::IndexedAccess {
+                            object: std::sync::Arc::new(arm.clone()),
+                            index: index.clone(),
+                        };
+                        if let Some(arm_keys) = self.legacy_enumerate_member_surface_keys_via_route(
+                            scope,
+                            &arm_indexed,
+                            member_name,
+                            depth + 1,
+                        ) {
+                            any_enumerable = true;
+                            keys.extend(arm_keys);
+                        }
+                    }
+                    if any_enumerable {
+                        keys.sort();
+                        keys.dedup();
+                        Some(keys)
+                    } else {
+                        None
+                    }
+                }
+                TypeExpr::Conditional {
+                    true_type,
+                    false_type,
+                    ..
+                } => {
+                    let mut keys = Vec::new();
+                    let mut any_enumerable = false;
+                    for branch in [true_type.as_ref(), false_type.as_ref()] {
+                        let branch_indexed = TypeExpr::IndexedAccess {
+                            object: std::sync::Arc::new(branch.clone()),
+                            index: index.clone(),
+                        };
+                        if let Some(branch_keys) = self
+                            .legacy_enumerate_member_surface_keys_via_route(
+                                scope,
+                                &branch_indexed,
+                                member_name,
+                                depth + 1,
+                            )
+                        {
+                            any_enumerable = true;
+                            keys.extend(branch_keys);
+                        }
+                    }
+                    if any_enumerable {
+                        keys.sort();
+                        keys.dedup();
+                        Some(keys)
+                    } else {
+                        None
+                    }
+                }
+                TypeExpr::Ref { .. } => {
+                    // The retired arm expanded the alias body (via the
+                    // since-removed `instantiate_local_generic_ref_via_dispatch`)
+                    // and re-applied the index. The shared dispatch now lowers a
+                    // generic `Ref` directly, so stabilise the indexed-access
+                    // OBJECT to its materialised body and re-apply the index — the
+                    // net-equivalent reconstruction. Unreached by the differential
+                    // fixture.
+                    let expanded = self
+                        .legacy_materialised_leaf(scope, object)
+                        .filter(|expanded| expanded != object.as_ref())?;
+                    let expanded_indexed = TypeExpr::IndexedAccess {
+                        object: std::sync::Arc::new(expanded),
+                        index: index.clone(),
+                    };
+                    self.legacy_enumerate_member_surface_keys_via_route(
+                        scope,
+                        &expanded_indexed,
+                        member_name,
+                        depth + 1,
+                    )
+                }
+                TypeExpr::IndexedAccess { .. } => {
+                    let resolved_inner = self
+                        .legacy_materialised_leaf(scope, object)
+                        .filter(|resolved| resolved != object.as_ref())?;
+                    let next = TypeExpr::IndexedAccess {
+                        object: std::sync::Arc::new(resolved_inner),
+                        index: index.clone(),
+                    };
+                    self.legacy_enumerate_member_surface_keys_via_route(
+                        scope,
+                        &next,
+                        member_name,
+                        depth + 1,
+                    )
+                }
+                _ => None,
+            },
+            _ => None,
         }
     }
 }

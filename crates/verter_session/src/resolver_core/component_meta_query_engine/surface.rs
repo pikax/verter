@@ -108,6 +108,46 @@ impl AdmittedRouteProjectionNode {
     }
 }
 
+/// A freshly-lowered route-key SOURCE node held in node domain for the SINGLE
+/// shared dispatch keyspace enumerator
+/// ([`enumerate_keyspace_names_from_keyspace_node`]).
+///
+/// DELIBERATELY DISTINCT from [`AdmittedRouteProjectionNode`]: that carrier
+/// asserts its node passed a route/surface adapter's
+/// `materialized && expanded_surface` acceptance gate, whereas a keyspace source
+/// is INTENTIONALLY an un-admitted `keyof` / `IndexedAccess` carrier (a keyspace
+/// type is NOT a materialized + expanded surface) so the `KeyOf` producer +
+/// structural-transit can reduce it inside the shared dispatch. Minting this
+/// carrier therefore makes NO admission claim — it only NAMES the lowered
+/// keyspace node for the enumerator, keeping the `AdmittedRouteProjectionNode`
+/// post-gate invariant honest.
+///
+/// SEALED + subtree-mint-scoped exactly like [`AdmittedRouteProjectionNode`]: the
+/// `node` field is module-private and `new` / `node` are
+/// `pub(in …::component_meta_query_engine)`, so only the in-subtree route-key
+/// lowerer mints it and only the keyspace enumerator reads it. The carrier never
+/// reaches a materialise sink (key enumeration reads NAMES, not a `TypeExpr`).
+#[derive(Debug, Clone, Copy)]
+pub(in crate::resolver_core::component_meta_query_engine) struct RouteKeyspaceNode {
+    node: SemanticNodeId,
+}
+
+impl RouteKeyspaceNode {
+    /// Mint the carrier around a freshly-lowered keyspace SOURCE node. Makes no
+    /// admission claim (no `materialized && expanded_surface` gate) — a keyspace
+    /// carrier is un-admitted by design.
+    #[must_use]
+    pub(in crate::resolver_core::component_meta_query_engine) fn new(node: SemanticNodeId) -> Self {
+        Self { node }
+    }
+
+    /// The lowered keyspace node, for the shared dispatch keyspace enumerator.
+    #[must_use]
+    pub(in crate::resolver_core::component_meta_query_engine) fn node(&self) -> SemanticNodeId {
+        self.node
+    }
+}
+
 /// Terminal sink: materialise an [`AdmittedRouteProjectionNode`] into a
 /// published `TypeExpr` ONCE, at the existing `materialize_published_node`
 /// surface sink (the sealed [`MetaQuerySurfaceOutputCap`]). The route fixpoint
@@ -191,18 +231,21 @@ pub(crate) fn route_projection_nodes_eq(
         == Some(true)
 }
 
-/// Route-key keyspace enumeration over a stabilised route node: read the
-/// node's literal key NAMES through the SINGLE shared dispatch keyspace
+/// Route-key keyspace enumeration over a freshly-lowered keyspace SOURCE node:
+/// read the node's literal key NAMES through the SINGLE shared dispatch keyspace
 /// enumerator ([`crate::project_semantic_dispatch::ProjectSemanticDispatch::key_names_from_keyspace_node`]
 /// — the same enumerator the `Pick` / `Omit` dispatch reducers consume). This
 /// is the narrow query-engine wrapper: the route-key enumerator hands its
-/// admitted node here instead of forking a second `TypeExpr`-domain key walker.
+/// un-admitted keyspace carrier ([`RouteKeyspaceNode`]) here instead of forking
+/// a second `TypeExpr`-domain key walker. It takes the keyspace carrier (NOT an
+/// [`AdmittedRouteProjectionNode`]) precisely because a keyspace source is an
+/// un-admitted `keyof` / `IndexedAccess` carrier the `KeyOf` producer reduces.
 /// `None` when the node is not a keyspace type (a member SURFACE — the caller
 /// falls back to [`enumerate_public_surface_member_names_from_admitted_node`]).
 /// Names sorted + deduped so the derived route-key set is order-stable.
-pub(in crate::resolver_core::component_meta_query_engine) fn enumerate_keyspace_names_from_admitted_node(
+pub(in crate::resolver_core::component_meta_query_engine) fn enumerate_keyspace_names_from_keyspace_node(
     ctx: &dyn ResolverContext,
-    node: &AdmittedRouteProjectionNode,
+    node: &RouteKeyspaceNode,
 ) -> Option<Vec<String>> {
     let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
     let names = dispatch.key_names_from_keyspace_node(node.node())?;
@@ -250,47 +293,6 @@ pub(in crate::resolver_core::component_meta_query_engine) fn enumerate_public_su
     names.sort();
     names.dedup();
     Some(names)
-}
-
-/// Split-scope generic-`Ref` instantiation for the route-key leaf stabiliser:
-/// dispatch `Instantiate { base: type_slot(owner, name), args, ctx }` with the
-/// caller's pre-lowered NODE args (the ref NAME resolved in `decl_scope`, the
-/// type arguments lowered in `arg_scope` / chain scopes by the caller), gate on
-/// the node-domain route facts (`materialized && expanded_surface`), and mint
-/// the admitted node — NO `TypeExpr` materialise. The owner canonical roots the
-/// `Instantiate` resolve env. `None` on dispatch error / recursive or
-/// gate-reject. This is the node-domain replacement for the former split-scope
-/// arm that pre-resolved `typeof` args by reconstructing a new `TypeExpr::Ref`.
-pub(in crate::resolver_core::component_meta_query_engine) fn instantiate_split_scope_route_node(
-    ctx: &dyn ResolverContext,
-    owner_canonical: &str,
-    resolved_name: &str,
-    args: &[SemanticNodeId],
-) -> Option<AdmittedRouteProjectionNode> {
-    use crate::project_semantic_dispatch::raise::node_raised_shape_facts_with_dispatch;
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::{ProjectionMode, QueryResult, SemanticQueryKey};
-
-    let dispatch = ProjectSemanticDispatch::new(ctx);
-    let slot = dispatch.type_slot_for(
-        std::sync::Arc::from(owner_canonical),
-        std::sync::Arc::from(resolved_name),
-    );
-    let read = dispatch.execute_read(SemanticQueryKey::Instantiate {
-        base: slot,
-        args: std::sync::Arc::from(args.to_vec().into_boxed_slice()),
-        context: dispatch.instantiate_context_for(
-            owner_canonical,
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
-        ),
-    });
-    let result_node = match read.value {
-        QueryResult::Value(node) => node,
-        QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
-    };
-    let facts = node_raised_shape_facts_with_dispatch(&dispatch, result_node)?;
-    (facts.materialized && facts.expanded_surface)
-        .then(|| AdmittedRouteProjectionNode::new(result_node))
 }
 
 /// Demand-bound adapter for the empty-terminal Expanded publication path

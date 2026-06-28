@@ -2288,134 +2288,21 @@ import type { Outer } from './cfg'
 // Differential-equivalence oracle for the node-domain route-key / member-key
 // enumeration. The NEW node path (`enumerate_route_literal_keys` lowering +
 // keyspace enumerator + the narrow admitted-surface member-name reader) must
-// equal the OLD materialise-then-walk path, field-for-field, on every input
-// class that reaches the route. The legacy oracle below is TEST-ONLY — it
-// reconstructs the retired `enumerate_route_literal_keys_inner` +
-// `enumerate_member_surface_keys_via_route` walkers over the MATERIALISED leaf
-// (`lower_and_project_to_expanded_published`, the same Expanded lower + project
-// + materialise the deleted leaf stabiliser performed) — never a production
-// shim.
+// equal the OLD recursive materialise-then-walk path, field-for-field, on every
+// input class that reaches the route.
+//
+// The faithful legacy walker lives in `route_keys.rs` under `#[cfg(test)]`
+// (`ComponentMetaQueryEngine::legacy_enumerate_route_literal_keys` +
+// `legacy_projected_surface_member_names`), reconstructed branch-for-branch from
+// `git show 0810933b9`: the retired `enumerate_route_literal_keys_inner` +
+// `enumerate_member_surface_keys_via_route` recursive `TypeExpr` key-algebra
+// (depth limits 4 / 8, the whole-`KeyOf` step-2, conditional / typeof / union /
+// intersection arm accumulation), with its leaf stabiliser routed through the
+// SURVIVING node fixpoint + the surface-sink materialise — the exact computation
+// the retired materialised stabiliser performed, NEVER the node-domain
+// key/member enumerators the differential is proving. A test oracle, never a
+// production shim.
 // =========================================================================
-
-/// TEST-ONLY copy of the retired `helpers::projected_surface_member_names`
-/// `TypeExpr` walker — the legacy oracle for the node-domain
-/// `enumerate_public_surface_member_names_from_admitted_node`.
-fn legacy_projected_surface_member_names(expr: &TypeExpr) -> Option<Vec<String>> {
-    match expr {
-        TypeExpr::Object(object) => {
-            let mut members = Vec::new();
-            for member in object.properties.iter() {
-                match member {
-                    ObjectMember::Property(property) if property.visibility.is_public() => {
-                        members.push(property.name.clone())
-                    }
-                    ObjectMember::Method(method) if method.visibility.is_public() => {
-                        members.push(method.name.clone())
-                    }
-                    _ => {}
-                }
-            }
-            members.sort();
-            members.dedup();
-            Some(members)
-        }
-        TypeExpr::Intersection(parts) | TypeExpr::Union(parts) => {
-            let mut members = Vec::new();
-            for part in parts.iter() {
-                members.extend(legacy_projected_surface_member_names(part)?);
-            }
-            members.sort();
-            members.dedup();
-            Some(members)
-        }
-        TypeExpr::Parenthesized(inner) => legacy_projected_surface_member_names(inner),
-        _ => None,
-    }
-}
-
-/// TEST-ONLY reconstruction of the retired route-literal-key enumeration over
-/// the MATERIALISED leaf. The leaf stabiliser is the surviving
-/// `lower_and_project_to_expanded_published`; the `keyof <surface>` arm projects
-/// the operand and reads its public member names exactly as the old
-/// `enumerate_member_surface_keys_via_route` did. A test oracle, never a shim.
-fn legacy_enumerate_route_literal_keys(
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    scope: &str,
-    expr: &TypeExpr,
-    depth: usize,
-) -> Option<Vec<String>> {
-    use verter_type_expr::LiteralValue;
-    if depth >= 6 {
-        return None;
-    }
-    // The retired leaf stabiliser materialised an empty-path surface; the
-    // retired `enumerate_member_surface_keys_via_route` then hand-distributed an
-    // `X['m']['n']` indexed-access chain to its member surface. The path-precise
-    // Class-A projector navigates that chain, so the oracle falls back to it for
-    // an indexed-access source the empty-path materialise cannot reduce.
-    let materialise = |e: &TypeExpr| {
-        crate::resolver_core::lower_and_project_to_expanded_published(ctx, scope, e)
-            .or_else(|| crate::resolver_core::project_class_a_terminal_published(ctx, scope, e))
-    };
-    match expr {
-        TypeExpr::Literal(LiteralValue::String(value)) => Some(vec![value.clone()]),
-        TypeExpr::Union(types) => {
-            let mut keys = Vec::new();
-            for ty in types.iter() {
-                keys.extend(legacy_enumerate_route_literal_keys(
-                    ctx,
-                    scope,
-                    ty,
-                    depth + 1,
-                )?);
-            }
-            keys.sort();
-            keys.dedup();
-            Some(keys)
-        }
-        TypeExpr::Parenthesized(inner) => {
-            legacy_enumerate_route_literal_keys(ctx, scope, inner, depth + 1)
-        }
-        TypeExpr::KeyOf(inner) => {
-            let projected_inner = materialise(inner).unwrap_or_else(|| inner.as_ref().clone());
-            if let Some(keys) = legacy_projected_surface_member_names(&projected_inner) {
-                return Some(keys);
-            }
-            match &projected_inner {
-                TypeExpr::Intersection(parts) | TypeExpr::Union(parts) => {
-                    let mut keys = Vec::new();
-                    let mut any_enumerable = false;
-                    for part in parts.iter() {
-                        let arm = TypeExpr::KeyOf(Arc::new(part.clone()));
-                        if let Some(arm_keys) =
-                            legacy_enumerate_route_literal_keys(ctx, scope, &arm, depth + 1)
-                        {
-                            any_enumerable = true;
-                            keys.extend(arm_keys);
-                        }
-                    }
-                    if !any_enumerable {
-                        return None;
-                    }
-                    keys.sort();
-                    keys.dedup();
-                    Some(keys)
-                }
-                _ => None,
-            }
-        }
-        _ => {
-            let projected = materialise(expr)?;
-            if projected == *expr {
-                crate::resolver_core::component_meta_registry::component_meta_registry_string_literal_keys(
-                    &projected,
-                )
-            } else {
-                legacy_enumerate_route_literal_keys(ctx, scope, &projected, depth + 1)
-            }
-        }
-    }
-}
 
 /// Build the differential fixture: a `types.ts` covering every route-key input
 /// class plus an `App.vue` importing it, wired with import dependencies.
@@ -2439,6 +2326,9 @@ export class WithPrivate {
   protected guardedProp: boolean
 }
 export interface IndexOnly { [key: string]: number }
+export type MappedSurface = { [K in keyof Surface]: boolean }
+export type ConditionalKeys = true extends true ? Left : Right
+export const themeConfig = { alpha: 1, beta: 2 }
 "#,
         ),
     );
@@ -2446,7 +2336,8 @@ export interface IndexOnly { [key: string]: number }
         "/src/App.vue".to_string(),
         Arc::from(
             r#"<script lang="ts">
-import type { LiteralKeys, LiteralKeysAlias, Surface, Variants, Left, Right, WithPrivate, IndexOnly } from './types'
+import type { LiteralKeys, LiteralKeysAlias, Surface, Variants, Left, Right, WithPrivate, IndexOnly, MappedSurface, ConditionalKeys } from './types'
+import { themeConfig } from './types'
 </script>
 <template><div /></template>"#,
         ),
@@ -2522,34 +2413,92 @@ fn enumerate_route_literal_keys_node_path_matches_legacy_materialise_oracle() {
         ("keyof index-only", keyof(TypeExpr::named("IndexOnly"))),
         // unresolvable source → None / carrier-stop
         ("keyof unresolvable", keyof(TypeExpr::named("DoesNotExist"))),
+        // ANTI-VACUITY: keyof (A | B) — the common-keys answer (the whole-`KeyOf`
+        // step-2 the pre-fix oracle omitted). `keyof (Left | Right)` is `"shared"`,
+        // NOT the union `"l1" | "r1" | "shared"`.
+        (
+            "keyof union",
+            keyof(TypeExpr::union(vec![
+                TypeExpr::named("Left"),
+                TypeExpr::named("Right"),
+            ])),
+        ),
+        // ANTI-VACUITY: keyof a mapped/remapped keyspace.
+        ("keyof mapped", keyof(TypeExpr::named("MappedSurface"))),
+        // ANTI-VACUITY: keyof a conditional-typed keyspace (closed conditional).
+        (
+            "keyof conditional",
+            keyof(TypeExpr::named("ConditionalKeys")),
+        ),
+        // ANTI-VACUITY: keyof a `typeof <value>` value-body route.
+        (
+            "keyof typeof value",
+            keyof(TypeExpr::TypeOf(verter_type_expr::ValueRef {
+                path: vec!["themeConfig".to_string()],
+                type_args: Vec::new(),
+            })),
+        ),
     ];
 
     for (label, case) in &cases {
         let new_result = engine.enumerate_route_literal_keys("/src/App.vue", "/src/App.vue", case);
-        let old_result = legacy_enumerate_route_literal_keys(engine.ctx(), "/src/App.vue", case, 0);
+        let old_result = engine.legacy_enumerate_route_literal_keys("/src/App.vue", case, 0);
         assert_eq!(
             new_result, old_result,
-            "node-path enumeration must equal the legacy materialise oracle for `{label}`",
+            "node-path enumeration must equal the faithful legacy walker for `{label}`",
         );
     }
 
     // Anti-vacuity: the keyspace and member-surface routes actually enumerate
-    // (a tautological `None == None` differential would prove nothing).
+    // (a tautological `None == None` differential would prove nothing). Each
+    // probe pins the exact NEW node-path result so the differential cannot pass
+    // by both sides collapsing to `None` on a class.
+    let new_keys = |engine: &mut ComponentMetaQueryEngine<'_>, index: usize| {
+        engine.enumerate_route_literal_keys("/src/App.vue", "/src/App.vue", &cases[index].1)
+    };
+    let owned = |names: &[&str]| Some(names.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+
     assert_eq!(
-        engine.enumerate_route_literal_keys("/src/App.vue", "/src/App.vue", &cases[0].1),
-        Some(vec!["alpha".to_string(), "beta".to_string()]),
+        new_keys(&mut engine, 0),
+        owned(&["alpha", "beta"]),
         "the literal-union case must enumerate its keys",
     );
     assert_eq!(
-        engine.enumerate_route_literal_keys("/src/App.vue", "/src/App.vue", &cases[4].1),
-        Some(vec!["primary".to_string(), "secondary".to_string()]),
+        new_keys(&mut engine, 4),
+        owned(&["primary", "secondary"]),
         "the keyof X['variants']['color'] member-surface route must enumerate its keys",
     );
     // The class case enumerates ONLY the public member (private/protected excluded).
     assert_eq!(
-        engine.enumerate_route_literal_keys("/src/App.vue", "/src/App.vue", &cases[6].1),
-        Some(vec!["publicProp".to_string()]),
+        new_keys(&mut engine, 6),
+        owned(&["publicProp"]),
         "keyof a class enumerates the PUBLIC keyspace only",
+    );
+    // `keyof (Left | Right)` is the COMMON keys (`"shared"`), NOT the union of
+    // arm keys — the regression the whole-`KeyOf` step-2 oracle fix locks down.
+    assert_eq!(
+        new_keys(&mut engine, 9),
+        owned(&["shared"]),
+        "keyof of a union enumerates the COMMON keys only",
+    );
+    // `keyof { [K in keyof Surface]: boolean }` enumerates Surface's keys.
+    assert_eq!(
+        new_keys(&mut engine, 10),
+        owned(&["one", "two"]),
+        "keyof a mapped keyspace enumerates the source keys",
+    );
+    // `keyof (true extends true ? Left : Right)` reduces the closed conditional
+    // to `Left`, so it enumerates `keyof Left`.
+    assert_eq!(
+        new_keys(&mut engine, 11),
+        owned(&["l1", "shared"]),
+        "keyof a closed-conditional keyspace enumerates the taken branch's keys",
+    );
+    // `keyof typeof themeConfig` enumerates the value's object keys.
+    assert_eq!(
+        new_keys(&mut engine, 12),
+        owned(&["alpha", "beta"]),
+        "keyof a typeof-value route enumerates the value's keys",
     );
 }
 
@@ -2596,7 +2545,7 @@ fn enumerate_public_surface_member_names_matches_legacy_projected_surface_oracle
         let materialised = super::surface::materialize_route_projection_node(engine.ctx(), &node);
         let old_names = materialised
             .as_ref()
-            .and_then(legacy_projected_surface_member_names);
+            .and_then(super::route_keys::legacy_projected_surface_member_names);
         assert_eq!(
             new_names, old_names,
             "admitted-surface member-name reader must equal the legacy projected-surface oracle for `{label}`",

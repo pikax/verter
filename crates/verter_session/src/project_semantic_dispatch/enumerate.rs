@@ -357,7 +357,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ///
     /// `pub(crate)` (not `pub(super)`) so the component-meta query-engine's
     /// route-key enumerator reaches this SINGLE shared keyspace enumerator
-    /// through its narrow `surface::enumerate_keyspace_names_from_admitted_node`
+    /// through its narrow `surface::enumerate_keyspace_names_from_keyspace_node`
     /// wrapper rather than forking a second `TypeExpr`-domain key walker.
     pub(crate) fn key_names_from_keyspace_node(
         &self,

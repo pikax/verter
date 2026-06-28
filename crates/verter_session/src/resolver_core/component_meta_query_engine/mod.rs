@@ -450,25 +450,11 @@ use std::cell::Cell;
 /// `route_keys.rs`: `enumerate_route_literal_keys` constructs it from the
 /// engine's live scope state and
 /// [`ComponentMetaQueryEngine::solve_or_project_leaf_node_with_context`]
-/// reads its three scopes for the per-`TypeExpr` node-domain dispatch rules.
+/// reads its two scopes for the per-`TypeExpr` node-domain dispatch rules.
 #[derive(Debug, Clone)]
 struct PreparedProjectionContext {
     decl_scope: String,
     arg_scope: String,
-    /// Scopes from outer levels of a declaration-chain projection,
-    /// snapshotted from the engine's `projection_chain_scopes` when
-    /// `solve_or_project_prepared_member_leaf_expr` builds this context,
-    /// so a `TypeOf(value)` reference inside an inner helper body (e.g.,
-    /// the lowered `ComponentUI<typeof theme>` inside
-    /// `ComponentConfig`'s body, where the original `Button` alias
-    /// lives in `button-types.ts`) can fall back through the chain
-    /// to find the scope where the value symbol was actually
-    /// visible.
-    ///
-    /// Innermost-first ordering: `chain_scopes[0]` is the scope of the
-    /// most recently entered declaration. Deduplicated against
-    /// `decl_scope` and `arg_scope` at lookup time.
-    chain_scopes: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -525,7 +511,6 @@ pub(crate) struct FastShallowFieldExpr {
 /// | `prepared_type_decls` | (a) | Arc-cache for `Arc<PreparedTypeDecl>` from ctx; no semantic computation — only refcount avoidance. |
 /// | `prepared_*_query_count`, `prepared_*_hit_count` | (a) | `#[cfg(test)]` instrumentation counters. |
 /// | `fuse_budgets` / `fuse_state` | (a) | Engine-construction-scoped fuse rails (§1.4). |
-/// | `projection_chain_scopes` | (a) | Call-scoped scope chain for prepared-route projection. |
 ///
 /// **Audit conclusion:** all (b) producer caches operate at the
 /// pre-lowering `TypeExpr` identity space, which dispatch's
@@ -581,19 +566,6 @@ pub struct ComponentMetaQueryEngine<'a> {
     prepared_type_decl_query_count: usize,
     fuse_budgets: FuseBudgets,
     fuse_state: FuseState,
-    /// Ambient declaration-scope chain accumulated during
-    /// prepared-member-path projection recursion. Innermost entry at
-    /// index 0; outermost (originating call's `decl_scope`) at the
-    /// end. Used by `solve_or_project_leaf_node_with_context` to find
-    /// the scope where a `TypeOf(value)` reference is visible when
-    /// neither `decl_scope` (the current declaration owner) nor
-    /// `arg_scope` (the
-    /// caller's SFC) contains the value symbol.
-    ///
-    /// Unread after trampoline
-    /// conversion. Field.
-    #[allow(dead_code)]
-    projection_chain_scopes: Vec<String>,
 }
 
 #[cfg(test)]
@@ -933,7 +905,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             prepared_type_decl_query_count: 0,
             fuse_budgets: FuseBudgets::default(),
             fuse_state: FuseState::default(),
-            projection_chain_scopes: Vec::new(),
         }
     }
 

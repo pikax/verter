@@ -21161,8 +21161,8 @@ defineProps<{
 // ─────────────────────────────────────────────────────────────────────────
 // C5 route-fixpoint behaviour-parity characterization.
 //
-// `solve_or_project_leaf_expr_until_stable` (route_keys.rs) is the route-key
-// leaf stabiliser: it re-feeds a materialized `TypeExpr` cursor through the
+// `solve_or_project_leaf_node_until_stable` (route_keys.rs) is the route-key
+// leaf stabiliser: it re-projects a node-domain cursor through the
 // target scope on each iteration (the C5 fixpoint) to stabilise imported-alias
 // helper indexed-access / utility routes. These tests PIN the published prop
 // surface for the C5-exercising fixtures — an imported-alias `Button['ui']`

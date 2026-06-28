@@ -720,11 +720,9 @@ pub(crate) fn decompose_indexed_access_chain_node(
 
 // Generic-`Ref` instantiation for component-meta type resolution goes through
 // the shared dispatch lowering (`lower_type_expr_in_scope*` → `Instantiate`).
-// The route-key leaf stabiliser's split-scope arm
-// (`route_keys::instantiate_split_scope_ref` →
-// `surface::instantiate_split_scope_route_node`) dispatches `Instantiate` with
-// NODE args directly; there is no engine-side single-scope generic-`Ref`
-// materialise helper.
+// The route-key leaf stabiliser lowers a generic `Ref` through that same shared
+// dispatch path; there is no engine-side single-scope generic-`Ref` materialise
+// helper.
 
 // =============================================================================
 // Class B surface bridge helpers — these thread `query_engine.ctx` through dispatch.
@@ -807,7 +805,7 @@ pub(crate) fn lower_and_project_to_expanded_via_host_threaded<'ctx>(
 // ===========================================================================
 // Node-returning route fixpoint adapters.
 //
-// The route fixpoint (`solve_or_project_leaf_expr_until_stable`) stabilises on
+// The route fixpoint (`solve_or_project_leaf_node_until_stable`) stabilises on
 // node-domain `RaisedShapeKey` identity with NO per-iteration materialisation:
 // each iteration projects through these node wrappers (which return the admitted
 // `AdmittedRouteProjectionNode`, never a `TypeExpr`), the fixpoint compares

@@ -4811,7 +4811,7 @@ pub(crate) fn node_raised_shape_for_eq(
 //
 // Node-vs-node member of the node-domain decision API: the route fixpoint's
 // later-iteration convergence (`route_projection_nodes_eq` →
-// `solve_or_project_leaf_expr_until_stable`) compares successive admitted route
+// `solve_or_project_leaf_node_until_stable`) compares successive admitted route
 // nodes through this form. The parity suite exercises it as the equivalence
 // proof against `raise(a) == raise(b)`.
 #[must_use]
