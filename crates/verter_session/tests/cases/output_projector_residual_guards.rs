@@ -4592,6 +4592,18 @@ const SINK_LOCAL_RAW_AUTHORITY_ALLOWLIST: &[(&str, &str)] = &[
         "crate::resolver_core::component_meta_query_engine::surface",
         "materialize_route_projection_node",
     ),
+    // The registry-publication terminal raiser: materialises the sealed
+    // `RegistryPublicationNode` (the no-admission-claim carrier minted only by the
+    // in-subtree registry candidate path for a first-pass / stabilised member-surface
+    // node — an arbitrary `Miss`/`Recursive`/`Tainted`/degenerate outcome) into the
+    // published `TypeExpr` through the SAME `materialize_published_node` surface sink.
+    // Sink-internal, confined to the `component_meta_query_engine` subtree — same
+    // category as `materialize_route_projection_node` above; the carried node is the
+    // input, not a caller-forged surface/member.
+    (
+        "crate::resolver_core::component_meta_query_engine::surface",
+        "materialize_registry_publication_node",
+    ),
     // The SurfaceView → `ExpandedObjectShape` DTO projector — the exact analog of
     // `surface_view_to_projected_surface` above: it delegates to that registered
     // surface sink (which mints each terminal leaf once) plus the pure
@@ -12229,6 +12241,16 @@ const HOT_TERMINAL_SINKS: &[(&str, &str)] = &[
     (
         "component_meta_query_engine/surface.rs",
         "materialize_route_projection_node",
+    ),
+    // The registry-publication terminal: materialises a registry member-surface
+    // node (held in the no-admission-claim `RegistryPublicationNode` carrier — an
+    // arbitrary `Miss`/`Recursive`/`Tainted`/degenerate outcome, NOT a
+    // route-admitted node) ONCE through the SAME `materialize_published_node`
+    // surface sink. Pure one-shot publication — no decision on the result; the
+    // object-surface fact is read off the node separately.
+    (
+        "component_meta_query_engine/surface.rs",
+        "materialize_registry_publication_node",
     ),
     (
         "component_meta_query_engine/surface.rs",

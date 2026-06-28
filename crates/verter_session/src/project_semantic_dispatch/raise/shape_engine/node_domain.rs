@@ -22,7 +22,7 @@ use super::{
     ShapeInterner,
 };
 use crate::resolver_core::component_meta_query_engine::{
-    semantic_query_error_raw, SEMANTIC_OBJECT_SURFACE,
+    semantic_query_error_raw, SEMANTIC_MISS, SEMANTIC_OBJECT_SURFACE,
 };
 use crate::semantic_query::QueryError;
 
@@ -36,7 +36,9 @@ use crate::semantic_query::QueryError;
 // or interner), exactly mirroring the historical inline `RaisedShapeAlg` arms.
 // ===========================================================================
 mod summary {
-    use super::{FactShapeTag, RaisedShapeFacts, RaisedShapeSummary, SEMANTIC_OBJECT_SURFACE};
+    use super::{
+        FactShapeTag, RaisedShapeFacts, RaisedShapeSummary, SEMANTIC_MISS, SEMANTIC_OBJECT_SURFACE,
+    };
 
     /// Assemble a summary from the three facts + tag. `can_shell_raise` is
     /// ALWAYS `true` for any value the fold produces (a `Some(result)`).
@@ -53,9 +55,10 @@ mod summary {
             },
             tag,
             // Only the two sentinel-leaf constructors (`unknown` / `opaque_sentinel`)
-            // set this true; every compound / non-sentinel term is `false` (its
+            // set these true; every compound / non-sentinel term is `false` (its
             // ROOT is not a sentinel, even when a child is).
             root_unmaterialized_sentinel: false,
+            root_semantic_miss_sentinel: false,
         }
     }
 
@@ -79,8 +82,10 @@ mod summary {
         };
         let mut s = summary(materialized, true, tag);
         // The ROOT term IS this `Unknown { raw }`, so it is a root sentinel iff the
-        // raw reads unmaterialised (`!materialized`).
+        // raw reads unmaterialised (`!materialized`), and the NARROWER miss-root iff
+        // the raw is EXACTLY the `semanticMiss` spelling.
         s.root_unmaterialized_sentinel = !materialized;
+        s.root_semantic_miss_sentinel = raw == SEMANTIC_MISS;
         s
     }
 
@@ -102,7 +107,8 @@ mod summary {
     /// `expanded_surface` is always `true`, exactly as `unknown` passes.
     pub(super) fn opaque_sentinel(err: &crate::semantic_query::QueryError) -> RaisedShapeSummary {
         use crate::project_semantic_dispatch::raise_sentinel::{
-            query_error_is_object_surface_sentinel, query_error_is_unmaterialized_sentinel,
+            query_error_is_object_surface_sentinel, query_error_is_semantic_miss_sentinel,
+            query_error_is_unmaterialized_sentinel,
         };
         let materialized = !query_error_is_unmaterialized_sentinel(err);
         let tag = if query_error_is_object_surface_sentinel(err) {
@@ -112,8 +118,12 @@ mod summary {
         };
         let mut s = summary(materialized, true, tag);
         // The ROOT term IS this typed sentinel, so it is a root sentinel iff the
-        // error reads unmaterialised (`!materialized`).
+        // error reads unmaterialised (`!materialized`), and the NARROWER miss-root
+        // iff the error round-trips to the `semanticMiss` spelling — classified
+        // DIRECTLY from the typed variant via the shared authority, never by
+        // re-spelling a raw string.
         s.root_unmaterialized_sentinel = !materialized;
+        s.root_semantic_miss_sentinel = query_error_is_semantic_miss_sentinel(err);
         s
     }
 

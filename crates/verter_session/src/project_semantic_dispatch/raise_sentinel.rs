@@ -164,6 +164,53 @@ pub(in crate::project_semantic_dispatch) fn query_error_is_unmaterialized_sentin
 /// `FactShapeTag` itself, in `node_domain::summary::opaque_sentinel`. The match is
 /// EXHAUSTIVE (no `_` wildcard) so a future `QueryError` variant is forced to
 /// declare whether it is the object-surface sentinel.
+/// The DOMAIN-NEUTRAL semantic-MISS-sentinel predicate: `true` iff `err`'s raised
+/// raw spelling IS exactly [`SEMANTIC_MISS`] — the SINGLE sentinel the `TypeExpr`
+/// published-operator predicate
+/// (`type_expr_root_is_published_operator`'s `Mapped { value: Unknown { raw ==
+/// "semanticMiss" } }` carrier check) treats as a carrier. By construction this
+/// equals `semantic_query_error_raw(err) == SEMANTIC_MISS` for EVERY variant (the
+/// same by-construction agreement [`query_error_is_object_surface_sentinel`] holds):
+/// the typed [`QueryError::Miss`] carrier round-trips to that spelling, and the
+/// text-bearing [`QueryError::Other`] arm DELEGATES to its payload text (a
+/// caller-supplied string CAN spell the sentinel, e.g. `Other("semanticMiss")`), so
+/// it tags the miss sentinel exactly when the raw-string rule would.
+/// [`QueryError::DeclPlaceholder`]'s raw is always `declPlaceholder(<name>)`, which
+/// never equals the miss spelling, so it is `false` for every name. NARROWER than
+/// [`query_error_is_unmaterialized_sentinel`] (which is `true` for object-surface /
+/// surface-member / budget / cycle / … sentinels too); this isolates the SINGLE
+/// `semanticMiss` spelling so the node-domain published-operator mirror can suppress
+/// EXACTLY the carriers the `TypeExpr` predicate does. The match is EXHAUSTIVE (no
+/// `_` wildcard) so a future `QueryError` variant must declare whether it is the
+/// miss sentinel.
+#[must_use]
+pub(in crate::project_semantic_dispatch) fn query_error_is_semantic_miss_sentinel(
+    err: &QueryError,
+) -> bool {
+    match err {
+        QueryError::Miss => true,
+        // `Other`'s raised raw IS its payload text — delegate (no allocation:
+        // compare the borrowed text to the const directly) so the predicate is
+        // exactly `raised-raw == SEMANTIC_MISS` even for an adversarial
+        // sentinel-spelling payload.
+        QueryError::Other(text) => text.as_ref() == SEMANTIC_MISS,
+        // `declPlaceholder(<name>)` never equals the miss spelling.
+        QueryError::DeclPlaceholder { .. } => false,
+        QueryError::UnsupportedIntrinsic { .. }
+        | QueryError::BudgetExceeded(_)
+        | QueryError::UnstableState { .. }
+        | QueryError::AliasCycle { .. }
+        | QueryError::RecursiveRef { .. }
+        | QueryError::ValueDomainMismatch { .. }
+        | QueryError::RaiseAliasCycle
+        | QueryError::TypeParamCycle
+        | QueryError::RaiseMiss
+        | QueryError::UnrepresentableSurface
+        | QueryError::UnrepresentableSurfaceMember
+        | QueryError::VueMacroElementsPlaceholder => false,
+    }
+}
+
 #[must_use]
 pub(in crate::project_semantic_dispatch) fn query_error_is_object_surface_sentinel(
     err: &QueryError,
@@ -197,11 +244,12 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        query_error_is_object_surface_sentinel, query_error_is_unmaterialized_sentinel,
-        raw_is_unmaterialized_sentinel, QueryError, SEMANTIC_OBJECT_SURFACE,
+        query_error_is_object_surface_sentinel, query_error_is_semantic_miss_sentinel,
+        query_error_is_unmaterialized_sentinel, raw_is_unmaterialized_sentinel, QueryError,
+        SEMANTIC_OBJECT_SURFACE,
     };
     use crate::resolver_core::component_meta_query_engine::{
-        semantic_query_error_raw, BUDGET_EXCEEDED_SENTINEL_PREFIX,
+        semantic_query_error_raw, BUDGET_EXCEEDED_SENTINEL_PREFIX, SEMANTIC_MISS,
     };
     use crate::resolver_core::shallow_file_state::{BudgetDomain, BudgetExceededFailure};
     use crate::semantic_query::SemanticQueryValueTag;
@@ -412,6 +460,60 @@ mod tests {
             "the surface-MEMBER carrier round-trips to SEMANTIC_SURFACE_MEMBER, not the \
              object-surface spelling"
         );
+    }
+
+    /// The semantic-MISS-sentinel no-drift contract: the TYPED predicate
+    /// (`query_error_is_semantic_miss_sentinel`) returns exactly
+    /// `semantic_query_error_raw(err) == SEMANTIC_MISS` for EVERY variant. This is
+    /// the SINGLE sentinel the node-domain published-operator mirror's `Mapped` arm
+    /// suppresses — strictly NARROWER than `query_error_is_unmaterialized_sentinel`
+    /// (which is `true` for object-surface / surface-member / budget / cycle too).
+    /// DISCRIMINATING: the object-surface / surface-member carriers and an
+    /// adversarial benign `Other` are NOT the miss sentinel, while `Miss` and a
+    /// text-bearing `Other("semanticMiss")` ARE.
+    #[test]
+    fn query_error_semantic_miss_sentinel_agrees_with_raw_miss_spelling() {
+        assert_eq!(semantic_query_error_raw(&QueryError::Miss), SEMANTIC_MISS);
+
+        for variant in all_query_error_variants()
+            .into_iter()
+            .chain(adversarial_text_bearing_variants())
+        {
+            let typed = query_error_is_semantic_miss_sentinel(&variant);
+            let raw_is_miss = semantic_query_error_raw(&variant) == SEMANTIC_MISS;
+            assert_eq!(
+                typed,
+                raw_is_miss,
+                "semantic-miss-sentinel predicate must equal \
+                 (semantic_query_error_raw(err) == SEMANTIC_MISS) for {variant:?} \
+                 (raw spelling = {:?})",
+                semantic_query_error_raw(&variant)
+            );
+        }
+
+        // _discriminates: the predicate isolates EXACTLY the miss spelling — the
+        // broad unmaterialised set (object-surface / surface-member) is NOT miss.
+        assert!(query_error_is_semantic_miss_sentinel(&QueryError::Miss));
+        assert!(query_error_is_semantic_miss_sentinel(&QueryError::Other(
+            Arc::from("semanticMiss")
+        )));
+        assert!(
+            !query_error_is_semantic_miss_sentinel(&QueryError::UnrepresentableSurface),
+            "the object-surface carrier is an unmaterialised sentinel but NOT the miss sentinel — \
+             the exact divergence the node `Mapped` arm must honour"
+        );
+        assert!(
+            !query_error_is_semantic_miss_sentinel(&QueryError::UnrepresentableSurfaceMember),
+            "the surface-member carrier is NOT the miss sentinel"
+        );
+        // Anti-vacuity cross-check: every miss-sentinel variant is ALSO an
+        // unmaterialised sentinel, but not vice versa.
+        assert!(query_error_is_unmaterialized_sentinel(
+            &QueryError::UnrepresentableSurface
+        ));
+        assert!(!query_error_is_semantic_miss_sentinel(&QueryError::Other(
+            Arc::from("genuinely free text")
+        )));
     }
 
     /// Behavioural pin for the budget-exceeded prefix: the classifier recognises

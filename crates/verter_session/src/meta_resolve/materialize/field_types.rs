@@ -148,13 +148,15 @@ fn type_expr_root_is_published_operator(expr: &verter_type_expr::TypeExpr) -> bo
 ///     predicate's `Parenthesized` peel); the raise strips it.
 ///   - `DeclRef` / `InstantiationRef` / `BareRef` ⇒ true — they raise to
 ///     `TypeExpr::Ref` (a surviving declared surface root).
-///   - `Mapped { value }` ⇒ true UNLESS the `value` raises to an unmaterialised
-///     miss placeholder (the node form of the `TypeExpr` predicate's
-///     `value == Unknown { raw == "semanticMiss" }` carrier check). The node
-///     sentinel recogniser is the established miss-placeholder authority; it is
-///     marginally broader than the single `"semanticMiss"` spelling, which only
-///     differs for a `Mapped` value raising to one of the OTHER sentinel spellings
-///     (e.g. an object-surface placeholder) — a shape the parity test pins.
+///   - `Mapped { value }` ⇒ true UNLESS the `value`'s raised ROOT is EXACTLY the
+///     `semanticMiss` sentinel (`node_root_is_semantic_miss_sentinel_with_dispatch`,
+///     the node form of the `TypeExpr` predicate's `value == Unknown { raw ==
+///     "semanticMiss" }` carrier check). This is the NARROW miss-root fact, NOT the
+///     broad unmaterialised-sentinel set: a `Mapped` value raising to one of the
+///     OTHER sentinel spellings (object-surface, surface-member, budget, cycle)
+///     PUBLISHES (true), exactly as the `TypeExpr` predicate does — pinned by the
+///     `Mapped { value: semanticObjectSurface }` vs `Mapped { value: semanticMiss }`
+///     parity cases.
 ///   - `KeyOf` / `IndexedAccess` / `Conditional` / `TypeOf` ⇒ true.
 ///   - everything else (`Object`/`Union`/`Intersection`/primitives/… and
 ///     `ImportType`/`RawFallback`, which raise to non-`Ref` non-operator terms) ⇒
@@ -163,7 +165,7 @@ fn node_root_is_published_operator(
     ctx: &dyn crate::resolver_core::ResolverContext,
     node: crate::semantic_query::SemanticNodeId,
 ) -> bool {
-    use crate::project_semantic_dispatch::raise::node_root_is_unmaterialized_sentinel_with_dispatch;
+    use crate::project_semantic_dispatch::raise::node_root_is_semantic_miss_sentinel_with_dispatch;
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::semantic_query::SemanticNodeData;
 
@@ -189,13 +191,18 @@ fn node_root_is_published_operator(
             | SemanticNodeData::InstantiationRef { .. }
             | SemanticNodeData::BareRef(_) => true,
             SemanticNodeData::Mapped { mapper, .. } => {
-                // The mapped VALUE expression (`{ [K in S]: <value> }`) lives on
-                // the mapper key. The `TypeExpr` predicate keeps a `Mapped` whose
-                // value is the miss placeholder as a carrier (false) and publishes
-                // one with an author-visible value (true).
+                // The mapped VALUE expression (`{ [K in S]: <value> }`) lives on the
+                // mapper key. `type_expr_root_is_published_operator` keeps a `Mapped`
+                // as a carrier (false) ONLY when its value is EXACTLY the
+                // `Unknown { raw == "semanticMiss" }` placeholder, and publishes
+                // (true) for ANY other value — including a value that raises to one of
+                // the OTHER unmaterialised sentinels (object-surface, surface-member,
+                // budget, cycle). So this arm suppresses on the NARROW miss-root fact,
+                // NOT the broad unmaterialised-sentinel set, to mirror the `TypeExpr`
+                // predicate exactly.
                 let value = mapper.value_expr;
                 drop(data);
-                !node_root_is_unmaterialized_sentinel_with_dispatch(dispatch, value)
+                !node_root_is_semantic_miss_sentinel_with_dispatch(dispatch, value)
             }
             SemanticNodeData::KeyOf { .. }
             | SemanticNodeData::IndexedAccess { .. }
@@ -207,6 +214,41 @@ fn node_root_is_published_operator(
 
     let dispatch = ProjectSemanticDispatch::new(ctx);
     walk(&dispatch, node, 0)
+}
+
+/// Whether `node`'s raised ROOT term is a `TypeOf` — the node-domain equivalent of
+/// `matches!(expr, TypeExpr::TypeOf(_))`, following the `Alias` identity hop (the
+/// node-domain peel the raise strips). The registry member-surface stabiliser scopes
+/// its typeof-result-miss admission refusal to a `TypeOf`-rooted surface, exactly as
+/// `materialize_component_meta_type_expr_until_stable_full` scopes that refusal to a
+/// `TypeOf` input expr (so a miss-rooted `Pick`/`Omit`/`Ref` surface — a different,
+/// already-handled class — is not refused here).
+fn node_root_is_typeof(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    node: crate::semantic_query::SemanticNodeId,
+) -> bool {
+    use crate::semantic_query::SemanticNodeData;
+
+    fn walk(
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        node: crate::semantic_query::SemanticNodeId,
+        depth: u32,
+    ) -> bool {
+        const MAX_DEPTH: u32 = 32;
+        if depth >= MAX_DEPTH {
+            return false;
+        }
+        let Some(data) = crate::project_semantic_dispatch::node_data_for(ctx, node) else {
+            return false;
+        };
+        match data.as_ref() {
+            SemanticNodeData::Alias(inner) => walk(ctx, *inner, depth + 1),
+            SemanticNodeData::TypeOf(_) => true,
+            _ => false,
+        }
+    }
+
+    walk(ctx, node, 0)
 }
 
 /// Node-domain mirror of [`type_expr_materialize_reduction_context`]: the EXACT
@@ -312,20 +354,56 @@ pub(crate) fn stabilize_registry_member_surface_node_with_shape_cache(
             emit_dispatch_dep_signature_facts(ctx, cached.dep_signature());
             cached
         } else {
+            // Snapshot the request-scoped materialization suppress sticky BEFORE the
+            // reduce, and take the scope observation BEFORE computing the value —
+            // mirroring the `TypeExpr`-start
+            // `materialize_component_meta_type_expr_until_stable_full`, so the
+            // signature self-root and the admission gate root on the version the
+            // reduce actually ran under (one tear-free observation taken before the
+            // value settles, not one re-read afterward).
+            let suppress_sticky_before =
+                crate::request_context::current_materialization_cache_suppress();
+            let observed_scope = ctx.observe_materialize_scope(scope_canonical_id);
             let materialized = reduce_member_value_graph_native_with_context(
                 ctx,
                 scope_canonical_id,
                 first_node,
                 reduction_context,
             );
-            // A GENUINE-partial reduce (budget-tripped contributing read) must NOT
-            // warm the shared slot — refused admission, the no-poison invariant.
+            // Reproduce ALL THREE of `_until_stable_full`'s admission rails, not just
+            // the partial gate:
+            //   1. a GENUINE-partial reduce (budget-tripped contributing read);
+            //   2. a reduce that observed a MissingDependency (the request's
+            //      materialization suppress sticky transitioned unset→set DURING this
+            //      reduce); and
+            //   3. a `typeof <unresolved import>`-rooted member surface whose reduced
+            //      ROOT is the unmaterialised/miss sentinel.
+            // Cases 2 + 3 are `ReturnOnly` partials whose only invalidation rail is
+            // the owner's `ImportRoute` derived fact — a rail this node-keyed slot's
+            // fact signature cannot carry — so admitting them warm would stale-serve
+            // the miss after the dependency appears. The value still flows to the
+            // caller; only the shared-slot admission is refused, and the next request
+            // recomputes cold and recovers. The suppress-sticky transition alone
+            // misses a typeof miss whose sticky an EARLIER `build_typeof` sub-read in
+            // the SAME request already set, so the typeof-root-miss check is carried
+            // IN ADDITION and is scoped to a `TypeOf`-rooted first-pass node (a
+            // miss-rooted `Pick`/`Omit`/`Ref` surface is a different, already-handled
+            // class the surrounding gates cover).
+            let observed_missing_dependency = !suppress_sticky_before
+                && crate::request_context::current_materialization_cache_suppress();
+            let typeof_result_root_is_miss = node_root_is_typeof(ctx, first_node)
+                && materialized.node_id().is_some_and(|node| {
+                    crate::project_semantic_dispatch::raise::node_root_is_unmaterialized_sentinel_with_dispatch(
+                        &dispatch, node,
+                    )
+                });
             if crate::cache_runtime::refuse_result_cache_admission_if_partial(
                 materialized.result_is_partial(),
-            ) {
+            ) || observed_missing_dependency
+                || typeof_result_root_is_miss
+            {
                 materialized
             } else {
-                let observed_scope = ctx.observe_materialize_scope(scope_canonical_id);
                 let materialized_for_closure = materialized.clone();
                 let admitted = cache.get_or_compute(&key, ctx, move || {
                     let scope_obs = observed_scope?;
@@ -1255,4 +1333,141 @@ pub(crate) fn mtl_call_count_for_tests() -> usize {
 #[allow(dead_code)]
 pub(crate) fn reset_mtl_call_count_for_tests() {
     MTL_CALL_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(test)]
+mod stabilizer_admission_tests {
+    use std::sync::Arc;
+
+    use super::{
+        node_materialize_reduction_context,
+        stabilize_registry_member_surface_node_with_shape_cache, RegistryMemberShapeKeyCap,
+    };
+    use crate::component_meta_caches::ShapeCacheKey;
+    use crate::meta::MetaProject;
+    use crate::semantic_query::{
+        PrimitiveKind, ProjectionMode, ScopeId, SemanticNodeData, SemanticNodeId, ValueRootKey,
+    };
+    use crate::types::{AnalysisLevel, HostConfig};
+    use crate::VerterHost;
+
+    /// Peek the ShapeCacheDb member-VALUE-node slot the stabiliser keys, reconstructing
+    /// the key the SAME way `stabilize_registry_member_surface_node_with_shape_cache`
+    /// does (the EXACT `node_materialize_reduction_context` + member-value-node key).
+    fn slot_warm(
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        scope: &str,
+        first_node: SemanticNodeId,
+    ) -> bool {
+        let reduction_context =
+            node_materialize_reduction_context(ctx, first_node, ProjectionMode::Navigate);
+        let cap = RegistryMemberShapeKeyCap::new();
+        let key = ShapeCacheKey::registry_member_value_node_whole_with_context(
+            Arc::<str>::from(scope),
+            &cap,
+            first_node,
+            reduction_context,
+        );
+        ctx.project_type_store()
+            .shape_cache_db()
+            .peek(&key, ctx)
+            .is_some()
+    }
+
+    /// F2: the stabiliser carries `_until_stable_full`'s extra admission rails
+    /// (`typeof_result_root_is_miss` + `observed_missing_dependency`), and this test
+    /// PROVES — discriminatingly — that the typeof-miss stale-serve the rails defend
+    /// against is UNREACHABLE in the registry-member (Navigate) stabiliser path, because
+    /// a `TypeOf` root reduces to a MATERIALISED deferred carrier (NOT a cached miss
+    /// sentinel) under the stabiliser's `Published(Navigate)` context. A deferred carrier
+    /// admitted to the slot re-resolves the typeof on demand (correct), so it is NOT the
+    /// import-route-rail-less cached miss that would stale-serve.
+    ///
+    /// Two discriminating assertions:
+    /// 1. the new `node_root_is_typeof` helper TRUE for a `TypeOf` root, FALSE for a
+    ///    non-`TypeOf` root (the typeof-scope the rail keys on);
+    /// 2. the typeof root reduces to a MATERIALISED non-sentinel (a deferred carrier) at
+    ///    the stabiliser's Navigate context — so `typeof_result_root_is_miss` is
+    ///    correctly NOT tripped and the carrier is admitted warm. If `Navigate` lowering
+    ///    ever STARTED resolving a typeof to a cached miss here, assertion (2) fails and
+    ///    surfaces that the refusal rail became load-bearing.
+    #[test]
+    fn typeof_root_reduces_to_deferred_carrier_so_stale_serve_is_unreachable() {
+        let host = VerterHost::new_standalone(HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        });
+        let project = MetaProject::new(host);
+        project
+            .upsert_base("/p.ts", "export type Anchor = number\n")
+            .unwrap();
+        let session = project.open_session_batch().unwrap();
+        let _ = session.evaluate_types("/p.ts").unwrap();
+        let host = session.host();
+        let ctx: &dyn crate::resolver_core::ResolverContext = host;
+        let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+        let graph = ctx.project_type_store().semantic_graph();
+
+        // first_node = `typeof definitelyMissingValue` — a TypeOf carrier whose value
+        // root is unresolvable in /p.ts.
+        let typeof_node = graph.intern_node(SemanticNodeData::new_typeof(
+            ValueRootKey {
+                scope: ScopeId {
+                    canonical_id: Arc::from("/p.ts"),
+                    local_scope: None,
+                },
+                name: Arc::from("definitelyMissingValue"),
+            },
+            Arc::from(Vec::new().into_boxed_slice()),
+            Arc::from(Vec::new().into_boxed_slice()),
+        ));
+        let primitive_node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+
+        // (1) The typeof-scope helper the rail keys on discriminates a TypeOf root.
+        assert!(
+            super::node_root_is_typeof(ctx, typeof_node),
+            "node_root_is_typeof must be TRUE for a TypeOf root (the rail's scope)",
+        );
+        assert!(
+            !super::node_root_is_typeof(ctx, primitive_node),
+            "node_root_is_typeof must be FALSE for a non-TypeOf root",
+        );
+
+        // (2) The typeof reduces to a MATERIALISED non-sentinel (a deferred carrier) at
+        // the stabiliser's `Published(Navigate)` context — NOT a cached miss — so
+        // `typeof_result_root_is_miss` is correctly not tripped and the carrier is
+        // admitted warm (re-resolves on demand; no stale-serve).
+        let reduction_context =
+            node_materialize_reduction_context(ctx, typeof_node, ProjectionMode::Navigate);
+        let reduced = super::reduce_member_value_graph_native_with_context(
+            ctx,
+            "/p.ts",
+            typeof_node,
+            reduction_context,
+        );
+        let result_is_sentinel = reduced.node_id().is_some_and(|n| {
+            crate::project_semantic_dispatch::raise::node_root_is_unmaterialized_sentinel_with_dispatch(
+                &dispatch, n,
+            )
+        });
+        assert!(
+            !result_is_sentinel,
+            "a typeof root reduces to a deferred carrier (NOT a cached miss) under \
+             Published(Navigate); the typeof-miss stale-serve is unreachable in this path. \
+             If this fails, the typeof now resolves to a miss here and the \
+             typeof_result_root_is_miss refusal rail became load-bearing",
+        );
+
+        let _ = stabilize_registry_member_surface_node_with_shape_cache(
+            ctx,
+            "/p.ts",
+            typeof_node,
+            ProjectionMode::Navigate,
+        );
+        assert!(
+            slot_warm(ctx, "/p.ts", typeof_node),
+            "a deferred typeof carrier IS admitted warm (it re-resolves on demand — correct, \
+             not the import-route-rail-less cached miss the rails refuse)",
+        );
+    }
 }

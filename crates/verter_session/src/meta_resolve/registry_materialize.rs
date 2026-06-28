@@ -586,6 +586,12 @@ pub(crate) fn materialize_component_meta_registry_structural_expr(
         if let Some(key) = cycle_key {
             active.remove(&key);
         }
+        // Interim TypeExpr-derived object-surface fact: this structural path still
+        // materialises a `TypeExpr` (the fence flags it at its own site), so the fact
+        // is `component_meta_registry_has_explicit_object_surface(&result)` on the FINAL
+        // materialised value — NOT a node-domain decision. It is threaded out to the
+        // host so the caller reads it as a precomputed fact rather than re-deriving it;
+        // a later block converts this path node-native and the fact with it.
         let explicit_object_surface = component_meta_registry_has_explicit_object_surface(&result);
         (result, explicit_object_surface)
     }

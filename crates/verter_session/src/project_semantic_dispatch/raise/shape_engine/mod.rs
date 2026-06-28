@@ -371,6 +371,19 @@ pub(in crate::project_semantic_dispatch) struct RaisedShapeSummary {
     /// sentinel). Carried on the summary (not `RaisedShapeFacts`) because only the
     /// ROOT node's value is read, through [`project_node_root_sentinel`].
     pub(in crate::project_semantic_dispatch) root_unmaterialized_sentinel: bool,
+    /// `true` when this node's OWN raised root term is EXACTLY the
+    /// [`SEMANTIC_MISS`](crate::resolver_core::component_meta_query_engine::SEMANTIC_MISS)
+    /// sentinel — strictly NARROWER than [`Self::root_unmaterialized_sentinel`]
+    /// (which is also `true` for the object-surface / surface-member / budget /
+    /// cycle / … spellings). Set ONLY by the two sentinel-leaf constructors
+    /// (`unknown` / `opaque_sentinel`) when the raw / `QueryError` reads as the miss
+    /// spelling, so it is the node-domain equivalent of `matches!(raise(node),
+    /// TypeExpr::Unknown { raw } if raw == "semanticMiss")` applied to the ROOT term.
+    /// Read through [`project_node_root_semantic_miss_sentinel`] by the
+    /// published-operator mirror's `Mapped` arm, which suppresses EXACTLY the
+    /// carriers the `TypeExpr` predicate does (the miss spelling alone, NOT the broad
+    /// sentinel set).
+    pub(in crate::project_semantic_dispatch) root_semantic_miss_sentinel: bool,
 }
 
 /// The bottom-up node-domain projection result: the interned structural key
@@ -1112,6 +1125,24 @@ pub(in crate::project_semantic_dispatch) fn project_node_root_sentinel(
     let mut alg = RaisedFactsAlg;
     let mut active = FxHashSet::default();
     Some(fold_node(&mut alg, dispatch, node, &mut active)?.root_unmaterialized_sentinel)
+}
+
+/// Whether `node`'s OWN raised root term is EXACTLY the
+/// [`SEMANTIC_MISS`](crate::resolver_core::component_meta_query_engine::SEMANTIC_MISS)
+/// sentinel — the node-domain equivalent of `matches!(raise(node), TypeExpr::Unknown
+/// { raw } if raw == "semanticMiss")` applied to the ROOT term. Reads the ROOT
+/// node's [`RaisedShapeSummary::root_semantic_miss_sentinel`] from the facts-only
+/// fold (no key interned, no `TypeExpr` materialised). STRICTLY NARROWER than
+/// [`project_node_root_sentinel`]: an object-surface / surface-member / budget /
+/// cycle root is an unmaterialised sentinel there but is NOT the miss sentinel here.
+/// `None` when the whole raise is `None`.
+pub(in crate::project_semantic_dispatch) fn project_node_root_semantic_miss_sentinel(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+) -> Option<bool> {
+    let mut alg = RaisedFactsAlg;
+    let mut active = FxHashSet::default();
+    Some(fold_node(&mut alg, dispatch, node, &mut active)?.root_semantic_miss_sentinel)
 }
 
 /// Whether `node`'s raised shape contains a semantic miss ANYWHERE in its tree —

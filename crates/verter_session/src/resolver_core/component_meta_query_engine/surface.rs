@@ -148,6 +148,47 @@ impl RouteKeyspaceNode {
     }
 }
 
+/// A registry member-surface PUBLICATION node held in node domain for the
+/// single registry publication sink ([`materialize_registry_publication_node`]).
+///
+/// DELIBERATELY DISTINCT from [`AdmittedRouteProjectionNode`]: that carrier asserts
+/// its node passed a route/surface adapter's `materialized && expanded_surface`
+/// acceptance gate, whereas a registry PUBLICATION node is the first-pass /
+/// already-stabilised member-surface node the registry candidate path holds
+/// DIRECTLY — it makes NO admission claim. The member surface can be an arbitrary
+/// outcome (`Miss` / `Recursive` / `Tainted` / a degenerate reduce), so wrapping it
+/// in `AdmittedRouteProjectionNode` would FORGE the post-gate invariant that carrier
+/// documents. Minting this carrier instead keeps the admitted-carrier invariant
+/// honest while still routing the one publication materialisation through the SAME
+/// cap-gated `materialize_published_node` surface sink.
+///
+/// SEALED + subtree-mint-scoped exactly like [`AdmittedRouteProjectionNode`] /
+/// [`RouteKeyspaceNode`]: the `node` field is module-private and `new` / `node` are
+/// `pub(in …::component_meta_query_engine)`, so only the in-subtree registry
+/// candidate path mints it and only the registry publication sink reads it — and the
+/// materialisation it feeds stays cap-gated regardless of who holds the carrier.
+#[derive(Debug, Clone, Copy)]
+pub(in crate::resolver_core::component_meta_query_engine) struct RegistryPublicationNode {
+    node: SemanticNodeId,
+}
+
+impl RegistryPublicationNode {
+    /// Mint the carrier around a registry member-surface publication node. Makes NO
+    /// admission claim (no `materialized && expanded_surface` gate) — the node is the
+    /// first-pass / stabilised member surface, an arbitrary outcome the registry
+    /// candidate path publishes once.
+    #[must_use]
+    pub(in crate::resolver_core::component_meta_query_engine) fn new(node: SemanticNodeId) -> Self {
+        Self { node }
+    }
+
+    /// The publication node, for the registry publication sink.
+    #[must_use]
+    pub(in crate::resolver_core::component_meta_query_engine) fn node(&self) -> SemanticNodeId {
+        self.node
+    }
+}
+
 /// Terminal sink: materialise an [`AdmittedRouteProjectionNode`] into a
 /// published `TypeExpr` ONCE, at the existing `materialize_published_node`
 /// surface sink (the sealed [`MetaQuerySurfaceOutputCap`]). The route fixpoint
@@ -164,6 +205,24 @@ impl RouteKeyspaceNode {
 pub(in crate::resolver_core::component_meta_query_engine) fn materialize_route_projection_node(
     ctx: &dyn ResolverContext,
     node: &AdmittedRouteProjectionNode,
+) -> Option<TypeExpr> {
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+    materialize_published_node(&dispatch, node.node())
+}
+
+/// Terminal sink: materialise a [`RegistryPublicationNode`] into a published
+/// `TypeExpr` ONCE, at the same cap-gated `materialize_published_node` surface sink.
+///
+/// Distinct from [`materialize_route_projection_node`] in its INPUT carrier ONLY: the
+/// registry candidate path holds a first-pass / stabilised member-surface node that
+/// is NOT a route/surface adapter's admitted node, so it cannot honestly wear the
+/// [`AdmittedRouteProjectionNode`] post-gate invariant. Both sinks materialise once
+/// with no decision on the result; this one accepts the no-admission-claim carrier so
+/// an arbitrary member-surface outcome (`Miss` / `Recursive` / `Tainted` / a
+/// degenerate reduce) is published without forging the admitted-carrier contract.
+pub(in crate::resolver_core::component_meta_query_engine) fn materialize_registry_publication_node(
+    ctx: &dyn ResolverContext,
+    node: &RegistryPublicationNode,
 ) -> Option<TypeExpr> {
     let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
     materialize_published_node(&dispatch, node.node())

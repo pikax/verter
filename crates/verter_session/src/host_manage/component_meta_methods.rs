@@ -1330,12 +1330,18 @@ impl VerterHost {
             crate::meta_resolve::exactness::expr_root_should_stay_symbolic(expr)
         }
         /// Module-private registry candidate carrier: the published `TypeExpr`
-        /// PAIRED with the precomputed node-domain `explicit_object_surface` fact.
-        /// The registry loop reads the fact instead of inspecting the materialised
-        /// value, and publishes the `type_expr` directly — no semantic decision
-        /// crosses the materialised value. The materialisation + fact are produced
-        /// together by the query-engine candidate siblings (which decide the fact
-        /// off the producing node), so this carrier never re-derives meaning.
+        /// PAIRED with its precomputed `explicit_object_surface` fact. The registry
+        /// loop reads the fact instead of inspecting the materialised value, and
+        /// publishes the `type_expr` directly — no semantic decision crosses the
+        /// materialised value. The fact is precomputed at its producer per arm: the
+        /// node-domain candidate siblings (`materialize_pick_member_surface_candidate`,
+        /// `materialize_registry_routed_member_surface`,
+        /// `materialize_registry_whole_surface_candidate`, …) decide it OFF THE
+        /// PRODUCING NODE, while the still-`TypeExpr` structural materialiser threads
+        /// out an interim `component_meta_registry_has_explicit_object_surface(&result)`
+        /// computed on its final materialised value (its own fence-flagged site, a
+        /// later block converts it node-native). Either way the host reads a
+        /// precomputed fact and this carrier never RE-derives meaning.
         struct RegistryCandidate {
             type_expr: verter_type_expr::TypeExpr,
             explicit_object_surface: bool,
@@ -1459,8 +1465,14 @@ impl VerterHost {
             // Structural-materialisation preference is the graph-native predicate:
             // lower the raw TypeExpr to a Navigate-mode SemanticNodeId and consult
             // `component_meta_registry_prefers_structural_materialization_node`.
-            // The structural materialiser composes the surface PAIRED with its
-            // object-surface fact (decided compositionally during construction).
+            // The structural materialiser returns the surface PAIRED with its
+            // object-surface fact. That fact is NOT node-domain here: it is an interim
+            // `component_meta_registry_has_explicit_object_surface(&result)` computed on
+            // the FINAL materialised `TypeExpr`, threaded out of the structural
+            // materialiser (which still materialises a `TypeExpr` and is flagged by the
+            // hot-path fence at its own site). The host READS this precomputed fact
+            // rather than re-deriving it; a later block converts the structural path
+            // node-native and the fact along with it.
             if let Some(raw) = raw_body.filter(|expr| {
                 if !component_meta_registry_has_non_object_top_level_surface(expr) {
                     return false;

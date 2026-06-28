@@ -4719,6 +4719,23 @@ pub(crate) fn node_root_is_unmaterialized_sentinel_with_dispatch(
     shape_engine::project_node_root_sentinel(dispatch, node).unwrap_or(false)
 }
 
+/// Node-domain equivalent of `matches!(raise(node), TypeExpr::Unknown { raw } if raw
+/// == "semanticMiss")`: whether `node`'s OWN raised ROOT term is EXACTLY the
+/// `semanticMiss` sentinel. STRICTLY NARROWER than
+/// [`node_root_is_unmaterialized_sentinel_with_dispatch`] — an object-surface /
+/// surface-member / budget / cycle root reads as an unmaterialised sentinel THERE but
+/// is NOT the miss sentinel HERE. A whole-raise `None` is `false`. DISPATCH-taking
+/// primary — the published-operator mirror's `Mapped` arm reads this off the value
+/// node so it suppresses EXACTLY the carriers `type_expr_root_is_published_operator`
+/// does (the single miss spelling), without raising the node to a `TypeExpr`.
+#[must_use]
+pub(crate) fn node_root_is_semantic_miss_sentinel_with_dispatch(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    node: SemanticNodeId,
+) -> bool {
+    shape_engine::project_node_root_semantic_miss_sentinel(dispatch, node).unwrap_or(false)
+}
+
 /// Node-domain equivalent of `type_expr_contains_semantic_miss(raise(node))`:
 /// whether `node`'s raised shape carries a semantic miss ANYWHERE in its tree
 /// (`!RaisedShapeFacts.materialized`). `None` when the whole raise is `None`,
