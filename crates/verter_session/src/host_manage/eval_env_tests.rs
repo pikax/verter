@@ -969,7 +969,7 @@ fn c3_fallthrough_oracle_value_symbol_surface_matches_graph_native_dep_set() {
 
     // The oracle whole-env consumer: the materialised runtime-value SURFACE.
     let env = host
-        .build_fallthrough_eval_env_lightweight("/src/Owner.vue", &snapshot, None, None)
+        .build_fallthrough_eval_env_lightweight("/src/Owner.vue", &snapshot, None)
         .expect("the oracle must build the lightweight fallthrough env");
 
     // SURFACE positive: the required cross-file binding `theme` is hydrated.
@@ -1078,7 +1078,7 @@ fn c3_double_alias_onto_same_source_drives_readiness_without_false_panic() {
     // Drive the FULL C3 readiness consumer (template path → root_reachability
     // None). Under the retired `deps >= added` debug_assert this PANICS
     // (deps=1, added=2). With the fix it returns Some(env) cleanly.
-    let env = host.build_fallthrough_eval_env_lightweight("/src/Owner.vue", &snapshot, None, None);
+    let env = host.build_fallthrough_eval_env_lightweight("/src/Owner.vue", &snapshot, None);
     assert!(
         env.is_some(),
         "the C3 readiness consumer must build an env for a legal double-alias-onto-one-source SFC \

@@ -55,8 +55,7 @@ use crate::meta_resolve::build_origin_graph;
 use crate::meta_resolve::{
     component_meta_registry_prefers_structural_materialization_node,
     component_meta_registry_should_keep_raw_symbolic_non_object_alias,
-    materialize_component_meta_registry_structural_expr, preserve_nested_symbolic_member_routes,
-    preserve_registry_callable_param_member_routes,
+    preserve_nested_symbolic_member_routes, preserve_registry_callable_param_member_routes,
     type_expr_needs_nested_symbolic_route_preservation,
 };
 
@@ -1499,11 +1498,7 @@ impl VerterHost {
                 }
             }) {
                 let (type_expr, explicit_object_surface) =
-                    materialize_component_meta_registry_structural_expr(
-                        raw,
-                        scope_canonical_id,
-                        query_engine,
-                    );
+                    query_engine.materialize_registry_structural_candidate(scope_canonical_id, raw);
                 return Some(RegistryCandidate {
                     type_expr,
                     explicit_object_surface,

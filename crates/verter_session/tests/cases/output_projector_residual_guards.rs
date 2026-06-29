@@ -12254,28 +12254,11 @@ const HOT_TERMINAL_SINKS: &[(&str, &str)] = &[
     ),
     (
         "component_meta_query_engine/surface.rs",
-        "lower_and_project_to_expanded_published",
-    ),
-    (
-        "component_meta_query_engine/surface.rs",
-        "project_class_a_terminal_published",
-    ),
-    (
-        "component_meta_query_engine/surface.rs",
         "surface_view_to_projected_surface",
     ),
     (
         "component_meta_query_engine/registry_decl.rs",
         "materialize_member_surface_node_core",
-    ),
-    // Registry-route publication terminal: the node-domain
-    // `dispatch_routed_expr_surface_node` makes the route's materializedness
-    // decision; this wrapper materialises the admitted node ONCE at the registry
-    // sink (Whole route: publishes the SurfaceView after its node-domain gate).
-    // No decision on the materialised value.
-    (
-        "component_meta_query_engine/registry_decl.rs",
-        "dispatch_routed_expr_surface_expr",
     ),
     (
         "meta_resolve/materialize/field_types.rs",

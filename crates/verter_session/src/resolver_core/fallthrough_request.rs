@@ -1,9 +1,8 @@
-use rustc_hash::{FxHashMap, FxHashSet};
-use verter_type_expr::TypeExpr;
+use rustc_hash::FxHashSet;
 
 use crate::resolver_core::{
-    fallthrough_cache_key, run_stable_request, FallthroughNodeKey, RequestRunResult,
-    SingleflightGroup, StableExecutionValue, StableRequestExecutor, StoreView,
+    fallthrough_cache_key, run_stable_request, FallthroughNodeKey, FallthroughPropOverrideSet,
+    RequestRunResult, SingleflightGroup, StableExecutionValue, StableRequestExecutor, StoreView,
 };
 
 pub trait FallthroughRequestHost {
@@ -40,7 +39,7 @@ pub trait FallthroughRequestHost {
     fn try_get_cached_fallthrough(
         &self,
         canonical_id: &str,
-        prop_type_overrides: Option<&FxHashMap<String, TypeExpr>>,
+        prop_type_overrides: Option<&FallthroughPropOverrideSet>,
         store_view: &Self::View,
     ) -> Option<Self::Resolution>;
     /// Run the cold fallthrough compute against `store_view`.
@@ -58,7 +57,7 @@ pub trait FallthroughRequestHost {
     fn compute_fallthrough_surface_uncached(
         &self,
         canonical_id: &str,
-        prop_type_overrides: Option<&FxHashMap<String, TypeExpr>>,
+        prop_type_overrides: Option<&FallthroughPropOverrideSet>,
         visiting: &mut FxHashSet<String>,
         store_view: &Self::View,
         base_is_current: bool,
@@ -66,7 +65,7 @@ pub trait FallthroughRequestHost {
     fn store_fallthrough_result(
         &self,
         canonical_id: &str,
-        prop_type_overrides: Option<&FxHashMap<String, TypeExpr>>,
+        prop_type_overrides: Option<&FallthroughPropOverrideSet>,
         result: &Self::Resolution,
     );
 }
@@ -74,7 +73,7 @@ pub trait FallthroughRequestHost {
 struct FallthroughRequestExecutor<'a, 'b, H: FallthroughRequestHost> {
     host: &'a H,
     canonical_id: String,
-    prop_type_overrides: Option<&'a FxHashMap<String, TypeExpr>>,
+    prop_type_overrides: Option<&'a FallthroughPropOverrideSet>,
     visiting: &'b mut FxHashSet<String>,
     fixed_store_view: Option<H::View>,
     /// EXTERNAL-supersession fingerprint of the snapshot the current
@@ -106,7 +105,7 @@ impl<'a, 'b, H: FallthroughRequestHost> FallthroughRequestExecutor<'a, 'b, H> {
     fn new(
         host: &'a H,
         canonical_id: String,
-        prop_type_overrides: Option<&'a FxHashMap<String, TypeExpr>>,
+        prop_type_overrides: Option<&'a FallthroughPropOverrideSet>,
         visiting: &'b mut FxHashSet<String>,
         max_attempts: usize,
     ) -> Self {
@@ -275,7 +274,7 @@ pub fn run_fallthrough_request<H>(
         (),
     >,
     canonical_id: &str,
-    prop_type_overrides: Option<&FxHashMap<String, TypeExpr>>,
+    prop_type_overrides: Option<&FallthroughPropOverrideSet>,
     visiting: &mut FxHashSet<String>,
     fixed_store_view: Option<&H::View>,
     max_attempts: usize,
@@ -389,7 +388,7 @@ mod tests {
         fn try_get_cached_fallthrough(
             &self,
             _canonical_id: &str,
-            _prop_type_overrides: Option<&FxHashMap<String, TypeExpr>>,
+            _prop_type_overrides: Option<&FallthroughPropOverrideSet>,
             _store_view: &Self::View,
         ) -> Option<Self::Resolution> {
             None
@@ -398,7 +397,7 @@ mod tests {
         fn compute_fallthrough_surface_uncached(
             &self,
             _canonical_id: &str,
-            _prop_type_overrides: Option<&FxHashMap<String, TypeExpr>>,
+            _prop_type_overrides: Option<&FallthroughPropOverrideSet>,
             _visiting: &mut FxHashSet<String>,
             _store_view: &Self::View,
             _base_is_current: bool,
@@ -409,7 +408,7 @@ mod tests {
         fn store_fallthrough_result(
             &self,
             canonical_id: &str,
-            _prop_type_overrides: Option<&FxHashMap<String, TypeExpr>>,
+            _prop_type_overrides: Option<&FallthroughPropOverrideSet>,
             _result: &Self::Resolution,
         ) {
             self.promotions.borrow_mut().push(canonical_id.to_string());

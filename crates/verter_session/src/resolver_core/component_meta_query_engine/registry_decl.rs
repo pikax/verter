@@ -18,7 +18,7 @@
 //! - `pub(crate) fn materialize_member_surface_expr`,
 //!   `pub(crate) fn prepared_type_decl`, `pub(crate) fn ctx`,
 //!   `pub(crate) fn dispatch_projected_surface`,
-//!   `pub(crate) fn dispatch_routed_expr_surface_expr` — crate-visible
+//!   `pub(crate) fn dispatch_routed_expr_surface_node` — crate-visible
 //!   helpers used by `meta_resolve` and other engine impl methods.
 //! - Private methods (`semantic_dispatch`, `dispatch_root_instantiated`)
 //!   stay private and are visible inside the
@@ -1103,9 +1103,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// fact (the typed equivalent of the former
     /// `.filter(dispatch_route_expr_is_materialized)` over the materialised
     /// route TypeExpr). The MemberPath / Pick / Omit routes carry a single
-    /// admitted node; the Whole route projects a SurfaceView (no single node)
-    /// and is served by [`Self::dispatch_routed_expr_surface_expr`] directly, so
-    /// it returns `None` here. The route fixpoint's registry fast-path projects
+    /// admitted node; the Whole route projects a SurfaceView (no single node),
+    /// so it returns `None` here (a whole surface is served by the registry
+    /// whole-surface candidate). The route fixpoint's registry fast-path projects
     /// through THIS node-returning form so no per-iteration materialisation
     /// happens; the publication wrapper below materialises the accepted node
     /// once at the registry sink.
@@ -1172,50 +1172,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
     }
 
-    /// Publication terminal over [`Self::dispatch_routed_expr_surface_node`]:
-    /// the Whole route projects a SurfaceView (gated on the node-domain
-    /// materializedness of the surface's producing node, then published), while
-    /// the MemberPath / Pick / Omit routes materialise their admitted node ONCE
-    /// at the registry sink (the sealed [`MetaQueryRegistryOutputCap`]). No
-    /// semantic decision is made on the materialised value — the acceptance gate
-    /// is the node-domain fact in the node form above.
-    pub(crate) fn dispatch_routed_expr_surface_expr(
-        &mut self,
-        scope_canonical_id: &str,
-        root_symbol: &str,
-        route: &RouteDemand,
-    ) -> Option<TypeExpr> {
-        match route {
-            RouteDemand::Whole => {
-                let (surface, surface_node) =
-                    self.dispatch_projected_surface_with_node(scope_canonical_id, root_symbol)?;
-                // Node-domain materializedness gate on the surface's producing
-                // node (the instantiated root, or — for the compound-root
-                // fallback — the composed surface's terminal `Object` node, not
-                // the carrier-intact decl anchor) — the typed equivalent of the
-                // former `.filter(dispatch_route_expr_is_materialized)` over the
-                // materialised surface TypeExpr.
-                let materialized =
-                    node_raised_shape_facts_with_dispatch(&self.semantic_dispatch(), surface_node)
-                        .is_some_and(|facts| facts.materialized());
-                materialized
-                    .then(|| projected_surface_to_type_expr(&surface))
-                    .flatten()
-            }
-            _ => {
-                let node =
-                    self.dispatch_routed_expr_surface_node(scope_canonical_id, root_symbol, route)?;
-                // Publication sink: materialize the admitted node into a sealed
-                // carrier and unwrap via the query-engine registry output
-                // capability — ONCE, with no decision on the result.
-                let dispatch = self.semantic_dispatch();
-                let cap = MetaQueryRegistryOutputCap::new(&dispatch);
-                cap.materialize_output_type_expr(node.node())
-                    .map(|raised| raised.into_type_expr(&cap))
-            }
-        }
-    }
-
     /// Project a root symbol's surface to its whole-surface [`TypeExpr`].
     ///
     /// The sink-local composition of [`Self::dispatch_projected_surface`] +
@@ -1264,7 +1220,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// surface-gate contract):
     /// 1. a registry public-indexed-access / public-utility ROUTE
     ///    (`Foo['a']` / `Pick<Foo, …>`) projects through
-    ///    [`Self::dispatch_routed_expr_surface_expr`] then to an object shape;
+    ///    [`Self::dispatch_routed_expr_surface_node`] then to an object shape;
     /// 2. a direct utility surface ([`Self::project_direct_utility_surface_shape`]);
     /// 3. the general path — lower at `Navigate` (intermediate-base), run the
     ///    terminal empty-path `ProjectPath { .., Shallow }` (the publication

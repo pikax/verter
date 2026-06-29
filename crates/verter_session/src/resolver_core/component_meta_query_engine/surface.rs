@@ -311,9 +311,8 @@ pub(in crate::resolver_core::component_meta_query_engine) fn enumerate_public_su
     Some(names)
 }
 
-/// Demand-bound adapter for the empty-terminal Expanded publication path
-/// (former `lower_and_project_to_expanded_via_host_threaded` materialisation
-/// tail). Lower `expr` at `Expanded`, dispatch `ProjectPath { base, [],
+/// Demand-bound adapter for the empty-terminal Expanded publication path.
+/// Lower `expr` at `Expanded`, dispatch `ProjectPath { base, [],
 /// Published(Expanded) }`, gate on NODE-DOMAIN facts
 /// (`materialized && expanded_surface`) plus the node-domain "changed" check
 /// (`!raised_shape_eq_node_type_expr(result, expr)`), and materialise the
@@ -351,19 +350,6 @@ pub(crate) fn lower_and_project_to_expanded_node(
     // against `expr`) is encoded in `admit_expanded_surface_changed`.
     let shape = node_raised_shape_for_eq_with_dispatch(&dispatch, result_node, expr)?;
     admit_expanded_surface_changed(&shape)
-}
-
-/// Thin publication wrapper over [`lower_and_project_to_expanded_node`]:
-/// resolve the node-domain decision, then materialise the accepted node ONCE at
-/// the surface sink. The node-domain gate (`materialized && expanded_surface &&
-/// changed`) lives in the node fn; this wrapper adds only the terminal raise.
-pub(crate) fn lower_and_project_to_expanded_published(
-    ctx: &dyn ResolverContext,
-    scope_canonical_id: &str,
-    expr: &TypeExpr,
-) -> Option<TypeExpr> {
-    let node = lower_and_project_to_expanded_node(ctx, scope_canonical_id, expr)?;
-    materialize_route_projection_node(ctx, &node)
 }
 
 /// Demand-bound adapter for the mode-explicit dispatch-direct surface
@@ -419,8 +405,8 @@ pub(crate) fn project_expr_surface_expr_node(
     admit_mode_aware(&witness, terminal_mode)
 }
 
-/// Demand-bound NODE adapter for the Class-A path-precise projection (former
-/// `project_expr_class_a_via_dispatch_threaded` pure-dispatch tail). Decompose
+/// Demand-bound NODE adapter for the Class-A path-precise projection (the
+/// pure-dispatch tail of the node-domain Class-A projection). Decompose
 /// the IndexedAccess chain INTERNALLY, lower the base (empty path → lower the
 /// whole `expr` at `Expanded`; non-empty path → lower the chain root at
 /// `Navigate`), dispatch `ProjectPath { base, path, Published(Expanded) }`,
@@ -474,17 +460,60 @@ pub(crate) fn project_class_a_terminal_node(
     admit_expanded_surface(&witness)
 }
 
-/// Thin publication wrapper over [`project_class_a_terminal_node`]: resolve the
-/// node-domain Class-A decision, then materialise the accepted node ONCE at the
-/// surface sink. The node-domain gate (`materialized && expanded_surface`) lives
-/// in the node fn; this wrapper adds only the terminal raise.
-pub(crate) fn project_class_a_terminal_published(
+/// Publication wrapper over the FULL node-domain Class-A projection
+/// ([`crate::meta_resolve::project_expr_class_a_node_via_dispatch_threaded`]):
+/// resolve the registry route fast-path THEN the terminal node adapter in node
+/// domain, then materialise the accepted route node ONCE at the surface sink.
+///
+/// This is the materialising counterpart of the node sibling: the node-domain
+/// decision (route fast-path + terminal
+/// `materialized && expanded_surface` gate) lives in the node fn; this wrapper
+/// adds only the one terminal raise. It lives in the surface sink module so the
+/// node→`TypeExpr` materialisation stays owner-confined. The engine is NOT
+/// threaded (a transient engine is created internally), matching the engine-less
+/// `project_expr_class_a_via_dispatch` callers.
+pub(crate) fn project_class_a_published(
     ctx: &dyn ResolverContext,
     scope_canonical_id: &str,
     expr: &TypeExpr,
 ) -> Option<TypeExpr> {
-    let node = project_class_a_terminal_node(ctx, scope_canonical_id, expr)?;
+    let node = crate::meta_resolve::project_expr_class_a_node_via_dispatch_threaded(
+        ctx,
+        None,
+        scope_canonical_id,
+        expr,
+    )?;
     materialize_route_projection_node(ctx, &node)
+}
+
+/// Engine-THREADED variant of [`project_class_a_published`]: resolve the
+/// Class-A decision through the node sibling using the CALLER's engine (so
+/// engine-local re-export / prepared-decl resolution state persists across
+/// callsites — the registry structural materialiser threads one engine across
+/// every leaf), decide the object-surface fact off the PRODUCING node, then
+/// materialise the accepted route node ONCE at the surface sink. Returns the
+/// materialised `TypeExpr` paired with that node-domain object-surface fact, so
+/// the registry materialiser never re-lowers the materialised value to recover
+/// it. The node→`TypeExpr` materialisation stays owner-confined here.
+pub(crate) fn project_class_a_published_threaded(
+    engine: &mut super::ComponentMetaQueryEngine<'_>,
+    scope_canonical_id: &str,
+    expr: &TypeExpr,
+) -> Option<(TypeExpr, bool)> {
+    let ctx = engine.ctx;
+    let node = crate::meta_resolve::project_expr_class_a_node_via_dispatch_threaded(
+        ctx,
+        Some(engine),
+        scope_canonical_id,
+        expr,
+    )?;
+    let explicit_object_surface =
+        super::node_materialize::component_meta_registry_node_has_explicit_object_surface(
+            ctx,
+            node.node(),
+        );
+    let type_expr = materialize_route_projection_node(ctx, &node)?;
+    Some((type_expr, explicit_object_surface))
 }
 
 pub(crate) fn projected_surface_from_semantic_node(

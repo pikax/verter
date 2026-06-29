@@ -1798,7 +1798,7 @@ fn raised_shape_eq_node_type_expr_ignores_has_ts_annotation_like_typeexpr_partia
     // identity). The raised mirror (`RaisedFunctionParam`) must exclude it too,
     // or the key would distinguish a field `TypeExpr::PartialEq` ignores —
     // falsely reading a no-op as "changed" at the `surface.rs` route gates
-    // (`lower_and_project_to_expanded_published` :104 / `instantiate_local_
+    // (`lower_and_project_to_expanded_node` / `instantiate_local_
     // generic_ref_published` :261).
     //
     // The node side ALWAYS raises `has_ts_annotation: false` (the materializer

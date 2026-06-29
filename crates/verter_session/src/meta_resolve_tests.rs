@@ -305,12 +305,9 @@ defineProps<{ modelValue?: ModelValue<R> }>()
         .owner_collection_expr("/src/App.vue", "ModelValue")
         .expect("owner helper body should be available from prepared declarations");
 
-    let materialized = materialize_component_meta_registry_structural_expr(
-        &raw_body,
-        "/src/App.vue",
-        &mut query_engine,
-    )
-    .0;
+    let materialized = query_engine
+        .materialize_registry_structural_candidate("/src/App.vue", &raw_body)
+        .0;
 
     let verter_type_expr::TypeExpr::Conditional {
         true_type,
@@ -9214,17 +9211,14 @@ defineProps<{ value: Foo }>()
         );
     }
 
-    /// refactored
-    /// `materialize_component_meta_registry_structural_expr` (inner
-    /// closure migrated to graph-native cycle tracking). Equivalence
-    /// fixture: package-backed `Ref { name, [] }` short-circuits
-    /// (returns the input unchanged), local `Ref { name, [] }`
-    /// projects through `project_type_surface_expr` (returns the
-    /// projected surface). Tests both branches of the no-args Ref
-    /// arm where the package check landed graph-native.
+    /// Node-domain registry structural materialisation, no-args `Ref` arm:
+    /// a package-backed `Ref { name, [] }` short-circuits (returns the input
+    /// unchanged) and carries object-surface fact `false`; a local
+    /// `Ref { name, [] }` projects to its whole surface and carries the
+    /// producing node's object-surface fact. Asserts BOTH the materialised
+    /// `TypeExpr` and the threaded object-surface fact for each branch.
     #[test]
     fn registry_structural_expr_handles_package_vs_local_no_args_ref() {
-        use crate::meta_resolve::materialize_component_meta_registry_structural_expr;
         use crate::resolver_core::ComponentMetaQueryEngine;
         use std::sync::Arc as StdArc;
         use verter_type_expr::TypeExpr;
@@ -9285,16 +9279,18 @@ defineProps<{ a: LocalLeaf; b: FromPkg }>()
             name: StdArc::from("FromPkg"),
             type_arguments: StdArc::from(Vec::new().into_boxed_slice()),
         };
-        let materialized_pkg = materialize_component_meta_registry_structural_expr(
-            &pkg_ref,
-            "/Owner.vue",
-            &mut engine,
-        )
-        .0;
+        let (materialized_pkg, pkg_is_object) =
+            engine.materialize_registry_structural_candidate("/Owner.vue", &pkg_ref);
         assert_eq!(
             materialized_pkg, pkg_ref,
             "package-backed Ref must short-circuit unchanged; \
              refactor regression if this fails (e.g., inverted package check)"
+        );
+        assert!(
+            !pkg_is_object,
+            "a symbolic package-backed Ref carries no explicit object surface, \
+             so the threaded object-surface fact must be false — regression if \
+             the fact mis-reports a symbolic ref as an object surface"
         );
 
         // Local `LocalLeaf` — must NOT short-circuit to itself; must
@@ -9307,21 +9303,22 @@ defineProps<{ a: LocalLeaf; b: FromPkg }>()
             name: StdArc::from("LocalLeaf"),
             type_arguments: StdArc::from(Vec::new().into_boxed_slice()),
         };
-        let materialized_local = materialize_component_meta_registry_structural_expr(
-            &local_ref,
-            "/Owner.vue",
-            &mut engine,
-        )
-        .0;
-        // Local Ref should project through the surface API; since
-        // LocalLeaf is a real interface, project_type_surface_expr
-        // returns the Object surface, so materialized_local must NOT
-        // be the input Ref unchanged.
+        let (materialized_local, local_is_object) =
+            engine.materialize_registry_structural_candidate("/Owner.vue", &local_ref);
+        // Local Ref should project through the whole-surface candidate; since
+        // LocalLeaf is a real interface, the candidate returns the Object
+        // surface, so materialized_local must NOT be the input Ref unchanged.
         assert_ne!(
             materialized_local, local_ref,
             "local LocalLeaf with projectable interface body must NOT \
              short-circuit unchanged — refactor regression if this fails \
              (e.g., local refs misclassified as package-backed)"
+        );
+        assert!(
+            local_is_object,
+            "LocalLeaf projects to its interface object surface, so the threaded \
+             object-surface fact must be true — regression if the fact is dropped \
+             or forced always-false"
         );
     }
 }

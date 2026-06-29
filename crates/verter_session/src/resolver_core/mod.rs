@@ -86,9 +86,8 @@ pub use component_meta_query_engine::ComponentMetaQueryEngine;
 // engine's sink-local methods `dispatch_projected_surface_to_type_expr` /
 // `projected_expanded_shape_from_node` / the routed-surface methods).
 pub(crate) use component_meta_query_engine::{
-    lower_and_project_to_expanded_node, lower_and_project_to_expanded_published,
-    project_admitted_node_to_expanded_node, project_class_a_terminal_node,
-    project_class_a_terminal_published, project_expr_surface_expr_node,
+    lower_and_project_to_expanded_node, project_admitted_node_to_expanded_node,
+    project_class_a_published, project_class_a_terminal_node, project_expr_surface_expr_node,
     type_expr_contains_semantic_miss, AdmittedRouteProjectionNode,
 };
 // `type_expr_root_is_unmaterialized_sentinel` survives only as the `#[cfg(test)]`
@@ -121,13 +120,12 @@ pub use external_type_frontier::{
 };
 pub use fallthrough::{
     append_component_candidate_branches, append_native_candidate_branch,
-    collect_dynamic_root_candidates_from_type, evaluate_value_expression_via_env_or_dispatch,
-    extend_unique_fact_versions, fallthrough_cache_key, hash_prop_type_overrides,
-    inject_prop_type_overrides, known_spread_keys_from_type_expr, merge_fallthrough_branches,
-    push_partial_reason, resolve_fallthrough_surface, resolve_usage_prop_type,
+    collect_dynamic_root_candidates_from_type, component_import_candidate_for_binding,
+    extend_unique_fact_versions, fallthrough_cache_key, known_spread_keys_from_type_expr,
+    merge_fallthrough_branches, push_partial_reason, resolve_fallthrough_surface,
     structural_substitute_typeof_refs, DynamicRootCandidate, FallthroughComputeHost,
-    FallthroughResolutionView, FallthroughResolverHost, KnownSpreadKeys, ResolvedConsumedBindings,
-    ResolvedFallthroughSurface,
+    FallthroughPropOverride, FallthroughPropOverrideSet, FallthroughResolutionView,
+    FallthroughResolverHost, KnownSpreadKeys, ResolvedConsumedBindings, ResolvedFallthroughSurface,
 };
 pub use fallthrough_request::{run_fallthrough_request, FallthroughRequestHost};
 pub use prepared_decl::{

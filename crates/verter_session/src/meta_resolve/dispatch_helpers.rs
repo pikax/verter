@@ -26,7 +26,7 @@
 //!
 //! The surface bridge helpers thread the caller's `ResolverContext` through
 //! dispatch and compose the surviving `pub(crate)` cycle-protected dispatch
-//! helpers (`dispatch_projected_surface`, `dispatch_routed_expr_surface_expr`,
+//! helpers (`dispatch_projected_surface`, `dispatch_routed_expr_surface_node`,
 //! `project_direct_utility_surface_shape`, etc.) plus the surface→expr /
 //! surface→shape raises. Dispatch is the sole resolution authority on these
 //! paths.
@@ -466,162 +466,25 @@ pub(crate) fn project_expr_class_a_via_dispatch(
     scope_canonical_id: &str,
     expr: &verter_type_expr::TypeExpr,
 ) -> Option<verter_type_expr::TypeExpr> {
-    project_expr_class_a_via_dispatch_threaded(ctx, None, scope_canonical_id, expr)
+    // Resolve via the node-domain Class-A sibling (registry route fast-path +
+    // terminal), materialising ONCE at the surface sink — the engine-less
+    // counterpart of `project_expr_class_a_node_via_dispatch_threaded`.
+    crate::resolver_core::project_class_a_published(ctx, scope_canonical_id, expr)
 }
 
-/// Engine-threaded variant of [`project_expr_class_a_via_dispatch`].
+/// Node-domain Class-A projection: returns the admitted route/surface NODE
+/// instead of a materialised `TypeExpr`.
 ///
-/// When `engine` is `Some(...)`, the route fast-path uses the
-/// caller's engine instance so engine-local fuse / scope-payload /
-/// request-local cache state persists across callsites that share an
-/// engine. This matters for utility shapes like `Partial<T>` whose
-/// optionality propagation is observed via the engine's prepared-decl
-/// fixed-point. When `engine` is `None`, a transient engine is
-/// created (suitable for top-level entry points without a caller
-/// engine).
-///
-/// The engine route-fast-path is retained because
-/// `engine.project_route_surface_expr` exercises engine-local
-/// resolution paths (re-export chains, prepared-decl fallbacks) that
-/// the dispatch's `lower_type_expr_in_scope` does not subsume —
-/// removing it would cause stack overflows on realistic
-/// indexed-access / utility shapes (e.g., `*_keeps_imported_*`
-/// member-path test family). The engine route helper itself routes
-/// through dispatch, so the fast-path stays semantically aligned with
-/// dispatch.
-pub(crate) fn project_expr_class_a_via_dispatch_threaded<'ctx>(
-    ctx: &'ctx dyn ResolverContext,
-    mut engine: Option<&mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>>,
-    scope_canonical_id: &str,
-    expr: &verter_type_expr::TypeExpr,
-) -> Option<verter_type_expr::TypeExpr> {
-    use crate::resolver_core::{
-        component_meta_registry::{
-            component_meta_registry_public_indexed_access_route,
-            component_meta_registry_public_utility_route,
-        },
-        ComponentMetaQueryEngine,
-    };
-
-    // registry-route fast path via caller's engine (or a
-    // transient engine when caller doesn't pass one). The Class D
-    // route helpers (`project_route_surface_expr`,
-    // `lower_and_project_to_expanded`) exercise engine-local
-    // re-export and prepared-decl resolution paths that dispatch's
-    // generic `lower_type_expr_in_scope` does not inherit verbatim.
-    //
-    // r15/F11 — scope-shadowing gate. The TypeExpr
-    // route extractors recognise `Pick<…>` / `Omit<…>` syntactically;
-    // they do not consult the owner scope. When the SFC's same-file
-    // scope already declares a userland `type Pick<T,_K> = T`
-    // (ScopeShadowing::is_shadowing_lib returns true), the registry
-    // fast-path MUST be suppressed so the bare-name walk below
-    // resolves `Pick` to the userland declaration via dispatch's
-    // standard `ResolveDecl` path — preserving the "user shadowing
-    // wins" rule across BOTH lowering entry points. With a
-    // `ComponentMetaQueryEngine` threaded in, the `Some` arm takes the
-    // shadow set from its per-scope memo (`from_scope_payload` of the
-    // loaded bundle payload, built once per scope and reused per field);
-    // the engine-less `None`-arm fallback builds it directly via
-    // `from_host_scope`. When the scope's prepared-decl bundle is loaded —
-    // the case an engine-present caller hits, since the SFC's own bundle is
-    // already loaded — the two observe a membership-equivalent shadow set.
-    // In the rare unloaded-bundle case the memo's lazy load yields the
-    // properly-shadowed set where the bare `from_host_scope` fallback would
-    // see an empty one: strictly more correct, not a regression.
-    // `as_deref_mut` reborrows so `engine` stays usable at the later
-    // `match engine` below.
-    let shadowing = match engine.as_deref_mut() {
-        Some(e) => e.scope_shadowing_for_scope(scope_canonical_id),
-        None => std::sync::Arc::new(
-            crate::resolver_core::scope_shadowing::ScopeShadowing::from_host_scope(
-                ctx,
-                scope_canonical_id,
-            ),
-        ),
-    };
-    // r15/F11 shadow gate — check the OUTER utility / chain-root
-    // identifier the userland alias would shadow (e.g. `Pick` /
-    // `Omit` / the chain root for indexed-access). The route's
-    // `root_symbol` is the route's INNER root identity (for
-    // `Pick<Source, K>` that is `Source`, NOT the outer `Pick`).
-    // Checking shadowing on `root_symbol` mis-suppressed the route
-    // whenever the source was a locally-declared interface — the
-    // common case — because `ScopeShadowing.shadowed_type_names`
-    // contains ALL locally-declared type names. The helper extracts
-    // the outer identifier via a structural walk of `expr`.
-    let route = component_meta_registry_public_indexed_access_route(expr)
-        .or_else(|| component_meta_registry_public_utility_route(expr))
-        .filter(|_| !route_outer_utility_is_shadowed(expr, &shadowing));
-    if let Some((root_symbol, route)) = route {
-        let mut transient_engine: Option<ComponentMetaQueryEngine<'_>> = None;
-        let engine_ref: &mut ComponentMetaQueryEngine<'_> = match engine {
-            Some(e) => e,
-            None => transient_engine.insert(ComponentMetaQueryEngine::new(ctx)),
-        };
-        // Route through the surface bridge helpers
-        // (`project_route_surface_expr_via_host_threaded` /
-        // `lower_and_project_to_expanded_via_host_threaded`), which thread
-        // the caller's engine through dispatch. The bridges compose the
-        // engine's surviving cycle-protected route helpers — dispatch is
-        // the resolution authority on this path.
-        if let Some(projected) = project_route_surface_expr_via_host_threaded(
-            engine_ref,
-            scope_canonical_id,
-            &root_symbol,
-            &route,
-        ) {
-            return Some(projected);
-        }
-        if let Some(solved) =
-            lower_and_project_to_expanded_via_host_threaded(engine_ref, scope_canonical_id, expr)
-        {
-            return Some(solved);
-        }
-    }
-
-    // Every lowering site explicitly states its mode; there is no
-    // implicit-Expanded wrapper.
-    //
-    // Empty path: lowering the whole expr is the carrier hop that
-    // feeds the empty-terminal `ProjectPath { ..., Expanded }`. The
-    // walker's `expand_empty_path_terminal` does NOT have a generic
-    // `InstantiationRef` arm (the catch-all returns the node
-    // unchanged), so a `Navigate` carrier would prevent the
-    // expanded-surface filter downstream from observing an
-    // Object/Intersection. The lowering mode therefore stays
-    // `Expanded` here — the Shallow walker would need an
-    // `InstantiationRef` / deferred-`Mapped` enumeration arm before
-    // a carrier base could feed an Expanded terminal, and the
-    // transit-shallow leak-fix lives at the macro-shape publication
-    // boundary instead (see `project_expr_class_a_via_dispatch_transit_shallow`).
-    //
-    // Non-empty path: the base is an intermediate hop, and PathWalker
-    // handles `InstantiationRef` per-hop. `Navigate` is correct here
-    // — operator reductions inside the base body do NOT fire at the
-    // lowering site, only at the terminal hop (CLAUDE.md "Macro Type
-    // Traversal Rule" — walking `A['c']['full']['bar']` navigates
-    // intermediate hops and expands only the terminal requested
-    // projection).
-    // Pure-dispatch tail: the decompose + lower + ProjectPath + node-domain
-    // gate + publication materialisation are confined to the registered surface
-    // sink (M4 demand-bound adapter), so no `SemanticNodeId -> TypeExpr`
-    // mid-flight raise happens here.
-    crate::resolver_core::project_class_a_terminal_published(ctx, scope_canonical_id, expr)
-}
-
-/// Node-domain sibling of [`project_expr_class_a_via_dispatch_threaded`]: returns
-/// the admitted route/surface NODE instead of its materialised `TypeExpr`.
-///
-/// Mirrors the `TypeExpr` form ARM FOR ARM — the SAME scope-shadowing gate, the
-/// SAME registry route fast-path, the SAME primary/fallback order — but swaps the
-/// two host-threaded `*_expr_via_host_threaded` bridges for their node
+/// Applies the SAME scope-shadowing gate, the SAME registry route fast-path, and
+/// the SAME primary/fallback order as the materialising
+/// [`project_expr_class_a_via_dispatch`], but composes the node-domain bridge
 /// counterparts ([`project_route_surface_node_via_host_threaded`] /
-/// [`lower_and_project_to_expanded_node_via_host_threaded`]) and the pure-dispatch
-/// tail for [`crate::resolver_core::project_class_a_terminal_node`]. None of these
-/// materialises: the admitted node is published ONCE downstream at the registry
-/// sink, so the registry member-path / refine consumers compute their reject/accept
-/// facts off the projected node WITHOUT re-lowering a materialised leaf.
+/// [`lower_and_project_to_expanded_node_via_host_threaded`]) and the node tail
+/// [`crate::resolver_core::project_class_a_terminal_node`]. None of these
+/// materialises: the admitted node is published ONCE downstream at the registry /
+/// surface sink (e.g. via [`crate::resolver_core::project_class_a_published`]), so
+/// the registry member-path / refine consumers compute their reject/accept facts
+/// off the projected node WITHOUT re-lowering a materialised leaf.
 pub(crate) fn project_expr_class_a_node_via_dispatch_threaded<'ctx>(
     ctx: &'ctx dyn ResolverContext,
     mut engine: Option<&mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>>,
@@ -835,39 +698,6 @@ pub(crate) fn project_expr_surface_shape_via_host_threaded<'ctx>(
     engine.project_expr_to_surface_shape(scope_canonical_id, expr)
 }
 
-pub(crate) fn project_route_surface_expr_via_host_threaded<'ctx>(
-    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
-    scope_canonical_id: &str,
-    root_symbol: &str,
-    route: &crate::resolver_core::RouteDemand,
-) -> Option<verter_type_expr::TypeExpr> {
-    if engine.projection_op_budget_exhausted() {
-        return None;
-    }
-    engine.dispatch_routed_expr_surface_expr(scope_canonical_id, root_symbol, route)
-}
-
-pub(crate) fn lower_and_project_to_expanded_via_host_threaded<'ctx>(
-    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
-    scope_canonical_id: &str,
-    expr: &verter_type_expr::TypeExpr,
-) -> Option<verter_type_expr::TypeExpr> {
-    if engine.projection_op_budget_exhausted() {
-        return None;
-    }
-    // Empty-terminal `ProjectPath { .., Expanded }` requires the base to be a
-    // structural surface `expand_empty_path_terminal` can walk; the lowering
-    // therefore stays `Expanded` (see the demand-bound adapter). The lower +
-    // ProjectPath + node-domain gate (`materialized && expanded_surface &&
-    // node-domain-changed`) + publication materialisation are confined to the
-    // registered surface sink (M4), so no mid-flight raise happens here.
-    crate::resolver_core::lower_and_project_to_expanded_published(
-        engine.ctx(),
-        scope_canonical_id,
-        expr,
-    )
-}
-
 // ===========================================================================
 // Node-returning route fixpoint adapters.
 //
@@ -882,8 +712,8 @@ pub(crate) fn lower_and_project_to_expanded_via_host_threaded<'ctx>(
 // minus the terminal raise.
 // ===========================================================================
 
-/// Node-domain counterpart of [`lower_and_project_to_expanded_via_host_threaded`]:
-/// returns the admitted route node (no materialisation).
+/// Node-domain empty-terminal `Expanded` projection: returns the admitted route
+/// node (no materialisation).
 pub(crate) fn lower_and_project_to_expanded_node_via_host_threaded<'ctx>(
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
     scope_canonical_id: &str,
@@ -895,8 +725,8 @@ pub(crate) fn lower_and_project_to_expanded_node_via_host_threaded<'ctx>(
     crate::resolver_core::lower_and_project_to_expanded_node(engine.ctx(), scope_canonical_id, expr)
 }
 
-/// Node-domain counterpart of [`project_route_surface_expr_via_host_threaded`]:
-/// returns the admitted registry-route node (no materialisation).
+/// Node-domain registry-route projection: returns the admitted registry-route
+/// node (no materialisation).
 pub(crate) fn project_route_surface_node_via_host_threaded<'ctx>(
     engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
     scope_canonical_id: &str,

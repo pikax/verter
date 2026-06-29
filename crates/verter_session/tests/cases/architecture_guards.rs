@@ -2316,6 +2316,37 @@ mod resolver_core_recursion {
             "Phase 5l-supplement: bounded by TypeExpr AST depth (rewriter).",
         ),
         // -----------------------------------------------------------------
+        // component_meta_query_engine/fallthrough_value_eval.rs — node-domain
+        // siblings of the fallthrough TypeExpr walkers above (spread-keys
+        // reduction, root-candidate enum, override fingerprint).
+        // -----------------------------------------------------------------
+        (
+            "fallthrough_value_eval",
+            "known_spread_keys_from_node_inner",
+            "DAG-bounded by the acyclic interned-node arena + the `active: &mut FxHashSet<SemanticNodeId>` visited-set dedup.",
+        ),
+        (
+            "fallthrough_value_eval",
+            "collect_dynamic_root_candidates_from_node_inner",
+            "DAG-bounded by the acyclic interned-node arena + the `active: &mut FxHashSet<SemanticNodeId>` visited-set dedup.",
+        ),
+        (
+            "fallthrough_value_eval",
+            "node_structural_content_hash",
+            "bounded by the `OVERRIDE_FINGERPRINT_DEPTH` depth cap (depth-1 per hop, discriminant-only at 0).",
+        ),
+        // -----------------------------------------------------------------
+        // component_meta_query_engine/registry_structural.rs — the registry
+        // structure-preserving materialiser recurses on the input
+        // `TypeExpr` tree, resolving reference / route leaves to their
+        // node-domain surfaces.
+        // -----------------------------------------------------------------
+        (
+            "registry_structural",
+            "structural_materialize",
+            "bounded by finite input `TypeExpr` nesting depth + the `active: &mut FxHashSet<SemanticNodeId>` Navigate-node visited-set cycle guard (a reference back-edge short-circuits to the symbolic input).",
+        ),
+        // -----------------------------------------------------------------
         // shallow_file_state.rs — type-expression walkers. All bodies
         // recurse on TypeExpr / ValueExpr / FunctionBody AST. The
         // `extract_string_literal_keys_from_type_expr` body additionally

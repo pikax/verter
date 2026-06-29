@@ -2513,7 +2513,7 @@ import { unused } from './unused'
         .get_analysis_snapshot_internal("/src/App.vue", None)
         .expect("analysis snapshot should exist");
     let env = host
-        .build_fallthrough_eval_env_lightweight("/src/App.vue", &snapshot, None, None)
+        .build_fallthrough_eval_env_lightweight("/src/App.vue", &snapshot, None)
         .expect("fallthrough owner env should build");
 
     assert!(
@@ -2620,7 +2620,6 @@ import Child from './Child.vue'
             "/src/App.vue",
             &snapshot,
             Some(&base_meta.root_reachability),
-            None,
         )
         .expect("fallthrough owner env should build");
 

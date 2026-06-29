@@ -3112,13 +3112,16 @@ fn type_expand_expand_normalized_expr_removal_preserves_normalization_output() {
 /// Final-state expectations:
 /// - `meta_resolve.rs` retains AT MOST 1 `.lower_and_project_to_expanded(`
 ///   callsite (the Class A helper's engine-threaded route fast-path).
-/// - `fallthrough.rs` retains 0 callsites — the
-///   `evaluate_value_expression_via_env_or_dispatch` fallback uses
-///   `project_expr_class_a_via_dispatch`.
+/// - `resolver_core/fallthrough.rs` retains 0 callsites — value-expression
+///   evaluation no longer lives there.
+/// - The node-domain fallthrough value evaluator routes value expressions
+///   through the shared Class-A NODE dispatch helper (one shared resolver).
 #[test]
 fn route_loop_callers_route_through_dispatch() {
     let meta_src = include_str!("meta_resolve.rs");
     let fallthrough_src = include_str!("resolver_core/fallthrough.rs");
+    let value_eval_src =
+        include_str!("resolver_core/component_meta_query_engine/fallthrough_value_eval.rs");
 
     let meta_callsites = meta_src.matches(".lower_and_project_to_expanded(").count();
     let fallthrough_callsites = fallthrough_src
@@ -3129,9 +3132,7 @@ fn route_loop_callers_route_through_dispatch() {
     //
     // - `meta_resolve.rs` retains AT MOST 1 callsite (the Class A
     //   helper's engine-threaded route fast-path).
-    // - `fallthrough.rs` retains 0 callsites; the
-    //   `evaluate_value_expression_via_env_or_dispatch` fallback
-    //   routes through the Class A helper.
+    // - `resolver_core/fallthrough.rs` retains 0 callsites.
     assert!(
         meta_callsites <= 1,
         "meta_resolve.rs must have <= 1 .lower_and_project_to_expanded( callsite; found {meta_callsites}",
@@ -3141,11 +3142,12 @@ fn route_loop_callers_route_through_dispatch() {
         "fallthrough.rs must have 0 .lower_and_project_to_expanded( callsites; found {fallthrough_callsites}",
     );
 
-    // Positive marker: the Class A helper is the canonical dispatch
-    // entry, so its name must appear in fallthrough.rs.
+    // Positive marker: the node-domain value evaluator routes value
+    // expressions through the shared Class-A NODE dispatch helper, so that
+    // canonical dispatch entry's name must appear in its module.
     assert!(
-        fallthrough_src.contains("project_expr_class_a_via_dispatch"),
-        "fallthrough.rs must call project_expr_class_a_via_dispatch",
+        value_eval_src.contains("project_expr_class_a_node_via_dispatch_threaded"),
+        "fallthrough value evaluation must route through the Class-A node dispatch helper",
     );
 }
 

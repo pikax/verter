@@ -95,16 +95,9 @@ pub(crate) use dispatch_helpers::{
     lower_and_project_to_expanded_node_via_host_threaded,
     project_admitted_node_to_expanded_node_via_host_threaded,
     project_expr_class_a_node_via_dispatch_threaded, project_expr_class_a_via_dispatch,
-    project_expr_class_a_via_dispatch_threaded, project_expr_surface_expr_node_via_host_threaded,
-    project_expr_surface_shape_via_host_threaded, project_type_surface_expr_via_host_threaded,
+    project_expr_surface_expr_node_via_host_threaded, project_expr_surface_shape_via_host_threaded,
+    project_type_surface_expr_via_host_threaded,
 };
-// Test-only re-export — exercised by the kept dispatch-route-helper
-// coverage tests (`project_route_surface_expr_pick_*` in the engine
-// tests + the routed-surface classification fixture). This is the
-// surviving routed-surface bridge; it routes through the dispatch
-// keeper `dispatch_routed_expr_surface_expr`.
-#[cfg(test)]
-pub(crate) use dispatch_helpers::project_route_surface_expr_via_host_threaded;
 pub(crate) use graph_predicates::{
     build_keys_union_node, component_meta_ref_resolves_to_package_node,
     extract_route_root_identity_node, node_package_backed_object_like_root_with_fence,
@@ -153,8 +146,7 @@ pub(crate) use origin_graph::build_origin_graph;
 pub(crate) use registry_materialize::{
     component_meta_registry_prefers_structural_materialization_node,
     component_meta_registry_should_keep_raw_symbolic_non_object_alias,
-    materialize_component_meta_registry_structural_expr, preserve_nested_symbolic_member_routes,
-    preserve_registry_callable_param_member_routes,
+    preserve_nested_symbolic_member_routes, preserve_registry_callable_param_member_routes,
     type_expr_needs_nested_symbolic_route_preservation,
 };
 // Test-only registry-materialise predicates — exercised by parity tests

@@ -109,9 +109,11 @@ use crate::semantic_query::SemanticNodeId;
 // existing public-API symbols so external `crate::resolver_core::component_meta_query_engine::<name>`
 // paths remain stable.
 mod engine_accessors;
+mod fallthrough_value_eval;
 mod helpers;
 mod node_materialize;
 mod registry_decl;
+mod registry_structural;
 mod route_admission;
 mod route_keys;
 mod shallow_preserve;
@@ -138,9 +140,8 @@ mod surface;
 // re-export; they cannot widen the mint.
 pub(crate) use route_admission::AdmittedRouteProjectionNode;
 pub(crate) use surface::{
-    lower_and_project_to_expanded_node, lower_and_project_to_expanded_published,
-    project_admitted_node_to_expanded_node, project_class_a_terminal_node,
-    project_class_a_terminal_published, project_expr_surface_expr_node,
+    lower_and_project_to_expanded_node, project_admitted_node_to_expanded_node,
+    project_class_a_published, project_class_a_terminal_node, project_expr_surface_expr_node,
     route_projection_node_eq_to_expr, route_projection_nodes_eq, semantic_query_error_raw,
     type_expr_contains_semantic_miss, type_expr_is_budget_exceeded_sentinel,
 };

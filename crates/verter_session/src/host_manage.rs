@@ -761,7 +761,7 @@ impl FallthroughRequestHost for VerterHost {
     fn try_get_cached_fallthrough(
         &self,
         canonical_id: &str,
-        prop_type_overrides: Option<&rustc_hash::FxHashMap<String, verter_type_expr::TypeExpr>>,
+        prop_type_overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
         store_view: &Self::View,
     ) -> Option<Self::Resolution> {
         let cache_key = fallthrough_cache_key(
@@ -791,7 +791,7 @@ impl FallthroughRequestHost for VerterHost {
         let root_follow_key = crate::resolver_core::fallthrough_resolver::root_follow_key(
             canonical_id,
             prop_type_overrides
-                .map(crate::resolver_core::hash_prop_type_overrides)
+                .map(|overrides| overrides.fingerprint)
                 .unwrap_or_default(),
             self.config.generic_root_propagation,
         );
@@ -848,7 +848,7 @@ impl FallthroughRequestHost for VerterHost {
     fn compute_fallthrough_surface_uncached(
         &self,
         canonical_id: &str,
-        prop_type_overrides: Option<&rustc_hash::FxHashMap<String, verter_type_expr::TypeExpr>>,
+        prop_type_overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
         visiting: &mut rustc_hash::FxHashSet<String>,
         store_view: &Self::View,
         base_is_current: bool,
@@ -896,7 +896,7 @@ impl FallthroughRequestHost for VerterHost {
     fn store_fallthrough_result(
         &self,
         canonical_id: &str,
-        prop_type_overrides: Option<&rustc_hash::FxHashMap<String, verter_type_expr::TypeExpr>>,
+        prop_type_overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
         result: &Self::Resolution,
     ) {
         self.cache_fallthrough_result(canonical_id, prop_type_overrides, result);
@@ -1057,13 +1057,13 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
     fn resolve_child_fallthrough(
         &self,
         canonical_id: &str,
-        prop_type_overrides: Option<&rustc_hash::FxHashMap<String, verter_type_expr::TypeExpr>>,
+        prop_type_overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
         visiting: &mut rustc_hash::FxHashSet<String>,
     ) -> Option<Self::ChildResolution> {
         let cache_key = crate::resolver_core::fallthrough_resolver::child_surface_key(
             canonical_id,
             prop_type_overrides
-                .map(crate::resolver_core::hash_prop_type_overrides)
+                .map(|overrides| overrides.fingerprint)
                 .unwrap_or_default(),
         );
 
@@ -1113,6 +1113,7 @@ impl FallthroughComputeHost for HostFallthroughResolver<'_> {
         base: &verter_semantic::analysis::component_meta::ConsumedRootBindings,
         has_unknown_spread: bool,
         eval_env: &mut Option<Self::EvalEnv>,
+        overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
     ) -> ResolvedConsumedBindings {
         let cache_key = crate::resolver_core::fallthrough_resolver::consumed_bindings_key(
             canonical_id,
@@ -1142,6 +1143,7 @@ impl FallthroughComputeHost for HostFallthroughResolver<'_> {
             has_unknown_spread,
             eval_env,
             self.ctx,
+            overrides,
         );
         self.host.resolver_runtime().fallthrough.store_node(
             cache_key,
@@ -1159,7 +1161,8 @@ impl FallthroughComputeHost for HostFallthroughResolver<'_> {
         snapshot: &Self::Snapshot,
         usage_index: u32,
         eval_env: &mut Option<Self::EvalEnv>,
-    ) -> Option<rustc_hash::FxHashMap<String, verter_type_expr::TypeExpr>> {
+        overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
+    ) -> Option<crate::resolver_core::FallthroughPropOverrideSet> {
         debug_assert_eq!(self.parent_canonical_id, canonical_id);
         self.host.build_generic_child_prop_overrides(
             canonical_id,
@@ -1167,6 +1170,7 @@ impl FallthroughComputeHost for HostFallthroughResolver<'_> {
             usage_index,
             eval_env,
             self.ctx,
+            overrides,
         )
     }
 
@@ -1176,6 +1180,7 @@ impl FallthroughComputeHost for HostFallthroughResolver<'_> {
         snapshot: &Self::Snapshot,
         usage_index: u32,
         eval_env: &mut Option<Self::EvalEnv>,
+        overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
     ) -> Vec<DynamicRootCandidate> {
         debug_assert_eq!(self.parent_canonical_id, canonical_id);
         self.host.resolve_dynamic_root_candidates(
@@ -1184,6 +1189,7 @@ impl FallthroughComputeHost for HostFallthroughResolver<'_> {
             usage_index,
             eval_env,
             self.ctx,
+            overrides,
         )
     }
 }

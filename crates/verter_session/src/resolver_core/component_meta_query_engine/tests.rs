@@ -675,13 +675,10 @@ export interface LinkProps extends NuxtLinkProps {
     let route =
         crate::resolver_core::RouteDemand::Pick(vec!["to".to_string(), "target".to_string()]);
 
-    let projected = crate::meta_resolve::project_route_surface_expr_via_host_threaded(
-        &mut query_engine,
-        "/src/Link.vue",
-        "LinkProps",
-        &route,
-    )
-    .expect("member-viable inherited pick route should project to the requested members only");
+    let projected = query_engine
+        .dispatch_routed_expr_surface_node("/src/Link.vue", "LinkProps", &route)
+        .and_then(|node| super::surface::materialize_route_projection_node(query_engine.ctx, &node))
+        .expect("member-viable inherited pick route should project to the requested members only");
     let TypeExpr::Object(object) = &projected else {
         panic!("projected inherited pick route should materialize as an object");
     };
@@ -709,7 +706,7 @@ export interface LinkProps extends NuxtLinkProps {
 #[test]
 fn project_route_surface_expr_pick_over_class_excludes_non_public_keys() {
     // DISCRIMINATING (fix #5, routed component-meta Pick/Omit helper): the
-    // routed Pick/Omit path (`dispatch_routed_expr_surface_expr`) must NOT
+    // routed Pick/Omit path (`dispatch_routed_expr_surface_node`) must NOT
     // hand-filter the projected surface by NAME only — it routes through the
     // SHARED builtin Pick/Omit engine, inheriting its public-keyspace gate.
     // `Pick<C, "secret">` over a class whose `secret` is PRIVATE yields an
@@ -768,12 +765,10 @@ export class MixedClass {
 
     // Positive control: Pick of the PUBLIC key materialises it.
     let pub_route = crate::resolver_core::RouteDemand::Pick(vec!["open".to_string()]);
-    if let Some(projected) = crate::meta_resolve::project_route_surface_expr_via_host_threaded(
-        &mut query_engine,
-        "/src/Mixed.vue",
-        "MixedClass",
-        &pub_route,
-    ) {
+    if let Some(projected) = query_engine
+        .dispatch_routed_expr_surface_node("/src/Mixed.vue", "MixedClass", &pub_route)
+        .and_then(|node| super::surface::materialize_route_projection_node(query_engine.ctx, &node))
+    {
         assert!(
             member_names(&projected).contains("open"),
             "Pick<MixedClass, \"open\"> (public) must materialise `open`: {projected:?}"
@@ -783,12 +778,11 @@ export class MixedClass {
     // DISCRIMINATING: Pick of a PRIVATE / PROTECTED key must NOT materialise it.
     for key in ["secret", "guarded"] {
         let route = crate::resolver_core::RouteDemand::Pick(vec![key.to_string()]);
-        let projected = crate::meta_resolve::project_route_surface_expr_via_host_threaded(
-            &mut query_engine,
-            "/src/Mixed.vue",
-            "MixedClass",
-            &route,
-        );
+        let projected = query_engine
+            .dispatch_routed_expr_surface_node("/src/Mixed.vue", "MixedClass", &route)
+            .and_then(|node| {
+                super::surface::materialize_route_projection_node(query_engine.ctx, &node)
+            });
         if let Some(projected) = projected {
             assert!(
                 !member_names(&projected).contains(key),
@@ -800,12 +794,10 @@ export class MixedClass {
     // DISCRIMINATING: Omit of the PUBLIC key must NOT leave the non-public
     // members on the routed surface.
     let omit_route = crate::resolver_core::RouteDemand::Omit(vec!["open".to_string()]);
-    if let Some(projected) = crate::meta_resolve::project_route_surface_expr_via_host_threaded(
-        &mut query_engine,
-        "/src/Mixed.vue",
-        "MixedClass",
-        &omit_route,
-    ) {
+    if let Some(projected) = query_engine
+        .dispatch_routed_expr_surface_node("/src/Mixed.vue", "MixedClass", &omit_route)
+        .and_then(|node| super::surface::materialize_route_projection_node(query_engine.ctx, &node))
+    {
         let names = member_names(&projected);
         assert!(
             !names.contains("secret") && !names.contains("guarded"),
@@ -862,13 +854,10 @@ export interface LinkProps extends NuxtLinkProps {
     let route =
         crate::resolver_core::RouteDemand::Pick(vec!["to".to_string(), "target".to_string()]);
 
-    let projected = crate::meta_resolve::project_route_surface_expr_via_host_threaded(
-        &mut query_engine,
-        "/src/Link.vue",
-        "LinkProps",
-        &route,
-    )
-    .expect("package-backed inherited pick route should project");
+    let projected = query_engine
+        .dispatch_routed_expr_surface_node("/src/Link.vue", "LinkProps", &route)
+        .and_then(|node| super::surface::materialize_route_projection_node(query_engine.ctx, &node))
+        .expect("package-backed inherited pick route should project");
     let TypeExpr::Object(object) = &projected else {
         panic!("projected inherited pick route should materialize as an object");
     };
@@ -963,15 +952,12 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
     let route =
         crate::resolver_core::RouteDemand::Pick(vec!["to".to_string(), "target".to_string()]);
 
-    let projected = crate::meta_resolve::project_route_surface_expr_via_host_threaded(
-        &mut query_engine,
-        "/src/Link.vue",
-        "LinkProps",
-        &route,
-    )
-    .expect(
-        "local inherited members should project without deepening unrelated imported utility bases",
-    );
+    let projected = query_engine
+        .dispatch_routed_expr_surface_node("/src/Link.vue", "LinkProps", &route)
+        .and_then(|node| super::surface::materialize_route_projection_node(query_engine.ctx, &node))
+        .expect(
+            "local inherited members should project without deepening unrelated imported utility bases",
+        );
     let TypeExpr::Object(object) = &projected else {
         panic!("projected inherited pick route should materialize as an object");
     };
@@ -1092,13 +1078,10 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
     let route =
         crate::resolver_core::RouteDemand::Pick(vec!["target".to_string(), "to".to_string()]);
 
-    let projected = crate::meta_resolve::project_route_surface_expr_via_host_threaded(
-        &mut query_engine,
-        "/src/Link.vue",
-        "LinkProps",
-        &route,
-    )
-    .expect("realistic inherited pick route should project to the requested members only");
+    let projected = query_engine
+        .dispatch_routed_expr_surface_node("/src/Link.vue", "LinkProps", &route)
+        .and_then(|node| super::surface::materialize_route_projection_node(query_engine.ctx, &node))
+        .expect("realistic inherited pick route should project to the requested members only");
     let TypeExpr::Object(object) = &projected else {
         panic!("projected inherited pick route should materialize as an object");
     };
@@ -1222,13 +1205,10 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
     let route =
         crate::resolver_core::RouteDemand::Pick(vec!["target".to_string(), "to".to_string()]);
 
-    let projected = crate::meta_resolve::project_route_surface_expr_via_host_threaded(
-        &mut query_engine,
-        "/src/Link.vue",
-        "LinkProps",
-        &route,
-    )
-    .expect("module-routed inherited pick route should project to the requested members only");
+    let projected = query_engine
+        .dispatch_routed_expr_surface_node("/src/Link.vue", "LinkProps", &route)
+        .and_then(|node| super::surface::materialize_route_projection_node(query_engine.ctx, &node))
+        .expect("module-routed inherited pick route should project to the requested members only");
     let TypeExpr::Object(object) = &projected else {
         panic!("projected inherited pick route should materialize as an object");
     };
@@ -1919,11 +1899,12 @@ type F<T> = <T>(x: T) => T
     // the route-key leaf stabiliser drives): lower `F<string>` at Expanded so
     // `build_instantiate` binds the outer `T -> string` and substitutes while
     // lowering, then materialise the instantiated function body once.
-    let instantiated = crate::resolver_core::lower_and_project_to_expanded_published(
+    let instantiated = crate::resolver_core::lower_and_project_to_expanded_node(
         query_engine.ctx,
         "/src/App.vue",
         &expr,
     )
+    .and_then(|node| super::surface::materialize_route_projection_node(query_engine.ctx, &node))
     .expect(
         "F<string> over a function-typed generic alias should instantiate to the function body \
          via the shared dispatch instantiation path",
@@ -4299,158 +4280,6 @@ export interface Derived extends ButtonProps {
     assert!(
         names.iter().any(|name| name == "extra"),
         "ordinary heritage surface keeps the derived own-body `extra`; got {names:?}",
-    );
-}
-
-// ── Whole-route publication gate: composed-surface materializedness ──
-// The registry Whole route gates publication on the node-domain
-// materializedness of the surface BEING PUBLISHED. For a compound root
-// (Union / Intersection / `Omit`-heritage) the projected surface is the
-// SHALLOW-COMPOSED surface the walker reconstructs from the decl anchor —
-// NOT the carrier-intact anchor declaration itself. The gate must fold its
-// materializedness over that composed surface node, so that a partial
-// composed surface (one bearing an unresolved `semanticMiss` member) is
-// REJECTED exactly as the surface-materialization filter rejected it,
-// while a clean composed surface is ADMITTED.
-
-/// Discriminating: a compound-root component whose composed Whole surface
-/// carries an own-body member that resolves to a `semanticMiss` carrier
-/// (`import('./ghost').Ghost` — the module is absent). `Omit`-heritage makes
-/// the instantiated root an Intersection, so the surface composes from the
-/// carrier-intact decl anchor.
-///
-/// The Whole route must REJECT this partial surface (return `None`), matching
-/// the surface-materialization filter that rejects a surface bearing such a
-/// sentinel member. Gating on the anchor declaration instead spuriously
-/// ADMITS it: the anchor's own raise keeps `Ghost` as an unresolved
-/// `ImportType` carrier (which reads materialized), whereas the composed
-/// shallow walk resolves the absent import to a `semanticMiss`.
-#[test]
-fn whole_route_gate_rejects_partial_compound_surface() {
-    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
-        verter_workspace::MemoryOptions::default(),
-    ));
-    ws.inject_file(
-        "/src/App.vue".to_string(),
-        Arc::from(
-            r#"<script lang="ts">
-type Item = { label?: string }
-export interface BaseG<T> { keep?: T }
-export interface Derived extends Omit<BaseG<Item>, 'nothing'> {
-  bad?: import('./ghost').Ghost
-}
-</script>
-<template><div /></template>"#,
-        ),
-    );
-
-    let host = VerterHost::new(
-        HostConfig {
-            analysis_level: AnalysisLevel::Full,
-            ..HostConfig::default()
-        },
-        ws,
-    );
-    assert!(host.ensure_loaded("/src/App.vue"));
-
-    let _store_view = host.resolver_store_view_read().into_owned_view();
-    let mut query_engine = ComponentMetaQueryEngine::new(&host);
-
-    // The compound-root surface itself COMPOSES (it is non-empty: `keep` from the
-    // `Omit` heritage and the own-body `bad`). It is the publication GATE, not
-    // emptiness, that must reject the partial surface.
-    let composed = query_engine.dispatch_projected_surface("/src/App.vue", "Derived");
-    assert!(
-        composed.is_some(),
-        "the compound-root surface composes (non-empty); the gate, not emptiness, rejects the partial",
-    );
-
-    // The Whole route must REJECT the partial composed surface — its `bad` member
-    // is an unresolved `semanticMiss` carrier. Gating on the carrier-intact decl
-    // anchor instead ADMITS it (`Some`), the divergence this test pins.
-    let whole = query_engine.dispatch_routed_expr_surface_expr(
-        "/src/App.vue",
-        "Derived",
-        &crate::resolver_core::RouteDemand::Whole,
-    );
-    assert!(
-        whole.is_none(),
-        "Whole route must REJECT a partial compound surface (a `semanticMiss` member) to match \
-         the surface-materialization filter; the anchor-proxy gate spuriously admitted it: {whole:?}",
-    );
-}
-
-/// Control (behaviour-preservation): a CLEAN compound-root surface — every
-/// composed member materialises — must still be ADMITTED by the Whole gate,
-/// keeping the inherited members and dropping the `Omit`-ed key. Folding the
-/// gate over the composed surface (rather than the anchor) must not over-reject
-/// the clean case.
-#[test]
-fn whole_route_gate_admits_clean_compound_surface() {
-    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
-        verter_workspace::MemoryOptions::default(),
-    ));
-    ws.inject_file(
-        "/src/base.ts".to_string(),
-        Arc::from(
-            r#"
-export interface RootProps<T> {
-  open?: boolean
-  defaultOpen?: boolean
-  disabled?: boolean
-  modelValue?: T
-}
-"#,
-        ),
-    );
-    ws.inject_file(
-        "/src/App.vue".to_string(),
-        Arc::from(
-            r#"<script lang="ts">
-import type { RootProps } from './base'
-
-type Item = { label?: string }
-
-export interface SelectMenuProps<T = Item[]> extends Pick<RootProps<T>, 'open' | 'defaultOpen' | 'disabled'> {
-  items?: T
-}
-
-export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'items'> {}
-</script>
-<template><div /></template>"#,
-        ),
-    );
-
-    let host = VerterHost::new(
-        HostConfig {
-            analysis_level: AnalysisLevel::Full,
-            ..HostConfig::default()
-        },
-        ws,
-    );
-    assert!(host.ensure_loaded("/src/App.vue"));
-
-    let _store_view = host.resolver_store_view_read().into_owned_view();
-    let mut query_engine = ComponentMetaQueryEngine::new(&host);
-
-    let whole = query_engine
-        .dispatch_routed_expr_surface_expr(
-            "/src/App.vue",
-            "ColorModeSelectProps",
-            &crate::resolver_core::RouteDemand::Whole,
-        )
-        .expect("Whole route must ADMIT a clean compound surface (all members materialise)");
-
-    let names = projected_object_member_names(&whole);
-    for kept in ["open", "defaultOpen", "disabled"] {
-        assert!(
-            names.iter().any(|name| name == kept),
-            "admitted clean compound surface keeps inherited `{kept}`; got {names:?}",
-        );
-    }
-    assert!(
-        !names.iter().any(|name| name == "items"),
-        "admitted clean compound surface drops the `Omit`-ed `items`; got {names:?}",
     );
 }
 

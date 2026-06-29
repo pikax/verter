@@ -17,10 +17,9 @@ use crate::resolver_core::{
     collect_dynamic_root_candidates_from_type,
     component_meta_resolved_macros as resolver_component_meta_resolved_macros,
     component_meta_type_registry as resolver_component_meta_type_registry, fallthrough_cache_key,
-    known_spread_keys_from_type_expr, materialize_imported_runtime_values_into_env,
-    push_partial_reason, resolve_fallthrough_surface as resolver_resolve_fallthrough_surface,
-    resolve_usage_prop_type, DynamicRootCandidate, RequestSource, ResolvedConsumedBindings,
-    SingleflightRole,
+    materialize_imported_runtime_values_into_env, push_partial_reason,
+    resolve_fallthrough_surface as resolver_resolve_fallthrough_surface, DynamicRootCandidate,
+    RequestSource, ResolvedConsumedBindings, SingleflightRole,
 };
 use crate::types::*;
 use crate::VerterHost;
@@ -55,7 +54,7 @@ impl VerterHost {
     pub(super) fn resolve_fallthrough_surface_internal_with_overrides(
         &self,
         canonical_id: &str,
-        prop_type_overrides: Option<&rustc_hash::FxHashMap<String, verter_type_expr::TypeExpr>>,
+        prop_type_overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
         visiting: &mut rustc_hash::FxHashSet<String>,
     ) -> Option<crate::types::FallthroughResolution> {
         use verter_semantic::analysis::component_meta::*;
@@ -66,7 +65,7 @@ impl VerterHost {
                 "owner={} overrides={} visiting={} store_view={}",
                 canonical_id,
                 prop_type_overrides
-                    .map(|overrides| overrides.len())
+                    .map(|overrides| overrides.entries.len())
                     .unwrap_or_default(),
                 visiting.len(),
                 false,
@@ -187,7 +186,7 @@ impl VerterHost {
     pub(super) fn compute_fallthrough_surface_uncached(
         &self,
         canonical_id: &str,
-        prop_type_overrides: Option<&rustc_hash::FxHashMap<String, verter_type_expr::TypeExpr>>,
+        prop_type_overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
         visiting: &mut rustc_hash::FxHashSet<String>,
         ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
     ) -> Option<crate::types::FallthroughResolution> {
@@ -216,7 +215,7 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         resolved: &crate::meta_resolve::ResolvedComponentMetaState,
-        prop_type_overrides: Option<&rustc_hash::FxHashMap<String, verter_type_expr::TypeExpr>>,
+        prop_type_overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
         visiting: &mut rustc_hash::FxHashSet<String>,
         ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
     ) -> Option<crate::types::FallthroughResolution> {
@@ -276,7 +275,6 @@ impl VerterHost {
             canonical_id,
             &resolved.snapshot,
             Some(&base_meta.root_reachability),
-            prop_type_overrides,
         );
 
         let resolved_surface = resolver_resolve_fallthrough_surface(
@@ -336,23 +334,26 @@ impl VerterHost {
         })
     }
 
-    /// Lightweight fallthrough eval env: base owner env + runtime values + overrides.
+    /// Lightweight fallthrough eval env: base owner env + runtime values.
+    ///
+    /// Child prop-type overrides are NOT injected here: they ride the
+    /// fallthrough recursion as a node-backed
+    /// [`crate::resolver_core::FallthroughPropOverrideSet`] and are consumed in
+    /// node domain by the value evaluators (`evaluate_fallthrough_value_node`'s
+    /// override forwarding), never re-injected into this `EvalEnv` as a
+    /// `TypeExpr`.
     pub(super) fn build_fallthrough_eval_env_lightweight(
         &self,
         canonical_id: &str,
         snapshot: &FileAnalysisSnapshot,
         root_reachability: Option<&verter_semantic::analysis::component_meta::RootReachability>,
-        prop_type_overrides: Option<&rustc_hash::FxHashMap<String, verter_type_expr::TypeExpr>>,
     ) -> Option<verter_semantic::analysis::type_eval::EvalEnv> {
         component_meta_trace_custom!(
             "build_fallthrough_eval_env_lightweight",
             format!(
-                "owner={} imports={} overrides={} store_view={}",
+                "owner={} imports={} store_view={}",
                 canonical_id,
                 snapshot.imports.len(),
-                prop_type_overrides
-                    .map(|overrides| overrides.len())
-                    .unwrap_or_default(),
                 false,
             ),
         );
@@ -394,11 +395,6 @@ impl VerterHost {
                 Some(&required_runtime_value_names),
                 &mut env,
             );
-        }
-
-        // Apply prop type overrides for generic root propagation.
-        if let Some(overrides) = prop_type_overrides {
-            crate::resolver_core::inject_prop_type_overrides(&mut env, overrides);
         }
 
         Some(env)
@@ -553,19 +549,24 @@ impl VerterHost {
         usage_index: u32,
         eval_env: &mut Option<verter_semantic::analysis::type_eval::EvalEnv>,
         ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
-    ) -> Option<rustc_hash::FxHashMap<String, verter_type_expr::TypeExpr>> {
+        overrides_in: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
+    ) -> Option<crate::resolver_core::FallthroughPropOverrideSet> {
         if !self.config.generic_root_propagation {
             return None;
         }
 
         let template = snapshot.template.as_deref()?;
         let usage = template.components.get(usage_index as usize)?;
-        let mut overrides = rustc_hash::FxHashMap::default();
         // Bind the engine to the supplied request-bound `ctx` so cache
         // validators inside the engine inherit the overlay-aware view.
         let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(ctx);
         let env_ref = eval_env.as_ref();
 
+        // Each child prop override is carried as its resolved value NODE
+        // (env- + parent-override-aware, via `value_expression_override_node`).
+        // The child consumes these nodes in node domain; nothing is
+        // materialised to a `TypeExpr` here.
+        let mut entries: Vec<crate::resolver_core::FallthroughPropOverride> = Vec::new();
         for prop in &usage.props {
             if prop.from_spread {
                 continue;
@@ -574,23 +575,25 @@ impl VerterHost {
                 continue;
             }
 
-            let Some(prop_type) = resolve_usage_prop_type(prop, |expr| {
-                crate::resolver_core::evaluate_value_expression_via_env_or_dispatch(
-                    expr,
-                    canonical_id,
-                    env_ref,
-                    &mut engine,
-                )
-            }) else {
+            let Some(node) =
+                engine.value_expression_override_node(canonical_id, prop, env_ref, overrides_in)
+            else {
                 continue;
             };
-            overrides.insert(prop.name.clone(), prop_type);
+            entries.push(crate::resolver_core::FallthroughPropOverride {
+                name: prop.name.clone(),
+                node,
+            });
         }
 
-        if overrides.is_empty() {
+        if entries.is_empty() {
             None
         } else {
-            Some(overrides)
+            let fingerprint = engine.fallthrough_override_fingerprint(&entries);
+            Some(crate::resolver_core::FallthroughPropOverrideSet {
+                entries,
+                fingerprint,
+            })
         }
     }
 
@@ -603,6 +606,7 @@ impl VerterHost {
         has_unknown_spread: bool,
         eval_env: &mut Option<verter_semantic::analysis::type_eval::EvalEnv>,
         ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+        overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
     ) -> ResolvedConsumedBindings {
         use verter_semantic::analysis::component_meta::PartialBranchReason;
 
@@ -673,20 +677,12 @@ impl VerterHost {
                     continue;
                 };
 
-                let Some(ty) = crate::resolver_core::evaluate_value_expression_via_env_or_dispatch(
-                    expression,
+                let Some(summary) = engine.known_spread_keys_for_value_expression(
                     canonical_id,
+                    expression,
                     env_ref,
-                    &mut engine,
+                    overrides,
                 ) else {
-                    push_partial_reason(
-                        &mut resolved.partial_reasons,
-                        PartialBranchReason::UnknownSpread,
-                    );
-                    continue;
-                };
-
-                let Some(summary) = known_spread_keys_from_type_expr(&ty) else {
                     push_partial_reason(
                         &mut resolved.partial_reasons,
                         PartialBranchReason::UnknownSpread,
@@ -721,6 +717,7 @@ impl VerterHost {
         usage_index: u32,
         eval_env: &mut Option<verter_semantic::analysis::type_eval::EvalEnv>,
         ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+        overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
     ) -> Vec<DynamicRootCandidate> {
         let Some(template) = snapshot.template.as_deref() else {
             return Vec::new();
@@ -751,19 +748,17 @@ impl VerterHost {
         }
         // Bind the engine to the supplied request-bound `ctx` so
         // cache validators inside the engine inherit the overlay-aware
-        // view.
+        // view. The evaluated `is=` value resolves to a NODE and its
+        // dynamic-root candidates are read in node domain (the raw-parse
+        // step above stays syntactic).
         let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(ctx);
-        if let Some(evaluated) = crate::resolver_core::evaluate_value_expression_via_env_or_dispatch(
-            &expression,
+        candidates.extend(engine.dynamic_root_candidates_for_value_expression(
             canonical_id,
+            &expression,
             eval_env.as_ref(),
-            &mut engine,
-        ) {
-            candidates.extend(collect_dynamic_root_candidates_from_type(
-                &evaluated,
-                snapshot.imports.as_slice(),
-            ));
-        }
+            overrides,
+            snapshot.imports.as_slice(),
+        ));
 
         candidates.sort_by(|left, right| match (left, right) {
             (
@@ -801,7 +796,7 @@ impl VerterHost {
     pub(super) fn cache_fallthrough_result(
         &self,
         canonical_id: &str,
-        prop_type_overrides: Option<&rustc_hash::FxHashMap<String, verter_type_expr::TypeExpr>>,
+        prop_type_overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
         result: &crate::types::FallthroughResolution,
     ) {
         let cache_key = fallthrough_cache_key(
@@ -814,7 +809,7 @@ impl VerterHost {
             crate::resolver_core::fallthrough_resolver::root_follow_key(
                 canonical_id,
                 prop_type_overrides
-                    .map(crate::resolver_core::hash_prop_type_overrides)
+                    .map(|overrides| overrides.fingerprint)
                     .unwrap_or_default(),
                 self.config.generic_root_propagation,
             ),

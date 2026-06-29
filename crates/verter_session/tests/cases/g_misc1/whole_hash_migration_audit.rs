@@ -111,7 +111,7 @@ fn whole_hash_read_site_2_route_db_surface_hash_inventoried() {
 /// (`component_meta_query_engine/routed_expr.rs`). That engine and its
 /// whole_hash read are DELETED with the walker cluster: macro/route
 /// surfaces now resolve through the DISPATCH routed-expr path
-/// (`registry_decl.rs::dispatch_routed_expr_surface_expr`, which routes
+/// (`registry_decl.rs::dispatch_routed_expr_surface_node`, which routes
 /// through `dispatch_projected_surface` / `dispatch_root_instantiated`
 /// / the semantic-query substrate). That dispatch path does NOT do
 /// file-version tracking via a `whole_hash` read — the surviving
@@ -135,7 +135,7 @@ fn whole_hash_read_site_3_routed_expr_retired() {
     assert!(
         !deleted.exists(),
         "the walker routed-expr engine `routed_expr.rs` is retired and MUST NOT exist — \
-         macro/route surfaces resolve through `dispatch_routed_expr_surface_expr` (site #3 \
+         macro/route surfaces resolve through `dispatch_routed_expr_surface_node` (site #3 \
          is retired, not relocated)"
     );
 
@@ -145,11 +145,11 @@ fn whole_hash_read_site_3_routed_expr_retired() {
         "crates/verter_session/src/resolver_core/component_meta_query_engine/registry_decl.rs",
     );
     let source = read_source_file(&path);
-    let body = extract_fn_body(&source, "pub(crate) fn dispatch_routed_expr_surface_expr(");
+    let body = extract_fn_body(&source, "pub(crate) fn dispatch_routed_expr_surface_node(");
     for forbidden in ["whole_hash", "get_whole_hash", "content_hash_for"] {
         assert!(
             !body.contains(forbidden),
-            "the dispatch routed-expr method `dispatch_routed_expr_surface_expr` MUST NOT \
+            "the dispatch routed-expr method `dispatch_routed_expr_surface_node` MUST NOT \
              read `{forbidden}` — the routed-expr surface path resolves through the dispatch \
              / semantic-query substrate, not via file-version whole_hash tracking. \
              Reintroducing a whole_hash read here resurrects the retired routed-expr engine's \

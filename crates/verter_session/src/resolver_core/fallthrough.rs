@@ -1,5 +1,4 @@
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::hash::{Hash, Hasher};
 use verter_semantic::analysis::component_meta::{
     AcceptedEventAnalysis, AcceptedEventKind, AcceptedPropAnalysis, AcceptedPropKind,
     AcceptedSurfaceCompleteness, BranchStatus, ComponentMetaAnalysis, ConsumedRootBindings,
@@ -37,7 +36,7 @@ pub trait FallthroughResolverHost {
     fn resolve_child_fallthrough(
         &self,
         canonical_id: &str,
-        prop_type_overrides: Option<&FxHashMap<String, TypeExpr>>,
+        prop_type_overrides: Option<&FallthroughPropOverrideSet>,
         visiting: &mut FxHashSet<String>,
     ) -> Option<Self::ChildResolution>;
 }
@@ -71,6 +70,7 @@ pub trait FallthroughComputeHost: FallthroughResolverHost {
         base: &ConsumedRootBindings,
         has_unknown_spread: bool,
         eval_env: &mut Option<Self::EvalEnv>,
+        overrides: Option<&FallthroughPropOverrideSet>,
     ) -> ResolvedConsumedBindings;
 
     fn build_generic_child_prop_overrides(
@@ -79,7 +79,8 @@ pub trait FallthroughComputeHost: FallthroughResolverHost {
         snapshot: &Self::Snapshot,
         usage_index: u32,
         eval_env: &mut Option<Self::EvalEnv>,
-    ) -> Option<FxHashMap<String, TypeExpr>>;
+        overrides: Option<&FallthroughPropOverrideSet>,
+    ) -> Option<FallthroughPropOverrideSet>;
 
     fn resolve_dynamic_root_candidates(
         &self,
@@ -87,6 +88,7 @@ pub trait FallthroughComputeHost: FallthroughResolverHost {
         snapshot: &Self::Snapshot,
         usage_index: u32,
         eval_env: &mut Option<Self::EvalEnv>,
+        overrides: Option<&FallthroughPropOverrideSet>,
     ) -> Vec<DynamicRootCandidate>;
 }
 
@@ -114,6 +116,45 @@ pub struct KnownSpreadKeys {
     pub exact: bool,
 }
 
+/// A single child prop-type override carried in NODE domain: the prop name
+/// plus the interned `SemanticNodeId` of the parent-propagated value type. The
+/// node is consumed by the child evaluator directly (never materialised back to
+/// a `TypeExpr` and re-injected into the child `EvalEnv`).
+#[derive(Debug, Clone)]
+pub struct FallthroughPropOverride {
+    pub name: String,
+    pub node: crate::semantic_query::SemanticNodeId,
+}
+
+/// Node-backed child prop-type override set threaded through fallthrough
+/// recursion in place of the materialised `FxHashMap<String, TypeExpr>` map.
+/// Each entry binds a prop name to its override value NODE; `fingerprint` is a
+/// content-derived structural hash over those nodes (NOT raw arena
+/// `SemanticNodeId` ordinals), used as the `override_fingerprint` cache-key
+/// dimension so a warm fallthrough hit is valid only for equivalent overrides.
+#[derive(Debug, Clone, Default)]
+pub struct FallthroughPropOverrideSet {
+    pub entries: Vec<FallthroughPropOverride>,
+    pub fingerprint: u64,
+}
+
+impl FallthroughPropOverrideSet {
+    /// Look up the override value node for `name`, if present.
+    #[must_use]
+    pub fn lookup(&self, name: &str) -> Option<crate::semantic_query::SemanticNodeId> {
+        self.entries
+            .iter()
+            .find(|entry| entry.name == name)
+            .map(|entry| entry.node)
+    }
+
+    /// `true` when the set carries no overrides.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
 pub fn extend_unique_fact_versions<I>(fact_versions: &mut Vec<FactVersionRef>, new_facts: I)
 where
     I: IntoIterator<Item = FactVersionRef>,
@@ -129,29 +170,17 @@ where
 pub fn fallthrough_cache_key(
     canonical_id: &str,
     generic_root_propagation: bool,
-    prop_type_overrides: Option<&FxHashMap<String, TypeExpr>>,
+    prop_type_overrides: Option<&FallthroughPropOverrideSet>,
 ) -> FallthroughNodeKey {
     FallthroughNodeKey {
         canonical_component_id: canonical_id.to_string(),
         node_kind: FallthroughNodeKind::BranchUnionMerge,
         override_fingerprint: prop_type_overrides
-            .map(hash_prop_type_overrides)
+            .map(|overrides| overrides.fingerprint)
             .unwrap_or_default(),
         behavior_flags: u32::from(generic_root_propagation),
         branch_selector: None,
     }
-}
-
-pub fn hash_prop_type_overrides(overrides: &FxHashMap<String, TypeExpr>) -> u64 {
-    let mut pairs: Vec<_> = overrides.iter().collect();
-    pairs.sort_by(|a, b| a.0.cmp(b.0));
-
-    let mut hasher = rustc_hash::FxHasher::default();
-    for (name, ty) in pairs {
-        name.hash(&mut hasher);
-        ty.hash(&mut hasher);
-    }
-    hasher.finish()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -254,7 +283,7 @@ pub fn append_component_candidate_branches<H: FallthroughResolverHost>(
     consumed_attrs: &[String],
     consumed_listeners: &[String],
     parent_partial_reasons: &[PartialBranchReason],
-    child_prop_overrides: Option<&FxHashMap<String, TypeExpr>>,
+    child_prop_overrides: Option<&FallthroughPropOverrideSet>,
     declared_prop_names: &FxHashSet<String>,
     declared_event_names: &FxHashSet<String>,
     declared_listener_aliases: &FxHashSet<String>,
@@ -591,7 +620,7 @@ pub fn resolve_fallthrough_surface<H: FallthroughComputeHost>(
     canonical_id: &str,
     snapshot: &H::Snapshot,
     base_meta: &ComponentMetaAnalysis,
-    _prop_type_overrides: Option<&FxHashMap<String, TypeExpr>>,
+    prop_type_overrides: Option<&FallthroughPropOverrideSet>,
     mut eval_env: Option<H::EvalEnv>,
     mut fact_versions: Vec<FactVersionRef>,
     visiting: &mut FxHashSet<String>,
@@ -673,6 +702,7 @@ pub fn resolve_fallthrough_surface<H: FallthroughComputeHost>(
                     &branch.consumed,
                     branch.has_unknown_spread,
                     &mut eval_env,
+                    prop_type_overrides,
                 );
                 let consumed = &resolved_consumed.bindings;
                 let parent_partial_reasons = resolved_consumed.partial_reasons.clone();
@@ -701,12 +731,14 @@ pub fn resolve_fallthrough_surface<H: FallthroughComputeHost>(
                             snapshot,
                             *usage_index,
                             &mut eval_env,
+                            prop_type_overrides,
                         );
                         let candidates = host.resolve_dynamic_root_candidates(
                             canonical_id,
                             snapshot,
                             *usage_index,
                             &mut eval_env,
+                            prop_type_overrides,
                         );
 
                         if candidates.is_empty() {
@@ -795,6 +827,7 @@ pub fn resolve_fallthrough_surface<H: FallthroughComputeHost>(
                             snapshot,
                             *usage_index,
                             &mut eval_env,
+                            prop_type_overrides,
                         );
 
                         match import_source.as_deref() {
@@ -889,33 +922,16 @@ pub fn resolve_fallthrough_surface<H: FallthroughComputeHost>(
     }
 }
 
-pub fn inject_prop_type_overrides(
-    env: &mut verter_semantic::analysis::type_eval::EvalEnv,
-    overrides: &FxHashMap<String, TypeExpr>,
-) {
-    for (name, ty) in overrides {
-        env.add_value(verter_semantic::analysis::type_eval::ValueDeclInfo {
-            name: name.clone(),
-            declaration_id: 0,
-            kind: verter_semantic::analysis::type_eval::ValueDeclKind::Const,
-            type_annotation: Some(ty.clone()),
-            signatures: Vec::new(),
-            object_shape: None,
-            enum_members: None,
-        });
-    }
-}
-
-/// Structural substitution of bare `TypeOf(ValueRef)` references with
-/// annotations from a standalone evaluation environment.
+/// Structural substitution of bare single-segment `TypeOf(ValueRef)`
+/// references with the annotation bound to that value name in a standalone
+/// evaluation environment.
 ///
-/// migration path: the session-side callers of
-/// `evaluate_value_expression` now route value references through this
-/// env-first substitution + `ComponentMetaQueryEngine` dispatch fallback
-/// pair. This helper handles the injected-override hot path
-/// (`inject_prop_type_overrides` writes length-1 value symbols that the
-/// previous solver would resolve via `EvalEnvSolverHost`). Dispatch, not
-/// env substitution, handles imported/declared types.
+/// Used by the node-domain fallthrough value evaluator
+/// (`evaluate_fallthrough_value_node`) to fold imported runtime-value bindings
+/// before node projection: a reference resolved here is a concrete value type
+/// (lowered to a node directly); everything else routes through dispatch. It
+/// does NOT carry child prop-type overrides — those ride the fallthrough
+/// recursion as node carriers and are forwarded in node domain.
 pub fn structural_substitute_typeof_refs(
     expr: &TypeExpr,
     env: &verter_semantic::analysis::type_eval::EvalEnv,
@@ -943,87 +959,6 @@ pub fn structural_substitute_typeof_refs(
         )),
         other => other.clone(),
     }
-}
-
-/// Evaluate a value expression by parsing it and resolving identifiers
-/// via env-based substitution followed by component-meta dispatch.
-///
-/// Contract: env-level substitutions (including injected prop-type
-/// overrides) take precedence; otherwise the lowered expression is
-/// routed through the Class A dispatch helper in the owning canonical
-/// scope.
-///
-/// The engine's `project_expr_surface_expr` /
-/// `lower_and_project_to_expanded` callsites delegate to
-/// `project_expr_class_a_via_dispatch_threaded`, which covers BOTH the
-/// registry-route fast-path AND the generic
-/// `ProjectPath { [], Expanded }` dispatch — collapsing two earlier
-/// fallback layers that terminated at the same dispatch query.
-pub fn evaluate_value_expression_via_env_or_dispatch(
-    expression: &str,
-    canonical_id: &str,
-    env: Option<&verter_semantic::analysis::type_eval::EvalEnv>,
-    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-) -> Option<TypeExpr> {
-    let lowered =
-        verter_semantic::analysis::type_eval_build::parse_value_expression_type(expression)?;
-    if let Some(env) = env {
-        let substituted = structural_substitute_typeof_refs(&lowered, env);
-        if substituted != lowered {
-            return Some(substituted);
-        }
-    }
-    crate::meta_resolve::project_expr_class_a_via_dispatch_threaded(
-        engine.ctx,
-        Some(engine),
-        canonical_id,
-        &lowered,
-    )
-}
-
-pub fn resolve_usage_prop_type<F>(
-    prop: &verter_semantic::analysis::template::TemplatePropUsage,
-    mut evaluator: F,
-) -> Option<TypeExpr>
-where
-    F: FnMut(&str) -> Option<TypeExpr>,
-{
-    if prop.from_spread {
-        return None;
-    }
-
-    if !prop.is_bound {
-        return match &prop.expression {
-            Some(expression) => Some(TypeExpr::string_literal(expression.clone())),
-            None => Some(TypeExpr::boolean_literal(true)),
-        };
-    }
-
-    if let Some(expression) = &prop.expression {
-        if let Some(ty) = evaluator(expression) {
-            return Some(ty);
-        }
-
-        if let Some(ty) =
-            verter_semantic::analysis::type_eval_build::parse_value_expression_type(expression)
-        {
-            return Some(ty);
-        }
-    }
-
-    if prop.is_shorthand {
-        if let Some(ty) = evaluator(&prop.name) {
-            return Some(ty);
-        }
-
-        if let Some(ty) =
-            verter_semantic::analysis::type_eval_build::parse_value_expression_type(&prop.name)
-        {
-            return Some(ty);
-        }
-    }
-
-    None
 }
 
 pub fn push_partial_reason(reasons: &mut Vec<PartialBranchReason>, reason: PartialBranchReason) {
@@ -1091,35 +1026,50 @@ pub fn collect_dynamic_root_candidates_from_type(
             .flat_map(|branch| collect_dynamic_root_candidates_from_type(branch, imports))
             .collect(),
         TypeExpr::Parenthesized(inner) => collect_dynamic_root_candidates_from_type(inner, imports),
-        TypeExpr::TypeOf(value_ref) if value_ref.path.len() == 1 => imports
-            .iter()
-            .filter(|import| !import.is_type_only)
-            .find_map(|import| {
-                import
-                    .bindings
-                    .iter()
-                    .find(|binding| !binding.is_type_only && binding.name == value_ref.path[0])
-                    .map(|binding| DynamicRootCandidate::ComponentImport {
-                        component_name: value_ref.path[0].clone(),
-                        import_source: import.source.clone(),
-                        imported_name: binding.imported_name.clone(),
-                        binding_kind: Some(match binding.kind {
-                            verter_semantic::analysis::types::ImportBindingKind::Named => {
-                                crate::resolver_core::symbol_resolver::ImportBindingKind::Named
-                            }
-                            verter_semantic::analysis::types::ImportBindingKind::Default => {
-                                crate::resolver_core::symbol_resolver::ImportBindingKind::Default
-                            }
-                            verter_semantic::analysis::types::ImportBindingKind::Namespace => {
-                                crate::resolver_core::symbol_resolver::ImportBindingKind::Namespace
-                            }
-                        }),
-                    })
-            })
-            .into_iter()
-            .collect(),
+        TypeExpr::TypeOf(value_ref) if value_ref.path.len() == 1 => {
+            component_import_candidate_for_binding(imports, value_ref.path[0].as_str())
+                .into_iter()
+                .collect()
+        }
         _ => Vec::new(),
     }
+}
+
+/// Map a single-segment value-reference NAME to a
+/// [`DynamicRootCandidate::ComponentImport`] by matching it against a
+/// non-type-only import binding (preserving the import-binding-kind mapping).
+/// Shared by the `TypeExpr` reader and the node-domain
+/// `collect_dynamic_root_candidates_from_node` so the kind mapping cannot
+/// drift between them. `None` when no matching value binding exists.
+pub fn component_import_candidate_for_binding(
+    imports: &[AnalyzedImport],
+    name: &str,
+) -> Option<DynamicRootCandidate> {
+    imports
+        .iter()
+        .filter(|import| !import.is_type_only)
+        .find_map(|import| {
+            import
+                .bindings
+                .iter()
+                .find(|binding| !binding.is_type_only && binding.name == name)
+                .map(|binding| DynamicRootCandidate::ComponentImport {
+                    component_name: name.to_string(),
+                    import_source: import.source.clone(),
+                    imported_name: binding.imported_name.clone(),
+                    binding_kind: Some(match binding.kind {
+                        verter_semantic::analysis::types::ImportBindingKind::Named => {
+                            crate::resolver_core::symbol_resolver::ImportBindingKind::Named
+                        }
+                        verter_semantic::analysis::types::ImportBindingKind::Default => {
+                            crate::resolver_core::symbol_resolver::ImportBindingKind::Default
+                        }
+                        verter_semantic::analysis::types::ImportBindingKind::Namespace => {
+                            crate::resolver_core::symbol_resolver::ImportBindingKind::Namespace
+                        }
+                    }),
+                })
+        })
 }
 
 fn unresolved_child_import_branch(
@@ -1291,7 +1241,7 @@ fn merge_inherited_sources(existing: &mut Vec<InheritedSource>, incoming: &[Inhe
     existing.dedup();
 }
 
-fn normalize_public_spread_key(
+pub(crate) fn normalize_public_spread_key(
     key: &str,
     attrs: &mut std::collections::BTreeSet<String>,
     listeners: &mut std::collections::BTreeSet<String>,
@@ -1332,7 +1282,7 @@ fn known_spread_keys_from_object(object: &verter_type_expr::ObjectExpr) -> Known
     result
 }
 
-fn intersect_known_spread_keys(
+pub(crate) fn intersect_known_spread_keys(
     mut left: KnownSpreadKeys,
     right: KnownSpreadKeys,
 ) -> KnownSpreadKeys {
@@ -1350,11 +1300,11 @@ fn intersect_known_spread_keys(
 mod tests {
     use super::{
         append_component_candidate_branches, append_native_candidate_branch,
-        collect_dynamic_root_candidates_from_type, fallthrough_cache_key, hash_prop_type_overrides,
-        inject_prop_type_overrides, known_spread_keys_from_type_expr, merge_fallthrough_branches,
-        resolve_fallthrough_surface, resolve_usage_prop_type, structural_substitute_typeof_refs,
-        DynamicRootCandidate, FallthroughComputeHost, FallthroughResolutionView,
-        FallthroughResolverHost, ResolvedConsumedBindings,
+        collect_dynamic_root_candidates_from_type, fallthrough_cache_key,
+        known_spread_keys_from_type_expr, merge_fallthrough_branches, resolve_fallthrough_surface,
+        structural_substitute_typeof_refs, DynamicRootCandidate, FallthroughComputeHost,
+        FallthroughPropOverrideSet, FallthroughResolutionView, FallthroughResolverHost,
+        ResolvedConsumedBindings,
     };
     use rustc_hash::{FxHashMap, FxHashSet};
     use std::sync::Arc;
@@ -1365,7 +1315,6 @@ mod tests {
         ResolvedRootStep, RootBranch, RootReachability, RootTargetRef,
     };
     use verter_semantic::analysis::html_intrinsics::{IntrinsicMemberKind, OwnedIntrinsicMember};
-    use verter_semantic::analysis::template::{PropValueConstness, TemplatePropUsage};
     use verter_semantic::analysis::types::{
         AnalyzedImport, AnalyzedImportBinding, ImportBindingKind,
     };
@@ -1444,7 +1393,7 @@ mod tests {
         fn resolve_child_fallthrough(
             &self,
             canonical_id: &str,
-            _prop_type_overrides: Option<&FxHashMap<String, TypeExpr>>,
+            _prop_type_overrides: Option<&FallthroughPropOverrideSet>,
             _visiting: &mut FxHashSet<String>,
         ) -> Option<Self::ChildResolution> {
             self.child_resolutions.get(canonical_id).cloned()
@@ -1464,6 +1413,7 @@ mod tests {
             base: &ConsumedRootBindings,
             _has_unknown_spread: bool,
             _eval_env: &mut Option<Self::EvalEnv>,
+            _overrides: Option<&FallthroughPropOverrideSet>,
         ) -> ResolvedConsumedBindings {
             ResolvedConsumedBindings {
                 bindings: base.clone(),
@@ -1477,7 +1427,8 @@ mod tests {
             _snapshot: &Self::Snapshot,
             _usage_index: u32,
             _eval_env: &mut Option<Self::EvalEnv>,
-        ) -> Option<FxHashMap<String, TypeExpr>> {
+            _overrides: Option<&FallthroughPropOverrideSet>,
+        ) -> Option<FallthroughPropOverrideSet> {
             None
         }
 
@@ -1487,6 +1438,7 @@ mod tests {
             _snapshot: &Self::Snapshot,
             _usage_index: u32,
             _eval_env: &mut Option<Self::EvalEnv>,
+            _overrides: Option<&FallthroughPropOverrideSet>,
         ) -> Vec<DynamicRootCandidate> {
             Vec::new()
         }
@@ -1523,22 +1475,38 @@ mod tests {
     }
 
     #[test]
-    fn fallthrough_cache_key_hashes_overrides_deterministically() {
-        let mut left = FxHashMap::default();
-        left.insert("b".to_string(), TypeExpr::primitive(PrimitiveName::String));
-        left.insert("a".to_string(), TypeExpr::primitive(PrimitiveName::Number));
+    fn fallthrough_cache_key_carries_override_fingerprint() {
+        // The cache key's `override_fingerprint` dimension is the override
+        // set's content-derived `fingerprint` field (NOT the raw node ids).
+        // Two sets with the SAME fingerprint key identically; a different
+        // fingerprint produces a distinct key, so a warm fallthrough surface
+        // is reused only for equivalent overrides.
+        let left = FallthroughPropOverrideSet {
+            entries: Vec::new(),
+            fingerprint: 0xA11CE,
+        };
+        let right = FallthroughPropOverrideSet {
+            entries: Vec::new(),
+            fingerprint: 0xA11CE,
+        };
+        let different = FallthroughPropOverrideSet {
+            entries: Vec::new(),
+            fingerprint: 0xB0B,
+        };
 
-        let mut right = FxHashMap::default();
-        right.insert("a".to_string(), TypeExpr::primitive(PrimitiveName::Number));
-        right.insert("b".to_string(), TypeExpr::primitive(PrimitiveName::String));
-
-        assert_eq!(
-            hash_prop_type_overrides(&left),
-            hash_prop_type_overrides(&right)
-        );
         assert_eq!(
             fallthrough_cache_key("/App.vue", true, Some(&left)),
             fallthrough_cache_key("/App.vue", true, Some(&right))
+        );
+        assert_ne!(
+            fallthrough_cache_key("/App.vue", true, Some(&left)),
+            fallthrough_cache_key("/App.vue", true, Some(&different))
+        );
+        // A `None` override set and an empty-but-distinct fingerprint differ
+        // from the populated-fingerprint key.
+        assert_ne!(
+            fallthrough_cache_key("/App.vue", true, Some(&left)),
+            fallthrough_cache_key("/App.vue", true, None)
         );
     }
 
@@ -1917,60 +1885,6 @@ mod tests {
                     crate::resolver_core::symbol_resolver::ImportBindingKind::Default
                 ),
             }]
-        );
-    }
-
-    #[test]
-    fn inject_prop_type_overrides_adds_value_bindings() {
-        let mut env = verter_semantic::analysis::type_eval::EvalEnv::new();
-        let mut overrides = FxHashMap::default();
-        overrides.insert(
-            "size".to_string(),
-            TypeExpr::primitive(PrimitiveName::Number),
-        );
-
-        inject_prop_type_overrides(&mut env, &overrides);
-
-        assert_eq!(
-            env.value_symbols
-                .get("size")
-                .and_then(|value| value.primary().type_annotation.clone()),
-            Some(TypeExpr::primitive(PrimitiveName::Number))
-        );
-    }
-
-    #[test]
-    fn resolve_usage_prop_type_handles_static_and_bound_inputs() {
-        let static_prop = TemplatePropUsage {
-            name: "title".to_string(),
-            is_bound: false,
-            expression: Some("hello".to_string()),
-            constness: PropValueConstness::Const,
-            referenced_bindings: Vec::new(),
-            is_shorthand: false,
-            from_spread: false,
-            span: Span::new(0, 0),
-            name_span: Span::new(0, 0),
-        };
-        let bound_prop = TemplatePropUsage {
-            name: "size".to_string(),
-            is_bound: true,
-            expression: Some("42".to_string()),
-            constness: PropValueConstness::Const,
-            referenced_bindings: Vec::new(),
-            is_shorthand: false,
-            from_spread: false,
-            span: Span::new(0, 0),
-            name_span: Span::new(0, 0),
-        };
-
-        assert_eq!(
-            resolve_usage_prop_type(&static_prop, |_| None),
-            Some(TypeExpr::string_literal("hello"))
-        );
-        assert_eq!(
-            resolve_usage_prop_type(&bound_prop, |_| None),
-            Some(TypeExpr::number_literal(42.0))
         );
     }
 
