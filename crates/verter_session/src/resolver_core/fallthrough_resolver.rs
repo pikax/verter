@@ -16,9 +16,9 @@
 use std::sync::Arc;
 
 use crate::resolver_core::{
-    symbol_resolver::ResolveContext, FactVersionRef, FallthroughNodeKey, FallthroughNodeKind,
-    ResolverCounters, ResolverDiagnostic, SingleflightGroup, StableExecutionValue, StoreView,
-    ValidatedFactCache,
+    symbol_resolver::ResolveContext, FactVersionRef, FallthroughNodeKey,
+    FallthroughOverrideIdentity, ResolverCounters, ResolverDiagnostic, SingleflightGroup,
+    StableExecutionValue, StoreView, ValidatedFactCache,
 };
 use verter_semantic::analysis::component_meta::{
     AcceptedEventAnalysis, AcceptedPropAnalysis, AcceptedSurfaceCompleteness, FallthroughSurface,
@@ -179,6 +179,13 @@ impl FallthroughResolverState {
     where
         V: StoreView,
     {
+        // An override-bearing key whose identity is `Uncacheable` is never
+        // stored, so it can never hit — and reading through it must not
+        // alias another override set's warm entry.
+        if !key.is_cacheable() {
+            self.counters.record_cache_miss();
+            return None;
+        }
         if let Some(cached) = self.cache.get_if_valid(key, view) {
             self.counters.record_cache_hit();
             return Some((*cached).clone());
@@ -188,6 +195,18 @@ impl FallthroughResolverState {
     }
 
     pub fn store_node(&self, key: FallthroughNodeKey, result: FallthroughNodeResult) {
+        // No-poison: never admit an override-bearing-uncacheable result, and
+        // never warm a result computed by a request that tripped its shared
+        // projection budget (the walk returned a partial). Both reuse the
+        // EXISTING request budget — no second budget engine.
+        if !key.is_cacheable() {
+            return;
+        }
+        if crate::request_context::current_request_budget()
+            .is_some_and(|budget| budget.is_exhausted())
+        {
+            return;
+        }
         if !result.facts.is_empty()
             || matches!(
                 result.value,
@@ -223,11 +242,8 @@ impl FallthroughResolverState {
                 facts: vec![],
                 diagnostics: vec![ResolverDiagnostic {
                     code: "fallthrough-cycle".to_string(),
-                    message: format!(
-                        "Cycle detected in fallthrough resolution for {}::{:?}",
-                        key.canonical_component_id, key.node_kind
-                    ),
-                    canonical_path: Some(key.canonical_component_id.clone()),
+                    message: format!("Cycle detected in fallthrough resolution for {key:?}"),
+                    canonical_path: Some(key.canonical().to_string()),
                     span_start: None,
                 }],
             };
@@ -281,15 +297,13 @@ impl FallthroughResolverState {
 
 pub fn root_follow_key(
     canonical_component_id: &str,
-    override_fingerprint: u64,
+    overrides: FallthroughOverrideIdentity,
     generic_propagation: bool,
 ) -> FallthroughNodeKey {
-    FallthroughNodeKey {
-        canonical_component_id: canonical_component_id.to_string(),
-        node_kind: FallthroughNodeKind::ComponentRootFollow,
-        override_fingerprint,
-        behavior_flags: if generic_propagation { 1 } else { 0 },
-        branch_selector: None,
+    FallthroughNodeKey::ComponentRootFollow {
+        canonical: canonical_component_id.to_string(),
+        overrides,
+        generic_root_propagation: generic_propagation,
     }
 }
 
@@ -298,48 +312,43 @@ pub fn intrinsic_surface_key(
     cache_generation: u64,
     tag: &str,
 ) -> FallthroughNodeKey {
-    FallthroughNodeKey {
-        canonical_component_id: project_anchor.to_string(),
-        node_kind: FallthroughNodeKind::IntrinsicSurfaceLoad,
-        override_fingerprint: cache_generation,
-        behavior_flags: 0,
-        branch_selector: Some(tag.to_string()),
+    FallthroughNodeKey::IntrinsicSurfaceLoad {
+        project_anchor: project_anchor.to_string(),
+        cache_generation,
+        tag: tag.to_string(),
     }
 }
 
 pub fn child_surface_key(
     canonical_component_id: &str,
-    override_fingerprint: u64,
+    overrides: FallthroughOverrideIdentity,
 ) -> FallthroughNodeKey {
-    FallthroughNodeKey {
-        canonical_component_id: canonical_component_id.to_string(),
-        node_kind: FallthroughNodeKind::ChildComponentSurfaceFollow,
-        override_fingerprint,
-        behavior_flags: 0,
-        branch_selector: None,
+    FallthroughNodeKey::ChildComponentSurfaceFollow {
+        canonical: canonical_component_id.to_string(),
+        overrides,
     }
 }
 
-pub fn consumed_bindings_key(canonical_component_id: &str, branch_key: &str) -> FallthroughNodeKey {
-    FallthroughNodeKey {
-        canonical_component_id: canonical_component_id.to_string(),
-        node_kind: FallthroughNodeKind::ConsumedBindingEvaluation,
-        override_fingerprint: 0,
-        behavior_flags: 0,
-        branch_selector: Some(branch_key.to_string()),
+pub fn consumed_bindings_key(
+    canonical_component_id: &str,
+    branch_key: &str,
+    overrides: FallthroughOverrideIdentity,
+) -> FallthroughNodeKey {
+    FallthroughNodeKey::ConsumedBindingEvaluation {
+        canonical: canonical_component_id.to_string(),
+        branch_key: branch_key.to_string(),
+        overrides,
     }
 }
 
 pub fn branch_union_key(
     canonical_component_id: &str,
-    override_fingerprint: u64,
+    overrides: FallthroughOverrideIdentity,
 ) -> FallthroughNodeKey {
-    FallthroughNodeKey {
-        canonical_component_id: canonical_component_id.to_string(),
-        node_kind: FallthroughNodeKind::BranchUnionMerge,
-        override_fingerprint,
-        behavior_flags: 0,
-        branch_selector: None,
+    FallthroughNodeKey::BranchUnionMerge {
+        canonical: canonical_component_id.to_string(),
+        overrides,
+        generic_root_propagation: false,
     }
 }
 
@@ -388,7 +397,11 @@ mod tests {
         let state = FallthroughResolverState::new(counters.clone());
         let fact = make_fact("/src/Child.vue");
         let view = make_view(1, vec![fact.clone()]);
-        let key = root_follow_key("/src/App.vue", 0, false);
+        let key = root_follow_key(
+            "/src/App.vue",
+            FallthroughOverrideIdentity::NoOverrides,
+            false,
+        );
 
         let mut ctx = ResolveContext::new();
         state.resolve_node(key.clone(), &view, &mut ctx, |_| FallthroughNodeResult {
@@ -418,7 +431,11 @@ mod tests {
         let counters = Arc::new(ResolverCounters::new());
         let state = FallthroughResolverState::new(counters.clone());
         let view = make_view(1, vec![]);
-        let key = root_follow_key("/src/Recursive.vue", 0, false);
+        let key = root_follow_key(
+            "/src/Recursive.vue",
+            FallthroughOverrideIdentity::NoOverrides,
+            false,
+        );
 
         let mut ctx = ResolveContext::new();
         ctx.fallthrough_visiting.insert(key.clone());
@@ -447,7 +464,11 @@ mod tests {
         };
         ctx.visiting.insert(symbol_key.clone());
 
-        let ft_key = root_follow_key("/src/App.vue", 0, false);
+        let ft_key = root_follow_key(
+            "/src/App.vue",
+            FallthroughOverrideIdentity::NoOverrides,
+            false,
+        );
         ctx.fallthrough_visiting.insert(ft_key.clone());
 
         assert!(ctx.visiting.contains(&symbol_key));
@@ -459,19 +480,38 @@ mod tests {
     }
 
     #[test]
-    fn root_follow_key_uses_override_fingerprint() {
-        let key_a = root_follow_key("/src/App.vue", 0, false);
-        let key_b = root_follow_key("/src/App.vue", 42, false);
-        assert_ne!(
-            key_a, key_b,
-            "different override fingerprints should differ"
+    fn root_follow_key_uses_override_identity() {
+        use crate::resolver_core::fallthrough_override_key::{
+            FallthroughOverrideSetKey, FallthroughOverrideValueKey,
+        };
+        use crate::semantic_query::PrimitiveKind;
+        let key_a = root_follow_key(
+            "/src/App.vue",
+            FallthroughOverrideIdentity::NoOverrides,
+            false,
         );
+        let distinct = FallthroughOverrideIdentity::Exact(Arc::new(FallthroughOverrideSetKey {
+            entries: vec![(
+                Arc::from("p"),
+                FallthroughOverrideValueKey::Primitive(PrimitiveKind::String),
+            )],
+        }));
+        let key_b = root_follow_key("/src/App.vue", distinct, false);
+        assert_ne!(key_a, key_b, "different override identities should differ");
     }
 
     #[test]
     fn root_follow_key_uses_generic_propagation() {
-        let key_a = root_follow_key("/src/App.vue", 0, false);
-        let key_b = root_follow_key("/src/App.vue", 0, true);
+        let key_a = root_follow_key(
+            "/src/App.vue",
+            FallthroughOverrideIdentity::NoOverrides,
+            false,
+        );
+        let key_b = root_follow_key(
+            "/src/App.vue",
+            FallthroughOverrideIdentity::NoOverrides,
+            true,
+        );
         assert_ne!(
             key_a, key_b,
             "different generic propagation flags should differ"
@@ -496,8 +536,16 @@ mod tests {
 
     #[test]
     fn consumed_bindings_key_keyed_by_branch() {
-        let key_a = consumed_bindings_key("/src/App.vue", "0");
-        let key_b = consumed_bindings_key("/src/App.vue", "0.1");
+        let key_a = consumed_bindings_key(
+            "/src/App.vue",
+            "0",
+            FallthroughOverrideIdentity::NoOverrides,
+        );
+        let key_b = consumed_bindings_key(
+            "/src/App.vue",
+            "0.1",
+            FallthroughOverrideIdentity::NoOverrides,
+        );
         assert_ne!(key_a, key_b);
     }
 }

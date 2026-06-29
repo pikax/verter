@@ -681,12 +681,10 @@ mod tests {
 
         let sym_key =
             type_shape_node_key("/src/types.ts", "Props", TraversalLens::StructuralObject);
-        let ft_key = crate::resolver_core::FallthroughNodeKey {
-            canonical_component_id: "/src/App.vue".to_string(),
-            node_kind: crate::resolver_core::FallthroughNodeKind::ComponentRootFollow,
-            override_fingerprint: 0,
-            behavior_flags: 0,
-            branch_selector: None,
+        let ft_key = crate::resolver_core::FallthroughNodeKey::ComponentRootFollow {
+            canonical: "/src/App.vue".to_string(),
+            overrides: crate::resolver_core::FallthroughOverrideIdentity::NoOverrides,
+            generic_root_propagation: false,
         };
 
         ctx.visiting.insert(sym_key.clone());
@@ -697,15 +695,13 @@ mod tests {
         assert!(!ctx.visiting.is_empty());
         assert!(!ctx.fallthrough_visiting.is_empty());
 
-        assert!(!ctx
-            .fallthrough_visiting
-            .contains(&crate::resolver_core::FallthroughNodeKey {
-                canonical_component_id: "/src/types.ts".to_string(),
-                node_kind: crate::resolver_core::FallthroughNodeKind::ComponentRootFollow,
-                override_fingerprint: 0,
-                behavior_flags: 0,
-                branch_selector: None,
-            }));
+        assert!(!ctx.fallthrough_visiting.contains(
+            &crate::resolver_core::FallthroughNodeKey::ComponentRootFollow {
+                canonical: "/src/types.ts".to_string(),
+                overrides: crate::resolver_core::FallthroughOverrideIdentity::NoOverrides,
+                generic_root_propagation: false,
+            }
+        ));
     }
 
     // ── Layered routed-symbol node topology tests ─────────────────────

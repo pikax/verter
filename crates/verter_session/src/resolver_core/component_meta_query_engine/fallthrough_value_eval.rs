@@ -8,9 +8,7 @@
 //! free-fn readers then walk `SemanticNodeData`. No semantic decision is taken
 //! on a materialised `TypeExpr`.
 
-use std::hash::{Hash, Hasher};
-
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use verter_semantic::analysis::template::TemplatePropUsage;
 use verter_semantic::analysis::type_eval::EvalEnv;
 use verter_semantic::analysis::types::AnalyzedImport;
@@ -23,13 +21,74 @@ use crate::resolver_core::fallthrough::{
     normalize_public_spread_key, structural_substitute_typeof_refs, DynamicRootCandidate,
     FallthroughPropOverride, FallthroughPropOverrideSet, KnownSpreadKeys,
 };
+use crate::resolver_core::fallthrough_override_key::{
+    FallthroughOverrideConditionalKey, FallthroughOverrideFunctionKey, FallthroughOverrideIdentity,
+    FallthroughOverrideIndexKey, FallthroughOverrideIndexSigKey, FallthroughOverrideMappedKey,
+    FallthroughOverrideMemberKey, FallthroughOverrideParamKey, FallthroughOverrideScopeKey,
+    FallthroughOverrideSetKey, FallthroughOverrideSurfaceKey, FallthroughOverrideTupleElementKey,
+    FallthroughOverrideTypeParamDeclKey, FallthroughOverrideValueKey, OpaqueErrorKey,
+};
 use crate::resolver_core::ResolverContext;
-use crate::semantic_query::{ProjectionMode, SemanticNodeData, SemanticNodeId};
+use crate::semantic_query::{IndexKey, ProjectionMode, SemanticNodeData, SemanticNodeId};
 
-/// Depth cap for the override structural content fingerprint. Bounds the
-/// recursion over a value node's content (the interned arena is acyclic, but the
-/// cap keeps an arbitrarily deep override value fingerprint terminating + cheap).
-const OVERRIDE_FINGERPRINT_DEPTH: u32 = 64;
+/// Shared per-call prologue for the fallthrough node-DAG walkers
+/// ([`known_spread_keys_from_node_inner`],
+/// [`collect_dynamic_root_candidates_from_node_inner`], and the override-key
+/// value projector). It is the SINGLE mechanism the three walkers reuse:
+///
+/// - **Persistent memo** (`memo`): each distinct `SemanticNodeId` is computed
+///   ONCE per top-level call. A shared subtree reached through two sibling arms
+///   of a content-interned diamond is therefore O(distinct nodes), not the
+///   former O(2^depth) re-traversal.
+/// - **Shared op-budget**: ONE unit of the EXISTING request projection budget
+///   ([`crate::request_budget::RequestBudget`]) is charged per distinct node.
+///   A trip halts the walk (no second budget engine); the partial result is
+///   never warm-admitted (the fallthrough store gates admission on
+///   `RequestBudget::is_exhausted`).
+/// - **Cycle sentinel** (`active`): tracks the in-progress path so a (defensive)
+///   re-entry halts instead of recursing — it is the cycle sentinel, NOT the
+///   memo.
+enum NodeWalkStep<T> {
+    /// `node` was already computed — reuse this value.
+    Cached(T),
+    /// Cycle re-entry OR budget trip — return the walker's halt value.
+    Halt,
+    /// First visit, within budget, marked active — proceed to compute.
+    Visit,
+}
+
+/// Run the shared walk prologue for `node`: memo probe, then per-distinct-node
+/// budget charge, then cycle-sentinel insert. See [`NodeWalkStep`].
+fn enter_node<T: Clone>(
+    node: SemanticNodeId,
+    active: &mut FxHashSet<SemanticNodeId>,
+    memo: &FxHashMap<SemanticNodeId, T>,
+) -> NodeWalkStep<T> {
+    if let Some(cached) = memo.get(&node) {
+        return NodeWalkStep::Cached(cached.clone());
+    }
+    if crate::request_context::current_request_budget()
+        .is_some_and(|budget| budget.check_projection_op_count())
+    {
+        return NodeWalkStep::Halt;
+    }
+    if !active.insert(node) {
+        return NodeWalkStep::Halt;
+    }
+    NodeWalkStep::Visit
+}
+
+/// Shared walk epilogue: pop the cycle sentinel and memoize `result` for `node`.
+fn exit_node<T: Clone>(
+    node: SemanticNodeId,
+    active: &mut FxHashSet<SemanticNodeId>,
+    memo: &mut FxHashMap<SemanticNodeId, T>,
+    result: T,
+) -> T {
+    active.remove(&node);
+    memo.insert(node, result.clone());
+    result
+}
 
 impl ComponentMetaQueryEngine<'_> {
     /// Evaluate a fallthrough value expression to its resolved value NODE,
@@ -190,26 +249,58 @@ impl ComponentMetaQueryEngine<'_> {
         )
     }
 
-    /// Content-derived structural fingerprint over an override set's value
-    /// NODES. Hashes each override's name plus a bounded recursive content hash
-    /// of its value node's `SemanticNodeData` shape — NOT the raw arena
-    /// `SemanticNodeId` ordinal — so the `override_fingerprint` cache-key
-    /// dimension reuses a warm fallthrough surface only for equivalent overrides.
-    pub(crate) fn fallthrough_override_fingerprint(
+    /// Compute the EXACT, content-free override-set cache identity for
+    /// `entries` (codex ruling C). Each override value NODE is projected to a
+    /// full structural [`FallthroughOverrideValueKey`] — NOT a lossy digest —
+    /// through the shared persistent-memo + op-budget node walker
+    /// ([`project_override_value_key_inner`]), so two genuinely-different
+    /// override sets never alias and a content edit reaching an override value
+    /// keys distinctly.
+    ///
+    /// - Empty set → [`FallthroughOverrideIdentity::NoOverrides`].
+    /// - Any override value that projects to an unrepresentable node
+    ///   (`VueMacroElements`, missing node, a cycle anomaly, or an op-budget
+    ///   trip) → [`FallthroughOverrideIdentity::Uncacheable`]: the request skips
+    ///   override-bearing fallthrough cache admission + singleflight.
+    /// - Otherwise → [`FallthroughOverrideIdentity::Exact`] with entries SORTED
+    ///   by prop name and made UNIQUE by the runtime-effective (first-match)
+    ///   winner, mirroring [`FallthroughPropOverrideSet::lookup`].
+    pub(crate) fn fallthrough_override_identity(
         &self,
         entries: &[FallthroughPropOverride],
-    ) -> u64 {
-        let mut hasher = rustc_hash::FxHasher::default();
-        for entry in entries {
-            entry.name.hash(&mut hasher);
-            node_structural_content_hash(
-                self.ctx,
-                entry.node,
-                OVERRIDE_FINGERPRINT_DEPTH,
-                &mut hasher,
-            );
+    ) -> FallthroughOverrideIdentity {
+        if entries.is_empty() {
+            return FallthroughOverrideIdentity::NoOverrides;
         }
-        hasher.finish()
+        let dispatch = ProjectSemanticDispatch::new(self.ctx);
+        let mut memo: FxHashMap<SemanticNodeId, Option<FallthroughOverrideValueKey>> =
+            FxHashMap::default();
+        let mut active: FxHashSet<SemanticNodeId> = FxHashSet::default();
+        let mut seen_names: FxHashSet<&str> = FxHashSet::default();
+        let mut keyed: Vec<(std::sync::Arc<str>, FallthroughOverrideValueKey)> = Vec::new();
+        for entry in entries {
+            // First-match winner per prop name — mirrors
+            // `FallthroughPropOverrideSet::lookup` (order-sensitive).
+            if !seen_names.insert(entry.name.as_str()) {
+                continue;
+            }
+            let Some(value_key) = project_override_value_key_inner(
+                self.ctx,
+                &dispatch,
+                entry.node,
+                &mut active,
+                &mut memo,
+            ) else {
+                return FallthroughOverrideIdentity::Uncacheable;
+            };
+            keyed.push((std::sync::Arc::from(entry.name.as_str()), value_key));
+        }
+        // SORTED by (now-unique) prop name, so the same effective overrides in
+        // any source order key identically.
+        keyed.sort_by(|left, right| left.0.cmp(&right.0));
+        FallthroughOverrideIdentity::Exact(std::sync::Arc::new(FallthroughOverrideSetKey {
+            entries: keyed,
+        }))
     }
 }
 
@@ -221,16 +312,24 @@ pub(crate) fn known_spread_keys_from_node(
     ctx: &dyn ResolverContext,
     node: SemanticNodeId,
 ) -> Option<KnownSpreadKeys> {
-    known_spread_keys_from_node_inner(ctx, node, &mut FxHashSet::default())
+    known_spread_keys_from_node_inner(
+        ctx,
+        node,
+        &mut FxHashSet::default(),
+        &mut FxHashMap::default(),
+    )
 }
 
 fn known_spread_keys_from_node_inner(
     ctx: &dyn ResolverContext,
     node: SemanticNodeId,
     active: &mut FxHashSet<SemanticNodeId>,
+    memo: &mut FxHashMap<SemanticNodeId, Option<KnownSpreadKeys>>,
 ) -> Option<KnownSpreadKeys> {
-    if !active.insert(node) {
-        return None;
+    match enter_node(node, active, memo) {
+        NodeWalkStep::Cached(cached) => return cached,
+        NodeWalkStep::Halt => return None,
+        NodeWalkStep::Visit => {}
     }
     let result = match node_data_for(ctx, node) {
         None => None,
@@ -238,7 +337,7 @@ fn known_spread_keys_from_node_inner(
             // The `Alias` identity hop is the node equivalent of the
             // `TypeExpr::Parenthesized` wrap.
             SemanticNodeData::Alias(inner) => {
-                known_spread_keys_from_node_inner(ctx, *inner, active)
+                known_spread_keys_from_node_inner(ctx, *inner, active, memo)
             }
             SemanticNodeData::Object(surface) => Some(known_spread_keys_from_surface(surface)),
             SemanticNodeData::Intersection(arms) => {
@@ -248,7 +347,7 @@ fn known_spread_keys_from_node_inner(
                 };
                 let mut saw_any = false;
                 for part in arms.iter() {
-                    let Some(summary) = known_spread_keys_from_node_inner(ctx, *part, active)
+                    let Some(summary) = known_spread_keys_from_node_inner(ctx, *part, active, memo)
                     else {
                         result.exact = false;
                         continue;
@@ -262,40 +361,41 @@ fn known_spread_keys_from_node_inner(
             }
             SemanticNodeData::Union(arms) => {
                 let mut iter = arms.iter();
-                let Some(first_node) = iter.next() else {
-                    active.remove(&node);
-                    return None;
-                };
-                let Some(first) = known_spread_keys_from_node_inner(ctx, *first_node, active)
-                else {
-                    active.remove(&node);
-                    return None;
-                };
-                let mut result = first.clone();
-                let mut exact_same_keys = first.exact;
-                let mut early_inexact = false;
-                for branch in iter {
-                    let Some(summary) = known_spread_keys_from_node_inner(ctx, *branch, active)
-                    else {
-                        result.exact = false;
-                        early_inexact = true;
-                        break;
-                    };
-                    exact_same_keys &= summary.exact
-                        && summary.attrs == result.attrs
-                        && summary.listeners == result.listeners;
-                    result = intersect_known_spread_keys(result, summary);
+                match iter.next() {
+                    None => None,
+                    Some(first_node) => {
+                        match known_spread_keys_from_node_inner(ctx, *first_node, active, memo) {
+                            None => None,
+                            Some(first) => {
+                                let mut result = first.clone();
+                                let mut exact_same_keys = first.exact;
+                                let mut early_inexact = false;
+                                for branch in iter {
+                                    let Some(summary) = known_spread_keys_from_node_inner(
+                                        ctx, *branch, active, memo,
+                                    ) else {
+                                        result.exact = false;
+                                        early_inexact = true;
+                                        break;
+                                    };
+                                    exact_same_keys &= summary.exact
+                                        && summary.attrs == result.attrs
+                                        && summary.listeners == result.listeners;
+                                    result = intersect_known_spread_keys(result, summary);
+                                }
+                                if !early_inexact {
+                                    result.exact = exact_same_keys;
+                                }
+                                Some(result)
+                            }
+                        }
+                    }
                 }
-                if !early_inexact {
-                    result.exact = exact_same_keys;
-                }
-                Some(result)
             }
             _ => None,
         },
     };
-    active.remove(&node);
-    result
+    exit_node(node, active, memo, result)
 }
 
 /// Node-domain mirror of `known_spread_keys_from_object`: classify each surface
@@ -333,7 +433,13 @@ pub(crate) fn collect_dynamic_root_candidates_from_node(
     node: SemanticNodeId,
     imports: &[AnalyzedImport],
 ) -> Vec<DynamicRootCandidate> {
-    collect_dynamic_root_candidates_from_node_inner(ctx, node, imports, &mut FxHashSet::default())
+    collect_dynamic_root_candidates_from_node_inner(
+        ctx,
+        node,
+        imports,
+        &mut FxHashSet::default(),
+        &mut FxHashMap::default(),
+    )
 }
 
 fn collect_dynamic_root_candidates_from_node_inner(
@@ -341,9 +447,12 @@ fn collect_dynamic_root_candidates_from_node_inner(
     node: SemanticNodeId,
     imports: &[AnalyzedImport],
     active: &mut FxHashSet<SemanticNodeId>,
+    memo: &mut FxHashMap<SemanticNodeId, Vec<DynamicRootCandidate>>,
 ) -> Vec<DynamicRootCandidate> {
-    if !active.insert(node) {
-        return Vec::new();
+    match enter_node(node, active, memo) {
+        NodeWalkStep::Cached(cached) => return cached,
+        NodeWalkStep::Halt => return Vec::new(),
+        NodeWalkStep::Visit => {}
     }
     let out = match node_data_for(ctx, node) {
         None => Vec::new(),
@@ -354,11 +463,13 @@ fn collect_dynamic_root_candidates_from_node_inner(
             SemanticNodeData::Union(arms) => arms
                 .iter()
                 .flat_map(|arm| {
-                    collect_dynamic_root_candidates_from_node_inner(ctx, *arm, imports, active)
+                    collect_dynamic_root_candidates_from_node_inner(
+                        ctx, *arm, imports, active, memo,
+                    )
                 })
                 .collect(),
             SemanticNodeData::Alias(inner) => {
-                collect_dynamic_root_candidates_from_node_inner(ctx, *inner, imports, active)
+                collect_dynamic_root_candidates_from_node_inner(ctx, *inner, imports, active, memo)
             }
             // A single-segment `typeof <name>` carrier maps to a component
             // import binding — the node equivalent of the `TypeOf(value_ref)`
@@ -376,103 +487,519 @@ fn collect_dynamic_root_candidates_from_node_inner(
             _ => Vec::new(),
         },
     };
-    active.remove(&node);
-    out
+    exit_node(node, active, memo, out)
 }
 
-/// Bounded recursive CONTENT hash of a value node's `SemanticNodeData` shape.
+/// The override-key value memo type — a per-call `SemanticNodeId` → projected
+/// value key (or `None` = uncacheable) memo.
+type OverrideKeyMemo = FxHashMap<SemanticNodeId, Option<FallthroughOverrideValueKey>>;
+
+/// EXHAUSTIVE projection of a value node onto its content-free
+/// [`FallthroughOverrideValueKey`]. `None` = UNCACHEABLE — the node is
+/// unrepresentable for a durable cache key (`VueMacroElements`), is missing,
+/// re-enters a cycle, or tripped the shared op-budget.
 ///
-/// Hashes the variant discriminant (so distinct kinds never collide) plus the
-/// content-bearing fields, recursing into child node ids for structural shapes
-/// and reading carrier HEADS for references — never the raw arena
-/// `SemanticNodeId` ordinal (which is non-durable). At the depth cap a node
-/// contributes its discriminant only, keeping the hash bounded + terminating.
-fn node_structural_content_hash<H: Hasher>(
+/// The walk reuses the shared persistent-memo + op-budget substrate
+/// (`enter_node`/`exit_node`), so a shared override-value subtree is projected
+/// once and an over-budget walk fails closed.
+///
+/// The inner `match` over [`SemanticNodeData`] has NO `_` wildcard: a new node
+/// variant fails to compile here until it is classified, so a future field can
+/// never be silently dropped from the override identity (the
+/// `IndexedAccess.index` / signature / carrier-arg omission that caused the
+/// cache-poison).
+fn project_override_value_key_inner(
     ctx: &dyn ResolverContext,
+    dispatch: &ProjectSemanticDispatch,
     node: SemanticNodeId,
-    depth: u32,
-    hasher: &mut H,
-) {
-    let Some(data) = node_data_for(ctx, node) else {
-        0u8.hash(hasher);
-        return;
-    };
-    std::mem::discriminant(data.as_ref()).hash(hasher);
-    if depth == 0 {
-        return;
+    active: &mut FxHashSet<SemanticNodeId>,
+    memo: &mut OverrideKeyMemo,
+) -> Option<FallthroughOverrideValueKey> {
+    match enter_node(node, active, memo) {
+        NodeWalkStep::Cached(cached) => return cached,
+        NodeWalkStep::Halt => return None,
+        NodeWalkStep::Visit => {}
     }
-    let next = depth - 1;
-    match data.as_ref() {
-        SemanticNodeData::Alias(inner) => node_structural_content_hash(ctx, *inner, next, hasher),
-        SemanticNodeData::Object(surface) => {
-            (surface.members.len() as u64).hash(hasher);
-            for member in surface.members.iter() {
-                member.name.hash(hasher);
-                member.optional.hash(hasher);
-                member.readonly.hash(hasher);
-                member.is_method.hash(hasher);
-                node_structural_content_hash(ctx, member.value, next, hasher);
-            }
-            surface.has_index_signature.hash(hasher);
-            (surface.index_signatures.len() as u64).hash(hasher);
-            (surface.call_signatures.len() as u64).hash(hasher);
-            (surface.construct_signatures.len() as u64).hash(hasher);
+    let data = match node_data_for(ctx, node) {
+        Some(data) => data,
+        None => return exit_node(node, active, memo, None),
+    };
+    let result = match data.as_ref() {
+        // Single-child recursive shells — direct self-calls (the
+        // self-recursion the bounded-recursion guard allowlists).
+        SemanticNodeData::Alias(inner) => {
+            project_override_value_key_inner(ctx, dispatch, *inner, active, memo)
+                .map(|child| FallthroughOverrideValueKey::Alias(Box::new(child)))
         }
-        SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
-            (arms.len() as u64).hash(hasher);
-            for arm in arms.iter() {
-                node_structural_content_hash(ctx, *arm, next, hasher);
-            }
+        SemanticNodeData::KeyOf { base } => {
+            project_override_value_key_inner(ctx, dispatch, *base, active, memo).map(|base| {
+                FallthroughOverrideValueKey::KeyOf {
+                    base: Box::new(base),
+                }
+            })
         }
-        SemanticNodeData::Primitive(kind) => kind.hash(hasher),
-        SemanticNodeData::Literal(value) => value.hash(hasher),
         SemanticNodeData::Array { element, readonly } => {
-            readonly.hash(hasher);
-            node_structural_content_hash(ctx, *element, next, hasher);
+            project_override_value_key_inner(ctx, dispatch, *element, active, memo).map(|element| {
+                FallthroughOverrideValueKey::Array {
+                    element: Box::new(element),
+                    readonly: *readonly,
+                }
+            })
+        }
+        SemanticNodeData::ConstructorType { signature } => project_override_value_key_inner(
+            ctx, dispatch, *signature, active, memo,
+        )
+        .map(|signature| FallthroughOverrideValueKey::ConstructorType {
+            signature: Box::new(signature),
+        }),
+        // Multi-child structural shells.
+        SemanticNodeData::Union(arms) => {
+            project_override_children(ctx, dispatch, arms, active, memo)
+                .map(FallthroughOverrideValueKey::Union)
+        }
+        SemanticNodeData::Intersection(arms) => {
+            project_override_children(ctx, dispatch, arms, active, memo)
+                .map(FallthroughOverrideValueKey::Intersection)
+        }
+        SemanticNodeData::MergedDecl { contributors } => {
+            project_override_children(ctx, dispatch, contributors, active, memo)
+                .map(|contributors| FallthroughOverrideValueKey::MergedDecl { contributors })
+        }
+        SemanticNodeData::Object(surface) => {
+            project_override_surface(ctx, dispatch, surface, active, memo)
+                .map(|surface| FallthroughOverrideValueKey::Object(Box::new(surface)))
         }
         SemanticNodeData::Tuple { elements, readonly } => {
-            readonly.hash(hasher);
-            (elements.len() as u64).hash(hasher);
-            for element in elements.iter() {
-                element.label.hash(hasher);
-                element.optional.hash(hasher);
-                element.rest.hash(hasher);
-                node_structural_content_hash(ctx, element.value, next, hasher);
-            }
+            project_override_tuple(ctx, dispatch, elements, active, memo).map(|elements| {
+                FallthroughOverrideValueKey::Tuple {
+                    elements,
+                    readonly: *readonly,
+                }
+            })
         }
-        SemanticNodeData::KeyOf { base } => node_structural_content_hash(ctx, *base, next, hasher),
-        SemanticNodeData::IndexedAccess { object, .. } => {
-            node_structural_content_hash(ctx, *object, next, hasher);
+        SemanticNodeData::TemplateLiteral {
+            quasis,
+            expressions,
+        } => {
+            project_override_children(ctx, dispatch, expressions, active, memo).map(|expressions| {
+                FallthroughOverrideValueKey::TemplateLiteral {
+                    quasis: quasis.iter().cloned().collect(),
+                    expressions,
+                }
+            })
+        }
+        SemanticNodeData::IndexedAccess { object, index } => {
+            project_override_indexed_access(ctx, dispatch, *object, index, active, memo)
+        }
+        SemanticNodeData::Mapped { source, mapper } => {
+            project_override_mapped(ctx, dispatch, *source, mapper, active, memo)
+        }
+        SemanticNodeData::Conditional {
+            check,
+            extends,
+            true_branch_ref,
+            false_branch_ref,
+            distributive,
+        } => project_override_conditional(
+            ctx,
+            dispatch,
+            *check,
+            *extends,
+            *true_branch_ref,
+            *false_branch_ref,
+            *distributive,
+            active,
+            memo,
+        ),
+        SemanticNodeData::Function {
+            params,
+            return_type,
+            type_parameters,
+            ..
+        } => project_override_function(
+            ctx,
+            dispatch,
+            params,
+            *return_type,
+            type_parameters,
+            active,
+            memo,
+        ),
+        SemanticNodeData::TypeParam {
+            decl,
+            param_index,
+            constraint,
+            default,
+            ..
+        } => {
+            let constraint = match constraint {
+                Some(node) => Some(Box::new(project_override_value_key_inner(
+                    ctx, dispatch, *node, active, memo,
+                )?)),
+                None => None,
+            };
+            let default = match default {
+                Some(node) => Some(Box::new(project_override_value_key_inner(
+                    ctx, dispatch, *node, active, memo,
+                )?)),
+                None => None,
+            };
+            Some(FallthroughOverrideValueKey::TypeParam {
+                decl: dispatch.type_slot_for(
+                    std::sync::Arc::clone(&decl.canonical_id),
+                    std::sync::Arc::clone(&decl.decl_name),
+                ),
+                param_index: *param_index,
+                constraint,
+                default,
+            })
+        }
+        SemanticNodeData::DeclRef { identity } => Some(FallthroughOverrideValueKey::DeclRef {
+            slot: dispatch.type_slot_for(
+                std::sync::Arc::clone(&identity.canonical_id),
+                std::sync::Arc::clone(&identity.decl_name),
+            ),
+        }),
+        SemanticNodeData::InstantiationRef { base, args } => {
+            project_override_children(ctx, dispatch, args, active, memo).map(|args| {
+                FallthroughOverrideValueKey::InstantiationRef {
+                    base: dispatch.type_slot_for(
+                        std::sync::Arc::clone(&base.canonical_id),
+                        std::sync::Arc::clone(&base.decl_name),
+                    ),
+                    args,
+                }
+            })
         }
         SemanticNodeData::TypeOf(_) => {
-            if let Some((value_root, path)) = data.typeof_head() {
-                value_root.name.hash(hasher);
-                for segment in path.iter() {
-                    segment.hash(hasher);
-                }
-            }
-            for arg in data.carrier_type_args() {
-                node_structural_content_hash(ctx, *arg, next, hasher);
-            }
+            project_override_typeof(ctx, dispatch, data.as_ref(), active, memo)
         }
         SemanticNodeData::BareRef(_) => {
-            if let Some((name, _scope)) = data.bare_ref_head() {
-                name.hash(hasher);
-            }
-            for arg in data.carrier_type_args() {
-                node_structural_content_hash(ctx, *arg, next, hasher);
-            }
+            project_override_bare_ref(ctx, dispatch, data.as_ref(), active, memo)
         }
-        // Remaining carriers / shells: the discriminant (hashed above)
-        // distinguishes the kind; fold any carried type-args for extra
-        // discrimination. Realistic fallthrough override values are literals /
-        // objects / unions / `typeof` refs (covered above); the residual arms
-        // keep the fingerprint stable + content-derived without an exhaustive
-        // per-variant walk.
-        _ => {
-            for arg in data.carrier_type_args() {
-                node_structural_content_hash(ctx, *arg, next, hasher);
-            }
+        SemanticNodeData::ImportType(_) => {
+            project_override_import_type(ctx, dispatch, data.as_ref(), active, memo)
         }
-    }
+        // Leaves — no node children.
+        SemanticNodeData::Primitive(kind) => Some(FallthroughOverrideValueKey::Primitive(*kind)),
+        SemanticNodeData::Literal(value) => {
+            Some(FallthroughOverrideValueKey::Literal(value.clone()))
+        }
+        SemanticNodeData::Opaque(err) => Some(FallthroughOverrideValueKey::Opaque(
+            OpaqueErrorKey::from_query_error(err),
+        )),
+        SemanticNodeData::Infer { name } => Some(FallthroughOverrideValueKey::Infer {
+            name: std::sync::Arc::clone(name),
+        }),
+        SemanticNodeData::RawFallback { raw } => Some(FallthroughOverrideValueKey::RawFallback {
+            raw: std::sync::Arc::clone(raw),
+        }),
+        SemanticNodeData::SyntheticBinding { id, .. } => {
+            Some(FallthroughOverrideValueKey::SyntheticBinding { id: id.clone() })
+        }
+        // Unrepresentable as a durable, content-free key → UNCACHEABLE.
+        SemanticNodeData::VueMacroElements(_) => None,
+    };
+    exit_node(node, active, memo, result)
 }
+
+/// Project a slice of child node ids, propagating uncacheable (`None`) if any
+/// child is unrepresentable.
+fn project_override_children(
+    ctx: &dyn ResolverContext,
+    dispatch: &ProjectSemanticDispatch,
+    nodes: &[SemanticNodeId],
+    active: &mut FxHashSet<SemanticNodeId>,
+    memo: &mut OverrideKeyMemo,
+) -> Option<Vec<FallthroughOverrideValueKey>> {
+    let mut out = Vec::with_capacity(nodes.len());
+    for &child in nodes {
+        out.push(project_override_value_key_inner(
+            ctx, dispatch, child, active, memo,
+        )?);
+    }
+    Some(out)
+}
+
+fn project_override_surface(
+    ctx: &dyn ResolverContext,
+    dispatch: &ProjectSemanticDispatch,
+    surface: &crate::semantic_query::SurfaceView,
+    active: &mut FxHashSet<SemanticNodeId>,
+    memo: &mut OverrideKeyMemo,
+) -> Option<FallthroughOverrideSurfaceKey> {
+    let mut members = Vec::with_capacity(surface.members.len());
+    for member in surface.members.iter() {
+        members.push(FallthroughOverrideMemberKey {
+            name: std::sync::Arc::clone(&member.name),
+            value: project_override_value_key_inner(ctx, dispatch, member.value, active, memo)?,
+            optional: member.optional,
+            readonly: member.readonly,
+            is_method: member.is_method,
+            visibility: member.visibility,
+            merge_role: member.merge_role,
+        });
+    }
+    let mut index_signatures = Vec::with_capacity(surface.index_signatures.len());
+    for sig in surface.index_signatures.iter() {
+        index_signatures.push(FallthroughOverrideIndexSigKey {
+            key_type: project_override_value_key_inner(ctx, dispatch, sig.key_type, active, memo)?,
+            value_type: project_override_value_key_inner(
+                ctx,
+                dispatch,
+                sig.value_type,
+                active,
+                memo,
+            )?,
+            readonly: sig.readonly,
+        });
+    }
+    let call_signatures =
+        project_override_children(ctx, dispatch, &surface.call_signatures, active, memo)?;
+    let construct_signatures =
+        project_override_children(ctx, dispatch, &surface.construct_signatures, active, memo)?;
+    let keyspace = match surface.keyspace {
+        Some(node) => Some(Box::new(project_override_value_key_inner(
+            ctx, dispatch, node, active, memo,
+        )?)),
+        None => None,
+    };
+    Some(FallthroughOverrideSurfaceKey {
+        members,
+        index_signatures,
+        call_signatures,
+        construct_signatures,
+        keyspace,
+        has_index_signature: surface.has_index_signature,
+    })
+}
+
+fn project_override_tuple(
+    ctx: &dyn ResolverContext,
+    dispatch: &ProjectSemanticDispatch,
+    elements: &[crate::semantic_query::TupleElement],
+    active: &mut FxHashSet<SemanticNodeId>,
+    memo: &mut OverrideKeyMemo,
+) -> Option<Vec<FallthroughOverrideTupleElementKey>> {
+    let mut out = Vec::with_capacity(elements.len());
+    for element in elements {
+        out.push(FallthroughOverrideTupleElementKey {
+            label: element.label.clone(),
+            value: project_override_value_key_inner(ctx, dispatch, element.value, active, memo)?,
+            optional: element.optional,
+            rest: element.rest,
+        });
+    }
+    Some(out)
+}
+
+fn project_override_indexed_access(
+    ctx: &dyn ResolverContext,
+    dispatch: &ProjectSemanticDispatch,
+    object: SemanticNodeId,
+    index: &IndexKey,
+    active: &mut FxHashSet<SemanticNodeId>,
+    memo: &mut OverrideKeyMemo,
+) -> Option<FallthroughOverrideValueKey> {
+    let object = Box::new(project_override_value_key_inner(
+        ctx, dispatch, object, active, memo,
+    )?);
+    let index = match index {
+        IndexKey::String(name) => FallthroughOverrideIndexKey::String(std::sync::Arc::clone(name)),
+        IndexKey::Number(value) => FallthroughOverrideIndexKey::Number(*value),
+        IndexKey::TypeNode(node) => FallthroughOverrideIndexKey::TypeNode(Box::new(
+            project_override_value_key_inner(ctx, dispatch, *node, active, memo)?,
+        )),
+    };
+    Some(FallthroughOverrideValueKey::IndexedAccess { object, index })
+}
+
+fn project_override_mapped(
+    ctx: &dyn ResolverContext,
+    dispatch: &ProjectSemanticDispatch,
+    source: SemanticNodeId,
+    mapper: &crate::semantic_query::MapperKey,
+    active: &mut FxHashSet<SemanticNodeId>,
+    memo: &mut OverrideKeyMemo,
+) -> Option<FallthroughOverrideValueKey> {
+    let name_remap = match mapper.name_remap {
+        Some(node) => Some(project_override_value_key_inner(
+            ctx, dispatch, node, active, memo,
+        )?),
+        None => None,
+    };
+    Some(FallthroughOverrideValueKey::Mapped(Box::new(
+        FallthroughOverrideMappedKey {
+            source: project_override_value_key_inner(ctx, dispatch, source, active, memo)?,
+            parameter_node: project_override_value_key_inner(
+                ctx,
+                dispatch,
+                mapper.parameter_node,
+                active,
+                memo,
+            )?,
+            key_space: project_override_value_key_inner(
+                ctx,
+                dispatch,
+                mapper.key_space,
+                active,
+                memo,
+            )?,
+            value_expr: project_override_value_key_inner(
+                ctx,
+                dispatch,
+                mapper.value_expr,
+                active,
+                memo,
+            )?,
+            optionality: mapper.optionality,
+            readonly: mapper.readonly,
+            name_remap,
+            kind: mapper.kind,
+        },
+    )))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn project_override_conditional(
+    ctx: &dyn ResolverContext,
+    dispatch: &ProjectSemanticDispatch,
+    check: SemanticNodeId,
+    extends: SemanticNodeId,
+    true_branch: SemanticNodeId,
+    false_branch: SemanticNodeId,
+    distributive: bool,
+    active: &mut FxHashSet<SemanticNodeId>,
+    memo: &mut OverrideKeyMemo,
+) -> Option<FallthroughOverrideValueKey> {
+    Some(FallthroughOverrideValueKey::Conditional(Box::new(
+        FallthroughOverrideConditionalKey {
+            check: project_override_value_key_inner(ctx, dispatch, check, active, memo)?,
+            extends: project_override_value_key_inner(ctx, dispatch, extends, active, memo)?,
+            true_branch: project_override_value_key_inner(
+                ctx,
+                dispatch,
+                true_branch,
+                active,
+                memo,
+            )?,
+            false_branch: project_override_value_key_inner(
+                ctx,
+                dispatch,
+                false_branch,
+                active,
+                memo,
+            )?,
+            distributive,
+        },
+    )))
+}
+
+fn project_override_function(
+    ctx: &dyn ResolverContext,
+    dispatch: &ProjectSemanticDispatch,
+    params: &[crate::semantic_query::FunctionParam],
+    return_type: SemanticNodeId,
+    type_parameters: &[crate::semantic_query::TypeParamDecl],
+    active: &mut FxHashSet<SemanticNodeId>,
+    memo: &mut OverrideKeyMemo,
+) -> Option<FallthroughOverrideValueKey> {
+    let mut projected_params = Vec::with_capacity(params.len());
+    for param in params {
+        projected_params.push(FallthroughOverrideParamKey {
+            name: param.name.clone(),
+            ty: project_override_value_key_inner(ctx, dispatch, param.ty, active, memo)?,
+            optional: param.optional,
+            rest: param.rest,
+        });
+    }
+    let mut projected_type_params = Vec::with_capacity(type_parameters.len());
+    for tp in type_parameters {
+        let constraint = match tp.constraint {
+            Some(node) => Some(project_override_value_key_inner(
+                ctx, dispatch, node, active, memo,
+            )?),
+            None => None,
+        };
+        let default = match tp.default {
+            Some(node) => Some(project_override_value_key_inner(
+                ctx, dispatch, node, active, memo,
+            )?),
+            None => None,
+        };
+        projected_type_params.push(FallthroughOverrideTypeParamDeclKey {
+            name: std::sync::Arc::clone(&tp.name),
+            constraint,
+            default,
+        });
+    }
+    Some(FallthroughOverrideValueKey::Function(Box::new(
+        FallthroughOverrideFunctionKey {
+            params: projected_params,
+            return_type: project_override_value_key_inner(
+                ctx,
+                dispatch,
+                return_type,
+                active,
+                memo,
+            )?,
+            type_parameters: projected_type_params,
+        },
+    )))
+}
+
+fn project_override_typeof(
+    ctx: &dyn ResolverContext,
+    dispatch: &ProjectSemanticDispatch,
+    data: &SemanticNodeData,
+    active: &mut FxHashSet<SemanticNodeId>,
+    memo: &mut OverrideKeyMemo,
+) -> Option<FallthroughOverrideValueKey> {
+    let (value_root, path) = data.typeof_head()?;
+    let type_args =
+        project_override_children(ctx, dispatch, data.carrier_type_args(), active, memo)?;
+    Some(FallthroughOverrideValueKey::TypeOf {
+        value_root: dispatch.value_root_slot_for(value_root.clone()),
+        path: path.iter().cloned().collect(),
+        type_args,
+    })
+}
+
+fn project_override_bare_ref(
+    ctx: &dyn ResolverContext,
+    dispatch: &ProjectSemanticDispatch,
+    data: &SemanticNodeData,
+    active: &mut FxHashSet<SemanticNodeId>,
+    memo: &mut OverrideKeyMemo,
+) -> Option<FallthroughOverrideValueKey> {
+    let (name, scope) = data.bare_ref_head()?;
+    let type_args =
+        project_override_children(ctx, dispatch, data.carrier_type_args(), active, memo)?;
+    Some(FallthroughOverrideValueKey::BareRef {
+        name: std::sync::Arc::clone(name),
+        scope: FallthroughOverrideScopeKey::from_node_scope(scope),
+        type_args,
+    })
+}
+
+fn project_override_import_type(
+    ctx: &dyn ResolverContext,
+    dispatch: &ProjectSemanticDispatch,
+    data: &SemanticNodeData,
+    active: &mut FxHashSet<SemanticNodeId>,
+    memo: &mut OverrideKeyMemo,
+) -> Option<FallthroughOverrideValueKey> {
+    let (specifier, qualifier, typeof_query) = data.import_type_head()?;
+    let type_args =
+        project_override_children(ctx, dispatch, data.carrier_type_args(), active, memo)?;
+    Some(FallthroughOverrideValueKey::ImportType {
+        specifier: std::sync::Arc::clone(specifier),
+        qualifier: qualifier.iter().cloned().collect(),
+        typeof_query,
+        type_args,
+    })
+}
+
+#[cfg(test)]
+#[path = "fallthrough_value_eval_recursion_tests.rs"]
+mod recursion_tests;

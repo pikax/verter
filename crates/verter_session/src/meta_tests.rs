@@ -357,7 +357,7 @@ fn clear_runtime_top_level_fallthrough_node(project: &MetaProject, canonical: &s
 fn clear_runtime_root_follow_node(project: &MetaProject, canonical: &str) {
     let key = crate::resolver_core::fallthrough_resolver::root_follow_key(
         canonical,
-        0,
+        crate::resolver_core::FallthroughOverrideIdentity::NoOverrides,
         project.host().config.generic_root_propagation,
     );
     project

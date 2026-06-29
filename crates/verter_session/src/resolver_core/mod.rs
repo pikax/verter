@@ -17,6 +17,7 @@ mod external_macro_types;
 mod external_type_body;
 pub mod external_type_frontier;
 mod fallthrough;
+pub mod fallthrough_override_key;
 mod fallthrough_request;
 pub mod fallthrough_resolver;
 pub mod hot_prepared;
@@ -126,6 +127,9 @@ pub use fallthrough::{
     structural_substitute_typeof_refs, DynamicRootCandidate, FallthroughComputeHost,
     FallthroughPropOverride, FallthroughPropOverrideSet, FallthroughResolutionView,
     FallthroughResolverHost, KnownSpreadKeys, ResolvedConsumedBindings, ResolvedFallthroughSurface,
+};
+pub use fallthrough_override_key::{
+    FallthroughOverrideIdentity, FallthroughOverrideSetKey, FallthroughOverrideValueKey,
 };
 pub use fallthrough_request::{run_fallthrough_request, FallthroughRequestHost};
 pub use prepared_decl::{
@@ -598,15 +602,6 @@ pub enum ResolutionNodeKind {
     Assemble,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum FallthroughNodeKind {
-    ComponentRootFollow,
-    IntrinsicSurfaceLoad,
-    ChildComponentSurfaceFollow,
-    ConsumedBindingEvaluation,
-    BranchUnionMerge,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ResolutionNodeKey {
     pub symbol_id: String,
@@ -623,13 +618,71 @@ pub struct ResolutionNodeKey {
     pub view_fingerprint: u64,
 }
 
+/// Typed fallthrough-node cache key. Each variant is one node kind, so the
+/// kind-discriminating fields are not field-overloaded: the override-bearing
+/// variants carry a typed [`FallthroughOverrideIdentity`] (not a lossy `u64`),
+/// and the intrinsic-surface variant carries its own
+/// `(project_anchor, cache_generation, tag)` axes instead of overloading the
+/// override field to also smuggle the intrinsic cache generation.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct FallthroughNodeKey {
-    pub canonical_component_id: String,
-    pub node_kind: FallthroughNodeKind,
-    pub override_fingerprint: u64,
-    pub behavior_flags: u32,
-    pub branch_selector: Option<String>,
+pub enum FallthroughNodeKey {
+    ComponentRootFollow {
+        canonical: String,
+        overrides: FallthroughOverrideIdentity,
+        generic_root_propagation: bool,
+    },
+    BranchUnionMerge {
+        canonical: String,
+        overrides: FallthroughOverrideIdentity,
+        generic_root_propagation: bool,
+    },
+    ChildComponentSurfaceFollow {
+        canonical: String,
+        overrides: FallthroughOverrideIdentity,
+    },
+    ConsumedBindingEvaluation {
+        canonical: String,
+        branch_key: String,
+        overrides: FallthroughOverrideIdentity,
+    },
+    IntrinsicSurfaceLoad {
+        project_anchor: String,
+        cache_generation: u64,
+        tag: String,
+    },
+}
+
+impl FallthroughNodeKey {
+    /// The owning canonical / project-anchor id this key is rooted in.
+    #[must_use]
+    pub fn canonical(&self) -> &str {
+        match self {
+            Self::ComponentRootFollow { canonical, .. }
+            | Self::BranchUnionMerge { canonical, .. }
+            | Self::ChildComponentSurfaceFollow { canonical, .. }
+            | Self::ConsumedBindingEvaluation { canonical, .. } => canonical,
+            Self::IntrinsicSurfaceLoad { project_anchor, .. } => project_anchor,
+        }
+    }
+
+    /// `false` for an override-bearing key whose override identity could not be
+    /// projected to an exact canonical key
+    /// ([`FallthroughOverrideIdentity::Uncacheable`]). Such a key must NOT be
+    /// stored, looked up, or used as a singleflight lane identity — a unit
+    /// `Uncacheable` value would alias two genuinely-different override sets.
+    /// No-override keys and the intrinsic-surface key are always cacheable.
+    #[must_use]
+    pub fn is_cacheable(&self) -> bool {
+        match self {
+            Self::ComponentRootFollow { overrides, .. }
+            | Self::BranchUnionMerge { overrides, .. }
+            | Self::ChildComponentSurfaceFollow { overrides, .. }
+            | Self::ConsumedBindingEvaluation { overrides, .. } => {
+                !matches!(overrides, FallthroughOverrideIdentity::Uncacheable)
+            }
+            Self::IntrinsicSurfaceLoad { .. } => true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

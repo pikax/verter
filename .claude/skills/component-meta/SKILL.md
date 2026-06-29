@@ -191,6 +191,8 @@ The shared Rust pipeline owns all fallthrough and root inheritance semantics. `v
 
 **Compat**: mapping-only. Flat Volar `props/events` stay on declared surfaces. Branch-structured inherited data is on `_verter`.
 
+**Fallthrough cache identity (overrides):** the fallthrough cache key's `overrides` dimension is the sealed internal enum `FallthroughOverrideIdentity` (`crates/verter_session/src/resolver_core/fallthrough_override_key.rs`) — `NoOverrides` | `Exact(Arc<FallthroughOverrideSetKey>)` | `Uncacheable`. It is an INTERNAL cache-key type (no public / wire DTO, no new CRITICAL rule). A non-empty child prop-type override set is projected to its EXACT, content-free structural identity: each override value NODE projects through the exhaustive, no-wildcard `SemanticNodeId → FallthroughOverrideValueKey` walker `project_override_value_key_inner` (`resolver_core/component_meta_query_engine/fallthrough_value_eval.rs`), which carries EVERY semantic field — `IndexedAccess.index`, call/construct signatures, and carrier type-args included (the fields a former lossy `u64` digest dropped, aliasing two genuinely-different override sets onto the same warm surface). Equality compares STRUCTURE, never a digest. R6: the key carries no `whole_hash` / `content_hash` / raw `SemanticNodeId` — declaration and value-root references project through the env-bearing content-free `ResolvedDeclSlotIdentity` / `ValueRootSlotIdentity` slots; a `BareRef` scope drops its `whole_hash`. An override value that projects to an unrepresentable node (`VueMacroElements`), re-enters a cycle, or trips the shared `request_budget` op-budget yields `Uncacheable`, which makes the request SKIP override-bearing fallthrough cache admission + singleflight for that request (no-override fallthrough caching and intrinsic-surface caching keep working). The same identity keys the `FallthroughNodeKey::ConsumedBindingEvaluation` consumed-bindings node, so the same child branch reached under two different override sets keys distinctly (no wrong reuse). The override-value walker shares the persistent per-call `SemanticNodeId` memo + op-budget substrate (`enter_node` / `exit_node`) with the `known_spread` / dynamic-root node walkers, so a content-interned override-value diamond is O(distinct nodes), not O(2^depth).
+
 **Key files**:
 
 | File | Purpose |
@@ -198,6 +200,7 @@ The shared Rust pipeline owns all fallthrough and root inheritance semantics. `v
 | `crates/verter_semantic/src/analysis/component_meta.rs` | Types + root extraction |
 | `crates/verter_semantic/src/analysis/html_intrinsics.rs` | Native intrinsic catalog |
 | `crates/verter_session/src/host_manage.rs` | Resolver + cache |
+| `crates/verter_session/src/resolver_core/fallthrough_override_key.rs` | Sealed internal override-identity cache key (`FallthroughOverrideIdentity` / `FallthroughOverrideValueKey`) — exact, content-free, R6-compliant |
 | `crates/verter_protocol/src/types.rs` | Schema DTOs |
 | `crates/verter_ffi/src/convert.rs` | Adapter conversion |
 | `packages/component-meta/src/types.ts` | TS types |

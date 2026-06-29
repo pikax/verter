@@ -10,7 +10,7 @@ use verter_semantic::analysis::html_intrinsics::{IntrinsicMemberKind, OwnedIntri
 use verter_semantic::analysis::types::AnalyzedImport;
 use verter_type_expr::TypeExpr;
 
-use crate::resolver_core::{FactVersionRef, FallthroughNodeKey, FallthroughNodeKind};
+use crate::resolver_core::{FactVersionRef, FallthroughNodeKey, FallthroughOverrideIdentity};
 
 pub trait FallthroughResolutionView {
     fn accepted_props(&self) -> &[AcceptedPropAnalysis];
@@ -128,14 +128,16 @@ pub struct FallthroughPropOverride {
 
 /// Node-backed child prop-type override set threaded through fallthrough
 /// recursion in place of the materialised `FxHashMap<String, TypeExpr>` map.
-/// Each entry binds a prop name to its override value NODE; `fingerprint` is a
-/// content-derived structural hash over those nodes (NOT raw arena
-/// `SemanticNodeId` ordinals), used as the `override_fingerprint` cache-key
-/// dimension so a warm fallthrough hit is valid only for equivalent overrides.
+/// Each entry binds a prop name to its override value NODE; `identity` is the
+/// EXACT, content-free structural projection of those nodes (NOT a lossy `u64`
+/// digest), used as the `overrides` cache-key dimension so a warm fallthrough
+/// hit is valid only for an equivalent override set. The identity is computed
+/// once at set construction (see
+/// [`crate::resolver_core::ComponentMetaQueryEngine::fallthrough_override_identity`]).
 #[derive(Debug, Clone, Default)]
 pub struct FallthroughPropOverrideSet {
     pub entries: Vec<FallthroughPropOverride>,
-    pub fingerprint: u64,
+    pub identity: FallthroughOverrideIdentity,
 }
 
 impl FallthroughPropOverrideSet {
@@ -172,14 +174,10 @@ pub fn fallthrough_cache_key(
     generic_root_propagation: bool,
     prop_type_overrides: Option<&FallthroughPropOverrideSet>,
 ) -> FallthroughNodeKey {
-    FallthroughNodeKey {
-        canonical_component_id: canonical_id.to_string(),
-        node_kind: FallthroughNodeKind::BranchUnionMerge,
-        override_fingerprint: prop_type_overrides
-            .map(|overrides| overrides.fingerprint)
-            .unwrap_or_default(),
-        behavior_flags: u32::from(generic_root_propagation),
-        branch_selector: None,
+    FallthroughNodeKey::BranchUnionMerge {
+        canonical: canonical_id.to_string(),
+        overrides: FallthroughOverrideIdentity::for_overrides(prop_type_overrides),
+        generic_root_propagation,
     }
 }
 
@@ -1475,23 +1473,41 @@ mod tests {
     }
 
     #[test]
-    fn fallthrough_cache_key_carries_override_fingerprint() {
-        // The cache key's `override_fingerprint` dimension is the override
-        // set's content-derived `fingerprint` field (NOT the raw node ids).
-        // Two sets with the SAME fingerprint key identically; a different
-        // fingerprint produces a distinct key, so a warm fallthrough surface
-        // is reused only for equivalent overrides.
+    fn fallthrough_cache_key_carries_override_identity() {
+        // The cache key's `overrides` dimension is the override set's EXACT
+        // content-free `identity` (NOT a lossy digest, NOT the raw node ids).
+        // Two sets with the SAME identity key identically; a different identity
+        // produces a distinct key, so a warm fallthrough surface is reused only
+        // for an equivalent override set.
+        use crate::resolver_core::fallthrough_override_key::{
+            FallthroughOverrideSetKey, FallthroughOverrideValueKey,
+        };
+        use crate::resolver_core::FallthroughOverrideIdentity;
+        use crate::semantic_query::PrimitiveKind;
+
+        let identity_a = FallthroughOverrideIdentity::Exact(Arc::new(FallthroughOverrideSetKey {
+            entries: vec![(
+                Arc::from("p"),
+                FallthroughOverrideValueKey::Primitive(PrimitiveKind::String),
+            )],
+        }));
+        let identity_b = FallthroughOverrideIdentity::Exact(Arc::new(FallthroughOverrideSetKey {
+            entries: vec![(
+                Arc::from("p"),
+                FallthroughOverrideValueKey::Primitive(PrimitiveKind::Number),
+            )],
+        }));
         let left = FallthroughPropOverrideSet {
             entries: Vec::new(),
-            fingerprint: 0xA11CE,
+            identity: identity_a.clone(),
         };
         let right = FallthroughPropOverrideSet {
             entries: Vec::new(),
-            fingerprint: 0xA11CE,
+            identity: identity_a,
         };
         let different = FallthroughPropOverrideSet {
             entries: Vec::new(),
-            fingerprint: 0xB0B,
+            identity: identity_b,
         };
 
         assert_eq!(
@@ -1502,8 +1518,8 @@ mod tests {
             fallthrough_cache_key("/App.vue", true, Some(&left)),
             fallthrough_cache_key("/App.vue", true, Some(&different))
         );
-        // A `None` override set and an empty-but-distinct fingerprint differ
-        // from the populated-fingerprint key.
+        // A `None` override set (NoOverrides) differs from a populated
+        // (Exact) identity key.
         assert_ne!(
             fallthrough_cache_key("/App.vue", true, Some(&left)),
             fallthrough_cache_key("/App.vue", true, None)

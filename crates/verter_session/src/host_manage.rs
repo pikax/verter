@@ -790,9 +790,7 @@ impl FallthroughRequestHost for VerterHost {
 
         let root_follow_key = crate::resolver_core::fallthrough_resolver::root_follow_key(
             canonical_id,
-            prop_type_overrides
-                .map(|overrides| overrides.fingerprint)
-                .unwrap_or_default(),
+            crate::resolver_core::FallthroughOverrideIdentity::for_overrides(prop_type_overrides),
             self.config.generic_root_propagation,
         );
         if let Some(node) = self
@@ -1062,9 +1060,7 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
     ) -> Option<Self::ChildResolution> {
         let cache_key = crate::resolver_core::fallthrough_resolver::child_surface_key(
             canonical_id,
-            prop_type_overrides
-                .map(|overrides| overrides.fingerprint)
-                .unwrap_or_default(),
+            crate::resolver_core::FallthroughOverrideIdentity::for_overrides(prop_type_overrides),
         );
 
         // Validate through the request-bound `ctx.store_view()` (see
@@ -1118,6 +1114,7 @@ impl FallthroughComputeHost for HostFallthroughResolver<'_> {
         let cache_key = crate::resolver_core::fallthrough_resolver::consumed_bindings_key(
             canonical_id,
             branch_key,
+            crate::resolver_core::FallthroughOverrideIdentity::for_overrides(overrides),
         );
 
         // Validate through the request-bound `ctx.store_view()` (see

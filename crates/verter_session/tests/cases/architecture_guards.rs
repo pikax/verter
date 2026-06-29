@@ -2008,12 +2008,20 @@ mod resolver_core_recursion {
     ///    expression would have already failed parser parsing before
     ///    reaching the resolver.
     ///
-    /// 2. **DAG-bounded** (with explicit `seen` / `visiting` set). The
-    ///    function recurses on an import / export / reexport graph
-    ///    that the surrounding cache layer dedups, AND the function
-    ///    body itself carries a `visited` / `seen` / `seen_locals`
-    ///    cycle-dedup set. Stack growth is bounded by the number of
-    ///    distinct entries in the graph, not by the call depth.
+    /// 2. **DAG-bounded** (with explicit `seen` / `visiting` set, or a
+    ///    per-call compute-once memo). The function recurses on a graph
+    ///    (an import / export / reexport graph, or the content-interned
+    ///    semantic-node DAG) and carries one of: a `visited` / `seen` /
+    ///    `seen_locals` cycle-dedup set, OR a per-call
+    ///    `FxHashMap<SemanticNodeId, _>` memo that computes each distinct
+    ///    node exactly once (so a content-interned diamond is O(distinct
+    ///    nodes), not O(2^depth)). Stack/work growth is bounded by the
+    ///    number of distinct entries, not by the call depth. The
+    ///    `fallthrough_value_eval` node walkers ADDITIONALLY charge the
+    ///    existing `request_budget` op-budget once per distinct node as a
+    ///    worst-case fuse; a trip halts the walk with a partial that is
+    ///    never warm-admitted (and the override-key projector reports
+    ///    `FallthroughOverrideIdentity::Uncacheable`).
     ///
     /// 3. **Recursive-descent parser**. The function is part of the
     ///    `type_text_parser` hand-written recursive-descent parser.
@@ -2317,23 +2325,31 @@ mod resolver_core_recursion {
         ),
         // -----------------------------------------------------------------
         // component_meta_query_engine/fallthrough_value_eval.rs — node-domain
-        // siblings of the fallthrough TypeExpr walkers above (spread-keys
-        // reduction, root-candidate enum, override fingerprint).
+        // walkers over the content-interned semantic-node DAG (spread-keys
+        // reduction, dynamic-root-candidate enum, and the exact override-key
+        // value projector). All three share ONE prologue/epilogue
+        // (`enter_node`/`exit_node`): a per-call `FxHashMap<SemanticNodeId, _>`
+        // memo computes each DISTINCT node once (so a content-interned diamond
+        // is O(distinct nodes), not O(2^depth)), and the EXISTING
+        // `request_budget` op-budget is charged once per distinct node; a trip
+        // halts the walk with a partial that is never warm-admitted. `active`
+        // is the in-progress-path cycle sentinel ONLY (a re-entry halts), not
+        // the memo.
         // -----------------------------------------------------------------
         (
             "fallthrough_value_eval",
             "known_spread_keys_from_node_inner",
-            "DAG-bounded by the acyclic interned-node arena + the `active: &mut FxHashSet<SemanticNodeId>` visited-set dedup.",
+            "bounded by the shared per-call `SemanticNodeId` memo (each distinct node computed once) + the shared `request_budget` op-budget (one charge per distinct node; a trip returns the no-warm partial); `active` is the in-progress-path cycle sentinel only.",
         ),
         (
             "fallthrough_value_eval",
             "collect_dynamic_root_candidates_from_node_inner",
-            "DAG-bounded by the acyclic interned-node arena + the `active: &mut FxHashSet<SemanticNodeId>` visited-set dedup.",
+            "bounded by the shared per-call `SemanticNodeId` memo (each distinct node computed once) + the shared `request_budget` op-budget (one charge per distinct node; a trip returns the no-warm partial); `active` is the in-progress-path cycle sentinel only.",
         ),
         (
             "fallthrough_value_eval",
-            "node_structural_content_hash",
-            "bounded by the `OVERRIDE_FINGERPRINT_DEPTH` depth cap (depth-1 per hop, discriminant-only at 0).",
+            "project_override_value_key_inner",
+            "bounded by the SAME shared per-call `SemanticNodeId` memo + `request_budget` op-budget as the two walkers above (via `enter_node`/`exit_node`); a budget trip or a cycle re-entry returns `None`, which the override-identity producer maps to `FallthroughOverrideIdentity::Uncacheable` (skips override-bearing cache admission). No depth cap; `active` is the in-progress-path cycle sentinel only.",
         ),
         // -----------------------------------------------------------------
         // component_meta_query_engine/registry_structural.rs — the registry
@@ -2344,7 +2360,7 @@ mod resolver_core_recursion {
         (
             "registry_structural",
             "structural_materialize",
-            "bounded by finite input `TypeExpr` nesting depth + the `active: &mut FxHashSet<SemanticNodeId>` Navigate-node visited-set cycle guard (a reference back-edge short-circuits to the symbolic input).",
+            "bounded by the finite input `TypeExpr` tree (structural recursion descends into strictly-smaller sub-expressions) + the `active: &mut FxHashSet<SemanticNodeId>` path-scoped Navigate-node cycle sentinel (inserted on entry, removed on unwind; a reference back-edge short-circuits to the symbolic input).",
         ),
         // -----------------------------------------------------------------
         // shallow_file_state.rs — type-expression walkers. All bodies
