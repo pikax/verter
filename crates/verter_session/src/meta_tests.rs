@@ -2331,6 +2331,278 @@ fn fallthrough_only_budget_partial_not_warmed_through_session_view_surfaces() {
     );
 }
 
+/// Owner that charges projection ops in BOTH phases over DISJOINT source
+/// types: the `defineProps<Partial<PropsBase>>()` macro's Expanded resolve
+/// instantiates the mapped utility (resolve-phase ops), and the
+/// `v-bind="obj"` spread's fallthrough walk resolves a 4-arm union
+/// (fallthrough-phase ops). Disjoint types ⇒ the two phases' op costs are
+/// additive (no shared sub-resolution that would warm one phase from the
+/// other).
+fn upsert_mixed_budget_owner(project: &Arc<MetaProject>) {
+    project
+        .upsert_base(
+            "/src/propsbase.ts",
+            r#"export interface PropsBase { a: string; b: number; c: boolean; d: string; e: number }"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/obj.ts",
+            r#"export declare const obj: { p: string } | { q: string } | { r: string } | { s: string };"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { PropsBase } from './propsbase'
+import { obj } from './obj'
+defineProps<Partial<PropsBase>>()
+</script>
+<template><div v-bind="obj" /></template>"#,
+        )
+        .unwrap();
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![
+            crate::types::DependencyResolution {
+                specifier: "./propsbase".to_string(),
+                resolved_canonical_id: Some("/src/propsbase.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+            crate::types::DependencyResolution {
+                specifier: "./obj".to_string(),
+                resolved_canonical_id: Some("/src/obj.ts".to_string()),
+                possible_canonical_ids: Vec::new(),
+            },
+        ],
+    );
+}
+
+/// The mixed owner with the `v-bind` spread REMOVED — same props macro, no
+/// fallthrough spread — so the fallthrough phase charges ~0 ops. Isolates
+/// the RESOLVE-phase op cost `R`.
+fn upsert_mixed_budget_resolve_only_owner(project: &Arc<MetaProject>) {
+    project
+        .upsert_base(
+            "/src/propsbase.ts",
+            r#"export interface PropsBase { a: string; b: number; c: boolean; d: string; e: number }"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { PropsBase } from './propsbase'
+defineProps<Partial<PropsBase>>()
+</script>
+<template><div>no spread</div></template>"#,
+        )
+        .unwrap();
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./propsbase".to_string(),
+            resolved_canonical_id: Some("/src/propsbase.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+}
+
+/// BUDGET-PARITY (D4) — the VIEW-AWARE OUTER full-request install is
+/// load-bearing: the projection budget must span resolve AND fallthrough as
+/// ONE budget, not two per-phase budgets the fallthrough choke alone would
+/// arm.
+///
+/// The sibling `fallthrough_only_budget_partial_not_warmed_through_session_view_surfaces`
+/// uses a fallthrough-ONLY trip — the fallthrough choke backstop
+/// (`compute_fallthrough_surface_from_resolved_state`'s install-if-none)
+/// arms a fresh per-fallthrough budget and trips it, so that test stays
+/// GREEN even with the OUTER installs deleted. This test closes that gap
+/// with a MIXED fixture whose RESOLVE phase (a `defineProps<Partial<…>>()`
+/// macro) AND fallthrough phase (a `v-bind` spread) each charge projection
+/// ops over DISJOINT types: neither phase alone exceeds the budget, but their
+/// COMBINED work does.
+///
+/// View-aware (`get_component_meta`, `component_meta_entry.rs`): the resolve
+/// and the fallthrough extract share ONE resolver ctx, so the choke's
+/// re-resolution of the owner's declared props hits the resolve's WARM cache
+/// (the choke charges only the fallthrough's ops). Only the OUTER install
+/// makes the resolve ops and the fallthrough ops share one budget — so the
+/// combined work trips ONLY with the outer install. Revert it and the work
+/// splits into an inner-resolve budget + a fresh-choke budget, neither trips,
+/// the compute is Complete, and the partial-as-complete warms
+/// `ComponentMetaResultDb` (the replay warm-hits) — RED. This surface is the
+/// DISCRIMINATING half.
+///
+/// Session (`get_component_meta_with_resolution`,
+/// `component_meta_entry_resolution.rs`): this path rebuilds the resolver ctx
+/// with a COLD-SEED view between resolve and extract, so the choke's
+/// `extract_component_meta` re-resolves the full surface COLD within the
+/// choke's own budget — the choke alone already spans the combined work, so
+/// the session outer install is choke-covered (it is exercised here as a
+/// corroborating combined-budget-partial guard, not an independently
+/// discriminating one).
+///
+/// The discriminating budget is MEASURED, not hard-coded: `R` (resolve-only)
+/// and `S = C - R` (fallthrough) are read from the shared projection-op
+/// counter under a generous ambient context (the session via-view entry is
+/// install-if-none, so it inherits and charges that context's budget). The
+/// budget is set to `max(R, S)`: resolve alone (`R <= K`) and fallthrough
+/// alone (`S <= K`) each stay within it, but the combined cold work
+/// (`C = R + S > K`) trips a SHARED budget.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn combined_resolve_plus_fallthrough_budget_partial_not_warmed_through_session_view_surfaces() {
+    use crate::resolver_core::FallthroughRequestHost;
+    use std::sync::atomic::Ordering::Relaxed;
+
+    let canonical = "/src/App.vue";
+
+    // Measure a fixture's cold combined projection-op count under a GENEROUS
+    // budget: install an OUTER request context (install-if-none in the
+    // session via-view entry inherits it, charging ITS budget Arc — shared
+    // across any worker that propagates it) and read the counter back.
+    let measure = |upsert: &dyn Fn(&Arc<MetaProject>)| -> usize {
+        let project = make_project_with_config(HostConfig {
+            analysis_level: crate::types::AnalysisLevel::Full,
+            projection_op_budget: 0, // generous (effective 2000)
+            ..HostConfig::default()
+        });
+        upsert(&project);
+        let host = project.host();
+        let ctx = crate::request_context::RequestContext::with_kind_timing_and_projection_budget(
+            host.next_request_id(),
+            Arc::<str>::from(canonical),
+            verter_audit::RequestKind::ComponentMeta,
+            false,
+            false,
+            None,
+            0,
+        );
+        let budget = Arc::clone(&ctx.projection_budget);
+        let _guard = crate::request_context::RequestContextGuard::install(ctx);
+        let session = project.open_session_batch().unwrap();
+        let _ = session
+            .get_component_meta_with_resolution(canonical)
+            .expect("the generous-budget measurement request must succeed");
+        budget.projection_ops_executed_count()
+    };
+
+    let r_ops = measure(&upsert_mixed_budget_resolve_only_owner);
+    let c_ops = measure(&upsert_mixed_budget_owner);
+    let s_ops = c_ops.saturating_sub(r_ops);
+
+    assert!(
+        r_ops >= 1,
+        "the resolve phase must charge >=1 projection op — else the fixture is fallthrough-only \
+         and the OUTER install is not load-bearing (the choke alone would suffice); got R={r_ops}"
+    );
+    assert!(
+        s_ops >= 1,
+        "the fallthrough phase must charge >=1 projection op; got C={c_ops} R={r_ops} S={s_ops}"
+    );
+
+    // K = max(R, S): neither phase alone exceeds it, but the SHARED combined
+    // work (C = R + S) does. Each surface runs on its OWN fresh host so a
+    // partial from the other surface cannot confound it (each cold run
+    // re-charges the full combined work).
+    let k = r_ops.max(s_ops);
+    assert!(
+        c_ops > k,
+        "the combined cold work (C={c_ops}) must exceed the shared budget K={k} so a SHARED \
+         budget trips while neither phase alone does (R={r_ops} S={s_ops})"
+    );
+
+    // ── Surface 1: view-aware `MetaSession::get_component_meta`
+    // (`component_meta_entry.rs` outer install). The combined budget partial
+    // must NOT warm `ComponentMetaResultDb`: the replay is a cold miss.
+    {
+        let project = make_project_with_config(HostConfig {
+            analysis_level: crate::types::AnalysisLevel::Full,
+            projection_op_budget: k,
+            ..HostConfig::default()
+        });
+        upsert_mixed_budget_owner(&project);
+        let host = project.host();
+        assert!(
+            crate::request_context::current_request_context().is_none(),
+            "test precondition: no ambient request context — the entry installs its own spanning one"
+        );
+        let session = project.open_session_batch().unwrap();
+        let _ = session
+            .get_component_meta(canonical)
+            .expect("view-aware meta request must succeed")
+            .expect("a partial analysis is still RETURNED to the caller, just not warmed");
+        let hits_before = host
+            .provenance()
+            .component_meta_result_cache_hits
+            .load(Relaxed);
+        let _ = session
+            .get_component_meta(canonical)
+            .expect("second view-aware request must succeed")
+            .expect("the replay is still RETURNED");
+        let hits_after = host
+            .provenance()
+            .component_meta_result_cache_hits
+            .load(Relaxed);
+        assert_eq!(
+            hits_after, hits_before,
+            "the view-aware surface's COMBINED resolve+fallthrough budget partial MUST NOT warm \
+             `ComponentMetaResultDb` — the replay must be cold (hits_before={hits_before}, \
+             hits_after={hits_after}); reverting the OUTER install at `component_meta_entry.rs` \
+             splits the work into an inner-resolve budget + a fresh-choke budget (the choke sees the \
+             resolve's WARM props), neither trips, the compute is Complete, and the publish gate \
+             warms the partial"
+        );
+    }
+
+    // ── Surface 2 (corroborating): session
+    // `MetaSession::get_component_meta_with_resolution`
+    // (`component_meta_entry_resolution.rs`). It discards the
+    // `ComponentMetaResultDb` publish, so the gated runtime-node `store_node`
+    // is the observable. The combined budget partial must NOT warm the
+    // top-level fallthrough node. The session path rebuilds the resolver ctx
+    // with a cold-seed between resolve and extract, so the choke's
+    // `extract_component_meta` re-resolves the full surface COLD within the
+    // choke's own budget — the choke alone already bounds the combined work,
+    // so this corroborates the session path's combined-budget bounding (the
+    // session outer install is choke-covered, NOT independently isolated
+    // here; the view-aware Surface 1 is the discriminating half).
+    {
+        let project = make_project_with_config(HostConfig {
+            analysis_level: crate::types::AnalysisLevel::Full,
+            projection_op_budget: k,
+            ..HostConfig::default()
+        });
+        upsert_mixed_budget_owner(&project);
+        let host = project.host();
+        let key = crate::resolver_core::fallthrough_cache_key(
+            canonical,
+            host.config.generic_root_propagation,
+            None,
+        );
+        let session_wr = project.open_session_batch().unwrap();
+        let _ = session_wr
+            .get_component_meta_with_resolution(canonical)
+            .expect("session with-resolution request must succeed")
+            .expect("a partial result is still RETURNED to the caller, just not warmed");
+        let view = FallthroughRequestHost::snapshot_store_view(host);
+        let s2_node_warmed = host
+            .resolver_runtime()
+            .fallthrough
+            .get_cached_node(&key, &view)
+            .is_some();
+        assert!(
+            !s2_node_warmed,
+            "the session with-resolution surface's COMBINED budget partial MUST NOT warm the \
+             runtime fallthrough node — the session path bounds the combined resolve+fallthrough \
+             work (here via the choke, which re-runs the extract cold under its own budget) and \
+             `store_node` refuses the partial"
+        );
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn fallthrough_runtime_reuse_survives_host_cache_clear() {
