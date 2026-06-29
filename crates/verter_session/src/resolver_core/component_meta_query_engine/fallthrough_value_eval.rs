@@ -383,21 +383,36 @@ fn known_spread_keys_from_surface(surface: &crate::semantic_query::SurfaceView) 
 /// collapses the duplicates, so the result stays O(unique candidates).
 type DynamicRootCandidateSet = IndexSet<DynamicRootCandidate, FxBuildHasher>;
 
-/// Insert `candidate` into `set`, charging the SHARED request projection
-/// budget per NEWLY-INSERTED unique candidate (cardinality). This unifies
-/// result-size accounting with the per-node-visit charge in [`enter_node`] —
-/// NO second fuse — so a genuine result-size explosion trips the SAME budget;
-/// a trip folds a partial (the walk's result is incomplete).
+/// Insert `candidate` into `set`, charging the SHARED request projection budget
+/// per NEWLY-INSERTED unique candidate (cardinality). This unifies result-size
+/// accounting with the per-node-visit charge in [`enter_node`] — NO second fuse —
+/// so a genuine result-size explosion trips the SAME budget.
+///
+/// The charge happens BEFORE the insert and the trip HALTS the merge: a tripping
+/// candidate is NOT inserted, `false` is returned, and a partial is folded. The
+/// caller stops merging/recursing on `false`, so a wide-UNIQUE union is BOUNDED at
+/// the trip point rather than grown to its full cardinality. An already-present
+/// candidate carries no new cardinality, so it neither charges nor halts (`true`)
+/// — this keeps a content-interned diamond's duplicate re-insertions free, so the
+/// result-size charge stays per-UNIQUE candidate.
+///
+/// Returns `true` when the merge may continue (inserted, or already present),
+/// `false` when the budget tripped (not inserted; the merge must stop).
 fn insert_dynamic_root_candidate_charged(
     set: &mut DynamicRootCandidateSet,
     candidate: DynamicRootCandidate,
-) {
-    if set.insert(candidate)
-        && crate::request_context::current_request_budget()
-            .is_some_and(|budget| budget.check_projection_op_count())
+) -> bool {
+    if set.contains(&candidate) {
+        return true;
+    }
+    if crate::request_context::current_request_budget()
+        .is_some_and(|budget| budget.check_projection_op_count())
     {
         crate::request_context::mark_request_materialization_cache_suppress();
+        return false;
     }
+    set.insert(candidate);
+    true
 }
 
 /// Node-domain mirror of `collect_dynamic_root_candidates_from_type`: walk a
@@ -441,7 +456,7 @@ fn collect_dynamic_root_candidates_from_node_inner(
         Some(data) => match data.as_ref() {
             SemanticNodeData::Literal(LiteralValue::String(tag)) => {
                 let mut set = DynamicRootCandidateSet::default();
-                insert_dynamic_root_candidate_charged(
+                let _ = insert_dynamic_root_candidate_charged(
                     &mut set,
                     DynamicRootCandidate::NativeTag { tag: tag.clone() },
                 );
@@ -449,12 +464,17 @@ fn collect_dynamic_root_candidates_from_node_inner(
             }
             SemanticNodeData::Union(arms) => {
                 let mut set = DynamicRootCandidateSet::default();
-                for arm in arms.iter() {
+                'merge: for arm in arms.iter() {
                     let arm_set = collect_dynamic_root_candidates_from_node_inner(
                         ctx, *arm, imports, active, memo,
                     );
                     for candidate in arm_set {
-                        insert_dynamic_root_candidate_charged(&mut set, candidate);
+                        // A budget trip HALTS the merge: stop unioning further
+                        // candidates (and walking further arms) so a wide-UNIQUE
+                        // union is bounded at the trip, not grown to N.
+                        if !insert_dynamic_root_candidate_charged(&mut set, candidate) {
+                            break 'merge;
+                        }
                     }
                 }
                 set
@@ -475,7 +495,7 @@ fn collect_dynamic_root_candidates_from_node_inner(
                             imports,
                             value_root.name.as_ref(),
                         ) {
-                            insert_dynamic_root_candidate_charged(&mut set, candidate);
+                            let _ = insert_dynamic_root_candidate_charged(&mut set, candidate);
                         }
                     }
                 }

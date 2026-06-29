@@ -373,3 +373,83 @@ fn over_cap_walker_trip_folds_partial_into_cold_compute_scope() {
         );
     }
 }
+
+/// #5 — WIDE-UNIQUE result bound (halt on trip). A union whose memoized arm-set
+/// carries N DISTINCT candidates is re-merged through a single parent arm, so the
+/// `for candidate in arm_set` merge loop iterates all N candidates WITHOUT a
+/// per-candidate `enter_node` charge between them. A budget that survives the
+/// inner computation but trips MID-MERGE must BOUND the produced set below N (and
+/// fold a partial), NOT grow it to the full union cardinality.
+///
+/// This isolates the INSERT-level halt from the node-visit halt: a flat union of
+/// distinct literals is ALREADY bounded by `enter_node` (every subsequent arm
+/// halts once the budget trips), so it does not discriminate the merge-loop halt.
+/// Re-merging a MEMOIZED N-candidate set does — that merge loop has no intervening
+/// `enter_node` charge, so only the per-insert halt can bound it.
+///
+/// RED on insert-then-charge (no halt): the merge loop inserts each candidate
+/// FIRST then charges, so all N land before the loop notices the trip → the set
+/// grows to N and the `bounded.len() < n` assertion FAILS. GREEN after: the
+/// charge-before-insert + `break` bounds it to the pre-trip prefix.
+#[test]
+fn wide_unique_union_result_is_bounded_by_halt_not_grown_to_n() {
+    let project = open_project();
+    let host = project.host();
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let ctx: &dyn crate::resolver_core::ResolverContext = host;
+
+    let n: usize = 24;
+    // `wide` yields N DISTINCT native-tag candidates.
+    let leaves: Vec<SemanticNodeId> = (0..n)
+        .map(|i| {
+            graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(format!(
+                "tag{i:02}"
+            ))))
+        })
+        .collect();
+    let wide = graph.intern_node(SemanticNodeData::Union(Arc::from(leaves)));
+    // `top` re-merges `wide`'s memoized set through ONE arm: the merge loop then
+    // carries all N candidates with NO intervening `enter_node` charge, so the
+    // per-insert halt is the only thing that can bound it.
+    let top = graph.intern_node(SemanticNodeData::Union(Arc::from(vec![wide])));
+
+    // Measure the full cost `total` under a generous budget (separate install).
+    // All N distinct candidates are produced. This self-calibrates the cap below,
+    // so the test is robust to the exact per-node/per-insert charge accounting.
+    let total = {
+        let (rctx, _guard) = install_budget(1_000_000);
+        let before = rctx.projection_budget.projection_ops_executed_count();
+        let full = collect_dynamic_root_candidates_from_node(ctx, top, &[]);
+        let after = rctx.projection_budget.projection_ops_executed_count();
+        assert_eq!(
+            full.len(),
+            n,
+            "the generous run collects all N distinct candidates"
+        );
+        after - before
+    };
+
+    // A cap of `total - n/2` ALWAYS lets `wide` compute fully (its cost is at most
+    // `total - n`, since the top re-merge contributes the N inserts) yet trips the
+    // re-merge loop after roughly N/2 of its N inserts — independent of the exact
+    // charge constants.
+    let cap = total - n / 2;
+    let (_rctx, _guard) = install_budget(cap);
+    let _scope = ColdComputeCompletenessScope::enter();
+    let bounded = collect_dynamic_root_candidates_from_node(ctx, top, &[]);
+
+    assert!(
+        bounded.len() < n,
+        "halt-on-trip must BOUND the wide-unique merge below N (got {} of {n}); insert-then-charge \
+         grows it to the full N",
+        bounded.len(),
+    );
+    assert!(
+        !bounded.is_empty(),
+        "the pre-trip merge prefix is still produced — a genuine bounded partial, not empty"
+    );
+    assert!(
+        current_cold_compute_completeness().is_partial(),
+        "the mid-merge budget trip folds a partial into the active cold-compute scope"
+    );
+}
