@@ -2743,6 +2743,224 @@ fn session_pre_choke_macro_dto_budget_partial_not_admitted_to_vue_surface_store(
     );
 }
 
+/// #4-CLOSE — the full-extract `ColdComputeCompletenessScope` captures a
+/// pre-choke macro-DTO partial that the resolve phase did NOT, feeding the merged
+/// admission signal so the result is refused warm promotion.
+///
+/// `extract_component_meta_from_resolved` reads the macro-DTO surface
+/// (`component_meta_resolved_macros` → `vue_macro_dtos_with_ctx`) BEFORE the
+/// fallthrough cold compute. A budget-tripped DTO is returned partial and REFUSED
+/// its own `vue_surface_store` (the sibling
+/// `session_pre_choke_macro_dto_budget_partial_not_admitted_to_vue_surface_store`
+/// pins that refusal). The former publish gate keyed only on
+/// `resolved.synthesis_should_suppress || fallthrough_completeness`, so a macro-DTO
+/// partial that escaped BOTH terms warmed the overall result. The fix enters ONE
+/// full-extract scope spanning the macro-DTO read and gates on the single
+/// `final_completeness = resolved.completeness.merge(extract_scope_completeness)`.
+///
+/// DECOUPLING the macro-DTO partial from `resolved.completeness` is what makes the
+/// extract-scope term observable in isolation: in a single cold request the
+/// RESOLVE-phase props projector (`define_shapes` → `vue_macro_dtos_with_ctx` →
+/// `observe_partial`) ALSO reads the DTO, so a budget-tripped DTO folds into
+/// `resolved.completeness` too. Here the macro-DTO is warmed by a GENEROUS resolve
+/// (so `resolved.completeness == Complete`); then the imported helper is EDITED so
+/// the DTO's validated `vue_surface_store` entry fails re-validation; then the
+/// extract re-resolves the DTO COLD under a pre-exhausted budget. The fallthrough
+/// is skipped (`include_fallthrough = false`) to remove the only other
+/// extract-phase partiality source. Now `resolved.completeness` is Complete and the
+/// ONLY partiality lives in the full-extract scope — so a partial `extract`
+/// completeness proves the scope captured the macro-DTO, exactly the source the
+/// pre-fix fallthrough-only carrier missed.
+///
+/// RED proof: in `extract_component_meta_from_resolved`, move
+/// `ColdComputeCompletenessScope::enter()` to AFTER the macro-DTO read (so the
+/// macro-DTO partial escapes the captured scope) → `extract.completeness` is
+/// Complete → `final_completeness` is Complete → both assertions FAIL.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn extract_scope_captures_cold_macro_dto_partial_into_merged_gate_signal() {
+    use std::sync::Arc;
+    let canonical = "/src/App.vue";
+
+    // (1) GENEROUS resolve → `resolved` COMPLETE, and the resolve warms the
+    // macro-DTO's host-global type memo.
+    let project = make_project_with_config(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        projection_op_budget: 0, // generous (effective 2000)
+        ..HostConfig::default()
+    });
+    upsert_macro_dto_budget_owner(&project);
+    let host = project.host();
+    let resolved = host
+        .resolve_component_meta(canonical, crate::types::ProjectionMode::Expanded)
+        .expect("the generous resolve produces a complete resolved state");
+    assert!(
+        !resolved.synthesis_should_suppress && !resolved.completeness.is_partial(),
+        "the generous resolve must be COMPLETE so the macro-DTO partial cannot ride \
+         `resolved.completeness` — only the extract scope can carry it"
+    );
+
+    // (2) Edit the imported helper → its content hash changes, so the macro-DTO's
+    // validated `vue_surface_store` entry FAILS re-validation and the extract must
+    // re-resolve the DTO COLD. The owned `resolved` value is retained (it carries
+    // the owner's snapshot/macros), and `resolved.completeness` stays the COMPLETE
+    // value the generous resolve produced.
+    {
+        use std::fmt::Write as _;
+        let mut helper = String::from("// invalidated\n");
+        for n in 1..=32u32 {
+            let _ = writeln!(
+                helper,
+                "export interface S{n:02} {{ a{n:02}: string; b{n:02}: number; c{n:02}: boolean }}"
+            );
+        }
+        project.upsert_base("/src/dto_helper.ts", &helper).unwrap();
+    }
+
+    // (3) Extract WITHOUT fallthrough (`include_fallthrough = false`) under a
+    // PRE-EXHAUSTED budget. Skipping the fallthrough removes the only other
+    // extract-phase partiality source (so the scope's partiality is attributable
+    // to the pre-choke macro-DTO read alone), and the policy over the tripped
+    // (prop-less) meta does no budget-charged work. The cold macro-DTO re-resolves,
+    // trips the fuse on its first charge, returns partial, and folds into the
+    // full-extract scope.
+    let extract = {
+        let ctx = crate::request_context::RequestContext::with_kind_timing_and_projection_budget(
+            host.next_request_id(),
+            Arc::<str>::from(canonical),
+            verter_audit::RequestKind::ComponentMeta,
+            false,
+            false,
+            None,
+            1,
+        );
+        // Pre-exhaust: drive the counter strictly past the cap so the very next
+        // `check_projection_op_count` (the cold macro-DTO's first charge) trips.
+        ctx.projection_budget.check_projection_op_count();
+        ctx.projection_budget.check_projection_op_count();
+        let _guard = crate::request_context::RequestContextGuard::install(ctx);
+        crate::resolver_core::with_bare_host_ctx_for_test(host, |rc| {
+            crate::host_manage::extract_component_meta_from_resolved(
+                host, canonical, &resolved, false, rc,
+            )
+        })
+    };
+
+    // THE #4 DISCRIMINATOR: `resolved` is COMPLETE and the fallthrough is skipped,
+    // so the macro-DTO partiality can reach the merged signal ONLY through the
+    // full-extract scope spanning the pre-choke macro-DTO read. A partial
+    // `extract.completeness` proves the scope captured it; the merged
+    // `final_completeness` is therefore partial, which is EXACTLY the publish gate's
+    // refusal condition (`if final_completeness.is_partial() { skip }`).
+    assert!(
+        extract.completeness.is_partial(),
+        "the full-extract scope MUST capture the cold pre-choke macro-DTO partial (RED: with the \
+         scope entered AFTER the macro-DTO read, `extract.completeness` stays Complete — the \
+         pre-fix fallthrough-only carrier never spanned the macro-DTO read)"
+    );
+    let final_completeness = resolved.completeness.merge(extract.completeness);
+    assert!(
+        final_completeness.is_partial(),
+        "the merged gate signal is partial SOLELY because the extract scope captured the macro DTO \
+         (`resolved.completeness` is Complete) → the publish gate refuses warm admission"
+    );
+}
+
+/// SYNTHESIS-SUPPRESS no-regression under the merged gate: a RESOLVE-phase
+/// partial (`synthesis_should_suppress == true`) with a COMPLETE extract scope
+/// must STILL be refused warm admission after the gate was rewritten to the
+/// single merged `final_completeness` signal (the former
+/// `resolved.synthesis_should_suppress` gate term was demoted).
+///
+/// `synthesis_should_suppress` is the bool PROJECTION of `resolved.completeness`
+/// (`synthesis_should_suppress: self.completeness.is_partial()`,
+/// `component_meta_result_db.rs`), so it is SUBSUMED by the `resolved.completeness`
+/// operand of `final_completeness = resolved.completeness.merge(extract_scope_completeness)`.
+/// This test pins that the subsumption is load-bearing and NOT silently dropped.
+///
+/// The fixture isolates a RESOLVE-ONLY partial from the extract scope: the
+/// `synthesis_steps` recursion budget (separate from `projection_op_budget`)
+/// trips DURING slot-binding synthesis → `synthesis_should_suppress == true`
+/// (`resolved.completeness == Partial`), while the generous projection budget
+/// leaves the extract macro-DTO read + fallthrough COMPLETE
+/// (`extract_scope_completeness == Complete`). So `final_completeness =
+/// Partial.merge(Complete) = Partial` and the result is refused. This is the
+/// INVERSE of `extract_scope_captures_cold_macro_dto_partial_into_merged_gate_signal`
+/// (resolve PARTIAL + extract COMPLETE here, vs resolve COMPLETE + extract
+/// PARTIAL there), so it discriminates the resolve operand specifically rather
+/// than the extract-scope operand.
+///
+/// RED proof: revert the `resolved.completeness` merge operand at the publishing
+/// caller (`let final_completeness = extract_completeness;`, dropping the resolve
+/// term) → the Complete-extract synthesis-suppressed result warms → the
+/// `has_owner_entry_in_test` assertion FAILS.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn synthesis_suppress_resolve_partial_still_refused_under_merged_gate() {
+    // Tight SYNTHESIS-step budget (NOT the projection budget): the slot-binding
+    // synthesis trips during the RESOLVE phase, while the projection budget
+    // stays generous so the EXTRACT scope is Complete.
+    let mut config = HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        ..HostConfig::default()
+    };
+    config.recursion_budget_overrides.synthesis_steps = Some(1);
+    let project = make_project_with_config(config);
+    project
+        .upsert_base(
+            "/src/types.ts",
+            "export interface Slots { default(props: { row: string }): any }",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/Comp.vue",
+            r#"<script setup lang="ts">
+import type { Slots } from './types'
+defineSlots<Slots>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    project.host().set_import_dependencies(
+        "/src/Comp.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+    let host = project.host();
+    let canonical = "/src/Comp.vue";
+
+    let (_analysis, resolved) = host
+        .get_component_meta_with_resolution(canonical)
+        .expect("component meta resolves (partial)");
+
+    // PRECONDITION: the partial is RESOLVE-phase (synthesis suppression) — the
+    // exact shape the demoted gate term covered. With a generous projection
+    // budget the EXTRACT scope is Complete, so the resolve operand is the ONLY
+    // thing that can keep this gated.
+    assert!(
+        resolved.synthesis_should_suppress,
+        "the synthesis_steps budget must trip during resolve so the partial is resolve-phase \
+         (synthesis_should_suppress == resolved.completeness.is_partial())"
+    );
+
+    // THE DISCRIMINATOR: the resolve-phase partial must STILL be refused warm
+    // admission. The merged gate keeps it gated via the `resolved.completeness`
+    // operand even though the extract scope is Complete.
+    assert!(
+        !crate::component_meta_result_db::ComponentMetaResultDb::has_owner_entry_in_test(
+            host, canonical
+        ),
+        "a synthesis-suppressed (resolve-phase partial) result MUST NOT warm `ComponentMetaResultDb` \
+         after the gate's `synthesis_should_suppress` term was demoted — the `resolved.completeness` \
+         merge operand subsumes it. Reverting that operand (`final_completeness = extract_completeness`) \
+         would warm this Complete-extract result"
+    );
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn fallthrough_runtime_reuse_survives_host_cache_clear() {
@@ -13027,7 +13245,7 @@ defineEmits<Emits>()
         .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
 
-    let (meta, _) = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
+    let meta = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
         crate::host_manage::extract_component_meta_from_resolved(
             project.host(),
             "/src/App.vue",
@@ -13035,7 +13253,8 @@ defineEmits<Emits>()
             true,
             ctx,
         )
-    });
+    })
+    .analysis;
     let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
 
     assert!(
@@ -13276,7 +13495,7 @@ defineSlots<TabsSlots<T>>()
         .host()
         .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
-    let (meta, _) = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
+    let meta = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
         crate::host_manage::extract_component_meta_from_resolved(
             project.host(),
             "/src/App.vue",
@@ -13284,7 +13503,8 @@ defineSlots<TabsSlots<T>>()
             true,
             ctx,
         )
-    });
+    })
+    .analysis;
     let prop_names: Vec<&str> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
 
     assert!(
@@ -13557,7 +13777,7 @@ defineSlots<TabsSlots<T>>()
         .host()
         .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
-    let (meta, _) = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
+    let meta = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
         crate::host_manage::extract_component_meta_from_resolved(
             project.host(),
             "/src/App.vue",
@@ -13565,7 +13785,8 @@ defineSlots<TabsSlots<T>>()
             true,
             ctx,
         )
-    });
+    })
+    .analysis;
 
     let color = meta
         .props
@@ -13768,7 +13989,7 @@ defineSlots<TabsSlots<T>>()
         .host()
         .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
-    let (meta, _) = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
+    let meta = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
         crate::host_manage::extract_component_meta_from_resolved(
             project.host(),
             "/src/App.vue",
@@ -13776,7 +13997,8 @@ defineSlots<TabsSlots<T>>()
             true,
             ctx,
         )
-    });
+    })
+    .analysis;
     let content_slot = meta
         .slots
         .iter()
@@ -14016,7 +14238,7 @@ defineSlots<TabsSlots<T>>()
         .host()
         .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
-    let (meta, _) = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
+    let meta = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
         crate::host_manage::extract_component_meta_from_resolved(
             project.host(),
             "/src/App.vue",
@@ -14024,7 +14246,8 @@ defineSlots<TabsSlots<T>>()
             true,
             ctx,
         )
-    });
+    })
+    .analysis;
     let content_slot = meta
         .slots
         .iter()
@@ -14127,7 +14350,7 @@ defineProps<{
         elapsed.as_secs_f64()
     );
 
-    let (meta, _) = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
+    let meta = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
         crate::host_manage::extract_component_meta_from_resolved(
             project.host(),
             "/src/App.vue",
@@ -14135,7 +14358,8 @@ defineProps<{
             true,
             ctx,
         )
-    });
+    })
+    .analysis;
     assert!(
         meta.props.iter().any(|prop| prop.name == "valueKey"),
         "valueKey prop should still be produced, got props {:?}",
@@ -14209,7 +14433,7 @@ defineProps<{
         .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
     let started = std::time::Instant::now();
-    let (meta, _) = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
+    let meta = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
         crate::host_manage::extract_component_meta_from_resolved(
             project.host(),
             "/src/App.vue",
@@ -14217,7 +14441,8 @@ defineProps<{
             false,
             ctx,
         )
-    });
+    })
+    .analysis;
     let elapsed = started.elapsed();
 
     assert!(
@@ -14310,7 +14535,7 @@ defineSlots<Slots<M>>()
         .host()
         .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
-    let (meta, _) = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
+    let meta = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
         crate::host_manage::extract_component_meta_from_resolved(
             project.host(),
             "/src/App.vue",
@@ -14318,7 +14543,8 @@ defineSlots<Slots<M>>()
             false,
             ctx,
         )
-    });
+    })
+    .analysis;
     let elapsed = started.elapsed();
 
     assert!(

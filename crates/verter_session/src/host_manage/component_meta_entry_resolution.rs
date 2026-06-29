@@ -199,23 +199,26 @@ impl VerterHost {
             );
             // Always include fallthrough — the solver path does not use walker
             // overflow as a gating signal.
-            let (analysis, fallthrough_completeness) = extract_component_meta_from_resolved(
+            let extract = extract_component_meta_from_resolved(
                 self,
                 canonical.as_str(),
                 &resolved,
                 true, // include_fallthrough
                 host_ctx_ref,
             );
-            Some((analysis, resolved, fallthrough_completeness))
+            Some((extract.analysis, resolved, extract.completeness))
         });
-        let (analysis, resolved, fallthrough_completeness) = maybe_resolved_analysis?;
+        let (analysis, resolved, extract_completeness) = maybe_resolved_analysis?;
+        // ONE merged admission signal: the resolve-phase completeness merged
+        // with the whole-extract scope (macro-DTO read + fallthrough compute).
+        let final_completeness = resolved.completeness.merge(extract_completeness);
 
         // Seal + admission decision — `publish_if_admissible` (by-value
         // fenced-serve consult + R20 finalise). An admitted write lets
         // subsequent identical calls short-circuit through
         // `try_with_resolution_cache_hit`; suppression is enforced inside
-        // `publish_component_meta_cache_entry` via
-        // `resolved.synthesis_should_suppress`.
+        // `publish_component_meta_cache_entry` via the merged
+        // `final_completeness` signal.
         self.publish_if_admissible(
             canonical.as_str(),
             "with-resolution path",
@@ -228,7 +231,7 @@ impl VerterHost {
                     sig,
                     validated_at_generation,
                     &seed_fence,
-                    fallthrough_completeness,
+                    final_completeness,
                 );
             },
         );
@@ -306,14 +309,15 @@ impl VerterHost {
             crate::resolver_core::HostResolverContext::from_cold_seed(self, &store_view, overlay);
         let host_ctx_ref: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
         // This view path does NOT publish to `ComponentMetaResultDb`, so the
-        // fallthrough completeness carrier is discarded here.
-        let (analysis, _fallthrough_completeness) = extract_component_meta_from_resolved(
+        // extract completeness carrier is discarded here.
+        let analysis = extract_component_meta_from_resolved(
             self,
             canonical.as_str(),
             &resolved,
             true,
             host_ctx_ref,
-        );
+        )
+        .analysis;
         Some((analysis, resolved))
     }
 

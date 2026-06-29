@@ -2676,9 +2676,10 @@ import { shared } from './shared'
         .resolve_component_meta("/src/Button.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved meta should be computed from the captured view");
 
-    let (meta, _) = crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
+    let meta = crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
         extract_component_meta_from_resolved(&host, "/src/Button.vue", &resolved, true, ctx)
-    });
+    })
+    .analysis;
 
     assert!(
         matches!(

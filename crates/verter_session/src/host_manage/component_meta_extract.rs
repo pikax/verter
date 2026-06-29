@@ -1007,17 +1007,59 @@ pub(crate) fn populate_public_instance_sidecar(
     };
 }
 
+/// Internal carrier for one component-meta extraction. Bundles the projected
+/// analysis, the optional fallthrough fact versions, and the extraction's
+/// observed COMPUTE completeness.
+///
+/// `completeness` is the completeness accumulated by ONE full-extract
+/// [`ColdComputeCompletenessScope`](crate::request_context::ColdComputeCompletenessScope)
+/// that spans the WHOLE extract body — the pre-choke macro-DTO read INCLUDED
+/// and the fallthrough compute folded in — so every partiality source inside
+/// extraction reaches one signal. The publishing surfaces merge it with the
+/// resolve-phase `resolved.completeness`
+/// (`final_completeness = resolved.completeness.merge(outcome.completeness)`)
+/// and gate admission on that single merged signal, replacing the
+/// source-enumerated per-phase gate.
+///
+/// INTERNAL to `verter_session`: `completeness` is admission metadata only —
+/// it never enters a cache key, the query value `V`, any `Hash`/equality, or a
+/// wire DTO.
+pub(crate) struct ComponentMetaExtractOutcome {
+    /// The projected component-meta analysis.
+    pub(crate) analysis: verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    /// The fallthrough resolution's fact versions when the caller threads them
+    /// (the payload surface stores Full payloads under this fact set); `None`
+    /// for the analysis-surface entry that does not request facts.
+    pub(crate) fallthrough_fact_versions: Option<Vec<crate::resolver_core::FactVersionRef>>,
+    /// The COMPUTE completeness observed across the WHOLE extract body — the
+    /// macro-DTO read, projection, policy, and the folded fallthrough compute.
+    /// `Partial` whenever any of those tripped a budget / fuse / fatal read.
+    /// This is COMPUTE completeness, NOT the surface-shape
+    /// `accepted_surface_completeness` (a representable `LowerBound` surface
+    /// with a complete compute stays cacheable).
+    pub(crate) completeness: crate::semantic_query::ResultCompleteness,
+}
+
 pub(crate) fn extract_component_meta_from_resolved(
     host: &VerterHost,
     canonical_or_alias: &str,
     resolved: &crate::meta_resolve::ResolvedComponentMetaState,
     include_fallthrough: bool,
     ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
-) -> (
-    verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
-    crate::semantic_query::ResultCompleteness,
-) {
+) -> ComponentMetaExtractOutcome {
     let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
+    // ONE full-extract completeness scope spans the WHOLE extract body so every
+    // partiality source inside extraction folds into ONE signal — the pre-choke
+    // macro-DTO read below INCLUDED. That read can `observe_partial` a
+    // budget-tripped DTO (`resolver_component_meta_resolved_macros` →
+    // `vue_macro_dtos_with_ctx`, which refuses its own `vue_surface_store`); a
+    // gate keyed only on the later fallthrough completeness let such a partial
+    // warm the overall result anyway. The scope captures it; the publishing
+    // surfaces merge `current_cold_compute_completeness()` with
+    // `resolved.completeness`. The scope is DISCARDED (not bubbled) once its
+    // completeness is read — the signal travels with the outcome carrier, never
+    // via a scope bubble that could over-suppress an enclosing compute.
+    let extract_scope = crate::request_context::ColdComputeCompletenessScope::enter();
     // The macro-DTO surface read (`vue_macro_dtos_with_ctx` ->
     // `ctx.store_view()`) MUST run under the request-bound `ctx`, not the
     // bare `&VerterHost` rail (whose `store_view()` panics in a
@@ -1046,20 +1088,13 @@ pub(crate) fn extract_component_meta_from_resolved(
         &resolved.snapshot,
         resolved.evaluated_types.as_ref(),
     );
-    // The fallthrough cold compute runs AFTER `resolved` was produced, so a
-    // fallthrough-only partial (a budget/fuse trip, a fatal semantic read, a
-    // same-path truncation) is too late for `resolved.synthesis_should_suppress`.
-    // Capture its COMPUTE completeness here through the shared per-cold-compute
-    // scope (the walker fold + the dispatch-level read suppressors fold into it)
-    // and carry it up so the outer publish gate refuses a partial. This is the
-    // COMPUTE completeness, NOT the surface-shape `accepted_surface_completeness`
-    // (a representable `LowerBound` surface stays cacheable).
-    let mut fallthrough_completeness = crate::semantic_query::ResultCompleteness::Complete;
     if include_fallthrough {
         let mut visiting = rustc_hash::FxHashSet::default();
         // The completeness travels WITH the resolution via the outcome carrier
         // (centralised per-call scope), so a stale partial from a discarded
-        // completion-fence retry cannot taint this attempt.
+        // completion-fence retry cannot taint this attempt. Fold the captured
+        // fallthrough completeness into the full-extract scope so it reaches the
+        // one merged signal alongside the macro-DTO partiality.
         let outcome = host.compute_fallthrough_outcome_from_resolved_state(
             &canonical,
             resolved,
@@ -1073,7 +1108,7 @@ pub(crate) fn extract_component_meta_from_resolved(
             meta.accepted_surface_completeness = resolution.accepted_surface_completeness;
             meta.fallthrough_surface = resolution.fallthrough_surface;
         }
-        fallthrough_completeness = outcome.completeness;
+        crate::request_context::fold_result_completeness(outcome.completeness);
     }
     // apply the publication policy over (resolved_type_registry,
     // resolved_type_registry_meta) + snapshot.macros (§3.4 structural
@@ -1094,7 +1129,13 @@ pub(crate) fn extract_component_meta_from_resolved(
         meta.macro_expansion_diagnostics
             .extend(resolved.synthesis_diagnostics.iter().cloned());
     }
-    (meta, fallthrough_completeness)
+    let completeness = crate::request_context::current_cold_compute_completeness();
+    extract_scope.discard();
+    ComponentMetaExtractOutcome {
+        analysis: meta,
+        fallthrough_fact_versions: None,
+        completeness,
+    }
 }
 
 /// Like [`extract_component_meta_from_resolved`] with `include_fallthrough=true`,
@@ -1105,15 +1146,14 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
     canonical_or_alias: &str,
     resolved: &crate::meta_resolve::ResolvedComponentMetaState,
     ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
-) -> (
-    verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
-    Option<Vec<crate::resolver_core::FactVersionRef>>,
-    crate::semantic_query::ResultCompleteness,
-) {
+) -> ComponentMetaExtractOutcome {
     let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
-    // Macro-DTO surface read runs under the request-bound `ctx` (not the
-    // bare host) — see the sibling `extract_component_meta_from_resolved`
-    // and `tests/cases/g_session/session_meta_store_view_regression.rs`.
+    // ONE full-extract completeness scope spans the WHOLE extract body, the
+    // pre-choke macro-DTO read INCLUDED — see the sibling
+    // `extract_component_meta_from_resolved` for the rationale and
+    // `tests/cases/g_session/session_meta_store_view_regression.rs` for the
+    // request-bound `ctx` requirement.
+    let extract_scope = crate::request_context::ColdComputeCompletenessScope::enter();
     let resolved_macros = resolver_component_meta_resolved_macros(
         ctx,
         canonical.as_str(),
@@ -1141,11 +1181,12 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
     // The outcome carrier centralises the per-call completeness scope: a
     // fallthrough partial folds in so the fallthrough's OWN caches
     // (`store_node`) self-gate on the typed completeness signal, and the
-    // captured completeness is RETURNED so the payload-write gate refuses to
-    // warm a fallthrough partial (matching the analysis surface's result-cache
-    // gate). The completeness travels with the resolution, so a discarded
-    // completion-fence retry cannot taint this attempt.
-    let (fallthrough_facts, fallthrough_completeness) = {
+    // captured completeness folds into the full-extract scope so the
+    // payload-write gate refuses to warm a fallthrough partial (matching the
+    // analysis surface's result-cache gate). The completeness travels with the
+    // resolution, so a discarded completion-fence retry cannot taint this
+    // attempt.
+    let fallthrough_facts = {
         let outcome = host.compute_fallthrough_outcome_from_resolved_state(
             &canonical,
             resolved,
@@ -1163,7 +1204,8 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
         } else {
             None
         };
-        (facts, outcome.completeness)
+        crate::request_context::fold_result_completeness(outcome.completeness);
+        facts
     };
     // apply the publication policy AFTER fallthrough merge so the
     // pass operates on the final accepted_props/events. Walks
@@ -1179,7 +1221,13 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
         Some(&resolved.snapshot),
         ctx,
     );
-    (meta, fallthrough_facts, fallthrough_completeness)
+    let completeness = crate::request_context::current_cold_compute_completeness();
+    extract_scope.discard();
+    ComponentMetaExtractOutcome {
+        analysis: meta,
+        fallthrough_fact_versions: fallthrough_facts,
+        completeness,
+    }
 }
 
 /// Test-only entry point that exercises `harvest_ref_names_iterative`

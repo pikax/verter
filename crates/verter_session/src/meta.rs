@@ -853,13 +853,19 @@ impl MetaSession {
             overlay,
         );
         let host_ctx_ref: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
-        let (analysis, fallthrough_fact_versions, fallthrough_completeness) =
-            crate::host_manage::extract_component_meta_from_resolved_with_facts(
-                host,
-                canonical.as_str(),
-                &resolved,
-                host_ctx_ref,
-            );
+        let crate::host_manage::ComponentMetaExtractOutcome {
+            analysis,
+            fallthrough_fact_versions,
+            completeness: extract_completeness,
+        } = crate::host_manage::extract_component_meta_from_resolved_with_facts(
+            host,
+            canonical.as_str(),
+            &resolved,
+            host_ctx_ref,
+        );
+        // ONE merged admission signal: the resolve-phase completeness merged
+        // with the whole-extract scope (macro-DTO read + fallthrough compute).
+        let final_completeness = resolved.completeness.merge(extract_completeness);
 
         if let Some(err) =
             component_meta_resolution_budget_error(canonical.as_str(), Some(&analysis), &resolved)
@@ -880,14 +886,13 @@ impl MetaSession {
         // currentness) AND the per-result completeness rail — a partial
         // (budget-fail-closed / carrier-stopped) payload is returned but
         // never admitted, so a transient trip cannot warm-replay as a
-        // sticky degraded payload. The completeness rail is two signals: the
-        // resolve-level `synthesis_should_suppress` AND the fallthrough-level
-        // `fallthrough_completeness`, which folds a budget/fuse/semantic
-        // partial observed DURING the (now budget-scoped) fallthrough extract.
-        if fixed.payload_promotion_admissible(host)
-            && !resolved.synthesis_should_suppress
-            && !fallthrough_completeness.is_partial()
-        {
+        // sticky degraded payload. The completeness rail is ONE merged signal:
+        // `final_completeness = resolved.completeness.merge(extract_completeness)`
+        // — the resolve-phase completeness merged with the WHOLE-extract scope
+        // (the pre-choke macro-DTO read + the fallthrough cold compute). The
+        // former `synthesis_should_suppress` term is SUBSUMED (it is the bool
+        // projection of `resolved.completeness`, already a merge operand).
+        if fixed.payload_promotion_admissible(host) && !final_completeness.is_partial() {
             // Stamp from the FLIGHT-CAPTURED generation (the fixed
             // view's captured token), never the live counter: a project
             // bump landing between the fence above and this store must

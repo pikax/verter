@@ -280,7 +280,7 @@ defineProps<{ root: Tree }>()
         .host()
         .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
-    let (meta, _) = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
+    let meta = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
         crate::host_manage::extract_component_meta_from_resolved(
             project.host(),
             "/src/App.vue",
@@ -288,7 +288,8 @@ defineProps<{ root: Tree }>()
             false,
             ctx,
         )
-    });
+    })
+    .analysis;
     let elapsed = started.elapsed();
 
     // No stack growth / no hang: the recursive alias terminated.

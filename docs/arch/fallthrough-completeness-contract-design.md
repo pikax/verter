@@ -97,3 +97,33 @@ Each step is TDD red→green; the whole lands as ONE clean conventional commit (
 ## 8. Strongest residual risk
 
 A generic-query regression from adding metadata to the shared carriers. Mitigation (codex): default `Complete` capture + no-op follower-fold hooks, no key change, no `V` change, and dedicated `run_stable_request` tests proving cache/leader/follower/fallback SOURCE ATTRIBUTION (`RequestSource`) and value are unchanged for a generic executor. The reviewer must read those attribution tests and confirm they discriminate (a regression in attribution would fail them).
+
+## 9. Component-meta admission gates on one merged completeness signal
+
+Component-meta admission keys on ONE merged completeness signal, not a source-enumerated list. This is the settled state of the admission boundary.
+
+### The single signal
+
+`extract_component_meta_from_resolved` (and its with-facts sibling) enters ONE `ColdComputeCompletenessScope` spanning the WHOLE extract body — from before the pre-choke macro-DTO read (`resolver_component_meta_resolved_macros` → `vue_macro_dtos_with_ctx`) through the fallthrough cold compute and the publication policy. Both functions return the internal `ComponentMetaExtractOutcome { analysis, fallthrough_fact_versions, completeness }`; `completeness` is the scope's observed partiality — the union of EVERY extract-phase compute partial, no longer only the fallthrough's. The carrier is internal to `verter_session`: completeness is admission metadata and never enters a cache key, the query value, any `Hash`/equality, or any wire DTO.
+
+Each publishing caller computes the one admission signal:
+
+```
+final_completeness = resolved.completeness.merge(extract_scope_completeness)
+```
+
+`resolved.completeness` is the resolve-phase compute completeness (dispatch / materializer / projector / slot-binding / resolve-macro partials); `extract_scope_completeness` is the full-extract scope. The merge is a lattice join in which `Partial` dominates, and it is load-bearing: neither operand alone suffices — the resolve phase and the extract phase each observe partials the other does not (a budget-tripped pre-choke macro DTO is invisible to the resolve-phase completeness on a path where the resolve completed; a resolve-phase slot-binding partial is invisible to the extract scope).
+
+Every owner-result and payload promotion gates on the single `final_completeness.is_partial()` check. The three former source-enumerated gates — the two owner-result sites in `component_meta_entry.rs` and the payload site in `meta.rs` — no longer enumerate `synthesis_should_suppress || fallthrough_completeness`; each reads only the merged signal. Because the scope boundary equals the result boundary, no extract-phase partiality source can escape by construction: a partiality source added anywhere inside the extract is captured without touching the gate, so the contract does not regress as the extract grows.
+
+### `synthesis_should_suppress` is subsumed
+
+`synthesis_should_suppress` is the boolean projection of `resolved.completeness.is_partial()` — its sole producer sets `synthesis_should_suppress` to exactly that predicate. Every admission case it suppressed is therefore already carried by the `resolved.completeness` operand of the merge. It is demoted to a compatibility/audit projection: it remains on the resolved state for output and span diagnostics, but it is not an admission-gate term. The merged signal covers it, and a synthesis-suppressed (resolve-partial) result with a complete extract scope is still refused warm admission through the `resolved.completeness` operand.
+
+### Surface shape never suppresses admission
+
+The gate keys on COMPUTE completeness (`final_completeness`), never on accepted-surface shape. `AcceptedSurfaceCompleteness::LowerBound` describes a surface shape, not a partial compute; a `LowerBound` accepted surface produced by a COMPLETE compute still warms. Surface shape is never an admission-suppression term.
+
+### Dynamic-root result bound: halt on trip
+
+The dynamic-root candidate walker (`collect_dynamic_root_candidates_from_node_inner` / `insert_dynamic_root_candidate_charged`) charges the shared projection budget per newly-inserted UNIQUE candidate BEFORE the insert, and HALTS the merge on a trip: a tripping candidate is not inserted, the walk stops unioning and recursing, and a partial is folded. Deduplication keeps a content-interned diamond's duplicate re-insertions free (the result-size charge stays per-unique), so a shared subtree does not re-expand; the halt additionally bounds the wide-UNIQUE cardinality (a union of N distinct roots under a budget below N yields a bounded partial set, not an N-element set). Non-trip output order is unchanged — the sorted emit is preserved.

@@ -228,17 +228,23 @@ impl VerterHost {
                 Some(r) => r,
                 None => return (None, None),
             };
-            let (meta, fallthrough_completeness) = extract_component_meta_from_resolved(
+            let extract = extract_component_meta_from_resolved(
                 self,
                 canonical.as_str(),
                 &resolved,
                 true, // include_fallthrough
                 ctx,
             );
-            (Some(resolved), Some((meta, fallthrough_completeness)))
+            (
+                Some(resolved),
+                Some((extract.analysis, extract.completeness)),
+            )
         });
         let resolved = resolved_opt?;
-        let (meta, fallthrough_completeness) = meta_opt?;
+        let (meta, extract_completeness) = meta_opt?;
+        // ONE merged admission signal: the resolve-phase completeness merged
+        // with the whole-extract scope (macro-DTO read + fallthrough compute).
+        let final_completeness = resolved.completeness.merge(extract_completeness);
 
         // Seal + admission decision (the by-value fenced-serve consult
         // + the R20 finalise) live in ONE place — `publish_if_admissible`.
@@ -250,7 +256,7 @@ impl VerterHost {
                 sig,
                 validated_at_generation,
                 &seed_fence,
-                fallthrough_completeness,
+                final_completeness,
             );
         });
 
@@ -442,17 +448,23 @@ impl VerterHost {
                 Some(r) => r,
                 None => return (None, None),
             };
-            let (meta, fallthrough_completeness) = extract_component_meta_from_resolved(
+            let extract = extract_component_meta_from_resolved(
                 self,
                 canonical.as_str(),
                 &resolved,
                 true, // include_fallthrough
                 ctx,
             );
-            (Some(resolved), Some((meta, fallthrough_completeness)))
+            (
+                Some(resolved),
+                Some((extract.analysis, extract.completeness)),
+            )
         });
         let resolved = resolved_opt?;
-        let (meta, fallthrough_completeness) = meta_opt?;
+        let (meta, extract_completeness) = meta_opt?;
+        // ONE merged admission signal: the resolve-phase completeness merged
+        // with the whole-extract scope (macro-DTO read + fallthrough compute).
+        let final_completeness = resolved.completeness.merge(extract_completeness);
 
         // Seal + admission decision — `publish_if_admissible` (by-value
         // fenced-serve consult + R20 finalise).
@@ -465,7 +477,7 @@ impl VerterHost {
                 sig,
                 validated_at_generation,
                 &seed_fence,
-                fallthrough_completeness,
+                final_completeness,
             );
         });
 
@@ -839,19 +851,25 @@ impl VerterHost {
         fact_dep_signature: Arc<[crate::resolver_core::FactVersionRef]>,
         validated_at_generation: u64,
         seed_fence: &ColdSeedFence,
-        fallthrough_completeness: crate::semantic_query::ResultCompleteness,
+        final_completeness: crate::semantic_query::ResultCompleteness,
     ) {
-        // Refuse a partial result: `resolved.synthesis_should_suppress` covers
-        // the resolve step, and `fallthrough_completeness` covers the
-        // fallthrough cold compute (which runs AFTER `resolved` was produced, so
-        // a fallthrough-only partial would otherwise escape the resolve-time
-        // signal). This is COMPUTE completeness — a `LowerBound` accepted-surface
-        // SHAPE with a complete compute stays cacheable.
-        if resolved.synthesis_should_suppress || fallthrough_completeness.is_partial() {
+        // Refuse a partial result on ONE merged signal. `final_completeness` is
+        // `resolved.completeness.merge(extract_scope_completeness)`: the
+        // resolve-phase completeness merged with the WHOLE-extract scope (the
+        // pre-choke macro-DTO read + the fallthrough cold compute). It replaces
+        // the former source-enumerated gate
+        // (`resolved.synthesis_should_suppress || fallthrough_completeness`),
+        // so no partiality source can escape by construction. The dropped
+        // `synthesis_should_suppress` term is SUBSUMED: it is the bool
+        // projection of `resolved.completeness` (`= completeness.is_partial()`,
+        // `component_meta_result_db.rs`), already a merge operand here. This is
+        // COMPUTE completeness — a `LowerBound` accepted-surface SHAPE with a
+        // complete compute stays cacheable.
+        if final_completeness.is_partial() {
             tracing::debug!(
                 target: "verter::audit::record",
                 file = %canonical,
-                "skipping component-meta cache promotion (view-aware path): partial result (resolve or fallthrough)",
+                "skipping component-meta cache promotion (view-aware path): partial result (merged extract+resolve completeness)",
             );
             return;
         }
@@ -916,19 +934,25 @@ impl VerterHost {
         fact_dep_signature: Arc<[crate::resolver_core::FactVersionRef]>,
         validated_at_generation: u64,
         seed_fence: &ColdSeedFence,
-        fallthrough_completeness: crate::semantic_query::ResultCompleteness,
+        final_completeness: crate::semantic_query::ResultCompleteness,
     ) {
-        // Refuse a partial result: `resolved.synthesis_should_suppress` covers
-        // the resolve step, and `fallthrough_completeness` covers the
-        // fallthrough cold compute (which runs AFTER `resolved` was produced, so
-        // a fallthrough-only partial would otherwise escape the resolve-time
-        // signal). This is COMPUTE completeness — a `LowerBound` accepted-surface
-        // SHAPE with a complete compute stays cacheable.
-        if resolved.synthesis_should_suppress || fallthrough_completeness.is_partial() {
+        // Refuse a partial result on ONE merged signal. `final_completeness` is
+        // `resolved.completeness.merge(extract_scope_completeness)`: the
+        // resolve-phase completeness merged with the WHOLE-extract scope (the
+        // pre-choke macro-DTO read + the fallthrough cold compute). It replaces
+        // the former source-enumerated gate
+        // (`resolved.synthesis_should_suppress || fallthrough_completeness`),
+        // so no partiality source can escape by construction. The dropped
+        // `synthesis_should_suppress` term is SUBSUMED: it is the bool
+        // projection of `resolved.completeness` (`= completeness.is_partial()`,
+        // `component_meta_result_db.rs`), already a merge operand here. This is
+        // COMPUTE completeness — a `LowerBound` accepted-surface SHAPE with a
+        // complete compute stays cacheable.
+        if final_completeness.is_partial() {
             tracing::debug!(
                 target: "verter::audit::record",
                 file = %canonical,
-                "skipping component-meta cache promotion: partial result (resolve or fallthrough)",
+                "skipping component-meta cache promotion: partial result (merged extract+resolve completeness)",
             );
             return;
         }

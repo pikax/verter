@@ -75,7 +75,7 @@ pub(crate) mod prepared_decl;
 // after the Domain K free functions moved to `component_meta_extract.rs`.
 pub(crate) use self::component_meta_extract::{
     extract_component_meta_from_resolved, extract_component_meta_from_resolved_with_facts,
-    populate_public_instance_sidecar,
+    populate_public_instance_sidecar, ComponentMetaExtractOutcome,
 };
 // Test-only re-export — `populate_sfc_blocks_sidecar` is exercised by
 // `meta_tests.rs` via the `crate::host_manage::*` path. Gated `#[cfg(test)]`
