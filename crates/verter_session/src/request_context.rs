@@ -73,14 +73,36 @@ thread_local! {
 /// no scope active the fold/read helpers degrade to request-level only.
 #[must_use]
 pub struct ColdComputeCompletenessScope {
-    _private: (),
+    /// When `true` (the default every [`Self::enter`] caller gets),
+    /// [`Drop`] merges this scope's accumulated partiality into the
+    /// enclosing scope — a nested compute taints its parent. When `false`
+    /// (set by [`Self::discard`]) the scope is popped WITHOUT bubbling.
+    bubble: bool,
 }
 
 impl ColdComputeCompletenessScope {
     /// Enter a per-cold-compute completeness scope, seeded `Complete`.
     pub fn enter() -> Self {
         COLD_COMPUTE_COMPLETENESS.with(|s| s.borrow_mut().push(ResultCompleteness::Complete));
-        Self { _private: () }
+        Self { bubble: true }
+    }
+
+    /// Pop this scope WITHOUT bubbling its accumulated partiality into the
+    /// enclosing scope.
+    ///
+    /// The DEFAULT drop bubbles a nested compute's partiality into its
+    /// parent. A caller that propagates the completeness by another route —
+    /// e.g. the fallthrough request executor, which carries the FINAL
+    /// attempt's completeness out via `RequestRunResult.completeness` and
+    /// folds it once at the surface boundary (`fold_result_completeness`) —
+    /// uses this to retire a per-attempt scope (a discarded completion-fence
+    /// retry, or the held scope on a cache-served-final path) so its
+    /// partiality neither double-propagates nor over-suppresses a later
+    /// complete result under the enclosing scope.
+    pub fn discard(mut self) {
+        self.bubble = false;
+        // `self` drops here: the cleared `bubble` flag makes the `Drop` impl
+        // pop this scope without merging into the parent.
     }
 }
 
@@ -89,8 +111,10 @@ impl Drop for ColdComputeCompletenessScope {
         COLD_COMPUTE_COMPLETENESS.with(|s| {
             let mut stack = s.borrow_mut();
             if let Some(child) = stack.pop() {
-                if let Some(parent) = stack.last_mut() {
-                    *parent = parent.merge(child);
+                if self.bubble {
+                    if let Some(parent) = stack.last_mut() {
+                        *parent = parent.merge(child);
+                    }
                 }
             }
         });

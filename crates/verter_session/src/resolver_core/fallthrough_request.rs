@@ -107,13 +107,17 @@ struct FallthroughRequestExecutor<'a, 'b, H: FallthroughRequestHost> {
     /// admission gate (`cache_fallthrough_result` / `store_node`) AND the
     /// leader's completeness snapshot both read THIS attempt's partiality —
     /// not a parent's, and not a stale prior attempt's. On `compute` the
-    /// prior attempt's scope is dropped FIRST (LIFO: it is the stack top),
-    /// then a fresh one is entered, so a discarded retry's partiality does
-    /// not taint the new attempt's gate. The held scope bubbles into the
-    /// ENCLOSING cold-compute scope (the extract helper, or a parent
-    /// fallthrough compute) on executor drop, so a child fallthrough's
-    /// completeness propagates to its parent exactly as the former ad-hoc
-    /// caller scope did.
+    /// prior attempt's scope is DISCARDED first (popped WITHOUT bubbling,
+    /// LIFO: it is the stack top), then a fresh one is entered, so a
+    /// discarded retry's partiality taints neither the new attempt's gate
+    /// nor the enclosing scope. The held scope is likewise DISCARDED on
+    /// executor drop: the FINAL attempt's completeness travels out via
+    /// `RequestRunResult.completeness` (the `capture_completeness` snapshot)
+    /// and folds ONCE at the surface boundary (`fold_result_completeness`),
+    /// which is the SOLE propagation into the enclosing cold-compute scope —
+    /// bubbling the held scope too would double-propagate it and, on a
+    /// retried / cache-served-final path, leak a discarded attempt's
+    /// partiality into the enclosing scope.
     compute_completeness_scope: Option<ColdComputeCompletenessScope>,
     max_attempts: usize,
 }
@@ -236,11 +240,16 @@ where
 
     fn compute(&mut self, view: &Self::View) -> Result<Option<H::Resolution>, Self::Error> {
         // Per-attempt cold-compute completeness scope, HELD through
-        // `store_stable` + `capture_completeness`. Drop any prior attempt's
-        // scope FIRST so it is the stack top when it pops (LIFO) — a
-        // discarded (unstable) retry's partiality bubbles into the enclosing
-        // scope rather than nesting under the new attempt's scope.
-        self.compute_completeness_scope = None;
+        // `store_stable` + `capture_completeness`. DISCARD any prior
+        // attempt's scope WITHOUT bubbling (it is the stack top, LIFO) so a
+        // discarded (unstable) retry's partiality taints neither the new
+        // attempt's gate nor the enclosing scope. The FINAL attempt's
+        // completeness reaches the enclosing scope SOLELY via
+        // `RequestRunResult.completeness` + the surface-boundary
+        // `fold_result_completeness`, never via an attempt-scope bubble.
+        if let Some(prior) = self.compute_completeness_scope.take() {
+            prior.discard();
+        }
         self.compute_completeness_scope = Some(ColdComputeCompletenessScope::enter());
         Ok(self.host.compute_fallthrough_surface_uncached(
             &self.canonical_id,
@@ -307,6 +316,22 @@ where
         // own owner / payload / node admission downstream refuses to warm a
         // surface built on a leader's partial child (the no-poison fence).
         crate::request_context::fold_result_completeness(joined);
+    }
+}
+
+impl<'a, 'b, H: FallthroughRequestHost> Drop for FallthroughRequestExecutor<'a, 'b, H> {
+    fn drop(&mut self) {
+        // DISCARD the FINAL attempt's held scope (or the held scope left by a
+        // prior attempt on a cache-served-final path) WITHOUT bubbling. The
+        // final completeness is already carried out via `capture_completeness`
+        // -> `RequestRunResult.completeness` and folded ONCE at the surface
+        // boundary (`fold_result_completeness`); bubbling here would
+        // double-propagate it, and on a retried / cache-served-final path it
+        // would leak a discarded attempt's partiality into the enclosing
+        // cold-compute scope (over-suppressing a later complete promotion).
+        if let Some(scope) = self.compute_completeness_scope.take() {
+            scope.discard();
+        }
     }
 }
 
@@ -993,6 +1018,167 @@ mod tests {
             "a budget-partial child surface must NEVER warm the shared fallthrough cache — \
              neither the gated leader nor the coalescing follower may promote it, got {:?}",
             promotions.lock().unwrap(),
+        );
+    }
+
+    /// DISCARDED-RETRY no-over-suppression: a NON-FINAL fallthrough attempt
+    /// that folds a PARTIAL and is then DISCARDED (its snapshot proved
+    /// unstable, so the driver retries) must NOT bubble its partiality into
+    /// the ENCLOSING cold-compute scope — only the FINAL attempt's
+    /// completeness propagates, via `RequestRunResult.completeness` + the
+    /// surface-boundary fold.
+    ///
+    /// Drive: attempt 1 folds a partial and advances the live supersession
+    /// fingerprint AFTER recording it, so the executor's `is_stable` re-read
+    /// diverges → the attempt is unstable → discarded → the outer loop
+    /// retries. Attempt 2 leaves the fingerprint fixed and folds NOTHING →
+    /// stable + complete → promoted.
+    ///
+    /// Asserts: (1) the final value is the COMPLETE attempt-2 value; (2) the
+    /// final `RequestRunResult.completeness` is Complete (not attempt-1's
+    /// discarded partial); (3) the ENCLOSING scope stays Complete — NOT
+    /// poisoned by the discarded attempt-1 partiality; (4) the complete
+    /// result WARMS the shared cache.
+    ///
+    /// DISCRIMINATES: with the per-attempt discard reverted (attempt scopes
+    /// drop with the default bubble), attempt 2's `compute` drops attempt 1's
+    /// held scope WITH bubbling, merging the discarded partial into the
+    /// enclosing scope → assertion (3) FAILS (the over-suppression hole).
+    #[test]
+    fn discarded_unstable_attempt_partiality_does_not_taint_enclosing_scope() {
+        use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
+
+        /// First compute attempt folds a PARTIAL and is UNSTABLE (discarded);
+        /// the second is COMPLETE and STABLE (promoted). The unstable signal
+        /// is a live-fingerprint advance recorded AFTER the partial fold, so
+        /// the executor's `is_stable` re-read diverges from the snapshot
+        /// fingerprint on attempt 1 only.
+        struct RetryCompletenessHost {
+            attempts: AtomicUsize,
+            live_fp: AtomicU64,
+            promotions: std::cell::RefCell<Vec<String>>,
+        }
+        impl FallthroughRequestHost for RetryCompletenessHost {
+            type View = StubView;
+            type Resolution = usize;
+
+            fn generic_root_propagation(&self) -> bool {
+                false
+            }
+            fn snapshot_store_view(&self) -> StubView {
+                StubView
+            }
+            fn snapshot_store_view_read(&self) -> (StubView, bool) {
+                (StubView, true)
+            }
+            fn current_view_supersession_fingerprint(&self) -> u64 {
+                self.live_fp.load(AtomicOrdering::Relaxed)
+            }
+            fn try_get_cached_fallthrough(
+                &self,
+                _canonical_id: &str,
+                _overrides: Option<&FallthroughPropOverrideSet>,
+                _store_view: &StubView,
+            ) -> Option<usize> {
+                None
+            }
+            fn compute_fallthrough_surface_uncached(
+                &self,
+                _canonical_id: &str,
+                _overrides: Option<&FallthroughPropOverrideSet>,
+                _visiting: &mut FxHashSet<String>,
+                _store_view: &StubView,
+                _base_is_current: bool,
+            ) -> Option<usize> {
+                let n = self.attempts.fetch_add(1, AtomicOrdering::Relaxed);
+                if n == 0 {
+                    // Attempt 1: fold a PARTIAL into the per-attempt held
+                    // scope, then advance the fingerprint so `is_stable`
+                    // diverges → unstable → discarded.
+                    crate::request_context::mark_request_materialization_cache_suppress();
+                    self.live_fp.fetch_add(1, AtomicOrdering::Relaxed);
+                    Some(1)
+                } else {
+                    // Attempt 2: COMPLETE (no partial fold); the fingerprint
+                    // stays fixed → stable → promoted.
+                    Some(2)
+                }
+            }
+            fn store_fallthrough_result(
+                &self,
+                canonical_id: &str,
+                _overrides: Option<&FallthroughPropOverrideSet>,
+                _result: &usize,
+            ) {
+                // Production no-poison gate mirror: refuse a partial.
+                if crate::request_context::current_cold_compute_completeness().is_partial() {
+                    return;
+                }
+                self.promotions.borrow_mut().push(canonical_id.to_string());
+            }
+        }
+
+        let host = RetryCompletenessHost {
+            attempts: AtomicUsize::new(0),
+            live_fp: AtomicU64::new(0xBEEF),
+            promotions: std::cell::RefCell::new(Vec::new()),
+        };
+        let singleflight = SingleflightGroup::<
+            FallthroughNodeKey,
+            StableExecutionValue<Option<usize>>,
+            (),
+        >::default();
+        let mut visiting = FxHashSet::default();
+
+        // ENCLOSING cold-compute scope (the extract helper / parent
+        // fallthrough compute analogue). A DISCARDED attempt's partiality
+        // must never taint it.
+        let enclosing = crate::request_context::ColdComputeCompletenessScope::enter();
+        let result = run_fallthrough_request(
+            &host,
+            &singleflight,
+            "/proj/Child.vue",
+            None,
+            &mut visiting,
+            None,
+            3,
+        );
+        // Read the enclosing scope's completeness BEFORE dropping it.
+        let enclosing_partial_after =
+            crate::request_context::current_cold_compute_completeness().is_partial();
+        drop(enclosing);
+
+        assert_eq!(
+            host.attempts.load(AtomicOrdering::Relaxed),
+            2,
+            "exactly two compute attempts ran: the unstable partial (discarded) then the \
+             complete stable one",
+        );
+        assert_eq!(
+            result.value,
+            Some(2),
+            "the COMPLETE second attempt's value is the one returned",
+        );
+        assert!(
+            !result.completeness.is_partial(),
+            "the final RequestRunResult completeness is Complete (attempt 2), NOT the discarded \
+             attempt-1 partial",
+        );
+        // DISCRIMINATING — reverting the per-attempt discard bubbles
+        // attempt-1's partial into the enclosing scope.
+        assert!(
+            !enclosing_partial_after,
+            "a DISCARDED unstable attempt's partiality MUST NOT taint the enclosing cold-compute \
+             scope — reverting the per-attempt discard merges attempt-1's discarded partial into \
+             the enclosing scope (the over-suppression hole), false-refusing a later complete \
+             promotion under it",
+        );
+        assert_eq!(
+            host.promotions.borrow().as_slice(),
+            ["/proj/Child.vue".to_string()],
+            "the COMPLETE second attempt MUST warm the shared fallthrough cache exactly once — its \
+             `store_stable` reads a Complete scope (the discarded attempt-1 partial was popped \
+             without bubbling)",
         );
     }
 }

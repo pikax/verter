@@ -155,12 +155,14 @@ impl VerterHost {
         // executor (`FallthroughRequestExecutor`): it enters a FRESH held
         // scope per `compute` attempt — spanning the admission `store_stable`
         // -> `cache_fallthrough_result` so a partial fallthrough never warms —
-        // and the rendezvous carries the COMPUTE completeness out. The
-        // LEADER's held scope bubbles into the ENCLOSING cold-compute scope
-        // (the extract helper, or a parent fallthrough compute) on drop, and a
-        // FOLLOWER folds the joined leader's partiality into it via
-        // `fold_follower_completeness`. So a child fallthrough's partiality
-        // reaches the parent without a stale-across-retries caller scope here.
+        // and the rendezvous carries the COMPUTE completeness out. Each
+        // attempt's held scope is DISCARDED (popped without bubbling), so a
+        // discarded retry's partiality never taints the enclosing scope; the
+        // FINAL completeness reaches the parent SOLELY via the
+        // `fold_result_completeness(result.completeness)` surface-boundary
+        // fold below (a FOLLOWER's join folds the same partiality via
+        // `fold_follower_completeness`). No stale-across-retries caller scope
+        // outlives the attempt it describes.
         let result = crate::resolver_core::run_fallthrough_request(
             self,
             &self.resolver_runtime().top_level_fallthrough_singleflight,
