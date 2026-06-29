@@ -291,6 +291,53 @@ const SUPPORTED_ATTRIBUTES: &[&str] = &[
     "attributes/dep_before_pure_call",
 ];
 
+/// The native-client EVENT corpus — the `events/*` fixtures exercising the
+/// regular-element event surface: non-delegated `$.event`, capture-phase (the 4th
+/// positional `true`), the legacy modifier WRAPPERS (`$.preventDefault` /
+/// `$.stopPropagation` / … in the fixed inner→outer order), the `passive` / `nonpassive`
+/// 5th-positional boolean (with the `void 0` capture-slot placeholder), and the
+/// `is_passive_event` default on the modern delegated `touchstart` / `touchmove` path.
+/// Each row runs the IDENTICAL compile + OXC-parse + AST-structural full-module
+/// comparison as the matrix/attribute corpora — the committed `events/<slug>.client.json`
+/// is the official `svelte@5.56.3` oracle. The full-module structural comparison signs
+/// every call argument (booleans, `void 0`, nested wrapper calls), so a wrong wrapper
+/// ORDER, a missing/extra capture/passive positional, or a delegated-vs-direct mode drift
+/// fails here.
+const SUPPORTED_EVENTS: &[&str] = &[
+    // Non-delegated direct `$.event` — a nullary $state-write arrow, an EMPTY arrow,
+    // a PARAM arrow, and an inline FUNCTION EXPRESSION (the last three discriminate the
+    // broadened direct handler classifier — the narrow delegated classifier rejects
+    // them). The function-expression row pins that a non-arrow inline handler is passed
+    // through to `$.event` with its `$state` body rewritten, matching official.
+    "events/nondelegated_focus",
+    "events/nondelegated_empty_arrow",
+    "events/nondelegated_param_arrow",
+    "events/nondelegated_funcexpr",
+    // Capture phase — the modern `*capture` suffix and the legacy `|capture` modifier,
+    // both emitting the 4th positional `true`.
+    "events/capture_suffix",
+    "events/capture_legacy",
+    // Each individual legacy modifier wrapper.
+    "events/modifier_prevent_default",
+    "events/modifier_stop_propagation",
+    "events/modifier_stop_immediate",
+    "events/modifier_self",
+    "events/modifier_trusted",
+    "events/modifier_once",
+    // A two-modifier STACK and the all-six stack — the fixed inner→outer wrapper order.
+    "events/modifier_stack",
+    "events/modifier_all",
+    // The passive / nonpassive 5th-positional boolean + the `void 0` capture slot.
+    "events/modifier_passive",
+    "events/modifier_nonpassive",
+    // Capture combined with a modifier wrapper (the 4th positional `true` + the wrapper).
+    "events/modifier_capture_combo",
+    // The modern delegated `touchstart` / `touchmove` passive-by-default positional
+    // (`$.delegated(..., void 0, true)`) — `is_passive_event` on the delegated path.
+    "events/passive_touchstart_modern",
+    "events/passive_touchmove_modern",
+];
+
 /// The repository root (two levels up from this crate's `tests/` dir).
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -5348,8 +5395,25 @@ fn all_supported_slugs() -> Vec<&'static str> {
         .iter()
         .chain(SUPPORTED_MATRIX.iter())
         .chain(SUPPORTED_ATTRIBUTES.iter())
+        .chain(SUPPORTED_EVENTS.iter())
         .copied()
         .collect()
+}
+
+#[test]
+fn supported_events_cover_the_full_event_corpus() {
+    // The native-client event corpus is the structural oracle for the regular-element
+    // event surface (non-delegated / capture / legacy modifiers / passive); a dropped
+    // row is a coverage regression. This count gate fails LOUDLY if a row is dropped.
+    assert_eq!(
+        SUPPORTED_EVENTS.len(),
+        19,
+        "the event corpus must enumerate all 19 `events/*` supported fixtures"
+    );
+    let mut seen = std::collections::BTreeSet::new();
+    for &slug in SUPPORTED_EVENTS {
+        assert!(seen.insert(slug), "duplicate supported-event slug {slug}");
+    }
 }
 
 #[test]
@@ -5906,6 +5970,72 @@ fn structural_full_module_gate_rejects_pre_fix_defects() {
     assert!(
         !parses_as_js("export default function f() { $.set_class(div, 1, 'a\nb'); }"),
         "a raw-newline single-quoted defect must be INVALID JS (the structural gate parse-assert fires)"
+    );
+}
+
+#[test]
+fn structural_gate_discriminates_event_wrapper_order_and_passive_topology() {
+    // The full-module structural comparator MUST discriminate the
+    // wrapper NESTING ORDER + the passive/capture POSITIONAL args of an event
+    // registration (a wrong wrapper order or a dropped/relocated passive is a
+    // BEHAVIORAL bug, not a cosmetic diff). This proves the comparator (which signs every
+    // call argument — nested calls, boolean literals, `void 0`) catches each, by
+    // mutating the official golden into a deliberately-wrong variant and asserting the
+    // STRUCTURAL signature no longer matches.
+    let mutated_is_rejected = |slug: &str, find: &str, wrong: &str| {
+        let golden = golden_client_module(&client_golden(slug));
+        assert!(
+            golden.contains(find),
+            "precondition: the {slug} golden must contain `{find}`:\n{golden}"
+        );
+        let mutated = golden.replace(find, wrong);
+        assert_ne!(
+            mutated, golden,
+            "precondition: the mutation must change the {slug} module"
+        );
+        assert!(
+            !sigs_equal(&mutated, &golden),
+            "the STRUCTURAL gate MUST reject the wrong event topology for {slug}:\n{mutated}"
+        );
+    };
+
+    // (a) WRONG WRAPPER ORDER — swapping `preventDefault`/`stopPropagation` nesting
+    // (the official inner→outer order is stopPropagation INNER, preventDefault OUTER).
+    mutated_is_rejected(
+        "events/modifier_stack",
+        "$.preventDefault($.stopPropagation(() => $.update(count)))",
+        "$.stopPropagation($.preventDefault(() => $.update(count)))",
+    );
+
+    // (b) DROPPED PASSIVE — removing the `void 0, true` 5th-positional passive arg.
+    mutated_is_rejected(
+        "events/modifier_passive",
+        "$.event('click', button, () => $.update(count), void 0, true)",
+        "$.event('click', button, () => $.update(count))",
+    );
+
+    // (c) WRONG PASSIVE BOOLEAN — `true` (passive) vs `false` (nonpassive).
+    mutated_is_rejected(
+        "events/modifier_passive",
+        "() => $.update(count), void 0, true)",
+        "() => $.update(count), void 0, false)",
+    );
+
+    // (d) WRONG CAPTURE SLOT — emitting `true` in the capture slot instead of the
+    // `void 0` placeholder (a passive-only registration must keep the capture slot
+    // `void 0`, NOT `true`).
+    mutated_is_rejected(
+        "events/modifier_passive",
+        "() => $.update(count), void 0, true)",
+        "() => $.update(count), true, true)",
+    );
+
+    // (e) DROPPED CAPTURE POSITIONAL — removing the 4th-positional `true` from a
+    // capture event.
+    mutated_is_rejected(
+        "events/capture_suffix",
+        "$.event('click', button, () => $.update(count), true)",
+        "$.event('click', button, () => $.update(count))",
     );
 }
 

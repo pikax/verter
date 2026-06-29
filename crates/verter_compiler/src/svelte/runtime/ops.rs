@@ -246,6 +246,7 @@ fn collect_attr_ops(
                 delegated,
                 capture,
                 modifiers,
+                passive,
             } => push_local(
                 ops,
                 local,
@@ -257,6 +258,7 @@ fn collect_attr_ops(
                         delegated: *delegated,
                         capture: *capture,
                         modifiers: modifiers.clone(),
+                        passive: *passive,
                     },
                 },
             ),

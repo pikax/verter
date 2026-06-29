@@ -30,36 +30,43 @@ use verter_span::Span;
 // Event-handler shape
 // ---------------------------------------------------------------------------
 
-/// The accepted shape of a delegated event handler expression.
+/// The accepted shape of an event handler expression.
 ///
-/// The supported boundary is the §1.2-class handler: a non-async INLINE ARROW
-/// whose body is exclusively `$state` assignment / update statements (`() => count
-/// += 1`, `() => count++`, `() => { a++; b++; }`). Official emits `$.delegated(...)`
-/// with the arrow passed through (rewriting the `$state` reads/writes inside).
-/// EVERY other handler shape — a function expression, a local-function identifier, a
-/// call, an update of a non-`$state`, a bare member, a sequence, a conditional, an
-/// imported identifier, a body containing any non-assignment statement (a call, a
-/// declaration, an `if`) — needs the official wrapper / `$.derived` hoist or the
-/// arbitrary statement-rewrite breadth and is a deferral-ledger follow-up (5d).
+/// The handler is passed (rewritten) as the `$.event` / `$.delegated` 3rd positional
+/// argument — wrapped in any legacy modifier wrappers. One accepted sub-shape:
+///
+/// - [`ClientEventHandlerShape::Inline`] — a non-async inline arrow / function
+///   expression. The DELEGATED path admits ONLY the §1.2 nullary `$state`-write arrow
+///   sub-shape (`() => count++`); the DIRECT (`$.event`) path admits ANY non-async
+///   inline arrow / function (`() => {}`, `(e) => count++`), with its body lowered
+///   through the shared expression rewriter (an unsupported body construct fails closed
+///   at the rewrite, never emits raw).
+///
+/// Every OTHER handler shape — a bare identifier (`onfocus={ev}`), a member
+/// (`onclick={o.m}`), a call, a conditional, an imported identifier — is not yet
+/// supported and fails closed. A bare-identifier handler in particular needs the
+/// official `build_event_handler` binding resolution (a non-import local /
+/// declared-function lookup, or the `function (...$$args) { handler.apply(this, $$args);
+/// }` wrapper / `$.derived` `has_call` hoist), which this surface does not own;
+/// admitting it would emit the raw binding as a handler (`$.event(type, node, ident)`)
+/// without the resolution that proves it is a function.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ClientEventHandlerShape {
-    /// `onclick={() => …}` — a non-async arrow whose body is `$state`
-    /// assignment / update statement(s).
-    Arrow,
+    /// A non-async inline arrow / function expression (rewritten).
+    Inline,
 }
 
-/// Classify a delegated event handler's expression into its accepted
-/// [`ClientEventHandlerShape`], or fail closed.
+/// Classify an event handler's expression into its accepted [`ClientEventHandlerShape`],
+/// or fail closed.
 ///
-/// Accepts ONLY a non-async arrow-function expression whose body is a simple
-/// supported `$state` assignment / update — either an expression body that IS a
-/// `$state` assignment / update (`() => count += 1`, `() => count++`) or a block
-/// body whose statements are ALL `$state` assignment / update expression statements
-/// (`() => { a++; b++; }`). An async arrow is the 5j async surface; every other
-/// handler shape (a function expression, a local-function identifier, a call, an
-/// update of a non-`$state`, a member, a sequence, a conditional, an imported
-/// identifier, a body with any non-assignment statement) is the official wrapper /
-/// statement-rewrite breadth (5d).
+/// `direct` selects the acceptance breadth: a DIRECT (`$.event`) handler — the
+/// regular-element non-delegated / capture / legacy-modifier surface — admits any
+/// non-async inline arrow / function expression; a DELEGATED (`$.delegated`) handler
+/// keeps the NARROW §1.2 boundary (a nullary `$state`-write arrow only), so the
+/// delegated path is unchanged. An async handler is the experimental-async surface; a
+/// bare identifier / member / call / conditional / other expression is the official
+/// binding-resolution / wrapper-form breadth (not yet supported) and fails closed. The
+/// accepted surface is exactly the surface the committed `events/*` goldens prove.
 pub(super) fn classify_event_handler_shape(
     handler_source: &str,
     event_type: &str,
@@ -67,9 +74,14 @@ pub(super) fn classify_event_handler_shape(
     scope: ScopeId,
     bindings: &BindingTable,
     scopes: &ScopeGraph,
+    direct: bool,
 ) -> Result<ClientEventHandlerShape, UnsupportedSvelteRuntimeSurface> {
     let refuse = || UnsupportedSvelteRuntimeSurface::NonDelegatedEvent {
         event_type: event_type.to_string(),
+        span: el_span,
+    };
+    let async_refuse = || UnsupportedSvelteRuntimeSurface::ExperimentalAsync {
+        surface: "async event handler",
         span: el_span,
     };
     let alloc = Allocator::default();
@@ -86,30 +98,43 @@ pub(super) fn classify_event_handler_shape(
     while let Expression::ParenthesizedExpression(p) = expr {
         expr = &p.expression;
     }
-    let Expression::ArrowFunctionExpression(arrow) = expr else {
-        // A function expression, a bare identifier (local-function / import), a call,
-        // an update, a member, a sequence, a conditional — the wrapper form (5d).
-        return Err(refuse());
-    };
-    if arrow.r#async {
-        return Err(UnsupportedSvelteRuntimeSurface::ExperimentalAsync {
-            surface: "async event handler",
-            span: el_span,
-        });
-    }
-    // The arrow must take NO parameters (a `(e) => …` handler reads the event arg —
-    // the broader handler-arg surface is a deferral). The §1.2-class handler is
-    // nullary.
-    if !arrow.params.items.is_empty() || arrow.params.rest.is_some() {
-        return Err(refuse());
-    }
-    // The body must be EXCLUSIVELY `$state` assignment / update statements: either an
-    // expression body that IS a `$state` assignment / update, or a block whose every
-    // statement is a `$state` assignment / update expression statement.
-    if arrow_body_is_state_writes(arrow, scope, bindings, scopes) {
-        Ok(ClientEventHandlerShape::Arrow)
-    } else {
-        Err(refuse())
+    match expr {
+        Expression::ArrowFunctionExpression(arrow) => {
+            if arrow.r#async {
+                return Err(async_refuse());
+            }
+            if direct {
+                // DIRECT: any non-async inline arrow. The body lowers through the shared
+                // rewriter at projection time (an unsupported construct fails closed
+                // there).
+                return Ok(ClientEventHandlerShape::Inline);
+            }
+            // DELEGATED (narrow §1.2): a NULLARY arrow whose body is EXCLUSIVELY `$state`
+            // assignment / update statements.
+            if !arrow.params.items.is_empty() || arrow.params.rest.is_some() {
+                return Err(refuse());
+            }
+            if arrow_body_is_state_writes(arrow, scope, bindings, scopes) {
+                Ok(ClientEventHandlerShape::Inline)
+            } else {
+                Err(refuse())
+            }
+        }
+        // A function expression handler (`onclick={function () { … }}`) — the DIRECT
+        // path admits it (passed through, body rewritten); the delegated narrow path
+        // does not.
+        Expression::FunctionExpression(func) if direct => {
+            if func.r#async {
+                return Err(async_refuse());
+            }
+            Ok(ClientEventHandlerShape::Inline)
+        }
+        // Every other handler shape — a bare identifier (`onfocus={ev}`, which needs the
+        // official `build_event_handler` binding resolution this surface does not own), a
+        // function expression on the delegated path, a member / call / conditional /
+        // sequence — is the official binding-resolution / wrapper-form breadth and is not
+        // yet supported. Fail closed (never emit the raw binding as a handler).
+        _ => Err(refuse()),
     }
 }
 

@@ -1,0 +1,81 @@
+{
+  "slug": "events/nondelegated_param_arrow.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "nondelegated_param_arrow",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "first_child",
+    "sibling",
+    "child",
+    "reset",
+    "template_effect",
+    "set_text",
+    "get",
+    "event",
+    "update",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "event",
+    "first_child",
+    "from_html",
+    "get",
+    "reset",
+    "set_text",
+    "sibling",
+    "state",
+    "template_effect",
+    "update"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 1,
+    "first_child": 1,
+    "sibling": 1,
+    "child": 1,
+    "reset": 1,
+    "template_effect": 1,
+    "set_text": 1,
+    "get": 1,
+    "event": 1,
+    "update": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<input/> <p> </p>",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<input/> <p> </p>`, 1); export default function nondelegated_param_arrow($$anchor) {let n = $.state(0); var fragment = root(); var input = $.first_child(fragment); var p = $.sibling(input, 2); var text = $.child(p, true); $.reset(p); $.template_effect(() => $.set_text(text, $.get(n))); $.event('focus', input, (e) => $.update(n)); $.append($$anchor, fragment);}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

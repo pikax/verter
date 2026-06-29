@@ -318,10 +318,18 @@ pub enum AttrIr {
         /// are NOT capture events despite the suffix (the official
         /// `is_capture_event` exclusion).
         capture: bool,
-        /// The legacy `on:` event modifiers (`|stop`, `|prevent`, …), empty for
-        /// the Svelte-5 attribute form. (`|capture` is reflected in `capture`,
-        /// but is also kept here for fidelity.)
+        /// The legacy `on:` event modifiers (`|stopPropagation`, `|preventDefault`,
+        /// …), empty for the Svelte-5 attribute form. (`|capture` is reflected in
+        /// `capture`, but is also kept here for fidelity.)
         modifiers: Vec<String>,
+        /// The resolved passive-listener option — the 5th positional `$.event` /
+        /// `$.delegated` argument: `Some(true)` (passive), `Some(false)`
+        /// (nonpassive), `None` (omitted). Computed at LOWERING (where the
+        /// modern-vs-legacy form is known) so the emitter never re-infers it: the
+        /// MODERN attribute form defaults to `is_passive_event(event_type)`
+        /// (`touchstart` / `touchmove` ⇒ `Some(true)`), the LEGACY directive form
+        /// derives it from the `|passive` / `|nonpassive` modifiers ONLY.
+        passive: Option<bool>,
     },
     /// A `use:action` directive (`use:fn` / `use:fn={arg}`).
     Use {
@@ -613,6 +621,10 @@ pub struct EventOp {
     pub capture: bool,
     /// The legacy `on:` modifiers (empty for the Svelte-5 attribute form).
     pub modifiers: Vec<String>,
+    /// The resolved passive-listener option (the 5th positional `$.event` /
+    /// `$.delegated` argument): `Some(true)` passive, `Some(false)` nonpassive,
+    /// `None` omitted. Carried from lowering (the modern-vs-legacy passive rule).
+    pub passive: Option<bool>,
 }
 
 /// A block construct.

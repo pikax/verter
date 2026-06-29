@@ -15,7 +15,7 @@
 use verter_span::Span;
 
 use super::entity_decode::decode_attr_entities;
-use super::events::{can_delegate_event, normalize_event_name};
+use super::events::{can_delegate_event, is_passive_event, normalize_event_name};
 use super::expr::ScopeId;
 use super::ir::{AttrIr, MixedAttrPart, StaticAttrValue, StyleDirectiveValue, TransitionKind};
 use super::{local_name_span, span_text, spread_expr_span, LoweringCtx};
@@ -162,12 +162,20 @@ fn lower_plain_attr(
                     // are NEVER delegated — they bind a DIRECT `$.event`.
                     let delegated =
                         matches!(host, AttrHost::Element) && can_delegate_event(raw_event);
+                    // The MODERN attribute form's passive default is purely
+                    // `is_passive_event(event_type)` (official `visit_event_attribute`
+                    // passes `is_passive_event(name) ? true : undefined`): `touchstart`
+                    // / `touchmove` ⇒ `Some(true)`, every other type ⇒ `None`. (A
+                    // modern attribute carries no `|passive` / `|nonpassive` modifier —
+                    // that is the legacy directive form only.)
+                    let passive = is_passive_event(&event_type).then_some(true);
                     return AttrIr::Event {
                         event_type,
                         handler,
                         delegated,
                         capture,
                         modifiers: Vec::new(),
+                        passive,
                     };
                 }
             }
@@ -438,12 +446,25 @@ fn lower_directive(
             // modifier is not part of the name, and the `*capture` SUFFIX form does
             // not apply to legacy directives — capture is a modifier there).
             let capture = directive.modifiers.iter().any(|m| m == "capture");
+            // The LEGACY directive form's passive option derives from its modifiers
+            // ONLY (official `OnDirective.js`: `passive = includes('passive') ||
+            // (includes('nonpassive') ? false : undefined)`): `|passive` ⇒ `Some(true)`,
+            // else `|nonpassive` ⇒ `Some(false)`, else `None`. It does NOT consult
+            // `is_passive_event` — a legacy `on:touchstart` emits no passive arg.
+            let passive = if directive.modifiers.iter().any(|m| m == "passive") {
+                Some(true)
+            } else if directive.modifiers.iter().any(|m| m == "nonpassive") {
+                Some(false)
+            } else {
+                None
+            };
             Some(AttrIr::Event {
                 event_type: directive.local.clone(),
                 handler,
                 delegated: false,
                 capture,
                 modifiers: directive.modifiers.clone(),
+                passive,
             })
         }
         SvelteDirectiveKind::Use => {

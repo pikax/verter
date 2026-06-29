@@ -1,0 +1,75 @@
+{
+  "slug": "events/nondelegated_funcexpr.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "nondelegated_funcexpr",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "child",
+    "reset",
+    "template_effect",
+    "set_text",
+    "get",
+    "event",
+    "update",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "event",
+    "from_html",
+    "get",
+    "reset",
+    "set_text",
+    "state",
+    "template_effect",
+    "update"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 1,
+    "child": 1,
+    "reset": 1,
+    "template_effect": 1,
+    "set_text": 1,
+    "get": 1,
+    "event": 1,
+    "update": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<button> </button>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<button> </button>`); export default function nondelegated_funcexpr($$anchor) {let n = $.state(0); var button = root(); var text = $.child(button); $.reset(button); $.template_effect(() => $.set_text(text, `go ${$.get(n) ?? ''}`)); $.event('focus', button, function () {$.update(n);}); $.append($$anchor, button);}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

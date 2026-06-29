@@ -1056,24 +1056,406 @@ fn await_expression_in_interpolation_fails_closed() {
 }
 
 #[test]
-fn capture_event_fails_closed() {
-    // A CAPTURE-phase event (`onclickcapture`) is a non-delegated event — fail
-    // closed (only modern delegated, non-capture, modifier-free events are
-    // supported).
-    assert_fail_closed(
+fn capture_event_emits_the_capture_positional_arg() {
+    // A CAPTURE-phase event (`onclickcapture`) is a non-delegated `$.event` with the
+    // capture flag as the 4th positional `true` (official `build_event`). It NO LONGER
+    // fails closed — the regular-element capture surface is supported.
+    let js = emit(
         "<script>let n = $state(0);</script>\n<button onclickcapture={() => n++}>x</button>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("$.event('click', button, () => $.update(n), true)")),
+        "a capture event must emit the 4th positional `true`:\n{js}"
+    );
+    // Negative: a capture event is NEVER delegated (no `$.delegated`, no `$.delegate`).
+    assert!(
+        !js.contains("$.delegated(") && !js.contains("$.delegate("),
+        "a capture event must not delegate:\n{js}"
+    );
+}
+
+#[test]
+fn legacy_on_unknown_modifier_event_fails_closed() {
+    // A legacy `on:click|stop` directive carries an UNRECOGNIZED modifier (`stop` is
+    // not in the official `EVENT_MODIFIERS` set) — the official
+    // `event_handler_invalid_modifier` compile error. Verter keeps it fail-closed /
+    // refused (the VALID legacy modifiers are supported; an invalid one is not).
+    assert_fail_closed(
+        "<script>let n = $state(0);</script>\n<button on:click|stop={() => n++}>x</button>\n",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::NonDelegatedEvent { .. }),
     );
 }
 
 #[test]
-fn legacy_on_modifier_event_fails_closed() {
-    // A legacy `on:click|stop` directive (a modifier-bearing event) is non-delegated
-    // — fail closed.
-    assert_fail_closed(
-        "<script>let n = $state(0);</script>\n<button on:click|stop={() => n++}>x</button>\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::NonDelegatedEvent { .. }),
+fn invalid_passive_modifier_combinations_fail_closed() {
+    // `passive` + `preventDefault` and `passive` + `nonpassive` are official
+    // `event_handler_invalid_modifier_combination` compile errors — Verter keeps them
+    // fail-closed / refused (matching official's rejection), in BOTH source orders.
+    for src in [
+        "<script>let n = $state(0);</script>\n<button on:click|passive|preventDefault={() => n++}>x</button>\n",
+        "<script>let n = $state(0);</script>\n<button on:click|preventDefault|passive={() => n++}>x</button>\n",
+        "<script>let n = $state(0);</script>\n<button on:click|passive|nonpassive={() => n++}>x</button>\n",
+    ] {
+        assert_fail_closed(src, |s| {
+            matches!(s, UnsupportedSvelteRuntimeSurface::NonDelegatedEvent { .. })
+        });
+    }
+}
+
+#[test]
+fn event_smoke_modules_match_the_committed_jsdom_fixtures() {
+    // Each behavioral event-smoke fixture's emitted module stays in lockstep with the
+    // committed `.client.mjs` the happy-dom spec (`svelte-client-events-smoke.spec.ts`)
+    // mounts — so the behavioral smoke can never drift from `compile_client`.
+    for (name, src) in EVENT_SMOKE_FIXTURES {
+        assert_jsdom_fixture_in_sync(src, &format!("{name}.client.mjs"));
+    }
+}
+
+/// The behavioral jsdom event-smoke fixture sources (kept in lockstep with the
+/// committed `.client.mjs` by the
+/// `event_smoke_*_module_matches_the_committed_jsdom_smoke_fixture` tests).
+const EVENT_SMOKE_FIXTURES: &[(&str, &str)] = &[
+    (
+        "event_nondelegated",
+        "<script>let focused = $state(false);</script>\n<input onfocus={() => focused = true} />\n<p>{focused}</p>\n",
+    ),
+    (
+        "event_once",
+        "<script>let count = $state(0);</script>\n<button on:click|once={() => count++}>btn</button>\n<p>{count}</p>\n",
+    ),
+    (
+        "event_prevent_default",
+        "<script>let hits = $state(0);</script>\n<button on:click|preventDefault={() => hits++}>btn</button>\n<p>{hits}</p>\n",
+    ),
+    (
+        "event_stop_propagation",
+        "<script>let inner = $state(0);\nlet outer = $state(0);</script>\n<div on:click={() => outer++}><button on:click|stopPropagation={() => inner++}>btn</button></div>\n<p>{inner}-{outer}</p>\n",
+    ),
+    (
+        "event_self",
+        "<script>let count = $state(0);</script>\n<div on:click|self={() => count++}><button>child</button></div>\n<p>{count}</p>\n",
+    ),
+    (
+        "event_capture",
+        // The BUBBLE handler is registered FIRST and the CAPTURE handler SECOND, so the
+        // capture-phase ordering is observable: a correct capture fires `C` before the
+        // bubble `B` (→ `CB`), while a DROPPED capture arg would make both bubble-phase
+        // and fire in REGISTRATION order (→ `BC`). The smoke asserts `CB`, so it now
+        // discriminates a missing 4th `true`.
+        "<script>let log = $state('');</script>\n<div on:click={() => log += 'B'} on:click|capture={() => log += 'C'}><button>btn</button></div>\n<p>{log}</p>\n",
+    ),
+];
+
+#[test]
+fn nondelegated_event_emits_a_direct_event_listener() {
+    // A non-bubbling event (`onfocus`, not in the delegated set) is a DIRECT
+    // `$.event('focus', node, handler)` — never delegated, no trailing args.
+    let js = emit(
+        "<script>let n = $state(0);</script>\n<button onfocus={() => n++}>x</button>\n",
+        "App.svelte",
     );
+    let norm = normalize_js_cosmetics(&js);
+    assert!(
+        norm.contains(&nc("$.event('focus', button, () => $.update(n))")),
+        "a non-delegated event must emit a direct $.event:\n{js}"
+    );
+    assert!(
+        !js.contains("$.delegated(") && !js.contains("$.delegate("),
+        "a non-delegated event must not delegate:\n{js}"
+    );
+}
+
+#[test]
+fn nondelegated_function_expression_handler_emits_a_direct_event_listener() {
+    // A non-delegated DIRECT event whose handler is an inline FUNCTION EXPRESSION (not an
+    // arrow) is accepted and passed through to `$.event`, with its `$state`-write body
+    // lowered through the shared rewriter (`n++` → `$.update(n)`) — matching the official
+    // `$.event('focus', button, function () { $.update(n); })`. This pins that the
+    // accepted direct-handler surface includes the function-expression form (the
+    // `events/nondelegated_funcexpr` structural golden is the full-module oracle).
+    let js = emit(
+        "<script>let n = $state(0);</script>\n<button onfocus={function () { n++; }}>x</button>\n",
+        "App.svelte",
+    );
+    let norm = normalize_js_cosmetics(&js);
+    assert!(
+        norm.contains(&nc("$.event('focus', button, function")),
+        "a function-expression handler must reach a direct $.event:\n{js}"
+    );
+    assert!(
+        norm.contains(&nc("$.update(n)")),
+        "the function-expression body's $state write must be rewritten:\n{js}"
+    );
+    assert!(
+        !js.contains("$.delegated(") && !js.contains("$.delegate("),
+        "a non-delegated function-expression handler must not delegate:\n{js}"
+    );
+}
+
+#[test]
+fn bare_identifier_direct_event_handler_fails_closed() {
+    // A bare-identifier DIRECT event handler (`onfocus={s}`) is refused here rather than
+    // emitted unproven, because this surface lacks the binding-aware event-handler split
+    // that official Svelte applies to such a handler. There is NO single fixed official
+    // emission for `onfocus={s}`: `build_event_handler` inspects the binding, so a demoted
+    // (non-reactive) value can pass straight through as the bare `s`, while a still-reactive
+    // signal is wrapped — `function (...$$args) { $.get(s)?.apply(this, $$args) }` — so the
+    // value is unwrapped per call instead of read once at registration. This surface owns
+    // neither arm of that split and cannot prove which form a given binding warrants;
+    // passing the raw binding through as the `$.event` 3rd argument would be a value, not the
+    // correct per-binding handler. So the bare-identifier shape fails closed, matching the
+    // delegated path (which never accepted bare identifiers). Discriminating: a direct
+    // classifier broad enough to accept this shape would emit an unproven handler value;
+    // fail-closing it is the correct boundary. (A `$props()`-member identifier is not
+    // exercised here: the native client path does not yet support `$props()`, so such a
+    // component would refuse at the instance-script gate rather than at the handler-shape
+    // gate under test.)
+    for src in [
+        "<script>let s = $state(0);</script>\n<button onfocus={s}>x</button>\n",
+        "<script>let s = $state(0);</script>\n<div onmouseenter={s}>x</div>\n",
+    ] {
+        assert_fail_closed(src, |s| {
+            matches!(s, UnsupportedSvelteRuntimeSurface::NonDelegatedEvent { .. })
+        });
+    }
+}
+
+#[test]
+fn multiple_events_on_one_element_each_resolve_to_their_own_registration() {
+    // An element carrying TWO events — a DELEGATED `onclick` and a non-delegated
+    // `onfocus`, each with its OWN handler — emits BOTH registrations with the correct
+    // per-event handler. The per-event shape fact is keyed by (node, event type, handler
+    // expr), so the second event does not collapse onto the element's first recorded
+    // event. (No delegated regression: the delegated click still emits `$.delegated` plus
+    // the `$.delegate(['click'])` epilogue.)
+    let js = emit(
+        "<script>let a = $state(0);\nlet b = $state(0);</script>\n<button onclick={() => a++} onfocus={() => b++}>x</button>\n",
+        "App.svelte",
+    );
+    let norm = normalize_js_cosmetics(&js);
+    assert!(
+        norm.contains(&nc("$.delegated('click', button, () => $.update(a))")),
+        "the delegated click must emit with its OWN handler:\n{js}"
+    );
+    assert!(
+        norm.contains(&nc("$.event('focus', button, () => $.update(b))")),
+        "the non-delegated focus must emit with its OWN handler:\n{js}"
+    );
+    assert!(
+        js.contains("$.delegate(['click'])"),
+        "the delegated click epilogue must remain (no delegated-path regression):\n{js}"
+    );
+}
+
+#[test]
+fn each_legacy_modifier_wraps_the_handler_in_its_official_helper() {
+    // Each individual legacy modifier wraps the handler in its official
+    // `svelte/internal/client` helper (`$.<modifier>(handler)`).
+    for (modifier, helper) in [
+        ("preventDefault", "preventDefault"),
+        ("stopPropagation", "stopPropagation"),
+        ("stopImmediatePropagation", "stopImmediatePropagation"),
+        ("self", "self"),
+        ("trusted", "trusted"),
+        ("once", "once"),
+    ] {
+        let src = format!(
+            "<script>let n = $state(0);</script>\n<button on:click|{modifier}={{() => n++}}>x</button>\n"
+        );
+        let js = emit(&src, "App.svelte");
+        let norm = normalize_js_cosmetics(&js);
+        let expected = format!("$.event('click', button, $.{helper}(() => $.update(n)))");
+        assert!(
+            norm.contains(&nc(&expected)),
+            "the `{modifier}` modifier must wrap via $.{helper}:\n{js}"
+        );
+    }
+}
+
+#[test]
+fn modifier_stack_wraps_inner_to_outer_in_fixed_order_independent_of_source_order() {
+    // A modifier STACK wraps in the FIXED official order (stopPropagation innermost,
+    // preventDefault outer) — INDEPENDENT of source order. Both source orderings emit
+    // the IDENTICAL nesting `$.preventDefault($.stopPropagation(handler))`.
+    let expected =
+        nc("$.event('click', button, $.preventDefault($.stopPropagation(() => $.update(n))))");
+    for src in [
+        "<script>let n = $state(0);</script>\n<button on:click|preventDefault|stopPropagation={() => n++}>x</button>\n",
+        "<script>let n = $state(0);</script>\n<button on:click|stopPropagation|preventDefault={() => n++}>x</button>\n",
+    ] {
+        let js = emit(src, "App.svelte");
+        let norm = normalize_js_cosmetics(&js);
+        assert!(
+            norm.contains(&expected),
+            "the modifier stack must wrap inner→outer in fixed order:\n{js}"
+        );
+        // Negative: the WRONG (source-order) nesting must NOT appear.
+        assert!(
+            !norm.contains(&nc(
+                "$.stopPropagation($.preventDefault(() => $.update(n)))"
+            )),
+            "the wrapper nesting must not follow source order:\n{js}"
+        );
+    }
+}
+
+#[test]
+fn all_modifiers_wrap_in_the_full_fixed_order() {
+    // All six wrappers, scrambled in source, emit the full fixed-order nesting:
+    // once(trusted(self(preventDefault(stopImmediatePropagation(stopPropagation(h)))))).
+    let js = emit(
+        "<script>let n = $state(0);</script>\n<button on:click|once|trusted|self|preventDefault|stopImmediatePropagation|stopPropagation={() => n++}>x</button>\n",
+        "App.svelte",
+    );
+    let norm = normalize_js_cosmetics(&js);
+    assert!(
+        norm.contains(&nc(
+            "$.event('click', button, $.once($.trusted($.self($.preventDefault($.stopImmediatePropagation($.stopPropagation(() => $.update(n))))))))"
+        )),
+        "all modifiers must wrap in the full fixed order:\n{js}"
+    );
+}
+
+#[test]
+fn passive_and_nonpassive_modifiers_emit_the_void0_capture_slot_plus_passive_boolean() {
+    // `passive` ⇒ 5th positional `true` with the capture slot `void 0`; `nonpassive`
+    // ⇒ 5th positional `false` with `void 0`. Passive/nonpassive are NOT wrappers.
+    let passive = normalize_js_cosmetics(&emit(
+        "<script>let n = $state(0);</script>\n<button on:click|passive={() => n++}>x</button>\n",
+        "App.svelte",
+    ));
+    assert!(
+        passive.contains(&nc(
+            "$.event('click', button, () => $.update(n), void 0, true)"
+        )),
+        "passive must emit `void 0, true`:\n{passive}"
+    );
+    let nonpassive = normalize_js_cosmetics(&emit(
+        "<script>let n = $state(0);</script>\n<button on:click|nonpassive={() => n++}>x</button>\n",
+        "App.svelte",
+    ));
+    assert!(
+        nonpassive.contains(&nc(
+            "$.event('click', button, () => $.update(n), void 0, false)"
+        )),
+        "nonpassive must emit `void 0, false`:\n{nonpassive}"
+    );
+}
+
+#[test]
+fn capture_and_modifier_combine_capture_positional_with_a_wrapper() {
+    // `on:click|capture|preventDefault` ⇒ the handler wrapped in `$.preventDefault`
+    // AND the 4th positional capture `true`.
+    let js = emit(
+        "<script>let n = $state(0);</script>\n<button on:click|capture|preventDefault={() => n++}>x</button>\n",
+        "App.svelte",
+    );
+    let norm = normalize_js_cosmetics(&js);
+    assert!(
+        norm.contains(&nc(
+            "$.event('click', button, $.preventDefault(() => $.update(n)), true)"
+        )),
+        "capture + modifier must combine the wrapper and the capture positional:\n{js}"
+    );
+}
+
+#[test]
+fn modern_touchstart_delegates_with_the_passive_by_default_positional() {
+    // A MODERN `ontouchstart` is delegated (touchstart is delegatable) AND passive by
+    // default (`is_passive_event`): `$.delegated('touchstart', div, handler, void 0,
+    // true)` + the `$.delegate(['touchstart'])` epilogue. Passive applies to the
+    // delegated path too.
+    let js = emit(
+        "<script>let n = $state(0);</script>\n<div ontouchstart={() => n++}>x</div>\n",
+        "App.svelte",
+    );
+    let norm = normalize_js_cosmetics(&js);
+    assert!(
+        norm.contains(&nc(
+            "$.delegated('touchstart', div, () => $.update(n), void 0, true)"
+        )),
+        "modern touchstart must delegate with the passive-by-default positional:\n{js}"
+    );
+    assert!(
+        js.contains("$.delegate(['touchstart'])"),
+        "modern touchstart must register the delegate epilogue:\n{js}"
+    );
+}
+
+#[test]
+fn legacy_touchstart_is_direct_without_a_passive_default() {
+    // A LEGACY `on:touchstart` is ALWAYS direct AND derives passive from its modifiers
+    // ONLY (it does NOT apply `is_passive_event`): `$.event('touchstart', div,
+    // handler)` with NO passive arg. Discriminates the modern-vs-legacy passive rule.
+    let js = emit(
+        "<script>let n = $state(0);</script>\n<div on:touchstart={() => n++}>x</div>\n",
+        "App.svelte",
+    );
+    let norm = normalize_js_cosmetics(&js);
+    assert!(
+        norm.contains(&nc("$.event('touchstart', div, () => $.update(n))")),
+        "legacy touchstart must be a direct $.event with no passive arg:\n{js}"
+    );
+    // Negative: no passive default, no delegation.
+    assert!(
+        !norm.contains(&nc("void 0")) && !js.contains("$.delegated("),
+        "legacy touchstart must not apply the modern passive default or delegate:\n{js}"
+    );
+}
+
+#[test]
+fn delegated_onclick_is_unchanged_with_no_trailing_positional_args() {
+    // No regression: a delegated modern `onclick` still emits `$.delegated('click',
+    // node, handler)` (no capture/passive trailing args) + the `$.delegate(['click'])`
+    // epilogue.
+    let js = emit(
+        "<script>let n = $state(0);</script>\n<button onclick={() => n++}>x</button>\n",
+        "App.svelte",
+    );
+    let norm = normalize_js_cosmetics(&js);
+    assert!(
+        norm.contains(&nc("$.delegated('click', button, () => $.update(n))")),
+        "a delegated onclick must be unchanged:\n{js}"
+    );
+    assert!(
+        js.contains("$.delegate(['click'])"),
+        "a delegated onclick must register the delegate epilogue:\n{js}"
+    );
+    // Negative: a plain delegated click has NO trailing capture/passive positional.
+    assert!(
+        !norm.contains(&nc("$.delegated('click', button, () => $.update(n), ")),
+        "a plain delegated onclick must emit no trailing positional args:\n{js}"
+    );
+}
+
+#[test]
+fn special_element_global_events_stay_fail_closed() {
+    // The special-element event boundary: `<svelte:window|body|document on*>` EVENTS need
+    // the special-element node gate, so they fail closed at the special-element host gate
+    // — never reaching the (open) regular-element event surface. Asserts the refusal is
+    // preserved (a positive boundary assertion).
+    for (host, src) in [
+        (
+            "svelte:window",
+            "<script>let n = $state(0);</script>\n<svelte:window onresize={() => n++} />\n",
+        ),
+        (
+            "svelte:body",
+            "<script>let n = $state(0);</script>\n<svelte:body onclick={() => n++} />\n",
+        ),
+        (
+            "svelte:document",
+            "<script>let n = $state(0);</script>\n<svelte:document onkeydown={() => n++} />\n",
+        ),
+    ] {
+        assert_fail_closed(
+            src,
+            |s| matches!(s, UnsupportedSvelteRuntimeSurface::ComponentOrSnippet { construct, .. } if *construct == host),
+        );
+    }
 }
 
 #[test]

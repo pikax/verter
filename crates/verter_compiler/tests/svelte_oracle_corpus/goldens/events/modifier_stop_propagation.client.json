@@ -1,0 +1,78 @@
+{
+  "slug": "events/modifier_stop_propagation.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "modifier_stop_propagation",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "child",
+    "reset",
+    "template_effect",
+    "set_text",
+    "get",
+    "event",
+    "stopPropagation",
+    "update",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "event",
+    "from_html",
+    "get",
+    "reset",
+    "set_text",
+    "state",
+    "stopPropagation",
+    "template_effect",
+    "update"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 1,
+    "child": 1,
+    "reset": 1,
+    "template_effect": 1,
+    "set_text": 1,
+    "get": 1,
+    "event": 1,
+    "stopPropagation": 1,
+    "update": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<button> </button>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<button> </button>`); export default function modifier_stop_propagation($$anchor) {let count = $.state(0); var button = root(); var text = $.child(button); $.reset(button); $.template_effect(() => $.set_text(text, `go ${$.get(count) ?? ''}`)); $.event('click', button, $.stopPropagation(() => $.update(count))); $.append($$anchor, button);}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

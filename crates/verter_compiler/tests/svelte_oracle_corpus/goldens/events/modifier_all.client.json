@@ -1,0 +1,93 @@
+{
+  "slug": "events/modifier_all.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "modifier_all",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "child",
+    "reset",
+    "template_effect",
+    "set_text",
+    "get",
+    "event",
+    "once",
+    "trusted",
+    "self",
+    "preventDefault",
+    "stopImmediatePropagation",
+    "stopPropagation",
+    "update",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "event",
+    "from_html",
+    "get",
+    "once",
+    "preventDefault",
+    "reset",
+    "self",
+    "set_text",
+    "state",
+    "stopImmediatePropagation",
+    "stopPropagation",
+    "template_effect",
+    "trusted",
+    "update"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 1,
+    "child": 1,
+    "reset": 1,
+    "template_effect": 1,
+    "set_text": 1,
+    "get": 1,
+    "event": 1,
+    "once": 1,
+    "trusted": 1,
+    "self": 1,
+    "preventDefault": 1,
+    "stopImmediatePropagation": 1,
+    "stopPropagation": 1,
+    "update": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<button> </button>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<button> </button>`); export default function modifier_all($$anchor) {let count = $.state(0); var button = root(); var text = $.child(button); $.reset(button); $.template_effect(() => $.set_text(text, `go ${$.get(count) ?? ''}`)); $.event('click', button, $.once($.trusted($.self($.preventDefault($.stopImmediatePropagation($.stopPropagation(() => $.update(count)))))))); $.append($$anchor, button);}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

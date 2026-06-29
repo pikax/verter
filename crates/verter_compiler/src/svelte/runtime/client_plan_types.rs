@@ -106,11 +106,17 @@ pub(super) enum ClientAttr {
         /// The coarse bind target kind (`this` vs a DOM value/property bind).
         target: ClientBindTarget,
     },
-    /// A modern delegated DOM event — the handler rewrite is on the corresponding
-    /// [`ClientRuntimeOp::Event`].
-    DelegatedEvent {
-        /// The normalized event type (`click`, …).
+    /// A DOM event registration — the precise emission (mode / capture / passive /
+    /// modifier-wrapper stack / rewritten handler) lives on the corresponding
+    /// [`ClientRuntimeOp::Event`]'s [`EventEmit`]. This narrow attr records the
+    /// coarse KIND only (the event type + the delegated-vs-direct mode), so the node
+    /// tree stays a faithful structural mirror — mirroring [`ClientAttr::Bind`]'s
+    /// coarse-target-kind discriminant.
+    Event {
+        /// The normalized event type (`click`, `focus`, …).
         event_type: String,
+        /// The coarse registration mode (delegated `$.delegated` vs direct `$.event`).
+        mode: EventMode,
     },
     /// A dynamic attribute / `class` / `style` surface — the emission
     /// (`$.set_attribute` / a property write / `$.set_class` / `$.set_style` /
@@ -135,6 +141,135 @@ pub(super) enum ClientBindTarget {
     DomValue,
     /// `bind:this` — a render-side binding emitted INLINE during the walk.
     This,
+}
+
+/// The reusable event-emission substrate carried on a planned [`ClientRuntimeOp::Event`].
+///
+/// This is the typed representation the official `$.event` / `$.delegated` emit shape
+/// is driven from — the emitter never re-infers a decision from source text. The
+/// regular-element event surface only PRODUCES `EventEmitTarget::Node` hosts, but the
+/// type models every target kind so the SAME emitter serves the special-element event
+/// hosts (`<svelte:window|body|document>`) by feeding the non-`Node` targets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct EventEmit {
+    /// The registration mode (delegated `$.delegated` vs direct `$.event`).
+    pub mode: EventMode,
+    /// The registration target host (the regular-element surface emits only `Node`).
+    pub target: EventEmitTarget,
+    /// The normalized event type (`click`, `focus`, …) — the `$.event` / `$.delegated`
+    /// first positional string argument.
+    pub event_type: String,
+    /// Whether this is a CAPTURE-phase handler — the 4th positional `true` (emitted as
+    /// the `void 0` placeholder when absent but a later `passive` arg is present).
+    pub capture: bool,
+    /// The passive-listener option — the 5th positional boolean: `Some(true)` passive,
+    /// `Some(false)` nonpassive, `None` omitted.
+    pub passive: Option<bool>,
+    /// The legacy modifier wrappers in the FIXED official application order
+    /// (inner→outer), each wrapping the previous handler (`$.<modifier>(handler)`).
+    pub wrappers: Vec<EventWrapper>,
+    /// The rewritten handler body (the innermost expression the wrappers nest).
+    pub handler: String,
+}
+
+/// The event-registration mode — the `$.delegated` (document-level delegation) vs
+/// `$.event` (direct per-node listener) helper choice. A legacy `on:` directive and a
+/// capture / non-bubbling event are ALWAYS direct; only a modern bubbling-event
+/// attribute on a regular element delegates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum EventMode {
+    /// A direct `$.event(...)` per-node listener.
+    Direct,
+    /// A delegated `$.delegated(...)` listener (registered in the module
+    /// `$.delegate([...])` epilogue).
+    Delegated,
+}
+
+/// The event-registration target host. The regular-element surface produces only
+/// `Node`; the global hosts are the reusable substrate the special-element event hosts
+/// consume (the special-element NODE gate stays closed for regular elements, so the
+/// global variants are never produced on that path).
+///
+/// `dead_code` is allowed for the global-host variants: they are NOT dead — the emitter
+/// (`event_target_host`) resolves all four to their host expression and the
+/// `event_target_host_resolves_node_and_global_hosts` test exercises every variant — but
+/// the regular-element surface never CONSTRUCTS them (the special-element event hosts
+/// do), so the non-test lib build sees them as unconstructed. Carrying them typed lets
+/// the special-element event hosts reuse the SAME emitter without re-extending the enum.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum EventEmitTarget {
+    /// A DOM node in the template (the var resolved from the node arena).
+    Node(ClientNodeId),
+    /// The `window` global (`$.window`) — a `<svelte:window>` listener.
+    Window,
+    /// The `document` global (`$.document`) — a `<svelte:document>` listener.
+    Document,
+    /// The document `body` (`$.document.body`) — a `<svelte:body>` listener.
+    Body,
+}
+
+/// A legacy `on:` event modifier WRAPPER — each wraps the handler in its official
+/// `svelte/internal/client` helper (`$.<modifier>(handler)`). The wrappers apply in
+/// the FIXED order [`EventWrapper::ORDER`] (inner→outer), INDEPENDENT of source order
+/// — matching the official `OnDirective.js` modifier iteration. `capture` / `passive`
+/// / `nonpassive` are NOT wrappers (they are positional `$.event` args) and have no
+/// variant here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum EventWrapper {
+    /// `$.stopPropagation(handler)`.
+    StopPropagation,
+    /// `$.stopImmediatePropagation(handler)`.
+    StopImmediatePropagation,
+    /// `$.preventDefault(handler)`.
+    PreventDefault,
+    /// `$.self(handler)`.
+    SelfTarget,
+    /// `$.trusted(handler)`.
+    Trusted,
+    /// `$.once(handler)` — a per-instance-closure once wrapper, NOT `{ once: true }`.
+    Once,
+}
+
+impl EventWrapper {
+    /// The FIXED official application order (inner→outer): the `OnDirective.js`
+    /// modifier iteration order. `stopPropagation` is the INNERMOST wrapper (applied
+    /// first, closest to the handler), `once` the OUTERMOST.
+    pub(super) const ORDER: [EventWrapper; 6] = [
+        EventWrapper::StopPropagation,
+        EventWrapper::StopImmediatePropagation,
+        EventWrapper::PreventDefault,
+        EventWrapper::SelfTarget,
+        EventWrapper::Trusted,
+        EventWrapper::Once,
+    ];
+
+    /// The legacy `on:` modifier NAME this wrapper is produced from (`stopPropagation`,
+    /// `preventDefault`, …) — the typed mapping from a parsed modifier string.
+    pub(super) fn from_modifier(name: &str) -> Option<EventWrapper> {
+        match name {
+            "stopPropagation" => Some(EventWrapper::StopPropagation),
+            "stopImmediatePropagation" => Some(EventWrapper::StopImmediatePropagation),
+            "preventDefault" => Some(EventWrapper::PreventDefault),
+            "self" => Some(EventWrapper::SelfTarget),
+            "trusted" => Some(EventWrapper::Trusted),
+            "once" => Some(EventWrapper::Once),
+            _ => None,
+        }
+    }
+
+    /// The `svelte/internal/client` helper member name (`$.<helper>`) this wrapper
+    /// emits — matching the official helper identity EXACTLY.
+    pub(super) fn helper(self) -> &'static str {
+        match self {
+            EventWrapper::StopPropagation => "stopPropagation",
+            EventWrapper::StopImmediatePropagation => "stopImmediatePropagation",
+            EventWrapper::PreventDefault => "preventDefault",
+            EventWrapper::SelfTarget => "self",
+            EventWrapper::Trusted => "trusted",
+            EventWrapper::Once => "once",
+        }
+    }
 }
 
 /// A narrow supported script item — a single emitted component-FUNCTION-BODY
@@ -201,19 +336,18 @@ pub(super) enum ClientRuntimeOp {
         /// The rewritten setter body.
         setter: String,
     },
-    /// A delegated event registration.
+    /// A DOM event registration (`$.event` direct or `$.delegated` delegated).
     Event {
-        /// The target node id.
-        target: ClientNodeId,
-        /// The normalized event type.
-        event_type: String,
+        /// The reusable event-emission metadata — mode / target host / capture /
+        /// passive / modifier-wrapper stack / rewritten handler. The emitter consumes
+        /// this typed substrate (never a re-inferred emit-time decision), and the SAME
+        /// emitter serves the special-element event hosts by feeding the non-`Node`
+        /// [`EventEmitTarget`] variants.
+        emit: EventEmit,
         /// The accepted handler SHAPE fact (from the default-deny classifier) — the
-        /// typed sub-shape (arrow / function-expr / local-fn-ident) the handler was
-        /// admitted as, carried so the emitter consumes a typed shape, not just a
-        /// rewritten string.
+        /// typed sub-shape the handler was admitted as, carried as the acceptance
+        /// record (the emission itself is driven by [`EventEmit`]).
         shape: ClientEventHandlerShape,
-        /// The rewritten handler body.
-        handler: String,
     },
     /// A dynamic plain-attribute write — `$.set_attribute(node, 'name',
     /// value)` OR a DOM-property write `node.<prop> = value`, decided by the accepted

@@ -27,12 +27,18 @@ use super::client_shapes::{
     self, ClientBindShape, ClientDynamicAttrShape, ClientEventHandlerShape,
     ClientInterpolationShape, ClientPropsUsage,
 };
+use super::client_surface_element_query::{
+    element_carries_is_attribute, element_has_class_directive, element_has_group_bind,
+    element_has_spread, element_has_style_directive, element_own_namespace,
+};
+use super::events::{validate_event_modifiers, EventModifierError};
 use super::expr::{BindingRuntimeKind, ExprRefKind};
 use super::expr_emit::{self, PropsShape, StateDeclShape};
 use super::html::{synthesize_region, TemplateFactory};
 use super::instance_items::{self, SupportedInstanceScriptItem};
 use super::ir::{
-    AttrIr, BlockIr, DeclKind, EscapeMode, IrNode, NodeId, SpecialKind, SvelteRuntimeIr, TagIr,
+    AttrIr, BlockIr, DeclKind, EscapeMode, ExprId, IrNode, NodeId, SpecialKind, SvelteRuntimeIr,
+    TagIr,
 };
 use super::whitespace::{
     clean_nodes, determine_namespace_for_children, CleanContext, CleanItem, Namespace,
@@ -58,10 +64,13 @@ pub(super) struct ClassifiedClientSurface {
     /// plan carries it onto each [`ClientNode::Element`] so the emitter reads the DOM
     /// var stem from [`SupportedHtmlElement::var_stem`], never the raw tag string.
     pub(super) element_facts: Vec<(NodeId, SupportedHtmlElement)>,
-    /// The accepted event-handler shape per target node — the FACT a delegated
-    /// event op consumes (the broad classifier accepts an event FAMILY; this
-    /// pins the exact handler sub-shape — the §1.2-class `$state`-write arrow).
-    pub(super) event_shapes: Vec<(NodeId, ClientEventHandlerShape)>,
+    /// The accepted event-handler shape per (target node, event type, handler expr) —
+    /// the FACT an event op consumes. The key includes the event TYPE and the handler
+    /// expression id because ONE element can carry MULTIPLE events
+    /// (`<button onfocus={a} onclick={b}>`), each with its own handler and routing;
+    /// keying on the node alone would collapse them onto the element's FIRST recorded
+    /// event.
+    pub(super) event_shapes: Vec<(NodeId, String, ExprId, ClientEventHandlerShape)>,
     /// The accepted bind shape per (target node, bind NAME) — the FACT a `bind:` op
     /// consumes. The bind NAME is part of the key because ONE element can carry
     /// MULTIPLE binds (e.g. `<video bind:currentTime bind:paused bind:duration>`), each
@@ -243,8 +252,10 @@ struct SurfaceFacts {
     /// The accepted element fact per element node (the strict-allowlist `try_from`
     /// result — the SOLE source of the DOM var stem at emit time).
     element_facts: Vec<(NodeId, SupportedHtmlElement)>,
-    /// The accepted event-handler shape per target node.
-    event_shapes: Vec<(NodeId, ClientEventHandlerShape)>,
+    /// The accepted event-handler shape per (target node, event type, handler expr) —
+    /// keyed precisely so an element with multiple events keeps each event's fact
+    /// distinct.
+    event_shapes: Vec<(NodeId, String, ExprId, ClientEventHandlerShape)>,
     /// The accepted bind shape per (target node, bind NAME) — keyed by name so an
     /// element with multiple binds keeps each bind's routing distinct.
     bind_shapes: Vec<(NodeId, String, ClientBindShape)>,
@@ -937,39 +948,6 @@ fn refuse_tag(tag: &TagIr) -> UnsupportedSvelteRuntimeSurface {
     }
 }
 
-/// The DOM namespace an element renders in, given the namespace inherited from its
-/// parent. An element ALREADY inside an SVG / MathML subtree (`inherited != Html`)
-/// stays in that namespace (so an svg `<a>` / `<title>` is SVG); at the HTML level,
-/// only `<svg>` / `<math>` introduce a non-HTML namespace. The overlapping
-/// `SVG_ELEMENTS` / `MATHML_ELEMENTS` names (`a` / `script` / `title` / `style`) are
-/// NOT namespace introducers at the HTML root — matching the official
-/// `from_svg` / `from_mathml` selection (a root `<a>` stays HTML; a root `<svg>` is
-/// SVG; an `<a>` inside `<svg>` is SVG by inheritance).
-fn element_own_namespace(inherited: Namespace, tag: &str) -> Namespace {
-    if inherited != Namespace::Html {
-        return inherited;
-    }
-    match tag {
-        "svg" => Namespace::Svg,
-        "math" => Namespace::Mathml,
-        _ => Namespace::Html,
-    }
-}
-
-/// Whether an element carries an `is` attribute (in ANY attribute form — static,
-/// dynamic, or mixed). An `is=` element is a customized built-in (the web-components
-/// surface); it is rejected at the custom-element owner (5h) BEFORE the attr walk,
-/// regardless of whether its tag is hyphenated. Driven from the typed `AttrIr`
-/// inventory, never a source scan.
-fn element_carries_is_attribute(el: &super::ir::ElementIr) -> bool {
-    el.attrs.iter().any(|a| match a {
-        AttrIr::Static { name, .. } | AttrIr::Dynamic { name, .. } | AttrIr::Mixed { name, .. } => {
-            name == "is"
-        }
-        _ => false,
-    })
-}
-
 /// Refuse a bindings-breadth special-content host (`<textarea>` / `<select>` /
 /// `<option>`) whose INTERIOR content is not the supported `bind:value` host shape.
 ///
@@ -1112,12 +1090,6 @@ fn static_non_static_property_shape(name: &str) -> Option<ClientDynamicAttrShape
     }
 }
 
-/// Whether an element carries any spread attribute (`{...x}`) — the trigger that
-/// switches its WHOLE attribute strategy to the single `$.attribute_effect` fold.
-fn element_has_spread(el: &super::ir::ElementIr) -> bool {
-    el.attrs.iter().any(|a| matches!(a, AttrIr::Spread { .. }))
-}
-
 /// Refuse a spread element that carries an attribute the `$.attribute_effect` fold does
 /// not model: an event handler / `bind:` / `use:` / `transition:` / `let:` directive
 /// (the handler-hoist / two-way-binding surface a spread fold leaves to its owning
@@ -1165,26 +1137,26 @@ fn refuse_spread_incompatible_attr(
     None
 }
 
-/// Whether the element at `node_id` carries any `class:` directive (so a static
-/// `class` on it is the base value of the merged `$.set_class`, not a baked attr).
-fn element_has_class_directive(ir: &SvelteRuntimeIr, node_id: NodeId) -> bool {
-    matches!(ir.node(node_id), IrNode::Element(el)
-        if el.attrs.iter().any(|a| matches!(a, AttrIr::Class { .. })))
-}
-
-/// Whether the element carries a `bind:group` directive — the trigger that turns a
-/// co-located static `value="X"` into the per-input `input.value = input.__value =
-/// 'X'` group-value write (rather than a baked static attr).
-fn element_has_group_bind(ir: &SvelteRuntimeIr, node_id: NodeId) -> bool {
-    matches!(ir.node(node_id), IrNode::Element(el)
-        if el.attrs.iter().any(|a| matches!(a, AttrIr::Bind { target, .. } if target == "group")))
-}
-
-/// Whether the element at `node_id` carries any `style:` directive (so a static
-/// `style` on it is the base value of the merged `$.set_style`, not a baked attr).
-fn element_has_style_directive(ir: &SvelteRuntimeIr, node_id: NodeId) -> bool {
-    matches!(ir.node(node_id), IrNode::Element(el)
-        if el.attrs.iter().any(|a| matches!(a, AttrIr::Style { .. })))
+/// Refuse a legacy `on:` directive carrying an OFFICIAL-INVALID modifier set — an
+/// unrecognized modifier (`event_handler_invalid_modifier`) or `passive` co-occurring
+/// with `nonpassive` / `preventDefault` (`event_handler_invalid_modifier_combination`).
+/// These are official COMPILE ERRORS; Verter keeps them fail-closed/refused (routed
+/// through the event channel) so an invalid event surface never emits. (A modern
+/// attribute carries no modifiers, so it validates trivially.)
+fn refuse_invalid_event_modifiers(
+    modifiers: &[String],
+    event_type: &str,
+    el_span: Span,
+) -> Result<(), UnsupportedSvelteRuntimeSurface> {
+    match validate_event_modifiers(modifiers) {
+        Ok(()) => Ok(()),
+        Err(
+            EventModifierError::Unknown(_) | EventModifierError::InvalidPassiveCombination { .. },
+        ) => Err(UnsupportedSvelteRuntimeSurface::NonDelegatedEvent {
+            event_type: event_type.to_string(),
+            span: el_span,
+        }),
+    }
 }
 
 /// Classify one attribute / directive into the narrow supported vocabulary,
@@ -1452,23 +1424,23 @@ fn classify_attr(
             event_type,
             handler,
             delegated,
-            capture,
+            capture: _,
             modifiers,
+            passive: _,
         } => {
-            // The supported event surface is a DELEGATED, non-capture, modifier-free
-            // handler. A non-delegated / capture / legacy-modifier event is 5d.
-            if !*delegated || *capture || !modifiers.is_empty() {
-                return Err(UnsupportedSvelteRuntimeSurface::NonDelegatedEvent {
-                    event_type: event_type.clone(),
-                    span: el_span,
-                });
-            }
-            // The narrow handler-shape classifier: ONLY a non-async inline arrow
-            // whose body is a §1.2-class `$state` assignment / update is in the
-            // boundary. A function expression, a local-function identifier, a call /
-            // update of a non-`$state` / member / sequence / conditional / imported
-            // identifier, or a body with any non-assignment statement is the official
-            // wrapper / statement-rewrite breadth (5d); an async handler is 5j.
+            // A regular intrinsic DOM element hosts the full event surface: a delegated
+            // modern attribute (`$.delegated`), a non-delegated / capture-phase / legacy
+            // modifier-bearing event (`$.event` + the 4th/5th positional capture/passive
+            // args + the modifier wrappers). The legacy modifier set is validated against
+            // the official `validate_element` rules — an unknown modifier or an
+            // official-invalid combo (`passive` + `preventDefault` / `passive` +
+            // `nonpassive`) is refused, matching official's
+            // `event_handler_invalid_modifier[_combination]` compile errors.
+            refuse_invalid_event_modifiers(modifiers, event_type, el_span)?;
+            // The DIRECT (`$.event`) path admits any non-async inline arrow / function
+            // expression; a DELEGATED (`$.delegated`) handler keeps the NARROW §1.2
+            // `$state`-write arrow boundary (no regression).
+            let direct = !*delegated;
             let analyzed = ir.analysis.expressions.get(*handler);
             let shape = client_shapes::classify_event_handler_shape(
                 analyzed.source,
@@ -1477,8 +1449,14 @@ fn classify_attr(
                 analyzed.scope,
                 &ir.analysis.bindings,
                 &ir.analysis.scopes,
+                direct,
             )?;
-            facts.borrow_mut().event_shapes.push((node_id, shape));
+            // Key the fact by (node, event type, handler expr) so an element with
+            // multiple events resolves EACH to its own shape at projection time.
+            facts
+                .borrow_mut()
+                .event_shapes
+                .push((node_id, event_type.clone(), *handler, shape));
             Ok(())
         }
         AttrIr::Use { .. } | AttrIr::Transition { .. } => {

@@ -15,7 +15,10 @@
 use super::client::UnsupportedSvelteRuntimeSurface;
 use super::client_codegen_helpers::is_signal_kind;
 use super::client_plan::SupportedClientIr;
-use super::client_plan_types::{ClientNodeId, ClientRuntimeOp};
+use super::client_plan_types::{
+    ClientNodeId, ClientRuntimeOp, EventEmit, EventEmitTarget, EventMode, EventWrapper,
+};
+use super::client_shapes::ClientEventHandlerShape;
 use super::expr::ScopeId;
 use super::ir::{AttrIr, BindOp, EventOp, EventTarget, ExprId, MixedAttrPart, NodeId};
 use verter_span::Span;
@@ -54,8 +57,17 @@ impl<'a> SupportedClientIr<'a> {
         })
     }
 
-    /// Project an event op into the narrow [`ClientRuntimeOp::Event`], carrying the
-    /// classifier's accepted [`ClientEventHandlerShape`] fact.
+    /// Project an event op into the narrow [`ClientRuntimeOp::Event`], building the
+    /// reusable [`EventEmit`] substrate (mode / target host / capture / passive /
+    /// modifier-wrapper stack / rewritten handler) and carrying the classifier's
+    /// accepted [`ClientEventHandlerShape`](super::client_shapes::ClientEventHandlerShape)
+    /// fact.
+    ///
+    /// The regular-element surface feeds ONLY regular DOM-node hosts
+    /// (`EventTarget::Node`) — the special-element event hosts (window/body/document) are
+    /// refused upstream at the special-element node gate; the emit-target KIND is
+    /// nonetheless carried typed so the special-element event hosts reuse the SAME emitter
+    /// by feeding the global-host variants.
     pub(super) fn project_event_op(
         &self,
         target: EventTarget,
@@ -63,32 +75,44 @@ impl<'a> SupportedClientIr<'a> {
         _scope: ScopeId,
     ) -> Result<ClientRuntimeOp, UnsupportedSvelteRuntimeSurface> {
         let EventTarget::Node(node_id) = target else {
+            // A special-element event host (window/body/document) is refused upstream at
+            // the special-element node gate; defensively fail closed here too.
             return Err(UnsupportedSvelteRuntimeSurface::NonDelegatedEvent {
                 event_type: event.event_type.clone(),
                 span: Span::new(0, 0),
             });
         };
-        // The accepted handler SHAPE the classifier recorded for this target node. An
-        // event op with NO recorded shape is a classifier/plan divergence — fail
-        // closed defensively (never emit an unclassified, possibly-non-function
-        // handler).
-        let shape = self
-            .event_shapes
-            .iter()
-            .find(|(n, _)| *n == node_id)
-            .map(|(_, s)| s.clone())
-            .ok_or_else(|| UnsupportedSvelteRuntimeSurface::NonDelegatedEvent {
-                event_type: event.event_type.clone(),
-                span: Span::new(0, 0),
-            })?;
+        // The accepted handler SHAPE the classifier recorded for THIS event — looked up
+        // by the full (node, event type, handler expr) key so an element with multiple
+        // events resolves to its OWN fact, never a sibling event's. An event op with NO
+        // recorded shape is a classifier/plan divergence — fail closed defensively (never
+        // emit an unclassified, possibly-non-function handler).
+        let shape = find_event_shape(
+            &self.event_shapes,
+            node_id,
+            &event.event_type,
+            event.handler,
+        )
+        .ok_or_else(|| UnsupportedSvelteRuntimeSurface::NonDelegatedEvent {
+            event_type: event.event_type.clone(),
+            span: Span::new(0, 0),
+        })?;
         let analyzed = self.ir.analysis.expressions.get(event.handler);
         let handler = self.rewrite(event.handler, analyzed.scope)?;
-        Ok(ClientRuntimeOp::Event {
-            target: ClientNodeId(node_id.0),
+        let emit = EventEmit {
+            mode: if event.delegated {
+                EventMode::Delegated
+            } else {
+                EventMode::Direct
+            },
+            target: EventEmitTarget::Node(ClientNodeId(node_id.0)),
             event_type: event.event_type.clone(),
-            shape,
+            capture: event.capture,
+            passive: event.passive,
+            wrappers: event_wrappers(&event.modifiers),
             handler,
-        })
+        };
+        Ok(ClientRuntimeOp::Event { emit, shape })
     }
 
     /// The getter + setter bodies for a `bind:` target. The getter is the bound
@@ -226,5 +250,89 @@ impl<'a> SupportedClientIr<'a> {
             ),
             super::reactive_fold::NullishCoalesce::None
         )
+    }
+}
+
+/// Build the legacy modifier WRAPPER stack from an event's modifier set, in the FIXED
+/// official application order ([`EventWrapper::ORDER`], inner→outer) INDEPENDENT of
+/// source order — only the recognized wrapper modifiers (`stopPropagation` …`once`)
+/// contribute; `capture` / `passive` / `nonpassive` are positional args, not wrappers,
+/// and are skipped here. The result drives the emitter's inner-to-outer
+/// `$.<modifier>(handler)` nesting.
+fn event_wrappers(modifiers: &[String]) -> Vec<EventWrapper> {
+    EventWrapper::ORDER
+        .into_iter()
+        .filter(|wrapper| {
+            modifiers
+                .iter()
+                .any(|m| EventWrapper::from_modifier(m) == Some(*wrapper))
+        })
+        .collect()
+}
+
+/// Find the accepted handler shape recorded for a SPECIFIC event — keyed by the target
+/// node, the normalized event type, AND the handler expression id. The full key is what
+/// keeps an element with multiple events (`<button onfocus={a} onclick={b}>`) from
+/// collapsing onto the element's first recorded event: a node-only match would return
+/// some event's shape for ANY event on the node, but each event must resolve to its OWN
+/// fact. Returns `None` when no fact matches the exact key (a classifier/plan divergence
+/// the caller fails closed on).
+fn find_event_shape(
+    facts: &[(NodeId, String, ExprId, ClientEventHandlerShape)],
+    node: NodeId,
+    event_type: &str,
+    handler: ExprId,
+) -> Option<ClientEventHandlerShape> {
+    facts
+        .iter()
+        .find(|(n, ty, h, _)| *n == node && ty == event_type && *h == handler)
+        .map(|(_, _, _, shape)| shape.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_event_shape;
+    use super::ClientEventHandlerShape;
+    use super::{ExprId, NodeId};
+
+    #[test]
+    fn event_shape_lookup_is_keyed_by_node_event_and_handler() {
+        let node = NodeId(1);
+        // Two events on the SAME node (`<button onfocus={a} onclick={b}>`), distinguished
+        // ONLY by their event type + handler expr id — the shape value is identical, so
+        // the discriminator is the KEY, not the value.
+        let facts = vec![
+            (
+                node,
+                "focus".to_string(),
+                ExprId(10),
+                ClientEventHandlerShape::Inline,
+            ),
+            (
+                node,
+                "click".to_string(),
+                ExprId(20),
+                ClientEventHandlerShape::Inline,
+            ),
+        ];
+        // Each event resolves to ITS OWN fact under the full (node, type, handler) key.
+        assert_eq!(
+            find_event_shape(&facts, node, "focus", ExprId(10)),
+            Some(ClientEventHandlerShape::Inline)
+        );
+        assert_eq!(
+            find_event_shape(&facts, node, "click", ExprId(20)),
+            Some(ClientEventHandlerShape::Inline)
+        );
+        // DISCRIMINATING: a coarse node-only match would return the element's FIRST fact
+        // for EVERY query on the node — so these would wrongly resolve to `Some`. The
+        // precise key returns `None` because no fact has that exact (type, handler)
+        // combination, proving the lookup does not collapse a sibling event's fact.
+        assert_eq!(find_event_shape(&facts, node, "click", ExprId(10)), None);
+        assert_eq!(find_event_shape(&facts, node, "focus", ExprId(20)), None);
+        assert_eq!(
+            find_event_shape(&facts, node, "mouseover", ExprId(10)),
+            None
+        );
     }
 }

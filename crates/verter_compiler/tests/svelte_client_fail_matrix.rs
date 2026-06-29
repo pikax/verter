@@ -431,19 +431,20 @@ const FAIL_MATRIX: &[FailRow] = &[
         source: "<script>let c = $state(0);</script>\n<button onclick={handler}>{c}</button>\n",
         code: "svelte-runtime-unsupported-non-delegated-event",
     },
+    // NOTE: regular-element non-delegated `$.event`, capture-phase, and legacy
+    // modifier-bearing events are now a SUPPORTED surface (they EMIT the official
+    // `$.event(...)` shape) — their former fail-closed rows moved to the positive
+    // `events/*` emit-topology corpus + the behavioral smoke. An INVALID legacy modifier
+    // (an unknown modifier / `passive`+`preventDefault` / `passive`+`nonpassive`) stays
+    // fail-closed via `event_invalid_modifier_combo` below.
     FailRow {
-        name: "event_legacy_modifier",
-        source: "<script>let c = $state(0);</script>\n<button on:click|preventDefault={() => c++}>x</button>\n",
+        name: "event_invalid_modifier_combo",
+        source: "<script>let c = $state(0);</script>\n<button on:click|passive|preventDefault={() => c++}>x</button>\n",
         code: "svelte-runtime-unsupported-non-delegated-event",
     },
     FailRow {
-        name: "event_capture",
-        source: "<script>let c = $state(0);</script>\n<button onclickcapture={() => c++}>x</button>\n",
-        code: "svelte-runtime-unsupported-non-delegated-event",
-    },
-    FailRow {
-        name: "event_nondelegated",
-        source: "<script>let c = $state(0);</script>\n<input onfocus={() => c++} />\n",
+        name: "event_unknown_modifier",
+        source: "<script>let c = $state(0);</script>\n<button on:click|stop={() => c++}>x</button>\n",
         code: "svelte-runtime-unsupported-non-delegated-event",
     },
     FailRow {
@@ -1067,13 +1068,19 @@ fn assert_variant(label: &str, source: &str, expected: Expected) {
 
 #[test]
 fn generated_event_handler_expression_kinds_land_on_boundary() {
-    // The finite grammar of an `onclick={…}` handler EXPRESSION kind. ONLY a
-    // non-async INLINE ARROW whose body is a `$state` assignment / update is
+    // The finite grammar of a DELEGATED `onclick={…}` handler EXPRESSION kind. `onclick`
+    // is a delegatable event, so its handler routes through the NARROW delegated boundary:
+    // ONLY a non-async INLINE ARROW whose body is a `$state` assignment / update is
     // supported (the §1.2-class handler); EVERY other handler shape — a function
     // expression, a local-function identifier, a call, a bare update/assignment
-    // (not an arrow), a member, a sequence, a conditional — is the official wrapper /
-    // statement-rewrite breadth and fails closed. An arrow whose body is NOT a
-    // `$state` write (a call, a non-`$state` update) ALSO fails closed.
+    // (not an arrow), a member, a sequence, a conditional — needs the official wrapper /
+    // statement-rewrite breadth and fails closed on the delegated path. An arrow whose
+    // body is NOT a `$state` write (a call, a non-`$state` update) ALSO fails closed.
+    //
+    // These rows characterize the DELEGATED `onclick` handler-EXPRESSION boundary, NOT
+    // the whole event-handler surface: the non-delegated DIRECT (`$.event`) path admits
+    // any non-async inline arrow / function expression (proven by the `events/*` emit
+    // corpus), and a bare identifier fails closed on BOTH paths.
     //
     // The head declares ONLY the supported `$state` signal (the strict instance-script
     // allowlist): a `let plain`, a `function inc`, a `function f` would themselves fail
@@ -1781,9 +1788,13 @@ fn fail_matrix_covers_every_documented_sub_shape() {
     // gate. +8 rows.
     assert_eq!(
         FAIL_MATRIX.len(),
-        129,
-        "the fail matrix must enumerate all 129 documented unsupported-feature \
-         fail-closed sub-shapes. The DOM bind target-lvalue widening moved three rows \
+        128,
+        "the fail matrix must enumerate all 128 documented unsupported-feature \
+         fail-closed sub-shapes. The regular-element event surface is now SUPPORTED, so \
+         its three former rows moved to the positive `events/*` corpus + smoke, replaced \
+         by the two still-fail-closed rows `event_invalid_modifier_combo` and \
+         `event_unknown_modifier` — net −1 row. The DOM bind target-lvalue \
+         widening moved three rows \
          from fail-closed to accepted-positive (with topology goldens): \
          `bind_value_plain_local` (a `bind:value={{v}}` to a PLAIN local — official \
          emits `$.bind_value(input, () => v, ($$value) => v = $$value)`), \

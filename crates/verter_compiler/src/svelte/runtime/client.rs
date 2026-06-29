@@ -26,8 +26,9 @@
 //! silent empty module, never a panic.
 
 use super::client_effect::{emit_text_effect, EffectBody, Memoizer};
+use super::client_event::{emit_delegate_epilogue, render_event_registration};
 use super::client_plan::{
-    AttrValue, ClientDynAttrEmit, ClientModulePlan, ClientNode, ClientRuntimeOp,
+    AttrValue, ClientDynAttrEmit, ClientModulePlan, ClientNode, ClientRuntimeOp, EventEmit,
 };
 use super::client_shapes::{BindGetSetForm, ClientBindShape, GroupBindKey};
 use super::client_walk::{
@@ -816,12 +817,7 @@ impl<'a> ClientEmitter<'a> {
                     setter,
                     ..
                 } => self.emit_bind(out, NodeId(target.0), shape, getter, setter),
-                ClientRuntimeOp::Event {
-                    target,
-                    event_type,
-                    handler,
-                    ..
-                } => self.emit_event(out, NodeId(target.0), event_type, handler),
+                ClientRuntimeOp::Event { emit, .. } => self.emit_event(out, emit),
                 // The reactive-text / reactive-attr / class / style ops were grouped
                 // above; the non-reactive attr inits were emitted in (b). The
                 // `$.attribute_effect` spread fold and the `$.html` raw-markup op are
@@ -1307,17 +1303,21 @@ impl<'a> ClientEmitter<'a> {
         }
     }
 
-    /// Emit a delegated event op from its already-rewritten handler body (the narrow
-    /// plan op).
-    fn emit_event(&mut self, out: &mut String, target: NodeId, event_type: &str, handler: &str) {
-        let var = self
-            .node_var
-            .get(&target)
-            .cloned()
-            .unwrap_or_else(|| "node".to_string());
-        out.push_str(&format!(
-            "\t$.delegated('{event_type}', {var}, {handler});\n"
-        ));
+    /// Emit a DOM event registration from its [`EventEmit`] substrate — the official
+    /// `$.event` (direct) / `$.delegated` (delegated) shape:
+    /// `$.<helper>('<type>', <target>, <wrapped-handler>[, <capture>][, <passive>])`.
+    ///
+    /// - The handler is nested inner→outer in its modifier wrappers (`$.<modifier>(…)`).
+    /// - The 4th positional `capture` arg is `true` when capture is enabled; when a 5th
+    ///   `passive` arg is present without capture, the capture slot is the `void 0`
+    ///   placeholder (mirroring the official `b.call` falsy-arg trimming).
+    /// - The 5th positional `passive` boolean is emitted only when `passive` is set.
+    ///
+    /// The target host resolves the global hosts (`$.window` / `$.document` /
+    /// `$.document.body`) for the reusable special-element event substrate; the
+    /// regular-element surface feeds only the regular-`Node` host.
+    fn emit_event(&mut self, out: &mut String, emit: &EventEmit) {
+        out.push_str(&render_event_registration(emit, &self.node_var));
     }
 }
 
@@ -1417,17 +1417,6 @@ fn emit_root_hoist(out: &mut String, root_var: &str, factory: Option<&TemplateFa
             false
         }
     }
-}
-
-/// Emit the `$.delegate([...])` module epilogue from the first-seen-ordered
-/// delegated event-type set.
-fn emit_delegate_epilogue(out: &mut String, events: &[String]) {
-    let list = events
-        .iter()
-        .map(|e| format!("'{e}'"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    out.push_str(&format!("$.delegate([{list}]);\n"));
 }
 
 /// Escape a string for embedding inside a backtick template literal (the
