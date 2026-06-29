@@ -2,7 +2,7 @@
 //!
 //! The fallthrough resolver handles component attribute inheritance through the
 //! template's root element chain. It uses [`FallthroughNodeKey`] for caching,
-//! where cache keys are based on component identity + override fingerprint
+//! where cache keys are based on component identity + override identity
 //! (not symbol identity).
 //!
 //! # Cross-Subsystem Cycle Safety
@@ -10,15 +10,15 @@
 //! Fallthrough resolution may trigger symbol resolution (to expand a child
 //! component's type surface) and symbol resolution may trigger fallthrough
 //! resolution (to compute accepted surfaces). Both subsystems share a single
-//! [`ResolveContext`] per root request, which carries tagged recursion stacks
-//! for both subsystems. This prevents deadlock and false cycle cuts.
+//! [`crate::resolver_core::symbol_resolver::ResolveContext`] per root request,
+//! which carries tagged recursion stacks for both subsystems. This prevents
+//! deadlock and false cycle cuts.
 
 use std::sync::Arc;
 
 use crate::resolver_core::{
-    symbol_resolver::ResolveContext, FactVersionRef, FallthroughNodeKey,
-    FallthroughOverrideIdentity, ResolverCounters, ResolverDiagnostic, SingleflightGroup,
-    StableExecutionValue, StoreView, ValidatedFactCache,
+    FactVersionRef, FallthroughNodeKey, FallthroughOverrideIdentity, ResolverCounters,
+    ResolverDiagnostic, StoreView, ValidatedFactCache,
 };
 use verter_semantic::analysis::component_meta::{
     AcceptedEventAnalysis, AcceptedPropAnalysis, AcceptedSurfaceCompleteness, FallthroughSurface,
@@ -144,8 +144,6 @@ pub struct FallthroughNodeResult {
 
 pub struct FallthroughResolverState {
     cache: ValidatedFactCache<FallthroughNodeKey, FallthroughNodeResult>,
-    singleflight:
-        SingleflightGroup<FallthroughNodeKey, StableExecutionValue<FallthroughNodeResult>, ()>,
     counters: Arc<ResolverCounters>,
 }
 
@@ -153,14 +151,12 @@ impl FallthroughResolverState {
     pub fn new(counters: Arc<ResolverCounters>) -> Self {
         Self {
             cache: ValidatedFactCache::default(),
-            singleflight: SingleflightGroup::default(),
             counters,
         }
     }
 
     pub fn clear_cache(&self) {
         self.cache.clear();
-        self.singleflight.clear();
     }
 
     pub fn remove_node_for_test(&self, key: &FallthroughNodeKey) {
@@ -217,82 +213,6 @@ impl FallthroughResolverState {
             self.cache.insert(key, result.clone(), result.facts.clone());
         }
     }
-
-    pub fn resolve_node<V, F>(
-        &self,
-        key: FallthroughNodeKey,
-        view: &V,
-        ctx: &mut ResolveContext,
-        compute_fn: F,
-    ) -> FallthroughNodeResult
-    where
-        V: StoreView,
-        F: FnOnce(&mut ResolveContext) -> FallthroughNodeResult,
-    {
-        if let Some(cached) = self.cache.get_if_valid(&key, view) {
-            self.counters.record_cache_hit();
-            return (*cached).clone();
-        }
-        self.counters.record_cache_miss();
-
-        if ctx.fallthrough_visiting.contains(&key) {
-            self.counters.record_cycle_detection();
-            return FallthroughNodeResult {
-                value: FallthroughNodeValue::RootFollow(RootFollowResult::default()),
-                facts: vec![],
-                diagnostics: vec![ResolverDiagnostic {
-                    code: "fallthrough-cycle".to_string(),
-                    message: format!("Cycle detected in fallthrough resolution for {key:?}"),
-                    canonical_path: Some(key.canonical().to_string()),
-                    span_start: None,
-                }],
-            };
-        }
-
-        let token = view.compat_token();
-        let result = self.singleflight.run(key.clone(), token, || {
-            ctx.fallthrough_visiting.insert(key.clone());
-            let result = compute_fn(ctx);
-            ctx.fallthrough_visiting.remove(&key);
-
-            let stable = !result.facts.is_empty()
-                || matches!(
-                    result.value,
-                    FallthroughNodeValue::IntrinsicSurface(_)
-                        | FallthroughNodeValue::ConsumedBindings(_)
-                );
-            if stable {
-                self.cache
-                    .insert(key.clone(), result.clone(), result.facts.clone());
-            }
-
-            Ok(StableExecutionValue {
-                value: result,
-                stable,
-                // This singleflight closure always runs `compute_fn`
-                // (no in-closure warm-hit short-circuit), so the winner
-                // always performed a cold build.
-                computed: true,
-            })
-        });
-
-        match result {
-            Ok(flight) => {
-                if flight.role == crate::resolver_core::SingleflightRole::Follower {
-                    self.counters.record_singleflight_coalesce();
-                }
-                if flight.forked_lane {
-                    self.counters.record_cross_view_lane_fork();
-                }
-                flight.value.value.clone()
-            }
-            Err(()) => FallthroughNodeResult {
-                value: FallthroughNodeValue::RootFollow(RootFollowResult::default()),
-                facts: vec![],
-                diagnostics: vec![],
-            },
-        }
-    }
 }
 
 pub fn root_follow_key(
@@ -341,113 +261,10 @@ pub fn consumed_bindings_key(
     }
 }
 
-pub fn branch_union_key(
-    canonical_component_id: &str,
-    overrides: FallthroughOverrideIdentity,
-) -> FallthroughNodeKey {
-    FallthroughNodeKey::BranchUnionMerge {
-        canonical: canonical_component_id.to_string(),
-        overrides,
-        generic_root_propagation: false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resolver_core::StoreViewCompatToken;
-    use rustc_hash::FxHashSet;
-
-    #[derive(Debug)]
-    struct TestView {
-        token: StoreViewCompatToken,
-        valid_facts: FxHashSet<FactVersionRef>,
-    }
-
-    impl StoreView for TestView {
-        fn compat_token(&self) -> StoreViewCompatToken {
-            self.token
-        }
-        fn validates(&self, fact: &FactVersionRef) -> bool {
-            self.valid_facts.contains(fact)
-        }
-    }
-
-    fn make_fact(id: &str) -> FactVersionRef {
-        FactVersionRef::FileWholeHash {
-            canonical_id: id.to_string(),
-            hash: [1; 16],
-        }
-    }
-
-    fn make_view(token: u64, facts: Vec<FactVersionRef>) -> TestView {
-        TestView {
-            token: StoreViewCompatToken {
-                epoch: token,
-                session: None,
-                validity_fingerprint: 0,
-            },
-            valid_facts: facts.into_iter().collect(),
-        }
-    }
-
-    #[test]
-    fn resolve_node_caches_and_reuses_on_valid_facts() {
-        let counters = Arc::new(ResolverCounters::new());
-        let state = FallthroughResolverState::new(counters.clone());
-        let fact = make_fact("/src/Child.vue");
-        let view = make_view(1, vec![fact.clone()]);
-        let key = root_follow_key(
-            "/src/App.vue",
-            FallthroughOverrideIdentity::NoOverrides,
-            false,
-        );
-
-        let mut ctx = ResolveContext::new();
-        state.resolve_node(key.clone(), &view, &mut ctx, |_| FallthroughNodeResult {
-            value: FallthroughNodeValue::RootFollow(RootFollowResult {
-                has_single_root: true,
-                branches: vec![],
-                ..RootFollowResult::default()
-            }),
-            facts: vec![fact.clone()],
-            diagnostics: vec![],
-        });
-        assert_eq!(counters.snapshot().node_cache_misses, 1);
-
-        let mut ctx2 = ResolveContext::new();
-        let result = state.resolve_node(key.clone(), &view, &mut ctx2, |_| {
-            panic!("should not recompute");
-        });
-        assert!(matches!(
-            result.value,
-            FallthroughNodeValue::RootFollow(ref r) if r.has_single_root
-        ));
-        assert_eq!(counters.snapshot().node_cache_hits, 1);
-    }
-
-    #[test]
-    fn resolve_node_detects_fallthrough_cycle() {
-        let counters = Arc::new(ResolverCounters::new());
-        let state = FallthroughResolverState::new(counters.clone());
-        let view = make_view(1, vec![]);
-        let key = root_follow_key(
-            "/src/Recursive.vue",
-            FallthroughOverrideIdentity::NoOverrides,
-            false,
-        );
-
-        let mut ctx = ResolveContext::new();
-        ctx.fallthrough_visiting.insert(key.clone());
-
-        let result = state.resolve_node(key.clone(), &view, &mut ctx, |_| {
-            panic!("should not compute for cycle");
-        });
-
-        assert_eq!(result.diagnostics.len(), 1);
-        assert_eq!(result.diagnostics[0].code, "fallthrough-cycle");
-        assert_eq!(counters.snapshot().cycle_detections, 1);
-    }
+    use crate::resolver_core::symbol_resolver::ResolveContext;
 
     #[test]
     fn cross_subsystem_visiting_sets_are_independent() {
@@ -481,23 +298,26 @@ mod tests {
 
     #[test]
     fn root_follow_key_uses_override_identity() {
-        use crate::resolver_core::fallthrough_override_key::{
-            FallthroughOverrideSetKey, FallthroughOverrideValueKey,
-        };
-        use crate::semantic_query::PrimitiveKind;
+        // Wholesale-uncacheable: the only non-`NoOverrides` identity is
+        // `Uncacheable`; an override-bearing key differs from the no-override
+        // key and is not cacheable, so it can never be reused as the
+        // no-override surface.
         let key_a = root_follow_key(
             "/src/App.vue",
             FallthroughOverrideIdentity::NoOverrides,
             false,
         );
-        let distinct = FallthroughOverrideIdentity::Exact(Arc::new(FallthroughOverrideSetKey {
-            entries: vec![(
-                Arc::from("p"),
-                FallthroughOverrideValueKey::Primitive(PrimitiveKind::String),
-            )],
-        }));
-        let key_b = root_follow_key("/src/App.vue", distinct, false);
+        let key_b = root_follow_key(
+            "/src/App.vue",
+            FallthroughOverrideIdentity::Uncacheable,
+            false,
+        );
         assert_ne!(key_a, key_b, "different override identities should differ");
+        assert!(key_a.is_cacheable(), "the no-override key is cacheable");
+        assert!(
+            !key_b.is_cacheable(),
+            "the override-bearing (Uncacheable) key is not cacheable"
+        );
     }
 
     #[test]

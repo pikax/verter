@@ -145,7 +145,6 @@ fn workspace_root() -> PathBuf {
 const EXPECTED_LOOSE_ADMISSION_COUNTS: &[(&str, &str, usize)] = &[
     // Category A: variant-gated / fact-presence-gated cold paths.
     ("resolver_core/fallthrough_resolver.rs", "store_node", 1),
-    ("resolver_core/fallthrough_resolver.rs", "resolve_node", 1),
     ("resolver_core/symbol_resolver.rs", "resolve_node", 1),
     // Category B: pre-resolved helper inserters (test-only callers).
     ("resolver_core/route_db.rs", "insert_route_with_facts", 1),

@@ -1793,6 +1793,83 @@ import Child from './Child.vue'
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
+fn budget_exhausted_no_override_fallthrough_is_not_cached() {
+    // No-poison: a no-override fallthrough computed by a request that tripped its
+    // shared projection budget is a PARTIAL — it must NOT warm the runtime node
+    // cache NOR the legacy `cached_fallthrough` mirror. The runtime node store
+    // self-gates on the budget; the legacy mirror is gated in
+    // `cache_fallthrough_result`. Without the mirror gate the partial warms
+    // `DerivedRawState.cached_fallthrough` and a later request replays it.
+    use crate::resolver_core::FallthroughRequestHost;
+
+    let project = make_project();
+    project
+        .upsert_base("/Child.vue", r#"<template><input /></template>"#)
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import Child from './Child.vue'
+</script>
+<template><Child /></template>"#,
+        )
+        .unwrap();
+
+    // A request budget that is already exhausted: the resolved fallthrough is a
+    // partial that must not warm any cache.
+    let rctx = crate::request_context::RequestContext::with_kind_timing_and_projection_budget(
+        1,
+        Arc::from("/App.vue"),
+        verter_audit::RequestKind::ComponentMeta,
+        false,
+        false,
+        None,
+        1,
+    );
+    while !rctx.projection_budget.is_exhausted() {
+        rctx.projection_budget.check_projection_op_count();
+    }
+    let guard = crate::request_context::RequestContextGuard::install(Arc::clone(&rctx));
+
+    let _ = project.host().resolve_fallthrough_surface("/App.vue");
+
+    drop(guard);
+
+    // The legacy mirror must be empty (THE Part 3 discriminator: without the
+    // mirror gate, the budget-exhausted partial warms it here).
+    assert!(
+        cached_fallthrough_state(&project, "/App.vue").is_none(),
+        "a budget-exhausted no-override fallthrough must NOT warm the legacy cached_fallthrough mirror"
+    );
+    // The runtime top-level node cache must also be empty (store_node self-gate).
+    let key = crate::resolver_core::fallthrough_cache_key(
+        "/App.vue",
+        project.host().config.generic_root_propagation,
+        None,
+    );
+    let view = FallthroughRequestHost::snapshot_store_view(project.host());
+    assert!(
+        project
+            .host()
+            .resolver_runtime()
+            .fallthrough
+            .get_cached_node(&key, &view)
+            .is_none(),
+        "a budget-exhausted no-override fallthrough must NOT warm the runtime node cache"
+    );
+
+    // Positive control: the SAME scenario WITHOUT an exhausted budget DOES warm
+    // the mirror, proving the gate suppresses only the budget-exhausted partial.
+    let _ = project.host().resolve_fallthrough_surface("/App.vue");
+    assert!(
+        cached_fallthrough_state(&project, "/App.vue").is_some(),
+        "without budget exhaustion the no-override fallthrough DOES warm the mirror"
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
 fn fallthrough_runtime_reuse_survives_host_cache_clear() {
     let project = make_project();
     project

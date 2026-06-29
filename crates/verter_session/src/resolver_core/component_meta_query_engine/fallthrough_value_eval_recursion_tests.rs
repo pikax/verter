@@ -1,28 +1,22 @@
-//! Discriminating tests for the fallthrough node-DAG recursion fix + the exact
-//! override-identity cache key.
+//! Discriminating tests for the fallthrough node-DAG recursion bound + the
+//! wholesale-uncacheable override identity.
 //!
 //! These exercise: (1) the persistent-memo + shared op-budget that bounds the
 //! `known_spread` / `dynamic-root` node walkers over a content-interned diamond;
-//! (2/3) the exact `FallthroughOverrideValueKey` projection (no field drop, no
-//! depth truncation, over-budget → `Uncacheable`, order-independence,
-//! structure-not-digest equality) and the consumed-bindings key now carrying the
-//! override identity; (4) a recursive-alias characterization that the structural
-//! materializer returns a bounded leaf without stack growth.
+//! (3) the wholesale-uncacheable override identity on the consumed-bindings key
+//! (an override-bearing key is `Uncacheable`, so it is never stored or
+//! warm-reused, while the no-override key stays cacheable); (4) a recursive-alias
+//! characterization of the PRE-EXISTING cycle-sentinel termination invariant.
 
 use std::sync::Arc;
 
 use super::{collect_dynamic_root_candidates_from_node, known_spread_keys_from_node};
 use crate::meta::MetaProject;
 use crate::request_context::{RequestContext, RequestContextGuard};
-use crate::resolver_core::fallthrough_override_key::{
-    FallthroughOverrideSetKey, FallthroughOverrideValueKey,
-};
 use crate::resolver_core::{
-    ComponentMetaQueryEngine, FallthroughOverrideIdentity, FallthroughPropOverride,
+    FallthroughOverrideIdentity, FallthroughPropOverride, FallthroughPropOverrideSet,
 };
-use crate::semantic_query::{
-    IndexKey, PrimitiveKind, SemanticNodeData, SemanticNodeId, SurfaceView,
-};
+use crate::semantic_query::{SemanticNodeData, SemanticNodeId, SurfaceView};
 use crate::types::{AnalysisLevel, HostConfig};
 use crate::VerterHost;
 use verter_type_expr::LiteralValue;
@@ -151,197 +145,59 @@ fn diamond_dag_walkers_are_memo_bounded_and_charge_shared_budget() {
     );
 }
 
-fn value_key_of(
-    engine: &ComponentMetaQueryEngine<'_>,
-    node: SemanticNodeId,
-) -> FallthroughOverrideValueKey {
-    match engine.fallthrough_override_identity(&[FallthroughPropOverride {
-        name: "p".to_string(),
-        node,
-    }]) {
-        FallthroughOverrideIdentity::Exact(set) => set.entries[0].1.clone(),
-        other => panic!("expected Exact identity, got {other:?}"),
-    }
-}
-
-/// #2 — The exact override-identity projection: distinct override values are
-/// distinct keys (no aliasing), structurally-equal values are equal keys
-/// (equality compares STRUCTURE, never a digest), deep structure does not
-/// truncate, an over-budget projection yields `Uncacheable`, and prop order
-/// does not matter after uniqueness.
+/// #3 — Override-bearing consumed-bindings is wholesale uncacheable: a
+/// consumed-bindings cache key whose override identity is derived (via
+/// `for_overrides`) from ANY non-empty override set is `Uncacheable`, so it is
+/// never stored, looked up, or warm-reused; the no-override key stays cacheable
+/// and differs from it.
 ///
-/// RED on the pre-fix tree: the override identity was a `u64`
-/// `node_structural_content_hash` that OMITTED `IndexedAccess.index` and
-/// TRUNCATED at depth 64 — so `T["a"]` vs `T["b"]` (and a >64-deep difference)
-/// collided. GREEN here: the typed `FallthroughOverrideValueKey` keeps every
-/// field, so they are distinct.
+/// Discriminates Part 1's `for_overrides`: were a non-empty override set to map
+/// to a cacheable identity (the pre-change exact-key behavior), the
+/// override-bearing key would report `is_cacheable()` and the first assertion
+/// would FAIL.
 #[test]
-fn override_value_key_is_exact_and_distinguishes_every_field() {
-    let project = open_project();
-    let host = project.host();
-    let graph = Arc::clone(host.project_type_store().semantic_graph());
-    let ctx: &dyn crate::resolver_core::ResolverContext = host;
-    let engine = ComponentMetaQueryEngine::new(ctx);
-
-    // (a) IndexedAccess differing ONLY in `index` — the field the old u64
-    // fingerprint dropped.
-    let object = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let indexed_a = graph.intern_node(SemanticNodeData::IndexedAccess {
-        object,
-        index: IndexKey::String(Arc::from("a")),
-    });
-    let indexed_b = graph.intern_node(SemanticNodeData::IndexedAccess {
-        object,
-        index: IndexKey::String(Arc::from("b")),
-    });
-    let key_a = value_key_of(&engine, indexed_a);
-    let key_b = value_key_of(&engine, indexed_b);
-    assert_ne!(
-        key_a, key_b,
-        "IndexedAccess values differing only in `index` must project to DISTINCT keys"
-    );
-
-    // (b) structure-not-digest: re-projecting the SAME node yields an EQUAL key.
-    assert_eq!(
-        key_a,
-        value_key_of(&engine, indexed_a),
-        "re-projecting the same value yields a structurally-equal key"
-    );
-
-    // (c) deep structure does not truncate: a chain deeper than the old depth-64
-    // cap, differing only at the bottom, stays distinct.
-    let deep_string = build_alias_chain(
-        &graph,
-        graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String)),
-        70,
-    );
-    let deep_number = build_alias_chain(
-        &graph,
-        graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number)),
-        70,
-    );
-    assert_ne!(
-        value_key_of(&engine, deep_string),
-        value_key_of(&engine, deep_number),
-        "a difference BELOW the old depth-64 cap must NOT be truncated away"
-    );
-
-    // (d) over-budget → Uncacheable.
-    let deep = build_alias_chain(
-        &graph,
-        graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean)),
-        20,
-    );
-    let (_rctx, _guard) = install_budget(5);
-    let identity = engine.fallthrough_override_identity(&[FallthroughPropOverride {
-        name: "p".to_string(),
-        node: deep,
-    }]);
-    assert_eq!(
-        identity,
-        FallthroughOverrideIdentity::Uncacheable,
-        "an over-budget override projection must yield Uncacheable, not a partial key"
-    );
-}
-
-/// #2b — prop order does not matter after uniqueness; the empty set is
-/// `NoOverrides`.
-#[test]
-fn override_identity_is_order_independent_and_canonical() {
-    let project = open_project();
-    let host = project.host();
-    let graph = Arc::clone(host.project_type_store().semantic_graph());
-    let ctx: &dyn crate::resolver_core::ResolverContext = host;
-    let engine = ComponentMetaQueryEngine::new(ctx);
-
-    let a = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let b = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
-
-    let forward = engine.fallthrough_override_identity(&[
-        FallthroughPropOverride {
-            name: "alpha".to_string(),
-            node: a,
-        },
-        FallthroughPropOverride {
-            name: "beta".to_string(),
-            node: b,
-        },
-    ]);
-    let reversed = engine.fallthrough_override_identity(&[
-        FallthroughPropOverride {
-            name: "beta".to_string(),
-            node: b,
-        },
-        FallthroughPropOverride {
-            name: "alpha".to_string(),
-            node: a,
-        },
-    ]);
-    assert_eq!(
-        forward, reversed,
-        "the same effective overrides in any source order must canonicalize to ONE identity"
-    );
-
-    assert_eq!(
-        engine.fallthrough_override_identity(&[]),
-        FallthroughOverrideIdentity::NoOverrides,
-        "the empty override set canonicalizes to NoOverrides"
-    );
-}
-
-fn build_alias_chain(
-    graph: &crate::semantic_query_memo::SemanticGraphStore,
-    leaf: SemanticNodeId,
-    depth: u32,
-) -> SemanticNodeId {
-    let mut cur = leaf;
-    for _ in 0..depth {
-        cur = graph.intern_node(SemanticNodeData::Alias(cur));
-    }
-    cur
-}
-
-/// #3 — The consumed-bindings cache key now carries the override identity, so
-/// the SAME child branch reached under TWO different override sets keys
-/// DISTINCTLY (no wrong reuse). RED on the pre-fix tree: `consumed_bindings_key`
-/// hardcoded `override_fingerprint: 0`, so two different override sets produced
-/// the SAME key and reused the wrong consumed-bindings.
-#[test]
-fn consumed_bindings_key_separates_distinct_override_sets() {
+fn consumed_bindings_key_is_uncacheable_for_override_bearing() {
     use crate::resolver_core::fallthrough_resolver::consumed_bindings_key;
 
-    let identity_a = FallthroughOverrideIdentity::Exact(Arc::new(FallthroughOverrideSetKey {
-        entries: vec![(
-            Arc::from("bag"),
-            FallthroughOverrideValueKey::Primitive(PrimitiveKind::String),
-        )],
-    }));
-    let identity_b = FallthroughOverrideIdentity::Exact(Arc::new(FallthroughOverrideSetKey {
-        entries: vec![(
-            Arc::from("bag"),
-            FallthroughOverrideValueKey::Primitive(PrimitiveKind::Number),
-        )],
-    }));
-
-    let key_a = consumed_bindings_key("/App.vue", "0", identity_a.clone());
-    let key_b = consumed_bindings_key("/App.vue", "0", identity_b);
-    assert_ne!(
-        key_a, key_b,
-        "the SAME branch under DIFFERENT override sets must key distinctly (no wrong reuse)"
+    let overrides = FallthroughPropOverrideSet {
+        entries: vec![FallthroughPropOverride {
+            name: "bag".to_string(),
+            node: SemanticNodeId(3),
+        }],
+    };
+    let override_key = consumed_bindings_key(
+        "/App.vue",
+        "0",
+        FallthroughOverrideIdentity::for_overrides(Some(&overrides)),
+    );
+    assert!(
+        !override_key.is_cacheable(),
+        "an override-bearing consumed-bindings key is wholesale uncacheable — never stored or warm-reused"
     );
 
-    let key_a_again = consumed_bindings_key("/App.vue", "0", identity_a);
-    assert_eq!(
-        key_a, key_a_again,
-        "the same branch under the SAME override identity keys identically"
+    let no_override = consumed_bindings_key(
+        "/App.vue",
+        "0",
+        FallthroughOverrideIdentity::for_overrides(None),
+    );
+    assert!(
+        no_override.is_cacheable(),
+        "the no-override consumed-bindings key stays cacheable"
+    );
+    assert_ne!(
+        override_key, no_override,
+        "the override-bearing key differs from the no-override key"
     );
 }
 
-/// #4 — Recursive-alias characterization: the structural materializer emits a
-/// bounded recursive/opaque leaf and the resolution returns WITHOUT stack
+/// #4 — Recursive-alias characterization of the PRE-EXISTING cycle-sentinel
+/// termination invariant (the `structural_materialize` `active` Navigate-node
+/// sentinel), NOT this change's walker memo: a recursive alias prop materializes
+/// a bounded recursive/opaque leaf and the resolution returns WITHOUT stack
 /// growth. Reaching the assertions (rather than overflowing/hanging) is the
 /// no-stack-growth discriminator; the bounded published surface is the
-/// opaque-leaf discriminator.
+/// opaque-leaf discriminator. It would pass on the parent tree too — it guards
+/// the durable termination invariant, not this commit's mechanism.
 #[test]
 fn recursive_alias_prop_materializes_bounded_leaf_without_stack_growth() {
     let project = open_project();

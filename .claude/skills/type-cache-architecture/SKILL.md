@@ -332,32 +332,28 @@ that passes BOTH §3.4 gates (below); `validated_at_generation` is LRU-recency
 metadata, NOT a semantic-validity oracle.
 
 **Fallthrough override identity (R6 content-free key dimension).** The fallthrough
-cache key (`FallthroughNodeKey`, on `resolver_core`) carries its child prop-type
-override set as the sealed internal enum `FallthroughOverrideIdentity`
+cache key (`FallthroughNodeKey`, on `resolver_core`) records whether the request
+carries a non-empty child prop-type override set via the internal enum
+`FallthroughOverrideIdentity`
 (`crates/verter_session/src/resolver_core/fallthrough_override_key.rs`) —
-`NoOverrides` | `Exact(Arc<FallthroughOverrideSetKey>)` | `Uncacheable` — NOT a
-lossy `u64` digest. INTERNAL cache-key type only (no public / wire DTO). A
-non-empty override set projects each override value NODE through the exhaustive,
-no-wildcard `SemanticNodeId → FallthroughOverrideValueKey` walker
-`project_override_value_key_inner` (`resolver_core/component_meta_query_engine/fallthrough_value_eval.rs`),
-which carries EVERY semantic field (the former digest dropped `IndexedAccess.index`,
-signatures and carrier type-args and truncated at depth 64 — two genuinely-different
-override sets then aliased onto one warm fallthrough surface). Equality compares
-STRUCTURE, never a digest. R6: the key carries NO `whole_hash` / `content_hash` /
-`parse_stable_hash` / `fact_dep_signature` / raw `SemanticNodeId` — declaration and
-value-root references project through the same env-bearing content-free
-`ResolvedDeclSlotIdentity` / `ValueRootSlotIdentity` slots used above (a `BareRef`
-scope drops its `whole_hash`). An override value that projects to an unrepresentable
-node (`VueMacroElements`), re-enters a cycle, or trips the shared `request_budget`
-op-budget yields `Uncacheable` — a CONSTRUCTION RESULT, never a stored key value:
-that request skips override-bearing fallthrough cache admission + singleflight (no
-poison; no-override fallthrough and intrinsic-surface caching keep working). The
-SAME identity also keys `FallthroughNodeKey::ConsumedBindingEvaluation`, so the same
-child branch under two different override sets keys distinctly. The override-value
-walker reuses the persistent per-call `SemanticNodeId` memo + op-budget substrate
-(`enter_node` / `exit_node`) shared with the `known_spread` / dynamic-root node
-walkers (compute-once per distinct node, O(distinct nodes) over a content-interned
-diamond).
+`NoOverrides` | `Uncacheable`. INTERNAL cache-key type only (no public / wire DTO);
+content-free (R6 — a unit discriminator carrying NO `whole_hash` / `content_hash` /
+`parse_stable_hash` / `fact_dep_signature` / raw `SemanticNodeId`).
+`for_overrides(None or empty) → NoOverrides`; `for_overrides(non-empty) →
+Uncacheable`. Override-bearing fallthrough is WHOLESALE uncacheable: an
+`Uncacheable` key skips warm lookup, cache admission, AND singleflight (computed
+cold, returned-only), enforced CENTRALLY at the owner layer
+(`run_fallthrough_request`, `resolver_core/fallthrough_request.rs`) plus the
+`FallthroughNodeKey::is_cacheable` cache gates, so two genuinely-different override
+sets can never alias one warm surface. The SAME identity also keys
+`FallthroughNodeKey::ConsumedBindingEvaluation`. No-override fallthrough, intrinsic
+surfaces, the semantic-graph caches, and the final component-meta result cache carry
+the warm-state value. (A durable override-specialized cache would only be
+reintroduced with measured evidence, as a narrowly-scoped graph-instance / request
+memo — not a query-identity key mirroring all semantic node structure.) Separately,
+NO fallthrough promotion — runtime node store or legacy `cached_fallthrough` mirror —
+admits a result computed by a request that tripped its shared `request_budget`
+(gated in `cache_fallthrough_result`).
 
 **§3.4 materialised-record satisfaction (the two-gate warm hit + recorded
 backfill).** A warm hit is decided by the RECORDED materialised `(path, point)`

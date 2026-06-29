@@ -111,32 +111,10 @@ impl VerterHost {
             });
         }
 
-        // Override-bearing requests whose identity could not be projected to an
-        // exact canonical key (`Uncacheable`) MUST NOT share the top-level
-        // singleflight lane or warm the shared cache: a unit `Uncacheable`
-        // identity compares EQUAL across two genuinely-different override sets,
-        // so a shared lane / warm entry would alias them. Compute directly
-        // (cold, return-only) against a request-bound snapshot, skipping
-        // singleflight + admission for THIS request only.
-        if matches!(
-            crate::resolver_core::FallthroughOverrideIdentity::for_overrides(prop_type_overrides),
-            crate::resolver_core::FallthroughOverrideIdentity::Uncacheable
-        ) {
-            use crate::resolver_core::FallthroughRequestHost;
-            let (store_view, base_is_current) =
-                FallthroughRequestHost::snapshot_store_view_read(self);
-            let result = FallthroughRequestHost::compute_fallthrough_surface_uncached(
-                self,
-                canonical_id,
-                prop_type_overrides,
-                visiting,
-                &store_view,
-                base_is_current,
-            );
-            visiting.remove(canonical_id);
-            return result;
-        }
-
+        // Override-bearing fallthrough is wholesale uncacheable. The owner-layer
+        // `run_fallthrough_request` enforces it centrally: a non-cacheable key
+        // skips warm lookup, cache admission, AND singleflight (computed cold,
+        // returned-only). No host-side special case is needed here.
         let result = crate::resolver_core::run_fallthrough_request(
             self,
             &self.resolver_runtime().top_level_fallthrough_singleflight,
@@ -615,8 +593,7 @@ impl VerterHost {
         if entries.is_empty() {
             None
         } else {
-            let identity = engine.fallthrough_override_identity(&entries);
-            Some(crate::resolver_core::FallthroughPropOverrideSet { entries, identity })
+            Some(crate::resolver_core::FallthroughPropOverrideSet { entries })
         }
     }
 
@@ -822,6 +799,19 @@ impl VerterHost {
         prop_type_overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
         result: &crate::types::FallthroughResolution,
     ) {
+        // No-poison: a result computed by a request that tripped its shared
+        // projection budget is a PARTIAL — gate ALL fallthrough promotion on a
+        // non-exhausted budget. The runtime node store self-gates on the same
+        // budget, but the legacy `cached_fallthrough` mirror does not, so a
+        // budget-exhausted no-override partial could otherwise warm-hit
+        // `DerivedRawState.cached_fallthrough`. Gating here covers both the
+        // node store and the mirror.
+        if crate::request_context::current_request_budget()
+            .is_some_and(|budget| budget.is_exhausted())
+        {
+            return;
+        }
+
         let cache_key = fallthrough_cache_key(
             canonical_id,
             self.config.generic_root_propagation,

@@ -2,7 +2,8 @@ use rustc_hash::FxHashSet;
 
 use crate::resolver_core::{
     fallthrough_cache_key, run_stable_request, FallthroughNodeKey, FallthroughPropOverrideSet,
-    RequestRunResult, SingleflightGroup, StableExecutionValue, StableRequestExecutor, StoreView,
+    RequestRunResult, RequestSource, SingleflightGroup, StableExecutionValue,
+    StableRequestExecutor, StoreView,
 };
 
 pub trait FallthroughRequestHost {
@@ -290,6 +291,24 @@ where
         max_attempts,
     )
     .with_fixed_view(fixed_store_view);
+
+    // Central fail-closed enforcement: an override-bearing key is wholesale
+    // uncacheable, and a non-cacheable key MUST skip warm lookup, cache
+    // admission, AND singleflight. Compute it cold, OFF the shared lane, and
+    // return-only. Every caller of this owner-layer entry inherits the
+    // guarantee — no caller relies on a host-side special case.
+    if !executor.cache_key().is_cacheable() {
+        let store_view = executor.snapshot_view();
+        let value = executor
+            .compute(&store_view)
+            .expect("fallthrough request execution is infallible");
+        return RequestRunResult {
+            value,
+            source: RequestSource::Fallback,
+            attempts: 1,
+        };
+    }
+
     run_stable_request(singleflight, &mut executor)
         .expect("fallthrough request execution is infallible")
 }
@@ -348,6 +367,9 @@ mod tests {
         /// Records every `store_fallthrough_result` call — i.e. every
         /// PROMOTION into the shared cache.
         promotions: std::cell::RefCell<Vec<String>>,
+        /// Records every `try_get_cached_fallthrough` call — i.e. every
+        /// WARM LOOKUP attempt.
+        lookups: std::cell::RefCell<Vec<String>>,
     }
 
     impl FallthroughRequestHost for MockHost {
@@ -387,10 +409,11 @@ mod tests {
 
         fn try_get_cached_fallthrough(
             &self,
-            _canonical_id: &str,
+            canonical_id: &str,
             _prop_type_overrides: Option<&FallthroughPropOverrideSet>,
             _store_view: &Self::View,
         ) -> Option<Self::Resolution> {
+            self.lookups.borrow_mut().push(canonical_id.to_string());
             None
         }
 
@@ -439,6 +462,7 @@ mod tests {
             flip_on_every_snapshot: Cell::new(true),
             snapshot_flip_budget: Cell::new(0),
             promotions: std::cell::RefCell::new(Vec::new()),
+            lookups: std::cell::RefCell::new(Vec::new()),
         };
         let singleflight = SingleflightGroup::<
             FallthroughNodeKey,
@@ -490,6 +514,7 @@ mod tests {
             flip_on_every_snapshot: Cell::new(false),
             snapshot_flip_budget: Cell::new(0),
             promotions: std::cell::RefCell::new(Vec::new()),
+            lookups: std::cell::RefCell::new(Vec::new()),
         };
         let singleflight = SingleflightGroup::<
             FallthroughNodeKey,
@@ -548,6 +573,7 @@ mod tests {
             // (`0..max_attempts`) + 1 fallback snapshot.
             snapshot_flip_budget: Cell::new(3),
             promotions: std::cell::RefCell::new(Vec::new()),
+            lookups: std::cell::RefCell::new(Vec::new()),
         };
         let singleflight = SingleflightGroup::<
             FallthroughNodeKey,
@@ -579,6 +605,70 @@ mod tests {
              fallback latched incoherent — each attempt's stability must \
              reflect ONLY that attempt's snapshot (per-attempt reset of \
              `fallback_snapshot_incoherent`)"
+        );
+    }
+
+    #[test]
+    fn uncacheable_override_request_skips_lookup_admission_and_singleflight() {
+        // Central fail-closed enforcement: an override-bearing request (a
+        // non-empty override set ⇒ an `Uncacheable` key) must compute cold OFF
+        // the shared singleflight lane and return-only — NO warm lookup, NO
+        // admission (store), NO singleflight participation.
+        //
+        // Discriminates Part 2's central gate: without it, the request would
+        // flow into `run_stable_request`, which would `try_get_cached` (a
+        // recorded lookup), join the singleflight lane (source `Flight`), and —
+        // on this coherent snapshot — `store_stable` (a recorded promotion).
+        let host = MockHost {
+            live_fp: Cell::new(0xAAAA),
+            flip_on_every_snapshot: Cell::new(false),
+            snapshot_flip_budget: Cell::new(0),
+            promotions: std::cell::RefCell::new(Vec::new()),
+            lookups: std::cell::RefCell::new(Vec::new()),
+        };
+        let singleflight = SingleflightGroup::<
+            FallthroughNodeKey,
+            StableExecutionValue<Option<usize>>,
+            (),
+        >::default();
+        let mut visiting = FxHashSet::default();
+
+        let overrides = FallthroughPropOverrideSet {
+            entries: vec![crate::resolver_core::FallthroughPropOverride {
+                name: "p".to_string(),
+                node: crate::semantic_query::SemanticNodeId(1),
+            }],
+        };
+
+        let result = run_fallthrough_request(
+            &host,
+            &singleflight,
+            "/proj/Child.vue",
+            Some(&overrides),
+            &mut visiting,
+            None,
+            3,
+        );
+
+        assert_eq!(
+            result.value,
+            Some(42),
+            "the cold compute result is still returned to the caller"
+        );
+        assert!(
+            matches!(result.source, RequestSource::Fallback),
+            "an uncacheable request computes off-lane (Fallback), never via the singleflight (Flight), got {:?}",
+            result.source
+        );
+        assert!(
+            host.lookups.borrow().is_empty(),
+            "an uncacheable request must skip warm lookup (no try_get_cached_fallthrough call), got {:?}",
+            host.lookups.borrow()
+        );
+        assert!(
+            host.promotions.borrow().is_empty(),
+            "an uncacheable request must skip cache admission (no store_fallthrough_result call), got {:?}",
+            host.promotions.borrow()
         );
     }
 }

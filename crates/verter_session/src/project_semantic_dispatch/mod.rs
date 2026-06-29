@@ -529,30 +529,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
-    /// Build the env-bearing, content-free
-    /// [`ValueRootSlotIdentity`](crate::semantic_query::ValueRootSlotIdentity)
-    /// for a value root — the slot half of [`Self::typeof_key_for`], without
-    /// the `resolve_env_hash`-bearing context. Reads the value-root scope
-    /// canonical's per-canonical env (`T`/`L`) + project identity (`J`) from
-    /// the live host. Used by the fallthrough override-key projector to carry a
-    /// `typeof` override value's value-root identity R6-compliantly.
-    #[must_use]
-    pub(crate) fn value_root_slot_for(
-        &self,
-        root: crate::semantic_query::ValueRootKey,
-    ) -> crate::semantic_query::ValueRootSlotIdentity {
-        let host = self.ctx.host_for_fact_tracer_install();
-        let canonical = root.scope.canonical_id.as_ref();
-        let env = host.host_view_env_hashes_for(canonical);
-        let project_identity = host.host_view_project_identity_for(canonical).fold_u32();
-        crate::semantic_query::ValueRootSlotIdentity::new(
-            root,
-            project_identity,
-            env.type_env_hash,
-            env.lib_env_hash,
-        )
-    }
-
     /// Push `identity` onto the active-instantiation stack. Returns `true`
     /// when the identity was not already present (caller MUST pair with
     /// `pop_instantiate_active` on the same identity). Returns `false`

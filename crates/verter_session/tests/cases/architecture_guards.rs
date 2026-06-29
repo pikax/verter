@@ -2324,17 +2324,16 @@ mod resolver_core_recursion {
             "Phase 5l-supplement: bounded by TypeExpr AST depth (rewriter).",
         ),
         // -----------------------------------------------------------------
-        // component_meta_query_engine/fallthrough_value_eval.rs — node-domain
-        // walkers over the content-interned semantic-node DAG (spread-keys
-        // reduction, dynamic-root-candidate enum, and the exact override-key
-        // value projector). All three share ONE prologue/epilogue
-        // (`enter_node`/`exit_node`): a per-call `FxHashMap<SemanticNodeId, _>`
-        // memo computes each DISTINCT node once (so a content-interned diamond
-        // is O(distinct nodes), not O(2^depth)), and the EXISTING
-        // `request_budget` op-budget is charged once per distinct node; a trip
-        // halts the walk with a partial that is never warm-admitted. `active`
-        // is the in-progress-path cycle sentinel ONLY (a re-entry halts), not
-        // the memo.
+        // component_meta_query_engine/fallthrough_value_eval.rs — the two
+        // node-domain walkers over the content-interned semantic-node DAG
+        // (spread-keys reduction and dynamic-root-candidate enum). Both share
+        // ONE prologue/epilogue (`enter_node`/`exit_node`): a per-call
+        // `FxHashMap<SemanticNodeId, _>` memo computes each DISTINCT node once
+        // (so a content-interned diamond is O(distinct nodes), not O(2^depth)),
+        // and the EXISTING `request_budget` op-budget is charged once per
+        // distinct node; a trip halts the walk with a partial that is never
+        // warm-admitted. `active` is the in-progress-path cycle sentinel ONLY
+        // (a re-entry halts, BEFORE the budget charge), not the memo.
         // -----------------------------------------------------------------
         (
             "fallthrough_value_eval",
@@ -2345,11 +2344,6 @@ mod resolver_core_recursion {
             "fallthrough_value_eval",
             "collect_dynamic_root_candidates_from_node_inner",
             "bounded by the shared per-call `SemanticNodeId` memo (each distinct node computed once) + the shared `request_budget` op-budget (one charge per distinct node; a trip returns the no-warm partial); `active` is the in-progress-path cycle sentinel only.",
-        ),
-        (
-            "fallthrough_value_eval",
-            "project_override_value_key_inner",
-            "bounded by the SAME shared per-call `SemanticNodeId` memo + `request_budget` op-budget as the two walkers above (via `enter_node`/`exit_node`); a budget trip or a cycle re-entry returns `None`, which the override-identity producer maps to `FallthroughOverrideIdentity::Uncacheable` (skips override-bearing cache admission). No depth cap; `active` is the in-progress-path cycle sentinel only.",
         ),
         // -----------------------------------------------------------------
         // component_meta_query_engine/registry_structural.rs — the registry

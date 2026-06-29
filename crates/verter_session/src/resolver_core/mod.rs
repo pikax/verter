@@ -128,9 +128,7 @@ pub use fallthrough::{
     FallthroughPropOverride, FallthroughPropOverrideSet, FallthroughResolutionView,
     FallthroughResolverHost, KnownSpreadKeys, ResolvedConsumedBindings, ResolvedFallthroughSurface,
 };
-pub use fallthrough_override_key::{
-    FallthroughOverrideIdentity, FallthroughOverrideSetKey, FallthroughOverrideValueKey,
-};
+pub use fallthrough_override_key::FallthroughOverrideIdentity;
 pub use fallthrough_request::{run_fallthrough_request, FallthroughRequestHost};
 pub use prepared_decl::{
     build_prepared_type_decl_cache, build_prepared_value_decl_cache,

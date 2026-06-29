@@ -128,16 +128,13 @@ pub struct FallthroughPropOverride {
 
 /// Node-backed child prop-type override set threaded through fallthrough
 /// recursion in place of the materialised `FxHashMap<String, TypeExpr>` map.
-/// Each entry binds a prop name to its override value NODE; `identity` is the
-/// EXACT, content-free structural projection of those nodes (NOT a lossy `u64`
-/// digest), used as the `overrides` cache-key dimension so a warm fallthrough
-/// hit is valid only for an equivalent override set. The identity is computed
-/// once at set construction (see
-/// [`crate::resolver_core::ComponentMetaQueryEngine::fallthrough_override_identity`]).
+/// Each entry binds a prop name to its override value NODE. Cacheability is
+/// derived from whether the set is empty: a non-empty override set is wholesale
+/// uncacheable (see [`FallthroughOverrideIdentity::for_overrides`]), so the set
+/// carries only its runtime `entries` — no precomputed identity.
 #[derive(Debug, Clone, Default)]
 pub struct FallthroughPropOverrideSet {
     pub entries: Vec<FallthroughPropOverride>,
-    pub identity: FallthroughOverrideIdentity,
 }
 
 impl FallthroughPropOverrideSet {
@@ -1473,56 +1470,71 @@ mod tests {
     }
 
     #[test]
-    fn fallthrough_cache_key_carries_override_identity() {
-        // The cache key's `overrides` dimension is the override set's EXACT
-        // content-free `identity` (NOT a lossy digest, NOT the raw node ids).
-        // Two sets with the SAME identity key identically; a different identity
-        // produces a distinct key, so a warm fallthrough surface is reused only
-        // for an equivalent override set.
-        use crate::resolver_core::fallthrough_override_key::{
-            FallthroughOverrideSetKey, FallthroughOverrideValueKey,
-        };
-        use crate::resolver_core::FallthroughOverrideIdentity;
-        use crate::semantic_query::PrimitiveKind;
+    fn fallthrough_cache_key_is_uncacheable_for_any_override_set() {
+        // Wholesale-uncacheable: a no-override key (`NoOverrides`) is cacheable;
+        // a key built for ANY non-empty override set is `Uncacheable`, so the
+        // two key values differ and the override-bearing one is never
+        // warm-reused. An empty set canonicalizes to the same key as `None`.
+        use crate::resolver_core::FallthroughPropOverride;
+        use crate::semantic_query::SemanticNodeId;
 
-        let identity_a = FallthroughOverrideIdentity::Exact(Arc::new(FallthroughOverrideSetKey {
-            entries: vec![(
-                Arc::from("p"),
-                FallthroughOverrideValueKey::Primitive(PrimitiveKind::String),
-            )],
-        }));
-        let identity_b = FallthroughOverrideIdentity::Exact(Arc::new(FallthroughOverrideSetKey {
-            entries: vec![(
-                Arc::from("p"),
-                FallthroughOverrideValueKey::Primitive(PrimitiveKind::Number),
-            )],
-        }));
-        let left = FallthroughPropOverrideSet {
-            entries: Vec::new(),
-            identity: identity_a.clone(),
+        let none_key = fallthrough_cache_key("/App.vue", true, None);
+        assert!(none_key.is_cacheable(), "a no-override key is cacheable");
+
+        let overrides = FallthroughPropOverrideSet {
+            entries: vec![FallthroughPropOverride {
+                name: "p".to_string(),
+                node: SemanticNodeId(1),
+            }],
         };
-        let right = FallthroughPropOverrideSet {
+        let override_key = fallthrough_cache_key("/App.vue", true, Some(&overrides));
+        assert!(
+            !override_key.is_cacheable(),
+            "any non-empty override set makes the key wholesale uncacheable"
+        );
+        assert_ne!(
+            none_key, override_key,
+            "the override-bearing key differs from the no-override key"
+        );
+
+        let empty = FallthroughPropOverrideSet {
             entries: Vec::new(),
-            identity: identity_a,
         };
-        let different = FallthroughPropOverrideSet {
-            entries: Vec::new(),
-            identity: identity_b,
-        };
+        assert_eq!(
+            fallthrough_cache_key("/App.vue", true, Some(&empty)),
+            none_key,
+            "an empty override set canonicalizes to the same key as None"
+        );
+    }
+
+    #[test]
+    fn for_overrides_maps_nonempty_to_uncacheable_and_empty_to_no_overrides() {
+        use crate::resolver_core::{FallthroughOverrideIdentity, FallthroughPropOverride};
+        use crate::semantic_query::SemanticNodeId;
 
         assert_eq!(
-            fallthrough_cache_key("/App.vue", true, Some(&left)),
-            fallthrough_cache_key("/App.vue", true, Some(&right))
+            FallthroughOverrideIdentity::for_overrides(None),
+            FallthroughOverrideIdentity::NoOverrides,
+            "None maps to NoOverrides"
         );
-        assert_ne!(
-            fallthrough_cache_key("/App.vue", true, Some(&left)),
-            fallthrough_cache_key("/App.vue", true, Some(&different))
+        let empty = FallthroughPropOverrideSet {
+            entries: Vec::new(),
+        };
+        assert_eq!(
+            FallthroughOverrideIdentity::for_overrides(Some(&empty)),
+            FallthroughOverrideIdentity::NoOverrides,
+            "an empty set maps to NoOverrides"
         );
-        // A `None` override set (NoOverrides) differs from a populated
-        // (Exact) identity key.
-        assert_ne!(
-            fallthrough_cache_key("/App.vue", true, Some(&left)),
-            fallthrough_cache_key("/App.vue", true, None)
+        let non_empty = FallthroughPropOverrideSet {
+            entries: vec![FallthroughPropOverride {
+                name: "p".to_string(),
+                node: SemanticNodeId(7),
+            }],
+        };
+        assert_eq!(
+            FallthroughOverrideIdentity::for_overrides(Some(&non_empty)),
+            FallthroughOverrideIdentity::Uncacheable,
+            "a non-empty set maps to Uncacheable (wholesale)"
         );
     }
 
