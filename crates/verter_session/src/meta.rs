@@ -812,6 +812,34 @@ impl MetaSession {
         }
         host.provenance().payload_cache_misses.fetch_add(1, Relaxed);
 
+        // Install ONE request context (with `config.projection_op_budget`)
+        // spanning the cold resolve AND the fallthrough extract, so the
+        // projection-op budget fuse and the no-poison completeness gate are
+        // uniformly LIVE on the payload surface exactly as on the analysis
+        // surface (the Shared Optimized Codebase rule — a budget partial must
+        // be observable here, not only through the analysis entry). Held to
+        // function end so it covers step-(2) resolve AND step-(3) extract; the
+        // step-(2) inner install-if-none-active reuses this outer context. This
+        // is the SHARED body for BOTH the scalar and the batch per-job payload
+        // paths, so this single install covers both (a per-job install on a
+        // batch pool thread is correct — `RequestContext` is thread-local RAII).
+        let _payload_request_ctx_guard =
+            if crate::request_context::current_request_context().is_none() {
+                Some(crate::request_context::RequestContextGuard::install(
+                    crate::request_context::RequestContext::with_kind_timing_and_projection_budget(
+                        crate::meta_resolve::next_component_meta_audit_request_id(),
+                        Arc::<str>::from(canonical.as_str()),
+                        verter_audit::RequestKind::ComponentMeta,
+                        false,
+                        host.config.audit_timing_capture && host.config.audit_enabled,
+                        None,
+                        host.config.projection_op_budget,
+                    ),
+                ))
+            } else {
+                None
+            };
+
         // (2) Cold resolve pinned to the fixed view (FENCED promotion).
         let Some(resolved) = ({
             let (executor_view, captured_fp) = fixed.executor_fixed_view();
@@ -836,7 +864,7 @@ impl MetaSession {
             overlay,
         );
         let host_ctx_ref: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
-        let (analysis, fallthrough_fact_versions) =
+        let (analysis, fallthrough_fact_versions, fallthrough_completeness) =
             crate::host_manage::extract_component_meta_from_resolved_with_facts(
                 host,
                 canonical.as_str(),
@@ -863,8 +891,14 @@ impl MetaSession {
         // currentness) AND the per-result completeness rail — a partial
         // (budget-fail-closed / carrier-stopped) payload is returned but
         // never admitted, so a transient trip cannot warm-replay as a
-        // sticky degraded payload.
-        if fixed.payload_promotion_admissible(host) && !resolved.synthesis_should_suppress {
+        // sticky degraded payload. The completeness rail is two signals: the
+        // resolve-level `synthesis_should_suppress` AND the fallthrough-level
+        // `fallthrough_completeness`, which folds a budget/fuse/semantic
+        // partial observed DURING the (now budget-scoped) fallthrough extract.
+        if fixed.payload_promotion_admissible(host)
+            && !resolved.synthesis_should_suppress
+            && !fallthrough_completeness.is_partial()
+        {
             // Stamp from the FLIGHT-CAPTURED generation (the fixed
             // view's captured token), never the live counter: a project
             // bump landing between the fence above and this store must

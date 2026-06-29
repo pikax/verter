@@ -205,7 +205,7 @@ impl SessionRuntime {
         let host_ctx =
             crate::resolver_core::HostResolverContext::from_cold_seed(host, &store_view, overlay);
         let host_ctx_ref: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
-        let (analysis, fallthrough_fact_versions) =
+        let (analysis, fallthrough_fact_versions, _fallthrough_completeness) =
             crate::host_manage::extract_component_meta_from_resolved_with_facts(
                 host,
                 canonical.as_str(),

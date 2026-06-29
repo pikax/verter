@@ -1105,6 +1105,7 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
 ) -> (
     verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
     Option<Vec<crate::resolver_core::FactVersionRef>>,
+    crate::semantic_query::ResultCompleteness,
 ) {
     let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
     // Macro-DTO surface read runs under the request-bound `ctx` (not the
@@ -1136,11 +1137,12 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
     let mut visiting = rustc_hash::FxHashSet::default();
     // Per-cold-compute completeness scope: a fallthrough partial folds in so the
     // fallthrough's OWN caches (`store_node`) self-gate on the typed completeness
-    // signal, consistent with the struct-returning extract path. The payload
-    // promotion gate is independent (keys on `resolved.synthesis_should_suppress`).
-    let fallthrough_facts = {
+    // signal, consistent with the struct-returning extract path. The captured
+    // completeness is also RETURNED so the payload-write gate refuses to warm a
+    // fallthrough partial (matching the analysis surface's result-cache gate).
+    let (fallthrough_facts, fallthrough_completeness) = {
         let _completeness_scope = crate::request_context::ColdComputeCompletenessScope::enter();
-        if let Some(resolution) = host.compute_fallthrough_surface_from_resolved_state(
+        let facts = if let Some(resolution) = host.compute_fallthrough_surface_from_resolved_state(
             &canonical,
             resolved,
             None,
@@ -1155,7 +1157,12 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
             Some(facts)
         } else {
             None
-        }
+        };
+        // Capture before the scope drops: a fallthrough partial (budget / fuse /
+        // semantic) folds into the active per-cold-compute scope regardless of
+        // whether a resolution was produced.
+        let completeness = crate::request_context::current_cold_compute_completeness();
+        (facts, completeness)
     };
     // apply the publication policy AFTER fallthrough merge so the
     // pass operates on the final accepted_props/events. Walks
@@ -1171,7 +1178,7 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
         Some(&resolved.snapshot),
         ctx,
     );
-    (meta, fallthrough_facts)
+    (meta, fallthrough_facts, fallthrough_completeness)
 }
 
 /// Test-only entry point that exercises `harvest_ref_names_iterative`

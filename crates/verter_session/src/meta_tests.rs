@@ -2092,6 +2092,118 @@ fn lower_bound_complete_fallthrough_surface_still_warms_component_meta_result_db
     );
 }
 
+/// Regression lock (payload-surface fallthrough-only-partial no-poison): a
+/// fallthrough-only budget partial reached through the BARE scalar payload
+/// surface must NOT warm `cached_meta_payload`. `resolve_one_payload_item`
+/// installs ONE `RequestContext` (with `config.projection_op_budget`) spanning
+/// its cold resolve AND its fallthrough extract, so the projection-op budget
+/// fuse is LIVE during the payload fallthrough exactly as on the analysis
+/// surface. The no-macro owner's resolve completes cleanly
+/// (`synthesis_should_suppress == false`) — the only partial comes from the
+/// spread walker tripping the low budget DURING the payload extract. The
+/// payload-write gate merges the threaded fallthrough completeness and refuses
+/// to warm the payload (it is still RETURNED). Without the spanning install the
+/// payload extract runs context-free, the budget never trips, the compute is
+/// Complete, and the payload warms — RED at the `is_none()` replay assertion.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn fallthrough_only_budget_partial_does_not_warm_cached_meta_payload() {
+    // Low projection budget: resolve (no macros) stays at zero ops; the
+    // fallthrough spread walker trips mid-walk during the PAYLOAD extract.
+    let project = make_project_with_config(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        projection_op_budget: 3,
+        ..HostConfig::default()
+    });
+    upsert_fallthrough_spread_owner(&project);
+    let host = project.host();
+    let canonical = "/src/App.vue";
+
+    // The resolve itself is clean — the partial is fallthrough-only (too late
+    // for `resolved.synthesis_should_suppress`, the exact shape this gate
+    // targets on the payload surface).
+    let (_meta, resolved) = host
+        .get_component_meta_with_resolution(canonical)
+        .expect("a fallthrough-tripped resolve must still return partial metadata");
+    assert!(
+        !resolved.synthesis_should_suppress,
+        "the no-macro owner's resolve completes cleanly so the partial is fallthrough-only \
+         (synthesis_should_suppress reflects resolve, not the later fallthrough trip)"
+    );
+
+    // Drive the BARE scalar payload surface with NO ambient context: the
+    // install inside `resolve_one_payload_item` is what makes the budget live
+    // during the extract (the discriminator is the FIX, not the fixture).
+    assert!(
+        crate::request_context::current_request_context().is_none(),
+        "test precondition: no ambient request context — the payload path must install its own"
+    );
+    let session = project.open_session_batch().unwrap();
+    let payload = session
+        .get_component_meta_payload(canonical, test_encode_fn)
+        .expect("the payload request must succeed")
+        .expect("a partial payload is still RETURNED to the caller, just not warmed");
+    assert!(
+        !payload.is_empty(),
+        "the partial payload is returned to the caller"
+    );
+
+    // The fallthrough-only budget partial must NOT have warmed the payload
+    // cache: a fresh warm read finds nothing.
+    assert!(
+        host.try_get_cached_meta_payload(canonical).is_none(),
+        "a fallthrough-only budget partial reached through the payload surface MUST NOT warm \
+         cached_meta_payload — without the spanning install the extract runs context-free (no trip \
+         → Complete compute → warmed); the fix installs a RequestContext spanning resolve+extract \
+         so the budget trips → partial → the completeness gate refuses the warm"
+    );
+}
+
+/// DON'T-OVER-GATE positive control (payload surface): a `LowerBound` SURFACE
+/// whose COMPUTE is COMPLETE must still warm `cached_meta_payload`. The same
+/// spread owner under the default (generous) budget produces a lower-bound
+/// accepted surface WITHOUT any budget/fuse trip, so the fallthrough
+/// completeness is `Complete` and the payload warms. A regression that wrongly
+/// gated on the surface-shape `accepted_surface_completeness == LowerBound`
+/// would refuse this and the warm read would miss.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn lower_bound_complete_fallthrough_surface_still_warms_cached_meta_payload() {
+    // Default (generous) budget: the spread walk COMPLETES, so the compute is
+    // Complete even though the surface is a lower bound.
+    let project = make_project();
+    upsert_fallthrough_spread_owner(&project);
+    let host = project.host();
+    let canonical = "/src/App.vue";
+
+    let (meta1, resolved) = host
+        .get_component_meta_with_resolution(canonical)
+        .expect("a clean resolve must return metadata");
+    assert!(
+        !resolved.synthesis_should_suppress,
+        "the clean resolve must not suppress"
+    );
+    assert!(
+        matches!(
+            meta1.accepted_surface_completeness,
+            verter_semantic::analysis::component_meta::AcceptedSurfaceCompleteness::LowerBound
+        ),
+        "the inexact union spread yields a lower-bound SURFACE (distinct from compute completeness)"
+    );
+
+    // The LowerBound-surface / Complete-compute payload MUST warm.
+    let session = project.open_session_batch().unwrap();
+    let _payload = session
+        .get_component_meta_payload(canonical, test_encode_fn)
+        .expect("the payload request must succeed")
+        .expect("a clean payload is returned");
+    assert!(
+        host.try_get_cached_meta_payload(canonical).is_some(),
+        "a LowerBound SURFACE with COMPLETE compute MUST still warm cached_meta_payload — gating on \
+         the surface shape instead of compute completeness would over-gate this"
+    );
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn fallthrough_runtime_reuse_survives_host_cache_clear() {

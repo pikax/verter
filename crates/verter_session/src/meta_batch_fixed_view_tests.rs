@@ -897,12 +897,18 @@ fn parse_completeness(slot: &Option<Vec<u8>>) -> SlotCompleteness {
 /// materialisation before natural completion — so the WHOLE result is flagged
 /// `completeness = Partial` (and its bool projection
 /// `synthesis_should_suppress = true`). An uncertified `Partial` is REFUSED
-/// warm admission, REGARDLESS of whether the published prop-NAME surface
-/// happens to be complete. Prop-name discovery is shallow/Navigate-owned and
-/// budget-INDEPENDENT here, so the constrained result still enumerates all 96
-/// names; the name surface being complete is incidental and is NOT a
-/// certification of completeness. The discriminator is therefore TYPED
-/// COMPLETENESS, not a name/prop count.
+/// warm admission, REGARDLESS of how large or small the published prop-NAME
+/// surface is. The discriminator is TYPED COMPLETENESS, NOT a name/prop count:
+/// the surface size is incidental and is NOT a certification of completeness.
+///
+/// The payload path shares ONE projection budget across the cold resolve AND
+/// the extract (the same single-context shape as the analysis surface), so a
+/// pathological owner whose resolve EXHAUSTS the budget enumerating its
+/// defineProps surface leaves the extract starved — the constrained result
+/// publishes a budget-TRUNCATED surface (here zero props cold), exactly as the
+/// analysis surface does for the same owner under the same budget. The
+/// no-poison invariant holds independent of that surface size: the uncertified
+/// Partial is still returned and still refused admission.
 ///
 /// The two promotion rails are conjunctive (a result must be BOTH complete
 /// AND token-stable/current to promote) and the completeness rail is
@@ -1032,20 +1038,24 @@ defineProps<{ icon: string; label: number }>();
         simple1.prop_count, 2,
         "the complete sibling resolves its full 2-prop surface",
     );
-    assert_eq!(
-        partial1.prop_count, 96,
-        "the constrained partial still publishes the full 96-name surface — \
-         name discovery is shallow/Navigate-owned and budget-independent; \
-         this is a typed-completeness fixture, NOT a name-count one",
+    assert!(
+        partial1.prop_count < 96,
+        "the constrained partial publishes a budget-TRUNCATED surface (observed \
+         zero props cold), NOT the full 96 — the payload extract shares the \
+         resolve's projection budget, which the 32-arm enumeration exhausts, so \
+         the surface is truncated exactly as the analysis surface truncates the \
+         same owner under the same budget; this is a typed-completeness fixture, \
+         NOT a name-count one (got {})",
+        partial1.prop_count,
     );
     assert!(
         partial1.is_partial,
         "the tight projection-op budget must trip the 32-arm intersection \
          mid-materialisation — an UNCERTIFIED, budget-tripped Partial result. \
-         The published name surface staying complete (all 96 props) is \
-         incidental: name discovery is shallow/Navigate-owned and \
-         budget-independent. If this is not Partial the fuse no longer trips \
-         and the fixture stops exercising the no-poison producer.",
+         The published name surface size is incidental (the budget-bound extract \
+         truncates it): the discriminator is typed completeness. If this is not \
+         Partial the fuse no longer trips and the fixture stops exercising the \
+         no-poison producer.",
     );
     assert_eq!(
         partial1.synthesis_should_suppress, partial1.is_partial,
@@ -1080,16 +1090,18 @@ defineProps<{ icon: string; label: number }>();
     let simple2 = parse_completeness(&payloads2[1]);
 
     assert_eq!(
-        partial2.prop_count, 96,
-        "the repeat partial slot keeps the full 96-name surface regardless of \
-         its typed completeness",
-    );
-    assert_eq!(
         partial2.synthesis_should_suppress, partial2.is_partial,
         "synthesis_should_suppress stays the bool projection of typed \
          completeness on the repeat batch",
     );
     if partial2.is_partial {
+        assert!(
+            partial2.prop_count < 96,
+            "a repeat-batch result still Partial publishes a budget-truncated \
+             surface — the budget-bound extract truncates it on the repeat too, \
+             NOT the full 96 (got {})",
+            partial2.prop_count,
+        );
         assert!(
             !result_admitted("/src/Partial.vue"),
             "a repeat-batch result that is STILL Partial must STILL be refused \
