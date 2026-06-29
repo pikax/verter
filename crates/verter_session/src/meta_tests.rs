@@ -2436,13 +2436,18 @@ defineProps<Partial<PropsBase>>()
 /// DISCRIMINATING half.
 ///
 /// Session (`get_component_meta_with_resolution`,
-/// `component_meta_entry_resolution.rs`): this path rebuilds the resolver ctx
+/// `component_meta_entry_resolution.rs`): for THIS combined fixture the budget
+/// trips in the FALLTHROUGH, and the session path rebuilds the resolver ctx
 /// with a COLD-SEED view between resolve and extract, so the choke's
 /// `extract_component_meta` re-resolves the full surface COLD within the
-/// choke's own budget — the choke alone already spans the combined work, so
-/// the session outer install is choke-covered (it is exercised here as a
-/// corroborating combined-budget-partial guard, not an independently
-/// discriminating one).
+/// choke's own budget — the choke alone already bounds this combined work, so
+/// Surface 2 is a corroborating combined-budget-partial guard here, not the
+/// discriminating half for this fixture. The session outer install is still
+/// load-bearing in general: it bounds the PRE-CHOKE macro-DTO extraction
+/// (`extract_component_meta_from_resolved` → `component_meta_resolved_macros` →
+/// `vue_macro_dtos_with_ctx`), which the fallthrough choke does NOT cover —
+/// discriminated by
+/// `session_pre_choke_macro_dto_budget_partial_not_admitted_to_vue_surface_store`.
 ///
 /// The discriminating budget is MEASURED, not hard-coded: `R` (resolve-only)
 /// and `S = C - R` (fallthrough) are read from the shared projection-op
@@ -2565,10 +2570,12 @@ fn combined_resolve_plus_fallthrough_budget_partial_not_warmed_through_session_v
     // top-level fallthrough node. The session path rebuilds the resolver ctx
     // with a cold-seed between resolve and extract, so the choke's
     // `extract_component_meta` re-resolves the full surface COLD within the
-    // choke's own budget — the choke alone already bounds the combined work,
-    // so this corroborates the session path's combined-budget bounding (the
-    // session outer install is choke-covered, NOT independently isolated
-    // here; the view-aware Surface 1 is the discriminating half).
+    // choke's own budget — the choke alone already bounds this combined work,
+    // so Surface 2 corroborates the session path's combined-budget bounding
+    // for this fixture; the view-aware Surface 1 is the discriminating half
+    // here. The session outer install is independently load-bearing for the
+    // PRE-CHOKE macro-DTO extraction the choke does NOT cover, discriminated by
+    // `session_pre_choke_macro_dto_budget_partial_not_admitted_to_vue_surface_store`.
     {
         let project = make_project_with_config(HostConfig {
             analysis_level: crate::types::AnalysisLevel::Full,
@@ -2601,6 +2608,139 @@ fn combined_resolve_plus_fallthrough_budget_partial_not_warmed_through_session_v
              `store_node` refuses the partial"
         );
     }
+}
+
+/// Owner whose `defineProps<>` macro-DTO COLD resolution trips the projection-op
+/// budget: a 32-arm `Partial<S..>` intersection over an imported helper. NO
+/// fallthrough spread (`<div />`) — so the budget trip is PURELY in the
+/// PRE-CHOKE macro-DTO extraction and the fallthrough choke charges ~0 ops and
+/// cannot independently bound the work. The 32-arm intersection trips a tight
+/// budget mid-materialisation; the DTO is returned partial and REFUSED
+/// `vue_surface_store` admission (`vue_exec` admits ONLY a Complete bundle).
+fn upsert_macro_dto_budget_owner(project: &Arc<MetaProject>) {
+    use std::fmt::Write as _;
+    let mut helper = String::new();
+    for n in 1..=32u32 {
+        let _ = writeln!(
+            helper,
+            "export interface S{n:02} {{ a{n:02}: string; b{n:02}: number; c{n:02}: boolean }}"
+        );
+    }
+    project.upsert_base("/src/dto_helper.ts", &helper).unwrap();
+
+    let mut names = String::new();
+    let mut arms = String::new();
+    for n in 1..=32u32 {
+        if n > 1 {
+            names.push_str(", ");
+            arms.push_str(" & ");
+        }
+        let _ = write!(names, "S{n:02}");
+        let _ = write!(arms, "Partial<S{n:02}>");
+    }
+    let source = format!(
+        "<script setup lang=\"ts\">\n\
+         import type {{ {names} }} from './dto_helper'\n\
+         defineProps<{arms}>();\n\
+         </script>\n\
+         <template><div /></template>\n"
+    );
+    project.upsert_base("/src/App.vue", &source).unwrap();
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./dto_helper".to_string(),
+            resolved_canonical_id: Some("/src/dto_helper.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+}
+
+/// BUDGET-PARITY: the SESSION outer install at
+/// `component_meta_entry_resolution.rs` (the
+/// `get_component_meta_with_resolution_via_view` body) is load-bearing for the
+/// PRE-CHOKE macro-DTO extraction — work the fallthrough choke backstop does
+/// NOT cover.
+///
+/// `extract_component_meta_from_resolved` calls `component_meta_resolved_macros`
+/// → `vue_macro_dtos_with_ctx` BEFORE `compute_fallthrough_outcome_from_resolved_state`
+/// installs the choke's install-if-none backstop. That cold macro-DTO path
+/// charges projection ops ONLY while a request budget is active, and a
+/// budget-tripped DTO is returned partial and REFUSED `vue_surface_store`
+/// admission (`vue_exec` admits ONLY a Complete bundle, so a warm DTO hit is
+/// unconditionally Complete — admitting a partial would launder a warm-Complete
+/// replay). The session outer install keeps ONE request budget alive across the
+/// resolve AND this pre-choke extraction. Without it the inner resolve's
+/// install-if-none budget drops before the extract, the pre-choke macro-DTO
+/// recompute runs UNBOUNDED, completes, and IS admitted — warming the store.
+///
+/// Discriminating: a budget-tripping `defineProps<Partial<S01> & … & Partial<S32>>()`
+/// with NO fallthrough spread (the choke charges ~0 ops, so it cannot bound this
+/// work). WITH the outer install the pre-choke macro DTO is partial and NOT
+/// admitted (`vue_surface_store` stays EMPTY). Reverting ONLY the outer install
+/// at `component_meta_entry_resolution.rs` — leaving the fallthrough choke
+/// intact — drops the budget before the extract: the pre-choke recompute runs
+/// unbounded, the macro DTO completes, and `vue_surface_store` GROWS. RED.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn session_pre_choke_macro_dto_budget_partial_not_admitted_to_vue_surface_store() {
+    // Tight budget: the 32-arm intersection trips the projection-op fuse
+    // mid-materialisation during the pre-choke macro-DTO extraction.
+    let project = make_project_with_config(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        projection_op_budget: 6,
+        ..HostConfig::default()
+    });
+    upsert_macro_dto_budget_owner(&project);
+    let host = project.host();
+    let canonical = "/src/App.vue";
+
+    // No ambient context — the session via-view entry's install-if-none must arm
+    // the budget across the FULL body (resolve AND the pre-choke extract). An
+    // ambient context here would no-op that install and defeat the discriminator.
+    assert!(
+        crate::request_context::current_request_context().is_none(),
+        "test precondition: no ambient request context"
+    );
+    assert_eq!(
+        host.vue_surface_store().len(),
+        0,
+        "the macro-DTO store starts empty"
+    );
+
+    // Cold drive through the SESSION view path (site 281). The pre-choke
+    // macro-DTO extraction runs under the outer install's budget. The partial is
+    // still RETURNED to the caller (the projection-op fuse produces a partial
+    // surface, not a hard `Err` — the symbolic-expansion budget that surfaces
+    // `Err` is a separate, untripped fuse), just not warmed.
+    let session = project.open_session_batch().unwrap();
+    let returned = session
+        .get_component_meta_with_resolution(canonical)
+        .expect("session with-resolution request must succeed");
+    assert!(
+        returned.is_some(),
+        "a partial result is still RETURNED to the caller"
+    );
+
+    // THE DISCRIMINATOR: the budget-tripped pre-choke macro DTO is returned
+    // partial and REFUSED `vue_surface_store` admission, so the store stays
+    // EMPTY. The admission gate (`vue_exec`) admits EVERY Complete bundle and
+    // refuses ONLY a partial, so an empty store after the macro-DTO resolution
+    // ran proves the DTO was a budget-tripped partial. Reverting the outer
+    // install at `component_meta_entry_resolution.rs` (leaving the fallthrough
+    // choke intact) drops the budget before the extract — the pre-choke
+    // macro-DTO recompute runs UNBOUNDED, the DTO completes, and the store GROWS.
+    assert_eq!(
+        host.vue_surface_store().len(),
+        0,
+        "the session outer install bounds the PRE-CHOKE macro-DTO extraction: the \
+         budget-tripped `defineProps` DTO is returned partial and REFUSED \
+         `vue_surface_store` admission, so the store stays empty. Reverting the outer \
+         install at `component_meta_entry_resolution.rs` drops the budget before the \
+         extract — the pre-choke macro-DTO recompute runs UNBOUNDED, completes, and is \
+         admitted, growing the store (the fallthrough choke does not cover this \
+         pre-choke work)"
+    );
 }
 
 #[cfg(not(target_arch = "wasm32"))]
