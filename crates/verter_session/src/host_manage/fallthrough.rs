@@ -33,6 +33,26 @@ use super::{
     HostFallthroughResolver, HostRuntimeValueResolver, STORE_VIEW_STABILITY_MAX_ATTEMPTS,
 };
 
+/// Internal carrier bundling a fallthrough cold compute's RESOLUTION with the
+/// COMPUTE completeness it produced.
+///
+/// The completeness travels WITH the resolution it describes — captured
+/// per-call under a fresh [`crate::request_context::ColdComputeCompletenessScope`]
+/// — rather than via a caller scope that could outlive a discarded
+/// completion-fence retry and taint a later complete attempt. The direct
+/// extract paths consume this; the singleflight path carries the same
+/// completeness out via `RequestRunResult.completeness` (the executor scopes
+/// per attempt).
+pub(crate) struct FallthroughComputeOutcome {
+    /// The resolved fallthrough surface (`None` when the owner has no
+    /// resolvable fallthrough state).
+    pub(crate) resolution: Option<crate::types::FallthroughResolution>,
+    /// The COMPUTE completeness of this resolution — `Partial` when a budget
+    /// trip / fatal read / same-path truncation folded into the per-call
+    /// scope. The publish gate refuses to warm a `Partial`.
+    pub(crate) completeness: crate::semantic_query::ResultCompleteness,
+}
+
 impl VerterHost {
     pub fn resolve_fallthrough_surface(
         &self,
@@ -48,21 +68,11 @@ impl VerterHost {
         // unchanged rather than clobbering it. The recursion runs through
         // `_internal_with_overrides`, so installing at this top-level public fn
         // means every child inherits the context.
-        let _ctx_guard = if crate::request_context::current_request_context().is_none() {
-            Some(crate::request_context::RequestContextGuard::install(
-                crate::request_context::RequestContext::with_kind_timing_and_projection_budget(
-                    self.next_request_id(),
-                    std::sync::Arc::<str>::from(canonical_id),
-                    verter_audit::RequestKind::ComponentMeta,
-                    false,
-                    false,
-                    None,
-                    self.config.projection_op_budget,
-                ),
-            ))
-        } else {
-            None
-        };
+        let _ctx_guard = self.install_request_budget_context_if_none(
+            self.next_request_id(),
+            canonical_id,
+            false,
+        );
         let mut visiting = rustc_hash::FxHashSet::default();
         self.resolve_fallthrough_surface_internal(canonical_id, &mut visiting)
     }
@@ -141,24 +151,25 @@ impl VerterHost {
         // skips warm lookup, cache admission, AND singleflight (computed cold,
         // returned-only). No host-side special case is needed here.
         //
-        // Per-cold-compute completeness scope spanning the compute AND its
-        // admission (`store_stable` -> `cache_fallthrough_result`): a budget /
-        // fuse / semantic partial folded during the compute is read by the
-        // admission gate so a partial fallthrough never warms any cache. A
-        // nested child resolve enters its own scope and bubbles its partiality
-        // into this one on drop.
-        let result = {
-            let _completeness_scope = crate::request_context::ColdComputeCompletenessScope::enter();
-            crate::resolver_core::run_fallthrough_request(
-                self,
-                &self.resolver_runtime().top_level_fallthrough_singleflight,
-                canonical_id,
-                prop_type_overrides,
-                visiting,
-                None,
-                STORE_VIEW_STABILITY_MAX_ATTEMPTS,
-            )
-        };
+        // Per-cold-compute completeness scoping lives INSIDE the request
+        // executor (`FallthroughRequestExecutor`): it enters a FRESH held
+        // scope per `compute` attempt — spanning the admission `store_stable`
+        // -> `cache_fallthrough_result` so a partial fallthrough never warms —
+        // and the rendezvous carries the COMPUTE completeness out. The
+        // LEADER's held scope bubbles into the ENCLOSING cold-compute scope
+        // (the extract helper, or a parent fallthrough compute) on drop, and a
+        // FOLLOWER folds the joined leader's partiality into it via
+        // `fold_follower_completeness`. So a child fallthrough's partiality
+        // reaches the parent without a stale-across-retries caller scope here.
+        let result = crate::resolver_core::run_fallthrough_request(
+            self,
+            &self.resolver_runtime().top_level_fallthrough_singleflight,
+            canonical_id,
+            prop_type_overrides,
+            visiting,
+            None,
+            STORE_VIEW_STABILITY_MAX_ATTEMPTS,
+        );
 
         if matches!(result.source, RequestSource::Cache) {
             self.provenance
@@ -219,6 +230,14 @@ impl VerterHost {
                 ),
             );
         }
+        // Surface-boundary read of the rendezvous COMPUTE completeness: a
+        // partial fallthrough surface (a budget trip / fatal read folded into
+        // the executor's per-attempt scope, or a leader's partiality a
+        // follower joined) folds into the ENCLOSING cold-compute scope + the
+        // request suppress flag, so a parent fallthrough compute or the extract
+        // helper observes this child's partiality without re-deriving it. A
+        // `Complete` result is a no-op, so a complete surface still warms.
+        crate::request_context::fold_result_completeness(result.completeness);
         result.value
     }
 
@@ -250,6 +269,42 @@ impl VerterHost {
         )
     }
 
+    /// Run [`Self::compute_fallthrough_surface_from_resolved_state`] under a
+    /// FRESH per-call cold-compute completeness scope and capture the COMPUTE
+    /// completeness into a [`FallthroughComputeOutcome`].
+    ///
+    /// This is the centralised fallthrough-compute scoping for the DIRECT
+    /// extract paths (the singleflight path scopes per-attempt inside the
+    /// request executor). It replaces the former ad-hoc `enter()` +
+    /// `current_cold_compute_completeness()` caller dance: a child fallthrough
+    /// resolved during the compute bubbles its partiality into THIS scope (on
+    /// its executor drop / its own follower fold), so the captured
+    /// completeness covers the whole surface — and a stale partial from a
+    /// DISCARDED completion-fence retry cannot taint a later complete attempt,
+    /// because the completeness travels with the resolution it describes.
+    pub(crate) fn compute_fallthrough_outcome_from_resolved_state(
+        &self,
+        canonical_id: &str,
+        resolved: &crate::meta_resolve::ResolvedComponentMetaState,
+        prop_type_overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
+        visiting: &mut rustc_hash::FxHashSet<String>,
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+    ) -> FallthroughComputeOutcome {
+        let _completeness_scope = crate::request_context::ColdComputeCompletenessScope::enter();
+        let resolution = self.compute_fallthrough_surface_from_resolved_state(
+            canonical_id,
+            resolved,
+            prop_type_overrides,
+            visiting,
+            ctx,
+        );
+        let completeness = crate::request_context::current_cold_compute_completeness();
+        FallthroughComputeOutcome {
+            resolution,
+            completeness,
+        }
+    }
+
     pub(crate) fn compute_fallthrough_surface_from_resolved_state(
         &self,
         canonical_id: &str,
@@ -258,6 +313,17 @@ impl VerterHost {
         visiting: &mut rustc_hash::FxHashSet<String>,
         ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
     ) -> Option<crate::types::FallthroughResolution> {
+        // INTERNAL backstop (install-if-none, NEVER install-always): a direct
+        // internal caller of this fallthrough choke with no active request
+        // context still gets the projection-budget fuse. A public surface that
+        // already armed an outer context keeps it and this no-ops — so the
+        // budget is never double-installed (the choke only scopes the
+        // fallthrough sub-compute; the outer install spans the whole request).
+        let _choke_budget_ctx_guard = self.install_request_budget_context_if_none(
+            self.next_request_id(),
+            canonical_id,
+            false,
+        );
         let fallthrough_fact_versions = resolved.fact_versions.clone();
 
         // Macro-DTO surface read runs under the request-bound `ctx` (not
@@ -795,34 +861,7 @@ impl VerterHost {
             snapshot.imports.as_slice(),
         ));
 
-        candidates.sort_by(|left, right| match (left, right) {
-            (
-                DynamicRootCandidate::NativeTag { tag: left_tag },
-                DynamicRootCandidate::NativeTag { tag: right_tag },
-            ) => left_tag.cmp(right_tag),
-            (
-                DynamicRootCandidate::NativeTag { .. },
-                DynamicRootCandidate::ComponentImport { .. },
-            ) => std::cmp::Ordering::Less,
-            (
-                DynamicRootCandidate::ComponentImport { .. },
-                DynamicRootCandidate::NativeTag { .. },
-            ) => std::cmp::Ordering::Greater,
-            (
-                DynamicRootCandidate::ComponentImport {
-                    component_name: left_name,
-                    import_source: left_source,
-                    binding_kind: _,
-                    imported_name: _,
-                },
-                DynamicRootCandidate::ComponentImport {
-                    component_name: right_name,
-                    import_source: right_source,
-                    binding_kind: _,
-                    imported_name: _,
-                },
-            ) => (left_name, left_source).cmp(&(right_name, right_source)),
-        });
+        candidates.sort_by(|left, right| left.ordering(right));
         candidates.dedup();
         candidates
     }
@@ -1129,6 +1168,18 @@ impl VerterHost {
         canonical_id: &str,
         resolution: Arc<crate::types::FallthroughResolution>,
     ) {
+        // No-poison SELF-GATE: the mirror is a promotion site (it warms the
+        // legacy `cached_fallthrough` entry on `DerivedRawState`), so it must
+        // refuse a PARTIAL just like `store_node` / `cache_fallthrough_result`
+        // — never relying on caller discipline. A budget / fuse / fatal read
+        // folded into the active cold-compute completeness scope means this
+        // surface is incomplete; mirroring it would warm a partial as
+        // complete.
+        if crate::cache_runtime::refuse_result_cache_admission_if_partial(
+            crate::request_context::current_cold_compute_completeness().is_partial(),
+        ) {
+            return;
+        }
         // cached_fallthrough lives on DerivedRawState (D48 split).
         {
             if self.effective_file_state(canonical_id, None).is_some() {

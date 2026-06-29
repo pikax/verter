@@ -92,7 +92,7 @@ pub trait FallthroughComputeHost: FallthroughResolverHost {
     ) -> Vec<DynamicRootCandidate>;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DynamicRootCandidate {
     NativeTag {
         tag: String,
@@ -107,6 +107,34 @@ pub enum DynamicRootCandidate {
         /// Some hosts derive it later from the owning file's import snapshot.
         binding_kind: Option<crate::resolver_core::symbol_resolver::ImportBindingKind>,
     },
+}
+
+impl DynamicRootCandidate {
+    /// Canonical total ordering for dynamic-root candidates: native tags
+    /// before component imports; native tags by `tag`; component imports by
+    /// `(component_name, import_source)`. Shared by the syntactic-combine site
+    /// in `host_manage::fallthrough` and the node-walker dedup-set emit so the
+    /// observable output order is identical regardless of which producer ran.
+    #[must_use]
+    pub(crate) fn ordering(&self, other: &Self) -> std::cmp::Ordering {
+        match (self, other) {
+            (Self::NativeTag { tag: left }, Self::NativeTag { tag: right }) => left.cmp(right),
+            (Self::NativeTag { .. }, Self::ComponentImport { .. }) => std::cmp::Ordering::Less,
+            (Self::ComponentImport { .. }, Self::NativeTag { .. }) => std::cmp::Ordering::Greater,
+            (
+                Self::ComponentImport {
+                    component_name: left_name,
+                    import_source: left_source,
+                    ..
+                },
+                Self::ComponentImport {
+                    component_name: right_name,
+                    import_source: right_source,
+                    ..
+                },
+            ) => (left_name, left_source).cmp(&(right_name, right_source)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

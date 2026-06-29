@@ -131,6 +131,39 @@ impl VerterHost {
         self.resolve_component_meta_with_view_and_fixed(canonical_or_alias, mode, view, None)
     }
 
+    /// Install a per-request [`crate::request_context::RequestContext`]
+    /// carrying `config.projection_op_budget` IFF none is active — the ONE
+    /// shared install-if-none path that arms the projection-budget fuse AND
+    /// the per-cold-compute completeness rail across EVERY component-meta
+    /// surface (Shared Optimized Codebase). Each public surface installs this
+    /// once around its FULL resolve + extract body so the fuse spans the
+    /// fallthrough extract, not only the resolve; nested installs (the inner
+    /// resolve, the fallthrough choke backstop) find the outer context and
+    /// no-op, so the budget is NEVER double-installed. Returns `None` (a
+    /// no-op guard) when an outer context already exists.
+    #[must_use]
+    pub(crate) fn install_request_budget_context_if_none(
+        &self,
+        request_id: u64,
+        canonical_id: &str,
+        timing_capture: bool,
+    ) -> Option<crate::request_context::RequestContextGuard> {
+        if crate::request_context::current_request_context().is_some() {
+            return None;
+        }
+        Some(crate::request_context::RequestContextGuard::install(
+            crate::request_context::RequestContext::with_kind_timing_and_projection_budget(
+                request_id,
+                std::sync::Arc::<str>::from(canonical_id),
+                verter_audit::RequestKind::ComponentMeta,
+                false,
+                timing_capture,
+                None,
+                self.config.projection_op_budget,
+            ),
+        ))
+    }
+
     /// [`Self::resolve_component_meta_with_view`] with an optional
     /// caller-captured FIXED base store view.
     ///
@@ -153,21 +186,11 @@ impl VerterHost {
     ) -> Option<ResolvedComponentMetaState> {
         let started = component_meta_debug_enabled().then(Instant::now);
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
-        let _ctx_guard = if crate::request_context::current_request_context().is_none() {
-            Some(crate::request_context::RequestContextGuard::install(
-                crate::request_context::RequestContext::with_kind_timing_and_projection_budget(
-                    next_component_meta_audit_request_id(),
-                    std::sync::Arc::<str>::from(canonical.as_str()),
-                    verter_audit::RequestKind::ComponentMeta,
-                    false,
-                    self.config.audit_timing_capture && self.config.audit_enabled,
-                    None,
-                    self.config.projection_op_budget,
-                ),
-            ))
-        } else {
-            None
-        };
+        let _ctx_guard = self.install_request_budget_context_if_none(
+            next_component_meta_audit_request_id(),
+            canonical.as_str(),
+            self.config.audit_timing_capture && self.config.audit_enabled,
+        );
         let audit = self.config.audit_enabled.then(|| {
             // Prefer the request_id stamped by
             // `get_component_meta_with_resolution` (via the installed

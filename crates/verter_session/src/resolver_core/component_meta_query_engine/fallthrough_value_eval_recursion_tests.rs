@@ -17,7 +17,8 @@ use crate::request_context::{
     RequestContextGuard,
 };
 use crate::resolver_core::{
-    FallthroughOverrideIdentity, FallthroughPropOverride, FallthroughPropOverrideSet,
+    DynamicRootCandidate, FallthroughOverrideIdentity, FallthroughPropOverride,
+    FallthroughPropOverrideSet,
 };
 use crate::semantic_query::{SemanticNodeData, SemanticNodeId, SurfaceView};
 use crate::types::{AnalysisLevel, HostConfig};
@@ -145,6 +146,51 @@ fn diamond_dag_walkers_are_memo_bounded_and_charge_shared_budget() {
     assert!(
         dr_delta <= 8 * n as usize,
         "the persistent memo must bound dynamic-root work to O(distinct nodes) (delta {dr_delta})"
+    );
+}
+
+/// #2 — RESULT-SIZE diamond bound. The dynamic-root node walker memoizes a
+/// DEDUPLICATED set and unions it across `Union` arms, so a content-interned
+/// shared-subtree diamond (`type Dn = An | Bn`, `An = Bn = D(n-1)`) over ONE
+/// shared leaf produces a result whose cardinality is bounded by the UNIQUE
+/// leaves (`== 1` here), NOT `2^depth`.
+///
+/// RED on the pre-fix tree: the former `flat_map` concatenated the cached
+/// child `Vec`s, doubling per level into `2^depth` identical entries (16384 at
+/// depth 14) — `candidates.len()` was `2^n`, not 1. GREEN after: the dedup set
+/// collapses them to a single candidate. This DISCRIMINATES the result-size
+/// fix specifically: the node-VISIT memo (asserted by the sibling test) was
+/// already present pre-fix and does NOT bound the result `Vec`'s size.
+#[test]
+fn diamond_dynamic_root_result_is_bounded_by_unique_leaves_not_exponential() {
+    let project = open_project();
+    let host = project.host();
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let ctx: &dyn crate::resolver_core::ResolverContext = host;
+
+    let n: u32 = 14;
+    let leaf = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+        "div".to_string(),
+    )));
+    let top = build_diamond(&graph, leaf, n);
+
+    let (_rctx, _guard) = install_budget(100_000);
+    let candidates = collect_dynamic_root_candidates_from_node(ctx, top, &[]);
+
+    assert_eq!(
+        candidates.len(),
+        1,
+        "a content-interned diamond over ONE shared leaf must yield exactly ONE deduplicated \
+         dynamic-root candidate, NOT 2^{n} = {} (the pre-fix flat_map concatenation that doubled \
+         the cached child Vec per level)",
+        1usize << n,
+    );
+    assert_eq!(
+        candidates,
+        vec![DynamicRootCandidate::NativeTag {
+            tag: "div".to_string()
+        }],
+        "the single deduplicated candidate is the shared leaf's native-tag",
     );
 }
 

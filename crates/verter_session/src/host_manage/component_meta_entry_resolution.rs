@@ -271,6 +271,19 @@ impl VerterHost {
             crate::host_manage::overlay_priority::prewarm_view_overlays(self, view);
         }
 
+        // Arm the projection-budget fuse + the per-cold-compute completeness
+        // rail across the FULL cold body (resolve AND the fallthrough
+        // extract). Without this the session with-resolution view path ran
+        // the fallthrough extract context-free — the inner resolve's
+        // install-if-none dropped before the extract, so the op-budget fuse
+        // was inert here. Install-if-none, so an outer context (the audited
+        // `get_component_meta_with_resolution` entry) keeps its own.
+        let _session_budget_ctx_guard = self.install_request_budget_context_if_none(
+            crate::meta_resolve::next_component_meta_audit_request_id(),
+            canonical.as_str(),
+            self.config.audit_timing_capture && self.config.audit_enabled,
+        );
+
         // Cold compute through the view-bearing path so the view's
         // fingerprint discriminates the singleflight slot.
         let mut resolved = self.resolve_component_meta_with_view(

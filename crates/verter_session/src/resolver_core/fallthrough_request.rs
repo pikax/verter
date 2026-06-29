@@ -1,10 +1,12 @@
 use rustc_hash::FxHashSet;
 
+use crate::request_context::ColdComputeCompletenessScope;
 use crate::resolver_core::{
     fallthrough_cache_key, run_stable_request, FallthroughNodeKey, FallthroughPropOverrideSet,
     RequestRunResult, RequestSource, SingleflightGroup, StableExecutionValue,
     StableRequestExecutor, StoreView,
 };
+use crate::semantic_query::ResultCompleteness;
 
 pub trait FallthroughRequestHost {
     type View: StoreView + Clone;
@@ -99,6 +101,20 @@ struct FallthroughRequestExecutor<'a, 'b, H: FallthroughRequestHost> {
     /// (`ReturnOnly`) snapshot taken under sustained churn MUST NOT serve a
     /// warm preflight hit. Gates [`Self::snapshot_view_is_current`].
     snapshot_view_current: bool,
+    /// Per-attempt cold-compute completeness scope, ENTERED in
+    /// [`StableRequestExecutor::compute`] and HELD through `store_stable`
+    /// and [`StableRequestExecutor::capture_completeness`] so the fallthrough
+    /// admission gate (`cache_fallthrough_result` / `store_node`) AND the
+    /// leader's completeness snapshot both read THIS attempt's partiality —
+    /// not a parent's, and not a stale prior attempt's. On `compute` the
+    /// prior attempt's scope is dropped FIRST (LIFO: it is the stack top),
+    /// then a fresh one is entered, so a discarded retry's partiality does
+    /// not taint the new attempt's gate. The held scope bubbles into the
+    /// ENCLOSING cold-compute scope (the extract helper, or a parent
+    /// fallthrough compute) on executor drop, so a child fallthrough's
+    /// completeness propagates to its parent exactly as the former ad-hoc
+    /// caller scope did.
+    compute_completeness_scope: Option<ColdComputeCompletenessScope>,
     max_attempts: usize,
 }
 
@@ -119,6 +135,7 @@ impl<'a, 'b, H: FallthroughRequestHost> FallthroughRequestExecutor<'a, 'b, H> {
             last_snapshot_supersession_fp: None,
             fallback_snapshot_incoherent: false,
             snapshot_view_current: true,
+            compute_completeness_scope: None,
             max_attempts,
         }
     }
@@ -218,6 +235,13 @@ where
     }
 
     fn compute(&mut self, view: &Self::View) -> Result<Option<H::Resolution>, Self::Error> {
+        // Per-attempt cold-compute completeness scope, HELD through
+        // `store_stable` + `capture_completeness`. Drop any prior attempt's
+        // scope FIRST so it is the stack top when it pops (LIFO) — a
+        // discarded (unstable) retry's partiality bubbles into the enclosing
+        // scope rather than nesting under the new attempt's scope.
+        self.compute_completeness_scope = None;
+        self.compute_completeness_scope = Some(ColdComputeCompletenessScope::enter());
         Ok(self.host.compute_fallthrough_surface_uncached(
             &self.canonical_id,
             self.prop_type_overrides,
@@ -265,9 +289,28 @@ where
     fn max_attempts(&self) -> usize {
         self.max_attempts
     }
+
+    fn capture_completeness(&self) -> ResultCompleteness {
+        // The fallthrough cold compute folds budget trips / fatal reads into
+        // the per-attempt held scope (entered in `compute`); read it back so
+        // the LEADER publishes its COMPUTE completeness with the value, and
+        // the off-lane / fallback paths carry it out. The held scope is still
+        // active here (it lives until executor drop), so this reads THIS
+        // attempt's partiality.
+        crate::request_context::current_cold_compute_completeness()
+    }
+
+    fn fold_follower_completeness(&self, joined: ResultCompleteness) {
+        // A FOLLOWER that coalesced onto a leader's fallthrough lane folds
+        // the leader's EXACT partiality into its own active cold-compute
+        // scope + request suppress flag BEFORE returning — so the follower's
+        // own owner / payload / node admission downstream refuses to warm a
+        // surface built on a leader's partial child (the no-poison fence).
+        crate::request_context::fold_result_completeness(joined);
+    }
 }
 
-pub fn run_fallthrough_request<H>(
+pub(crate) fn run_fallthrough_request<H>(
     host: &H,
     singleflight: &SingleflightGroup<
         FallthroughNodeKey,
@@ -302,10 +345,12 @@ where
         let value = executor
             .compute(&store_view)
             .expect("fallthrough request execution is infallible");
+        let completeness = executor.capture_completeness();
         return RequestRunResult {
             value,
             source: RequestSource::Fallback,
             attempts: 1,
+            completeness,
         };
     }
 
@@ -316,7 +361,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resolver_core::StoreViewCompatToken;
+    use crate::resolver_core::{SingleflightRole, StoreViewCompatToken};
     use std::cell::Cell;
 
     /// Validation-trivial view: the executor's stability gate reads
@@ -669,6 +714,285 @@ mod tests {
             host.promotions.borrow().is_empty(),
             "an uncacheable request must skip cache admission (no store_fallthrough_result call), got {:?}",
             host.promotions.borrow()
+        );
+    }
+
+    /// CENTERPIECE — concurrent-follower no-poison (Finding #3).
+    ///
+    /// A budget-tripping `NoOverrides` child A is resolved by two concurrent
+    /// callers that share one fallthrough singleflight lane. The LEADER parks
+    /// mid-`compute` (the established `LeaderGate` + `test_flight_strong_count`
+    /// seam — deterministic, no timing sleeps), folds a PARTIAL (a budget trip
+    /// modelled by `mark_request_materialization_cache_suppress`), then
+    /// returns. The FOLLOWER coalesces onto the in-flight lane and joins the
+    /// leader's partial value.
+    ///
+    /// Asserts: (1) the follower's observed `RequestRunResult.completeness` is
+    /// partial (the rendezvous carries COMPUTE completeness out); (2) the
+    /// follower FOLDED that partiality into its OWN active cold-compute scope
+    /// BEFORE returning — the discriminating fence: any warm-admission the
+    /// follower performs downstream now refuses; (3) nothing partial warmed
+    /// the shared fallthrough cache (the leader's `store_fallthrough_result`
+    /// is gated on the same typed completeness, mirroring the production
+    /// `cache_fallthrough_result` no-poison gate, and a follower never stores).
+    ///
+    /// DISCRIMINATES: with the follower fold reverted (the
+    /// `fold_follower_completeness` override / its `run_stable_request` call
+    /// removed) the follower's scope stays Complete and assertion (2) FAILS —
+    /// today's no-poison hole, where the follower would warm a leader's
+    /// budget-partial child surface as complete into its own owner / payload
+    /// caches.
+    #[test]
+    fn concurrent_follower_folds_leader_partiality_before_warming() {
+        use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+        use std::sync::{Arc, Condvar, Mutex};
+
+        /// Send leader gate: leader signals `entered`, parks on `open`.
+        struct LeaderGate {
+            entered: Mutex<bool>,
+            entered_cv: Condvar,
+            open: Mutex<bool>,
+            open_cv: Condvar,
+        }
+        impl LeaderGate {
+            fn new() -> Self {
+                Self {
+                    entered: Mutex::new(false),
+                    entered_cv: Condvar::new(),
+                    open: Mutex::new(false),
+                    open_cv: Condvar::new(),
+                }
+            }
+            fn signal_entered(&self) {
+                *self.entered.lock().unwrap() = true;
+                self.entered_cv.notify_all();
+            }
+            fn wait_entered(&self) {
+                let mut e = self.entered.lock().unwrap();
+                while !*e {
+                    e = self.entered_cv.wait(e).unwrap();
+                }
+            }
+            fn release(&self) {
+                *self.open.lock().unwrap() = true;
+                self.open_cv.notify_all();
+            }
+            fn wait_open(&self) {
+                let mut o = self.open.lock().unwrap();
+                while !*o {
+                    o = self.open_cv.wait(o).unwrap();
+                }
+            }
+        }
+
+        /// Send fallthrough host: the LEADER parks then folds a partial; both
+        /// gate `store_fallthrough_result` on the typed completeness exactly
+        /// like the production `cache_fallthrough_result`, so a partial result
+        /// never warms — and a follower never reaches `store` at all.
+        struct PoisonGatingHost {
+            gate: Arc<LeaderGate>,
+            is_leader: bool,
+            promotions: Arc<Mutex<Vec<String>>>,
+            live_fp: AtomicU64,
+        }
+        impl FallthroughRequestHost for PoisonGatingHost {
+            type View = StubView;
+            type Resolution = usize;
+
+            fn generic_root_propagation(&self) -> bool {
+                false
+            }
+            fn snapshot_store_view(&self) -> StubView {
+                StubView
+            }
+            fn snapshot_store_view_read(&self) -> (StubView, bool) {
+                (StubView, true)
+            }
+            fn current_view_supersession_fingerprint(&self) -> u64 {
+                // Fixed: the snapshot is coherent and the leader's result is
+                // stable → retained → joinable by the follower.
+                self.live_fp.load(AtomicOrdering::Relaxed)
+            }
+            fn try_get_cached_fallthrough(
+                &self,
+                _canonical_id: &str,
+                _overrides: Option<&FallthroughPropOverrideSet>,
+                _store_view: &StubView,
+            ) -> Option<usize> {
+                None
+            }
+            fn compute_fallthrough_surface_uncached(
+                &self,
+                _canonical_id: &str,
+                _overrides: Option<&FallthroughPropOverrideSet>,
+                _visiting: &mut FxHashSet<String>,
+                _store_view: &StubView,
+                _base_is_current: bool,
+            ) -> Option<usize> {
+                if self.is_leader {
+                    self.gate.signal_entered();
+                    self.gate.wait_open();
+                    // The leader's cold compute trips the projection budget —
+                    // fold a PARTIAL into the executor's per-attempt held
+                    // cold-compute scope (entered by `compute`).
+                    crate::request_context::mark_request_materialization_cache_suppress();
+                }
+                Some(42)
+            }
+            fn store_fallthrough_result(
+                &self,
+                canonical_id: &str,
+                _overrides: Option<&FallthroughPropOverrideSet>,
+                _result: &usize,
+            ) {
+                // Production no-poison gate mirror: refuse a partial.
+                if crate::request_context::current_cold_compute_completeness().is_partial() {
+                    return;
+                }
+                self.promotions
+                    .lock()
+                    .unwrap()
+                    .push(canonical_id.to_string());
+            }
+        }
+
+        let gate = Arc::new(LeaderGate::new());
+        let promotions = Arc::new(Mutex::new(Vec::new()));
+        let singleflight = Arc::new(SingleflightGroup::<
+            FallthroughNodeKey,
+            StableExecutionValue<Option<usize>>,
+            (),
+        >::default());
+        let cache_key = fallthrough_cache_key("/proj/Child.vue", false, None);
+        let token = StubView.compat_token();
+
+        // LEADER thread: parks mid-compute, then folds a partial.
+        let leader = {
+            let gate = Arc::clone(&gate);
+            let promotions = Arc::clone(&promotions);
+            let singleflight = Arc::clone(&singleflight);
+            std::thread::spawn(move || {
+                let host = PoisonGatingHost {
+                    gate,
+                    is_leader: true,
+                    promotions,
+                    live_fp: AtomicU64::new(0xAAAA),
+                };
+                let mut visiting = FxHashSet::default();
+                run_fallthrough_request(
+                    &host,
+                    &singleflight,
+                    "/proj/Child.vue",
+                    None,
+                    &mut visiting,
+                    None,
+                    3,
+                )
+            })
+        };
+
+        // Wait until the leader is provably parked inside `compute`, then
+        // snapshot the parked-leader strong-count baseline on the run lane.
+        gate.wait_entered();
+        let leader_baseline = singleflight.test_flight_strong_count(&cache_key, token);
+
+        // FOLLOWER thread: coalesces, joins the partial, folds it into its OWN
+        // cold-compute scope, and reports whether the scope went partial.
+        let follower = {
+            let gate = Arc::clone(&gate);
+            let promotions = Arc::clone(&promotions);
+            let singleflight = Arc::clone(&singleflight);
+            std::thread::spawn(move || {
+                let host = PoisonGatingHost {
+                    gate,
+                    is_leader: false,
+                    promotions,
+                    live_fp: AtomicU64::new(0xAAAA),
+                };
+                let mut visiting = FxHashSet::default();
+                // The follower's OWN cold-compute scope: the fold MUST land
+                // here so the follower's downstream admission refuses.
+                let scope = crate::request_context::ColdComputeCompletenessScope::enter();
+                let result = run_fallthrough_request(
+                    &host,
+                    &singleflight,
+                    "/proj/Child.vue",
+                    None,
+                    &mut visiting,
+                    None,
+                    3,
+                );
+                let scope_partial_after_join =
+                    crate::request_context::current_cold_compute_completeness().is_partial();
+                drop(scope);
+                (result, scope_partial_after_join)
+            })
+        };
+
+        // Deterministic coalescing gate: wait until the follower holds BOTH
+        // its `participate` pin AND its `run_retaining` waiter claim
+        // (`leader_baseline + 2`) — i.e. it has committed as a Follower past
+        // its cache peek, so releasing the leader cannot turn it into a
+        // pre-flight cache hit.
+        let mut spins = 0u64;
+        loop {
+            if singleflight.test_flight_strong_count(&cache_key, token) >= leader_baseline + 2 {
+                break;
+            }
+            spins += 1;
+            assert!(
+                spins < 50_000_000,
+                "follower never committed as a Follower onto the shared fallthrough lane",
+            );
+            std::thread::yield_now();
+        }
+
+        // Release the leader; both complete.
+        gate.release();
+
+        let leader_result = leader.join().expect("leader thread must not panic");
+        let (follower_result, scope_partial_after_join) =
+            follower.join().expect("follower thread must not panic");
+
+        // The straggler Follower-joined the in-flight leader (not a second
+        // leader, not a pre-flight cache hit).
+        assert!(
+            matches!(
+                follower_result.source,
+                RequestSource::Flight {
+                    role: SingleflightRole::Follower,
+                    ..
+                }
+            ),
+            "the second caller must Follower-join the in-flight leader, got {:?}",
+            follower_result.source,
+        );
+        // (1) The rendezvous carried the leader's COMPUTE completeness out.
+        assert!(
+            follower_result.completeness.is_partial(),
+            "the follower's RequestRunResult must carry the leader's partial completeness",
+        );
+        // (2) DISCRIMINATING — the follower folded that partiality into its
+        // OWN cold-compute scope BEFORE returning. Reverting the follower fold
+        // leaves this Complete (the no-poison hole).
+        assert!(
+            scope_partial_after_join,
+            "the follower MUST fold the leader's partiality into its own cold-compute scope \
+             before any warm-admission — else it would warm a leader's budget-partial child \
+             surface as complete (the concurrent-follower no-poison hole)",
+        );
+        // (3) Nothing partial warmed the shared fallthrough cache: the leader's
+        // admission is gated on the same typed completeness, and a follower
+        // never stores.
+        assert!(
+            leader_result.completeness.is_partial(),
+            "the leader's own result is partial (it tripped the budget)",
+        );
+        assert!(
+            promotions.lock().unwrap().is_empty(),
+            "a budget-partial child surface must NEVER warm the shared fallthrough cache — \
+             neither the gated leader nor the coalescing follower may promote it, got {:?}",
+            promotions.lock().unwrap(),
         );
     }
 }

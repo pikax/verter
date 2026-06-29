@@ -2204,6 +2204,133 @@ fn lower_bound_complete_fallthrough_surface_still_warms_cached_meta_payload() {
     );
 }
 
+/// BUDGET-PARITY (D4): the projection-budget fuse + the no-poison completeness
+/// gate must be LIVE on the SESSION-VIEW surfaces — the view-aware
+/// `MetaSession::get_component_meta` (`get_component_meta_via_view`) AND the
+/// session `MetaSession::get_component_meta_with_resolution`
+/// (`get_component_meta_with_resolution_via_view`) — not only on the
+/// direct-analysis / audited / payload surfaces (Shared Optimized Codebase).
+///
+/// Pre-fix both view paths ran the fallthrough extract CONTEXT-FREE: the inner
+/// `resolve_component_meta_with_*` install-if-none dropped its `RequestContext`
+/// before the extract, so `current_request_budget()` was `None` during the
+/// fallthrough, the spread walker never tripped, the compute was `Complete`,
+/// and the partial-as-complete warmed downstream caches. The D4 install-if-none
+/// spans the FULL cold body (resolve AND extract) on each surface.
+///
+/// Discriminating observables (each surface keys its own gate):
+/// - view-aware: the ComponentMetaResultDb publish is gated on the threaded
+///   `fallthrough_completeness` — a partial REFUSES admission, so a replay is a
+///   cold miss (`component_meta_result_cache_hits` unchanged). RED pre-fix
+///   (Complete → warmed → replay warm-hits).
+/// - session with-resolution: it discards the ComponentMetaResultDb publish,
+///   but its bounded fallthrough extract folds the budget trip into the
+///   cold-compute scope the runtime-node `store_node` gate reads, so the
+///   top-level fallthrough node is NOT warmed. RED pre-fix (no trip → Complete
+///   → `store_node` warms the runtime node).
+///
+/// The partial is fallthrough-ONLY: the no-macro owner's Expanded resolve
+/// completes cleanly (`synthesis_should_suppress == false`), isolating the
+/// budget fuse from the synthesis gate (the exact shape D4 targets).
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn fallthrough_only_budget_partial_not_warmed_through_session_view_surfaces() {
+    use crate::resolver_core::FallthroughRequestHost;
+    use std::sync::atomic::Ordering::Relaxed;
+
+    // Low projection budget: resolve (no macros) stays at zero ops; the
+    // fallthrough spread walker trips mid-walk DURING the extract.
+    let project = make_project_with_config(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        projection_op_budget: 3,
+        ..HostConfig::default()
+    });
+    upsert_fallthrough_spread_owner(&project);
+    let host = project.host();
+    let canonical = "/src/App.vue";
+
+    // Precondition: the partial is fallthrough-only (resolve completes clean).
+    // The audited base entry already spans resolve+extract, so it does NOT
+    // warm the partial — it only establishes the fallthrough-only shape.
+    let (_meta, resolved) = host
+        .get_component_meta_with_resolution(canonical)
+        .expect("a fallthrough-tripped resolve must still return partial metadata");
+    assert!(
+        !resolved.synthesis_should_suppress,
+        "the no-macro owner's resolve must complete cleanly so the partial is fallthrough-only \
+         (synthesis_should_suppress reflects resolve, not the later fallthrough trip)"
+    );
+
+    // ── Surface 1: view-aware `MetaSession::get_component_meta` (site 430).
+    // No ambient context — the via-view path must install its own spanning the
+    // extract (the discriminator is the FIX, not the fixture).
+    assert!(
+        crate::request_context::current_request_context().is_none(),
+        "test precondition: no ambient request context"
+    );
+    let session = project.open_session_batch().unwrap();
+    let _ = session
+        .get_component_meta(canonical)
+        .expect("view-aware meta request must succeed")
+        .expect("a partial analysis is still RETURNED to the caller, just not warmed");
+    let hits_before = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    let _ = session
+        .get_component_meta(canonical)
+        .expect("second view-aware request must succeed")
+        .expect("the replay is still RETURNED");
+    let hits_after = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    assert_eq!(
+        hits_after, hits_before,
+        "the view-aware surface's fallthrough-only budget partial MUST NOT warm \
+         `ComponentMetaResultDb` — the replay must be cold (hits_before={hits_before}, \
+         hits_after={hits_after}); pre-fix the extract ran context-free, the budget never tripped, \
+         the compute was Complete, and the publish gate warmed the partial"
+    );
+
+    // ── Surface 2: session `MetaSession::get_component_meta_with_resolution`
+    // (site 276). It discards the ComponentMetaResultDb publish, so the gated
+    // runtime-node `store_node` is the observable: the bounded extract folds
+    // the budget trip into the cold-compute scope the gate reads, refusing the
+    // top-level fallthrough node.
+    let key = crate::resolver_core::fallthrough_cache_key(
+        canonical,
+        host.config.generic_root_propagation,
+        None,
+    );
+    clear_runtime_top_level_fallthrough_node(&project, canonical);
+    {
+        let view = FallthroughRequestHost::snapshot_store_view(host);
+        assert!(
+            host.resolver_runtime()
+                .fallthrough
+                .get_cached_node(&key, &view)
+                .is_none(),
+            "test precondition: the runtime fallthrough node is cleared before the session call"
+        );
+    }
+    let session_wr = project.open_session_batch().unwrap();
+    let _ = session_wr
+        .get_component_meta_with_resolution(canonical)
+        .expect("session with-resolution request must succeed")
+        .expect("a partial result is still RETURNED to the caller, just not warmed");
+    let view = FallthroughRequestHost::snapshot_store_view(host);
+    assert!(
+        host.resolver_runtime()
+            .fallthrough
+            .get_cached_node(&key, &view)
+            .is_none(),
+        "the session with-resolution surface's bounded fallthrough extract MUST NOT warm the \
+         runtime fallthrough node — pre-fix the extract ran context-free, the budget never tripped, \
+         the compute was Complete, and `store_node` warmed the top-level node"
+    );
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn fallthrough_runtime_reuse_survives_host_cache_clear() {

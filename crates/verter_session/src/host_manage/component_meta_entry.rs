@@ -156,21 +156,11 @@ impl VerterHost {
             return Some(warm);
         }
 
-        let _ctx_guard = if crate::request_context::current_request_context().is_none() {
-            Some(crate::request_context::RequestContextGuard::install(
-                crate::request_context::RequestContext::with_kind_timing_and_projection_budget(
-                    self.next_request_id(),
-                    std::sync::Arc::<str>::from(canonical.as_str()),
-                    verter_audit::RequestKind::ComponentMeta,
-                    false,
-                    false,
-                    None,
-                    self.config.projection_op_budget,
-                ),
-            ))
-        } else {
-            None
-        };
+        let _ctx_guard = self.install_request_budget_context_if_none(
+            self.next_request_id(),
+            canonical.as_str(),
+            false,
+        );
 
         // Cold build under the existing `with_fact_tracer` scope.
         // The tracer continues to fan observations into any outer
@@ -369,6 +359,21 @@ impl VerterHost {
             }
             return Some(warm);
         }
+
+        // Arm the projection-budget fuse + the per-cold-compute completeness
+        // rail across the FULL cold body (resolve AND the fallthrough
+        // extract). Without this the view-aware path ran the fallthrough
+        // extract context-free — the inner `resolve_component_meta_with_*`
+        // install-if-none dropped before the extract, so the `[P0]` op-budget
+        // fuse was inert here. Install-if-none (never install-always), so a
+        // batch / outer-context caller keeps its context and the inner
+        // resolve install no-ops. Matches the inner audited id source so the
+        // resolve-phase audit is unchanged.
+        let _view_budget_ctx_guard = self.install_request_budget_context_if_none(
+            crate::meta_resolve::next_component_meta_audit_request_id(),
+            canonical.as_str(),
+            self.config.audit_timing_capture && self.config.audit_enabled,
+        );
 
         // Cold build. The view's overlay content (when present) has
         // been pre-warmed into `FileArtifactStore` under the overlay's

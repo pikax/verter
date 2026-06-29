@@ -8,7 +8,8 @@
 //! free-fn readers then walk `SemanticNodeData`. No semantic decision is taken
 //! on a materialised `TypeExpr`.
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use indexmap::IndexSet;
+use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use verter_semantic::analysis::template::TemplatePropUsage;
 use verter_semantic::analysis::type_eval::EvalEnv;
 use verter_semantic::analysis::types::AnalyzedImport;
@@ -374,21 +375,53 @@ fn known_spread_keys_from_surface(surface: &crate::semantic_query::SurfaceView) 
     result
 }
 
+/// A DEDUPLICATED set of dynamic-root candidates. Memoizing/unioning a SET
+/// (not a concatenated `Vec`) is what bounds the walker's RESULT cardinality:
+/// on a content-interned diamond (`type D = A | B`, `A = B = D'`) the former
+/// `flat_map` concatenated the cached child `Vec`s, doubling per level into an
+/// O(2^depth) allocation even though node VISITS were memo-bounded. A set
+/// collapses the duplicates, so the result stays O(unique candidates).
+type DynamicRootCandidateSet = IndexSet<DynamicRootCandidate, FxBuildHasher>;
+
+/// Insert `candidate` into `set`, charging the SHARED request projection
+/// budget per NEWLY-INSERTED unique candidate (cardinality). This unifies
+/// result-size accounting with the per-node-visit charge in [`enter_node`] —
+/// NO second fuse — so a genuine result-size explosion trips the SAME budget;
+/// a trip folds a partial (the walk's result is incomplete).
+fn insert_dynamic_root_candidate_charged(
+    set: &mut DynamicRootCandidateSet,
+    candidate: DynamicRootCandidate,
+) {
+    if set.insert(candidate)
+        && crate::request_context::current_request_budget()
+            .is_some_and(|budget| budget.check_projection_op_count())
+    {
+        crate::request_context::mark_request_materialization_cache_suppress();
+    }
+}
+
 /// Node-domain mirror of `collect_dynamic_root_candidates_from_type`: walk a
 /// value node's literal-string / union / alias / `typeof` shape into the
 /// native-tag + component-import dynamic-root candidates.
+///
+/// Emits a sorted `Vec` using the shared [`DynamicRootCandidate::ordering`]
+/// (the SAME ordering the syntactic-combine site re-applies), so observable
+/// output order is unchanged — only the exponential duplication is removed.
 pub(crate) fn collect_dynamic_root_candidates_from_node(
     ctx: &dyn ResolverContext,
     node: SemanticNodeId,
     imports: &[AnalyzedImport],
 ) -> Vec<DynamicRootCandidate> {
-    collect_dynamic_root_candidates_from_node_inner(
+    let set = collect_dynamic_root_candidates_from_node_inner(
         ctx,
         node,
         imports,
         &mut FxHashSet::default(),
         &mut FxHashMap::default(),
-    )
+    );
+    let mut out: Vec<DynamicRootCandidate> = set.into_iter().collect();
+    out.sort_by(|left, right| left.ordering(right));
+    out
 }
 
 fn collect_dynamic_root_candidates_from_node_inner(
@@ -396,27 +429,36 @@ fn collect_dynamic_root_candidates_from_node_inner(
     node: SemanticNodeId,
     imports: &[AnalyzedImport],
     active: &mut FxHashSet<SemanticNodeId>,
-    memo: &mut FxHashMap<SemanticNodeId, Vec<DynamicRootCandidate>>,
-) -> Vec<DynamicRootCandidate> {
+    memo: &mut FxHashMap<SemanticNodeId, DynamicRootCandidateSet>,
+) -> DynamicRootCandidateSet {
     match enter_node(node, active, memo) {
         NodeWalkStep::Cached(cached) => return cached,
-        NodeWalkStep::Halt => return Vec::new(),
+        NodeWalkStep::Halt => return DynamicRootCandidateSet::default(),
         NodeWalkStep::Visit => {}
     }
     let out = match node_data_for(ctx, node) {
-        None => Vec::new(),
+        None => DynamicRootCandidateSet::default(),
         Some(data) => match data.as_ref() {
             SemanticNodeData::Literal(LiteralValue::String(tag)) => {
-                vec![DynamicRootCandidate::NativeTag { tag: tag.clone() }]
+                let mut set = DynamicRootCandidateSet::default();
+                insert_dynamic_root_candidate_charged(
+                    &mut set,
+                    DynamicRootCandidate::NativeTag { tag: tag.clone() },
+                );
+                set
             }
-            SemanticNodeData::Union(arms) => arms
-                .iter()
-                .flat_map(|arm| {
-                    collect_dynamic_root_candidates_from_node_inner(
+            SemanticNodeData::Union(arms) => {
+                let mut set = DynamicRootCandidateSet::default();
+                for arm in arms.iter() {
+                    let arm_set = collect_dynamic_root_candidates_from_node_inner(
                         ctx, *arm, imports, active, memo,
-                    )
-                })
-                .collect(),
+                    );
+                    for candidate in arm_set {
+                        insert_dynamic_root_candidate_charged(&mut set, candidate);
+                    }
+                }
+                set
+            }
             SemanticNodeData::Alias(inner) => {
                 collect_dynamic_root_candidates_from_node_inner(ctx, *inner, imports, active, memo)
             }
@@ -425,15 +467,21 @@ fn collect_dynamic_root_candidates_from_node_inner(
             // arm (`value_ref.path.len() == 1`). The carrier head splits the
             // reference as `(value_root.name, path)`, so single-segment is an
             // empty trailing `path` with the head name as the binding name.
-            SemanticNodeData::TypeOf(_) => match data.typeof_head() {
-                Some((value_root, path)) if path.is_empty() => {
-                    component_import_candidate_for_binding(imports, value_root.name.as_ref())
-                        .into_iter()
-                        .collect()
+            SemanticNodeData::TypeOf(_) => {
+                let mut set = DynamicRootCandidateSet::default();
+                if let Some((value_root, path)) = data.typeof_head() {
+                    if path.is_empty() {
+                        if let Some(candidate) = component_import_candidate_for_binding(
+                            imports,
+                            value_root.name.as_ref(),
+                        ) {
+                            insert_dynamic_root_candidate_charged(&mut set, candidate);
+                        }
+                    }
                 }
-                _ => Vec::new(),
-            },
-            _ => Vec::new(),
+                set
+            }
+            _ => DynamicRootCandidateSet::default(),
         },
     };
     exit_node(node, active, memo, out)

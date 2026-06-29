@@ -823,22 +823,11 @@ impl MetaSession {
         // is the SHARED body for BOTH the scalar and the batch per-job payload
         // paths, so this single install covers both (a per-job install on a
         // batch pool thread is correct — `RequestContext` is thread-local RAII).
-        let _payload_request_ctx_guard =
-            if crate::request_context::current_request_context().is_none() {
-                Some(crate::request_context::RequestContextGuard::install(
-                    crate::request_context::RequestContext::with_kind_timing_and_projection_budget(
-                        crate::meta_resolve::next_component_meta_audit_request_id(),
-                        Arc::<str>::from(canonical.as_str()),
-                        verter_audit::RequestKind::ComponentMeta,
-                        false,
-                        host.config.audit_timing_capture && host.config.audit_enabled,
-                        None,
-                        host.config.projection_op_budget,
-                    ),
-                ))
-            } else {
-                None
-            };
+        let _payload_request_ctx_guard = host.install_request_budget_context_if_none(
+            crate::meta_resolve::next_component_meta_audit_request_id(),
+            canonical.as_str(),
+            host.config.audit_timing_capture && host.config.audit_enabled,
+        );
 
         // (2) Cold resolve pinned to the fixed view (FENCED promotion).
         let Some(resolved) = ({

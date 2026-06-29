@@ -5,6 +5,8 @@ use std::hash::Hash;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
+use crate::semantic_query::ResultCompleteness;
+
 pub(crate) mod ambient_resolve;
 pub(crate) mod bare_name_resolve;
 pub(crate) mod component_meta;
@@ -97,7 +99,8 @@ pub(crate) use component_meta_query_engine::{
 // imports it through this re-export.
 #[cfg(test)]
 pub(crate) use component_meta_query_engine::type_expr_root_is_unmaterialized_sentinel;
-pub use component_meta_request::{run_component_meta_request, ComponentMetaRequestHost};
+pub(crate) use component_meta_request::run_component_meta_request;
+pub use component_meta_request::ComponentMetaRequestHost;
 pub use declaration_metadata::{
     resolve_direct_local_type_declaration, resolve_local_type_declaration,
     resolve_type_declaration, DeclarationMetadataResolver, ResolvedDeclarationKind,
@@ -129,7 +132,8 @@ pub use fallthrough::{
     FallthroughResolverHost, KnownSpreadKeys, ResolvedConsumedBindings, ResolvedFallthroughSurface,
 };
 pub use fallthrough_override_key::FallthroughOverrideIdentity;
-pub use fallthrough_request::{run_fallthrough_request, FallthroughRequestHost};
+pub(crate) use fallthrough_request::run_fallthrough_request;
+pub use fallthrough_request::FallthroughRequestHost;
 pub use prepared_decl::{
     build_prepared_type_decl_cache, build_prepared_value_decl_cache,
     prepare_augmentation_type_decl, prepare_exported_type_decl, prepare_exported_value_decl,
@@ -692,7 +696,7 @@ pub struct ResolverDiagnostic {
 }
 
 #[derive(Debug, Clone)]
-pub struct StableExecutionValue<V> {
+pub(crate) struct StableExecutionValue<V> {
     pub value: V,
     pub stable: bool,
     /// `true` when the singleflight winner produced this value by
@@ -706,6 +710,18 @@ pub struct StableExecutionValue<V> {
     /// completed and reaped its lane) but immediately reads the warm
     /// result attributed as a cache hit, not as a second cold winner.
     pub computed: bool,
+    /// COMPUTE completeness of this rendezvous value — execution METADATA
+    /// ONLY (it gates ADMISSION, never IDENTITY): it is NOT part of the
+    /// lane key, the value `V`, any equality, or any wire DTO. The leader
+    /// snapshots [`StableRequestExecutor::capture_completeness`] after
+    /// compute/`store_stable` and stores it here BEFORE the
+    /// `FlightInner::Done` publish, so any follower that observes `Done`
+    /// observes the completeness atomically with the value and folds it
+    /// (via [`StableRequestExecutor::fold_follower_completeness`]) before
+    /// it can warm any cache (the no-poison fence). Defaults to
+    /// [`ResultCompleteness::Complete`] for every generic executor, which
+    /// leaves their rendezvous byte-identical.
+    pub completeness: ResultCompleteness,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -719,13 +735,23 @@ pub enum RequestSource {
 }
 
 #[derive(Debug, Clone)]
-pub struct RequestRunResult<V> {
+pub(crate) struct RequestRunResult<V> {
     pub value: V,
     pub source: RequestSource,
     pub attempts: usize,
+    /// COMPUTE completeness carried out to the top-level caller so the
+    /// surface-level promotion gates can read it without re-deriving.
+    /// Execution METADATA ONLY — never an identity / key / equality / wire
+    /// dimension. A LEADER carries its own [`capture_completeness`]
+    /// snapshot; a FOLLOWER carries the joined leader's completeness AND
+    /// has already folded it into its own thread-local suppress state
+    /// (via [`StableRequestExecutor::fold_follower_completeness`]) before
+    /// this result returned. Defaults to [`ResultCompleteness::Complete`]
+    /// for every generic executor.
+    pub completeness: ResultCompleteness,
 }
 
-pub trait StableRequestExecutor<K, V>
+pub(crate) trait StableRequestExecutor<K, V>
 where
     K: Clone + Eq + Hash,
     V: Clone,
@@ -798,9 +824,32 @@ where
     fn max_attempts(&self) -> usize {
         3
     }
+
+    /// The LEADER's post-compute completeness snapshot, recorded by
+    /// [`run_stable_request`] AFTER `compute`/`store_stable` and stored
+    /// into the published [`StableExecutionValue`].
+    ///
+    /// Default = [`ResultCompleteness::Complete`]: a generic query has no
+    /// partial notion, so the default keeps every non-fallthrough
+    /// executor's rendezvous byte-identical (the no-cost guarantee). An
+    /// executor whose cold compute can produce a structurally-incomplete
+    /// result (budget trip, fatal read) overrides this to surface its
+    /// COMPUTE completeness.
+    fn capture_completeness(&self) -> ResultCompleteness {
+        ResultCompleteness::Complete
+    }
+
+    /// Invoked on a FOLLOWER join with the joined leader's completeness,
+    /// BEFORE the follower returns (so it precedes ANY warm-admission site
+    /// in the follower's path). Default = no-op: a generic follower has no
+    /// thread-local suppress state to fold into. An executor that warms
+    /// caches from a follower-returned value overrides this to fold the
+    /// joined partiality into its own thread-local scope so a leader's
+    /// partial value can never be warmed as complete by a follower.
+    fn fold_follower_completeness(&self, _joined: ResultCompleteness) {}
 }
 
-pub fn run_stable_request<K, V, X>(
+pub(crate) fn run_stable_request<K, V, X>(
     singleflight: &SingleflightGroup<K, StableExecutionValue<V>, X::Error>,
     executor: &mut X,
 ) -> Result<RequestRunResult<V>, X::Error>
@@ -856,6 +905,7 @@ where
                     value,
                     source: RequestSource::Fallback,
                     attempts: attempt + 1,
+                    completeness: executor.capture_completeness(),
                 });
             }
             // Unstable off-lane result. For a per-attempt snapshot, retry on
@@ -871,6 +921,7 @@ where
                     value,
                     source: RequestSource::Fallback,
                     attempts: attempt + 1,
+                    completeness: executor.capture_completeness(),
                 });
             }
             continue;
@@ -913,6 +964,10 @@ where
                 value: cached,
                 source: RequestSource::Cache,
                 attempts: attempt + 1,
+                // A warm cache hit is COMPLETE by construction: a partial
+                // is never warm-admitted (the no-poison invariant), so a
+                // value served from cache cannot be partial.
+                completeness: ResultCompleteness::Complete,
             });
         }
 
@@ -929,6 +984,8 @@ where
                         value: cached,
                         stable: true,
                         computed: false,
+                        // A warm hit is complete (partials never warm).
+                        completeness: ResultCompleteness::Complete,
                     });
                 }
 
@@ -937,11 +994,18 @@ where
                 if stable {
                     executor.store_stable(&value);
                 }
+                // Snapshot the leader's COMPUTE completeness AFTER
+                // compute/`store_stable` and store it INTO the value before
+                // it is published as `FlightInner::Done` under the
+                // `flights`→`inner` lock — so any follower that observes
+                // `Done` observes the completeness atomically with the value.
+                let completeness = executor.capture_completeness();
 
                 Ok(StableExecutionValue {
                     value,
                     stable,
                     computed: true,
+                    completeness,
                 })
             },
             // Retain ONLY stable results as a joinable rendezvous. An
@@ -970,10 +1034,23 @@ where
                     forked_lane: flight.forked_lane,
                 },
             };
+            // A FOLLOWER coalesced onto the leader's lane: fold the joined
+            // leader's completeness into the follower's own thread-local
+            // suppress state BEFORE returning — this is the sole admission
+            // fence between the join and any warm-admission site in the
+            // follower's downstream path, so a leader's budget-partial value
+            // can never be warmed as complete by a follower (the no-poison
+            // hole this protocol closes). A LEADER does not fold (it already
+            // captured its own completeness); same-thread re-entry is a
+            // nested leader, never a follower, so it is not folded here.
+            if matches!(flight.role, SingleflightRole::Follower) {
+                executor.fold_follower_completeness(flight.value.completeness);
+            }
             return Ok(RequestRunResult {
                 value: flight.value.value.clone(),
                 source,
                 attempts: attempt + 1,
+                completeness: flight.value.completeness,
             });
         }
 
@@ -990,15 +1067,22 @@ where
                 value: flight.value.value.clone(),
                 source: RequestSource::Fallback,
                 attempts: attempt + 1,
+                // An unstable on-lane result is never retained, so a
+                // follower can never join it: this is the leader's own
+                // unstable result, carrying its own captured completeness.
+                completeness: flight.value.completeness,
             });
         }
     }
 
     let store_view = executor.snapshot_view();
+    let value = executor.compute(&store_view)?;
+    let completeness = executor.capture_completeness();
     Ok(RequestRunResult {
-        value: executor.compute(&store_view)?,
+        value,
         source: RequestSource::Fallback,
         attempts: max_attempts + 1,
+        completeness,
     })
 }
 
@@ -2740,6 +2824,88 @@ mod tests {
         assert!(executor.published.is_empty());
     }
 
+    /// Generic-attribution regression: the rendezvous `completeness`
+    /// metadata defaults to `Complete` for every NON-fallthrough (generic)
+    /// executor across EVERY [`RequestSource`] classification, and the value
+    /// and source attribution are unchanged. [`TestRequestExecutor`] does NOT
+    /// override `capture_completeness` / `fold_follower_completeness`, so it
+    /// exercises the DEFAULTED hooks — the proof that adding completeness to
+    /// the shared carriers leaves a generic query byte-identical.
+    ///
+    /// Covers cache / leader / fallback here; the FOLLOWER arm is asserted by
+    /// `session_cold_concurrent_requests_collapse_to_single_leader` (a generic
+    /// executor whose straggler Follower-joins). DISCRIMINATES: a regression
+    /// that made the default `capture_completeness` return anything but
+    /// `Complete`, or that folded a partial for a generic executor, or that
+    /// shifted the `RequestSource`/value, would fail one of these arms.
+    #[test]
+    fn generic_executor_completeness_defaults_complete_across_sources() {
+        let token = StoreViewCompatToken {
+            epoch: 5,
+            session: None,
+            validity_fingerprint: 0,
+        };
+
+        // CACHE: a warm hit is Complete; source/value unchanged.
+        {
+            let singleflight =
+                SingleflightGroup::<String, StableExecutionValue<usize>, &'static str>::default();
+            let mut executor = TestRequestExecutor::new("node", token, 3);
+            executor
+                .cache
+                .insert("node".to_string(), 41, vec![executor.valid_fact.clone()]);
+            let result = run_stable_request(&singleflight, &mut executor).unwrap();
+            assert_eq!(result.source, RequestSource::Cache);
+            assert_eq!(result.value, 41);
+            assert_eq!(
+                result.completeness,
+                ResultCompleteness::Complete,
+                "a generic cache hit's completeness is Complete",
+            );
+        }
+
+        // LEADER: a cold stable compute is Complete; source/value unchanged.
+        {
+            let singleflight =
+                SingleflightGroup::<String, StableExecutionValue<usize>, &'static str>::default();
+            let mut executor = TestRequestExecutor::new("node", token, 3);
+            executor.compute_values.extend([11]);
+            executor.stability.extend([true]);
+            let result = run_stable_request(&singleflight, &mut executor).unwrap();
+            assert_eq!(
+                result.source,
+                RequestSource::Flight {
+                    role: SingleflightRole::Leader,
+                    forked_lane: false,
+                }
+            );
+            assert_eq!(result.value, 11);
+            assert_eq!(
+                result.completeness,
+                ResultCompleteness::Complete,
+                "a generic leader's default capture_completeness is Complete",
+            );
+        }
+
+        // FALLBACK: retries exhausted; the return-only result is Complete;
+        // source/value unchanged.
+        {
+            let singleflight =
+                SingleflightGroup::<String, StableExecutionValue<usize>, &'static str>::default();
+            let mut executor = TestRequestExecutor::new("node", token, 2);
+            executor.compute_values.extend([1, 2, 3]);
+            executor.stability.extend([false, false, false]);
+            let result = run_stable_request(&singleflight, &mut executor).unwrap();
+            assert_eq!(result.source, RequestSource::Fallback);
+            assert_eq!(result.value, 3);
+            assert_eq!(
+                result.completeness,
+                ResultCompleteness::Complete,
+                "a generic fallback's default capture_completeness is Complete",
+            );
+        }
+    }
+
     /// A non-current snapshot must NEVER receive a retained flight's
     /// result as a follower. The lane key folds `compat_token`, which
     /// excludes the additive generations — so a snapshot the manager could
@@ -2781,6 +2947,7 @@ mod tests {
                         value: 7usize,
                         stable: true,
                         computed: true,
+                        completeness: crate::semantic_query::ResultCompleteness::Complete,
                     })
                 },
                 |sev| sev.stable,
@@ -3345,6 +3512,23 @@ mod tests {
         );
         assert_eq!(sibling_result.value, 42);
         assert_eq!(straggler_result.value, 42);
+
+        // Generic-attribution: a generic executor uses the DEFAULT
+        // `capture_completeness` (Complete) + `fold_follower_completeness`
+        // (no-op) hooks, so BOTH the leader's captured completeness AND the
+        // follower's joined-then-folded completeness stay `Complete` — the
+        // new rendezvous metadata leaves a non-fallthrough query
+        // byte-identical (the no-cost guarantee, follower arm).
+        assert_eq!(
+            sibling_result.completeness,
+            ResultCompleteness::Complete,
+            "a generic leader's default capture_completeness is Complete",
+        );
+        assert_eq!(
+            straggler_result.completeness,
+            ResultCompleteness::Complete,
+            "a generic follower's joined completeness stays Complete (default no-op fold)",
+        );
 
         // Non-cache contract: the lane fully drains after both pins
         // release.

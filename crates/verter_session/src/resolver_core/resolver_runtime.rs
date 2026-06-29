@@ -145,7 +145,9 @@ where
         self.cache.retain(predicate);
     }
 
-    pub fn singleflight(&self) -> &SingleflightGroup<K, StableExecutionValue<Option<V>>, ()> {
+    pub(crate) fn singleflight(
+        &self,
+    ) -> &SingleflightGroup<K, StableExecutionValue<Option<V>>, ()> {
         &self.singleflight
     }
 }
@@ -181,7 +183,7 @@ where
     /// Validated by file whole hash and import-route facts.
     pub prepared_decl_bundles: StableRequestState<String, PreparedDeclBundle>,
     /// Top-level fallthrough singleflight, with runtime fallthrough nodes remaining the cache authority.
-    pub top_level_fallthrough_singleflight:
+    pub(crate) top_level_fallthrough_singleflight:
         SingleflightGroup<FallthroughNodeKey, StableExecutionValue<Option<FallthroughV>>, ()>,
     /// Shared observability counters.
     pub counters: Arc<ResolverCounters>,

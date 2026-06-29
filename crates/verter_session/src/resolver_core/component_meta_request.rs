@@ -395,7 +395,7 @@ where
 /// stable bypass — a result computed against a now-stale (or non-current)
 /// fixed view is returned to the caller but not promoted. `None` runs the
 /// per-attempt snapshot-coherence path.
-pub fn run_component_meta_request<H>(
+pub(crate) fn run_component_meta_request<H>(
     host: &H,
     singleflight: &SingleflightGroup<
         ResolutionNodeKey,

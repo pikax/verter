@@ -165,6 +165,9 @@ impl SymbolResolverState {
                 // (no in-closure warm-hit short-circuit), so the winner
                 // always performed a cold build.
                 computed: true,
+                // The symbol resolver gates on the fact signature, not a
+                // partial-completeness lattice.
+                completeness: crate::semantic_query::ResultCompleteness::Complete,
             })
         });
 

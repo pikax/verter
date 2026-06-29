@@ -148,6 +148,29 @@ pub fn mark_request_materialization_cache_suppress() {
     fold_cold_compute_completeness(ResultCompleteness::partial(PartialReasonSet::PROPAGATED));
 }
 
+/// Fold a JOINED result completeness into the active suppress state — the
+/// follower's no-poison fence in the singleflight rendezvous.
+///
+/// A singleflight FOLLOWER that coalesces onto a leader's lane receives the
+/// leader's value AND its [`ResultCompleteness`]; this folds the EXACT
+/// partial reason set into the follower's active per-cold-compute scope
+/// (rather than blanket-re-marking a generic `PROPAGATED`, which would lose
+/// the reason class) AND raises the request-scoped sticky suppress flag, so
+/// the follower returns with its suppress state already partial BEFORE it
+/// reaches any warm-admission site (`store_node`, the fallthrough result
+/// cache, the owner / payload promotion). A `Complete` join is a no-op — the
+/// generic-query rendezvous stays byte-identical.
+pub fn fold_result_completeness(joined: ResultCompleteness) {
+    if !joined.is_partial() {
+        return;
+    }
+    if let Some(ctx) = current_request_context() {
+        ctx.materialization_cache_suppress
+            .store(true, Ordering::Relaxed);
+    }
+    fold_cold_compute_completeness(joined);
+}
+
 /// Class-fix helper for the component-meta read/materialize path: observe a
 /// completed dispatch read and propagate PARTIAL-result suppression onto
 /// the request-scoped sticky flag.

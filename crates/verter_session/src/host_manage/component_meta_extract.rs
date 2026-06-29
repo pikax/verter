@@ -1056,21 +1056,24 @@ pub(crate) fn extract_component_meta_from_resolved(
     // (a representable `LowerBound` surface stays cacheable).
     let mut fallthrough_completeness = crate::semantic_query::ResultCompleteness::Complete;
     if include_fallthrough {
-        let _completeness_scope = crate::request_context::ColdComputeCompletenessScope::enter();
         let mut visiting = rustc_hash::FxHashSet::default();
-        if let Some(resolution) = host.compute_fallthrough_surface_from_resolved_state(
+        // The completeness travels WITH the resolution via the outcome carrier
+        // (centralised per-call scope), so a stale partial from a discarded
+        // completion-fence retry cannot taint this attempt.
+        let outcome = host.compute_fallthrough_outcome_from_resolved_state(
             &canonical,
             resolved,
             None,
             &mut visiting,
             ctx,
-        ) {
+        );
+        if let Some(resolution) = outcome.resolution {
             meta.accepted_props = resolution.accepted_props;
             meta.accepted_events = resolution.accepted_events;
             meta.accepted_surface_completeness = resolution.accepted_surface_completeness;
             meta.fallthrough_surface = resolution.fallthrough_surface;
         }
-        fallthrough_completeness = crate::request_context::current_cold_compute_completeness();
+        fallthrough_completeness = outcome.completeness;
     }
     // apply the publication policy over (resolved_type_registry,
     // resolved_type_registry_meta) + snapshot.macros (§3.4 structural
@@ -1135,20 +1138,22 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
         resolved.evaluated_types.as_ref(),
     );
     let mut visiting = rustc_hash::FxHashSet::default();
-    // Per-cold-compute completeness scope: a fallthrough partial folds in so the
-    // fallthrough's OWN caches (`store_node`) self-gate on the typed completeness
-    // signal, consistent with the struct-returning extract path. The captured
-    // completeness is also RETURNED so the payload-write gate refuses to warm a
-    // fallthrough partial (matching the analysis surface's result-cache gate).
+    // The outcome carrier centralises the per-call completeness scope: a
+    // fallthrough partial folds in so the fallthrough's OWN caches
+    // (`store_node`) self-gate on the typed completeness signal, and the
+    // captured completeness is RETURNED so the payload-write gate refuses to
+    // warm a fallthrough partial (matching the analysis surface's result-cache
+    // gate). The completeness travels with the resolution, so a discarded
+    // completion-fence retry cannot taint this attempt.
     let (fallthrough_facts, fallthrough_completeness) = {
-        let _completeness_scope = crate::request_context::ColdComputeCompletenessScope::enter();
-        let facts = if let Some(resolution) = host.compute_fallthrough_surface_from_resolved_state(
+        let outcome = host.compute_fallthrough_outcome_from_resolved_state(
             &canonical,
             resolved,
             None,
             &mut visiting,
             ctx,
-        ) {
+        );
+        let facts = if let Some(resolution) = outcome.resolution {
             let facts = resolution.fact_versions.clone();
             meta.accepted_props = resolution.accepted_props;
             meta.accepted_events = resolution.accepted_events;
@@ -1158,11 +1163,7 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
         } else {
             None
         };
-        // Capture before the scope drops: a fallthrough partial (budget / fuse /
-        // semantic) folds into the active per-cold-compute scope regardless of
-        // whether a resolution was produced.
-        let completeness = crate::request_context::current_cold_compute_completeness();
-        (facts, completeness)
+        (facts, outcome.completeness)
     };
     // apply the publication policy AFTER fallthrough merge so the
     // pass operates on the final accepted_props/events. Walks

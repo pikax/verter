@@ -247,6 +247,10 @@ impl VerterHost {
                     // Served from the bundle cache inside the flight — no
                     // cold materialisation performed.
                     computed: false,
+                    // Prepared-decl bundles gate on `stable`/`admitted`, not
+                    // a partial-completeness lattice — a served bundle is
+                    // complete.
+                    completeness: crate::semantic_query::ResultCompleteness::Complete,
                 });
             }
             // Per-request audit attribution: cold materialisation of
@@ -321,6 +325,9 @@ impl VerterHost {
                 stable,
                 // Reached the cold materialisation branch.
                 computed: true,
+                // Prepared-decl bundles gate on `stable`/`admitted`, not a
+                // partial-completeness lattice.
+                completeness: crate::semantic_query::ResultCompleteness::Complete,
             })
         };
         // Bounded re-validation loop, mirroring the IndexedReady lane:
