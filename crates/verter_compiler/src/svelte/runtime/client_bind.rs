@@ -33,7 +33,7 @@ impl<'a> ClientEmitter<'a> {
         // Copy the plan reference so the op walk does not borrow `self` while `alloc_name`
         // mutates `self.used` + the group maps.
         let plan: &ClientModulePlan<'a> = self.plan();
-        for op in &plan.ops {
+        for op in plan.all_ops() {
             let ClientRuntimeOp::Bind {
                 shape:
                     ClientBindShape::DomBind {
@@ -445,7 +445,7 @@ pub(super) fn build_inline_this_index(
 ) -> rustc_hash::FxHashMap<NodeId, Vec<(BindGetSetForm, String, String)>> {
     let mut index: rustc_hash::FxHashMap<NodeId, Vec<(BindGetSetForm, String, String)>> =
         rustc_hash::FxHashMap::default();
-    for op in &plan.ops {
+    for op in plan.all_ops() {
         if let ClientRuntimeOp::Bind {
             target,
             shape: ClientBindShape::This { getset },

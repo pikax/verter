@@ -56,9 +56,16 @@ pub fn plan_client_topology(ir: &SvelteRuntimeIr, html: &StaticTemplatePlan) -> 
     // (it is the region's mount root, structurally parallel to `from_html`); this
     // is distinct from the INTERIOR reactive `$.text` nodes a `from_html` region
     // creates mid-DOM-walk, which stay the emitting backend's concern (and are NOT
-    // recorded by the planner). The owned-helper universe therefore counts the
-    // text-first root factory but the matrix only asserts the `Text` count for
-    // regions the planner actually plans as text-first.
+    // recorded by the planner). The owned-helper universe therefore counts ONLY
+    // text-first ROOT factories for `Text`, never the interior reactive `$.text()`.
+    // LATENT CONSTRAINT: the matrix's owned-helper `Text`-COUNT assertion
+    // (`runtime_tests` assertion (2)) compares this text-first-root-only planned
+    // count against the FULL golden `text` count (root factories PLUS any interior
+    // reactive `$.text()`); the equality is sound today ONLY because every committed
+    // fixture's interior-text count is 0, so its full golden `text` count equals its
+    // text-first-root count. A future fixture emitting an interior reactive
+    // `$.text()` would make the golden count exceed the planned count and trip that
+    // assertion — it would need an `OwnedHelperCounts` topology-ledger row.
     for factory in &html.templates {
         match factory {
             TemplateFactory::FromHtml { .. } => helpers.call(SvelteHelper::FromHtml),

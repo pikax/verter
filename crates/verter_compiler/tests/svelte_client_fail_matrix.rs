@@ -733,17 +733,67 @@ const FAIL_MATRIX: &[FailRow] = &[
     },
     // ── structure (component) ─────────────────────────────────────────────
     FailRow {
-        name: "block_if",
-        source: "<script>let c = $state(true);</script>\n{#if c}<p>yes</p>{/if}\n",
+        // The control-flow blocks (`{#if}`/`{#each}`/`{#await}`/`{#key}`) are SUPPORTED
+        // (5e); a `{#snippet}` DECLARATION inside a block body is the 5f surface — it still
+        // fails closed (the block being supported does not make its body's snippet
+        // declaration supported).
+        name: "snippet_in_if_block",
+        source: "<script>let on = $state(true);</script>\n{#if on}{#snippet foo()}<p>x</p>{/snippet}{/if}\n",
+        code: "svelte-runtime-unsupported-component",
+    },
+    FailRow {
+        // A `{@render}` tag inside a (supported) `{#each}` body is the 5f surface — still refused.
+        name: "render_in_each_block",
+        source: "<script>let { items } = $props();</script>\n{#each items as x}{@render foo(x)}{/each}\n",
+        code: "svelte-runtime-unsupported-component",
+    },
+    // ── Declaration-tag PLACEMENT (5e) — non-region-root fails closed ────────
+    FailRow {
+        // A `{@const}` NESTED inside an element (not a block-body region root). The official
+        // compiler rejects this placement (`const_tag_invalid_placement`); Verter fails
+        // closed rather than the roots-only hoist that silently DROPPED a nested `{@const}`.
+        name: "const_tag_nested_in_element",
+        source: "<script>let { items } = $props();</script>\n{#each items as item}<p>{@const x = item}</p>{/each}\n",
         code: "svelte-runtime-unsupported-block",
     },
     FailRow {
-        // An `{#each}` block; `items` is a plain-local array (not array-state) and
-        // a trailing `$state` keeps the component runes-mode, so the block gate is the
-        // surface under test.
-        name: "block_each",
-        source: "<script>let items = [1, 2]; let c = $state(0);</script>\n{#each items as x}<p>{x}</p>{/each}\n<button onclick={() => c++}>{c}</button>\n",
+        // A bare `{let …}` declaration tag NESTED inside an element. This is NOT a defect:
+        // the official compiler ACCEPTS a nested DeclarationTag via per-element
+        // `BlockStatement` scoping (element-local scope + a `$.template_effect` split).
+        // Verter does not emit that element-local lowering yet, so it fails closed here — a
+        // ratified DEFER deferral (codex DECIDER ruling) owned by the nested element-scope
+        // codegen axis (D-36), never the silent drop the roots-only hoist produced.
+        name: "decl_let_nested_in_element",
+        source: "<script>let { items } = $props();</script>\n{#each items as item}<p>{let x = item}</p>{/each}\n",
         code: "svelte-runtime-unsupported-block",
+    },
+    FailRow {
+        // A bare `{const …}` declaration tag NESTED inside an element — same ratified DEFER
+        // deferral as the `{let …}` form (nested element-scope codegen axis, D-36): the
+        // official accepts it via per-element `BlockStatement` scoping; Verter fails closed
+        // until that element-local lowering lands, never the silent drop the roots-only hoist
+        // produced.
+        name: "decl_const_nested_in_element",
+        source: "<script>let { items } = $props();</script>\n{#each items as item}<p>{const x = item}</p>{/each}\n",
+        code: "svelte-runtime-unsupported-block",
+    },
+    FailRow {
+        // A `{@const}` at the COMPONENT ROOT (not a block-body region root). The official
+        // compiler rejects this placement — the component root is not a `{@const}` valid
+        // parent. (A bare `{const}` / `{let}` at the component root is VALID and accepted.)
+        name: "const_tag_at_component_root",
+        source: "<script>let c = $state(0);</script>\n{@const x = 1}\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-block",
+    },
+    FailRow {
+        // A MEMBER read inside reactive text WITHIN a block body (`{item.x}`): block-body
+        // content is scoped to the BARE-signal reactive-text surface, so a member read is
+        // the interpolation-breadth surface (owned by the reactive-text/interpolation
+        // completion work) and fails closed — it is NOT emitted, matching the topology
+        // corpus comment that excludes `{item.label}` block-body member reads.
+        name: "block_body_member_interpolation",
+        source: "<script>let { items } = $props();</script>\n{#each items as item}<p>{item.x}</p>{/each}\n",
+        code: "svelte-runtime-unsupported-complex-interpolation",
     },
     FailRow {
         // A component reference (a capitalized tag) is the component surface; no import is
@@ -1788,9 +1838,19 @@ fn fail_matrix_covers_every_documented_sub_shape() {
     // gate. +8 rows.
     assert_eq!(
         FAIL_MATRIX.len(),
-        128,
-        "the fail matrix must enumerate all 128 documented unsupported-feature \
-         fail-closed sub-shapes. The regular-element event surface is now SUPPORTED, so \
+        133,
+        "the fail matrix must enumerate all 133 documented unsupported-feature \
+         fail-closed sub-shapes. The declaration-tag PLACEMENT gate adds four rows: a \
+         `{{@const}}` / `{{const}}` / `{{let}}` NESTED inside an element \
+         (`const_tag_nested_in_element` / `decl_const_nested_in_element` / \
+         `decl_let_nested_in_element`) fails closed (`svelte-runtime-unsupported-block`) \
+         rather than the roots-only hoist that silently DROPPED a non-region-root \
+         declaration tag, plus a `{{@const}}` at the COMPONENT ROOT \
+         (`const_tag_at_component_root`) which the official also rejects (the component root \
+         is not a `{{@const}}` valid parent) — +4 rows. A MEMBER read inside reactive text \
+         within a block body (`block_body_member_interpolation`, `{{item.x}}`) fails closed \
+         as the interpolation-breadth surface — +1 row. The regular-element event surface is \
+         now SUPPORTED, so \
          its three former rows moved to the positive `events/*` corpus + smoke, replaced \
          by the two still-fail-closed rows `event_invalid_modifier_combo` and \
          `event_unknown_modifier` — net −1 row. The DOM bind target-lvalue \

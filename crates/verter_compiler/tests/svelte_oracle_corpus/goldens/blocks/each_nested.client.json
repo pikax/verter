@@ -1,0 +1,86 @@
+{
+  "slug": "blocks/each_nested.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "each_nested",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "comment",
+    "first_child",
+    "each",
+    "index",
+    "comment",
+    "first_child",
+    "each",
+    "get",
+    "index",
+    "child",
+    "reset",
+    "template_effect",
+    "set_text",
+    "get",
+    "append",
+    "append",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "comment",
+    "each",
+    "first_child",
+    "from_html",
+    "get",
+    "index",
+    "reset",
+    "set_text",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "comment": 2,
+    "first_child": 2,
+    "each": 2,
+    "index": 2,
+    "get": 2,
+    "child": 1,
+    "reset": 1,
+    "template_effect": 1,
+    "set_text": 1,
+    "append": 3
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<p> </p>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<p> </p>`); export default function each_nested($$anchor, $$props) {var fragment = $.comment(); var node = $.first_child(fragment); $.each(node, 17, () => $$props.grid, $.index, ($$anchor, cells) => {var fragment_1 = $.comment(); var node_1 = $.first_child(fragment_1); $.each(node_1, 17, () => $.get(cells), $.index, ($$anchor, cell) => {var p = root(); var text = $.child(p, true); $.reset(p); $.template_effect(() => $.set_text(text, $.get(cell))); $.append($$anchor, p);}); $.append($$anchor, fragment_1);}); $.append($$anchor, fragment);}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

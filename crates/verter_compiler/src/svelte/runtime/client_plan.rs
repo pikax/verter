@@ -28,12 +28,12 @@ use super::client_shapes::{
 use super::client_surface::ClassifiedClientSurface;
 use super::entity_decode::decode_attr_entities;
 use super::events::{validate_event_modifiers, EventModifierError};
-use super::expr::BindingRuntimeKind;
+use super::expr::{BindingRuntimeKind, ScopeId};
 use super::expr_emit;
 use super::expr_rewrite::{PropReads, ProxyInitMap};
 use super::ir::{
     AttrIr, AttrOpKind, ExprId, IrNode, MixedAttrPart, NodeId, NonStaticPropertyKind,
-    NonStaticPropertyValue, RuntimeOp, StyleDirectiveValue, SvelteRuntimeIr,
+    NonStaticPropertyValue, OpId, RuntimeOp, StyleDirectiveValue, SvelteRuntimeIr,
 };
 use verter_span::Span;
 
@@ -42,8 +42,9 @@ use verter_span::Span;
 // projects the broad IR onto it. Re-exported so existing consumers (`super::client`, …)
 // keep importing the vocabulary as `super::client_plan::<Type>`.
 pub(super) use super::client_plan_types::{
-    AttrValue, AttrValuePart, ClientAttr, ClientBindTarget, ClientDynAttrEmit, ClientNode,
-    ClientNodeId, ClientRuntimeOp, ClientScriptItem, EventEmit, EventEmitTarget, EventMode,
+    AttrValue, AttrValuePart, ClientAttr, ClientBindTarget, ClientBlock, ClientDynAttrEmit,
+    ClientNode, ClientNodeId, ClientRuntimeOp, ClientScriptItem, EventEmit, EventEmitTarget,
+    EventMode, RegionOps,
 };
 
 /// The narrow client module plan — the SOLE emitter input.
@@ -59,8 +60,11 @@ pub(super) struct ClientModulePlan<'a> {
     /// / instance import is fail-closed upstream, so there are no module-scope
     /// imports / hoists — the body is the only script-item slot.)
     pub(super) body_statements: Vec<ClientScriptItem>,
-    /// The narrow reactive ops in source order.
-    pub(super) ops: Vec<ClientRuntimeOp>,
+    /// The narrow reactive ops, grouped by their owning template-scope REGION (the root
+    /// region plus every block body / branch region), in source order within each region.
+    /// A block body's reactive surface is its OWN region: the emitter builds each region's
+    /// combined `$.template_effect` + binds + events from its region's ops.
+    pub(super) region_ops: Vec<RegionOps>,
     /// Whether the component opens a component context (`$.push`/`$.pop`).
     pub(super) needs_context: bool,
     /// Whether the component function takes `$$props`.
@@ -124,6 +128,39 @@ pub(super) struct SupportedClientIr<'a> {
     /// [`ClientRuntimeOp::AttributeEffect`]; the per-attribute ops the IR also produced
     /// for these elements are suppressed.
     pub(super) spread_elements: Vec<NodeId>,
+}
+
+impl<'a> ClientModulePlan<'a> {
+    /// The reactive ops owned by a specific template-scope region (empty when the region
+    /// has no ops). The emitter reads this per region so a block body's effect is built
+    /// from the body's ops, never the root's.
+    pub(super) fn ops_in(&self, scope: super::ir::TemplateScopeId) -> &[ClientRuntimeOp] {
+        self.region_ops
+            .iter()
+            .find(|r| r.scope_id == scope)
+            .map_or(&[], |r| r.ops.as_slice())
+    }
+
+    /// Every reactive op across all regions, in region-then-source order. Used by the
+    /// by-unique-target lookups (a node lives in one region, so a flat scan resolves it).
+    pub(super) fn all_ops(&self) -> impl Iterator<Item = &ClientRuntimeOp> {
+        self.region_ops.iter().flat_map(|r| r.ops.iter())
+    }
+}
+
+/// The per-element first-op dedup state threaded through `project_scope_op` (one
+/// coalesced `$.set_class` / `$.set_style` / `$.set_attribute` / `$.attribute_effect`
+/// per element). Global across regions — an element lives in exactly one region.
+#[derive(Default)]
+struct OpDedup {
+    /// Targets whose coalesced `$.set_class` has been emitted.
+    class_done: rustc_hash::FxHashSet<NodeId>,
+    /// Targets whose coalesced `$.set_style` has been emitted.
+    style_done: rustc_hash::FxHashSet<NodeId>,
+    /// `(target, attr-name)` pairs whose whole plain-attribute value has been emitted.
+    plain_attr_done: rustc_hash::FxHashSet<(NodeId, String)>,
+    /// Spread elements whose `$.attribute_effect` fold has been emitted.
+    spread_attrs_done: rustc_hash::FxHashSet<NodeId>,
 }
 
 impl<'a> SupportedClientIr<'a> {
@@ -224,9 +261,9 @@ impl<'a> SupportedClientIr<'a> {
         // interpolation fails closed (the official compiler static-folds it).
         let nodes = projection.build_nodes()?;
 
-        // (3) The narrow ops (reactive text / binds / events), with bind/event
-        // expressions rewritten through the fallible rewriter.
-        let ops = projection.build_ops(&nodes)?;
+        // (3) The narrow ops (reactive text / binds / events), grouped per region, with
+        // bind/event expressions rewritten through the fallible rewriter.
+        let region_ops = projection.build_ops(&nodes)?;
 
         // (4) Component context + props-param facts.
         let needs_context = projection.needs_context(&alloc);
@@ -242,7 +279,7 @@ impl<'a> SupportedClientIr<'a> {
             component: ir.component.clone(),
             nodes,
             body_statements,
-            ops,
+            region_ops,
             needs_context,
             uses_props,
             build: projection,
@@ -391,6 +428,23 @@ impl<'a> SupportedClientIr<'a> {
             IrNode::Special(s) if s.kind == super::ir::SpecialKind::Options => {
                 Ok(ClientNode::OptionsMarker { span: s.span })
             }
+            // The control-flow blocks (`{#if}`/`{#each}`/`{#await}`/`{#key}`) — projected
+            // (head expressions rewritten, child regions carried by scope id) in
+            // `client_block_plan`. A `{#snippet}` is the component/snippet surface, refused
+            // upstream.
+            IrNode::Block(block) if !matches!(block, super::ir::BlockIr::Snippet { .. }) => {
+                self.project_block(block)
+            }
+            // The declaration / debug tags: `{@const}` (block-local derived), the
+            // `{const}/{let}` declaration tag (inert), and `{@debug}` (reactive snapshot
+            // effect).
+            IrNode::Tag(super::ir::TagIr::LegacyConst { pattern, init }) => {
+                self.project_const_tag(*pattern, *init)
+            }
+            IrNode::Tag(super::ir::TagIr::Declaration { kind, declarators }) => {
+                self.project_declaration_tag(*kind, declarators)
+            }
+            IrNode::Tag(super::ir::TagIr::Debug { args }) => self.project_debug_tag(args),
             // A node the classifier refused — unreachable on the accept path.
             // Fail closed loudly (never a silent placeholder).
             _ => Err(UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
@@ -491,170 +545,216 @@ impl<'a> SupportedClientIr<'a> {
     fn build_ops(
         &self,
         nodes: &[ClientNode],
-    ) -> Result<Vec<ClientRuntimeOp>, UnsupportedSvelteRuntimeSurface> {
-        let scope = self.ir.root_scope();
-        let scope_lexical = scope.scope;
-        // An op whose target is the `<svelte:options>` compile-option MARKER (which
-        // renders nothing) is dead — the options attributes (`runes={…}`) lower to a
-        // reactive-attr op that never reaches the DOM. Skip those ops (they are the
-        // one legitimately-ignorable op the supported surface produces); every OTHER
-        // broad op variant is a refusal.
-        let is_options_marker = |target: NodeId| {
-            matches!(
+    ) -> Result<Vec<super::client_plan_types::RegionOps>, UnsupportedSvelteRuntimeSurface> {
+        // The per-element first-op dedup sets are GLOBAL across regions: an element lives
+        // in exactly one region, so a per-region set would be identical. (One coalesced
+        // `$.set_class` / `$.set_style` / `$.set_attribute` / `$.attribute_effect` per
+        // element — official `RegularElement.js`.)
+        let mut dedup = OpDedup::default();
+        // Project EVERY template-scope region's ops — the root region PLUS every block
+        // body / branch region. Each op's expressions were rewritten in the op's OWN
+        // recorded scope, so a body op reads `$.get(item)` while a root op reads the root
+        // signal; the per-region grouping lets the emitter build each region's combined
+        // `$.template_effect` + binds + events independently.
+        // The owning region of every node (so a `{@html}` tag's `$.html` op is projected
+        // into ITS region — root-level OR a block body — not always the root).
+        let node_region = self.build_node_region_map();
+        let mut regions = Vec::with_capacity(self.ir.template_scopes.len());
+        for scope_idx in 0..self.ir.template_scopes.len() {
+            let scope_id = super::ir::TemplateScopeId(scope_idx as u32);
+            let region = &self.ir.template_scopes[scope_idx];
+            let scope_lexical = region.scope;
+            let mut ops = Vec::new();
+            for &op_id in &region.local_ops {
+                if let Some(op) = self.project_scope_op(op_id, scope_lexical, &mut dedup, nodes)? {
+                    ops.push(op);
+                }
+            }
+            // The `{@html}` raw-markup nodes have NO IR runtime op (they are tag NODES), so
+            // their `$.html` ops are projected into THIS region when they belong to it, in IR
+            // node-id (source) order. Each is a distinct `ClientRuntimeOp::Html` carrying its
+            // already-assembled payload (a `() => expr` thunk, or the bare elided callee) and
+            // its only-child topology flag.
+            let mut html_ids: Vec<NodeId> = self
+                .html_nodes
+                .iter()
+                .copied()
+                .filter(|n| node_region.get(n).copied() == Some(scope_id))
+                .collect();
+            html_ids.sort_by_key(|n| n.0);
+            for node_id in html_ids {
+                ops.push(self.project_html_op(node_id)?);
+            }
+            regions.push(super::client_plan_types::RegionOps { scope_id, ops });
+        }
+        Ok(regions)
+    }
+
+    /// Map every template node to its OWNING template-scope region — the scope whose
+    /// roots-subtree reaches it WITHOUT crossing a nested block boundary (a block body is a
+    /// separate region). Used to route a `{@html}` op into its region.
+    fn build_node_region_map(&self) -> rustc_hash::FxHashMap<NodeId, super::ir::TemplateScopeId> {
+        let mut map = rustc_hash::FxHashMap::default();
+        for scope_idx in 0..self.ir.template_scopes.len() {
+            let scope_id = super::ir::TemplateScopeId(scope_idx as u32);
+            for root in self.ir.template_scopes[scope_idx].roots.clone() {
+                self.assign_node_region(root, scope_id, &mut map);
+            }
+        }
+        map
+    }
+
+    /// Assign `node` (and its same-region element/component/special children) to `scope_id`.
+    /// A nested block's body is a SEPARATE region (already assigned from its own scope), so
+    /// the descent does not cross into it.
+    fn assign_node_region(
+        &self,
+        node: NodeId,
+        scope_id: super::ir::TemplateScopeId,
+        map: &mut rustc_hash::FxHashMap<NodeId, super::ir::TemplateScopeId>,
+    ) {
+        map.insert(node, scope_id);
+        match self.ir.node(node) {
+            IrNode::Element(el) => {
+                for &child in &el.children {
+                    self.assign_node_region(child, scope_id, map);
+                }
+            }
+            IrNode::Component(component) => {
+                for &child in &component.children {
+                    self.assign_node_region(child, scope_id, map);
+                }
+            }
+            IrNode::Special(special) => {
+                for &child in &special.children {
+                    self.assign_node_region(child, scope_id, map);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Project ONE supported `RuntimeOp` into its narrow `ClientRuntimeOp` (or `None`
+    /// when it is a dead options-marker op, a spread-absorbed per-attribute op, or a
+    /// dedup'd later class/style/attr/spread op). The op's expressions are rewritten in
+    /// their OWN recorded scope; `scope_lexical` is the op's region lexical scope (passed
+    /// to the bind/event projectors). Fail closed on a broad op the surface never produces.
+    fn project_scope_op(
+        &self,
+        op_id: OpId,
+        scope_lexical: ScopeId,
+        dedup: &mut OpDedup,
+        nodes: &[ClientNode],
+    ) -> Result<Option<ClientRuntimeOp>, UnsupportedSvelteRuntimeSurface> {
+        // Skip an op targeting the `<svelte:options>` compile-option MARKER (a dead attr
+        // that never reaches the DOM), and absorb a spread element's per-attribute ops
+        // into the single `$.attribute_effect` fold (the `SpreadAttrs` op is the trigger).
+        if let Some(target) = op_target_node(self.ir.op(op_id)) {
+            if matches!(
                 nodes.get(target.0 as usize),
                 Some(ClientNode::OptionsMarker { .. })
-            )
-        };
-        // The first `class` / `style` op for a target builds the WHOLE coalesced
-        // `$.set_class` / `$.set_style` call (reading the element's class/style attrs);
-        // subsequent class/style ops for the same target are skipped (one merged call
-        // per element, official `RegularElement.js`). These sets track which targets
-        // have already emitted their coalesced class/style op.
-        let mut class_done: rustc_hash::FxHashSet<NodeId> = rustc_hash::FxHashSet::default();
-        let mut style_done: rustc_hash::FxHashSet<NodeId> = rustc_hash::FxHashSet::default();
-        // A `Mixed` plain attribute (`id="a{x}b{y}"`) lowers to ONE `ReactiveAttr`
-        // op PER expression part in the IR, but the official compiler builds ONE
-        // `$.set_attribute` over the WHOLE concatenated value. Dedup by `(target,
-        // name)` so the first op for a plain attribute builds the full value and the
-        // rest are folded into it.
-        let mut plain_attr_done: rustc_hash::FxHashSet<(NodeId, String)> =
-            rustc_hash::FxHashSet::default();
-        // The first `SpreadAttrs` op for a spread element materializes the whole
-        // `$.attribute_effect` fold; later spreads on the same element are folded into it.
-        let mut spread_attrs_done: rustc_hash::FxHashSet<NodeId> = rustc_hash::FxHashSet::default();
-        let mut ops = Vec::new();
-        for &op_id in &scope.local_ops {
-            // Skip any op targeting the options marker (a dead compile-option attr).
-            if let Some(target) = op_target_node(self.ir.op(op_id)) {
-                if is_options_marker(target) {
-                    continue;
-                }
-                // A SPREAD element folds its WHOLE attribute set into one
-                // `$.attribute_effect` (projected from the `SpreadAttrs` op below); every
-                // OTHER per-attribute op the IR produced for the same element (a dynamic /
-                // class / style write, a non-static property init) is absorbed into the
-                // fold, so it is suppressed here. (The `SpreadAttrs` op itself is NOT
-                // suppressed — it is the trigger that emits the fold.)
-                if self.spread_elements.contains(&target)
-                    && !matches!(self.ir.op(op_id), RuntimeOp::SpreadAttrs { .. })
-                {
-                    continue;
-                }
+            ) {
+                return Ok(None);
             }
-            match self.ir.op(op_id) {
-                RuntimeOp::ReactiveText { target, expr } => {
-                    // Rewrite the interpolation expression at BUILD time (fallible —
-                    // an `await` / destructuring write inside `{…}` fails closed
-                    // here, before the plan exists). Compute `has_call` for the
-                    // memoizer.
-                    let analyzed = self.ir.analysis.expressions.get(*expr);
-                    let rewritten = self.rewrite(*expr, analyzed.scope)?;
-                    let has_call = super::reactive_analysis::expr_has_call(
-                        analyzed.source,
-                        analyzed.scope,
-                        &self.ir.analysis.bindings,
-                        &self.ir.analysis.scopes,
-                        &self.declared_roots,
-                    );
-                    ops.push(ClientRuntimeOp::ReactiveText {
-                        target: ClientNodeId(target.0),
-                        expr: *expr,
-                        rewritten,
-                        has_call,
-                    });
-                }
-                RuntimeOp::Binding { target, bind } => {
-                    let op = self.project_bind_op(*target, bind, scope_lexical)?;
-                    ops.push(op);
-                }
-                RuntimeOp::Event { target, event } => {
-                    let op = self.project_event_op(*target, event, scope_lexical)?;
-                    ops.push(op);
-                }
-                // A dynamic attribute / class / style write .
-                RuntimeOp::ReactiveAttr { target, attr } => match attr.kind {
-                    AttrOpKind::Plain => {
-                        // A `bind:group` input's DYNAMIC/mixed `value` is NOT a generic
-                        // reactive attr — it is the group-value source, emitted as the
-                        // change-tracked `$.template_effect` update + the bind getter
-                        // dependency read (see `group_dynamic_values` / the `Bind` op). Skip
-                        // the generic reactive-attr projection for it (which would mis-route
-                        // `value` through the form-control refusal).
-                        let is_group_value = attr.name == "value"
-                            && self.group_dynamic_values.iter().any(|(n, _)| *n == *target);
-                        // The first op for this `(target, name)` builds the WHOLE
-                        // attribute value (the full `Dynamic` / `Mixed` concatenation);
-                        // a Mixed attribute's later per-part ops are folded into it.
-                        if !is_group_value && plain_attr_done.insert((*target, attr.name.clone())) {
-                            let op = self.project_reactive_attr_op(*target, &attr.name)?;
-                            ops.push(op);
-                        }
-                    }
-                    AttrOpKind::Class => {
-                        // The first class op for this element materializes the WHOLE
-                        // coalesced `$.set_class`; later class ops are folded into it.
-                        if class_done.insert(*target) {
-                            let op = self.project_set_class_op(*target)?;
-                            ops.push(op);
-                        }
-                    }
-                    AttrOpKind::Style => {
-                        if style_done.insert(*target) {
-                            let op = self.project_set_style_op(*target)?;
-                            ops.push(op);
-                        }
-                    }
-                },
-                // A non-single-expression style directive trigger (static-text OR mixed) —
-                // the coalesced `$.set_style` projection fires once per element (same
-                // `style_done` dedup as the reactive style path), reading every style
-                // directive (Expr + Text + Mixed).
-                RuntimeOp::StyleDirectiveTrigger { target } => {
-                    if style_done.insert(*target) {
-                        let op = self.project_set_style_op(*target)?;
-                        ops.push(op);
-                    }
-                }
-                // A "cannot be set statically" attribute init (`autofocus` /
-                // media `muted`) — the §1.2-class non-static-property surface (5a).
-                RuntimeOp::NonStaticProperty { target, property } => {
-                    let op = self.project_non_static_property_op(*target, property)?;
-                    ops.push(op);
-                }
-                // A spread element folds its WHOLE attribute set (in source order) into a
-                // single `$.attribute_effect`. The IR emits one `SpreadAttrs` op per
-                // spread; the FIRST one materializes the whole fold (reading every
-                // co-located attribute from the element), later ones are skipped.
-                RuntimeOp::SpreadAttrs { target, .. } => {
-                    if spread_attrs_done.insert(*target) {
-                        let op = self.project_attribute_effect_op(*target)?;
-                        ops.push(op);
-                    }
-                }
-                // A broad op the supported surface never produces — defensive
-                // refusal (never silently dropped).
-                RuntimeOp::Attachment { .. }
-                | RuntimeOp::Action { .. }
-                | RuntimeOp::Transition { .. } => {
-                    return Err(UnsupportedSvelteRuntimeSurface::DynamicAttribute {
-                        name: "unsupported-op".to_string(),
-                        span: Span::new(0, 0),
-                    });
-                }
+            if self.spread_elements.contains(&target)
+                && !matches!(self.ir.op(op_id), RuntimeOp::SpreadAttrs { .. })
+            {
+                return Ok(None);
             }
         }
-        // The `{@html}` raw-markup nodes have NO IR runtime op (they are tag NODES), so
-        // their `$.html` ops are projected here, in IR node-id (source) order. Each is
-        // emitted as a distinct `ClientRuntimeOp::Html` carrying its already-assembled
-        // payload (a `() => expr` thunk, or the bare elided callee) and its only-child
-        // topology flag.
-        let mut html_ids: Vec<NodeId> = self.html_nodes.clone();
-        html_ids.sort_by_key(|n| n.0);
-        for node_id in html_ids {
-            let op = self.project_html_op(node_id)?;
-            ops.push(op);
+        let mut out = None;
+        match self.ir.op(op_id) {
+            RuntimeOp::ReactiveText { target, expr } => {
+                // Rewrite the interpolation expression at BUILD time (fallible — an
+                // `await` / destructuring write inside `{…}` fails closed here, before
+                // the plan exists). Compute `has_call` for the memoizer.
+                let analyzed = self.ir.analysis.expressions.get(*expr);
+                let rewritten = self.rewrite(*expr, analyzed.scope)?;
+                let has_call = super::reactive_analysis::expr_has_call(
+                    analyzed.source,
+                    analyzed.scope,
+                    &self.ir.analysis.bindings,
+                    &self.ir.analysis.scopes,
+                    &self.declared_roots,
+                );
+                out = Some(ClientRuntimeOp::ReactiveText {
+                    target: ClientNodeId(target.0),
+                    expr: *expr,
+                    rewritten,
+                    has_call,
+                });
+            }
+            RuntimeOp::Binding { target, bind } => {
+                out = Some(self.project_bind_op(*target, bind, scope_lexical)?);
+            }
+            RuntimeOp::Event { target, event } => {
+                out = Some(self.project_event_op(*target, event, scope_lexical)?);
+            }
+            // A dynamic attribute / class / style write.
+            RuntimeOp::ReactiveAttr { target, attr } => match attr.kind {
+                AttrOpKind::Plain => {
+                    // A `bind:group` input's DYNAMIC/mixed `value` is NOT a generic
+                    // reactive attr — it is the group-value source, emitted as the
+                    // change-tracked `$.template_effect` update + the bind getter
+                    // dependency read (see `group_dynamic_values` / the `Bind` op). Skip
+                    // the generic reactive-attr projection for it (which would mis-route
+                    // `value` through the form-control refusal).
+                    let is_group_value = attr.name == "value"
+                        && self.group_dynamic_values.iter().any(|(n, _)| *n == *target);
+                    // The first op for this `(target, name)` builds the WHOLE attribute
+                    // value (the full `Dynamic` / `Mixed` concatenation); a Mixed
+                    // attribute's later per-part ops are folded into it.
+                    if !is_group_value && dedup.plain_attr_done.insert((*target, attr.name.clone()))
+                    {
+                        out = Some(self.project_reactive_attr_op(*target, &attr.name)?);
+                    }
+                }
+                AttrOpKind::Class => {
+                    // The first class op for this element materializes the WHOLE coalesced
+                    // `$.set_class`; later class ops are folded into it.
+                    if dedup.class_done.insert(*target) {
+                        out = Some(self.project_set_class_op(*target)?);
+                    }
+                }
+                AttrOpKind::Style => {
+                    if dedup.style_done.insert(*target) {
+                        out = Some(self.project_set_style_op(*target)?);
+                    }
+                }
+            },
+            // A non-single-expression style directive trigger (static-text OR mixed) — the
+            // coalesced `$.set_style` projection fires once per element (same `style_done`
+            // dedup as the reactive style path), reading every style directive.
+            RuntimeOp::StyleDirectiveTrigger { target } => {
+                if dedup.style_done.insert(*target) {
+                    out = Some(self.project_set_style_op(*target)?);
+                }
+            }
+            // A "cannot be set statically" attribute init (`autofocus` / media `muted`) —
+            // the §1.2-class non-static-property surface (5a).
+            RuntimeOp::NonStaticProperty { target, property } => {
+                out = Some(self.project_non_static_property_op(*target, property)?);
+            }
+            // A spread element folds its WHOLE attribute set (in source order) into a
+            // single `$.attribute_effect`. The IR emits one `SpreadAttrs` op per spread;
+            // the FIRST one materializes the whole fold, later ones are skipped.
+            RuntimeOp::SpreadAttrs { target, .. } => {
+                if dedup.spread_attrs_done.insert(*target) {
+                    out = Some(self.project_attribute_effect_op(*target)?);
+                }
+            }
+            // A broad op the supported surface never produces — defensive refusal (never
+            // silently dropped).
+            RuntimeOp::Attachment { .. }
+            | RuntimeOp::Action { .. }
+            | RuntimeOp::Transition { .. } => {
+                return Err(UnsupportedSvelteRuntimeSurface::DynamicAttribute {
+                    name: "unsupported-op".to_string(),
+                    span: Span::new(0, 0),
+                });
+            }
         }
-        Ok(ops)
+        Ok(out)
     }
 
     /// Whether a template expression references a reactive SIGNAL (the official

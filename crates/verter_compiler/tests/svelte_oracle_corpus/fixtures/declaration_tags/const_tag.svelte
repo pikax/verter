@@ -1,10 +1,10 @@
 <script>
-	let items = $state([{ qty: 2, price: 3 }, { qty: 1, price: 5 }]);
+	let { items } = $props();
 </script>
 
-<ul>
+<div>
 	{#each items as item}
 		{@const total = item.qty * item.price}
-		<li>{total}</li>
+		<p>{total}</p>
 	{/each}
-</ul>
+</div>

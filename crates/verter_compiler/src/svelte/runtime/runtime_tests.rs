@@ -3563,10 +3563,14 @@ mod topology_oracle {
     }
 
     /// The COMPLETE set of structural runtime helpers the pre-lowering plan can
-    /// ever record — its OWNED universe. EXCLUDES the fine-grained DOM-walk helpers
-    /// (`first_child` / `child` / `sibling` / `reset` / `next` / `text`) and the
-    /// script read-rewrite helpers (`get` / `set` / `state` / `proxy` /
-    /// `template_effect` / `set_text`) — those are the emitting backend's concern.
+    /// ever record — its OWNED universe. EXCLUDES the fine-grained DOM-WALK helpers
+    /// (`first_child` / `child` / `sibling` / `reset` / `next`) and the script
+    /// read-rewrite helpers (`get` / `set` / `state` / `proxy` / `template_effect` /
+    /// `set_text`) — those are the emitting backend's concern. The text-first ROOT
+    /// factory `$.text` IS owned (it is a region's mount root, structurally parallel
+    /// to `from_html` / `comment`, recorded per text-first region in
+    /// [`plan_client_topology`]); only the INTERIOR reactive `$.text()` nodes a
+    /// `from_html` region creates mid-walk stay the backend's concern.
     ///
     /// Every helper the topology planner calls MUST appear here, so the topology
     /// assertion can pin the planned set EXACTLY (membership) against the
@@ -3574,6 +3578,7 @@ mod topology_oracle {
     /// slack remains.
     const OWNED_STRUCTURAL_HELPERS: &[SvelteHelper] = &[
         SvelteHelper::FromHtml,
+        SvelteHelper::Text,
         SvelteHelper::Comment,
         SvelteHelper::Append,
         SvelteHelper::If,
@@ -3893,6 +3898,13 @@ mod topology_oracle {
         }
 
         // (2) EXACT owned-helper COUNTS.
+        // LATENT CONSTRAINT (`Text`): the planner records only text-first ROOT
+        // `$.text` factories (see `plan_client_topology`), so for `Text` this
+        // compares a text-first-root-only planned count against the FULL golden
+        // `text` count (roots PLUS interior reactive `$.text()`). It is exact today
+        // only because every committed golden's interior-text count is 0; a future
+        // fixture emitting an interior reactive `$.text()` must take an
+        // `OwnedHelperCounts` ledger row here.
         if !is_ledgered(slug, TopologyAxis::OwnedHelperCounts) {
             let golden_counts = golden_helper_counts(&golden_rel);
             for owned in OWNED_STRUCTURAL_HELPERS {

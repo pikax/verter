@@ -94,6 +94,17 @@ pub(super) fn node_or_descendant_dynamic(ir: &SvelteRuntimeIr, node_id: NodeId) 
         // `$.html` op operates on a `<!>` anchor var, or — when it is the sole controlled
         // child — on the parent element followed by `$.reset(parent)`).
         IrNode::Tag(super::ir::TagIr::Html { .. }) => true,
+        // A `{@debug}` tag emits a reactive `$.template_effect` at its DOCUMENT position,
+        // so an element hosting one must be NAMED + walked (its effect is interleaved into
+        // the child walk). The debug occupies no DOM position itself (it is dropped from the
+        // clean sequence — never a `$.reset`-triggering named child), so an element whose
+        // ONLY dynamic descendant is a `{@debug}` is named without a reset.
+        IrNode::Tag(super::ir::TagIr::Debug { .. }) => true,
+        // A control-flow block (`{#if}`/`{#each}`/`{#await}`/`{#key}`) is a dynamic node the
+        // walk must reach — its `<!>` anchor var hosts the `$.if`/`$.each`/`$.await`/`$.key`
+        // call. A `{#snippet}` is a non-rendering DECLARATION (refused upstream / dropped
+        // from the clean sequence), so it never reaches here.
+        IrNode::Block(block) => !matches!(block, super::ir::BlockIr::Snippet { .. }),
         IrNode::Element(el) => {
             el.attrs.iter().any(super::html::attr_is_dynamic_surface)
                 || el

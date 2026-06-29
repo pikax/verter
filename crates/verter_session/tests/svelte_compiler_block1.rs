@@ -548,7 +548,8 @@ fn svelte_projector_diagnostic_reaches_diagnostics_snapshot() {
 #[test]
 fn runtime_main_request_on_a_refused_svelte_component_is_an_explicit_refusal_yet_ide_resolves() {
     // R6: requesting the runtime `Main` of a Svelte component whose runtime surface
-    // is REFUSED (here an `{#if}` block — a 5e unsupported construct) yields the
+    // is REFUSED (here a `<Child />` COMPONENT reference — the runtime component/snippet
+    // surface, refused as `svelte-runtime-unsupported-component`) yields the
     // EXPLICIT `HostError::RuntimeSurfaceRefused` (carrying the precise
     // `svelte-runtime-unsupported-*` reason) — NOT a silent `MissingVirtualNode`,
     // and NOT a successful compile. YET the IDE projection (`get_ide`) still
@@ -556,7 +557,7 @@ fn runtime_main_request_on_a_refused_svelte_component_is_an_explicit_refusal_yet
     // ignored `runtime_surface_refused` and collapsed the request to a generic
     // missing node, indistinguishable from a clean IDE-only carrier).
     let host = host();
-    let source = "<script>let c = $state(true);</script>\n{#if c}<p>yes</p>{/if}\n";
+    let source = "<script>let c = $state(true);</script>\n<Child answer={c} />\n";
     upsert(&host, "/src/Refused.svelte", source, FileLanguage::svelte());
     let profile = ide_profile();
 
@@ -573,6 +574,13 @@ fn runtime_main_request_on_a_refused_svelte_component_is_an_explicit_refusal_yet
             assert!(
                 diagnostic_code.starts_with("svelte-runtime-unsupported-"),
                 "the refusal must carry the precise reason, got: {diagnostic_code}"
+            );
+            // A `<Child />` component reference refuses with the EXACT
+            // `ComponentOrSnippet` diagnostic code — assert it precisely.
+            assert_eq!(
+                diagnostic_code, "svelte-runtime-unsupported-component",
+                "a component-reference root must refuse with the exact \
+                 `svelte-runtime-unsupported-component` code, got: {diagnostic_code}"
             );
         }
         Err(HostError::MissingVirtualNode { .. }) => panic!(
@@ -614,6 +622,9 @@ fn runtime_main_request_on_a_supported_svelte_component_returns_the_main_module(
 
 #[test]
 fn cached_runtime_refusal_satisfies_a_main_demand_without_recompute() {
+    // The refused runtime surface here is a `<Child />` COMPONENT reference (the runtime
+    // component/snippet surface, `svelte-runtime-unsupported-component`); its IDE
+    // projection still resolves.
     // A WARM cached runtime refusal (`runtime_surface_refused = true`, no `Main`
     // output) must SATISFY a `get_virtual_file(Main)` demand from the cache — the
     // serve gate (`compile_serve_satisfies_demand`) treats a `Main` demand as
@@ -626,7 +637,7 @@ fn cached_runtime_refusal_satisfies_a_main_demand_without_recompute() {
     // gate (which required `outputs.contains_key(Main)` and so recompiled the refusal
     // on every request — the second request's cold-run count would INCREASE).
     let host = host();
-    let source = "<script>let c = $state(true);</script>\n{#if c}<p>yes</p>{/if}\n";
+    let source = "<script>let c = $state(true);</script>\n<Child answer={c} />\n";
     upsert(
         &host,
         "/src/RefusedCached.svelte",
@@ -644,19 +655,48 @@ fn cached_runtime_refusal_satisfies_a_main_demand_without_recompute() {
         })
     };
 
-    // First request: the cold compile runs, fails closed, and the refusal is cached.
-    assert!(
-        matches!(request(), Err(HostError::RuntimeSurfaceRefused { .. })),
-        "the first runtime Main request on a refused component is a typed refusal"
-    );
+    // First request: the cold compile runs, fails closed, and the refusal is cached
+    // carrying the EXACT `svelte-runtime-unsupported-component` code.
+    match request() {
+        Err(HostError::RuntimeSurfaceRefused {
+            diagnostic_code, ..
+        }) => assert_eq!(
+            diagnostic_code, "svelte-runtime-unsupported-component",
+            "the first runtime Main request on a refused component is a typed refusal \
+             carrying the exact `svelte-runtime-unsupported-component` code, got: \
+             {diagnostic_code}"
+        ),
+        Ok(_) => panic!(
+            "the first runtime Main request on a refused component must be a typed \
+             RuntimeSurfaceRefused, not a successful Main module"
+        ),
+        Err(e) => panic!(
+            "the first runtime Main request on a refused component must be a typed \
+             RuntimeSurfaceRefused, got: {e:?}"
+        ),
+    }
     let cold_after_first = host.provenance_snapshot().compile_cold_runs;
 
-    // Second request: served from the WARM cached refusal — still the typed refusal,
-    // and NO new cold run (the cold-run count is unchanged).
-    assert!(
-        matches!(request(), Err(HostError::RuntimeSurfaceRefused { .. })),
-        "the second runtime Main request on a refused component is STILL a typed refusal"
-    );
+    // Second request: served from the WARM cached refusal — still the typed refusal
+    // carrying the same exact code, and NO new cold run (the cold-run count is unchanged).
+    match request() {
+        Err(HostError::RuntimeSurfaceRefused {
+            diagnostic_code, ..
+        }) => assert_eq!(
+            diagnostic_code, "svelte-runtime-unsupported-component",
+            "the warm-served runtime Main request on a refused component is STILL a typed \
+             refusal carrying the exact `svelte-runtime-unsupported-component` code, got: \
+             {diagnostic_code}"
+        ),
+        Ok(_) => panic!(
+            "the second runtime Main request on a refused component must STILL be a typed \
+             RuntimeSurfaceRefused, not a successful Main module"
+        ),
+        Err(e) => panic!(
+            "the second runtime Main request on a refused component must STILL be a typed \
+             RuntimeSurfaceRefused, got: {e:?}"
+        ),
+    }
     let cold_after_second = host.provenance_snapshot().compile_cold_runs;
     assert_eq!(
         cold_after_first, cold_after_second,

@@ -32,6 +32,8 @@ mod bind_target_names;
 pub mod client;
 mod client_allowlist;
 mod client_bind;
+mod client_block_emit;
+mod client_block_plan;
 mod client_codegen_helpers;
 mod client_effect;
 mod client_event;
@@ -44,6 +46,7 @@ mod client_shapes;
 mod client_spread_html_emit;
 mod client_surface;
 mod client_surface_element_query;
+mod client_surface_refuse;
 mod client_walk;
 mod css_reject;
 mod entity_decode;
@@ -91,16 +94,16 @@ use verter_span::Span;
 
 use attr_lowering::{lower_attributes, AttrHost};
 use expr::{
-    collect_expr_references, parse_declarators, parse_pattern_names, parse_render_call,
-    reparse_module, AnalyzedExpr, BindingInfo, BindingRuntimeKind, BindingTable, DeclaratorKeyword,
-    ExprArena, RenderCalleeShape, ScopeGraph, ScopeId, ScriptAnalysis,
+    collect_expr_references, parse_debug_identifier_spans, parse_declarators, parse_pattern_names,
+    parse_render_call, reparse_module, AnalyzedExpr, BindingInfo, BindingRuntimeKind, BindingTable,
+    DeclaratorKeyword, ExprArena, RenderCalleeShape, ScopeGraph, ScopeId, ScriptAnalysis,
 };
 use html::StaticTemplatePlan;
 use ir::{
-    AttrIr, BlockIr, ComponentIr, ComponentIrNode, DeclKind, ElementIr, EscapeMode, ExprId,
-    IfBranch, IrNode, NodeId, PatternBindings, PatternId, RenderCallee, RuntimeAnalysis, RuntimeOp,
-    SpecialElementIr, SpecialKind, SvelteMode, SvelteRuntimeIr, TagIr, TemplateDeclarator,
-    TemplateScope, TemplateScopeId,
+    AttrIr, BlockIr, ComponentIr, ComponentIrNode, DebugArg, DeclKind, ElementIr, EscapeMode,
+    ExprId, IfBranch, IrNode, NodeId, PatternBindings, PatternId, RenderCallee, RuntimeAnalysis,
+    RuntimeOp, SpecialElementIr, SpecialKind, SvelteMode, SvelteRuntimeIr, TagIr,
+    TemplateDeclarator, TemplateRune, TemplateScope, TemplateScopeId,
 };
 use state_scan::script_uses_runes;
 
@@ -209,6 +212,10 @@ pub(super) struct LoweringCtx<'a> {
     /// Pending `{@render}` tags whose callee is resolved AFTER lowering (so a
     /// forward-referenced snippet declared later in the same scope still resolves).
     pending_renders: Vec<PendingRender>,
+    /// BLOCK-scoped rune declarators (`{let x = $state(0)}`) registered during template
+    /// lowering, tracked for the post-template `$state` finalizer (a template write flips
+    /// the lowering to `$.state`) — the same write-gated pipeline as instance-script state.
+    block_rune_tracking: Vec<state_prep::TrackedState>,
 }
 
 /// A `{@render}` tag awaiting callee resolution: the node to finalize, the inner
@@ -503,6 +510,7 @@ pub fn lower_parsed_svelte_to_ir<'a>(
         bindings,
         errors,
         pending_renders: Vec::new(),
+        block_rune_tracking: Vec::new(),
     };
 
     // The root template scope owns the top-level template nodes.
@@ -526,6 +534,12 @@ pub fn lower_parsed_svelte_to_ir<'a>(
     // shadowed module binding.
     state_prep::finalize_state_classifications(&mut ctx, &module_state_tracking);
     state_prep::finalize_state_classifications(&mut ctx, &state_tracking);
+    // Finalize the BLOCK-scoped rune declarators (`{let x = $state(0)}`) discovered during
+    // template lowering — the same write-gated pass, so a template `x++` flips `x` to
+    // `$.state`. (Taken out of `ctx` to satisfy the borrow checker — the finalizer needs
+    // `&mut ctx`.)
+    let block_rune_tracking = std::mem::take(&mut ctx.block_rune_tracking);
+    state_prep::finalize_state_classifications(&mut ctx, &block_rune_tracking);
 
     // Populate the reactive runtime ops for every reactive surface the lowering
     // detected, attaching each op to its owning template scope.
@@ -802,9 +816,13 @@ fn lower_branch_body(
     ts
 }
 
-/// Lower an `{#each}` block. The item / index bindings are SIGNAL reads
-/// (`EachSignal`), declared in the body scope so a same-name outer signal is
-/// shadowed.
+/// Lower an `{#each}` block. The ITEM binding is a SIGNAL read (`EachSignal`),
+/// declared in the body scope so a same-name outer signal is shadowed. The INDEX
+/// binding is a signal ONLY for a KEYED each (where items reorder, so an item's
+/// index can change — official sets `EACH_INDEX_REACTIVE` and reads `$.get(i)`);
+/// for an UNKEYED each the index is positional and INERT (`PlainLocal`, read as
+/// the plain callback parameter `i`, NOT `$.get(i)`), matching the official
+/// `flags |= EACH_INDEX_REACTIVE` gate (`keyed && index`).
 fn lower_each_block(
     ctx: &mut LoweringCtx,
     block: &SvelteBlock,
@@ -817,11 +835,31 @@ fn lower_each_block(
         .head_expr
         .map(|s| ctx.push_expr(s, scope))
         .unwrap_or_else(|| ctx.push_expr(Span::new(0, 0), scope));
-    // The body scope binds the item/index as signals.
+    // The body scope binds the item as a signal; the index is reactive ONLY when
+    // the each is keyed (the official `keyed && index` reactivity gate).
     let body_scope = ctx.scopes.push_scope(Some(scope));
     let item_pat = item.map(|s| ctx.push_pattern(s, body_scope, BindingRuntimeKind::EachSignal));
-    let index_pat = index.map(|s| ctx.push_pattern(s, body_scope, BindingRuntimeKind::EachSignal));
-    let key_expr = key.map(|s| ctx.push_expr(s, body_scope));
+    let index_kind = if key.is_some() {
+        BindingRuntimeKind::EachSignal
+    } else {
+        BindingRuntimeKind::PlainLocal
+    };
+    let index_pat = index.map(|s| ctx.push_pattern(s, body_scope, index_kind));
+    // The KEY expression of a keyed each is rewritten in its OWN callback scope: the
+    // item / index are PLAIN callback params there (`(item) => item.id` — read plainly,
+    // shadowing any same-name OUTER signal), DISTINCT from the body scope where the item
+    // is a signal. This mirrors the official `key_state`, which deletes the item's signal
+    // transform so the key reads it directly.
+    let key_expr = key.map(|s| {
+        let key_scope = ctx.scopes.push_scope(Some(scope));
+        if let Some(item_span) = item {
+            ctx.push_pattern(item_span, key_scope, BindingRuntimeKind::PlainLocal);
+        }
+        if let Some(index_span) = index {
+            ctx.push_pattern(index_span, key_scope, BindingRuntimeKind::PlainLocal);
+        }
+        ctx.push_expr(s, key_scope)
+    });
     let ts = ctx.push_template_scope(body_scope);
     let mut roots = Vec::new();
     for child in &block.children {
@@ -1041,8 +1079,43 @@ fn lower_tag(ctx: &mut LoweringCtx, tag: &SvelteTag, scope: ScopeId) -> Option<N
         SvelteTagKind::Const => lower_declaration_tag(ctx, tag, DeclKind::Const, scope),
         SvelteTagKind::Let => lower_declaration_tag(ctx, tag, DeclKind::Let, scope),
         SvelteTagKind::Debug => {
-            let exprs = vec![ctx.push_expr(tag.inner, scope)];
-            Some(ctx.push_node(IrNode::Tag(TagIr::Debug { exprs })))
+            // `{@debug a, b}` lowers to ONE debug expression PER comma-separated
+            // argument (the official `DebugTag` walks `node.identifiers`
+            // individually), NOT a single `SequenceExpression` — the spans come from
+            // the OXC parse, never a byte scan. A non-identifier argument is the official
+            // `debug_tag_invalid_arguments` reject (the snapshot/object key must be a bare
+            // name) — fail closed, never emit an invalid object key.
+            let inner_text = span_text(ctx.source, tag.inner);
+            let idents = match parse_debug_identifier_spans(inner_text) {
+                Ok(idents) => idents,
+                Err(()) => {
+                    ctx.errors.push(
+                        "svelte-runtime-debug-invalid-arguments",
+                        format!(
+                            "`{{@debug}}` arguments must be identifiers, not arbitrary \
+                             expressions (`{}`)",
+                            inner_text.trim()
+                        ),
+                        tag.span,
+                    );
+                    return None;
+                }
+            };
+            // The object KEY is the parsed identifier name (carried on `DebugArg`); the
+            // span only seeds the snapshot expression. So a Unicode-escaped argument keys
+            // on its decoded name, not its raw escape bytes.
+            let args = idents
+                .into_iter()
+                .map(|ident| {
+                    let arg_span =
+                        Span::new(tag.inner.start + ident.start, tag.inner.start + ident.end);
+                    DebugArg {
+                        name: ident.name,
+                        expr: ctx.push_expr(arg_span, scope),
+                    }
+                })
+                .collect();
+            Some(ctx.push_node(IrNode::Tag(TagIr::Debug { args })))
         }
         SvelteTagKind::Attach => {
             let expr = ctx.push_expr(tag.inner, scope);
@@ -1132,13 +1205,56 @@ fn lower_declaration_tag(
     };
     let mut declarators = Vec::with_capacity(parsed.len());
     for decl in parsed {
+        // Every declarator is first declared as an INERT block-local (`TemplateDeclLocal`);
+        // a single-name `{let x = $state(<primitive>)}` / `{let x = $derived(<arg>)}` rune
+        // declarator is then RECLASSIFIED through the shared rune/state pipeline (its binding
+        // row is reclassified in place — `$state` write-gated + tracked for the finalizer,
+        // `$derived` a `Derived` signal), so its template reads/writes route through the
+        // signal rewriter; a rune the pipeline cannot lower stays inert and fails closed.
         let pattern =
             ctx.push_pattern_names(&decl.names, scope, BindingRuntimeKind::TemplateDeclLocal);
-        let init = decl.init.map(|(s, e)| {
-            let init_span = Span::new(tag.inner.start + s, tag.inner.start + e);
-            ctx.push_expr(init_span, scope)
+        let init_span = decl
+            .init
+            .map(|(s, e)| Span::new(tag.inner.start + s, tag.inner.start + e));
+        let mut rune = None;
+        let mut derived_arg = None;
+        if decl.names.len() == 1 {
+            if let Some(span) = init_span {
+                let init_text = span_text(ctx.source, span).to_string();
+                let binding = ctx.patterns[pattern.0 as usize].bindings[0];
+                match state_prep::classify_block_rune_declarator(
+                    binding,
+                    &init_text,
+                    &mut ctx.bindings,
+                ) {
+                    Some(state_prep::BlockRuneDeclarator::State { tracked, init }) => {
+                        ctx.block_rune_tracking.push(tracked);
+                        rune = Some(TemplateRune::State(init));
+                    }
+                    Some(state_prep::BlockRuneDeclarator::Derived { arg }) => {
+                        // The `$derived` ARGUMENT expr — rewritten into the `$.derived(() =>
+                        // …)` body at projection; carried on the declarator's `init` slot.
+                        let arg_span = Span::new(span.start + arg.0, span.start + arg.1);
+                        derived_arg = Some(ctx.push_expr(arg_span, scope));
+                        rune = Some(TemplateRune::Derived);
+                    }
+                    None => {}
+                }
+            }
+        }
+        // A `$state` rune declarator carries NO init expr (its primitive text rides the
+        // `TemplateRune::State`); a `$derived` declarator carries its rewritable argument;
+        // an inert declarator carries its plain initializer.
+        let init = match rune {
+            Some(TemplateRune::State(_)) => None,
+            Some(TemplateRune::Derived) => derived_arg,
+            None => init_span.map(|span| ctx.push_expr(span, scope)),
+        };
+        declarators.push(TemplateDeclarator {
+            pattern,
+            init,
+            rune,
         });
-        declarators.push(TemplateDeclarator { pattern, init });
     }
     Some(ctx.push_node(IrNode::Tag(TagIr::Declaration { kind, declarators })))
 }

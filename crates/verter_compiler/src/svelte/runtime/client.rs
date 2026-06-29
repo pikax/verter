@@ -28,7 +28,8 @@
 use super::client_effect::{emit_text_effect, EffectBody, Memoizer};
 use super::client_event::{emit_delegate_epilogue, render_event_registration};
 use super::client_plan::{
-    AttrValue, ClientDynAttrEmit, ClientModulePlan, ClientNode, ClientRuntimeOp, EventEmit,
+    AttrValue, ClientBlock, ClientDynAttrEmit, ClientModulePlan, ClientNode, ClientRuntimeOp,
+    EventEmit,
 };
 use super::client_shapes::{BindGetSetForm, ClientBindShape, GroupBindKey};
 use super::client_walk::{
@@ -36,11 +37,11 @@ use super::client_walk::{
 };
 use super::entity_decode::decode_text_entities;
 use super::helpers::{ImportPlan, RuntimeImport};
-use super::html::{StaticTemplatePlan, TemplateFactory};
+use super::html::{StaticTemplatePlan, TemplateFlag};
 use super::ir::{IrNode, NodeId, SvelteRuntimeIr, TemplateScopeId};
 use super::topology::ClientTopologyPlan;
 use super::whitespace::{
-    clean_nodes, cleaned_text_run_parts, CleanContext, CleanItem, RunTextPart,
+    clean_nodes, clean_nodes_indexed, cleaned_text_run_parts, CleanContext, CleanItem, RunTextPart,
 };
 
 pub use super::unsupported::UnsupportedSvelteRuntimeSurface;
@@ -132,6 +133,52 @@ pub(super) struct ClientEmitter<'a> {
     /// alongside its rewritten getter/setter bodies.
     pub(super) inline_this_binds:
         rustc_hash::FxHashMap<NodeId, Vec<(BindGetSetForm, String, String)>>,
+    /// The per-region clone frame, keyed by [`TemplateScopeId`] — a module-hoisted
+    /// `$.from_html` factory + walk base ([`RegionFrame::FromHtml`]), an in-closure
+    /// `$.text(...)` text-first body ([`RegionFrame::TextNode`]), or an in-body
+    /// `$.comment()` anchor ([`RegionFrame::CommentAnchor`]). Built ONCE in [`Self::emit`]
+    /// by a POST-ORDER region traversal (a block body's template is hoisted BEFORE its
+    /// parent's, matching the official depth-first hoist order), so every region's frame is
+    /// looked up here, never re-synthesized.
+    pub(super) region_frame: rustc_hash::FxHashMap<TemplateScopeId, RegionFrame>,
+}
+
+/// One template-scope region's clone frame — HOW the region's body materializes its root
+/// DOM. Only a [`RegionFrame::FromHtml`] region module-hoists a clone factory and
+/// factory-calls it; a text-first region emits an IN-CLOSURE `$.text(...)` (no hoist, no
+/// `root()` call); a comment-anchor region creates its `$.comment()` frame in the body.
+#[derive(Debug, Clone)]
+pub(super) enum RegionFrame {
+    /// A module-hoisted `$.from_html(...)` clone factory: the body clones it via
+    /// `var <region> = <hoist_var>();`. `mounts_fragment` → the clone is a multi-root
+    /// FRAGMENT (walk descends via `$.first_child`); else it IS the single clone-root
+    /// element (walk via `$.child`).
+    FromHtml {
+        /// The module-hoisted factory var (`root` / `root_1` / …).
+        hoist_var: String,
+        /// Whether the clone var is the fragment (vs the single root element).
+        mounts_fragment: bool,
+    },
+    /// A TEXT-FIRST region: the whole cleaned body is a SINGLE text run (a lone static
+    /// text, or one-or-more accepted interpolations, with no element/block sibling). It
+    /// is emitted INLINE in the closure (`var text = $.text(<seed>)`) — NO module hoist
+    /// and NO clone-factory call, matching official `svelte@5.56.3`. The official text
+    /// NODE is created in-body and `$.append`ed, never a hoisted `$.text(...)` called as
+    /// a clone factory.
+    TextNode {
+        /// The seed text: `Some` for a PURE static-text run (official `$.text('hello')`),
+        /// `None` for a run with any interpolation (official `$.text()`, the reactive
+        /// `$.set_text` fills it).
+        seed: Option<String>,
+        /// Whether the OWNING block kind prepends a `$.next()` hydration-cursor advance
+        /// before the `$.text(...)`. This is owner-kind metadata (an `{#each}` body /
+        /// else-fallback emits it; an `{#if}` / `{#key}` / `{#await}` text-first body does
+        /// NOT) — decided by the owning block, never inferred from the `TextNode` shape.
+        prelude_next: bool,
+    },
+    /// A `$.comment()` anchor created IN the body — a block-only / empty / lone-`{@html}`
+    /// / standalone region. The walk treats the comment as a fragment (`$.first_child`).
+    CommentAnchor,
 }
 
 /// Which coalesced reactive op an accumulator belongs to. A node has at most one
@@ -187,6 +234,7 @@ impl<'a> ClientEmitter<'a> {
             group_binding_names: rustc_hash::FxHashMap::default(),
             group_binding_decls: Vec::new(),
             inline_this_binds: super::client_bind::build_inline_this_index(plan),
+            region_frame: rustc_hash::FxHashMap::default(),
         };
         // Allocate ONE collision-safe `bind:group` accumulator per DISTINCT group (keyed by
         // the structural bind target + scope), in source order, through the seeded DOM-var
@@ -223,7 +271,7 @@ impl<'a> ClientEmitter<'a> {
     /// arena index-for-index). This is the EMISSION-decision view: the walk reads a
     /// node's KIND / tag / supported attrs from here, never from the broad
     /// [`IrNode`] taxonomy.
-    fn client_node(&self, id: NodeId) -> &'a ClientNode {
+    pub(super) fn client_node(&self, id: NodeId) -> &'a ClientNode {
         &self.plan.nodes[id.0 as usize]
     }
 
@@ -260,34 +308,20 @@ impl<'a> ClientEmitter<'a> {
         emit_imports(&mut out, &topology.imports);
         out.push('\n');
 
-        // (2) Module hoists — the `$.from_html(...)` template factories. The
-        // supported surface is exactly the single-region (root) component; a
-        // multi-region component (a nested block body) is a block surface already
-        // refused upstream.
-        let root_factory = html_plan.templates.first();
-        // A lone `{@html}` root is `$.comment()`-anchored IN THE BODY (no module hoist),
-        // so it reserves no `root` factory var.
-        let comment_anchor_root = matches!(
-            root_factory,
-            Some(TemplateFactory::CommentAnchor {
-                reason: super::html::AnchorReason::RawHtmlRoot,
-            })
-        );
-        let root_var = if comment_anchor_root {
-            String::new()
-        } else {
-            self.alloc_name("root")
-        };
-        let mounts_fragment = if comment_anchor_root {
-            // No `var root = …` module hoist; the `$.comment()` is created in the body.
-            true
-        } else {
-            emit_root_hoist(&mut out, &root_var, root_factory)
-        };
+        // (2) Module hoists — the per-region `$.from_html(...)` template factories, allocated
+        // + emitted in POST-ORDER (a block body's template is hoisted BEFORE its parent's,
+        // matching the official depth-first hoist order). Each region's clone frame lands in
+        // `self.region_frame`; a text-first region records NO hoist (its `$.text(...)` is
+        // emitted in the body), and a comment-anchor / empty body region records no hoist (its
+        // `$.comment()` frame is created in the body). The `html_plan` is no longer consulted
+        // here — the emitter synthesizes each region's factory through the same
+        // `synthesize_region` the plan uses.
+        let _ = html_plan;
+        self.plan_region_factories(&mut out);
         out.push('\n');
 
-        // (3) The component body.
-        self.emit_body(&mut out, &root_var, mounts_fragment, comment_anchor_root);
+        // (3) The component body (the root region plus every nested block body, recursive).
+        self.emit_body(&mut out);
 
         // (4) The `$.delegate([...])` epilogue.
         if !topology.delegated_events.is_empty() {
@@ -298,15 +332,9 @@ impl<'a> ClientEmitter<'a> {
         ClientModule { code: out }
     }
 
-    /// Emit the component function body. `comment_anchor_root` marks the lone-`{@html}`
-    /// root whose fragment is `$.comment()` created in the body (no `root()` clone frame).
-    fn emit_body(
-        &mut self,
-        out: &mut String,
-        root_var: &str,
-        mounts_fragment: bool,
-        comment_anchor_root: bool,
-    ) {
+    /// Emit the component function shell + the ROOT region (which recursively emits every
+    /// nested block body through [`Self::emit_region`]).
+    fn emit_body(&mut self, out: &mut String) {
         // The component-context (`$.push`/`$.pop`) + props-param facts were decided
         // by the semantic projection (`SupportedClientIr::build`); the emitter reads
         // the narrow decision, never re-derives it.
@@ -347,48 +375,10 @@ impl<'a> ClientEmitter<'a> {
             out.push('\n');
         }
 
-        // The clone frame: `var fragment = root();` for a multi-root fragment,
-        // `var <stem> = root();` for a single-element clone-root. EVERY synthesized
-        // DOM local — including the multi-root `fragment` stem — routes through the
-        // collision-aware allocator (seeded with the user's top-level bindings), so a
-        // user binding of the same name (`let fragment`) pushes it to `fragment_1`
-        // instead of emitting a duplicate declaration.
-        let root_scope_id = self.ir().root;
-        // The official PRE-CLONE cursor advance: when the component-ROOT region is a
-        // multi-root fragment whose FIRST cleaned position is a TEXT / interpolation
-        // run (the `is_text_first` case — `phases/3-transform/.../Fragment.js`), the
-        // official compiler skips over the inserted leading anchor with a bare
-        // `$.next();` emitted BEFORE `var fragment = root();`. (Inside an element the
-        // leading text does NOT get this — the in-element walk advances via
-        // `$.first_child` / `$.child`; only the root fragment is text-first-aware.) The
-        // trailing static-run `$.next(skipped - 1)` in the walk is a SEPARATE cursor
-        // advance and stays as-is.
-        if mounts_fragment && !comment_anchor_root && self.root_region_is_text_first(root_scope_id)
-        {
-            out.push_str("\t$.next();\n");
-        }
-        let region_var = if mounts_fragment {
-            self.alloc_name("fragment")
-        } else {
-            // The single clone-root element's own var (named by its tag).
-            self.single_root_var_name(root_scope_id)
-        };
-        // A lone-`{@html}` root creates its fragment via `$.comment()` (no `root()` clone
-        // frame); every other root clones the module-hoisted `root` factory.
-        if comment_anchor_root {
-            out.push_str(&format!("\tvar {region_var} = $.comment();\n"));
-        } else {
-            out.push_str(&format!("\tvar {region_var} = {root_var}();\n"));
-        }
-
-        // The DOM walk populates the node/interp var maps the ops read.
-        self.emit_walk(out, root_scope_id, &region_var, mounts_fragment);
-
-        // The reactive ops (template_effect for reactive text, binds, events).
-        self.emit_ops(out, root_scope_id);
-
-        // The mount: `$.append($$anchor, <region_var>);`.
-        out.push_str(&format!("\t$.append($$anchor, {region_var});\n"));
+        // The ROOT region: its clone frame, walk (interleaving nested block calls),
+        // reactive ops, and mount into `$$anchor` — recursively emitting every nested
+        // block body region. (`emit_region` lives in `client_block_emit`.)
+        self.emit_region(out, self.ir().root, "$$anchor");
 
         if needs_push {
             out.push_str("\t$.pop();\n");
@@ -404,16 +394,32 @@ impl<'a> ClientEmitter<'a> {
     /// is already trimmed by `clean_nodes`, so it does not count (matching official's
     /// trim). Only the root fragment consults this; an in-element leading text is NOT
     /// text-first.
-    fn root_region_is_text_first(&self, scope_id: TemplateScopeId) -> bool {
+    pub(super) fn region_is_text_first(&self, scope_id: TemplateScopeId) -> bool {
         let scope = self.ir().template_scope(scope_id);
         let ctx = CleanContext::region_root();
         let items = clean_nodes(self.ir(), &scope.roots, ctx);
         matches!(items.first(), Some(CleanItem::TextRun { .. }))
     }
 
+    /// Bind every interpolation in a TEXT-FIRST region's sole text run to `text_var`, so the
+    /// reactive `$.set_text(text_var, …)` op (emitted by [`Self::emit_ops`]) reuses the
+    /// in-closure `$.text(...)` node var instead of the unbound `"text"` fallback (the X8
+    /// ReferenceError). A no-op when the region is not a single text run. The owning
+    /// emission (`emit_text_first_region`) lives in the sibling block-emit module, so this is
+    /// the `pub(super)` seam that keeps the private `interp_var` map encapsulated here.
+    pub(super) fn bind_text_first_run(&mut self, scope_id: TemplateScopeId, text_var: &str) {
+        let scope = self.ir().template_scope(scope_id);
+        let items = clean_nodes(self.ir(), &scope.roots, CleanContext::region_root());
+        if let [CleanItem::TextRun { interps, .. }] = items.as_slice() {
+            for &interp in interps {
+                self.interp_var.insert(interp, text_var.to_string());
+            }
+        }
+    }
+
     /// The variable name for a single-element clone-root region (named by the
     /// root element's tag, e.g. `button`).
-    fn single_root_var_name(&mut self, scope_id: TemplateScopeId) -> String {
+    pub(super) fn single_root_var_name(&mut self, scope_id: TemplateScopeId) -> String {
         let scope = self.ir().template_scope(scope_id);
         let ctx = CleanContext::region_root();
         let items = clean_nodes(self.ir(), &scope.roots, ctx);
@@ -435,7 +441,7 @@ impl<'a> ClientEmitter<'a> {
     /// dynamic position via `$.first_child`, then each subsequent position via
     /// `$.sibling(prev, delta)` (delta = the cleaned-sequence index difference,
     /// omitted when 1).
-    fn emit_walk(
+    pub(super) fn emit_walk(
         &mut self,
         out: &mut String,
         scope_id: TemplateScopeId,
@@ -444,16 +450,24 @@ impl<'a> ClientEmitter<'a> {
     ) {
         let scope = self.ir().template_scope(scope_id);
         let ctx = CleanContext::region_root();
-        let items = clean_nodes(self.ir(), &scope.roots, ctx);
+        let (items, last_indices) = clean_nodes_indexed(self.ir(), &scope.roots, ctx);
+        // The region-root `{@debug}` effects, grouped by the clean-item gap they precede
+        // (a `{@debug}` is non-rendering — dropped from `items` — so it rides a gap, never
+        // a DOM position). Emitted INTERLEAVED at their document position, never hoisted.
+        let gaps = self.debug_gaps(&scope.roots, &last_indices);
 
         if mounts_fragment {
             // Multi-root fragment: the clone var IS the fragment.
-            self.emit_walk_over_items(out, &items, WalkBase::Fragment(region_var), ctx);
+            self.emit_walk_over_items(out, &items, &gaps, WalkBase::Fragment(region_var), ctx);
         } else {
             // Single-element clone-root: the clone var IS the element; descend into
             // its children directly, and the element itself is reachable as
             // `region_var` (a dynamic op on it operates on the clone var directly).
             let [CleanItem::Node(only)] = items.as_slice() else {
+                // No rendered element — a region whose only content is non-rendering
+                // (e.g. a `{@debug}`-only block body). Emit the region-root debug effects
+                // at their document position (never dropped); there is no DOM walk.
+                self.emit_debug_gap(out, &gaps[0]);
                 return;
             };
             let only = *only;
@@ -468,6 +482,9 @@ impl<'a> ClientEmitter<'a> {
             let IrNode::Element(el) = self.ir().node(only) else {
                 return;
             };
+            // A region-root `{@debug}` that PRECEDES the clone-root element emits right
+            // after the clone frame (gaps[0]), before the element's own inits.
+            self.emit_debug_gap(out, &gaps[0]);
             // The clone-root element's own bind PRELUDE cleanup, INIT-domain attribute
             // ops, and `bind:this` are emitted right after the clone frame named it.
             // The official per-element order (`RegularElement.js`) is: the bind prelude
@@ -479,22 +496,38 @@ impl<'a> ClientEmitter<'a> {
             self.emit_bind_prelude(out, only, region_var);
             self.emit_node_inline_inits(out, only);
             self.emit_inline_bind_this(out, only);
-            let child_items = clean_nodes(self.ir(), &el.children, child_ctx);
-            self.emit_walk_over_items(out, &child_items, WalkBase::Element(region_var), child_ctx);
+            let (child_items, child_last) = clean_nodes_indexed(self.ir(), &el.children, child_ctx);
+            let child_gaps = self.debug_gaps(&el.children, &child_last);
+            self.emit_walk_over_items(
+                out,
+                &child_items,
+                &child_gaps,
+                WalkBase::Element(region_var),
+                child_ctx,
+            );
             // `$.reset(region_var)` after the clone-root element's children, when
             // any child was named (matches official's innermost-first reset order).
             if any_item_needs_name(self.ir(), &child_items) {
                 out.push_str(&format!("\t$.reset({region_var});\n"));
             }
+            // A region-root `{@debug}` that FOLLOWS the clone-root element emits after its
+            // subtree (gaps[1]).
+            self.emit_debug_gap(out, &gaps[1]);
         }
     }
 
     /// Emit a chained walk over a cleaned DOM-position sequence, populating the
     /// node/interp var maps.
+    ///
+    /// `gaps[g]` holds the non-rendering `{@debug}` nodes that fall in document order
+    /// BEFORE clean-item `g` (and `gaps[items.len()]` the trailing ones). Each is emitted
+    /// INTERLEAVED at its document position — never hoisted, never dropped — so the reactive
+    /// `$.template_effect(debug)` lands in the official source-order slot.
     fn emit_walk_over_items(
         &mut self,
         out: &mut String,
         items: &[CleanItem],
+        gaps: &[Vec<NodeId>],
         base: WalkBase,
         ctx: CleanContext,
     ) {
@@ -516,7 +549,32 @@ impl<'a> ClientEmitter<'a> {
         // `$.next()` is emitted for a fragment base unconditionally, but for an
         // element base only when this level actually named a position.
         let mut named_any = false;
+        // A sole CONTROLLED `{#each}` child of a regular element anchors on the element
+        // ITSELF (the official `is_controlled`): no `<!>` marker in the cloned skeleton, no
+        // `$.first_child`/`$.child` descent — the each call targets the base element var
+        // directly with the `EACH_IS_CONTROLLED` flag bit. The caller's `$.reset(base)` still
+        // fires (the each is a named position). Only an `{#each}` qualifies (matching the
+        // skeleton serializer's `is_sole_controlled`).
+        if let WalkBase::Element(base_var) = base {
+            if let [CleanItem::Node(only)] = items {
+                if matches!(
+                    self.client_node(*only),
+                    ClientNode::Block(ClientBlock::Each(_))
+                ) {
+                    // A `{@debug}` sibling around a sole-controlled `{#each}` still emits at
+                    // its document position (the each occupies the element itself).
+                    self.emit_debug_gap(out, &gaps[0]);
+                    self.node_var.insert(*only, base_var.to_string());
+                    self.emit_block_call(out, *only, base_var, true);
+                    self.emit_debug_gap(out, gaps.get(1).map_or(&[][..], |g| g));
+                    return;
+                }
+            }
+        }
         for (idx, item) in items.iter().enumerate() {
+            // Any `{@debug}` falling in document order BEFORE this clean position emits
+            // here — at its source-order slot — before the position's own walk/getter.
+            self.emit_debug_gap(out, &gaps[idx]);
             // Decide whether this position needs a name (it is dynamic, or hosts a
             // dynamic descendant we must reach). A non-named position is a STATIC
             // skip — count it for the trailing `$.next()` cursor advance.
@@ -577,6 +635,13 @@ impl<'a> ClientEmitter<'a> {
                             out.push_str(&format!("\t$.html({var}, {payload});\n"));
                         }
                     }
+                    // A control-flow block (`{#if}`/`{#each}`/`{#await}`/`{#key}`) at this
+                    // `<!>` anchor var: emit its runtime call INLINE here (interleaved into
+                    // the parent walk at the anchor position), recursing into the body
+                    // region(s). (`emit_block_call` lives in `client_block_emit`.)
+                    if matches!(self.client_node(*node), ClientNode::Block(_)) {
+                        self.emit_block_call(out, *node, &var, false);
+                    }
                     // The element is a NARROW `ClientNode::Element` (the emission
                     // decision); its children are the IR geometry the cleaner
                     // partitions. A non-element narrow node has no children to walk.
@@ -602,10 +667,13 @@ impl<'a> ClientEmitter<'a> {
                             // init-domain writes), BEFORE the next sibling.
                             self.emit_inline_bind_this(out, *node);
                             let child_ctx = ctx.for_children_of(tag);
-                            let child_items = clean_nodes(self.ir(), &el.children, child_ctx);
+                            let (child_items, child_last) =
+                                clean_nodes_indexed(self.ir(), &el.children, child_ctx);
+                            let child_gaps = self.debug_gaps(&el.children, &child_last);
                             self.emit_walk_over_items(
                                 out,
                                 &child_items,
+                                &child_gaps,
                                 WalkBase::Element(&var),
                                 child_ctx,
                             );
@@ -617,6 +685,10 @@ impl<'a> ClientEmitter<'a> {
                 }
             }
         }
+
+        // Any trailing `{@debug}` (after the last clean position) emits before the
+        // hydration cursor advance — at its document-order slot following the last node.
+        self.emit_debug_gap(out, &gaps[items.len()]);
 
         // The TRAILING static-run cursor advance (`$.next(skipped - 1)`): the
         // hydration cursor must skip past the static positions following the last
@@ -689,9 +761,7 @@ impl<'a> ClientEmitter<'a> {
     /// walk ([`Self::emit_node_inline_inits`]) at each element's `init` position —
     /// matching official — so this stage does NOT emit them. Every op is the NARROW
     /// [`ClientRuntimeOp`] vocabulary — no broad `RuntimeOp` is matched.
-    fn emit_ops(&mut self, out: &mut String, scope_id: TemplateScopeId) {
-        let _ = scope_id;
-
+    pub(super) fn emit_ops(&mut self, out: &mut String, scope_id: TemplateScopeId) {
         // The single combined `$.template_effect` — ALL reactive updates in source
         // order: reactive text (one `$.set_text` per text-node run, the official
         // `flush_sequence` dedup), then the reactive dynamic attr / class / style
@@ -703,7 +773,7 @@ impl<'a> ClientEmitter<'a> {
         let mut memoizer = Memoizer::default();
         let mut update_bodies: Vec<EffectBody> = Vec::new();
         let mut seen_text_vars = rustc_hash::FxHashSet::default();
-        for op in &self.plan.ops {
+        for op in self.plan.ops_in(scope_id) {
             match op {
                 ClientRuntimeOp::ReactiveText { target, .. } => {
                     let node = NodeId(target.0);
@@ -801,7 +871,7 @@ impl<'a> ClientEmitter<'a> {
         // during the walk (see `emit_inline_bind_this`), BEFORE this grouped text
         // effect — matching the official op order. Only `bind:value` and delegated
         // events are post-walk.
-        for op in &self.plan.ops {
+        for op in self.plan.ops_in(scope_id) {
             match op {
                 ClientRuntimeOp::Bind {
                     shape: ClientBindShape::This { .. },
@@ -1010,7 +1080,7 @@ impl<'a> ClientEmitter<'a> {
     /// from the narrow plan ops (the op's `target` is the interp node id). A node
     /// with no op (unreachable for a reactive interpolation) yields its raw text.
     fn reactive_text_for(&self, interp: NodeId) -> (String, bool) {
-        for op in &self.plan.ops {
+        for op in self.plan.all_ops() {
             if let ClientRuntimeOp::ReactiveText {
                 target,
                 rewritten,
@@ -1203,8 +1273,7 @@ impl<'a> ClientEmitter<'a> {
         }
         let inits: Vec<InlineInit> = self
             .plan
-            .ops
-            .iter()
+            .all_ops()
             .filter_map(|op| match op {
                 // A non-reactive plain-attribute / property / autofocus init. The
                 // value is read once (no effect), so it is emitted INLINE with NO
@@ -1373,47 +1442,27 @@ fn emit_imports(out: &mut String, imports: &ImportPlan) {
 /// is still a SINGLE clone-root element: `$.from_html` returns the element, so the
 /// walk must take the single-element path (`var video = root();`), NOT the fragment
 /// path (`$.first_child(root())` → null on a single element).
-fn emit_root_hoist(out: &mut String, root_var: &str, factory: Option<&TemplateFactory>) -> bool {
-    match factory {
-        Some(TemplateFactory::FromHtml {
-            html,
-            fragment_flag,
-        }) => {
-            let escaped = escape_template_literal(html);
-            match fragment_flag {
-                Some(flag) => {
-                    out.push_str(&format!(
-                        "var {root_var} = $.from_html(`{escaped}`, {});\n",
-                        flag.literal()
-                    ));
-                    flag.is_fragment()
-                }
-                None => {
-                    out.push_str(&format!("var {root_var} = $.from_html(`{escaped}`);\n"));
-                    false
-                }
-            }
+pub(super) fn emit_root_hoist(
+    out: &mut String,
+    root_var: &str,
+    html: &str,
+    fragment_flag: Option<TemplateFlag>,
+) -> bool {
+    // ONLY a `$.from_html(...)` clone factory is module-hoisted. A text-first region emits
+    // its `$.text(...)` IN-CLOSURE (it is never a hoisted clone factory — calling a text
+    // node like `root()` is the X8 bug), and a comment-anchor / standalone region creates
+    // its `$.comment()` frame in the body, so neither reaches this hoist.
+    let escaped = escape_template_literal(html);
+    match fragment_flag {
+        Some(flag) => {
+            out.push_str(&format!(
+                "var {root_var} = $.from_html(`{escaped}`, {});\n",
+                flag.literal()
+            ));
+            flag.is_fragment()
         }
-        Some(TemplateFactory::TextNode { seed }) => {
-            match seed {
-                Some(text) => {
-                    let escaped = escape_template_literal(text);
-                    out.push_str(&format!("var {root_var} = $.text(`{escaped}`);\n"));
-                }
-                None => out.push_str(&format!("var {root_var} = $.text();\n")),
-            }
-            false
-        }
-        Some(TemplateFactory::CommentAnchor { .. }) => {
-            out.push_str(&format!("var {root_var} = $.comment();\n"));
-            false
-        }
-        // A standalone root has no factory; components/snippets are refused
-        // upstream, so this is unreachable for a supported component. Emit a
-        // comment anchor as a
-        // defensive fallback (never silently nothing).
-        Some(TemplateFactory::Standalone { .. }) | None => {
-            out.push_str(&format!("var {root_var} = $.comment();\n"));
+        None => {
+            out.push_str(&format!("var {root_var} = $.from_html(`{escaped}`);\n"));
             false
         }
     }

@@ -1,0 +1,88 @@
+{
+  "slug": "blocks/each_sibling_interp.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "each_sibling_interp",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "first_child",
+    "each",
+    "index",
+    "next",
+    "text",
+    "template_effect",
+    "set_text",
+    "get",
+    "append",
+    "sibling",
+    "each",
+    "index",
+    "next",
+    "text",
+    "template_effect",
+    "set_text",
+    "get",
+    "append",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "each",
+    "first_child",
+    "from_html",
+    "get",
+    "index",
+    "next",
+    "set_text",
+    "sibling",
+    "template_effect",
+    "text"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "first_child": 1,
+    "each": 2,
+    "index": 2,
+    "next": 2,
+    "text": 2,
+    "template_effect": 2,
+    "set_text": 2,
+    "get": 2,
+    "append": 3,
+    "sibling": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<!><!>",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<!><!>`, 1); export default function each_sibling_interp($$anchor, $$props) {var fragment = root(); var node = $.first_child(fragment); $.each(node, 17, () => $$props.xs, $.index, ($$anchor, x) => {$.next(); var text = $.text(); $.template_effect(() => $.set_text(text, $.get(x))); $.append($$anchor, text);}); var node_1 = $.sibling(node); $.each(node_1, 17, () => $$props.ys, $.index, ($$anchor, y) => {$.next(); var text_1 = $.text(); $.template_effect(() => $.set_text(text_1, $.get(y))); $.append($$anchor, text_1);}); $.append($$anchor, fragment);}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

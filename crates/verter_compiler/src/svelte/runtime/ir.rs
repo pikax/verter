@@ -711,8 +711,31 @@ pub enum DeclKind {
 pub struct TemplateDeclarator {
     /// The declarator's binding pattern.
     pub pattern: PatternId,
-    /// The initializer expression, if present.
+    /// The initializer expression, if present. For an INERT declarator this is the plain
+    /// initializer; for a `$derived` rune declarator it is the `$derived` ARGUMENT (rewritten
+    /// into the `$.derived(() => …)` body at projection); a `$state` rune declarator carries
+    /// no init expr (its primitive text rides [`TemplateRune::State`]).
     pub init: Option<ExprId>,
+    /// The declarator's rune classification, or `None` for an INERT declarator (a plain
+    /// `{const}`/`{let}`). A rune declarator's binding is registered through the shared
+    /// rune/state classification pipeline (so its template reads/writes route through the
+    /// signal rewriter); a rune form the pipeline cannot lower stays inert and fails closed
+    /// at the rewriter's advanced-rune gate.
+    pub rune: Option<TemplateRune>,
+}
+
+/// The rune a `{let x = $state(…)}` / `{let x = $derived(…)}` declaration-tag declarator
+/// carries — the typed classification that drives its emission. NEVER keyed by name: the
+/// binding kind / lowering is resolved per declarator from its own binding id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TemplateRune {
+    /// `$state(<primitive>)` — the primitive init source text (inner `None` for the no-arg
+    /// `$state()` ⇒ `void 0` form). The binding is reclassified through the write-gated
+    /// `$state` pipeline (`$.state(<init>)` vs a never-reassigned plain `let`).
+    State(Option<String>),
+    /// `$derived(<arg>)` — a block-local derived memo. The argument expression rides
+    /// [`TemplateDeclarator::init`]; the binding is a `Derived` signal (reads `$.get`).
+    Derived,
 }
 
 /// The callee of a `{@render}` tag.
@@ -758,14 +781,28 @@ pub enum TagIr {
     },
     /// `{@debug var1, var2}`.
     Debug {
-        /// The debugged expressions.
-        exprs: Vec<ExprId>,
+        /// The debugged identifiers — each carries the PARSED identifier name (the
+        /// emitted object key) plus its debugged expression (the snapshot argument), so
+        /// the key is the typed identifier fact, never a re-sliced raw source span.
+        args: Vec<DebugArg>,
     },
     /// `{@attach expr}`.
     Attach {
         /// The attachment expression.
         expr: ExprId,
     },
+}
+
+/// One `{@debug}` argument: the PARSED identifier name (the emitted `console.log({ … })`
+/// object key) plus the debugged expression id (the `$.snapshot(<expr>)` argument). The
+/// name is recovered from the OXC-parsed `IdentifierReference`, so a Unicode-escaped
+/// identifier keys on its DECODED name rather than its raw source bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DebugArg {
+    /// The decoded debug identifier name (the object key).
+    pub name: String,
+    /// The debugged expression (the snapshot argument).
+    pub expr: ExprId,
 }
 
 /// The pre-lowering Svelte runtime IR.

@@ -19,13 +19,13 @@
   "exportDefault": {
     "name": "const_tag",
     "params": [
-      "$$anchor"
+      "$$anchor",
+      "$$props"
     ]
   },
   "helperSequence": [
     "from_html",
     "from_html",
-    "proxy",
     "each",
     "index",
     "derived",
@@ -48,14 +48,12 @@
     "from_html",
     "get",
     "index",
-    "proxy",
     "reset",
     "set_text",
     "template_effect"
   ],
   "helperCounts": {
     "from_html": 2,
-    "proxy": 1,
     "each": 1,
     "index": 1,
     "derived": 1,
@@ -70,16 +68,16 @@
   "templates": [
     {
       "factory": "from_html",
-      "html": "<li> </li>",
+      "html": "<p> </p>",
       "flag": null
     },
     {
       "factory": "from_html",
-      "html": "<ul></ul>",
+      "html": "<div></div>",
       "flag": null
     }
   ],
-  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<li> </li>`); var root_1 = $.from_html(`<ul></ul>`); export default function const_tag($$anchor) {let items = $.proxy([{qty: 2, price: 3}, {qty: 1, price: 5}]); var ul = root_1(); $.each(ul, 21, () => items, $.index, ($$anchor, item) => {const total = $.derived(() => $.get(item).qty * $.get(item).price); var li = root(); var text = $.child(li, true); $.reset(li); $.template_effect(() => $.set_text(text, $.get(total))); $.append($$anchor, li);}); $.reset(ul); $.append($$anchor, ul);}",
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<p> </p>`); var root_1 = $.from_html(`<div></div>`); export default function const_tag($$anchor, $$props) {var div = root_1(); $.each(div, 21, () => $$props.items, $.index, ($$anchor, item) => {const total = $.derived(() => $.get(item).qty * $.get(item).price); var p = root(); var text = $.child(p, true); $.reset(p); $.template_effect(() => $.set_text(text, $.get(total))); $.append($$anchor, p);}); $.reset(div); $.append($$anchor, div);}",
   "css": {
     "present": false,
     "hash": null,

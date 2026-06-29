@@ -227,14 +227,32 @@ pub(super) fn clean_nodes(
     children: &[NodeId],
     ctx: CleanContext,
 ) -> Vec<CleanItem> {
-    // (1) The "regular" sequence: rendered nodes only. The dropped set (comments,
-    // hoisted non-rendering constructs, non-body specials) is the shared
-    // [`is_dropped_from_clean_sequence`] authority — mirroring official `clean_nodes`.
-    let regular: Vec<NodeId> = children
-        .iter()
-        .copied()
-        .filter(|&id| !is_dropped_from_clean_sequence(ir.node(id)))
-        .collect();
+    clean_nodes_indexed(ir, children, ctx).0
+}
+
+/// [`clean_nodes`] plus, per emitted [`CleanItem`], the LAST original-child index it
+/// covers (a `Node` item → that node's index; a `TextRun` → the index of its last
+/// contributing text/interp child). The indices are MONOTONIC in item order, so a
+/// document-order construct dropped from the clean sequence (a `{@debug}`) maps to its
+/// emission gap by counting the items whose last index precedes it. The `items` output is
+/// byte-identical to [`clean_nodes`].
+pub(super) fn clean_nodes_indexed(
+    ir: &SvelteRuntimeIr,
+    children: &[NodeId],
+    ctx: CleanContext,
+) -> (Vec<CleanItem>, Vec<usize>) {
+    // (1) The "regular" sequence: rendered nodes only (paired with their ORIGINAL child
+    // index). The dropped set (comments, hoisted non-rendering constructs, non-body
+    // specials) is the shared [`is_dropped_from_clean_sequence`] authority — mirroring
+    // official `clean_nodes`.
+    let mut regular: Vec<NodeId> = Vec::new();
+    let mut regular_orig: Vec<usize> = Vec::new();
+    for (orig, &id) in children.iter().enumerate() {
+        if !is_dropped_from_clean_sequence(ir.node(id)) {
+            regular.push(id);
+            regular_orig.push(orig);
+        }
+    }
 
     // (2) The whitespace-cleaned text for each regular node, aligned to `regular`
     // (`None` for a non-text node OR a fully-dropped whitespace-only text). Inside a
@@ -278,14 +296,19 @@ pub(super) fn clean_nodes(
 
     // (4) Partition into maximal (Text | Interpolation) runs.
     let mut items: Vec<CleanItem> = Vec::new();
+    let mut last_indices: Vec<usize> = Vec::new();
     let mut run_text = String::new();
     let mut run_interps: Vec<NodeId> = Vec::new();
     let mut run_active = false;
+    // The last ORIGINAL-child index contributing to the in-progress run.
+    let mut run_last_orig = 0usize;
 
     let flush = |items: &mut Vec<CleanItem>,
+                 last_indices: &mut Vec<usize>,
                  run_text: &mut String,
                  run_interps: &mut Vec<NodeId>,
-                 run_active: &mut bool| {
+                 run_active: &mut bool,
+                 run_last_orig: usize| {
         if !*run_active {
             return;
         }
@@ -301,6 +324,7 @@ pub(super) fn clean_nodes(
             text: item_text,
             interps: std::mem::take(run_interps),
         });
+        last_indices.push(run_last_orig);
         *run_active = false;
     };
 
@@ -313,6 +337,7 @@ pub(super) fn clean_nodes(
                 if let Some(t) = &cleaned_text[idx] {
                     run_text.push_str(t);
                     run_active = true;
+                    run_last_orig = regular_orig[idx];
                 }
                 // A text node that cleaned to nothing contributes no bytes but does
                 // NOT break the run (it never existed as a DOM node).
@@ -320,16 +345,32 @@ pub(super) fn clean_nodes(
             IrNode::Interpolation { .. } => {
                 run_interps.push(id);
                 run_active = true;
+                run_last_orig = regular_orig[idx];
             }
             // Any other rendered node breaks the current run and is its own DOM node.
             _ => {
-                flush(&mut items, &mut run_text, &mut run_interps, &mut run_active);
+                flush(
+                    &mut items,
+                    &mut last_indices,
+                    &mut run_text,
+                    &mut run_interps,
+                    &mut run_active,
+                    run_last_orig,
+                );
                 items.push(CleanItem::Node(id));
+                last_indices.push(regular_orig[idx]);
             }
         }
     }
-    flush(&mut items, &mut run_text, &mut run_interps, &mut run_active);
-    items
+    flush(
+        &mut items,
+        &mut last_indices,
+        &mut run_text,
+        &mut run_interps,
+        &mut run_active,
+        run_last_orig,
+    );
+    (items, last_indices)
 }
 
 /// One ordered part of a reactive text RUN: ONE text node's cleaned literal text,

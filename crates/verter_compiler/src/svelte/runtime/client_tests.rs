@@ -990,14 +990,18 @@ fn assert_fail_closed(source: &str, predicate: impl Fn(&UnsupportedSvelteRuntime
 }
 
 #[test]
-fn if_block_fails_closed() {
+fn snippet_inside_if_block_refuses() {
+    // The `{#if}`/`{#each}`/`{#await}`/`{#key}` control-flow blocks are SUPPORTED, but a
+    // `{#snippet}` DECLARATION inside a block body is an unsupported component/snippet
+    // surface — it must still refuse (the block being supported does not make its body's
+    // snippet declaration supported).
     assert_fail_closed(
-        "<script>let c = $state(true);</script>\n{#if c}<p>yes</p>{/if}\n",
+        "<script>let on = $state(true);</script>\n{#if on}{#snippet foo()}<p>x</p>{/snippet}{/if}\n",
         |s| {
             matches!(
                 s,
-                UnsupportedSvelteRuntimeSurface::Block {
-                    construct: "if",
+                UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
+                    construct: "snippet",
                     ..
                 }
             )
@@ -1006,17 +1010,15 @@ fn if_block_fails_closed() {
 }
 
 #[test]
-fn each_block_fails_closed() {
-    // An `{#each}` block is an unsupported control-flow block. `items` is a
-    // plain-local array + a trailing reactive `$state` keeps the component
-    // runes-mode, so the block gate is the surface (not the state-shape gate).
+fn render_inside_each_block_refuses() {
+    // A `{@render}` tag inside a (supported) `{#each}` body is the 5f surface — still refused.
     assert_fail_closed(
-        "<script>let items = [1, 2]; let c = $state(0);</script>\n{#each items as x}<p>{x}</p>{/each}\n<button onclick={() => c++}>{c}</button>\n",
+        "<script>let { items } = $props();</script>\n{#each items as x}{@render foo(x)}{/each}\n",
         |s| {
             matches!(
                 s,
-                UnsupportedSvelteRuntimeSurface::Block {
-                    construct: "each",
+                UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
+                    construct: "render",
                     ..
                 }
             )
@@ -1025,21 +1027,196 @@ fn each_block_fails_closed() {
 }
 
 #[test]
-fn await_block_fails_closed() {
-    // An `{#await}` block is an unsupported control-flow block — fail closed.
-    // `p` is a plain-local promise + a trailing reactive `$state` keeps runes-mode,
-    // so the block gate is the surface (not the non-primitive state-shape gate).
+fn each_block_emits_supported_surface() {
+    // The `{#each}` block IS supported (5e): a `$props()`-sourced array iterated with a
+    // reactive item body emits `$.each(...)` — NOT a fail-closed block refusal.
+    let js = emit_result(
+        "<script>let { items } = $props();</script>\n{#each items as x}<p>{x}</p>{/each}\n",
+    )
+    .expect("a supported {#each} block emits a module");
+    assert!(
+        js.contains("$.each("),
+        "the each block lowers to `$.each(...)`:\n{js}"
+    );
+    assert!(
+        js.contains("$.get(x)"),
+        "the each ITEM is a signal (`$.get(x)`):\n{js}"
+    );
+}
+
+#[test]
+fn await_block_emits_supported_surface() {
+    // The `{#await}` block IS supported: a `$props()`-sourced promise emits `$.await`, and
+    // the THEN branch reactively reads the resolved value (`$.get(...)`) — not a static
+    // textContent write. The pending slot is ABSENT here (a then-only `{#await p then v}`),
+    // so the pending sentinel is `null`, and the then closure is PRESENT (NOT the `void 0`
+    // missing-then sentinel).
+    let js = emit_result(
+        "<script>let { p } = $props();</script>\n{#await p then v}<p>{v}</p>{/await}\n",
+    )
+    .expect("a supported {#await} block emits a module");
+    assert!(
+        js.contains("$.await("),
+        "the await block lowers to `$.await(...)`:\n{js}"
+    );
+    assert!(
+        js.contains("$.get("),
+        "the then branch reactively reads the resolved value (`$.get(...)`):\n{js}"
+    );
+    assert!(
+        !js.contains("void 0"),
+        "a then-PRESENT await carries a real then closure, never the `void 0` missing-then \
+         sentinel:\n{js}"
+    );
+}
+
+#[test]
+fn await_catch_only_emits_void_zero_missing_then_sentinel() {
+    // A CATCH-ONLY `{#await p}{:catch e}…{/await}` (no `then`): the then slot is ABSENT but
+    // FOLLOWED by a catch, so official emits the `void 0` missing-then sentinel (distinct
+    // from the absent-PENDING `null`), an EMPTY pending arrow `($$anchor) => {}` (the
+    // present-but-content-free pending region), and the catch closure. This pins the
+    // then-before-catch sentinel — emitting `null` here would mis-slot the catch.
+    let js = emit_result(
+        "<script>let { p } = $props();</script>\n{#await p}{:catch e}<p>oops</p>{/await}\n",
+    )
+    .expect("a supported catch-only {#await} block emits a module");
+    assert!(
+        js.contains("$.await("),
+        "the catch-only await block lowers to `$.await(...)`:\n{js}"
+    );
+    assert!(
+        js.contains("void 0"),
+        "a then-absent-but-catch-present await emits the `void 0` missing-then sentinel:\n{js}"
+    );
+    assert!(
+        js.contains("($$anchor) => {}"),
+        "the present-but-empty pending region is an empty arrow `($$anchor) => {{}}`:\n{js}"
+    );
+}
+
+/// Assert `{@debug …}` with a non-identifier argument fails closed at lowering with the
+/// `debug_tag_invalid_arguments`-mirroring diagnostic, never an emitted module (which
+/// would carry an invalid object key like `a.x: $.snapshot(...)`).
+fn assert_debug_invalid_arguments(source: &str) {
+    match emit_result(source) {
+        Err(ClientCompileError::Lowering(errs)) => assert!(
+            errs.diagnostics
+                .iter()
+                .any(|d| d.code == "svelte-runtime-debug-invalid-arguments"),
+            "expected the debug-invalid-arguments diagnostic, got {:?}",
+            errs.diagnostics
+        ),
+        other => panic!("expected a `{{@debug}}` invalid-arguments refusal, got {other:?}"),
+    }
+}
+
+#[test]
+fn debug_tag_member_argument_fails_closed() {
+    // Official `debug_tag_invalid_arguments`: a `{@debug}` argument must be a bare
+    // identifier, never a member expression. Accepting `{@debug a.x}` would emit an
+    // invalid object key (`a.x: $.snapshot(...)`).
+    assert_debug_invalid_arguments(
+        "<script>let a = $state(0);</script>\n{@debug a.x}\n<button onclick={() => a++}>x</button>\n",
+    );
+}
+
+#[test]
+fn debug_tag_binary_argument_fails_closed() {
+    // A binary-expression `{@debug}` argument is the same official refusal — arguments
+    // are identifiers, not arbitrary expressions.
+    assert_debug_invalid_arguments(
+        "<script>let a = $state(0);</script>\n{@debug a + 1}\n<button onclick={() => a++}>x</button>\n",
+    );
+}
+
+#[test]
+fn debug_tag_identifier_arguments_emit_snapshot_effect() {
+    // The POSITIVE shape: bare-identifier arguments emit the reactive snapshot log
+    // `$.template_effect(() => {console.log({ a: $.snapshot(...), b: $.snapshot(...) }); debugger;})`.
+    let js = emit(
+        "<script>let a = $state(0); let b = $state(0);</script>\n{@debug a, b}\n<button onclick={() => a++}>x</button>\n<button onclick={() => b++}>y</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("console.log({a: $.snapshot(") && js.contains("b: $.snapshot("),
+        "identifier debug arguments emit one snapshot entry each:\n{js}"
+    );
+    assert!(
+        js.contains("debugger;"),
+        "the debug effect carries the `debugger;` statement:\n{js}"
+    );
+}
+
+#[test]
+fn debug_tag_no_arguments_logs_empty_object() {
+    // A no-argument `{@debug}` logs the empty object (official `console.log({})`), NOT a
+    // fail-closed refusal.
+    let js = emit(
+        "<script>let a = $state(0);</script>\n{@debug}\n<button onclick={() => a++}>x</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("console.log({});"),
+        "a no-argument debug logs the empty object:\n{js}"
+    );
+}
+
+#[test]
+fn debug_tag_key_comes_from_parsed_identifier_not_raw_source() {
+    // The `{@debug}` object key is the PARSED identifier NAME, not a raw source-text
+    // slice. A Unicode-escaped identifier makes the two derivations DIVERGE: the raw
+    // source bytes are the six-char escape sequence backslash-u-0-0-6-1 while the
+    // parsed `IdentifierReference.name` decodes to `a`. The official object key is the
+    // decoded identifier name (`a`); a `source.trim()` derivation would wrongly emit the
+    // raw escape sequence as the key. This DISCRIMINATES the typed-fact derivation from
+    // the raw-slice one.
+    let js = emit(
+        "<script>let a = $state(0);</script>\n{@debug \\u0061}\n<button onclick={() => a++}>x</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("console.log({a: $.snapshot("),
+        "the debug key must be the PARSED identifier name `a`, not the raw `\\u0061` slice:\n{js}"
+    );
+    assert!(
+        !js.contains("\\u0061:"),
+        "the debug key must NOT be the raw `\\u0061` source slice used as an object key:\n{js}"
+    );
+}
+
+#[test]
+fn block_object_state_declarator_fails_closed() {
+    // A block `{let o = $state({})}` declarator carries an OBJECT (proxy) `$state` — the
+    // deep-reactive proxy form is a deferred surface, so it fails closed as an advanced
+    // rune rather than mis-emitting the literal `$state({})` call (which references the
+    // un-imported `$state`).
     assert_fail_closed(
-        "<script>let p = Promise.resolve(1); let c = $state(0);</script>\n{#await p}<p>loading</p>{:then v}<p>{v}</p>{/await}\n<button onclick={() => c++}>{c}</button>\n",
-        |s| {
-            matches!(
-                s,
-                UnsupportedSvelteRuntimeSurface::Block {
-                    construct: "await",
-                    ..
-                }
-            )
-        },
+        "<script>let { items } = $props();</script>\n{#each items as item}{let o = $state({})}<button onclick={() => o.k++}>x</button>{/each}\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { .. }),
+    );
+}
+
+#[test]
+fn shadowed_block_rune_declarator_lowers_to_inner_binding() {
+    // SCOPE-SAFETY (the #1-trap class): a block `{let count = $state(0)}` declarator that
+    // SHADOWS an instance `count` must lower against ITS OWN binding, not a same-named
+    // outer one. The outer `count` is never written (a plain `let count = 5`); the INNER
+    // block `count` IS written (`count++`), so the block declarator is a `$.state(0)`
+    // signal. A NAME lookup would pick the outer (plain) binding and mis-emit `let count =
+    // 0`; lowering by binding id emits `let count = $.state(0)`.
+    let js = emit(
+        "<script>let count = $state(5);</script>\n{#if count}{let count = $state(0)}<button onclick={() => count++}>{count}</button>{/if}\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("let count = $.state(0)"),
+        "the SHADOWING block rune declarator lowers against its own (written) binding \
+         (`let count = $.state(0)`), not the outer plain binding:\n{js}"
+    );
+    assert!(
+        js.contains("let count = 5"),
+        "the outer instance `count` stays the never-written plain local (`let count = 5`):\n{js}"
     );
 }
 
@@ -1148,6 +1325,41 @@ const EVENT_SMOKE_FIXTURES: &[(&str, &str)] = &[
         "<script>let log = $state('');</script>\n<div on:click={() => log += 'B'} on:click|capture={() => log += 'C'}><button>btn</button></div>\n<p>{log}</p>\n",
     ),
 ];
+
+/// The behavioral jsdom CONTROL-FLOW-BLOCK smoke fixture sources (kept in lockstep with the
+/// committed `.client.mjs` by `block_smoke_modules_match_the_committed_jsdom_fixtures`). Each
+/// source ALSO lives in the golden corpus (`svelte_oracle_corpus/fixtures/blocks/`), so the
+/// emitted module is independently proven STRUCTURALLY conformant to the pinned official
+/// compiler — the smoke adds the BEHAVIORAL (mount-and-react) proof on top.
+const BLOCK_SMOKE_FIXTURES: &[(&str, &str)] = &[
+    // `{#if}` — the true branch renders its body.
+    (
+        "block_if_single",
+        "<script>\n\tlet show = $state(true);\n</script>\n\n{#if show}\n\t<p>shown</p>\n{/if}\n",
+    ),
+    // `{#each}` (unkeyed, `$props()`-sourced) — the body is rendered once per item and the
+    // item is a SIGNAL (`$.get(row)`), proven by the per-item text reflecting the prop array.
+    (
+        "block_each_unkeyed",
+        "<script>\n\tlet { rows } = $props();\n</script>\n\n{#each rows as row}\n\t<p>{row}</p>\n{/each}\n",
+    ),
+    // `{#key}` — the keyed block renders its body, and the reactive `count` read INSIDE the
+    // block updates on a delegated click (no re-key needed), proving block-interior reactivity.
+    (
+        "block_key_reactive",
+        "<script>\n\tlet selected = $state(0);\n\tlet count = $state(5);\n</script>\n\n<button onclick={() => count++}>inc</button>\n{#key selected}\n\t<p>{count}</p>\n{/key}\n",
+    ),
+];
+
+#[test]
+fn block_smoke_modules_match_the_committed_jsdom_fixtures() {
+    // Each behavioral block-smoke fixture's emitted module stays in lockstep with the
+    // committed `.client.mjs` the happy-dom spec (`svelte-client-blocks-smoke.spec.ts`)
+    // mounts — so the behavioral smoke can never drift from `compile_client`.
+    for (name, src) in BLOCK_SMOKE_FIXTURES {
+        assert_jsdom_fixture_in_sync(src, &format!("{name}.client.mjs"));
+    }
+}
 
 #[test]
 fn nondelegated_event_emits_a_direct_event_listener() {
@@ -2561,20 +2773,37 @@ fn component_spread_still_refuses_as_component_surface() {
 }
 
 #[test]
-fn html_inside_if_block_still_refuses_as_block_surface() {
-    // A `{@html}` INSIDE an `{#if}` block is the control-flow block-body surface; `{@html}`
-    // acceptance is scoped to the element/fragment/root context that stands alone, so a
-    // block-wrapped `{@html}` must still refuse via the block refusal.
-    let err = emit_result(
+fn html_inside_if_block_emits_into_the_branch_region() {
+    // A `{@html}` INSIDE an `{#if}` block (both supported: `{@html}` is the raw-markup tag,
+    // `{#if}` a control-flow block) emits its `$.html(...)` into the BRANCH region — the
+    // per-region op routing assigns the `{@html}` op to its owning block-body scope, NOT the
+    // root region.
+    let js = emit_result(
         "<script>let h = $state('<b>x</b>'); let on = $state(true);</script>\n{#if on}{@html h}{/if}\n",
     )
-    .expect_err("a {@html} inside an {#if} block must still refuse");
-    let ClientCompileError::Unsupported(surface) = err else {
-        panic!("expected an Unsupported refusal, got {err:?}");
-    };
+    .expect("a {@html} inside a supported {#if} block emits a module");
+    let if_at = js
+        .find("$.if(")
+        .expect("the if block lowers to `$.if(...)`");
+    let html_at = js
+        .find("$.html(")
+        .expect("the branch `{@html}` lowers to `$.html(...)`");
+    // STRUCTURAL proof the `$.html` is in the BRANCH region, not the root: the branch's
+    // consequent closure (which CONTAINS the `$.html`) is emitted BEFORE the `$.if(node, …)`
+    // call. A `{@html}` mis-routed to the ROOT region would instead emit its `$.html` in the
+    // root's post-walk ops — AFTER the `$.if(` call. So `$.html(` preceding `$.if(` discriminates
+    // correct branch-region routing from the root-region regression.
     assert!(
-        matches!(surface, UnsupportedSvelteRuntimeSurface::Block { .. }),
-        "a block-wrapped {{@html}} must refuse as the block surface, got {surface:?}"
+        html_at < if_at,
+        "the branch `{{@html}}` must emit inside the consequent closure (before the `$.if(` \
+         call), not the root region (after it):\n{js}"
+    );
+    // The root region carries NO reactive op of its own — its only content is the if block,
+    // so the sole `$.html` is the branch one (no root-level `$.html`).
+    assert_eq!(
+        js.matches("$.html(").count(),
+        1,
+        "exactly one `$.html` (the branch one) — no duplicate root-region routing:\n{js}"
     );
 }
 

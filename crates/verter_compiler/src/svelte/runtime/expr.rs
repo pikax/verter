@@ -1002,6 +1002,77 @@ pub(crate) fn parse_declarators(
     Ok(out)
 }
 
+/// Parse a `{@debug …}` tag inner text into the `(start, end)` byte spans (relative
+/// to the inner text) of its comma-separated debug arguments, via OXC — REJECTING a
+/// non-identifier argument.
+///
+/// `{@debug a, b}` lowers to TWO debug expressions (`a` and `b`), NOT one
+/// `SequenceExpression` — the official `DebugTag` walks `node.identifiers`
+/// individually to build `console.log({ a: $.snapshot(a), b: $.snapshot(b) })`. The
+/// split is structural (the parsed `SequenceExpression.expressions`), never a
+/// top-level-comma byte scan. Official rejects ANY non-identifier argument with
+/// `debug_tag_invalid_arguments` (the object key + snapshot must be a bare name), so a
+/// member / call / binary / conditional / … argument returns `Err(())` here. An empty
+/// inner (`{@debug}`) yields no arguments (the valid `console.log({})` form). A fragment
+/// that does not parse also returns `Err(())`.
+pub(crate) fn parse_debug_identifier_spans(inner_text: &str) -> Result<Vec<DebugIdentifier>, ()> {
+    if inner_text.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let alloc = Allocator::default();
+    // No prefix is prepended, so the parsed spans are already relative to the inner
+    // text (`a, b;` → the `ExpressionStatement`'s `SequenceExpression` elements).
+    let wrapped = format!("{inner_text};");
+    let parsed = Parser::new(&alloc, &wrapped, SourceType::tsx()).parse();
+    if parsed.panicked || !parsed.errors.is_empty() {
+        return Err(());
+    }
+    for stmt in &parsed.program.body {
+        let Statement::ExpressionStatement(es) = stmt else {
+            continue;
+        };
+        let args: Vec<&Expression> = match &es.expression {
+            Expression::SequenceExpression(seq) => seq.expressions.iter().collect(),
+            other => vec![other],
+        };
+        let mut idents = Vec::with_capacity(args.len());
+        for arg in args {
+            // Official `debug_tag_invalid_arguments`: every argument must be a bare
+            // identifier reference, never an arbitrary expression (member / call /
+            // binary / conditional / …). This is a STRUCTURAL check on the parsed node.
+            let Expression::Identifier(id) = arg else {
+                return Err(());
+            };
+            // The object key is the PARSED identifier NAME (the decoded
+            // `IdentifierReference.name`), carried alongside its byte span — NOT a raw
+            // source slice (which would keep a Unicode-escaped identifier's raw escape
+            // bytes verbatim instead of the decoded name).
+            let span = arg.span();
+            idents.push(DebugIdentifier {
+                name: id.name.as_str().to_string(),
+                start: span.start,
+                end: span.end,
+            });
+        }
+        return Ok(idents);
+    }
+    Ok(Vec::new())
+}
+
+/// A parsed `{@debug}` argument: the decoded identifier NAME (the object key) plus its
+/// byte span relative to the tag's inner text. The name is the typed fact the debug
+/// projector keys on, so the emitted `{ <name>: $.snapshot(<expr>) }` object key is the
+/// parsed identifier — never a re-sliced raw source span.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DebugIdentifier {
+    /// The decoded identifier name (the debug object key).
+    pub(crate) name: String,
+    /// The byte-span start, relative to the `{@debug}` inner text.
+    pub(crate) start: u32,
+    /// The byte-span end, relative to the `{@debug}` inner text.
+    pub(crate) end: u32,
+}
+
 /// The parsed shape of a `{@render …}` call's callee.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RenderCalleeShape {

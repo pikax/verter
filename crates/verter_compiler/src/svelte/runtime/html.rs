@@ -711,7 +711,8 @@ pub(super) fn synthesize_region(ir: &SvelteRuntimeIr, scope: &TemplateScope) -> 
     if let [CleanItem::Node(only)] = items.as_slice() {
         if !is_static_html_root(ir.node(*only)) {
             // A lone `{@html}` root is a SUPPORTED `$.comment()`-anchored raw-markup root
-            // (distinct from a block-only root, which fails closed).
+            // (a block-only root is also a supported `$.comment()`-anchored root, via a
+            // different `AnchorReason`).
             let reason = if matches!(
                 ir.node(*only),
                 IrNode::Tag(crate::svelte::runtime::ir::TagIr::Html { .. })

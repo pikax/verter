@@ -98,6 +98,135 @@ pub(super) fn prepare_state_bindings(
     tracked
 }
 
+/// The supported rune classification of a BLOCK declaration-tag declarator
+/// (`{let x = $state(…)}` / `{let x = $derived(…)}`), returned by
+/// [`classify_block_rune_declarator`].
+pub(super) enum BlockRuneDeclarator {
+    /// `$state(<primitive>)` — the binding was reclassified through the write-gated
+    /// `$state` pipeline; carries the tracking row (for the post-template finalizer) plus
+    /// the primitive init source text (inner `None` for the no-arg `$state()` form).
+    State {
+        /// The tracking row to push onto the post-template state finalizer.
+        tracked: TrackedState,
+        /// The primitive init source text, or `None` for the no-arg `$state()`.
+        init: Option<String>,
+    },
+    /// `$derived(<arg>)` — the binding was classified as a `Derived` signal; carries the
+    /// argument expression's `(start, end)` byte range RELATIVE to `init_text` (the caller
+    /// pushes the `ExprId` for the projection to rewrite into a `$.derived(() => …)` body).
+    Derived {
+        /// The `$derived` argument span, relative to `init_text`.
+        arg: (u32, u32),
+    },
+}
+
+/// Classify a BLOCK declaration-tag declarator's initializer as a SUPPORTED rune.
+///
+/// A `{let x = $state(<primitive>)}` is reclassified through the SAME write-gated `$state`
+/// pipeline as an instance-script declaration (in the block-body `scope`); a
+/// `{let x = $derived(<arg>)}` becomes a `Derived` signal (reads `$.get`). ANY other init
+/// — a non-rune expression, an object/array (proxy) `$state`, a multi-arg `$state`,
+/// `$derived.by`, `$derived()`/multi-arg `$derived`, a spread — returns `None`: the
+/// declarator stays INERT and a rune form the pipeline cannot lower fails closed at the
+/// rewriter's advanced-rune gate (never mis-emitting the un-imported `$state`/`$derived`).
+pub(super) fn classify_block_rune_declarator(
+    binding: BindingId,
+    init_text: &str,
+    bindings: &mut BindingTable,
+) -> Option<BlockRuneDeclarator> {
+    use oxc_ast::ast::{Expression, Statement};
+    use oxc_span::GetSpan;
+    let alloc = Allocator::default();
+    let wrapped = format!("({init_text});");
+    let program = reparse_module(&alloc, &wrapped)?;
+    let Some(Statement::ExpressionStatement(stmt)) = program.body.first() else {
+        return None;
+    };
+    let mut expr = &stmt.expression;
+    while let Expression::ParenthesizedExpression(p) = expr {
+        expr = &p.expression;
+    }
+    let Expression::CallExpression(call) = expr else {
+        return None;
+    };
+
+    // `$derived(<single expr>)` — a block-local derived memo. `$derived.by`, a multi-arg /
+    // no-arg / spread `$derived` is NOT lowered here (it stays inert → the rewriter's
+    // advanced-rune gate refuses it). The check is on the BARE `$derived` callee.
+    if matches!(&call.callee, Expression::Identifier(id) if id.name.as_str() == "$derived") {
+        if let [arg] = call.arguments.as_slice() {
+            if let Some(arg_expr) = arg.as_expression() {
+                // Reads of a derived binding are signals (`$.get`); it is not write-gated.
+                let info = bindings.get_mut(binding);
+                info.kind = BindingRuntimeKind::Derived;
+                info.state = None;
+                let span = arg_expr.span();
+                // `wrapped = "(<init_text>);"` — strip the leading `(` to map to `init_text`.
+                return Some(BlockRuneDeclarator::Derived {
+                    arg: (span.start.saturating_sub(1), span.end.saturating_sub(1)),
+                });
+            }
+        }
+        return None;
+    }
+
+    // `$state(<primitive literal>)` — the supported state declarator. The object/array
+    // proxy form, a multi-arg / spread init, and a non-`$state` call are NOT reclassified
+    // (they stay inert; a `$state`/`$derived` call init then fails closed at the rewriter).
+    let declared = super::expr::state_rune_call(call)?;
+    let init = match call.arguments.as_slice() {
+        [] => None,
+        [arg] => {
+            let arg = arg.as_expression()?;
+            if !block_rune_init_is_primitive(arg) {
+                return None;
+            }
+            let span = arg.span();
+            Some(wrapped[span.start as usize..span.end as usize].to_string())
+        }
+        _ => return None,
+    };
+    // A block rune declarator is a primitive `$state`, never proxiable; the provisional
+    // (script-side) use set is empty — a template write is attributed by the finalizer. The
+    // binding row already exists (declared by `push_pattern_names`); reclassify it in place.
+    let proxiable = false;
+    let script_uses = BindingUseSet::default();
+    let lowering = classify_state_lowering(declared, proxiable, script_uses);
+    let info = bindings.get_mut(binding);
+    info.kind = state_kind_for_lowering(lowering);
+    info.state = Some(StateClassification {
+        declared,
+        proxiable,
+        uses: script_uses,
+        lowering,
+    });
+    Some(BlockRuneDeclarator::State {
+        tracked: TrackedState {
+            declared,
+            proxiable,
+            script_uses,
+            binding,
+        },
+        init,
+    })
+}
+
+/// Whether a `$state(<arg>)` block-declarator init is a PRIMITIVE literal (the supported
+/// shape): a number / string / boolean / null / bigint literal, or a unary `-`/`+`/`!` of
+/// one. An object / array / call / identifier init is the deferred non-primitive form.
+fn block_rune_init_is_primitive(expr: &oxc_ast::ast::Expression<'_>) -> bool {
+    use oxc_ast::ast::Expression;
+    match expr {
+        Expression::NumericLiteral(_)
+        | Expression::StringLiteral(_)
+        | Expression::BooleanLiteral(_)
+        | Expression::NullLiteral(_)
+        | Expression::BigIntLiteral(_) => true,
+        Expression::UnaryExpression(unary) => block_rune_init_is_primitive(&unary.argument),
+        _ => false,
+    }
+}
+
 /// Declare the top-level PLAIN-local instance-script bindings (`let v = …` that is
 /// NOT a `$state` / `$derived` / `$props()` rune call) in `scope` as `PlainLocal`.
 ///

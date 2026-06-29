@@ -231,12 +231,13 @@ fn simple_target_ident(target: &oxc_ast::ast::SimpleAssignmentTarget<'_>) -> Opt
 /// a call / optional-call, a `new`, an array / object / function / class / template /
 /// tagged-template, a literal, `this`, `await`, a TS wrapper, a parenthesized — needs
 /// the official `build_template_chunk` evaluator (the `has_call` memoizer, the
-/// `is_defined` nullish-coalesce, the parenthesization builder) and is a
-/// reactive-text-completion follow-up, so it fails closed (5r).
+/// `is_defined` nullish-coalesce, the parenthesization builder), which is owned by the
+/// reactive-text/interpolation completion surface — so it fails closed here.
 // TODO(follow-up): port the official `build_template_chunk` evaluator (the `has_call`
 // memoizer deps-array `$.template_effect`, the `is_defined` nullish-coalesce, the
 // parenthesization builder) so a binary / call / member / conditional interpolation
-// lowers instead of failing closed. Owned by the reactive-text-completion block (5r).
+// lowers instead of failing closed. Owned by the reactive-text/interpolation completion
+// surface (the global interpolation-breadth owner), not this declaration-tag surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ClientInterpolationShape {
     /// `{x}` where `x` resolves to a reactive `$state` signal — emitted `$.get(x)`.
@@ -251,12 +252,13 @@ pub(super) enum ClientInterpolationShape {
 /// Accepts ONLY a bare `Identifier` resolving (scope-awarely) to EITHER a reactive
 /// `$state` signal binding (`StateSignal`/`StateProxy`/each/await/derived-as-signal)
 /// OR a no-default `$props()` prop binding. A bare identifier resolving to a
-/// NON-reactive binding (a plain local / module const) is the static-fold deferral
-/// (5n). EVERY non-identifier expression shape (a binary, a call, a member, an
-/// optional-call, a conditional, a literal, `this`, a parenthesized / TS-wrapped
-/// read, …) needs the official `build_template_chunk` evaluator and fails closed
-/// (5r) BY CONSTRUCTION — there is no wildcard accept. Drives the decision from the
-/// typed parse + the scope-aware binding table; never a text scan.
+/// NON-reactive binding (a plain local / module const) is the const-fold sub-contract
+/// (the official `textContent` static fold). EVERY non-identifier expression shape (a
+/// binary, a call, a member, an optional-call, a conditional, a literal, `this`, a
+/// parenthesized / TS-wrapped read, …) needs the official `build_template_chunk` evaluator
+/// (the reactive-text/interpolation completion surface) and fails closed BY CONSTRUCTION —
+/// there is no wildcard accept. Drives the decision from the typed parse + the scope-aware
+/// binding table; never a text scan.
 pub(super) fn classify_interpolation_shape(
     source: &str,
     scope: ScopeId,
@@ -280,8 +282,9 @@ pub(super) fn classify_interpolation_shape(
         return Err(refuse_complex());
     };
     // The interpolation must be a BARE identifier. A parenthesized / TS-wrapped /
-    // any other expression is the `build_template_chunk` breadth (5r) — the wrappers
-    // are NOT unwrapped (a `{(x)}` / `{x!}` is a deferral, not the bare-read shape).
+    // any other expression is the `build_template_chunk` breadth (the reactive-text/
+    // interpolation completion surface) — the wrappers are NOT unwrapped (a `{(x)}` /
+    // `{x!}` is a deferral, not the bare-read shape).
     let Expression::Identifier(id) = &stmt.expression else {
         return Err(refuse_complex());
     };
@@ -295,8 +298,8 @@ pub(super) fn classify_interpolation_shape(
         // A bare identifier resolving to a NON-reactive binding (a plain local, a
         // module const, a never-reassigned `$state` lowered to PlainLet) is a
         // compile-time constant — official static-folds it to a `textContent` write,
-        // a distinct topology (5n). A `BareProxy` (object/array `$state`) read is
-        // refused at the binding-kind gate (5g) before reaching here.
+        // a distinct topology (the const-fold sub-contract). A `BareProxy` (object/array
+        // `$state`) read is refused at the binding-kind gate (5g) before reaching here.
         _ => Err(UnsupportedSvelteRuntimeSurface::StaticInterpolation { span }),
     }
 }

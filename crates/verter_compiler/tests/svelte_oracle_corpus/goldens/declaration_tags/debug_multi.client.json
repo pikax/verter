@@ -1,0 +1,85 @@
+{
+  "slug": "declaration_tags/debug_multi.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "debug_multi",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "state",
+    "template_effect",
+    "snapshot",
+    "get",
+    "snapshot",
+    "get",
+    "first_child",
+    "sibling",
+    "delegated",
+    "update",
+    "delegated",
+    "update",
+    "append",
+    "delegate"
+  ],
+  "helperSet": [
+    "append",
+    "delegate",
+    "delegated",
+    "first_child",
+    "from_html",
+    "get",
+    "sibling",
+    "snapshot",
+    "state",
+    "template_effect",
+    "update"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 2,
+    "template_effect": 1,
+    "snapshot": 2,
+    "get": 2,
+    "first_child": 1,
+    "sibling": 1,
+    "delegated": 2,
+    "update": 2,
+    "append": 1,
+    "delegate": 1
+  },
+  "delegatedEvents": [
+    "click"
+  ],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<button>a</button> <button>b</button>",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<button>a</button> <button>b</button>`, 1); export default function debug_multi($$anchor) {let a = $.state(1); let b = $.state(2); var fragment = root(); $.template_effect(() => {console.log({a: $.snapshot($.get(a)), b: $.snapshot($.get(b))}); debugger;}); var button = $.first_child(fragment); var button_1 = $.sibling(button, 2); $.delegated('click', button, () => $.update(a)); $.delegated('click', button_1, () => $.update(b)); $.append($$anchor, fragment);} $.delegate(['click']);",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

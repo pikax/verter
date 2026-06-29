@@ -14,7 +14,8 @@
   "exportDefault": {
     "name": "const_tag",
     "params": [
-      "$$renderer"
+      "$$renderer",
+      "$$props"
     ]
   },
   "helperSequence": [

@@ -564,8 +564,11 @@ mod tests {
         // compile. YET the IDE projection (`tsx`) is still produced and the
         // diagnostics stay NON-FATAL, so type-checking survives.
         let compiler = SvelteCarrierCompiler::default();
-        // An `{#if}` block is an unsupported runtime surface (5e).
-        let source = "<script>let c = $state(true);</script>\n{#if c}<p>yes</p>{/if}\n";
+        // A `{#snippet}` declaration is an unsupported runtime surface — the
+        // control-flow blocks (`{#if}`/…) ARE supported, so the refused example uses a
+        // construct that genuinely still fails closed.
+        let source =
+            "<script>let c = $state(true);</script>\n{#snippet foo()}<p>{c}</p>{/snippet}\n";
         let artifact = compiler.parse(source, &ParseOptions::default());
         let alloc = oxc_allocator::Allocator::default();
         let opts = RuntimeCompileOptions {

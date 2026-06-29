@@ -1,0 +1,76 @@
+{
+  "slug": "blocks/each_debug_text.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "each_debug_text",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "comment",
+    "first_child",
+    "each",
+    "index",
+    "next",
+    "text",
+    "template_effect",
+    "snapshot",
+    "get",
+    "template_effect",
+    "set_text",
+    "get",
+    "append",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "comment",
+    "each",
+    "first_child",
+    "get",
+    "index",
+    "next",
+    "set_text",
+    "snapshot",
+    "template_effect",
+    "text"
+  ],
+  "helperCounts": {
+    "comment": 1,
+    "first_child": 1,
+    "each": 1,
+    "index": 1,
+    "next": 1,
+    "text": 1,
+    "template_effect": 2,
+    "snapshot": 1,
+    "get": 2,
+    "set_text": 1,
+    "append": 2
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; export default function each_debug_text($$anchor, $$props) {var fragment = $.comment(); var node = $.first_child(fragment); $.each(node, 17, () => $$props.rows, $.index, ($$anchor, row) => {$.next(); var text = $.text(); $.template_effect(() => {console.log({row: $.snapshot($.get(row))}); debugger;}); $.template_effect(() => $.set_text(text, $.get(row))); $.append($$anchor, text);}); $.append($$anchor, fragment);}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

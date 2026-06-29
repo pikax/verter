@@ -1,0 +1,79 @@
+{
+  "slug": "blocks/each_keyed_index.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "each_keyed_index",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "comment",
+    "first_child",
+    "each",
+    "delegated",
+    "set",
+    "get",
+    "append",
+    "append",
+    "delegate"
+  ],
+  "helperSet": [
+    "append",
+    "comment",
+    "delegate",
+    "delegated",
+    "each",
+    "first_child",
+    "from_html",
+    "get",
+    "set",
+    "state"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 1,
+    "comment": 1,
+    "first_child": 1,
+    "each": 1,
+    "delegated": 1,
+    "set": 1,
+    "get": 1,
+    "append": 2,
+    "delegate": 1
+  },
+  "delegatedEvents": [
+    "click"
+  ],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<button>x</button>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<button>x</button>`); export default function each_keyed_index($$anchor, $$props) {let n = $.state(0); var fragment = $.comment(); var node = $.first_child(fragment); $.each(node, 19, () => $$props.rows, (row) => row.id, ($$anchor, row, i) => {var button = root(); $.delegated('click', button, () => $.set(n, $.get(i), true)); $.append($$anchor, button);}); $.append($$anchor, fragment);} $.delegate(['click']);",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

@@ -31,14 +31,17 @@ use super::client_surface_element_query::{
     element_carries_is_attribute, element_has_class_directive, element_has_group_bind,
     element_has_spread, element_has_style_directive, element_own_namespace,
 };
+use super::client_surface_refuse::{
+    namespace_label, refuse_block, refuse_tag, refuse_unsupported_special_content, special_label,
+};
 use super::events::{validate_event_modifiers, EventModifierError};
 use super::expr::{BindingRuntimeKind, ExprRefKind};
 use super::expr_emit::{self, PropsShape, StateDeclShape};
 use super::html::{synthesize_region, TemplateFactory};
 use super::instance_items::{self, SupportedInstanceScriptItem};
 use super::ir::{
-    AttrIr, BlockIr, DeclKind, EscapeMode, ExprId, IrNode, NodeId, SpecialKind, SvelteRuntimeIr,
-    TagIr,
+    AttrIr, BlockIr, EscapeMode, ExprId, IrNode, NodeId, SpecialKind, SvelteRuntimeIr, TagIr,
+    TemplateScopeId,
 };
 use super::whitespace::{
     clean_nodes, determine_namespace_for_children, CleanContext, CleanItem, Namespace,
@@ -180,9 +183,24 @@ impl ClientSyntaxSurface {
             ir.analysis.scripts.instance_source,
         );
         let facts = RefCell::new(SurfaceFacts::default());
-        for scope in &ir.template_scopes {
+        for (idx, scope) in ir.template_scopes.iter().enumerate() {
+            // A region root is the COMPONENT root or a BLOCK BODY root — the placement axis
+            // the declaration-tag gate validates against. (A block body is its OWN scope, so
+            // its roots are region roots, never `Nested`; element children recurse `Nested`.)
+            let placement = if TemplateScopeId(idx as u32) == ir.root {
+                NodePlacement::ComponentRoot
+            } else {
+                NodePlacement::BlockBodyRoot
+            };
             for &root in &scope.roots {
-                classify_node(ir, root, Namespace::Html, &declared_root_names, &facts)?;
+                classify_node(
+                    ir,
+                    root,
+                    Namespace::Html,
+                    &declared_root_names,
+                    &facts,
+                    placement,
+                )?;
             }
         }
 
@@ -521,7 +539,7 @@ fn classify_script_items(ir: &SvelteRuntimeIr) -> Result<(), UnsupportedSvelteRu
         // read-only `const $state` constant-folds to an empty reactive topology) —
         // fail closed (5g) BEFORE the shape / static-interpolation checks, so a
         // `const c = $state(0)` read fails at the decl-kind gate, not as a
-        // static-fold (5n).
+        // const-fold (the const-fold sub-contract).
         client_shapes::classify_rune_declaration_kind(instance)?;
         match expr_emit::props_shape(instance) {
             PropsShape::None | PropsShape::BasicDestructure => {}
@@ -592,8 +610,10 @@ fn classify_script_items(ir: &SvelteRuntimeIr) -> Result<(), UnsupportedSvelteRu
     Ok(())
 }
 
-/// Refuse a ROOT REGION whose emission shape is NOT the supported `from_html`
-/// clone-root (or a standalone `<Component>` / `{@render}` root).
+/// Refuse a ROOT REGION whose emission shape is NOT a supported root shape. The
+/// supported shapes are the `from_html` clone-root, a standalone `<Component>` /
+/// `{@render}` root, and a `$.comment()`-anchored raw-markup (`{@html}`) or
+/// single-block (`{#if}` / `{#each}` / `{#await}` / `{#key}`) root.
 ///
 /// The root region's clone frame is emitted as `var <region> = root();` — a call of
 /// `root` as a FACTORY FUNCTION. `synthesize_region` (the SAME factory decision the
@@ -608,19 +628,24 @@ fn classify_script_items(ir: &SvelteRuntimeIr) -> Result<(), UnsupportedSvelteRu
 ///   This covers BOTH a pure-static-text root (`hello world`) and a reactive
 ///   text-node root (`{count}`); the latter additionally has no element host for its
 ///   `$.set_text`.
-/// - [`TemplateFactory::CommentAnchor`] — `root` is bound to a `$.comment()` NODE
-///   (an EMPTY template; a block-only root is already refused by the node walk).
-///   Official emits no `root()` clone frame at all. REFUSE (5q).
+/// - [`TemplateFactory::CommentAnchor`] — `root` is bound to a `$.comment()` NODE.
+///   A RAW-MARKUP (`{@html}`, `AnchorReason::RawHtmlRoot`) or SINGLE-BLOCK
+///   (`{#if}` / `{#each}` / `{#await}` / `{#key}`, `AnchorReason::BlockOnlyRoot`)
+///   comment-anchor root is SUPPORTED — the client backend emits the raw-markup /
+///   block helper against the `$.comment()` anchor. Only an EMPTY / comment-only
+///   (`AnchorReason::EmptyRoot`) comment-anchor root has no `root()` clone frame and
+///   REFUSES (5q) as a `RootTextRegion`.
 /// - [`TemplateFactory::Standalone`] — a `<Component>` / `{@render}` root, already
 ///   refused by the node walk (5f); never reaches here on the accept path. Treated
 ///   as supported here so this check owns ONLY the node-vs-factory clone-frame
 ///   mismatch.
 ///
-/// Returns `Some` to fail closed for a `TextNode` / `CommentAnchor` root, or `None`
-/// for a `from_html` / standalone root (a supported clone-frame shape).
+/// Returns `Some` to fail closed for a `TextNode` root or an EMPTY / comment-only
+/// (`AnchorReason::EmptyRoot`) `CommentAnchor` root, or `None` for a `from_html` /
+/// standalone / raw-markup-anchor / block-anchor root (a supported clone-frame shape).
 // TODO(follow-up): emit the official text-first root topology (a `$.text()` root
 // reached via `$.next()`, then — for a reactive text root — a `$.template_effect`
-// over it) and the empty-template / comment-anchor shape, instead of refusing them.
+// over it) and the empty-template comment-anchor shape, instead of refusing them.
 // Until then they fail closed (5q).
 fn refuse_unsupported_root_region(ir: &SvelteRuntimeIr) -> Option<UnsupportedSvelteRuntimeSurface> {
     let scope = ir.root_scope();
@@ -634,8 +659,17 @@ fn refuse_unsupported_root_region(ir: &SvelteRuntimeIr) -> Option<UnsupportedSve
         TemplateFactory::CommentAnchor {
             reason: super::html::AnchorReason::RawHtmlRoot,
         } => None,
-        // A `$.text(...)` / `$.comment()` node root (an empty / block-only / reactive-text
-        // root) — refuse, carrying the span of the first interpolation when the region is a
+        // A SINGLE control-flow block at the root (`{#if}`/`{#each}`/`{#await}`/`{#key}`)
+        // serializes to a lone `<!>` comment anchor — the official `$.comment()` block root
+        // frame (`var fragment = $.comment(); var node = $.first_child(fragment); $.if(node,
+        // …);`). The client backend emits the block helper against this anchor, so it
+        // is a SUPPORTED root shape (a MULTI-block root is a `from_html` of comment markers,
+        // already a `FromHtml` above).
+        TemplateFactory::CommentAnchor {
+            reason: super::html::AnchorReason::BlockOnlyRoot,
+        } => None,
+        // A `$.text(...)` / `$.comment()` node root (an empty / reactive-text root) —
+        // refuse, carrying the span of the first interpolation when the region is a
         // reactive text run (for a precise diagnostic), else the root region's first node
         // span.
         TemplateFactory::TextNode { .. } | TemplateFactory::CommentAnchor { .. } => {
@@ -696,12 +730,37 @@ fn scan_unsupported_rune_forms(
 /// top-level locals (computed once per compile, threaded down to the per-attr bind
 /// classifier). Every node maps to a supported [`ClientNodeKind`] or REFUSES — there is
 /// NO wildcard accept arm.
+/// Where a node sits relative to its region — the placement axis the non-rendering
+/// DECLARATION tags (`{@const}` / `{const}` / `{let}`) validate against. A `{@debug}` is
+/// placement-INDEPENDENT (it emits a reactive effect at any document position).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NodePlacement {
+    /// A direct child of a BLOCK BODY region (`{#if}` / `{:else}` / `{#each}` / `{:then}` /
+    /// `{:catch}` / … body root). The only in-scope valid parent for a `{@const}`, and a
+    /// valid parent for `{const}` / `{let}`.
+    BlockBodyRoot,
+    /// A direct child of the COMPONENT ROOT region. A valid parent for `{const}` / `{let}`;
+    /// the official compiler REJECTS a `{@const}` here (the component root is not a
+    /// `{@const}` valid parent).
+    ComponentRoot,
+    /// NESTED inside an element. The official REJECTS a `{@const}` here, and Verter matches
+    /// that rejection. A nested `{const}` / `{let}` is DIFFERENT — the official ACCEPTS it by
+    /// wrapping the element child-walk in a real JavaScript `BlockStatement` (element-local
+    /// lexical scope + a `$.template_effect` split local to that scope). Verter does not emit
+    /// that element-local lowering, so it fails CLOSED here — an honest typed refusal, never a
+    /// silent drop or a mis-hoist to the region top. That nested emission is the nested
+    /// element-scope codegen axis — an element-local `BlockStatement` scope plus a per-block
+    /// `$.template_effect` split — not ordinary block-body lowering.
+    Nested,
+}
+
 fn classify_node(
     ir: &SvelteRuntimeIr,
     node_id: NodeId,
     namespace: Namespace,
     declared_root_names: &rustc_hash::FxHashSet<String>,
     facts: &RefCell<SurfaceFacts>,
+    placement: NodePlacement,
 ) -> Result<(), UnsupportedSvelteRuntimeSurface> {
     match ir.node(node_id) {
         // A text node's literal chunk must be SIMPLE ASCII (no HTML entity, no
@@ -729,8 +788,9 @@ fn classify_node(
             }
             // The interpolation expression must be a BARE signal / no-default-prop
             // read (the §1.2-class reactive-text surface). A complex expression
-            // (binary / call / member / conditional / …) fails closed (5r). The
-            // accepted shape is recorded as a fact for the plan.
+            // (binary / call / member / conditional / …) fails closed — its breadth is
+            // owned by the reactive-text/interpolation completion surface. The accepted
+            // shape is recorded as a fact for the plan.
             let analyzed = ir.analysis.expressions.get(*expr);
             let shape = client_shapes::classify_interpolation_shape(
                 analyzed.source,
@@ -859,7 +919,16 @@ fn classify_node(
             }
             let child_namespace = determine_namespace_for_children(element_namespace, &el.tag);
             for &child in &el.children {
-                classify_node(ir, child, child_namespace, declared_root_names, facts)?;
+                // An element's children are NESTED — a declaration tag here is not a region
+                // root, so `{@const}` / `{const}` / `{let}` fail closed (placement gate).
+                classify_node(
+                    ir,
+                    child,
+                    child_namespace,
+                    declared_root_names,
+                    facts,
+                    NodePlacement::Nested,
+                )?;
             }
             Ok(())
         }
@@ -877,195 +946,58 @@ fn classify_node(
             construct: special_label(s.kind),
             span: s.span,
         }),
+        // The control-flow blocks (`{#if}`/`{#each}`/`{#await}`/`{#key}`) are ACCEPTED.
+        // Each block body is its OWN template scope, which the outer scope loop
+        // (`for scope in &ir.template_scopes`) classifies independently — so an out-of-scope
+        // child INSIDE a block body (a `<Component>`, a `{#snippet}`, a renderable
+        // `<svelte:*>`) is still refused by its own node arm. The block-head expressions
+        // (the `{#if}` test, the `{#each}` source/key, the `{#await}` promise, the `{#key}`
+        // expression) are rewritten at plan time (an `await` expression / async rune inside
+        // them fails closed at the rewrite). A `{#snippet}` is a declaration of the
+        // component/snippet surface and stays refused.
+        IrNode::Block(block) if !matches!(block, BlockIr::Snippet { .. }) => Ok(()),
         IrNode::Block(block) => Err(refuse_block(block)),
         // A `{@html expr}` raw-markup tag is the `$.html` surface — accept it, recording
         // the per-node acceptance proof. Its payload expression + the only-child topology
-        // are read from the IR at plan time. EVERY other standalone tag (`{@render}` /
-        // `{@const}` / `{@debug}` / `{@attach}`) is refused by `refuse_tag`.
+        // are read from the IR at plan time.
         IrNode::Tag(TagIr::Html { .. }) => {
             facts.borrow_mut().html_nodes.push(node_id);
             Ok(())
         }
-        IrNode::Tag(tag) => Err(refuse_tag(tag)),
-    }
-}
-
-/// The fail-closed reason for a block construct (5e), or 5f for a snippet.
-fn refuse_block(block: &BlockIr) -> UnsupportedSvelteRuntimeSurface {
-    let construct = match block {
-        BlockIr::If { .. } => "if",
-        BlockIr::Each { .. } => "each",
-        BlockIr::Await { .. } => "await",
-        BlockIr::Key { .. } => "key",
-        BlockIr::Snippet { .. } => "snippet",
-    };
-    if matches!(block, BlockIr::Snippet { .. }) {
-        UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
-            construct,
-            span: Span::new(0, 0),
-        }
-    } else {
-        UnsupportedSvelteRuntimeSurface::Block {
-            construct,
-            span: Span::new(0, 0),
-        }
-    }
-}
-
-/// The fail-closed reason for a standalone tag. A `{@html}` tag is the `$.html` surface
-/// and is accepted by the caller before this is reached, so it is not matched here.
-fn refuse_tag(tag: &TagIr) -> UnsupportedSvelteRuntimeSurface {
-    match tag {
-        TagIr::Html { .. } => UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
-            // Unreachable: `{@html}` is accepted by `classify_node` before `refuse_tag`
-            // runs. The arm is retained so the match stays exhaustive over `TagIr`.
-            construct: "html",
-            span: Span::new(0, 0),
-        },
-        TagIr::Render { .. } => UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
-            construct: "render",
-            span: Span::new(0, 0),
-        },
-        TagIr::Attach { .. } => UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
-            construct: "attach",
-            span: Span::new(0, 0),
-        },
-        TagIr::LegacyConst { .. } => UnsupportedSvelteRuntimeSurface::Block {
-            construct: "const",
-            span: Span::new(0, 0),
-        },
-        TagIr::Declaration { kind, .. } => UnsupportedSvelteRuntimeSurface::Block {
-            construct: match kind {
-                DeclKind::Const => "const",
-                DeclKind::Let => "let",
-            },
-            span: Span::new(0, 0),
-        },
-        TagIr::Debug { .. } => UnsupportedSvelteRuntimeSurface::Block {
-            construct: "debug",
-            span: Span::new(0, 0),
-        },
-    }
-}
-
-/// Refuse a bindings-breadth special-content host (`<textarea>` / `<select>` /
-/// `<option>`) whose INTERIOR content is not the supported `bind:value` host shape.
-///
-/// 5c emits these elements ONLY as the DOM-bind hosts the pinned `svelte@5.56.3`
-/// oracle proves: a `<textarea bind:value>` is cleared EMPTY (`$.remove_textarea_child`
-/// strips its content), and a `<select bind:value>` carries STATIC `<option>`
-/// children (`<select><option>a</option></select>`). The official compiler gives
-/// these elements a SPECIAL content model 5c does not own — a `<textarea>` with
-/// text/interpolation content is the raw-text-value surface, and an `<option>` with
-/// an INTERPOLATION child is the `option.__value` / `option_value` reactive-tracking
-/// surface. Those forms are refused HERE (before the per-attr / child walk) so a
-/// divergent module is never emitted.
-///
-/// The decision is STRUCTURAL over the typed IR children (the node kinds), never a
-/// raw-source scan. A non-special element (`element` not in the special set) returns
-/// `Ok(())` immediately.
-fn refuse_unsupported_special_content(
-    ir: &SvelteRuntimeIr,
-    element: SupportedHtmlElement,
-    el: &super::ir::ElementIr,
-    el_span: Span,
-) -> Result<(), UnsupportedSvelteRuntimeSurface> {
-    let refuse = || {
-        Err(UnsupportedSvelteRuntimeSurface::Element {
-            tag: el.tag.clone(),
-            span: el_span,
-        })
-    };
-    match element {
-        // `<textarea>`: the supported shape is the `bind:value` host. With EMPTY content
-        // it clears nothing; with a STATIC-TEXT fallback child AND a `bind:value` the
-        // existing `$.remove_textarea_child` prelude strips the baked child at runtime, so
-        // the static-text fallback is supported (the official `<textarea
-        // bind:value>fallback</textarea>` bakes the text into the cloned skeleton, then
-        // clears it — the bind is unaffected). A DYNAMIC / interpolation child is the
-        // official `$.set_value(textarea, expr)` content channel 5c does NOT own (a
-        // distinct surface owned by a later content-model layer — ledger D-22), so it
-        // still fails closed. A static-text child WITHOUT a `bind:value` is also out of
-        // the supported empty/bind-host shape and fails closed.
-        SupportedHtmlElement::Textarea => {
-            if el.children.is_empty() {
-                return Ok(());
-            }
-            let has_value_bind = el
-                .attrs
-                .iter()
-                .any(|a| matches!(a, AttrIr::Bind { target, .. } if target == "value"));
-            let all_children_static_text = el
-                .children
-                .iter()
-                .all(|&child| matches!(ir.node(child), IrNode::Text { .. }));
-            if has_value_bind && all_children_static_text {
+        // `{@debug}` is placement-INDEPENDENT: its reactive snapshot effect emits at ANY
+        // document position (region root or nested in an element, interleaved into the
+        // walk). Always accepted.
+        IrNode::Tag(TagIr::Debug { .. }) => Ok(()),
+        // `{@const}` is valid ONLY as a direct child of a BLOCK BODY (the official
+        // valid-parents set, restricted to Verter's supported surface). The official rejects
+        // it at the component root and nested in an element — both fail closed here, never a
+        // silent drop / mis-hoist.
+        IrNode::Tag(tag @ TagIr::LegacyConst { .. }) => {
+            if placement == NodePlacement::BlockBodyRoot {
                 Ok(())
             } else {
-                refuse()
+                Err(refuse_tag(tag))
             }
         }
-        // `<option>`: the supported shape carries STATIC text only (the
-        // `<select><option>a</option></select>` form). An INTERPOLATION child is the
-        // `option.__value` reactive-tracking surface; a nested element child is a
-        // non-core option interior. Only literal text children are accepted.
-        SupportedHtmlElement::Option => {
-            for &child in &el.children {
-                if !matches!(ir.node(child), IrNode::Text { .. }) {
-                    return refuse();
-                }
+        // `{const …}` / `{let …}` are valid at any region ROOT (hoisted block-local
+        // declarations) and are accepted here. A NESTED placement (inside an element) fails
+        // CLOSED — an honest typed refusal, never the silent drop the roots-only hoist
+        // produced. The official compiler ACCEPTS a nested DeclarationTag by wrapping the
+        // element's child-walk in a real JavaScript `BlockStatement`, emitting the
+        // declaration (and its `$.template_effect` split) inside that scope. That
+        // element-local lowering is the nested element-scope codegen axis — an element-local
+        // `BlockStatement` scope plus a per-block `$.template_effect` split; the nested
+        // placement is refused, not mis-emitted.
+        IrNode::Tag(tag @ TagIr::Declaration { .. }) => {
+            if placement == NodePlacement::Nested {
+                Err(refuse_tag(tag))
+            } else {
+                Ok(())
             }
-            Ok(())
         }
-        // `<select>`: the supported shape's children are STATIC `<option>` elements
-        // (each itself gated by the `Option` arm when the child walk reaches it).
-        // A non-`<option>` child (text other than insignificant whitespace, an
-        // interpolation, a block) is not the supported select-host interior.
-        SupportedHtmlElement::Select => {
-            for &child in &el.children {
-                match ir.node(child) {
-                    // A child `<option>` element is the supported select interior (it
-                    // is itself content-gated when the child walk classifies it).
-                    IrNode::Element(child_el) if child_el.tag == "option" => {}
-                    // Insignificant whitespace-only text between options is fine (the
-                    // whitespace cleaner drops it); significant text / interpolation /
-                    // any other node is not a supported select child.
-                    IrNode::Text { text, .. } if text.trim().is_empty() => {}
-                    _ => return refuse(),
-                }
-            }
-            Ok(())
-        }
-        // Every other element (including `<audio>` / `<video>` / `<details>`, whose
-        // bind-host forms are content-empty in the oracle but whose static interiors
-        // are NOT special-content-model surfaces and flow through the ordinary child
-        // walk) has no special-content restriction here.
-        _ => Ok(()),
-    }
-}
-
-/// A short namespace label for a fail-closed diagnostic.
-fn namespace_label(ns: Namespace) -> &'static str {
-    match ns {
-        Namespace::Html => "html",
-        Namespace::Svg => "svg",
-        Namespace::Mathml => "mathml",
-    }
-}
-
-/// A short label for a `<svelte:*>` special kind.
-fn special_label(kind: SpecialKind) -> &'static str {
-    match kind {
-        SpecialKind::Head => "svelte:head",
-        SpecialKind::Window => "svelte:window",
-        SpecialKind::Document => "svelte:document",
-        SpecialKind::Body => "svelte:body",
-        SpecialKind::Element => "svelte:element",
-        SpecialKind::Boundary => "svelte:boundary",
-        SpecialKind::Options => "svelte:options",
-        SpecialKind::Component => "svelte:component",
-        SpecialKind::SelfRef => "svelte:self",
-        SpecialKind::Fragment => "svelte:fragment",
+        // `{@html}` is accepted above; the component/snippet-surface tags (`{@render}` /
+        // `{@attach}`) stay refused via `refuse_tag`.
+        IrNode::Tag(tag) => Err(refuse_tag(tag)),
     }
 }
 

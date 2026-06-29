@@ -10,7 +10,7 @@ use verter_span::Span;
 
 use super::client_allowlist::SupportedHtmlElement;
 use super::client_shapes::{ClientBindShape, ClientEventHandlerShape};
-use super::ir::ExprId;
+use super::ir::{ExprId, TemplateScopeId};
 
 /// A node in the NARROW client node arena — the closed template-node vocabulary
 /// the emitter walks. Every supported [`IrNode`] projects to exactly one of these;
@@ -77,6 +77,169 @@ pub(super) enum ClientNode {
         /// The source span.
         span: Span,
     },
+    /// A control-flow block (`{#if}`/`{#each}`/`{#await}`/`{#key}`). The head
+    /// expressions are REWRITTEN at projection time (the fallible rewrite — an `await`
+    /// expression / async rune in a head fails closed BEFORE the plan exists), so the
+    /// emitter synthesizes the `$.if`/`$.each`/`$.await`/`$.key` call from this typed
+    /// node and recursively emits the child region(s) by their [`TemplateScopeId`].
+    Block(ClientBlock),
+    /// A run of block-local declaration tags (`{@const}` derived + `{const …}`/`{let
+    /// …}` declarations) — emitted as HOISTED statements at the TOP of the region body
+    /// (before the clone frame), matching the official `state.consts` placement.
+    Declarations {
+        /// The declarations in source order.
+        decls: Vec<ClientDeclaration>,
+    },
+    /// A `{@debug a, b}` reactive snapshot-logging effect — emitted at the node's walk
+    /// position as `$.template_effect(() => { console.log({ … }); debugger; })`.
+    Debug {
+        /// One `{ key: $.snapshot(arg) }` entry per debug identifier, in source order.
+        entries: Vec<ClientDebugEntry>,
+    },
+}
+
+/// The reactive ops for ONE template-scope region, in source order. A block body is
+/// its OWN region with its OWN ops: the emitter emits each region's combined
+/// `$.template_effect` + binds + events from its region's ops, NOT the root's. The op
+/// expressions were already rewritten in each op's OWN recorded scope (so a body op
+/// reads `$.get(item)` while a root op reads the root signal).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct RegionOps {
+    /// The owning template scope.
+    pub(super) scope_id: TemplateScopeId,
+    /// The region's reactive ops, in source order.
+    pub(super) ops: Vec<ClientRuntimeOp>,
+}
+
+/// A control-flow block with its head expressions rewritten + child-region scope ids.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ClientBlock {
+    /// `{#if}` chain — branches in source order; the trailing `test: None` branch is
+    /// the `{:else}`.
+    If {
+        /// The if/else-if/else branches, in source order.
+        branches: Vec<ClientIfBranch>,
+    },
+    /// `{#each}` — keyed/unkeyed, optional index, optional `{:else}`.
+    Each(ClientEach),
+    /// `{#await}` — pending/then/catch.
+    Await(ClientAwait),
+    /// `{#key expr}` — `$.key(node, () => expr, ($$anchor) => { … })`.
+    Key {
+        /// The rewritten key expression (the `() => expr` thunk body).
+        expr: String,
+        /// The body region.
+        body: TemplateScopeId,
+    },
+}
+
+/// One branch of an `{#if}` chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ClientIfBranch {
+    /// The rewritten branch test, or `None` for the `{:else}` branch.
+    pub(super) test: Option<String>,
+    /// The branch body region.
+    pub(super) body: TemplateScopeId,
+}
+
+/// A projected `{#each}` block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ClientEach {
+    /// The official EACH flags bitmask (`EACH_ITEM_REACTIVE` | `EACH_INDEX_REACTIVE` |
+    /// `EACH_IS_CONTROLLED` | `EACH_ITEM_IMMUTABLE`).
+    pub(super) flags: u8,
+    /// The rewritten source expression (the `() => SOURCE` thunk body).
+    pub(super) source: String,
+    /// The KEY callback for a keyed each (`(item) => key`), or `None` for an unkeyed
+    /// each (emitted as the `$.index` literal).
+    pub(super) key: Option<ClientEachKey>,
+    /// The item binding param name (`None` for the no-item `{#each {length}}` form).
+    pub(super) item_param: Option<String>,
+    /// The index binding param name, emitted ONLY when [`ClientEach::emit_index`] is set.
+    pub(super) index_param: Option<String>,
+    /// Whether the index render param is emitted (the official `uses_index` rule: the
+    /// index is read, OR the item is reassigned / mutated).
+    pub(super) emit_index: bool,
+    /// The body region.
+    pub(super) body: TemplateScopeId,
+    /// The `{:else}` fallback region.
+    pub(super) else_body: Option<TemplateScopeId>,
+}
+
+/// The key callback of a keyed `{#each}` — emitted in its OWN callback scope (the key
+/// expression is PLAIN, never body-signal-rewritten).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ClientEachKey {
+    /// The key-callback params (`(item)` or `(item, index)` when the key reads the index).
+    pub(super) params: Vec<String>,
+    /// The key expression rewritten in the KEY scope (plain, NOT body-signal-rewritten).
+    pub(super) expr: String,
+}
+
+/// A projected `{#await}` block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ClientAwait {
+    /// The rewritten promise expression (the `() => PROMISE` thunk body).
+    pub(super) promise: String,
+    /// The pending body region (`None` → the `null` argument slot).
+    pub(super) pending: Option<TemplateScopeId>,
+    /// The `{:then v}` value param name.
+    pub(super) then_param: Option<String>,
+    /// The `{:then}` body region.
+    pub(super) then_body: Option<TemplateScopeId>,
+    /// The `{:catch e}` error param name.
+    pub(super) catch_param: Option<String>,
+    /// The `{:catch}` body region.
+    pub(super) catch_body: Option<TemplateScopeId>,
+}
+
+/// One block-local declaration (a `{@const}` derived memo, a `{const}/{let}` inert
+/// declarator, or a rune-carrying `{let x = $state(…)}` declarator).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ClientDeclaration {
+    /// `{@const x = INIT}` (runes mode) → `const x = $.derived(() => INIT);`.
+    Derived {
+        /// The declared name.
+        name: String,
+        /// The rewritten initializer (the `() => INIT` derived body).
+        init: String,
+    },
+    /// `{const x = INIT}` / `{let x = INIT}` / `{let x}` inert declarator → a plain
+    /// block-local `const`/`let` (NO `$.derived`, NO `$.get`); the initializer is
+    /// signal-rewritten but the binding itself is inert.
+    Inert {
+        /// The declaration keyword.
+        keyword: ClientDeclKeyword,
+        /// The declared name.
+        name: String,
+        /// The rewritten initializer, or `None` for a bare `let x;`.
+        init: Option<String>,
+    },
+    /// A rune-carrying `{let x = $state(…)}` / `{let x = $derived(…)}` declarator,
+    /// classified through the instance-script rune/state pipeline → the already-lowered
+    /// declaration statement (`let x = $.state(…)` / `let x = $.derived(…)`).
+    Rune {
+        /// The fully-lowered declaration statement (without trailing `;`).
+        code: String,
+    },
+}
+
+/// The declaration keyword of an inert `{const}/{let}` declarator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ClientDeclKeyword {
+    /// `const`.
+    Const,
+    /// `let`.
+    Let,
+}
+
+/// One `{ key: $.snapshot(arg) }` entry of a `{@debug}` effect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ClientDebugEntry {
+    /// The object key (the debug identifier name).
+    pub(super) key: String,
+    /// The rewritten `$.snapshot(<expr>)` argument expression.
+    pub(super) snapshot_arg: String,
 }
 
 /// A node id into the plan's narrow node arena.

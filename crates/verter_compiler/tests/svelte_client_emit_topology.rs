@@ -338,6 +338,157 @@ const SUPPORTED_EVENTS: &[&str] = &[
     "events/passive_touchmove_modern",
 ];
 
+/// The SUPPORTED CONTROL-FLOW BLOCKS — `{#if}` / `{#each}` / `{#await}` / `{#key}`.
+/// Each row runs the IDENTICAL compile + OXC-parse + AST-structural full-module
+/// comparison as the other corpora — the committed `blocks/<slug>.client.json` is the
+/// official `svelte@5.56.3` oracle. The structural comparison signs the block helper
+/// (`$.if`/`$.each`/`$.await`/`$.key`), its argument arity (the each FLAG literal, the
+/// `$.index` vs keyed key callback, the pending/then/catch slots, the `{:else}` fallback
+/// arrow), the branch-render `$$render(consequent, …)` chain, and the per-region
+/// signal-read rewrite (`$.get(item)` in the body, plain `item` in a keyed key callback,
+/// plain `i` for an unkeyed index vs `$.get(i)` for a keyed index), so any structural or
+/// signal-rewrite drift fails here.
+//
+// 5e scopes block-body CONTENT to the existing reactive-text surface: DIRECT
+// bare-signal reactive reads (`{row}`/`{value}`/`{count}`/`{local}`/`{tripled}`),
+// static text, simple mixed literal+interpolation runs whose interpolations are
+// accepted bare-signal / no-default-prop reads (`got {value}`), and member-write /
+// index-read EVENT HANDLERS (`onclick={() => row.x++}` / `onclick={() => n = i}`).
+// Member READS inside reactive text (`{item.label}`, `{error.message}`) and
+// compile-time const-folds are the global reactive-text/interpolation breadth —
+// owned by the reactive-text/interpolation completion surface, with the const-fold
+// sub-contract its own narrow piece — refused fail-closed, not emitted — so the
+// coarse vendored `blocks/if_each_key` (member `{item.label}`) and
+// `blocks/await_block` (member `{error.message}`) fixtures are NOT wired here; they
+// land when that interpolation-breadth surface opens.
+const SUPPORTED_BLOCKS: &[&str] = &[
+    // `{#if}` chain (primary + `{:else if}` + `{:else}`) — the `$.if(node, ($$render) =>
+    // { … })` branch-closure chain (`consequent` / `consequent_1` / `alternate`, with the
+    // `$$render(fn, ordinal)` index args: none / `1` / `-1`).
+    "blocks/if_chain",
+    // `{#if}` with no else — a lone `if (test) $$render(consequent);`.
+    "blocks/if_single",
+    // Unkeyed `{#each}` — `$.each(node, 17, () => rows, $.index, ($$anchor, row) => …)`;
+    // the item is a signal (`$.get(row)`), the source is a `() => rows` thunk.
+    "blocks/each_unkeyed",
+    // Unkeyed `{#each}` WITH an index read in a handler — the index is INERT (plain `i`,
+    // NOT `$.get(i)`), flag 17 (no `EACH_INDEX_REACTIVE`); render callback `($$anchor,
+    // row, i)`.
+    "blocks/each_index",
+    // Keyed `{#each}` WITH an index read in a handler — the index IS a signal (`$.get(i)`),
+    // flag 19 (`EACH_INDEX_REACTIVE` set); the key callback is the PLAIN `(row) => row.id`.
+    "blocks/each_keyed_index",
+    // `{#each}…{:else}` — the trailing `($$anchor) => { … }` fallback arrow on `$.each`.
+    "blocks/each_else",
+    // `{#each}` with an item MEMBER WRITE in a handler (`row.x++` → `$.get(row).x++`) —
+    // the official adds the otherwise-omitted `$$index` render param when the item is
+    // mutated.
+    "blocks/each_write",
+    // Nested `{#each}` — the inner source reads the outer item signal (`() => $.get(cells)`);
+    // each body item is its own signal.
+    "blocks/each_nested",
+    // `{#await p then v}` inline-then form — `$.await(node, () => p, null, thenFn)` (the
+    // pending slot is `null`); the then value is a signal (`$.get(value)`).
+    "blocks/await_inline_then",
+    // `{#await p}<pending>{:then v}{/await}` — pending + then, no catch arg.
+    "blocks/await_then_pending",
+    // `{#await p}<pending>{:catch e}{/await}` — pending + catch, NO then: the absent
+    // MIDDLE then slot is the `void 0` sentinel (`$.await(node, get, pending, void 0,
+    // catch)`), distinct from the absent-pending `null`.
+    "blocks/await_pending_catch",
+    // `{#await p}{:catch e}{/await}` — catch only: an EMPTY pending arrow
+    // `($$anchor) => {}` (the present-but-empty pending region), the absent then slot
+    // the `void 0` sentinel, and the catch closure.
+    "blocks/await_catch_only",
+    // `{#key expr}` — `$.key(node, () => expr, ($$anchor) => { … })`; the body reads a
+    // reactive `$.get(count)`.
+    "blocks/key_reactive",
+    // ── Text-first block bodies (a LONE text node / LONE accepted-interpolation run, NO
+    // wrapping element) — the official `$.text(...)` in-closure topology, NOT a hoisted
+    // clone factory. The owning-block-kind `$.next()` prelude is pinned per body here.
+    // `{#if show}shown{/if}` — a lone STATIC-text consequent: `var text = $.text('shown');
+    // $.append($$anchor, text);` (NO `$.next()` prelude for an `{#if}` body).
+    "blocks/if_lone_text",
+    // `{#if show}shown{:else}hidden{/if}` — a lone STATIC-text consequent AND alternate:
+    // `var text = $.text('shown')` / `var text_1 = $.text('hidden')`, each `$.append(…)`
+    // with NO `$.next()` prelude — pins the `{#if}` ALTERNATE "no-`$.next()`" cell (the
+    // alternate is an `($$anchor) => { … }` arrow, no advance), distinct from the
+    // consequent-only `if_lone_text` row above.
+    "blocks/if_else_lone_text",
+    // `{#each rows as row}x{/each}` — a lone STATIC-text each body: `$.next(); var text =
+    // $.text('x'); $.append($$anchor, text);` (the `{#each}` body/else `$.next()` prelude).
+    "blocks/each_lone_text",
+    // `{#each rows as row}x{:else}empty{/each}` — a lone STATIC-text each body AND `{:else}`
+    // fallback: BOTH the body (`$.next(); var text = $.text('x'); …`) and the trailing
+    // fallback arrow (`$.next(); var text_1 = $.text('empty'); …`) carry the each `$.next()`
+    // prelude — pins the each-`{:else}` `$.next()` cell, distinct from the each-body cell.
+    "blocks/each_else_lone_text",
+    // `{#each rows as row}{row}{/each}` — a lone REACTIVE-interp each body (the each-item
+    // `EachSignal`): `$.next(); var text = $.text(); $.template_effect(() => $.set_text(text,
+    // $.get(row))); $.append($$anchor, text);` — the bound `text` local, NOT an unbound one.
+    "blocks/each_lone_interp",
+    // `{#each xs as x}{x}{/each}{#each ys as y}{y}{/each}` — TWO reactive text-first sibling
+    // each bodies: the first binds `text`, the SECOND a DISTINCT `text_1`, and its reactive
+    // op is `$.set_text(text_1, $.get(y))` — pins the bound-`text` rebinding ACROSS sibling
+    // text-first regions (a no-op'd binding would fall back to the out-of-scope literal
+    // `text` and diverge on the second region's `$.set_text` argument).
+    "blocks/each_sibling_interp",
+    // `{#key k}x{/key}` — a lone STATIC-text key body: `var text = $.text('x');
+    // $.append($$anchor, text);` (NO `$.next()` prelude for a `{#key}` body).
+    "blocks/key_lone_text",
+    // `{#await p}loading{:then v}{v}{:catch e}failed{/await}` — lone-text pending/catch +
+    // lone-interp then bodies, all text-first, NONE with a `$.next()` prelude.
+    "blocks/await_lone_text",
+    // `{#each rows as row}hi {row}{/each}` — an accepted MIXED single-TextRun each body
+    // (static `hi ` + bare-signal `{row}`): `$.next(); var text = $.text();
+    // $.template_effect(() => $.set_text(text, `hi ${$.get(row) ?? ''}`)); $.append(…);`.
+    "blocks/each_mixed_text",
+    // `{#each rows as row}{@debug row}{row}{/each}` — a `{@debug}` INSIDE a text-first each
+    // body: the debug `$.template_effect` emits AFTER `var text`, before the reactive
+    // `$.set_text` effect (the walk-before-ops order), under the each `$.next()` prelude.
+    "blocks/each_debug_text",
+    // `{#if show}{@debug a}shown{/if}` — a `{@debug}` INSIDE a text-first if body: the debug
+    // effect emits after `var text = $.text('shown')`, with NO `$.next()` prelude.
+    "blocks/if_debug_text",
+];
+
+/// The SUPPORTED DECLARATION / `{@const}` / `{@debug}` TAGS. `{@const}` (runes mode) is a
+/// block-local `const x = $.derived(() => …)` (reads `$.get(x)`); the `{const …}`/`{let …}`
+/// declaration tag is an INERT block-local declaration UNLESS its declarator carries a
+/// rune (`{let local = $state(0)}` registers a state transformer — reads `$.get(local)`,
+/// writes `$.update(local)` — like an instance-script `$state`); `{@debug a, b}` is a
+/// `$.template_effect(() => { console.log({ a: $.snapshot(a), b: $.snapshot(b) }); debugger; })`.
+const SUPPORTED_DECLARATION_TAGS: &[&str] = &[
+    // `{@const total = item.qty * item.price}` inside a `{#each}` — block-local derived.
+    "declaration_tags/const_tag",
+    // `{@const tripled = base * 3}` inside an `{#if}` branch — block-local derived.
+    "declaration_tags/const_in_if",
+    // `{const doubled = item * 2}` declaration tag — INERT plain `const doubled = …` (read
+    // plain, NOT `$.get(doubled)`), initializer signal-rewritten (`$.get(item) * 2`).
+    "declaration_tags/decl_plain",
+    // `{let local = $state(0)}` rune-carrying declaration tag — classified through the
+    // instance-script rune/state pipeline (`let local = $.state(0)`, `$.get`/`$.update`).
+    "declaration_tags/decl_rune",
+    // `{let doubled = $derived(item)}` rune-carrying declaration tag — a block-local
+    // derived memo (`let doubled = $.derived(() => $.get(item))`, read `$.get(doubled)`).
+    "declaration_tags/decl_derived",
+    // `{@debug a, b}` — the reactive-effect snapshot log (`a` is a written signal →
+    // `$.snapshot($.get(a))`; `b` is plain → `$.snapshot(b)`).
+    "declaration_tags/debug_multi",
+    // `<button/>{@debug a}` — a `{@debug}` AFTER a single-element clone-root sibling: the
+    // effect emits at its document position (after the element's subtree), NOT hoisted.
+    "declaration_tags/debug_after_sibling",
+    // `<div>{@debug v}</div><button/>` — a `{@debug}` NESTED inside an element: the effect
+    // interleaves into the element's child walk at its source-order slot.
+    "declaration_tags/debug_in_element",
+    // `{#if a}<button/>{@debug a}{/if}` — a `{@debug}` after a sibling INSIDE a block body:
+    // the effect emits at its document position within the consequent region.
+    "declaration_tags/debug_in_if",
+    // `{#if a}{@debug a}{/if}` — a `{@debug}`-ONLY block body: the consequent emits JUST the
+    // effect (no clone frame, no `$.append`) — the no-DOM-skeleton region shape.
+    "declaration_tags/debug_only_in_if",
+];
+
 /// The repository root (two levels up from this crate's `tests/` dir).
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -5396,8 +5547,53 @@ fn all_supported_slugs() -> Vec<&'static str> {
         .chain(SUPPORTED_MATRIX.iter())
         .chain(SUPPORTED_ATTRIBUTES.iter())
         .chain(SUPPORTED_EVENTS.iter())
+        .chain(SUPPORTED_BLOCKS.iter())
+        .chain(SUPPORTED_DECLARATION_TAGS.iter())
         .copied()
         .collect()
+}
+
+#[test]
+fn supported_blocks_cover_the_full_block_corpus() {
+    // The control-flow block corpus is the structural oracle for `{#if}`/`{#each}`/
+    // `{#await}`/`{#key}`; a dropped row is a coverage regression. This count gate fails
+    // LOUDLY if a row is dropped, and the no-duplicate check guards against a typo.
+    assert_eq!(
+        SUPPORTED_BLOCKS.len(),
+        24,
+        "the block corpus must enumerate all 24 `blocks/*` supported fixtures (if chain / \
+         if single / each unkeyed / each index / each keyed-index / each else / each write / \
+         each nested / await inline-then / await then+pending / await pending+catch / \
+         await catch-only / key / if lone-text / if else lone-text / each lone-text / \
+         each else lone-text / each lone-interp / each sibling-interp / key lone-text / \
+         await lone-text / each mixed-text / each debug-text / if debug-text)"
+    );
+    let mut seen = std::collections::BTreeSet::new();
+    for &slug in SUPPORTED_BLOCKS {
+        assert!(seen.insert(slug), "duplicate supported-block slug {slug}");
+    }
+}
+
+#[test]
+fn supported_declaration_tags_cover_the_full_tag_corpus() {
+    // The declaration/`{@const}`/`{@debug}` tag corpus is the structural oracle for the
+    // 5e tag surface; a dropped row is a coverage regression. This count gate fails LOUDLY
+    // if a row is dropped, and the no-duplicate check guards against a typo.
+    assert_eq!(
+        SUPPORTED_DECLARATION_TAGS.len(),
+        10,
+        "the declaration-tag corpus must enumerate all 10 `declaration_tags/*` supported \
+         fixtures ({{@const}} in each / {{@const}} in if / inert decl / rune $state decl / \
+         rune $derived decl / {{@debug}} multi / {{@debug}} after sibling / {{@debug}} in \
+         element / {{@debug}} in if-body / {{@debug}}-only if-body)"
+    );
+    let mut seen = std::collections::BTreeSet::new();
+    for &slug in SUPPORTED_DECLARATION_TAGS {
+        assert!(
+            seen.insert(slug),
+            "duplicate supported-declaration-tag slug {slug}"
+        );
+    }
 }
 
 #[test]

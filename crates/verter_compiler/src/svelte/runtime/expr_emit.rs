@@ -495,13 +495,34 @@ pub(super) enum SimpleItemLowering {
 /// one to `StateSignal`), so the emission matches official. A no-arg `$state()` is
 /// the SHADOW-ROBUST `void 0` form (never the bare identifier `undefined`); an
 /// explicit primitive init is emitted verbatim.
-fn lower_state_primitive_item(name: &str, init: Option<&str>, bindings: &BindingTable) -> String {
-    let arg = init.unwrap_or("void 0");
+pub(super) fn lower_state_primitive_item(
+    name: &str,
+    init: Option<&str>,
+    bindings: &BindingTable,
+) -> String {
+    // The instance-script `$state` is a ROOT-scope binding (first in the table), so a name
+    // lookup is unambiguous here. A BLOCK declarator that could SHADOW an instance binding
+    // resolves its lowering by BINDING ID and calls `state_primitive_decl` directly.
     let lowering = bindings
         .all()
         .iter()
         .find(|b| b.name.as_str() == name)
         .and_then(|b| b.state.map(|s| s.lowering));
+    state_primitive_decl(name, init, lowering)
+}
+
+/// The emitted `$state` primitive declaration for an already-RESOLVED write-gated
+/// [`StateLowering`] — `let {name} = {init}` for a never-reassigned `PlainLet`,
+/// `let {name} = $.state({init})` for a reassigned signal. The caller resolves `lowering`
+/// from the binding it OWNS (by binding id for a block declarator, by root-scope name for
+/// an instance item), so a SHADOWING same-name binding can never select the wrong wrapper.
+/// A no-arg `$state()` is the SHADOW-ROBUST `void 0` form (never the bare `undefined`).
+pub(super) fn state_primitive_decl(
+    name: &str,
+    init: Option<&str>,
+    lowering: Option<StateLowering>,
+) -> String {
+    let arg = init.unwrap_or("void 0");
     match lowering {
         Some(StateLowering::PlainLet) => format!("let {name} = {arg};"),
         Some(StateLowering::StateSignal) | Some(StateLowering::RawStateSignal) => {

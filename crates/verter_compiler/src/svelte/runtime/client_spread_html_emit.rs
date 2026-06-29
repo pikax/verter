@@ -40,7 +40,7 @@ impl ClientEmitter<'_> {
     /// The `payload` (second argument) of the `{@html}` op targeting `node`, or `None`
     /// when no such op exists (a non-`{@html}` node). Read from the narrow op set.
     pub(super) fn html_op_payload(&self, node: NodeId) -> Option<String> {
-        self.plan().ops.iter().find_map(|op| match op {
+        self.plan().all_ops().find_map(|op| match op {
             ClientRuntimeOp::Html {
                 target, payload, ..
             } if NodeId(target.0) == node => Some(payload.clone()),
@@ -50,7 +50,7 @@ impl ClientEmitter<'_> {
 
     /// Whether the `{@html}` op targeting `node` is the only-child (controlled) form.
     pub(super) fn html_op_is_only_child(&self, node: NodeId) -> bool {
-        self.plan().ops.iter().any(|op| {
+        self.plan().all_ops().any(|op| {
             matches!(op, ClientRuntimeOp::Html { target, only_child: true, .. }
                 if NodeId(target.0) == node)
         })

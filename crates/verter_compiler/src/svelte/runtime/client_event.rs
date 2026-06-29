@@ -78,6 +78,17 @@ fn event_target_host(
     }
 }
 
+/// Emit the `$.delegate([...])` module epilogue from the first-seen-ordered
+/// delegated event-type set.
+pub(super) fn emit_delegate_epilogue(out: &mut String, events: &[String]) {
+    let list = events
+        .iter()
+        .map(|e| format!("'{e}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    out.push_str(&format!("$.delegate([{list}]);\n"));
+}
+
 #[cfg(test)]
 mod event_target_host_tests {
     use super::*;
@@ -169,15 +180,4 @@ mod event_target_host_tests {
             "$.event('scroll', $.document, $.preventDefault(h), void 0, true);"
         );
     }
-}
-
-/// Emit the `$.delegate([...])` module epilogue from the first-seen-ordered
-/// delegated event-type set.
-pub(super) fn emit_delegate_epilogue(out: &mut String, events: &[String]) {
-    let list = events
-        .iter()
-        .map(|e| format!("'{e}'"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    out.push_str(&format!("$.delegate([{list}]);\n"));
 }

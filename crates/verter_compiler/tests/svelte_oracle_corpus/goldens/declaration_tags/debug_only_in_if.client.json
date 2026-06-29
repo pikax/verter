@@ -1,0 +1,57 @@
+{
+  "slug": "declaration_tags/debug_only_in_if.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "debug_only_in_if",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "comment",
+    "first_child",
+    "template_effect",
+    "snapshot",
+    "if",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "comment",
+    "first_child",
+    "if",
+    "snapshot",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "comment": 1,
+    "first_child": 1,
+    "template_effect": 1,
+    "snapshot": 1,
+    "if": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; export default function debug_only_in_if($$anchor) {let a = 0; var fragment = $.comment(); var node = $.first_child(fragment); {var consequent = ($$anchor) => {$.template_effect(() => {console.log({a: $.snapshot(a)}); debugger;});}; $.if(node, ($$render) => {if (a) $$render(consequent);});} $.append($$anchor, fragment);}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}
