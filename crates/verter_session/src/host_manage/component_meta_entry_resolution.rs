@@ -199,16 +199,16 @@ impl VerterHost {
             );
             // Always include fallthrough — the solver path does not use walker
             // overflow as a gating signal.
-            let analysis = extract_component_meta_from_resolved(
+            let (analysis, fallthrough_completeness) = extract_component_meta_from_resolved(
                 self,
                 canonical.as_str(),
                 &resolved,
                 true, // include_fallthrough
                 host_ctx_ref,
             );
-            Some((analysis, resolved))
+            Some((analysis, resolved, fallthrough_completeness))
         });
-        let (analysis, resolved) = maybe_resolved_analysis?;
+        let (analysis, resolved, fallthrough_completeness) = maybe_resolved_analysis?;
 
         // Seal + admission decision — `publish_if_admissible` (by-value
         // fenced-serve consult + R20 finalise). An admitted write lets
@@ -228,6 +228,7 @@ impl VerterHost {
                     sig,
                     validated_at_generation,
                     &seed_fence,
+                    fallthrough_completeness,
                 );
             },
         );
@@ -291,7 +292,9 @@ impl VerterHost {
         let host_ctx =
             crate::resolver_core::HostResolverContext::from_cold_seed(self, &store_view, overlay);
         let host_ctx_ref: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
-        let analysis = extract_component_meta_from_resolved(
+        // This view path does NOT publish to `ComponentMetaResultDb`, so the
+        // fallthrough completeness carrier is discarded here.
+        let (analysis, _fallthrough_completeness) = extract_component_meta_from_resolved(
             self,
             canonical.as_str(),
             &resolved,

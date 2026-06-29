@@ -35,9 +35,10 @@ use crate::semantic_query::{ProjectionMode, SemanticNodeData, SemanticNodeId};
 ///   former O(2^depth) re-traversal.
 /// - **Shared op-budget**: ONE unit of the EXISTING request projection budget
 ///   ([`crate::request_budget::RequestBudget`]) is charged per distinct node.
-///   A trip halts the walk (no second budget engine); the partial result is
-///   never warm-admitted (the fallthrough store gates admission on
-///   `RequestBudget::is_exhausted`).
+///   A trip halts the walk (no second budget engine) AND folds a partial into
+///   the active cold-compute completeness scope, so the partial result is never
+///   warm-admitted (the fallthrough store gates admission on the typed
+///   `current_cold_compute_completeness`).
 /// - **Cycle sentinel** (`active`): tracks the in-progress path so a (defensive)
 ///   re-entry halts instead of recursing — it is the cycle sentinel, NOT the
 ///   memo.
@@ -70,6 +71,10 @@ fn enter_node<T: Clone>(
     if crate::request_context::current_request_budget()
         .is_some_and(|budget| budget.check_projection_op_count())
     {
+        // The op-budget trip is a genuine incomplete compute: fold a partial
+        // into the active cold-compute completeness scope so the fallthrough
+        // surface this walk feeds is refused warm admission.
+        crate::request_context::mark_request_materialization_cache_suppress();
         return NodeWalkStep::Halt;
     }
     active.insert(node);

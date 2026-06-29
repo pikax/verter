@@ -1794,30 +1794,45 @@ import Child from './Child.vue'
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn budget_exhausted_no_override_fallthrough_is_not_cached() {
-    // No-poison: a no-override fallthrough computed by a request that tripped its
-    // shared projection budget is a PARTIAL — it must NOT warm the runtime node
-    // cache NOR the legacy `cached_fallthrough` mirror. The runtime node store
-    // self-gates on the budget; the legacy mirror is gated in
-    // `cache_fallthrough_result`. Without the mirror gate the partial warms
-    // `DerivedRawState.cached_fallthrough` and a later request replays it.
+    // No-poison: a no-override fallthrough whose spread walker trips the shared
+    // projection budget MID-WALK is a PARTIAL — the trip folds into the active
+    // per-cold-compute completeness scope, so it must NOT warm the runtime node
+    // cache NOR the legacy `cached_fallthrough` mirror. Both admission sites gate
+    // on the typed `current_cold_compute_completeness`; without the mirror gate
+    // the partial warms `DerivedRawState.cached_fallthrough` and a later request
+    // replays it.
     use crate::resolver_core::FallthroughRequestHost;
 
+    // A `v-bind` of a union of distinct-keyed objects on a native root drives the
+    // fallthrough spread walker, which is the budget consumer that trips the cap.
     let project = make_project();
     project
-        .upsert_base("/Child.vue", r#"<template><input /></template>"#)
+        .upsert_base(
+            "/obj.ts",
+            r#"export declare const obj: { a: string } | { b: string } | { c: string };"#,
+        )
         .unwrap();
     project
         .upsert_base(
             "/App.vue",
             r#"<script setup lang="ts">
-import Child from './Child.vue'
+import { obj } from './obj'
 </script>
-<template><Child /></template>"#,
+<template><div v-bind="obj" /></template>"#,
         )
         .unwrap();
+    project.host().set_import_dependencies(
+        "/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./obj".to_string(),
+            resolved_canonical_id: Some("/obj.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
 
-    // A request budget that is already exhausted: the resolved fallthrough is a
-    // partial that must not warm any cache.
+    // A low projection budget: the spread walker trips it mid-walk, folding a
+    // partial into the cold-compute scope — the resolved fallthrough is a partial
+    // that must not warm any cache.
     let rctx = crate::request_context::RequestContext::with_kind_timing_and_projection_budget(
         1,
         Arc::from("/App.vue"),
@@ -1827,9 +1842,6 @@ import Child from './Child.vue'
         None,
         1,
     );
-    while !rctx.projection_budget.is_exhausted() {
-        rctx.projection_budget.check_projection_op_count();
-    }
     let guard = crate::request_context::RequestContextGuard::install(Arc::clone(&rctx));
 
     let _ = project.host().resolve_fallthrough_surface("/App.vue");
@@ -1859,12 +1871,224 @@ import Child from './Child.vue'
         "a budget-exhausted no-override fallthrough must NOT warm the runtime node cache"
     );
 
-    // Positive control: the SAME scenario WITHOUT an exhausted budget DOES warm
-    // the mirror, proving the gate suppresses only the budget-exhausted partial.
+    // Positive control: the SAME scenario WITHOUT a tripped budget DOES warm the
+    // mirror (the direct entry installs the default budget, which the small spread
+    // walk completes under), proving the gate suppresses only the genuine partial.
     let _ = project.host().resolve_fallthrough_surface("/App.vue");
     assert!(
         cached_fallthrough_state(&project, "/App.vue").is_some(),
-        "without budget exhaustion the no-override fallthrough DOES warm the mirror"
+        "without a tripped budget the no-override fallthrough DOES warm the mirror"
+    );
+}
+
+/// A no-macro owner whose ONLY budget consumer is the fallthrough spread walker:
+/// resolve does zero projection ops (no `defineProps` to instantiate), so the
+/// low projection budget is tripped exclusively MID-FALLTHROUGH. The spread is a
+/// `v-bind` of a union of distinct-keyed objects on a native root, so the walker
+/// descends every union arm and trips the cap.
+fn upsert_fallthrough_spread_owner(project: &Arc<MetaProject>) {
+    project
+        .upsert_base(
+            "/src/obj.ts",
+            r#"export declare const obj: { a: string } | { b: string } | { c: string } | { d: string };"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import { obj } from './obj'
+</script>
+<template><div v-bind="obj" /></template>"#,
+        )
+        .unwrap();
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./obj".to_string(),
+            resolved_canonical_id: Some("/src/obj.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+}
+
+/// Regression lock (fallthrough-only-partial no-poison): a fallthrough-only
+/// budget partial must NOT warm the OUTER `ComponentMetaResultDb`. The owner's
+/// resolve completes cleanly
+/// (`synthesis_should_suppress == false`) — the ONLY partial comes from the
+/// fallthrough spread walker tripping the low projection budget AFTER `resolved`
+/// was produced. Without the fix the publish gate consults only
+/// `resolved.synthesis_should_suppress` (false), so it warms the partial and a
+/// replay warm-hits — RED. Post-fix the carrier merges the fallthrough
+/// completeness into the gate, refusing admission — GREEN. The runtime node
+/// cache and the legacy mirror also stay empty for the partial.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn fallthrough_only_budget_partial_does_not_warm_component_meta_result_db() {
+    use crate::resolver_core::FallthroughRequestHost;
+    use std::sync::atomic::Ordering::Relaxed;
+
+    // Low projection budget: resolve (no macros) stays at zero ops, the
+    // fallthrough spread walker trips mid-walk.
+    let project = make_project_with_config(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        projection_op_budget: 3,
+        ..HostConfig::default()
+    });
+    upsert_fallthrough_spread_owner(&project);
+    let host = project.host();
+    let canonical = "/src/App.vue";
+
+    // First (cold) resolve: produces the fallthrough partial.
+    let (meta1, resolved) = host
+        .get_component_meta_with_resolution(canonical)
+        .expect("a fallthrough-tripped resolve must still return partial metadata");
+
+    // The resolve is clean — the partial is fallthrough-only (the exact shape
+    // this fix targets: too late for `resolved.synthesis_should_suppress`).
+    assert!(
+        !resolved.synthesis_should_suppress,
+        "the no-macro owner's resolve must complete cleanly so the partial is fallthrough-only \
+         (synthesis_should_suppress reflects resolve, not the later fallthrough trip)"
+    );
+    assert!(
+        matches!(
+            meta1.accepted_surface_completeness,
+            verter_semantic::analysis::component_meta::AcceptedSurfaceCompleteness::LowerBound
+        ),
+        "the budget-tripped fallthrough surface is a lower bound"
+    );
+
+    // The fallthrough partial must NOT have warmed `ComponentMetaResultDb`: a
+    // second resolve is NOT a warm hit.
+    let hits_before = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    let _ = host
+        .get_component_meta_with_resolution(canonical)
+        .expect("second resolve must still succeed");
+    let hits_after = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    assert_eq!(
+        hits_after, hits_before,
+        "a fallthrough-only budget partial MUST NOT warm `ComponentMetaResultDb` — the replay must \
+         be cold (hits_before={hits_before}, hits_after={hits_after}); pre-fix the publish gate saw \
+         only resolved.synthesis_should_suppress=false and warmed the partial"
+    );
+
+    // The runtime node cache and the legacy mirror also stay empty for the
+    // partial (no fallthrough-cache leak).
+    let key = crate::resolver_core::fallthrough_cache_key(
+        canonical,
+        host.config.generic_root_propagation,
+        None,
+    );
+    let view = FallthroughRequestHost::snapshot_store_view(host);
+    assert!(
+        host.resolver_runtime()
+            .fallthrough
+            .get_cached_node(&key, &view)
+            .is_none(),
+        "the fallthrough-partial top-level node must NOT be warm in the runtime node cache"
+    );
+    assert!(
+        cached_fallthrough_state(&project, canonical).is_none(),
+        "the fallthrough-partial must NOT warm the legacy cached_fallthrough mirror"
+    );
+}
+
+/// The PUBLIC direct entry `resolve_fallthrough_surface` installs a
+/// `RequestContext` when none is ambient, so the projection budget and the
+/// completeness gate are LIVE on that path (no manually-installed guard). With a
+/// low `projection_op_budget` and NO ambient context, the spread walker trips
+/// and the partial gates the mirror.
+///
+/// Without the context install the direct entry has no `RequestContext`, so
+/// `current_request_budget()` is `None`, the walker never trips, the fallthrough
+/// completes, and the mirror is warmed. With it, the auto-installed context's
+/// budget trips and the completeness gate refuses the mirror.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn direct_resolve_fallthrough_surface_installs_context_so_budget_gate_is_live() {
+    let project = make_project_with_config(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        projection_op_budget: 3,
+        ..HostConfig::default()
+    });
+    upsert_fallthrough_spread_owner(&project);
+
+    // No ambient RequestContext is installed: the direct entry must install its
+    // own (with `config.projection_op_budget`) for the gate to be live.
+    assert!(
+        crate::request_context::current_request_context().is_none(),
+        "test precondition: no ambient request context"
+    );
+
+    let _ = project.host().resolve_fallthrough_surface("/src/App.vue");
+
+    assert!(
+        cached_fallthrough_state(&project, "/src/App.vue").is_none(),
+        "with no ambient context, the direct entry MUST install one so the low projection budget \
+         trips the spread walker and the partial-completeness gate refuses the mirror; pre-fix no \
+         context is installed, the walker never trips, and the mirror is warmed"
+    );
+}
+
+/// DON'T-OVER-GATE positive control: a `LowerBound` SURFACE whose COMPUTE is
+/// COMPLETE is still cacheable. The same spread owner under a generous budget
+/// produces a lower-bound accepted surface (the union spread is inexact) WITHOUT
+/// any budget/fuse trip, so the fallthrough completeness is `Complete` and the
+/// result warms `ComponentMetaResultDb`. A regression that wrongly gated on the
+/// surface-shape `accepted_surface_completeness == LowerBound` would refuse this
+/// and the replay would be cold.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn lower_bound_complete_fallthrough_surface_still_warms_component_meta_result_db() {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    // Default (generous) budget: the spread walk COMPLETES, so the compute is
+    // Complete even though the surface is a lower bound.
+    let project = make_project();
+    upsert_fallthrough_spread_owner(&project);
+    let host = project.host();
+    let canonical = "/src/App.vue";
+
+    let (meta1, resolved) = host
+        .get_component_meta_with_resolution(canonical)
+        .expect("a clean resolve must return metadata");
+    assert!(
+        !resolved.synthesis_should_suppress,
+        "the clean resolve must not suppress"
+    );
+    assert!(
+        matches!(
+            meta1.accepted_surface_completeness,
+            verter_semantic::analysis::component_meta::AcceptedSurfaceCompleteness::LowerBound
+        ),
+        "the inexact union spread yields a lower-bound SURFACE (distinct from compute completeness)"
+    );
+
+    // The LowerBound-surface / Complete-compute result MUST warm: a second
+    // resolve IS a warm hit.
+    let hits_before = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    let _ = host
+        .get_component_meta_with_resolution(canonical)
+        .expect("second resolve must succeed");
+    let hits_after = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    assert!(
+        hits_after > hits_before,
+        "a LowerBound SURFACE with COMPLETE compute MUST stay cacheable — the replay must warm-hit \
+         `ComponentMetaResultDb` (hits_before={hits_before}, hits_after={hits_after}); gating on the \
+         surface shape instead of compute completeness would over-gate this"
     );
 }
 
@@ -12152,7 +12376,7 @@ defineEmits<Emits>()
         .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
 
-    let meta = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
+    let (meta, _) = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
         crate::host_manage::extract_component_meta_from_resolved(
             project.host(),
             "/src/App.vue",
@@ -12401,7 +12625,7 @@ defineSlots<TabsSlots<T>>()
         .host()
         .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
-    let meta = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
+    let (meta, _) = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
         crate::host_manage::extract_component_meta_from_resolved(
             project.host(),
             "/src/App.vue",
@@ -12682,7 +12906,7 @@ defineSlots<TabsSlots<T>>()
         .host()
         .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
-    let meta = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
+    let (meta, _) = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
         crate::host_manage::extract_component_meta_from_resolved(
             project.host(),
             "/src/App.vue",
@@ -12893,7 +13117,7 @@ defineSlots<TabsSlots<T>>()
         .host()
         .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
-    let meta = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
+    let (meta, _) = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
         crate::host_manage::extract_component_meta_from_resolved(
             project.host(),
             "/src/App.vue",
@@ -13141,7 +13365,7 @@ defineSlots<TabsSlots<T>>()
         .host()
         .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
-    let meta = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
+    let (meta, _) = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
         crate::host_manage::extract_component_meta_from_resolved(
             project.host(),
             "/src/App.vue",
@@ -13252,7 +13476,7 @@ defineProps<{
         elapsed.as_secs_f64()
     );
 
-    let meta = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
+    let (meta, _) = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
         crate::host_manage::extract_component_meta_from_resolved(
             project.host(),
             "/src/App.vue",
@@ -13334,7 +13558,7 @@ defineProps<{
         .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
     let started = std::time::Instant::now();
-    let meta = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
+    let (meta, _) = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
         crate::host_manage::extract_component_meta_from_resolved(
             project.host(),
             "/src/App.vue",
@@ -13435,7 +13659,7 @@ defineSlots<Slots<M>>()
         .host()
         .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
-    let meta = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
+    let (meta, _) = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
         crate::host_manage::extract_component_meta_from_resolved(
             project.host(),
             "/src/App.vue",

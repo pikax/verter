@@ -12,7 +12,10 @@ use std::sync::Arc;
 
 use super::{collect_dynamic_root_candidates_from_node, known_spread_keys_from_node};
 use crate::meta::MetaProject;
-use crate::request_context::{RequestContext, RequestContextGuard};
+use crate::request_context::{
+    current_cold_compute_completeness, ColdComputeCompletenessScope, RequestContext,
+    RequestContextGuard,
+};
 use crate::resolver_core::{
     FallthroughOverrideIdentity, FallthroughPropOverride, FallthroughPropOverrideSet,
 };
@@ -231,7 +234,7 @@ defineProps<{ root: Tree }>()
         .host()
         .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved component meta should exist");
-    let meta = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
+    let (meta, _) = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
         crate::host_manage::extract_component_meta_from_resolved(
             project.host(),
             "/src/App.vue",
@@ -263,4 +266,63 @@ defineProps<{ root: Tree }>()
          (rendered {} bytes)",
         rendered.len()
     );
+}
+
+/// A REAL over-cap walker TRIP folds a partial into the active per-cold-compute
+/// completeness scope. Both fallthrough node walkers are driven over a
+/// content-interned diamond with a LOW projection budget so the walk itself
+/// trips the fuse MID-WALK (NOT a pre-exhausted budget installed before the
+/// call). On a trip the walk returns its halt value AND the trip MUST fold a
+/// partial, so the fallthrough completeness the carrier captures is `Partial`
+/// and cache admission is refused.
+///
+/// RED on the pre-fix tree: `enter_node` returns `Halt` on a budget trip
+/// WITHOUT folding, so the scope stays `Complete` and `is_partial()` is `false`.
+/// GREEN after: the trip folds via `mark_request_materialization_cache_suppress`.
+#[test]
+fn over_cap_walker_trip_folds_partial_into_cold_compute_scope() {
+    let project = open_project();
+    let host = project.host();
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let ctx: &dyn crate::resolver_core::ResolverContext = host;
+    let n: u32 = 14;
+
+    // known_spread walker: leaf is an (empty) object surface.
+    {
+        let leaf = graph.intern_node(SemanticNodeData::Object(empty_surface()));
+        let top = build_diamond(&graph, leaf, n);
+        // Cap 4 with a depth-14 diamond: the first-arm descent charges the
+        // budget per distinct node and trips on the 5th, deep mid-walk.
+        let (_rctx, _budget_guard) = install_budget(4);
+        let _scope = ColdComputeCompletenessScope::enter();
+        let spread = known_spread_keys_from_node(ctx, top);
+        assert!(
+            spread.is_none(),
+            "an over-cap known_spread walk halts to the `None` halt value"
+        );
+        assert!(
+            current_cold_compute_completeness().is_partial(),
+            "a REAL over-cap known_spread trip MUST fold a partial into the active cold-compute \
+             scope (pre-fix `enter_node` halts WITHOUT folding so the scope stays Complete)"
+        );
+    }
+
+    // dynamic-root walker: leaf is a string literal (a native-tag candidate).
+    {
+        let leaf = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+            "div".to_string(),
+        )));
+        let top = build_diamond(&graph, leaf, n);
+        let (_rctx, _budget_guard) = install_budget(4);
+        let _scope = ColdComputeCompletenessScope::enter();
+        let candidates = collect_dynamic_root_candidates_from_node(ctx, top, &[]);
+        assert!(
+            candidates.is_empty(),
+            "an over-cap dynamic-root walk halts to the empty halt value"
+        );
+        assert!(
+            current_cold_compute_completeness().is_partial(),
+            "a REAL over-cap dynamic-root trip MUST fold a partial into the active cold-compute scope"
+        );
+    }
 }

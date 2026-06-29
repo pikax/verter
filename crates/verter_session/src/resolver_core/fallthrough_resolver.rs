@@ -192,15 +192,16 @@ impl FallthroughResolverState {
 
     pub fn store_node(&self, key: FallthroughNodeKey, result: FallthroughNodeResult) {
         // No-poison: never admit an override-bearing-uncacheable result, and
-        // never warm a result computed by a request that tripped its shared
-        // projection budget (the walk returned a partial). Both reuse the
-        // EXISTING request budget — no second budget engine.
+        // never warm a PARTIAL result (a budget/fuse trip or a fatal semantic
+        // read folded into the active cold-compute completeness scope). The
+        // typed completeness signal is the single no-poison rail shared with
+        // the component-meta materialiser — not a fallthrough-private predicate.
         if !key.is_cacheable() {
             return;
         }
-        if crate::request_context::current_request_budget()
-            .is_some_and(|budget| budget.is_exhausted())
-        {
+        if crate::cache_runtime::refuse_result_cache_admission_if_partial(
+            crate::request_context::current_cold_compute_completeness().is_partial(),
+        ) {
             return;
         }
         if !result.facts.is_empty()

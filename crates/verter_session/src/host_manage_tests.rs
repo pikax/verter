@@ -2676,7 +2676,7 @@ import { shared } from './shared'
         .resolve_component_meta("/src/Button.vue", crate::types::ProjectionMode::Expanded)
         .expect("resolved meta should be computed from the captured view");
 
-    let meta = crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
+    let (meta, _) = crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
         extract_component_meta_from_resolved(&host, "/src/Button.vue", &resolved, true, ctx)
     });
 
@@ -2687,6 +2687,100 @@ import { shared } from './shared'
         ),
         "button fallthrough should still resolve through the imported Link root",
     );
+}
+
+/// Typed-completeness gate: a NON-budget partial (a fuse / semantic-miss class
+/// signal folded via `mark_request_materialization_cache_suppress`) gates BOTH
+/// fallthrough cache-admission sites — `store_node` and
+/// `cache_fallthrough_result` — EVEN THOUGH the projection budget is NOT
+/// exhausted. This proves the gate keys on the typed cold-compute completeness,
+/// not the ad-hoc `is_exhausted()` predicate the fix deletes.
+///
+/// Without the fix both gates consult `current_request_budget().is_exhausted()`
+/// (false here), so the node IS stored and the mirror IS warmed. With it, both
+/// gates consult `current_cold_compute_completeness().is_partial()` (true),
+/// refusing admission.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn non_budget_partial_gates_fallthrough_admission_with_budget_unexhausted() {
+    use crate::resolver_core::fallthrough_resolver::intrinsic_surface_key;
+    use crate::resolver_core::FallthroughRequestHost;
+
+    let host = make_host();
+    upsert_vue(&host, "/src/App.vue", r#"<template><div /></template>"#);
+    let canonical = "/src/App.vue";
+
+    // A request budget with ample headroom — it is NEVER exhausted.
+    let rctx = crate::request_context::RequestContext::with_kind_timing_and_projection_budget(
+        1,
+        Arc::from(canonical),
+        verter_audit::RequestKind::ComponentMeta,
+        false,
+        false,
+        None,
+        100_000,
+    );
+    let _guard = crate::request_context::RequestContextGuard::install(Arc::clone(&rctx));
+    let _scope = crate::request_context::ColdComputeCompletenessScope::enter();
+
+    // Fold a NON-budget partial (fuse / semantic-miss class) WITHOUT touching
+    // the projection budget.
+    crate::request_context::mark_request_materialization_cache_suppress();
+
+    // The discriminating precondition split: the partial is typed completeness,
+    // NOT budget exhaustion. The deleted ad-hoc gate would NOT fire here.
+    assert!(
+        !rctx.projection_budget.is_exhausted(),
+        "the projection budget must NOT be exhausted — this isolates the non-budget partial"
+    );
+    assert!(
+        crate::request_context::current_cold_compute_completeness().is_partial(),
+        "the cold-compute scope must carry a Partial after a non-budget fold"
+    );
+
+    // (a) `store_node` refuses a cacheable node on the typed-completeness gate.
+    let (anchor, generation) = host.project_intrinsic_cache_anchor(canonical);
+    let key = intrinsic_surface_key(&anchor, generation, "div");
+    let members = host.intrinsic_members_for_tag("div");
+    let node = host.build_runtime_intrinsic_surface_node(&members);
+    host.resolver_runtime()
+        .fallthrough
+        .store_node(key.clone(), node);
+    let view = FallthroughRequestHost::snapshot_store_view(&host);
+    assert!(
+        host.resolver_runtime()
+            .fallthrough
+            .get_cached_node(&key, &view)
+            .is_none(),
+        "a NON-budget partial (budget not exhausted) MUST refuse store_node admission — the gate is \
+         typed completeness, NOT is_exhausted() (pre-fix is_exhausted()=false stored the node)"
+    );
+
+    // (b) `cache_fallthrough_result` refuses the legacy mirror on the same gate.
+    let result = crate::types::FallthroughResolution {
+        accepted_props: Vec::new(),
+        accepted_events: Vec::new(),
+        accepted_surface_completeness:
+            verter_semantic::analysis::component_meta::AcceptedSurfaceCompleteness::Exact,
+        fallthrough_surface: verter_semantic::analysis::component_meta::FallthroughSurface::None {
+            reason: verter_semantic::analysis::component_meta::NoFallthroughReason::NoTemplate,
+        },
+        fact_versions: Vec::new(),
+    };
+    host.cache_fallthrough_result(canonical, None, &result);
+    let mirror_present = host
+        .derived_raw_cache()
+        .get(canonical)
+        .and_then(|entry| entry.cached_fallthrough.as_ref().map(|_| ()))
+        .is_some();
+    assert!(
+        !mirror_present,
+        "a NON-budget partial MUST refuse the cached_fallthrough mirror — typed-completeness gate, \
+         not is_exhausted() (pre-fix the un-exhausted budget warmed the mirror)"
+    );
+
+    drop(_scope);
+    drop(_guard);
 }
 
 #[test]

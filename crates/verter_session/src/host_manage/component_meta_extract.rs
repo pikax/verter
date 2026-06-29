@@ -1013,7 +1013,10 @@ pub(crate) fn extract_component_meta_from_resolved(
     resolved: &crate::meta_resolve::ResolvedComponentMetaState,
     include_fallthrough: bool,
     ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
-) -> verter_semantic::analysis::component_meta::ComponentMetaAnalysis {
+) -> (
+    verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    crate::semantic_query::ResultCompleteness,
+) {
     let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
     // The macro-DTO surface read (`vue_macro_dtos_with_ctx` ->
     // `ctx.store_view()`) MUST run under the request-bound `ctx`, not the
@@ -1043,7 +1046,17 @@ pub(crate) fn extract_component_meta_from_resolved(
         &resolved.snapshot,
         resolved.evaluated_types.as_ref(),
     );
+    // The fallthrough cold compute runs AFTER `resolved` was produced, so a
+    // fallthrough-only partial (a budget/fuse trip, a fatal semantic read, a
+    // same-path truncation) is too late for `resolved.synthesis_should_suppress`.
+    // Capture its COMPUTE completeness here through the shared per-cold-compute
+    // scope (the walker fold + the dispatch-level read suppressors fold into it)
+    // and carry it up so the outer publish gate refuses a partial. This is the
+    // COMPUTE completeness, NOT the surface-shape `accepted_surface_completeness`
+    // (a representable `LowerBound` surface stays cacheable).
+    let mut fallthrough_completeness = crate::semantic_query::ResultCompleteness::Complete;
     if include_fallthrough {
+        let _completeness_scope = crate::request_context::ColdComputeCompletenessScope::enter();
         let mut visiting = rustc_hash::FxHashSet::default();
         if let Some(resolution) = host.compute_fallthrough_surface_from_resolved_state(
             &canonical,
@@ -1057,6 +1070,7 @@ pub(crate) fn extract_component_meta_from_resolved(
             meta.accepted_surface_completeness = resolution.accepted_surface_completeness;
             meta.fallthrough_surface = resolution.fallthrough_surface;
         }
+        fallthrough_completeness = crate::request_context::current_cold_compute_completeness();
     }
     // apply the publication policy over (resolved_type_registry,
     // resolved_type_registry_meta) + snapshot.macros (§3.4 structural
@@ -1077,7 +1091,7 @@ pub(crate) fn extract_component_meta_from_resolved(
         meta.macro_expansion_diagnostics
             .extend(resolved.synthesis_diagnostics.iter().cloned());
     }
-    meta
+    (meta, fallthrough_completeness)
 }
 
 /// Like [`extract_component_meta_from_resolved`] with `include_fallthrough=true`,
@@ -1120,22 +1134,28 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
         resolved.evaluated_types.as_ref(),
     );
     let mut visiting = rustc_hash::FxHashSet::default();
-    let fallthrough_facts = if let Some(resolution) = host
-        .compute_fallthrough_surface_from_resolved_state(
+    // Per-cold-compute completeness scope: a fallthrough partial folds in so the
+    // fallthrough's OWN caches (`store_node`) self-gate on the typed completeness
+    // signal, consistent with the struct-returning extract path. The payload
+    // promotion gate is independent (keys on `resolved.synthesis_should_suppress`).
+    let fallthrough_facts = {
+        let _completeness_scope = crate::request_context::ColdComputeCompletenessScope::enter();
+        if let Some(resolution) = host.compute_fallthrough_surface_from_resolved_state(
             &canonical,
             resolved,
             None,
             &mut visiting,
             ctx,
         ) {
-        let facts = resolution.fact_versions.clone();
-        meta.accepted_props = resolution.accepted_props;
-        meta.accepted_events = resolution.accepted_events;
-        meta.accepted_surface_completeness = resolution.accepted_surface_completeness;
-        meta.fallthrough_surface = resolution.fallthrough_surface;
-        Some(facts)
-    } else {
-        None
+            let facts = resolution.fact_versions.clone();
+            meta.accepted_props = resolution.accepted_props;
+            meta.accepted_events = resolution.accepted_events;
+            meta.accepted_surface_completeness = resolution.accepted_surface_completeness;
+            meta.fallthrough_surface = resolution.fallthrough_surface;
+            Some(facts)
+        } else {
+            None
+        }
     };
     // apply the publication policy AFTER fallthrough merge so the
     // pass operates on the final accepted_props/events. Walks

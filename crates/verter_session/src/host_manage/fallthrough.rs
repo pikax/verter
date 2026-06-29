@@ -38,6 +38,31 @@ impl VerterHost {
         &self,
         canonical_id: &str,
     ) -> Option<crate::types::FallthroughResolution> {
+        // Direct-entry request context: when this public entry is reached
+        // outside an audited component-meta request (compile_cache and other
+        // direct callers), no `RequestContext` is installed, so the projection
+        // budget AND the partial-completeness gate would be inert on this path.
+        // Install one (mirroring the component-meta entry, threading
+        // `config.projection_op_budget`) ONLY when none is active, so a call
+        // nested inside `get_component_meta` inherits the existing context
+        // unchanged rather than clobbering it. The recursion runs through
+        // `_internal_with_overrides`, so installing at this top-level public fn
+        // means every child inherits the context.
+        let _ctx_guard = if crate::request_context::current_request_context().is_none() {
+            Some(crate::request_context::RequestContextGuard::install(
+                crate::request_context::RequestContext::with_kind_timing_and_projection_budget(
+                    self.next_request_id(),
+                    std::sync::Arc::<str>::from(canonical_id),
+                    verter_audit::RequestKind::ComponentMeta,
+                    false,
+                    false,
+                    None,
+                    self.config.projection_op_budget,
+                ),
+            ))
+        } else {
+            None
+        };
         let mut visiting = rustc_hash::FxHashSet::default();
         self.resolve_fallthrough_surface_internal(canonical_id, &mut visiting)
     }
@@ -115,15 +140,25 @@ impl VerterHost {
         // `run_fallthrough_request` enforces it centrally: a non-cacheable key
         // skips warm lookup, cache admission, AND singleflight (computed cold,
         // returned-only). No host-side special case is needed here.
-        let result = crate::resolver_core::run_fallthrough_request(
-            self,
-            &self.resolver_runtime().top_level_fallthrough_singleflight,
-            canonical_id,
-            prop_type_overrides,
-            visiting,
-            None,
-            STORE_VIEW_STABILITY_MAX_ATTEMPTS,
-        );
+        //
+        // Per-cold-compute completeness scope spanning the compute AND its
+        // admission (`store_stable` -> `cache_fallthrough_result`): a budget /
+        // fuse / semantic partial folded during the compute is read by the
+        // admission gate so a partial fallthrough never warms any cache. A
+        // nested child resolve enters its own scope and bubbles its partiality
+        // into this one on drop.
+        let result = {
+            let _completeness_scope = crate::request_context::ColdComputeCompletenessScope::enter();
+            crate::resolver_core::run_fallthrough_request(
+                self,
+                &self.resolver_runtime().top_level_fallthrough_singleflight,
+                canonical_id,
+                prop_type_overrides,
+                visiting,
+                None,
+                STORE_VIEW_STABILITY_MAX_ATTEMPTS,
+            )
+        };
 
         if matches!(result.source, RequestSource::Cache) {
             self.provenance
@@ -799,16 +834,16 @@ impl VerterHost {
         prop_type_overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
         result: &crate::types::FallthroughResolution,
     ) {
-        // No-poison: a result computed by a request that tripped its shared
-        // projection budget is a PARTIAL — gate ALL fallthrough promotion on a
-        // non-exhausted budget. The runtime node store self-gates on the same
-        // budget, but the legacy `cached_fallthrough` mirror does not, so a
-        // budget-exhausted no-override partial could otherwise warm-hit
-        // `DerivedRawState.cached_fallthrough`. Gating here covers both the
-        // node store and the mirror.
-        if crate::request_context::current_request_budget()
-            .is_some_and(|budget| budget.is_exhausted())
-        {
+        // No-poison: a PARTIAL fallthrough (a budget/fuse trip or a fatal
+        // semantic read folded into the active cold-compute completeness scope)
+        // must NOT warm any fallthrough cache. The runtime node store self-gates
+        // on the same typed completeness signal, but the legacy
+        // `cached_fallthrough` mirror does not, so gating here on
+        // `current_cold_compute_completeness` covers both the node store and the
+        // mirror — the single no-poison rail shared with the materialiser.
+        if crate::cache_runtime::refuse_result_cache_admission_if_partial(
+            crate::request_context::current_cold_compute_completeness().is_partial(),
+        ) {
             return;
         }
 

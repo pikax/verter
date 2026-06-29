@@ -39,7 +39,7 @@
 //!
 //! ## Allow-list
 //!
-//! Seven call sites in production source legitimately
+//! Six call sites in production source legitimately
 //! use the loose `<receiver>.insert(...)` / `<receiver>.insert_arc(...)`
 //! admission path. Three categories — call-site-gated, helper
 //! method, and wrapper method — are documented below. Adding a new
@@ -53,11 +53,6 @@
 //!   one of the inherently-constant variants
 //!   (`IntrinsicSurface(_)` / `ConsumedBindings(_)`) — the latter is
 //!   the canonical `is_facts_irrelevant: true` candidate.
-//! - `FallthroughResolverState::resolve_node` in
-//!   `resolver_core/fallthrough_resolver.rs`. The singleflight cold
-//!   body applies the same variant-or-facts gate via a local
-//!   `stable` boolean before `self.cache.insert(...)`. Same
-//!   audit-eligibility as `store_node`.
 //! - `SymbolResolverState::resolve_node` in
 //!   `resolver_core/symbol_resolver.rs`. The singleflight cold body
 //!   admits only when `!result.facts.is_empty()` (the local
