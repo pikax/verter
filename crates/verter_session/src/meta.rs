@@ -284,7 +284,7 @@ impl MetaProject {
     /// constructor. For batch workloads (test harness, MCP server),
     /// see [`Self::open_session_batch`].
     pub fn open_session(self: &Arc<Self>) -> Result<MetaSession, MetaError> {
-        self.open_session_with_mode(ExecutionMode::Interactive)
+        self.open_session_with_mode(MetaExecutionMode::Interactive)
     }
 
     /// Open a new session in batch execution mode.
@@ -297,13 +297,13 @@ impl MetaProject {
     /// non-empty batch. Test harness and MCP server callers use this path.
     #[allow(dead_code)]
     pub fn open_session_batch(self: &Arc<Self>) -> Result<MetaSession, MetaError> {
-        self.open_session_with_mode(ExecutionMode::Batch)
+        self.open_session_with_mode(MetaExecutionMode::Batch)
     }
 
     /// Open a new session with an explicit execution mode.
     fn open_session_with_mode(
         self: &Arc<Self>,
-        execution_mode: ExecutionMode,
+        execution_mode: MetaExecutionMode,
     ) -> Result<MetaSession, MetaError> {
         self.check_alive()?;
         let id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
@@ -402,6 +402,16 @@ impl MetaProject {
 
 /// Session execution mode.
 ///
+/// Component-meta FAN-OUT policy ONLY — it selects how a `MetaSession`
+/// fans its N component-meta requests across the host batch coordinator.
+/// It is NOT a host-construction axis and MUST NOT be reused to select a
+/// host preset / resource policy: host capability presets live on
+/// [`crate::HostConfig`] (`lsp_interactive` / `batch_typecheck`), and the
+/// host CPU / decl-lowering pool spawn-and-size policy lives on
+/// [`crate::types::HostResourcePolicy`]. Conflating this fan-out mode with
+/// host construction would reintroduce the fifth-axis drift the codex
+/// ruling rejected.
+///
 /// Separates interactive-latency callers (LSP) from batch-throughput
 /// callers (test harness, MCP server). Interactive mode follows the
 /// single-request-then-wait path; Batch mode issues N independent
@@ -412,7 +422,7 @@ impl MetaProject {
 /// cross-file `TaskKind::Load` load+parse work).
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ExecutionMode {
+pub enum MetaExecutionMode {
     /// Single-request latency-sensitive path. Default for
     /// [`MetaProject::open_session`]. LSP callers stay here.
     #[default]
@@ -438,7 +448,7 @@ pub struct MetaSession {
     /// `account_batch_submission`. Interactive sessions resolve one
     /// request at a time without a batch coordinator.
     #[allow(dead_code)]
-    execution_mode: ExecutionMode,
+    execution_mode: MetaExecutionMode,
     /// Session-owned runtime for overlay-sensitive request execution.
     /// Owns session identity, overlay context lifecycle, and the
     /// session-scoped resolved-meta cache.
@@ -468,7 +478,7 @@ impl MetaSession {
 
     /// This session's execution mode.
     #[allow(dead_code)]
-    pub fn execution_mode(&self) -> ExecutionMode {
+    pub fn execution_mode(&self) -> MetaExecutionMode {
         self.execution_mode
     }
 
