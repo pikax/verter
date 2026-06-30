@@ -205,6 +205,9 @@ Ownership resolution must match TypeScript's own configured-project semantics, *
 Verter's `verter_workspace` ownership must be extended to encode (a) the carrier extension as a member-extension, and (b) reference-graph awareness; until it does, the §1 "no owner ⇒ no TS" rule would mis-fire on legitimate `.vue` files. This is Block 1/3 work, gated by the §3 ownership fixtures (including the `.vue`-specific-`include` and `files`-list discovery cases).
 
 ### 2.7 Performance: do less *non-checker* work — and never less *checker* work than correctness requires
+
+*Host-mode / resource-policy design (the systems-layer lever this gate measures): see [host-mode-perf-design.md](./host-mode-perf-design.md). PERF-0 lands its carrier-byte + diagnostic-set parity oracle.*
+
 Both engines are checker-bound on the same tsgo, so equal work is at parity. The durable win is doing less work **around** the checker, with a hard line: Verter may skip **re-codegen** and redundant **transport**, but it must **never** suppress an engine re-check that a type change requires. The two decisions are split:
 
 **(a) Carrier *regeneration* skip (Verter's decision — safe).** Keyed by the orthogonal env dimensions the carrier text depends on: `source_content_hash + parse_env_hash + (codegen) compile profile + file_language_row + helper/runtime_version` (R21 — no single bundled hash). If this key is unchanged, **do not regenerate the carrier and do not re-send its text to the engine.** This is strictly less work than vize, which regenerates virtual TS per request. "Carrier-hash-stable" means *reuse the cached carrier text* — it does **not** mean "the type result is still valid."
