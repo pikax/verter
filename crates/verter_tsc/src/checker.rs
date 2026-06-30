@@ -257,6 +257,21 @@ fn generate_all_tsc(
         .collect()
 }
 
+/// Single source of truth for the [`HostConfig`] the production `verter-tsc`
+/// checker constructs its shared [`VerterHost`] from.
+///
+/// `verter-tsc` is a one-shot batch type-check: it builds the host, upserts
+/// every `.vue` file, generates public-API stubs + validation TSX, runs the
+/// external checker, and exits. It never serves interactive LSP queries, so it
+/// routes through the [`HostConfig::batch_typecheck`] preset — BUILD analysis
+/// scope, the `Build` query profile, and lazily-spawned host-owned pools (zero
+/// eager pool threads at construction) — rather than the Full / LSP-interactive
+/// [`HostConfig::default`]. Reverting this one body to `HostConfig::default()`
+/// flips both the production host and the discriminating unit test together.
+fn build_host_config() -> HostConfig {
+    HostConfig::batch_typecheck()
+}
+
 /// Run the full type-checking pipeline.
 pub fn run(
     config: &TsConfig,
@@ -292,7 +307,7 @@ pub fn run(
     // ── Generate public API stubs ─────────────────────────
     // Create a shared VerterHost, upsert all .vue files, and generate public-API
     // stubs containing real component types for cross-component type resolution.
-    let host = VerterHost::new_standalone(HostConfig::default());
+    let host = VerterHost::new_standalone(build_host_config());
     for vue_path in &config.vue_files {
         let source = match fs::read_to_string(vue_path) {
             Ok(s) => s,
@@ -1778,6 +1793,69 @@ fn cleanup_empty_dirs(dir: &Path) {
 mod tests {
     use super::*;
     use crate::tsconfig::load_tsconfig;
+
+    /// Discriminating gate for the `build_host_config()` seam: the production
+    /// `verter-tsc` host MUST construct through the Batch typecheck preset
+    /// (BUILD analysis scope + `Build` query profile + lazily-spawned
+    /// host-owned CPU pool), NOT the Full / LSP-interactive default.
+    ///
+    /// RED when `build_host_config()` returns `HostConfig::default()`; GREEN
+    /// when it returns `HostConfig::batch_typecheck()`. Asserts both the
+    /// positive identity (== the Batch preset, i.e. BUILD scope / `Build`
+    /// profile) and the negative (!= the default Full preset, i.e. != LSP scope
+    /// / != `LspInteractive` profile) on scope, query profile, and host-pool
+    /// spawn timing, then re-checks through a constructed host's public
+    /// accessors. The `verter_tsc` crate depends only on `verter_session` (not
+    /// `verter_semantic`) and `verter_session` re-exports neither `AnalysisScope`
+    /// nor `QueryProfile`, so the BUILD/`Build` and LSP/`LspInteractive` targets
+    /// are sourced from the canonical preset constructors rather than named
+    /// variants — semantically identical, and it ties the seam directly to the
+    /// presets it must select between.
+    #[test]
+    fn build_host_config_routes_production_host_through_batch_preset() {
+        let cfg = build_host_config();
+        let batch = HostConfig::batch_typecheck();
+        let full = HostConfig::default();
+
+        // Effective analysis scope == BUILD (Batch preset), != LSP (default).
+        assert_eq!(
+            cfg.effective_scope(),
+            batch.effective_scope(),
+            "build_host_config() must use the Batch BUILD analysis scope"
+        );
+        assert_ne!(
+            cfg.effective_scope(),
+            full.effective_scope(),
+            "build_host_config() must NOT use the default LSP analysis scope"
+        );
+
+        // Query profile == Build (Batch preset), != LspInteractive (default).
+        assert_eq!(
+            cfg.query_profile, batch.query_profile,
+            "build_host_config() must use the Build query profile"
+        );
+        assert_ne!(
+            cfg.query_profile, full.query_profile,
+            "build_host_config() must NOT use the LspInteractive query profile"
+        );
+
+        // Host-owned CPU pool spawns lazily under Batch, eagerly under default.
+        assert_eq!(
+            cfg.resource_policy.host_cpu_pool.spawn, batch.resource_policy.host_cpu_pool.spawn,
+            "build_host_config() must use lazy host-owned CPU pool spawn"
+        );
+        assert_ne!(
+            cfg.resource_policy.host_cpu_pool.spawn, full.resource_policy.host_cpu_pool.spawn,
+            "build_host_config() must NOT use eager host-owned CPU pool spawn"
+        );
+
+        // The same identity must hold through a constructed host's public API.
+        let host = VerterHost::new_standalone(build_host_config());
+        assert_eq!(host.config().effective_scope(), batch.effective_scope());
+        assert_ne!(host.config().effective_scope(), full.effective_scope());
+        assert_eq!(host.query_profile(), batch.query_profile);
+        assert_ne!(host.query_profile(), full.query_profile);
+    }
 
     fn write_mock_tsc(project_root: &Path, mode: &str) {
         let bin_dir = project_root.join("node_modules").join(".bin");
