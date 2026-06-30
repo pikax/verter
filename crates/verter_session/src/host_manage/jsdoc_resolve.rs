@@ -150,6 +150,80 @@ impl crate::resolver_core::DeclarationMetadataResolver for HostComponentMetaReso
     }
 }
 
+impl HostComponentMetaResolver<'_> {
+    /// Shared owner-local macro-root presence gate, decided in NODE DOMAIN.
+    ///
+    /// Lowers the bare root reference at `Navigate` and resolves its one-level
+    /// `SurfaceView` through the SOLE query-time dispatch at `Published(Shallow)`
+    /// (the same demand the prior `ExpandedObjectShape` bridge resolved), then
+    /// decides per macro kind whether the root carries a non-empty macro surface
+    /// directly off the `SurfaceView` — never materialising it to a `TypeExpr` /
+    /// `ExpandedObjectShape`.
+    ///
+    /// Construct signatures and index signatures live on dedicated `SurfaceView`
+    /// fields; the materialised `ExpandedObjectShape` form FOLDS construct
+    /// signatures into `call_signatures` and surfaces an open index domain through
+    /// `has_index_signature`, so the props/model/slots gate ORs `call_signatures`,
+    /// `construct_signatures`, `index_signatures` AND `has_index_signature` to keep
+    /// the presence semantics identical to the materialised reader it replaces.
+    fn owner_local_macro_root_surface_presence(
+        &self,
+        owner_canonical: &str,
+        root_name: &str,
+        macro_kind: verter_semantic::analysis::types::AnalyzedMacroKind,
+    ) -> bool {
+        use verter_semantic::analysis::AnalyzedMacroKind;
+
+        let root_ref = verter_type_expr::TypeExpr::Ref {
+            name: std::sync::Arc::from(root_name),
+            type_arguments: std::sync::Arc::from(Vec::<verter_type_expr::TypeExpr>::new()),
+        };
+        let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(self.ctx);
+        let Some(base) = dispatch.lower_type_expr_in_scope_with_mode(
+            owner_canonical,
+            &root_ref,
+            crate::semantic_query::ProjectionMode::Navigate,
+        ) else {
+            return false;
+        };
+        let Some(view) = dispatch.resolve_typeinfo_surface_view(
+            base,
+            crate::semantic_query::ProjectionReductionContext::published(
+                crate::semantic_query::ProjectionMode::Shallow,
+            ),
+        ) else {
+            return false;
+        };
+        match macro_kind {
+            // Props / model / slots gate on any member surface: named members,
+            // call signatures, construct signatures, a concrete index signature,
+            // OR an open index domain.
+            AnalyzedMacroKind::DefineProps
+            | AnalyzedMacroKind::WithDefaults
+            | AnalyzedMacroKind::DefineModel
+            | AnalyzedMacroKind::DefineSlots => {
+                !view.members.is_empty()
+                    || !view.call_signatures.is_empty()
+                    || !view.construct_signatures.is_empty()
+                    || !view.index_signatures.is_empty()
+                    || view.has_index_signature
+            }
+            // Emits surface comes from property-style members or callable events
+            // (call signatures, or construct signatures folded alongside them).
+            AnalyzedMacroKind::DefineEmits => {
+                !view.members.is_empty()
+                    || !view.call_signatures.is_empty()
+                    || !view.construct_signatures.is_empty()
+            }
+            // The exposed surface publishes named members only
+            // (`exposed_from_typeinfo_surface`), so the presence gate is the
+            // named-property surface.
+            AnalyzedMacroKind::DefineExpose => !view.members.is_empty(),
+            AnalyzedMacroKind::DefineOptions => false,
+        }
+    }
+}
+
 impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolver<'_> {
     type Snapshot = FileAnalysisSnapshot;
     type EvalContext = CapturedComponentMetaInputs;
@@ -327,47 +401,17 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
         }
 
         // Projectability is decided through the SOLE query-time resolver: each
-        // candidate root name lowers to a bare `TypeExpr::Ref` and projects
-        // through `project_expr_surface_shape_via_host_threaded` (dispatch
-        // `lower_type_expr_in_scope` + empty-path `Published(Shallow)`
-        // `ProjectPath`), the SAME dispatch surface route as the owner-local
-        // authority gate `owner_local_macro_root_has_surface`. The retired
-        // prepared-decl walker is NOT used here — a surviving production walker
-        // path would violate the one-engine / no-production-walker seal.
-        let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(self.ctx);
-
+        // candidate root name lowers to a bare `TypeExpr::Ref` and resolves its
+        // one-level `SurfaceView` in NODE DOMAIN (dispatch `lower_type_expr_in_scope`
+        // at `Navigate` + empty-path `Published(Shallow)`), the SAME dispatch
+        // surface route the owner-local authority gate
+        // `owner_local_macro_root_has_surface` uses — both share the single
+        // `owner_local_macro_root_surface_presence` helper, so the pre-filter and
+        // the authority gate agree by construction on what "projectable" means.
         candidate_roots
             .into_iter()
             .filter(|root_name| {
-                let root_ref = verter_type_expr::TypeExpr::Ref {
-                    name: std::sync::Arc::from(*root_name),
-                    type_arguments: std::sync::Arc::from(Vec::<verter_type_expr::TypeExpr>::new()),
-                };
-                crate::meta_resolve::project_expr_surface_shape_via_host_threaded(
-                    &mut query_engine,
-                    owner_canonical,
-                    &root_ref,
-                )
-                .is_some_and(|shape| match mac.kind {
-                    verter_semantic::analysis::AnalyzedMacroKind::DefineProps
-                    | verter_semantic::analysis::AnalyzedMacroKind::WithDefaults
-                    | verter_semantic::analysis::AnalyzedMacroKind::DefineModel
-                    | verter_semantic::analysis::AnalyzedMacroKind::DefineSlots => {
-                        !shape.properties.is_empty()
-                            || !shape.call_signatures.is_empty()
-                            || !shape.index_signatures.is_empty()
-                    }
-                    verter_semantic::analysis::AnalyzedMacroKind::DefineEmits => {
-                        !shape.properties.is_empty() || !shape.call_signatures.is_empty()
-                    }
-                    // The exposed surface publishes named members only
-                    // (`exposed_from_typeinfo_surface`), so the presence
-                    // gate is the named-property surface.
-                    verter_semantic::analysis::AnalyzedMacroKind::DefineExpose => {
-                        !shape.properties.is_empty()
-                    }
-                    verter_semantic::analysis::AnalyzedMacroKind::DefineOptions => false,
-                })
+                self.owner_local_macro_root_surface_presence(owner_canonical, root_name, mac.kind)
             })
             .map(str::to_string)
             .collect()
@@ -385,47 +429,13 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
         // they are owned by the typeinfo macro-surface path (`vue_macro_dtos`);
         // this is purely a presence gate.
         //
-        // Resolution routes through the SOLE query-time resolver: the root name
-        // lowers to a bare `TypeExpr::Ref` and projects through
-        // `project_expr_surface_shape_via_host_threaded` (dispatch
-        // `lower_type_expr_in_scope` + empty-path `Published(Shallow)`
-        // `ProjectPath`), NOT the retired prepared-decl walker.
-        let mut query_engine = crate::resolver_core::ComponentMetaQueryEngine::new(self.ctx);
-        let root_ref = verter_type_expr::TypeExpr::Ref {
-            name: std::sync::Arc::from(root_name),
-            type_arguments: std::sync::Arc::from(Vec::<verter_type_expr::TypeExpr>::new()),
-        };
-        let Some(shape) = crate::meta_resolve::project_expr_surface_shape_via_host_threaded(
-            &mut query_engine,
-            owner_canonical,
-            &root_ref,
-        ) else {
-            return false;
-        };
-        match macro_kind {
-            // Props / model / slots gate on any member surface (named members,
-            // call signatures, or an index signature).
-            verter_semantic::analysis::AnalyzedMacroKind::DefineProps
-            | verter_semantic::analysis::AnalyzedMacroKind::WithDefaults
-            | verter_semantic::analysis::AnalyzedMacroKind::DefineModel
-            | verter_semantic::analysis::AnalyzedMacroKind::DefineSlots => {
-                !shape.properties.is_empty()
-                    || !shape.call_signatures.is_empty()
-                    || !shape.index_signatures.is_empty()
-            }
-            // Emits surface comes from either property-style members or
-            // call-signature events.
-            verter_semantic::analysis::AnalyzedMacroKind::DefineEmits => {
-                !shape.properties.is_empty() || !shape.call_signatures.is_empty()
-            }
-            // The exposed surface publishes named members only
-            // (`exposed_from_typeinfo_surface`), so the presence gate is the
-            // named-property surface.
-            verter_semantic::analysis::AnalyzedMacroKind::DefineExpose => {
-                !shape.properties.is_empty()
-            }
-            verter_semantic::analysis::AnalyzedMacroKind::DefineOptions => false,
-        }
+        // Resolution routes through the SOLE query-time resolver via the shared
+        // `owner_local_macro_root_surface_presence` helper (dispatch
+        // `lower_type_expr_in_scope` at `Navigate` + empty-path
+        // `Published(Shallow)` one-level `SurfaceView`), decided in node domain —
+        // no `ExpandedObjectShape` materialisation, NOT the retired prepared-decl
+        // walker.
+        self.owner_local_macro_root_surface_presence(owner_canonical, root_name, macro_kind)
     }
 
     fn resolve_macro_elements(

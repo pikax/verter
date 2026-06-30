@@ -4012,6 +4012,166 @@ defineProps<Props>()
     );
 }
 
+/// TRAP 1 (construct-signature fold) for the node-domain owner-local presence
+/// gate: a root whose ONLY surface member is a CONSTRUCT signature
+/// (`type Props = { new (): { x: number } }`) is a non-empty props surface.
+///
+/// The prior materialised reader gated on `ExpandedObjectShape.call_signatures`,
+/// into which `type_expr_to_object_shape` FOLDS construct signatures — so a
+/// construct-signature-only root read non-empty. The node-domain `SurfaceView`
+/// keeps `call_signatures` and `construct_signatures` SEPARATE, so the props gate
+/// must OR `construct_signatures` to preserve that semantics.
+///
+/// Discriminating: removing the `|| !view.construct_signatures.is_empty()` clause
+/// from `owner_local_macro_root_surface_presence` makes this gate report `false`
+/// for a construct-signature-only root (proven by mutation — the construct sig is
+/// the surface's only member, so dropping the clause leaves every OR term false).
+#[test]
+fn owner_local_macro_root_construct_signature_only_passes_props_gate() {
+    use crate::host_manage::jsdoc_resolve::HostComponentMetaResolver;
+    use crate::resolver_core::component_meta::ComponentMetaResolverHost;
+    use verter_semantic::analysis::AnalyzedMacroKind;
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/CtorRoot.vue",
+            r#"<script setup lang="ts">
+type Props = { new (): { x: number } }
+defineProps<Props>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let _ = project
+        .open_session_batch()
+        .unwrap()
+        .evaluate_types("/CtorRoot.vue")
+        .unwrap()
+        .unwrap();
+
+    let host = project.host();
+    let resolver_host = HostComponentMetaResolver { host, ctx: host };
+    assert!(
+        resolver_host.owner_local_macro_root_has_surface(
+            "/CtorRoot.vue",
+            "Props",
+            AnalyzedMacroKind::DefineProps,
+        ),
+        "a construct-signature-only props root `type Props = {{ new (): {{ x: number }} }}` MUST \
+         read as a non-empty macro surface; a `false` here means the node-domain gate dropped \
+         the construct signature the materialised reader folded into `call_signatures`",
+    );
+}
+
+/// Behaviour-preservation for the node-domain owner-local presence gate: an
+/// index-signature-only root (`type Root = { [k: string]: string }`) counts as a
+/// non-empty PROPS surface but NOT a non-empty EMITS surface — exactly as the
+/// prior materialised reader did (props OR-ed `index_signatures`; emits did not).
+///
+/// Discriminating: the SAME named root yields `true` for `DefineProps` and
+/// `false` for `DefineEmits`; folding `index_signatures` into the emits gate (a
+/// narrowing bug in the opposite direction) would flip the emits assertion.
+#[test]
+fn owner_local_macro_root_index_signature_counts_for_props_not_emits() {
+    use crate::host_manage::jsdoc_resolve::HostComponentMetaResolver;
+    use crate::resolver_core::component_meta::ComponentMetaResolverHost;
+    use verter_semantic::analysis::AnalyzedMacroKind;
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/IdxKind.vue",
+            r#"<script setup lang="ts">
+type Root = { [key: string]: string }
+defineProps<Root>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let _ = project
+        .open_session_batch()
+        .unwrap()
+        .evaluate_types("/IdxKind.vue")
+        .unwrap()
+        .unwrap();
+
+    let host = project.host();
+    let resolver_host = HostComponentMetaResolver { host, ctx: host };
+    assert!(
+        resolver_host.owner_local_macro_root_has_surface(
+            "/IdxKind.vue",
+            "Root",
+            AnalyzedMacroKind::DefineProps,
+        ),
+        "an index-signature-only root MUST read as a non-empty props surface (props ORs \
+         index signatures)",
+    );
+    assert!(
+        !resolver_host.owner_local_macro_root_has_surface(
+            "/IdxKind.vue",
+            "Root",
+            AnalyzedMacroKind::DefineEmits,
+        ),
+        "an index-signature-only root MUST NOT read as a non-empty emits surface — the emits \
+         gate counts members / call / construct signatures only, never index signatures",
+    );
+}
+
+/// Behaviour-preservation for the node-domain owner-local presence gate: a
+/// call-signature-only root (`type Root = { (): void }`) is a non-empty PROPS /
+/// SLOTS surface (props ORs call signatures) but NOT a non-empty EXPOSE surface
+/// (expose publishes named members only — `exposed_from_typeinfo_surface`).
+///
+/// Discriminating: the SAME named root yields `true` for `DefineProps` and
+/// `false` for `DefineExpose`; ORing `call_signatures` into the expose gate would
+/// flip the expose assertion.
+#[test]
+fn owner_local_macro_root_call_signature_only_props_yes_expose_no() {
+    use crate::host_manage::jsdoc_resolve::HostComponentMetaResolver;
+    use crate::resolver_core::component_meta::ComponentMetaResolverHost;
+    use verter_semantic::analysis::AnalyzedMacroKind;
+
+    let project = make_project();
+    project
+        .upsert_base(
+            "/CallRoot.vue",
+            r#"<script setup lang="ts">
+type Root = { (): void }
+defineProps<Root>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    let _ = project
+        .open_session_batch()
+        .unwrap()
+        .evaluate_types("/CallRoot.vue")
+        .unwrap()
+        .unwrap();
+
+    let host = project.host();
+    let resolver_host = HostComponentMetaResolver { host, ctx: host };
+    assert!(
+        resolver_host.owner_local_macro_root_has_surface(
+            "/CallRoot.vue",
+            "Root",
+            AnalyzedMacroKind::DefineProps,
+        ),
+        "a call-signature-only root MUST read as a non-empty props surface (props ORs call \
+         signatures)",
+    );
+    assert!(
+        !resolver_host.owner_local_macro_root_has_surface(
+            "/CallRoot.vue",
+            "Root",
+            AnalyzedMacroKind::DefineExpose,
+        ),
+        "a call-signature-only root MUST NOT read as a non-empty expose surface — expose \
+         publishes named members only",
+    );
+}
+
 /// `define_props_shape` distinguishes a RESOLVED-but-empty surface from a
 /// genuinely UNRESOLVED macro via `macro_surface_resolves`
 /// (`resolve_vue_macro_surface_with_ctx().is_some()`):
