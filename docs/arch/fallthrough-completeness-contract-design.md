@@ -6,7 +6,7 @@ Status: BINDING DESIGN — CTO layer-2 APPROVED. This is the codex-architect-app
 
 These four are contract-level and the 3-leg explicitly verifies them:
 
-1. Completeness is execution METADATA ONLY. It gates ADMISSION, never IDENTITY. It must NEVER enter the query value `V`, any cache key, any equality/`Hash`, or any wire DTO (completeness-in-key would fragment the cache). Confine it to the rendezvous carriers + the TLS scope.
+1. Completeness is execution METADATA ONLY. It gates ADMISSION, never IDENTITY. It must NEVER enter the query value `V`, any cache key, any lane identity, or any wire DTO (completeness-in-key would fragment the cache). `ResultCompleteness` derives `Hash`/`Eq` only as plain value-side metadata (so it can ride on `ResolvedComponentMetaState`/`ResolutionTemplate`); that derive is never used as — and must never enter — a cache key or lane identity. Confine it to the rendezvous carriers + the TLS scope.
 2. The defaulted hooks (`capture_completeness` = `Complete`, `fold_follower_completeness` = no-op) MUST keep every non-fallthrough generic query BYTE-IDENTICAL — proven via the full surface (no other query's value or `RequestSource` attribution shifts).
 3. The follower's fold MUST be sequenced BEFORE ANY warm-admission in its path (no admission site between join and fold); the leader's `(value, completeness)` publish stays ATOMIC under the `flights`→`inner` lock. The concurrency review leg verifies BOTH windows.
 4. ONE `RequestBudget` for #2 (no second fuse); install-if-none everywhere for #1 (no double-install).
@@ -64,7 +64,7 @@ Design:
 
 ## 4. Auxiliary (folded into the contract)
 
-- `FallthroughComputeOutcome { resolution, completeness }` — centralize fallthrough compute scoping into one internal outcome carrier; replace the ad-hoc caller scopes at `component_meta_extract.rs:1059`, `component_meta_extract.rs:1144`, and `host_manage/fallthrough.rs:151`. Rationale (codex): prevents a stale partial from a DISCARDED retry (completion-fence revalidate-and-retry) tainting a later complete attempt — the completeness travels with the resolution it describes, not via a scope that outlives a discarded attempt.
+- `FallthroughComputeOutcome { resolution, completeness }` — centralize fallthrough compute scoping into one internal outcome carrier; replace the ad-hoc caller scopes at `component_meta_extract.rs:1059`, `component_meta_extract.rs:1144`, and `host_manage/fallthrough.rs:151`. Rationale (codex): prevents a stale partial from a DISCARDED retry (completion-fence revalidate-and-retry) tainting a later complete attempt — the outcome carrier is the PRIMARY/intended travel path for the completeness it describes. The landed `compute_fallthrough_outcome_from_resolved_state` still bubbles its cold-compute scope implicitly and the callers fold it explicitly per attempt (idempotent — callers fold per-attempt and discard prior attempts, so a discarded retry's partial does not taint a later complete attempt). A capture-and-discard tightening so completeness travels SOLELY via the carrier is a tracked residual (not yet landed).
 - `mirror_cached_fallthrough_arc` (`host_manage/fallthrough.rs:1127`) — add a self-gate (refuse partial) so the mirror does not rely on caller discipline. Currently caller-safe ([P3]); belt-and-suspenders, but the mirror is a promotion site and should self-gate.
 - Keep the existing fallthrough node gate (`fallthrough_resolver.rs:193`) unchanged.
 
@@ -104,7 +104,7 @@ Component-meta admission keys on ONE merged completeness signal, not a source-en
 
 ### The single signal
 
-`extract_component_meta_from_resolved` (and its with-facts sibling) enters ONE `ColdComputeCompletenessScope` spanning the WHOLE extract body — from before the pre-choke macro-DTO read (`resolver_component_meta_resolved_macros` → `vue_macro_dtos_with_ctx`) through the fallthrough cold compute and the publication policy. Both functions return the internal `ComponentMetaExtractOutcome { analysis, fallthrough_fact_versions, completeness }`; `completeness` is the scope's observed partiality — the union of EVERY extract-phase compute partial, no longer only the fallthrough's. The carrier is internal to `verter_session`: completeness is admission metadata and never enters a cache key, the query value, any `Hash`/equality, or any wire DTO.
+`extract_component_meta_from_resolved` (and its with-facts sibling) enters ONE `ColdComputeCompletenessScope` spanning the WHOLE extract body — from before the pre-choke macro-DTO read (`resolver_component_meta_resolved_macros` → `vue_macro_dtos_with_ctx`) through the fallthrough cold compute and the publication policy. Both functions return the internal `ComponentMetaExtractOutcome { analysis, fallthrough_fact_versions, completeness }`; `completeness` is the scope's observed partiality — the union of EVERY extract-phase compute partial, no longer only the fallthrough's. The carrier is internal to `verter_session`: completeness is admission metadata and never enters a cache key, lane identity, the query value, or any wire DTO. (`ResultCompleteness` derives `Hash`/`Eq` only as plain value-side metadata so it can ride on `ResolvedComponentMetaState`/`ResolutionTemplate`; that derive is never used as a cache key or lane-identity term.)
 
 Each publishing caller computes the one admission signal:
 
@@ -112,9 +112,15 @@ Each publishing caller computes the one admission signal:
 final_completeness = resolved.completeness.merge(extract_scope_completeness)
 ```
 
-`resolved.completeness` is the resolve-phase compute completeness (dispatch / materializer / projector / slot-binding / resolve-macro partials); `extract_scope_completeness` is the full-extract scope. The merge is a lattice join in which `Partial` dominates, and it is load-bearing: neither operand alone suffices — the resolve phase and the extract phase each observe partials the other does not (a budget-tripped pre-choke macro DTO is invisible to the resolve-phase completeness on a path where the resolve completed; a resolve-phase slot-binding partial is invisible to the extract scope).
+`resolved.completeness` is the resolve-phase compute completeness (dispatch / materializer / projector / slot-binding / resolve-macro partials); `extract_scope_completeness` is the full-extract scope. The merge is a lattice join in which `Partial` dominates, and it is load-bearing: neither operand alone suffices — the resolve phase and the extract phase each observe partials the other does not (a fallthrough-only extract-phase partial is invisible to the resolve-phase completeness on a path where the resolve completed and only the fallthrough tripped; a resolve-phase slot-binding partial is invisible to the extract scope). The pre-choke macro-DTO path is COUPLING-PREVENTED in production — the resolve-phase props projector also reads the DTO, so a budget-tripped DTO folds into `resolved.completeness` too — and the extract-scope operand is observable for that source in isolation only via the `#4` white-box decoupling test (defense-by-construction of the convergent gate).
 
 Every owner-result and payload promotion gates on the single `final_completeness.is_partial()` check. The three former source-enumerated gates — the two owner-result sites in `component_meta_entry.rs` and the payload site in `meta.rs` — no longer enumerate `synthesis_should_suppress || fallthrough_completeness`; each reads only the merged signal. Because the scope boundary equals the result boundary, no extract-phase partiality source can escape by construction: a partiality source added anywhere inside the extract is captured without touching the gate, so the contract does not regress as the extract grows.
+
+### Scope of the no-poison guarantee
+
+This block delivers the no-poison guarantee on the FINAL `ComponentMetaResultDb` + payload admission via the merged-signal gate. The intermediate resolved-meta scalar-lane cache (the `None`-fixed-view lane in `resolver_core/component_meta_request.rs`) carries a SEPARATE pre-existing latent poison bug, tracked as the `RESOLVED_META_SCALAR_NO_POISON` follow-up in `semantic-db-overhaul-unified-remaining-plan.md`.
+
+Residual: `materialization_cache_suppress` is sticky + monotonic across a discarded→retried-complete attempt, but its readers run in the resolve/materialize phase (before the extract fallthrough), so the blast radius is a possible MISSED-WARM (perf), never poison.
 
 ### `synthesis_should_suppress` is subsumed
 

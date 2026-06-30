@@ -1290,6 +1290,63 @@ Deferred follow-ups (lead-architect ruled, tracked here):
   ruled it a new row that does NOT fold into WHOLE-ENV CONSUMER BOUNDED-DEMAND
   CUTOVER, which concerns `whole_env()` consumers, not the per-symbol lazy-body
   path's locator precision).
+- **`RESOLVED_META_SCALAR_NO_POISON`** (HIGH PRIORITY): a CONFIRMED latent poison
+  bug in the INTERMEDIATE resolved-meta cache (NOT the final-cache block this
+  contract closes). The `None`-fixed-view scalar lane
+  (`resolver_core/component_meta_request.rs:372`, gate keyed on
+  `fixed_store_view.is_some()`) warms a `Partial` `ResolvedComponentMetaState` into
+  the intermediate `store_component_meta_result` cache and replays it as
+  authoritative: warm replay performs NO completeness check
+  (`host_manage/component_meta_methods.rs:3059`) while the stable driver marks warm
+  hits complete BY CONSTRUCTION (`resolver_core/mod.rs:962`). This CONTRADICTS the
+  documented universal no-poison invariant at
+  `meta_resolve/resolved_state.rs:105-107` ("a `Partial` result … is refused warm
+  admission to the `ComponentMetaResultDb` / resolved-meta caches (the no-poison
+  invariant)"). The "deliberately NOT gated … pinned by the partial-metadata
+  invariant suite" comment (`component_meta_request.rs:89,368-372`) PINS the buggy
+  behavior, so the follow-up block MUST revisit and CORRECT that partial-metadata
+  invariant suite (today it pins the bug). PRE-EXISTING on
+  `refactor/semantic-db-overhaul` (predates stage9 — the gate + comment are verbatim
+  on `refactor`; the completeness block's ONLY edit to that file is the
+  `pub`→`pub(crate)` visibility change on `run_component_meta_request`). The
+  structural `insert_if_complete` admission from
+  `COMPONENT_META_RESULT_DB_STRUCTURAL_ADMISSION` (below) would also close this.
+  Owner: named follow-up block `RESOLVED_META_SCALAR_NO_POISON`. codex-DEFER ruling
+  2026-06-30 (.feedback/completeness-block/p1-disposition-consult-OUT.txt;
+  gpt-5.5/xhigh, neutral-verified + best-not-lowest-effort-explicit): DEFER —
+  pre-existing, outside the final-cache block scope, but the pinned scalar invariant
+  is wrong and must be revisited.
+- **`DYNAMIC_ROOT_TYPE_WALKER_BOUNDING`**: the dynamic-root TYPE-domain walker
+  `collect_dynamic_root_candidates_from_type` (`resolver_core/fallthrough.rs:1037`,
+  live via `host_manage/fallthrough.rs:843`) still uses raw uncharged `.flat_map`
+  recursion — the O(2^depth) pattern the completeness block's result-bound removed
+  ONLY in the node-domain sibling (`collect_dynamic_root_candidates_from_node` /
+  `insert_dynamic_root_candidate_charged`). It is live perf / stack-risk debt; it is
+  NOT a final-cache no-poison blocker under the merged completeness gate. Best
+  follow-up: delete the legacy syntactic `TypeExpr` leg if node-domain extraction
+  covers the semantic cases, else replace it with an iterative, budget-charged,
+  bounded set walker + parity tests (literals / unions / imports / deep nesting).
+  PRE-EXISTING (unchanged from base). Owner: `DYNAMIC_ROOT_TYPE_WALKER_BOUNDING`.
+  codex-DEFER ruling 2026-06-30
+  (.feedback/completeness-block/p1-disposition-consult-OUT.txt; gpt-5.5/xhigh,
+  neutral-verified + best-not-lowest-effort-explicit): DEFER — pre-existing, outside
+  the node-domain result-bound scope, but a live performance / stack-risk debt.
+- **`COMPONENT_META_RESULT_DB_STRUCTURAL_ADMISSION`** (SC-First; rule-bearing):
+  make "no partial admission" STRUCTURAL rather than caller-discipline — add an
+  owner-layer `ComponentMetaResultDb::insert_if_complete(value, completeness)`
+  checked-admission wrapper, make raw production inserts impossible outside the DB
+  layer (`component_meta_result_db.rs`; today partial filtering is left to callers
+  and raw production inserts remain at
+  `host_manage/component_meta_entry.rs:900,988`), and add an architecture guard
+  banning direct production `.component_meta_results().insert(...)`. The completeness
+  contract surfaced FOUR enumerated-gate gaps from caller-discipline fragility;
+  structural admission removes that whole class and would ALSO structurally close the
+  intermediate-cache gap of `RESOLVED_META_SCALAR_NO_POISON` (above). Adding a guard
+  is rule-bearing → GOVERNANCE codex approval required at implementation time. Owner:
+  `COMPONENT_META_RESULT_DB_STRUCTURAL_ADMISSION`. codex-DEFER ruling 2026-06-30
+  (.feedback/completeness-block/p1-disposition-consult-OUT.txt; gpt-5.5/xhigh,
+  neutral-verified + best-not-lowest-effort-explicit): DEFER — correct long-term
+  design (structural admission), not a ff-merge blocker for this block.
 
 ### 1.6 Known-failure baseline (recorded at the B7c land; re-derived at implementation)
 

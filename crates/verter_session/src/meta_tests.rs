@@ -2752,9 +2752,17 @@ fn session_pre_choke_macro_dto_budget_partial_not_admitted_to_vue_surface_store(
 /// fallthrough cold compute. A budget-tripped DTO is returned partial and REFUSED
 /// its own `vue_surface_store` (the sibling
 /// `session_pre_choke_macro_dto_budget_partial_not_admitted_to_vue_surface_store`
-/// pins that refusal). The former publish gate keyed only on
-/// `resolved.synthesis_should_suppress || fallthrough_completeness`, so a macro-DTO
-/// partial that escaped BOTH terms warmed the overall result. The fix enters ONE
+/// pins that refusal). In production this macro-DTO partial is COUPLING-PREVENTED:
+/// in a single cold request the resolve-phase props projector (`define_shapes` →
+/// `vue_macro_dtos_with_ctx` → `observe_partial`) ALSO reads the DTO, so a
+/// budget-tripped DTO already folds into `resolved.completeness`, which the former
+/// `synthesis_should_suppress` gate term already caught — so it is NOT a reachable
+/// pre-fix production poison hole. This test ARTIFICIALLY DECOUPLES the macro-DTO
+/// to exercise the extract-scope operand in isolation (defense-by-construction of
+/// the convergent gate, not proof of a reachable pre-fix hole); the
+/// genuinely-reachable operand divergence the merge closes is a fallthrough-only
+/// extract partial (extract scope) versus a synthesis-suppress resolve partial
+/// (`resolved.completeness`). The fix enters ONE
 /// full-extract scope spanning the macro-DTO read and gates on the single
 /// `final_completeness = resolved.completeness.merge(extract_scope_completeness)`.
 ///
@@ -2776,6 +2784,15 @@ fn session_pre_choke_macro_dto_budget_partial_not_admitted_to_vue_surface_store(
 /// `ColdComputeCompletenessScope::enter()` to AFTER the macro-DTO read (so the
 /// macro-DTO partial escapes the captured scope) → `extract.completeness` is
 /// Complete → `final_completeness` is Complete → both assertions FAIL.
+///
+/// Scope: the merged gate protects the FINAL `ComponentMetaResultDb` + payload
+/// admission; the intermediate resolved-meta scalar-lane cache is a SEPARATE
+/// pre-existing latent poison bug, tracked as `RESOLVED_META_SCALAR_NO_POISON`.
+///
+/// Discrimination robustness: the RED proof relies on the extract AFTER the
+/// macro-DTO read charging ZERO additional budget under the tripped / prop-less /
+/// `include_fallthrough = false` setup (reasoned, not guarded by an assertion), so
+/// the captured partiality is attributable to the pre-choke macro-DTO read alone.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn extract_scope_captures_cold_macro_dto_partial_into_merged_gate_signal() {
