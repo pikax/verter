@@ -17,8 +17,8 @@ use crate::resolver_core::{CanonicalCompletionOverlay, HostResolverContext, Reso
 use crate::resolver_store::CurrentHostStoreView;
 use crate::semantic_query::{
     DeclIdentity, FunctionParam, LiteralValue, PrimitiveKind, ProjectionMode,
-    ProjectionReductionContext, SemanticNodeData, SemanticNodeId, SurfaceMember, SurfaceView,
-    TupleElement,
+    ProjectionReductionContext, QueryError, SemanticNodeData, SemanticNodeId, SurfaceMember,
+    SurfaceView, TupleElement,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 use crate::typeinfo::framework_surface::vue_exec::navigate_param_to_object_surface;
@@ -1864,17 +1864,25 @@ fn event_names_mutual_cycle_fails_whole_via_visited_set() {
         "a genuine mutual cycle (`A` references `B`, `B` references `A`) re-yields the same union node on the back-edge → the active-path visited set fails the WHOLE enumeration (not a partial `Some([\"a\", \"b\"])`, not a stack overflow)"
     );
 
-    // [P3] PROOF THE VISITED SET FIRED (not the depth fuse): the SAME 2-hop
-    // carrier shape (`Ack = 'ack0' | AckTail; AckTail = 'ack1' | 'ack2'`) but
-    // ACYCLIC. Its back-edge-free enumeration descends to the SAME shallow depth
-    // (~2-3 hops) at which the mutual cycle's revisit fires — far below
-    // `CALLABLE_VIEW_DEPTH_FUSE` (32). It enumerates COMPLETELY →
-    // `Some(["ack0", "ack1", "ack2"])`. Because enumeration SUCCEEDS at this depth
-    // when acyclic, the `None` above CANNOT be a depth-fuse trip — it is the
-    // active-path visited set firing on the cycle's back-edge. (A regression that
-    // replaced the visited set with the depth fuse would still return `None` for
-    // `onmut` but would NOT enumerate `onack` at this depth — this control
-    // discriminates the two mechanisms.)
+    // [P3] SAME-SHAPE ACYCLIC CONTROL (NOT a visited-vs-fuse discriminator): the
+    // SAME 2-hop carrier shape (`Ack = 'ack0' | AckTail; AckTail = 'ack1' |
+    // 'ack2'`) but ACYCLIC. It enumerates COMPLETELY →
+    // `Some(["ack0", "ack1", "ack2"])`, which shows the mutual-cycle `None` above
+    // is CYCLE-SPECIFIC — NOT a generic failure to read a 2-hop carrier chain.
+    //
+    // This control does NOT isolate "the visited set fired" from "the depth fuse
+    // fired": both the 2-hop cycle (`onmut`) and this 2-hop acyclic chain (`onack`)
+    // sit FAR below `CALLABLE_VIEW_DEPTH_FUSE` (32), and a hypothetical
+    // depth-fuse-ONLY impl (no visited set) would ALSO yield `onmut = None` (the
+    // cycle eventually trips the fuse@32) and `onack = Some([...])` (terminates@~2)
+    // — so this pair passes under EITHER mechanism. The TRUE visited-set-vs-
+    // depth-fuse discriminator is `event_names_finite_deep_dag_union_enumerates_
+    // completely`: a deep-but-FINITE union (leaf near the fuse) with a SHARED
+    // subtree reached via two sibling branches enumerates the FULL name set, which
+    // succeeds ONLY because the active-path visited set is REMOVED on unwind (a
+    // GLOBAL never-removed visited set would wrongly fail it; a depth-fuse-only
+    // impl would not truncate the < fuse chain) — that test pins the active-path
+    // semantics this one cannot.
     assert_eq!(
         CallableNodeView::new(&dispatch, member("onack")).event_names(navigate()),
         Some(vec![
@@ -1882,7 +1890,7 @@ fn event_names_mutual_cycle_fails_whole_via_visited_set() {
             Arc::<str>::from("ack1"),
             Arc::<str>::from("ack2")
         ]),
-        "an ACYCLIC 2-hop carrier chain of the same depth enumerates completely — proving the mutual-cycle `None` is the active-path visited set, NOT the depth fuse"
+        "an ACYCLIC 2-hop carrier chain of the same shape enumerates completely — showing the mutual-cycle `None` is CYCLE-SPECIFIC (not a generic 2-hop-chain failure); the visited-set-vs-depth-fuse discriminator is `event_names_finite_deep_dag_union_enumerates_completely`"
     );
 }
 
@@ -2026,18 +2034,26 @@ fn event_names_residual_carrier_arm_fails_whole_not_partial() {
         identity: DeclIdentity::synthetic("Nonexistent"),
     });
 
-    // PRECONDITION (#4): the second arm genuinely normalizes to a RESIDUAL
-    // CARRIER (a `DeclRef` / `Opaque` miss), NOT a literal — so the test
-    // exercises the residual-carrier arm, not a pre-resolved literal that would
-    // pass regardless of the fix.
+    // PRECONDITION (#4): the second arm genuinely normalizes to an UNRESOLVABLE
+    // RESIDUAL CARRIER (a `DeclRef` / a non-`RecursiveRef` `Opaque` miss), NOT a
+    // literal — so the test exercises the residual-carrier fail-closed arm, not a
+    // pre-resolved literal that would pass regardless of the fix. The precondition
+    // EXCLUDES `Opaque(RecursiveRef)`: that carrier routes to the `true` carve-out
+    // (a decided recursion stop), which would yield `Some` and invalidate this
+    // test's `None` premise. (Excluding it is unreachable in practice — a
+    // synthetic miss yields `Opaque(Miss)` / a residual `DeclRef` — but pinned so
+    // the precondition EXACTLY characterizes "unresolvable residual".)
     let normalized_arm =
         dispatch.normalize_node_for_structural_fact_demand(unresolvable, navigate());
+    let arm_is_unresolvable_residual = match node_data_for(dispatch.ctx, normalized_arm).as_deref()
+    {
+        Some(SemanticNodeData::DeclRef { .. }) => true,
+        Some(SemanticNodeData::Opaque(err)) => !matches!(err, QueryError::RecursiveRef { .. }),
+        _ => false,
+    };
     assert!(
-        matches!(
-            node_data_for(dispatch.ctx, normalized_arm).as_deref(),
-            Some(SemanticNodeData::DeclRef { .. }) | Some(SemanticNodeData::Opaque(_))
-        ),
-        "precondition: the unresolvable `DeclRef` arm carrier-stops to a residual carrier (DeclRef / Opaque), not a literal, got {:?}",
+        arm_is_unresolvable_residual,
+        "precondition: the unresolvable `DeclRef` arm carrier-stops to an UNRESOLVABLE residual (DeclRef / non-RecursiveRef Opaque miss), not a literal and not the RecursiveRef carve-out, got {:?}",
         node_data_for(dispatch.ctx, normalized_arm).as_deref()
     );
 
@@ -2082,5 +2098,48 @@ fn event_names_concrete_non_literal_arm_is_skipped_not_failed() {
         CallableNodeView::new(&dispatch, f).event_names(navigate()),
         Some(vec![Arc::<str>::from("a")]),
         "a concrete non-literal arm (`number`) is SKIPPED (complete-no-name), not fail-closed — `'a' | number` yields `[\"a\"]`"
+    );
+}
+
+#[test]
+fn event_names_constructor_type_arm_is_skipped_not_failed() {
+    // [P2] CONTROL against over-failing on the `ConstructorType` sibling of
+    // `Function`: a mixed first-param union `'a' | (new () => X)` — the
+    // `ConstructorType` arm (`new () => X`) is a CONCRETE callable shape that,
+    // exactly like `Function`, can neither BE nor HIDE a string-literal event
+    // name, so it is SKIPPED (complete-no-name), NOT fail-closed. `event_names`
+    // surfaces `["a"]`.
+    //
+    // FLIP (the cycle-4 partition-completeness gap both codex legs caught):
+    // pre-fix `ConstructorType` fell into the `_ => false` fail-closed bucket
+    // (only its sibling `Function` was in the `true`/skip set), so the
+    // `new () => X` arm returned `false`, the whole union fail-closed, and
+    // `event_names` wrongly returned `None` instead of `Some(["a"])` — an
+    // over-fail dropping a legitimate event name. This test is RED pre-fix
+    // (`None`) and GREEN post-fix (`Some(["a"])`).
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let void = prim(&graph, PrimitiveKind::Void);
+    let a = string_literal(&graph, "a");
+    // `new () => X` — a constructor-type whose construct signature is a
+    // `Function` node. Architecture-equivalent to `Function` for the event-name
+    // collector (it can neither BE nor HIDE a string-literal event name).
+    let x = prim(&graph, PrimitiveKind::Object);
+    let ctor_signature = function(&graph, vec![], x);
+    let ctor = graph.intern_node(SemanticNodeData::ConstructorType {
+        signature: ctor_signature,
+    });
+    let names_union = union(&graph, vec![a, ctor]);
+    let f = function(
+        &graph,
+        vec![param(Some("e"), names_union, false, false)],
+        void,
+    );
+    assert_eq!(
+        CallableNodeView::new(&dispatch, f).event_names(navigate()),
+        Some(vec![Arc::<str>::from("a")]),
+        "a `ConstructorType` (`new () => X`) arm is SKIPPED (complete-no-name), exactly like `Function` — `'a' | (new () => X)` yields `[\"a\"]`, never fail-closed `None`"
     );
 }

@@ -389,40 +389,87 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
                     }
                     all
                 }
-                // CONCRETE NON-LITERAL leaf — a definitively-resolved shape that
-                // is not, and cannot hide, a string literal (the `number` arm of
-                // a mixed `'save' | number` union, an object / tuple / array /
-                // function param, a non-string literal). Contributes no name but
-                // is a legitimately-enumerated COMPLETE branch — the `build.rs`
-                // precedent's `_ => {}` skip: `'a' | number` → `["a"]`.
-                SemanticNodeData::Primitive(_)
+                // ── TRUE / SKIP ── a definitively-resolved CONCRETE shape that
+                // can neither BE nor HIDE a string-literal event name. Contributes
+                // no name but is a legitimately-enumerated COMPLETE branch — the
+                // `build.rs` precedent's `_ => {}` skips: the `number` arm of
+                // `'save' | number` → `["save"]`, the `new () => X` arm of
+                // `'a' | (new () => X)` → `["a"]`.
+                //   - `Object`               — a concrete object surface
+                //   - `Primitive`            — `number` / `string` / `boolean` / …
+                //   - `Literal` (non-String) — a number / bool / bigint literal
+                //                              (the String case is pushed above)
+                //   - `Array` / `Tuple`      — concrete element / tuple shapes
+                //   - `Function`             — a callable signature
+                //   - `ConstructorType`      — `new () => X`, architecture-
+                //                              equivalent to `Function` here
+                SemanticNodeData::Object(_)
+                | SemanticNodeData::Primitive(_)
                 | SemanticNodeData::Literal(_)
-                | SemanticNodeData::Object(_)
-                | SemanticNodeData::Tuple { .. }
                 | SemanticNodeData::Array { .. }
-                | SemanticNodeData::Function { .. } => true,
-                // CLOSED-CYCLE carve-out — the shared resolver's DIRECT
+                | SemanticNodeData::Tuple { .. }
+                | SemanticNodeData::Function { .. }
+                | SemanticNodeData::ConstructorType { .. } => true,
+                // ── TRUE / CARVE-OUT ── the shared resolver's DIRECT
                 // self-reference carrier-stop (`type S = 'x' | S` resolves to
                 // `Union(Literal('x'), Opaque(RecursiveRef))`). A CLOSED back-edge
                 // to a node already enumerated on the active path: it hides NO new
                 // literal, so it is COMPLETE (keeps `event_names` = `Some(["x"])`).
-                // Distinct from an UNRESOLVED carrier below — this is a *decided*
-                // recursion stop, NOT a "could-not-resolve".
+                // Distinct from an UNRESOLVED `Opaque` miss below — this is a
+                // *decided* recursion stop, NOT a "could-not-resolve". MUST stay
+                // BEFORE the general `Opaque(_)` fail-closed arm.
                 SemanticNodeData::Opaque(QueryError::RecursiveRef { .. }) => true,
-                // RESIDUAL UNRESOLVED CARRIER / open operator / any other
-                // not-definitively-resolved shape → FAIL CLOSED (`false`). A node
-                // the demand primitive could NOT resolve — a `DeclRef` /
-                // `InstantiationRef` / `BareRef` / `ImportType` / `MergedDecl`
-                // carrier it carrier-stopped on (its own fuse / cycle / miss), an
-                // `Opaque(Miss / DeclPlaceholder / BudgetExceeded / …)` miss, or an
-                // open `KeyOf` / `IndexedAccess` / `Mapped` / `Conditional` /
-                // `TemplateLiteral` / `TypeParam` / `Infer` / `TypeOf` operator
-                // `normalize` left shaped — where a string literal COULD still
-                // hide. We don't KNOW it isn't (or doesn't hide) a literal, so we
-                // must NOT present the enumeration as complete: fail-closed-whole
-                // (`event_names` → `None`), never a partial-as-complete poison.
-                // New `SemanticNodeData` variants land here and fail closed by
-                // default (no-poison).
+                // ── FALSE / FAIL-CLOSED ── could BE or HIDE a string literal, is
+                // an unresolved carrier the demand primitive could NOT resolve, or
+                // is genuinely ambiguous → fail-closed-whole is the safe choice
+                // (`event_names` → `None`), never a partial-as-complete poison: we
+                // don't KNOW the node isn't (or doesn't hide) a literal.
+                //   could BE / HIDE a literal:
+                //   - `Alias`           — a still-shaped alias normalize did not unwrap
+                //   - `Intersection`    — `'save' & Brand` is a branded literal
+                //   - `TemplateLiteral` — a closed template can equal a literal
+                //   open operators `normalize` left shaped:
+                //   - `KeyOf` / `IndexedAccess` / `Mapped` / `TypeOf` /
+                //     `TypeParam` / `Infer` / `Conditional`
+                //   unresolved carriers (carrier-stopped on fuse / cycle / miss):
+                //   - `DeclRef` / `InstantiationRef` / `BareRef` / `ImportType` /
+                //     `MergedDecl`
+                //   - `Opaque(_)` general (non-RecursiveRef): `Miss` /
+                //     `DeclPlaceholder` / `BudgetExceeded` / …
+                //   ambiguous / unrepresentable artifacts:
+                //   - `VueMacroElements` — a macro-resolution artifact we cannot
+                //     prove does not hide event-name literals
+                //   - `RawFallback`      — raw unrepresentable text, could be anything
+                //   - `SyntheticBinding` — a synthetic binding carrier, ambiguous
+                SemanticNodeData::Alias(_)
+                | SemanticNodeData::Intersection(_)
+                | SemanticNodeData::TemplateLiteral { .. }
+                | SemanticNodeData::KeyOf { .. }
+                | SemanticNodeData::IndexedAccess { .. }
+                | SemanticNodeData::Mapped { .. }
+                | SemanticNodeData::TypeOf(_)
+                | SemanticNodeData::TypeParam { .. }
+                | SemanticNodeData::Infer { .. }
+                | SemanticNodeData::Conditional { .. }
+                | SemanticNodeData::DeclRef { .. }
+                | SemanticNodeData::InstantiationRef { .. }
+                | SemanticNodeData::MergedDecl { .. }
+                | SemanticNodeData::BareRef(_)
+                | SemanticNodeData::ImportType(_)
+                | SemanticNodeData::Opaque(_)
+                | SemanticNodeData::VueMacroElements(_)
+                | SemanticNodeData::RawFallback { .. }
+                | SemanticNodeData::SyntheticBinding { .. } => false,
+                // ── FUTURE-VARIANT DEFAULT ── every one of the 27 known
+                // `SemanticNodeData` variants is classified explicitly above, so
+                // this catch-all is currently unreachable; it is KEPT so a variant
+                // added later fails closed by default (no-poison) rather than
+                // silently changing behaviour. `SemanticNodeData` is NOT
+                // `#[non_exhaustive]`, so the exhaustive explicit arms make this
+                // `_` unreachable today — `#[allow(unreachable_patterns)]`
+                // documents that the catch-all is intentional forward-compat, not
+                // dead code to delete.
+                #[allow(unreachable_patterns)]
                 _ => false,
             },
         };
