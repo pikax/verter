@@ -124,28 +124,16 @@ impl VerterHost {
             .filter(|resolved_id| resolved_id != canonical_id);
         let scope = tag_scope_canonical.as_deref().unwrap_or(canonical_id);
         let _ = self.ensure_indexed_ready_serve(scope);
-        // TODO(follow-up — intrinsic tag-value node-domain merge): this site is the
-        // one intrinsic-C fence site NOT yet converted to node domain. The tag
-        // value is re-resolved through the materialising Class-A bridge +
-        // `type_expr_to_object_shape`, whose intersection merge is LAST-ARM-WINS:
-        // an inline `HTMLAttributes & { override }` arm OVERWRITES the heritage
-        // ref's same-named members. The shared node-domain surface synthesiser
-        // merges an ANONYMOUS property-type intersection role-awarely (both arms
-        // are `Authored`, so same-named members value-INTERSECT — `number & string`
-        // — rather than override), so no node-domain projection demand reproduces
-        // the override the intrinsic contract requires
-        // (`project_local_intrinsics_tag_members_override_fallback_duplicates`).
-        // Converting this site needs the shared intersection merge to apply
-        // own-body-shadows-heritage to the intrinsic tag value's anonymous
-        // intersection (an owner-layer merge-semantics decision), which is out of
-        // scope for the per-site fence conversion.
-        let expanded =
-            crate::meta_resolve::project_expr_class_a_via_dispatch(ctx, scope, &tag_type)
-                .unwrap_or_else(|| tag_type.clone());
-        // The engine binds to the supplied request-bound `ctx`.
+        // The tag's value `TypeExpr` (`HTMLAttributes & { … }`) projects to its
+        // `ExpandedObjectShape` in NODE DOMAIN through the query engine's intrinsic
+        // tag-member rail, resolved in the `NativeElements` scope. The node-domain
+        // surface synthesiser merges the anonymous property-type intersection
+        // role-awarely (Authored arms value-INTERSECT — `number & string` — never
+        // last-arm-override), the TS-correct merge for `A & B`. The engine binds to
+        // the supplied request-bound `ctx`; member surfaces then materialise
+        // shallow-by-default through the node-domain member rail.
         let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(ctx);
-        let mut tag_shape =
-            verter_semantic::analysis::type_expand::type_expr_to_object_shape(&expanded);
+        let mut tag_shape = engine.project_intrinsic_tag_member_shape(scope, &tag_type)?;
         Self::materialize_project_intrinsic_shape_members(&mut tag_shape, &mut engine, scope);
         Some(Self::owned_intrinsic_members_from_shape(tag_shape))
     }

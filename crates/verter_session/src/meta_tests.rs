@@ -19614,7 +19614,7 @@ export interface NativeElements {
 }
 
 #[test]
-fn project_local_intrinsics_tag_members_override_fallback_duplicates() {
+fn project_local_intrinsics_tag_members_value_intersect_conflicting_fallback() {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
     ));
@@ -19693,49 +19693,133 @@ export interface ProjectClickEvent {
 
     let meta = get_meta(&project, "/workspace/src/App.vue");
 
+    // `div = HTMLAttributes & { projectOnly?: string; onClick?: (payload:
+    // ProjectClickEvent) => void }` over `HTMLAttributes.projectOnly?: number`
+    // and `HTMLAttributes.onClick?: (payload: FallbackClickEvent) => void`. An
+    // anonymous `A & B` object intersection VALUE-INTERSECTS conflicting
+    // same-named members — `projectOnly` is `number & string`, NOT the last-arm
+    // override `string`. This is the TS-correct merge (the same authored-`&`
+    // semantics `authored_intersection_duplicate_does_not_shadow` pins) and is
+    // distinct from interface heritage, which DOES shadow.
+
+    /// An intersection arm `&TypeExpr` contains `expected` when it (or one of its
+    /// intersection / union arms) is that primitive.
+    fn intersection_contains_primitive(expr: &TypeExpr, expected: PrimitiveName) -> bool {
+        match expr {
+            TypeExpr::Primitive(name) => *name == expected,
+            TypeExpr::Union(types) | TypeExpr::Intersection(types) => types
+                .iter()
+                .any(|ty| intersection_contains_primitive(ty, expected)),
+            _ => false,
+        }
+    }
+
     let project_only = meta
         .accepted_props
         .iter()
         .find(|prop| prop.name == "projectOnly")
         .expect("project-local tag members must still be present");
+    // POSITIVE: the conflicting member is the value-intersection of both arms.
     assert!(
-        matches!(
+        matches!(&project_only.type_expr, TypeExpr::Intersection(_)),
+        "projectOnly must value-intersect the conflicting fallback (`number & \
+         string`), not override; got: {:?}",
+        project_only.type_expr
+    );
+    assert!(
+        intersection_contains_primitive(&project_only.type_expr, PrimitiveName::Number),
+        "projectOnly intersection must retain the fallback `number` arm; got: {:?}",
+        project_only.type_expr
+    );
+    assert!(
+        intersection_contains_primitive(&project_only.type_expr, PrimitiveName::String),
+        "projectOnly intersection must retain the tag-local `string` arm; got: {:?}",
+        project_only.type_expr
+    );
+    // NEGATIVE: it must NOT have collapsed to the old last-arm override `string`.
+    assert!(
+        !matches!(
             project_only.type_expr,
-            TypeExpr::Primitive(PrimitiveName::String),
+            TypeExpr::Primitive(PrimitiveName::String)
         ),
-        "tag-specific projectOnly should override the fallback type, got: {:?}",
+        "projectOnly must NOT collapse to the last-arm override `string` — that \
+         was the bug; got: {:?}",
         project_only.type_expr
     );
 
+    // The conflicting listener `onClick` is likewise the intersection of the two
+    // handler types — NOT the last-arm override. Its presence on the accepted
+    // event surface is preserved; its payload is the value-intersection.
     let click = meta
         .accepted_events
         .iter()
         .find(|event| event.name == "click")
         .expect("tag-specific listeners must still appear on the accepted event surface");
-    let project_payload = matches!(
-        &click.payload,
-        TypeExpr::Function(function)
-            if function.parameters.len() == 1
-                && match &function.parameters[0].ty {
-                    TypeExpr::Object(shape) => shape.properties.iter().any(|member| matches!(
-                        member,
-                        ObjectMember::Property(property)
-                            if property.name == "source"
-                                && matches!(
-                                    property.ty,
-                                    TypeExpr::Literal(verter_type_expr::LiteralValue::String(ref value))
-                                        if value == "project"
-                                )
-                    )),
-                    TypeExpr::Ref { name, .. } => name.as_ref() == "ProjectClickEvent",
-                    _ => false,
-                }
-    );
+    // POSITIVE: the listener payload intersects both handlers' parameter types.
+    let payload_intersects = matches!(&click.payload, TypeExpr::Intersection(arms)
+        if arms.iter().any(|arm| payload_param_references(arm, "FallbackClickEvent"))
+            && arms.iter().any(|arm| payload_param_references(arm, "ProjectClickEvent")));
     assert!(
-        project_payload,
-        "tag-specific listener payloads must override fallback listeners, got: {:?}",
+        payload_intersects,
+        "click listener payload must value-intersect both handler types \
+         (fallback + project), not override; got: {:?}",
         click.payload
     );
+    // NEGATIVE: it must NOT be a single function overriding to the project-only
+    // handler (the old override bug).
+    assert!(
+        !matches!(
+            &click.payload,
+            TypeExpr::Function(function)
+                if function.parameters.len() == 1
+                    && payload_ty_references(&function.parameters[0].ty, "ProjectClickEvent")
+        ),
+        "click listener payload must NOT be the last-arm override handler \
+         (`(payload: ProjectClickEvent) => void`) alone; got: {:?}",
+        click.payload
+    );
+}
+
+/// True when `arm` is a `(payload: <name>) => …` handler whose sole parameter's
+/// type references `event_name` (by `Ref` name or by the `source: '<discriminant>'`
+/// literal of its resolved object body).
+fn payload_param_references(arm: &TypeExpr, event_name: &str) -> bool {
+    match arm {
+        TypeExpr::Function(function) | TypeExpr::ConstructorType(function) => function
+            .parameters
+            .first()
+            .is_some_and(|param| payload_ty_references(&param.ty, event_name)),
+        TypeExpr::Parenthesized(inner) => payload_param_references(inner, event_name),
+        _ => false,
+    }
+}
+
+/// True when `ty` references `event_name` — either as a bare `Ref { name }` or as
+/// the resolved object body carrying the matching `source: '<discriminant>'`
+/// literal (`FallbackClickEvent` ⇒ `'fallback'`, `ProjectClickEvent` ⇒ `'project'`).
+fn payload_ty_references(ty: &TypeExpr, event_name: &str) -> bool {
+    let discriminant = match event_name {
+        "FallbackClickEvent" => "fallback",
+        "ProjectClickEvent" => "project",
+        _ => return false,
+    };
+    match ty {
+        TypeExpr::Ref { name, .. } => name.as_ref() == event_name,
+        TypeExpr::Object(shape) => shape.properties.iter().any(|member| {
+            matches!(
+                member,
+                ObjectMember::Property(property)
+                    if property.name == "source"
+                        && matches!(
+                            &property.ty,
+                            TypeExpr::Literal(verter_type_expr::LiteralValue::String(value))
+                                if value == discriminant
+                        )
+            )
+        }),
+        TypeExpr::Parenthesized(inner) => payload_ty_references(inner, event_name),
+        _ => false,
+    }
 }
 
 #[test]

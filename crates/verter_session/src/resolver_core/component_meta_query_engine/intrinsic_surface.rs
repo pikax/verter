@@ -65,6 +65,30 @@ impl ComponentMetaQueryEngine<'_> {
         project_admitted_route_node_to_expanded_object_shape(ctx, &node)
     }
 
+    /// Project an intrinsic TAG's value `TypeExpr` (the `JSX.IntrinsicElements`
+    /// member value, e.g. `HTMLAttributes & { … }`) to its [`ExpandedObjectShape`]
+    /// in NODE DOMAIN, in the supplied (`NativeElements`) scope. Mirrors the
+    /// Class-A fallback arm of [`Self::project_intrinsic_root_shape`]: project the
+    /// tag value's admitted route NODE through the shared node-domain Class-A
+    /// projector, then build the object shape from that admitted node. The
+    /// node-domain surface synthesiser merges an anonymous property-type
+    /// intersection role-awarely (Authored arms value-INTERSECT — `number &
+    /// string` — never last-arm-override), the TS-correct merge for `A & B`.
+    pub(crate) fn project_intrinsic_tag_member_shape(
+        &mut self,
+        scope_canonical_id: &str,
+        tag_type: &TypeExpr,
+    ) -> Option<ExpandedObjectShape> {
+        let ctx = self.ctx;
+        let node = crate::meta_resolve::project_expr_class_a_node_via_dispatch_threaded(
+            ctx,
+            Some(self),
+            scope_canonical_id,
+            tag_type,
+        )?;
+        project_admitted_route_node_to_expanded_object_shape(ctx, &node)
+    }
+
     /// PRIMARY arm of [`Self::project_intrinsic_root_shape`]: the root-symbol
     /// whole-surface path. `None` (deferring to the Class-A fallback) when the
     /// projection budget is exhausted, the root symbol does not resolve, or the
