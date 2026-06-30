@@ -411,44 +411,105 @@ fn slot_param_and_return_every_arm_has_first_param_intersects() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
-    let void = prim(&graph, PrimitiveKind::Void);
+    // DISTINCT return nodes (`number` vs `string`) so the combiner mode is
+    // DISCRIMINATING: a test asserting only `is_some()` would pass even if the
+    // combiner were ignored. Here we assert the exact combined return shape for
+    // BOTH `Union` and `Intersection`.
     let p1 = prim(&graph, PrimitiveKind::Number);
     let p2 = prim(&graph, PrimitiveKind::String);
-    let f1 = function(&graph, vec![param(Some("a"), p1, false, false)], void);
-    let f2 = function(&graph, vec![param(Some("b"), p2, false, false)], void);
+    let r1 = prim(&graph, PrimitiveKind::Boolean);
+    let r2 = prim(&graph, PrimitiveKind::Object);
+    let f1 = function(&graph, vec![param(Some("a"), p1, false, false)], r1);
+    let f2 = function(&graph, vec![param(Some("b"), p2, false, false)], r2);
     let slot = union(&graph, vec![f1, f2]);
 
     let view = CallableNodeView::new(&dispatch, slot);
-    let parts = view
+
+    // ── Union combiner ──
+    let union_parts = view
         .slot_param_and_return_by_arm(ArmCombineNode::Union, shallow())
         .expect("a 2-arm slot yields parts");
-    let first_param = parts
+    let first_param = union_parts
         .first_param
         .expect("every arm supplies a first param -> intersected binding");
-    let mat = dispatch
+    let first_mat = dispatch
         .materialize_output_type_expr_for_test(first_param)
         .expect("the combined first param materializes");
-    let TypeExpr::Intersection(arms) = &mat else {
-        panic!("the combined first param is an Intersection of both arms, got {mat:?}");
+    let TypeExpr::Intersection(first_arms) = &first_mat else {
+        panic!("the combined first param is an Intersection of both arms, got {first_mat:?}");
     };
     assert_eq!(
-        arms.len(),
+        first_arms.len(),
         2,
-        "the intersection carries both arms' first params"
+        "the intersection carries both first params"
     );
     assert!(
-        arms.iter()
+        first_arms
+            .iter()
             .any(|a| matches!(a, TypeExpr::Primitive(PrimitiveName::Number))),
         "one arm's first param is `number`"
     );
     assert!(
-        arms.iter()
+        first_arms
+            .iter()
             .any(|a| matches!(a, TypeExpr::Primitive(PrimitiveName::String))),
         "the other arm's first param is `string`"
     );
+    let union_ret = dispatch
+        .materialize_output_type_expr_for_test(
+            union_parts
+                .return_type
+                .expect("Union combine yields a return"),
+        )
+        .expect("the combined return materializes");
+    let TypeExpr::Union(union_ret_arms) = &union_ret else {
+        panic!("ArmCombineNode::Union must combine the DISTINCT returns into a Union, got {union_ret:?}");
+    };
+    assert_eq!(
+        union_ret_arms.len(),
+        2,
+        "the Union return carries both arms' returns"
+    );
     assert!(
-        parts.return_type.is_some(),
-        "the return type combines across arms"
+        union_ret_arms
+            .iter()
+            .any(|a| matches!(a, TypeExpr::Primitive(PrimitiveName::Boolean))),
+        "one arm's return is `boolean`"
+    );
+    assert!(
+        union_ret_arms
+            .iter()
+            .any(|a| matches!(a, TypeExpr::Primitive(PrimitiveName::Object))),
+        "the other arm's return is `object`"
+    );
+
+    // ── Intersection combiner (same fixture, different combine) ──
+    let isect_parts = view
+        .slot_param_and_return_by_arm(ArmCombineNode::Intersection, shallow())
+        .expect("a 2-arm slot yields parts");
+    let isect_ret = dispatch
+        .materialize_output_type_expr_for_test(
+            isect_parts
+                .return_type
+                .expect("Intersection combine yields a return"),
+        )
+        .expect("the combined return materializes");
+    let TypeExpr::Intersection(isect_ret_arms) = &isect_ret else {
+        panic!("ArmCombineNode::Intersection must combine the DISTINCT returns into an Intersection, got {isect_ret:?}");
+    };
+    assert_eq!(
+        isect_ret_arms.len(),
+        2,
+        "the Intersection return carries both arms' returns"
+    );
+    assert!(
+        isect_ret_arms
+            .iter()
+            .any(|a| matches!(a, TypeExpr::Primitive(PrimitiveName::Boolean)))
+            && isect_ret_arms
+                .iter()
+                .any(|a| matches!(a, TypeExpr::Primitive(PrimitiveName::Object))),
+        "the Intersection return carries both `boolean` and `object`"
     );
 }
 
@@ -602,15 +663,15 @@ fn signature_accessors_read_function_facts() {
     );
     assert_eq!(
         sig.return_type(),
-        ret,
-        "return_type reads the function's return node"
+        Some(ret),
+        "return_type reads the function's return node (fail-closed Option)"
     );
     assert_eq!(
         sig.return_type_span(),
         Some(span),
         "return_type_span reads the stored span (not a constant None)"
     );
-    let positions = sig.positional_params_expanded();
+    let positions = sig.positional_params_expanded(navigate());
     assert_eq!(positions.len(), 1, "the single positional param surfaces");
     assert_eq!(positions[0].ty, row);
 }
@@ -833,5 +894,447 @@ fn single_callable_arm_realizes_declared_and_instantiated_callbacks() {
         view_func.as_ref(),
         helper_func.as_ref(),
         "the view's node-domain callable matches callable_arm_from_raised's materialized callable"
+    );
+}
+
+// ──────────── carrier-RESOLUTION: real DeclRef / InstantiationRef ──────────
+//
+// These exercise the demand-point structural-fact primitive over REAL carriers
+// (a workspace `.svelte` + `.ts`). Each DISCRIMINATES against the pre-fix
+// raw-node behaviour: pre-fix the view decided on the unresolved `DeclRef` /
+// `InstantiationRef` and dropped the carrier-wrapped shape; post-fix it resolves
+// through the shared primitive and surfaces the names / tuple / callable.
+
+#[test]
+fn event_names_resolves_declref_and_instantiationref_event_unions() {
+    // `type Event = 'save' | 'cancel'` is a real `DeclRef` in the param
+    // position; `GenEvent<'x' | 'y'>` is a real `InstantiationRef`. Pre-fix the
+    // view saw the unresolved carrier and produced NO names; post-fix it
+    // resolves the union and surfaces the literal names.
+    let component = "/workspace/Events.svelte";
+    let source = "<script lang=\"ts\">\n\
+         import type { Event, GenEvent } from './types';\n\
+         interface Props {\n\
+           onsave: (e: Event) => void;\n\
+           ongen: (e: GenEvent<'x' | 'y'>) => void;\n\
+           onplain: (e: string) => void;\n\
+         }\n\
+         let props: Props = $props();\n\
+         void props;\n\
+         </script>\n\
+         <div />";
+    let (host, view) = workspace_host_with_svelte(
+        component,
+        source,
+        &[(
+            "/workspace/types.ts",
+            "export type Event = 'save' | 'cancel';\n\
+             export type GenEvent<T> = T;\n",
+        )],
+    );
+    let overlay = Arc::new(CanonicalCompletionOverlay::new());
+    let ctx = HostResolverContext::from_current(&host, &view, overlay);
+    let facts = host
+        .resolve_svelte_script_facts_with_ctx(&ctx, component)
+        .expect("svelte facts");
+    let props_type = facts.props_type.as_ref().expect("props type");
+    let surface =
+        navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
+    let dispatch = ctx.dispatch();
+    let member = |name: &str| -> SemanticNodeId {
+        surface
+            .members
+            .iter()
+            .find(|m| m.name.as_ref() == name)
+            .unwrap_or_else(|| panic!("the `{name}` member is present"))
+            .value
+    };
+
+    // DeclRef-aliased event-name union → its names.
+    assert_eq!(
+        CallableNodeView::new(&dispatch, member("onsave")).event_names(navigate()),
+        Some(vec![Arc::<str>::from("save"), Arc::<str>::from("cancel")]),
+        "a `DeclRef`-aliased event-name union resolves to its names"
+    );
+    // InstantiationRef-instantiated event-name union → its names.
+    assert_eq!(
+        CallableNodeView::new(&dispatch, member("ongen")).event_names(navigate()),
+        Some(vec![Arc::<str>::from("x"), Arc::<str>::from("y")]),
+        "a generic-instantiated (`InstantiationRef`) event-name union resolves to its names"
+    );
+    // A non-literal first param surfaces no names (fail-closed).
+    assert_eq!(
+        CallableNodeView::new(&dispatch, member("onplain")).event_names(navigate()),
+        None,
+        "a non-literal (`string`) first param yields no event names"
+    );
+}
+
+#[test]
+fn positional_params_expands_declref_and_instantiationref_rest_tuples() {
+    // `type Args = [item: Item, index: number]` is a real `DeclRef` rest-tuple;
+    // `GenTuple<Item, number>` is a real `InstantiationRef` rest-tuple. Pre-fix
+    // the view saw the unresolved carrier and could NOT expand it; post-fix it
+    // resolves the tuple and expands per element.
+    let component = "/workspace/Rest.svelte";
+    let source = "<script lang=\"ts\">\n\
+         import type { Item, Args, GenTuple } from './types';\n\
+         interface Props {\n\
+           onrest: (...args: Args) => void;\n\
+           ongentuple: (...args: GenTuple<Item, number>) => void;\n\
+           onopen: (...args: string[]) => void;\n\
+         }\n\
+         let props: Props = $props();\n\
+         void props;\n\
+         </script>\n\
+         <div />";
+    let (host, view) = workspace_host_with_svelte(
+        component,
+        source,
+        &[(
+            "/workspace/types.ts",
+            "export interface Item { name: string }\n\
+             export type Args = [item: Item, index: number];\n\
+             export type GenTuple<A, B> = [first: A, second: B];\n",
+        )],
+    );
+    let overlay = Arc::new(CanonicalCompletionOverlay::new());
+    let ctx = HostResolverContext::from_current(&host, &view, overlay);
+    let facts = host
+        .resolve_svelte_script_facts_with_ctx(&ctx, component)
+        .expect("svelte facts");
+    let props_type = facts.props_type.as_ref().expect("props type");
+    let surface =
+        navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
+    let dispatch = ctx.dispatch();
+    let member = |name: &str| -> SemanticNodeId {
+        surface
+            .members
+            .iter()
+            .find(|m| m.name.as_ref() == name)
+            .unwrap_or_else(|| panic!("the `{name}` member is present"))
+            .value
+    };
+
+    // DeclRef rest-tuple → expanded element labels.
+    let rest = CallableNodeView::new(&dispatch, member("onrest"))
+        .positional_params(navigate())
+        .expect("the `onrest` callable yields positional params");
+    let rest_labels: Vec<Option<&str>> = rest.iter().map(|p| p.label.as_deref()).collect();
+    assert_eq!(
+        rest_labels,
+        vec![Some("item"), Some("index")],
+        "a `DeclRef` rest-tuple expands element-wise with its labels"
+    );
+
+    // InstantiationRef rest-tuple → expanded element labels.
+    let gen = CallableNodeView::new(&dispatch, member("ongentuple"))
+        .positional_params(navigate())
+        .expect("the `ongentuple` callable yields positional params");
+    let gen_labels: Vec<Option<&str>> = gen.iter().map(|p| p.label.as_deref()).collect();
+    assert_eq!(
+        gen_labels,
+        vec![Some("first"), Some("second")],
+        "a generic-instantiated (`InstantiationRef`) rest-tuple expands element-wise"
+    );
+
+    // A non-tuple rest (`string[]`) carries no enumerable positional bindings.
+    let open = CallableNodeView::new(&dispatch, member("onopen"))
+        .positional_params(navigate())
+        .expect("the `onopen` callable yields (empty) positional params");
+    assert!(
+        open.is_empty(),
+        "a non-tuple rest param (`string[]`) contributes no positional entries"
+    );
+}
+
+#[test]
+fn single_callable_arm_resolves_carrier_wrapped_nullish_callable() {
+    // `type MaybeFn = ((r: Row) => void) | undefined` referenced as `onmaybe:
+    // MaybeFn` is a real `DeclRef` whose body is a nullish union. Pre-fix the
+    // view's `_` arm called `realize_callable_member(DeclRef(MaybeFn))`, whose
+    // strict whole-composite rule FAILS on the `undefined` arm → `None`.
+    // Post-fix the view normalizes the `DeclRef` to `Union(Function, undefined)`
+    // FIRST, strips `undefined`, then realizes the surviving `Function`.
+    let component = "/workspace/Maybe.svelte";
+    let source = "<script lang=\"ts\">\n\
+         import type { Row, MaybeFn } from './types';\n\
+         interface Props {\n\
+           onmaybe: MaybeFn;\n\
+           label: string;\n\
+         }\n\
+         let props: Props = $props();\n\
+         void props;\n\
+         </script>\n\
+         <div />";
+    let (host, view) = workspace_host_with_svelte(
+        component,
+        source,
+        &[(
+            "/workspace/types.ts",
+            "export interface Row { id: number }\n\
+             export type MaybeFn = ((r: Row) => void) | undefined;\n",
+        )],
+    );
+    let overlay = Arc::new(CanonicalCompletionOverlay::new());
+    let ctx = HostResolverContext::from_current(&host, &view, overlay);
+    let facts = host
+        .resolve_svelte_script_facts_with_ctx(&ctx, component)
+        .expect("svelte facts");
+    let props_type = facts.props_type.as_ref().expect("props type");
+    let surface =
+        navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
+    let dispatch = ctx.dispatch();
+    let member = |name: &str| -> SemanticNodeId {
+        surface
+            .members
+            .iter()
+            .find(|m| m.name.as_ref() == name)
+            .unwrap_or_else(|| panic!("the `{name}` member is present"))
+            .value
+    };
+
+    // The carrier-wrapped nullish callback resolves to a single callable arm.
+    let arm = CallableNodeView::new(&dispatch, member("onmaybe"))
+        .single_callable_arm(navigate())
+        .expect("a `DeclRef`-wrapped `Fn | undefined` resolves to a single callable arm");
+    assert!(
+        matches!(
+            node_data_for(dispatch.ctx, arm).as_deref(),
+            Some(SemanticNodeData::Function { .. })
+        ),
+        "the resolved callable arm is a `Function` node"
+    );
+
+    // PARITY ORACLE: the view's node-domain callable, materialized once, equals
+    // `callable_arm_from_raised` on the materialized NORMALIZED member value.
+    let arm_mat = dispatch
+        .materialize_output_type_expr_for_test(arm)
+        .expect("the view node materializes");
+    let TypeExpr::Function(view_func) = &arm_mat else {
+        panic!("the view node materializes to a Function, got {arm_mat:?}");
+    };
+    let normalized =
+        dispatch.normalize_node_for_structural_fact_demand(member("onmaybe"), navigate());
+    let mem_mat = dispatch
+        .materialize_output_type_expr_for_test(normalized)
+        .expect("the normalized member materializes");
+    let helper_func = callable_arm_from_raised(&mem_mat)
+        .expect("callable_arm_from_raised extracts the single callable");
+    assert_eq!(
+        view_func.as_ref(),
+        helper_func.as_ref(),
+        "the view's callable matches callable_arm_from_raised on the resolved member"
+    );
+
+    // A plain non-callable member still refuses.
+    assert_eq!(
+        CallableNodeView::new(&dispatch, member("label")).single_callable_arm(navigate()),
+        None,
+        "a non-callable (`string`) member refuses"
+    );
+}
+
+#[test]
+fn slot_param_and_return_resolves_aliased_and_nullable_slot_arms() {
+    // `nullableslot: SlotAlias | undefined` DISCRIMINATES: pre-fix
+    // `realize_callable_member` on the whole root failed on the `undefined` arm
+    // → `None`; post-fix the view strips `undefined` and combines the surviving
+    // arm. `slotcombo: SlotAlias | GenSlot<SlotProps>` exercises a 2-arm combine
+    // over a `DeclRef` + an `InstantiationRef` callable.
+    let component = "/workspace/Slots.svelte";
+    let source = "<script lang=\"ts\">\n\
+         import type { SlotAlias, GenSlot, SlotProps } from './types';\n\
+         interface Props {\n\
+           nullableslot: SlotAlias | undefined;\n\
+           slotcombo: SlotAlias | GenSlot<SlotProps>;\n\
+         }\n\
+         let props: Props = $props();\n\
+         void props;\n\
+         </script>\n\
+         <div />";
+    let (host, view) = workspace_host_with_svelte(
+        component,
+        source,
+        &[(
+            "/workspace/types.ts",
+            "export interface SlotProps { id: number }\n\
+             export type SlotAlias = (props: { a: number }) => void;\n\
+             export type GenSlot<P> = (props: P) => void;\n",
+        )],
+    );
+    let overlay = Arc::new(CanonicalCompletionOverlay::new());
+    let ctx = HostResolverContext::from_current(&host, &view, overlay);
+    let facts = host
+        .resolve_svelte_script_facts_with_ctx(&ctx, component)
+        .expect("svelte facts");
+    let props_type = facts.props_type.as_ref().expect("props type");
+    let surface =
+        navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
+    let dispatch = ctx.dispatch();
+    let member = |name: &str| -> SemanticNodeId {
+        surface
+            .members
+            .iter()
+            .find(|m| m.name.as_ref() == name)
+            .unwrap_or_else(|| panic!("the `{name}` member is present"))
+            .value
+    };
+
+    // Nullable single slot: the `undefined` arm is stripped, the surviving
+    // callable supplies the first-param binding.
+    let nullable = CallableNodeView::new(&dispatch, member("nullableslot"))
+        .slot_param_and_return_by_arm(ArmCombineNode::Intersection, shallow())
+        .expect("`SlotAlias | undefined` strips the nullish arm and yields parts");
+    assert!(
+        nullable.first_param.is_some(),
+        "the surviving callable supplies a first-param binding"
+    );
+    // Same nullable single slot is a single callable for `single_callable_arm`.
+    assert!(
+        CallableNodeView::new(&dispatch, member("nullableslot"))
+            .single_callable_arm(navigate())
+            .is_some(),
+        "`SlotAlias | undefined` is a single callable after stripping the nullish arm"
+    );
+
+    // Two distinct callable arms (DeclRef + InstantiationRef): a slot combine
+    // yields a binding across both arms; `single_callable_arm` refuses
+    // (ambiguous — two distinct callables).
+    let combo = CallableNodeView::new(&dispatch, member("slotcombo"))
+        .slot_param_and_return_by_arm(ArmCombineNode::Intersection, shallow())
+        .expect("`SlotAlias | GenSlot<SlotProps>` yields a 2-arm slot combine");
+    let combo_first = combo
+        .first_param
+        .expect("both callable arms supply a first param → intersected binding");
+    let combo_mat = dispatch
+        .materialize_output_type_expr_for_test(combo_first)
+        .expect("the combined first param materializes");
+    assert!(
+        matches!(&combo_mat, TypeExpr::Intersection(arms) if arms.len() == 2),
+        "the combined first param intersects both arms, got {combo_mat:?}"
+    );
+    assert_eq!(
+        CallableNodeView::new(&dispatch, member("slotcombo")).single_callable_arm(navigate()),
+        None,
+        "two distinct callable arms are ambiguous for single_callable_arm"
+    );
+}
+
+#[test]
+fn single_callable_arm_strips_nested_nullish_union() {
+    // claude [P3-1]: `Union([Union([f, undefined]), undefined])`. Pre-fix the
+    // outer arm `Union([f, undefined])` was handed to
+    // `realize_callable_member`, whose strict composite rule fails on the inner
+    // `undefined` → the whole classification returned `None`. Post-fix the view
+    // RECURSES through the normalized nested composite, stripping the inner
+    // `undefined` too, and surfaces `f`.
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let void = prim(&graph, PrimitiveKind::Void);
+    let row = prim(&graph, PrimitiveKind::Number);
+    let f = function(&graph, vec![param(Some("r"), row, false, false)], void);
+    let undefined = prim(&graph, PrimitiveKind::Undefined);
+    let inner = union(&graph, vec![f, undefined]);
+    let outer = union(&graph, vec![inner, undefined]);
+
+    let view = CallableNodeView::new(&dispatch, outer);
+    assert_eq!(
+        view.single_callable_arm(navigate()),
+        Some(f),
+        "a nested nullish union surfaces the inner callable (recursive strip)"
+    );
+}
+
+#[test]
+fn first_param_object_surface_keeps_root_carrier_shaped() {
+    // SCOPING RULE (#4): `first_param_object_surface` must NOT carrier-resolve
+    // the first-param root — it stays a `DeclRef` carrier reaching the shallow
+    // projector, preserving the `AppProps['avatar']` symbolic indexed-access
+    // policy. We assert the signature's first-param root is a `DeclRef` (carrier,
+    // NOT resolved to an `Object`) and the shallow surface still projects the
+    // one-level members; the surface is context-invariant (always one-level
+    // Shallow).
+    let component = "/workspace/Props.svelte";
+    let source = "<script lang=\"ts\">\n\
+         import type { AppProps } from './types';\n\
+         interface Props {\n\
+           onprops: (props: AppProps) => void;\n\
+         }\n\
+         let props: Props = $props();\n\
+         void props;\n\
+         </script>\n\
+         <div />";
+    let (host, view) = workspace_host_with_svelte(
+        component,
+        source,
+        &[(
+            "/workspace/types.ts",
+            "export interface Avatar { url: string }\n\
+             export interface AppProps { avatar: Avatar; label: string }\n",
+        )],
+    );
+    let overlay = Arc::new(CanonicalCompletionOverlay::new());
+    let ctx = HostResolverContext::from_current(&host, &view, overlay);
+    let facts = host
+        .resolve_svelte_script_facts_with_ctx(&ctx, component)
+        .expect("svelte facts");
+    let props_type = facts.props_type.as_ref().expect("props type");
+    let surface =
+        navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
+    let dispatch = ctx.dispatch();
+    let onprops = surface
+        .members
+        .iter()
+        .find(|m| m.name.as_ref() == "onprops")
+        .expect("the `onprops` member is present")
+        .value;
+
+    // The first-param root reaching the projector is a carrier (`DeclRef`),
+    // NOT a resolved `Object` — the scoping rule keeps it carrier-shaped.
+    let first = CallableNodeView::new(&dispatch, onprops)
+        .signature(navigate())
+        .expect("onprops realizes to a signature")
+        .first_param()
+        .expect("the signature has a first param");
+    assert!(
+        matches!(
+            node_data_for(dispatch.ctx, first).as_deref(),
+            Some(SemanticNodeData::DeclRef { .. })
+        ),
+        "the first-param root stays a `DeclRef` carrier (not resolved to an Object)"
+    );
+
+    // The shallow surface still projects the one-level members, and is
+    // context-invariant (Shallow regardless of the caller's mode).
+    let names = |context| -> Vec<String> {
+        let mut n: Vec<String> = CallableNodeView::new(&dispatch, onprops)
+            .first_param_object_surface(&ctx, context)
+            .expect("the first-param object projects a one-level surface")
+            .members
+            .iter()
+            .map(|m| m.name.to_string())
+            .collect();
+        n.sort();
+        n
+    };
+    assert_eq!(
+        names(shallow()),
+        vec!["avatar".to_string(), "label".to_string()],
+        "the shallow surface carries the one-level members"
+    );
+    assert_eq!(
+        names(navigate()),
+        names(shallow()),
+        "the surface is one-level Shallow regardless of the caller's context"
+    );
+    assert_eq!(
+        names(ProjectionReductionContext::published(
+            ProjectionMode::Expanded
+        )),
+        names(shallow()),
+        "an Expanded caller context does NOT expand the (always-Shallow) surface"
     );
 }

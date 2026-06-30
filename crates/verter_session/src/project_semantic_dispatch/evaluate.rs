@@ -15,7 +15,7 @@ use std::sync::Arc;
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{
     IndexKey, LiteralValue, PathSegment, ProjectionMode, ProjectionReductionContext, QueryError,
-    QueryResult, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
+    QueryResult, ResolveDeclKey, ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
 };
 
 /// Hard ceiling on recursive `evaluate_deferred_semantic_node_with_context`
@@ -45,6 +45,14 @@ use crate::semantic_query::{
 /// `ChatMessagesSlots<T>`'s thousand-recursive-entry chain) where work
 /// would otherwise grow exponentially.
 const EVALUATE_DEFERRED_DEPTH_CEILING: u32 = 256;
+
+/// Strict step fuse for the residual-carrier resolution loop in
+/// [`ProjectSemanticDispatch::normalize_node_for_structural_fact_demand`]. The
+/// `visited` set already guarantees termination on a finite graph; this is the
+/// secondary depth bound the demand-point contract requires. Real carrier
+/// chains (a `DeclRef` to an alias whose body is an `InstantiationRef` whose
+/// body is a `Union`) resolve in a handful of hops, far under this bound.
+const STRUCTURAL_FACT_DEMAND_FUSE: u32 = 64;
 
 thread_local! {
     /// Per-thread recursive-depth counter for
@@ -236,6 +244,137 @@ impl<'a> ProjectSemanticDispatch<'a> {
         reduction_context: ProjectionReductionContext,
     ) -> SemanticNodeId {
         self.evaluate_deferred_outcome(node, reduction_context).node
+    }
+
+    /// Demand-point structural-fact normalizer for node-domain fact readers
+    /// (e.g. [`CallableNodeView`](crate::meta_resolve::callable_view::CallableNodeView)).
+    ///
+    /// Resolves a node to its concrete STRUCTURAL BODY at a GENUINE fact demand:
+    /// first evaluate deferred shells
+    /// ([`Self::evaluate_deferred_semantic_node_with_context`] — which unwraps
+    /// `Alias` / `KeyOf` / `IndexedAccess` / `Mapped` / `Conditional` /
+    /// `TemplateLiteral` / decl-placeholder / bare-import carriers), then resolve
+    /// a RESIDUAL `DeclRef` via the shared `ResolveDecl` query and a residual
+    /// `InstantiationRef` via the shared `Instantiate` query — the two carriers
+    /// the deferred-shell evaluator deliberately leaves carrier-shaped so an
+    /// intermediate indexed-access hop stays symbolic (see the `_ => break node`
+    /// arm of [`Self::evaluate_deferred_outcome`] and the matching `relation.rs`
+    /// demand note) — then RE-EVALUATE the materialised body. The loop is bounded
+    /// by a `visited` set plus [`STRUCTURAL_FACT_DEMAND_FUSE`] and is FAIL-CLOSED:
+    /// on a cycle, no progress, depth exhaustion, or a `Recursive`/`Error` query
+    /// result it returns the current node unchanged (which may still be a
+    /// carrier — the caller fails closed, never fabricating a fact).
+    ///
+    /// This GENERALIZES the relation-oracle demand-resolve pattern (the
+    /// `InstantiationRef` materialisation in `relation::record_target_shape`) to
+    /// BOTH residual carriers. It is NOT a second resolver: every resolution step
+    /// delegates to the existing shared `ResolveDecl` / `Instantiate` queries
+    /// (the same keys [`realize_callable_member`](crate::meta_resolve::dispatch_helpers::realize_callable_member)
+    /// issues), records their dep-signature facts into the active tracer, and
+    /// folds their partial / suppress signals — so a node-domain reader's
+    /// cache-validity signature observes exactly the facts the resolution
+    /// depended on. It NEVER lowers through `TypeExpr` and NEVER walks structure
+    /// beyond recognising these carrier shells (shallow-by-default: a child node
+    /// is normalised only when a reader reaches its OWN concrete fact demand —
+    /// this primitive does not enumerate object surfaces, walk members, or expand
+    /// keyspaces).
+    ///
+    /// MUST NOT be used by carrier-PRESERVING readers (e.g.
+    /// `first_param_object_surface`): resolving a `DeclRef` subject there would
+    /// break the symbolic indexed-access preservation policy (`AppProps['avatar']`).
+    /// The semantic demand identity is the caller's `context`; the primitive only
+    /// uses the helper contexts `ResolveDecl` / `Instantiate` themselves require.
+    pub(crate) fn normalize_node_for_structural_fact_demand(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        // Step 1: evaluate deferred shells (Alias / KeyOf / IndexedAccess /
+        // Mapped / Conditional / TemplateLiteral / DeclPlaceholder / bare-import).
+        let mut n = self.evaluate_deferred_semantic_node_with_context(node, context);
+        // Step 2: resolve residual DeclRef / InstantiationRef carriers the
+        // deferred evaluator deliberately leaves shaped, then re-evaluate the
+        // materialised body. Bounded + fail-closed.
+        let mut visited = rustc_hash::FxHashSet::default();
+        let mut steps: u32 = 0;
+        loop {
+            if steps >= STRUCTURAL_FACT_DEMAND_FUSE || !visited.insert(n) {
+                break;
+            }
+            steps += 1;
+            let Some(data) = self.graph().node_data(n) else {
+                break;
+            };
+            let resolved = match data.as_ref() {
+                // Residual DeclRef → the canonical shallow `ResolveDecl` query
+                // (the same `ScopeId { canonical_id, local_scope: None }` shape
+                // `realize_callable_member`'s DeclRef arm issues).
+                SemanticNodeData::DeclRef { identity } => {
+                    let identity = identity.clone();
+                    drop(data);
+                    let read = self.execute_read(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+                        scope: ScopeId {
+                            canonical_id: Arc::clone(&identity.canonical_id),
+                            local_scope: None,
+                        },
+                        name: Arc::clone(&identity.decl_name),
+                    }));
+                    crate::request_context::observe_component_meta_read_suppress(&read);
+                    crate::meta_resolve::emit_dispatch_dep_signature_facts(
+                        self.ctx,
+                        &read.dep_signature,
+                    );
+                    match read.value {
+                        QueryResult::Value(id) => id,
+                        QueryResult::Recursive(_) | QueryResult::Error(_) => break,
+                    }
+                }
+                // Residual InstantiationRef → the shared `Instantiate` query
+                // (the `relation::record_target_shape` shape generalised): args
+                // evaluate carrier-shaped under the caller's context, the slot is
+                // the base decl's type slot, and the instantiate context derives
+                // from the caller's context.
+                SemanticNodeData::InstantiationRef { base, args } => {
+                    let slot = self
+                        .type_slot_for(Arc::clone(&base.canonical_id), Arc::clone(&base.decl_name));
+                    let owner_canonical = Arc::clone(&base.canonical_id);
+                    let args: Arc<[SemanticNodeId]> = Arc::from(
+                        args.iter()
+                            .map(|arg| {
+                                self.evaluate_deferred_semantic_node_with_context(*arg, context)
+                            })
+                            .collect::<Vec<_>>()
+                            .into_boxed_slice(),
+                    );
+                    drop(data);
+                    let read = self.execute_read(SemanticQueryKey::Instantiate {
+                        base: slot,
+                        args,
+                        context: self.instantiate_context_for(&owner_canonical, context),
+                    });
+                    crate::request_context::observe_component_meta_read_suppress(&read);
+                    crate::meta_resolve::emit_dispatch_dep_signature_facts(
+                        self.ctx,
+                        &read.dep_signature,
+                    );
+                    match read.value {
+                        QueryResult::Value(id) => id,
+                        QueryResult::Recursive(_) | QueryResult::Error(_) => break,
+                    }
+                }
+                // Not a residual resolvable carrier — `n` is the structural body.
+                _ => break,
+            };
+            // Re-evaluate the materialised body (it may itself be a deferred
+            // shell or chain into a further residual carrier).
+            let next = self.evaluate_deferred_semantic_node_with_context(resolved, context);
+            if next == n {
+                // No progress — carrier-stop.
+                break;
+            }
+            n = next;
+        }
+        n
     }
 
     /// Entry-scoped workhorse for the deferred-shell evaluator. Returns the

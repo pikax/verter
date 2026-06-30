@@ -99,6 +99,22 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
         node_data_for(self.dispatch.ctx, node)
     }
 
+    /// Normalize a node to its concrete structural body at a GENUINE node-domain
+    /// fact demand through the shared dispatch-layer primitive
+    /// ([`ProjectSemanticDispatch::normalize_node_for_structural_fact_demand`]):
+    /// evaluate deferred shells, resolve a residual `DeclRef` / `InstantiationRef`
+    /// via the shared `ResolveDecl` / `Instantiate` queries, re-evaluate. The
+    /// view NEVER resolves declaration slots or instantiates bases itself — it
+    /// calls this one shared primitive (no second resolver lives here).
+    fn normalized_fact_node(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        self.dispatch
+            .normalize_node_for_structural_fact_demand(node, context)
+    }
+
     fn intern(&self, data: SemanticNodeData) -> SemanticNodeId {
         self.dispatch
             .ctx
@@ -143,28 +159,39 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
         if depth > CALLABLE_VIEW_DEPTH_FUSE {
             return None;
         }
-        let data = self.data(node)?;
+        // Normalize to the concrete structural body BEFORE every structural
+        // match — at a genuine callable-fact demand the view resolves carrier
+        // shells (incl. residual `DeclRef` / `InstantiationRef`) through the
+        // shared primitive, so a `type MaybeFn = ((r) => void) | undefined`
+        // member (`DeclRef(MaybeFn)`) becomes `Union(Function, undefined)` HERE,
+        // letting the view strip the nullish arm the strict whole-composite
+        // `realize_callable_member` rule would otherwise fail on.
+        let normalized = self.normalized_fact_node(node, context);
+        let data = self.data(normalized)?;
         match data.as_ref() {
             // A realized callable — return verbatim.
-            SemanticNodeData::Function { .. } => Some(node),
+            SemanticNodeData::Function { .. } => Some(normalized),
 
-            // The view OWNS the arm recursion. Skip nullish arms, compose
-            // `realize_callable_member` on each non-nullish arm, then require
-            // exactly one distinct callable function node.
+            // The view OWNS the arm recursion. Skip nullish arms, RECURSE per
+            // surviving arm (so a nested nullish composite —
+            // `Union([Union([f, undefined]), …])` — has its inner `undefined`
+            // stripped too, rather than failing the strict composite realize),
+            // then require exactly one distinct callable function node.
             SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
                 let arms = Arc::clone(arms);
                 drop(data);
                 let mut callable: Option<SemanticNodeId> = None;
                 for arm in arms.iter() {
-                    // Nullish arms (`undefined` / `null`) of an explicit nullish
-                    // composite are stripped — they are not the callable.
-                    if self.node_is_nullish_primitive(*arm) {
+                    // Normalize the arm enough to detect / strip a nullish arm
+                    // (`undefined` / `null`), incl. one behind a carrier.
+                    let arm_norm = self.normalized_fact_node(*arm, context);
+                    if self.node_is_nullish_primitive(arm_norm) {
                         continue;
                     }
-                    // A non-nullish, non-callable arm means the root is not a
-                    // pure callable — refuse.
-                    let realized = realize_callable_member(self.dispatch, *arm, context)?;
-                    let found = self.classify_single_callable(realized, context, depth + 1)?;
+                    // A non-nullish arm must itself classify to a single callable
+                    // (recursion handles nested composites AND realizes leaf
+                    // callables); a non-callable non-nullish arm refuses.
+                    let found = self.classify_single_callable(arm_norm, context, depth + 1)?;
                     match callable {
                         // A second, distinct callable arm is ambiguous — refuse
                         // rather than pick one.
@@ -176,13 +203,14 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
                 callable
             }
 
-            // A carrier shell (Alias / DeclRef / InstantiationRef / Conditional
-            // / DeclPlaceholder): normalize through the shared realizer, then
-            // reclassify. A no-progress realize (or a non-callable shape)
-            // refuses.
+            // A non-composite leaf that is not itself a `Function` (a residual
+            // carrier the primitive could not resolve, a `Conditional` the
+            // realizer can still decide, or a non-callable scalar): compose the
+            // shared per-arm callable realizer. A no-progress realize (or a
+            // non-callable shape) refuses.
             _ => {
-                let realized = realize_callable_member(self.dispatch, node, context)?;
-                if realized == node {
+                let realized = realize_callable_member(self.dispatch, normalized, context)?;
+                if realized == normalized {
                     None
                 } else {
                     self.classify_single_callable(realized, context, depth + 1)
@@ -203,11 +231,17 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
     /// The realized callable as a [`SignatureNodeView`]. `None` when the root
     /// does not realize to a single `Function` node (e.g. a multi-arm
     /// composite, or a non-callable).
+    ///
+    /// Routes through [`Self::single_callable_arm`] (NOT a direct
+    /// `realize_callable_member`) so a single-signature projection respects the
+    /// view's nullish-stripping policy — an optional callback root
+    /// (`((r) => void) | undefined`, including one behind a carrier) projects to
+    /// the surviving callable signature.
     pub(crate) fn signature(
         &self,
         context: ProjectionReductionContext,
     ) -> Option<SignatureNodeView<'a, 'ctx>> {
-        let realized = realize_callable_member(self.dispatch, self.root, context)?;
+        let realized = self.single_callable_arm(context)?;
         match self.data(realized).as_deref() {
             Some(SemanticNodeData::Function { .. }) => Some(SignatureNodeView {
                 dispatch: self.dispatch,
@@ -221,19 +255,22 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
     /// declares — its string-literal type, or each `Literal(String)` of a union
     /// first parameter, flattened recursively. `None` when the root is not a
     /// callable, has no first parameter, or the first parameter carries no
-    /// string literal. Generalizes the node-domain `call_signature_event_names`
-    /// / `collect_string_literal_names` precedent. Zero materialization.
+    /// string literal.
+    ///
+    /// This is the node-domain event-name AUTHORITY: it carrier-resolves the
+    /// first-param type (`Alias` / `DeclRef` / `InstantiationRef`) through the
+    /// shared structural-fact demand primitive BEFORE extracting literals, so a
+    /// `type Event = 'save' | 'cancel'` (a `DeclRef`) or a generic-instantiated
+    /// event-name alias (an `InstantiationRef`) surfaces its names. This
+    /// RESOLVES MORE than the legacy `fold_node` materializer, which keeps
+    /// `DeclRef` / `InstantiationRef` shallow and would miss those names — the
+    /// decided correct Vue semantics. A residual carrier where a literal is
+    /// required contributes no name (fail-closed). Zero `TypeExpr`
+    /// materialization.
     pub(crate) fn event_names(&self, context: ProjectionReductionContext) -> Option<Vec<Arc<str>>> {
-        let callable = realize_callable_member(self.dispatch, self.root, context)?;
-        let data = self.data(callable)?;
-        let SemanticNodeData::Function { params, .. } = data.as_ref() else {
-            return None;
-        };
-        let first = params.first()?;
-        let first_ty = first.ty;
-        drop(data);
+        let first_ty = self.signature(context)?.first_param()?;
         let mut names = Vec::new();
-        self.collect_string_literal_names(first_ty, &mut names);
+        self.collect_string_literal_names(first_ty, context, &mut names);
         if names.is_empty() {
             None
         } else {
@@ -241,8 +278,17 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
         }
     }
 
-    fn collect_string_literal_names(&self, node: SemanticNodeId, out: &mut Vec<Arc<str>>) {
-        let Some(data) = self.data(node) else {
+    fn collect_string_literal_names(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+        out: &mut Vec<Arc<str>>,
+    ) {
+        // Carrier-resolve before EVERY structural match — a `DeclRef` /
+        // `InstantiationRef` event-name union resolves to its `Union` here, and
+        // each union arm is normalized again on recursion.
+        let normalized = self.normalized_fact_node(node, context);
+        let Some(data) = self.data(normalized) else {
             return;
         };
         match data.as_ref() {
@@ -253,7 +299,7 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
                 let members = Arc::clone(members);
                 drop(data);
                 for member in members.iter() {
-                    self.collect_string_literal_names(*member, out);
+                    self.collect_string_literal_names(*member, context, out);
                 }
             }
             _ => {}
@@ -265,6 +311,16 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
     /// shallow-surface synthesiser the DTO slot-binding path uses. The first
     /// param is taken from the realized signature node directly; it is NOT
     /// re-materialized to a `TypeExpr` and re-navigated.
+    ///
+    /// SCOPING RULE: unlike the other fact readers, this method MUST NOT
+    /// carrier-resolve the first-param root through
+    /// [`Self::normalized_fact_node`]. It is a SHALLOW PUBLICATION reader, not a
+    /// structural-fact reader: the surface projection is ALWAYS one-level
+    /// `Shallow` and KEEPS the first-param root carrier-shaped. Resolving a
+    /// `DeclRef(AppProps)` subject here would break the symbolic indexed-access
+    /// preservation policy (`AppProps['avatar']`) the Vue slot-binding shallow
+    /// publication relies on. `context` governs ONLY the signature realization
+    /// (which callable arm) — the surface itself is invariant in `Shallow`.
     ///
     /// `None` when the root is not a single callable, has no first parameter,
     /// or the first-param root is symbolic-only (an open Conditional / mapped /
@@ -293,14 +349,14 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
             )
     }
 
-    /// All positional params of the realized callable — `this` skipped, a
-    /// rest-tuple param expanded into one entry per tuple element. `None` when
+    /// All positional params of the realized callable — leading `this` skipped,
+    /// a rest-tuple param expanded into one entry per tuple element. `None` when
     /// the root does not realize to a single `Function`.
     pub(crate) fn positional_params(
         &self,
         context: ProjectionReductionContext,
     ) -> Option<Vec<PositionalParamNode>> {
-        Some(self.signature(context)?.positional_params_expanded())
+        Some(self.signature(context)?.positional_params_expanded(context))
     }
 
     /// The Vue multi-arm slot first-param + return facts. The root is realized
@@ -318,25 +374,65 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
         combine: ArmCombineNode,
         context: ProjectionReductionContext,
     ) -> Option<SlotCallableNodeParts> {
-        let realized = realize_callable_member(self.dispatch, self.root, context)?;
-        let data = self.data(realized)?;
+        // Collect EVERY non-nullish callable arm as a realized `Function` node —
+        // the view owns the composite/nullish policy and normalizes carriers at
+        // this genuine slot-callable fact demand, so an aliased slot
+        // (`SlotAlias | GenSlot<Props>`) or a carrier-wrapped composite resolves
+        // here rather than failing the strict whole-root `realize_callable_member`
+        // composite rule. Fails closed on a non-callable non-nullish arm.
+        let mut functions: Vec<SemanticNodeId> = Vec::new();
+        self.collect_callable_arms(self.root, context, 0, &mut functions)?;
+        if functions.is_empty() {
+            return None;
+        }
+        self.combine_slot_arms(&functions, combine)
+    }
+
+    /// Recursively collect every non-nullish callable arm of `node` as a
+    /// realized [`SemanticNodeData::Function`] node into `out`, normalizing
+    /// carrier shells at each hop. Returns `None` (FAIL CLOSED) on a
+    /// non-callable non-nullish arm, missing data, or fuse exhaustion.
+    fn collect_callable_arms(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+        depth: u32,
+        out: &mut Vec<SemanticNodeId>,
+    ) -> Option<()> {
+        if depth > CALLABLE_VIEW_DEPTH_FUSE {
+            return None;
+        }
+        let normalized = self.normalized_fact_node(node, context);
+        let data = self.data(normalized)?;
         match data.as_ref() {
-            SemanticNodeData::Function {
-                params,
-                return_type,
-                return_type_span,
-                ..
-            } => Some(SlotCallableNodeParts {
-                first_param: params.first().map(|p| p.ty),
-                return_type: Some(*return_type),
-                return_type_span: *return_type_span,
-            }),
+            SemanticNodeData::Function { .. } => {
+                out.push(normalized);
+                Some(())
+            }
             SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
                 let arms = Arc::clone(arms);
                 drop(data);
-                self.combine_slot_arms(&arms, combine)
+                for arm in arms.iter() {
+                    let arm_norm = self.normalized_fact_node(*arm, context);
+                    // Nullish arms (`undefined` / `null`) are stripped, incl. one
+                    // behind a carrier.
+                    if self.node_is_nullish_primitive(arm_norm) {
+                        continue;
+                    }
+                    self.collect_callable_arms(arm_norm, context, depth + 1, out)?;
+                }
+                Some(())
             }
-            _ => None,
+            // A non-composite leaf: realize to a callable `Function`. FAIL CLOSED
+            // (a non-callable non-nullish arm makes the member not slot-callable).
+            _ => {
+                let realized = realize_callable_member(self.dispatch, normalized, context)?;
+                if realized == normalized {
+                    None
+                } else {
+                    self.collect_callable_arms(realized, context, depth + 1, out)
+                }
+            }
         }
     }
 
@@ -349,6 +445,9 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
         let mut returns: Vec<SemanticNodeId> = Vec::new();
         // A binding is guaranteed only when EVERY arm contributes a first param.
         let mut all_arms_have_first_param = true;
+        // A single-arm callable keeps its return-type annotation span; a composed
+        // multi-arm callable has no single span.
+        let mut single_return_type_span: Option<Span> = None;
         for arm in arms {
             let arm_data = self.data(*arm)?;
             // FAIL CLOSED: a non-`Function` arm means the member is not purely
@@ -356,11 +455,15 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
             let SemanticNodeData::Function {
                 params,
                 return_type,
+                return_type_span,
                 ..
             } = arm_data.as_ref()
             else {
                 return None;
             };
+            if arms.len() == 1 {
+                single_return_type_span = *return_type_span;
+            }
             match params.first() {
                 Some(p) => first_params.push(p.ty),
                 None => all_arms_have_first_param = false,
@@ -399,8 +502,9 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
         Some(SlotCallableNodeParts {
             first_param,
             return_type,
-            // A composed multi-arm callable has no single return-type span.
-            return_type_span: None,
+            // Preserved for a single-arm callable; `None` for a composed
+            // multi-arm callable (no single return-type span).
+            return_type_span: single_return_type_span,
         })
     }
 }
@@ -419,12 +523,17 @@ impl SignatureNodeView<'_, '_> {
         params.first().map(|p| p.ty)
     }
 
-    /// The signature's return-type node. `function` is a `Function` by
-    /// construction, so the fallback is unreachable.
-    pub(crate) fn return_type(&self) -> SemanticNodeId {
+    /// The signature's return-type node. `Some` only when `function` is a
+    /// `Function` node (which it is by construction); FAILS CLOSED with `None`
+    /// on the unreachable non-`Function` case rather than fabricating a
+    /// valid-looking node fact by returning `self.function`.
+    pub(crate) fn return_type(&self) -> Option<SemanticNodeId> {
         match self.data(self.function).as_deref() {
-            Some(SemanticNodeData::Function { return_type, .. }) => *return_type,
-            _ => self.function,
+            Some(SemanticNodeData::Function { return_type, .. }) => Some(*return_type),
+            _ => {
+                debug_assert!(false, "SignatureNodeView function is not a Function node");
+                None
+            }
         }
     }
 
@@ -438,29 +547,42 @@ impl SignatureNodeView<'_, '_> {
         }
     }
 
-    /// All positional params — the leading `this` param skipped and a rest-tuple
+    /// All positional params — the LEADING `this` param skipped and a rest-tuple
     /// param expanded into one [`PositionalParamNode`] per tuple element. A rest
     /// param whose type is NOT a tuple (an open generic / `unknown[]`) carries
     /// no enumerable positional bindings.
-    pub(crate) fn positional_params_expanded(&self) -> Vec<PositionalParamNode> {
-        let Some(data) = self.data(self.function) else {
-            return Vec::new();
-        };
-        let SemanticNodeData::Function { params, .. } = data.as_ref() else {
-            return Vec::new();
+    ///
+    /// `context` is the demand identity used to carrier-resolve a rest param's
+    /// type before checking for `Tuple`: rest expansion is a genuine structural
+    /// fact (`type Args = [item: Item, index: number]` — a `DeclRef` — must
+    /// resolve to its `Tuple` to enumerate), so it routes through the shared
+    /// structural-fact demand primitive. A rest param that does not resolve to a
+    /// `Tuple` contributes no positional entries (fail-closed).
+    pub(crate) fn positional_params_expanded(
+        &self,
+        context: ProjectionReductionContext,
+    ) -> Vec<PositionalParamNode> {
+        let params = match self.data(self.function).as_deref() {
+            Some(SemanticNodeData::Function { params, .. }) => Arc::clone(params),
+            _ => return Vec::new(),
         };
         let mut out = Vec::new();
-        for param in params.iter() {
-            // Skip the `this` parameter (a snippet's vendored call signature is
-            // `(this: void, ...args: Params)`); only the leading param can be
-            // named `this` in valid TypeScript.
-            if param.name.as_deref() == Some("this") {
+        for (idx, param) in params.iter().enumerate() {
+            // Skip ONLY the LEADING `this` parameter (a snippet's vendored call
+            // signature is `(this: void, ...args: Params)`); only the first param
+            // can be named `this` in valid TypeScript, so a later same-named
+            // param is a real positional binding.
+            if idx == 0 && param.name.as_deref() == Some("this") {
                 continue;
             }
             if param.rest {
-                // A rest-tuple param spreads its tuple element-wise.
+                // A rest-tuple param spreads its tuple element-wise — resolve the
+                // carrier to its concrete `Tuple` body at this genuine demand.
+                let resolved = self
+                    .dispatch
+                    .normalize_node_for_structural_fact_demand(param.ty, context);
                 if let Some(SemanticNodeData::Tuple { elements, .. }) =
-                    self.data(param.ty).as_deref()
+                    self.data(resolved).as_deref()
                 {
                     for element in elements.iter() {
                         out.push(PositionalParamNode {
