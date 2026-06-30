@@ -1,0 +1,71 @@
+{
+  "slug": "components/component_full.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "./Child.svelte",
+      "kind": "default",
+      "names": [
+        "default:Child"
+      ]
+    },
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "component_full",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "state",
+    "get",
+    "set",
+    "next",
+    "text",
+    "template_effect",
+    "set_text",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "get",
+    "next",
+    "set",
+    "set_text",
+    "state",
+    "template_effect",
+    "text"
+  ],
+  "helperCounts": {
+    "state": 1,
+    "get": 1,
+    "set": 1,
+    "next": 1,
+    "text": 1,
+    "template_effect": 1,
+    "set_text": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; import Child from './Child.svelte'; export default function component_full($$anchor, $$props) {let v = $.state(''); Child($$anchor, {a: 's', get b() {return $$props.x;}, onclick: () => $$props.x, get value() {return $.get(v);}, set value($$value) {$.set(v, $$value, true);}, children: ($$anchor, $$slotProps) => {$.next(); var text = $.text(); $.template_effect(() => $.set_text(text, `body ${$$props.x ?? ''}`)); $.append($$anchor, text);}, $$slots: {default: true}});}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

@@ -28,9 +28,9 @@
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
     ArrowFunctionExpression, AssignmentExpression, AssignmentTarget, BindingPattern,
-    BlockStatement, CallExpression, CatchClause, Expression, ForInStatement, ForOfStatement,
-    ForStatement, Function, FunctionType, IdentifierReference, Program, SimpleAssignmentTarget,
-    Statement, UpdateExpression, VariableDeclarationKind,
+    BlockStatement, CallExpression, CatchClause, ChainElement, Expression, ForInStatement,
+    ForOfStatement, ForStatement, Function, FunctionType, IdentifierReference, Program,
+    SimpleAssignmentTarget, Statement, UpdateExpression, VariableDeclarationKind,
 };
 use oxc_ast_visit::{walk, Visit};
 use oxc_parser::Parser;
@@ -84,6 +84,11 @@ pub enum BindingRuntimeKind {
     SnippetParam,
     /// A module-script binding.
     ModuleBinding,
+    /// A default import of a `.svelte` component module (`import Child from
+    /// './Child.svelte'`) — a NON-REACTIVE value binding. The imported local is a
+    /// component callee (`Child($$anchor, …)`); a read emits the bare name, NEVER
+    /// `$.get`.
+    ComponentImport,
 }
 
 /// The declared `$state` rune flavour.
@@ -457,6 +462,12 @@ pub struct ExprReference {
     pub name: String,
     /// How the identifier is referenced.
     pub kind: ExprRefKind,
+    /// Whether the reference appears INSIDE a nested function / arrow body (a DEFERRED
+    /// read, executed only when the function is called) vs SYNCHRONOUSLY at the
+    /// expression's top level. The official `metadata.expression.has_state` counts only
+    /// SYNCHRONOUS reactive reads — `onclick={() => x}` is a plain prop init (`has_state =
+    /// false`), while `b={x}` / `depth={depth - 1}` are reactive (a getter / derived).
+    pub in_function: bool,
 }
 
 /// How a free identifier is referenced inside a template expression.
@@ -920,6 +931,39 @@ pub(crate) fn parse_pattern_names(pattern_text: &str) -> Result<Vec<String>, ()>
     Ok(names)
 }
 
+/// Parse a `let:`-directive alias value (`let:item={alias}`) and return the bare LOCAL name
+/// IFF the value is a SINGLE bare binding identifier. The value is parsed (no text scan) as
+/// `const <text> = null as any;`; only a top-level [`BindingPattern::BindingIdentifier`]
+/// declarator id is a supported alias.
+///
+/// A destructuring pattern (`{ a }` / `[a]`, even a SINGLE-name one), a multi-declarator
+/// list, or an unparseable value yields `None` so the caller fails CLOSED. The NODE KIND is
+/// the discriminator, NOT a name count: a single-name destructure (`{ a }`) collects exactly
+/// one name yet is an unsupported decomposition (it would otherwise lower as a one-name slot
+/// rename), so the count alone cannot distinguish a bare-identifier alias from it.
+pub(crate) fn parse_let_alias_identifier(value_text: &str) -> Option<String> {
+    let alloc = Allocator::default();
+    let wrapped = format!("const {value_text} = null as any;");
+    let parsed = Parser::new(&alloc, &wrapped, SourceType::tsx()).parse();
+    if parsed.panicked || !parsed.errors.is_empty() {
+        return None;
+    }
+    let mut decls = parsed.program.body.iter().filter_map(|stmt| match stmt {
+        Statement::VariableDeclaration(decl) => Some(decl),
+        _ => None,
+    });
+    let decl = decls.next()?;
+    // Exactly ONE declarator whose id is a bare binding identifier — anything else (a
+    // destructuring pattern, multiple declarators) is an unsupported alias form.
+    if decls.next().is_some() || decl.declarations.len() != 1 {
+        return None;
+    }
+    match &decl.declarations[0].id {
+        BindingPattern::BindingIdentifier(id) => Some(id.name.to_string()),
+        _ => None,
+    }
+}
+
 /// One declarator parsed from a `{@const …}` / `{const …}` / `{let …}` tag's
 /// inner text: its declared binding names (in source order) and the byte span of
 /// its initializer expression RELATIVE to the inner text (i.e. `0` is the first
@@ -1086,18 +1130,35 @@ pub enum RenderCalleeShape {
         args: Vec<(u32, u32)>,
     },
     /// Anything else — an optional call (`expr?.()`), a member/computed callee, a
-    /// non-call expression: the whole inner expression is dynamic.
-    Dynamic,
+    /// non-call expression: the whole inner expression is the dynamic callee. The
+    /// trailing call's ARGUMENT spans are still carried (relative to the inner
+    /// text) so a prop/member/optional callee keeps its argument thunks.
+    Dynamic {
+        /// The argument expression spans, relative to the inner text (empty for a
+        /// zero-arg call or a non-call expression).
+        args: Vec<(u32, u32)>,
+    },
+    /// A `{@render …(…)}` call carrying a SPREAD argument (`{@render row(...xs)}`).
+    /// Official `svelte@5.56.3` HARD-ERRORS on this (`render_tag_invalid_spread_argument`:
+    /// "cannot use spread arguments in {@render ...} tags"), so it is the fail-closed
+    /// signal — the caller refuses rather than degrading to dropped (un-thunk-able) args.
+    /// Independent of the callee shape (a spread can ride a static-name, member, or
+    /// optional callee), so it is its own arm: the refusal is about the ARGUMENT, the
+    /// callee identity is irrelevant once a spread is present.
+    SpreadArguments,
 }
 
 /// Parse a `{@render …}` tag's inner text into its callee shape.
 ///
-/// A static-name call (`row(1)`) yields [`RenderCalleeShape::StaticName`] with the
-/// callee name + argument spans (relative to the inner text); ANYTHING else — an
-/// optional call (`getSnippet()?.()`), a member callee, or a non-call expression —
-/// yields [`RenderCalleeShape::Dynamic`]. This is purely structural (no text
-/// matching): it inspects the OXC-parsed `CallExpression`. A fragment that does
-/// not parse yields `Err(())`.
+/// A plain (non-optional) call with a plain-identifier callee (`row(1)`) yields
+/// [`RenderCalleeShape::StaticName`] (the static-snippet-name candidate); ANYTHING
+/// else — an optional call (`getSnippet()?.()`), a member/computed callee
+/// (`obj.snip(x)`), or a non-call expression — yields [`RenderCalleeShape::Dynamic`].
+/// In BOTH call shapes the trailing call's ARGUMENT spans (relative to the inner
+/// text) are carried, so a prop/member/optional callee keeps its argument thunks
+/// (the official `$.snippet(node, callee, …args)` shape). This is purely structural
+/// (no text matching): it inspects the OXC-parsed `CallExpression`. A fragment that
+/// does not parse yields `Err(())`.
 pub(crate) fn parse_render_call(inner_text: &str) -> Result<RenderCalleeShape, ()> {
     let alloc = Allocator::default();
     let wrapped = format!("({inner_text});");
@@ -1107,31 +1168,40 @@ pub(crate) fn parse_render_call(inner_text: &str) -> Result<RenderCalleeShape, (
     }
     // The single wrapped expression statement.
     let Some(Statement::ExpressionStatement(stmt)) = parsed.program.body.first() else {
-        return Ok(RenderCalleeShape::Dynamic);
+        return Ok(RenderCalleeShape::Dynamic { args: Vec::new() });
     };
-    // Unwrap the parenthesised expression.
-    let inner_expr = match &stmt.expression {
-        Expression::ParenthesizedExpression(p) => &p.expression,
-        other => other,
-    };
-    // A plain (non-optional) call with a plain-identifier callee is a static
-    // snippet call.
-    let Expression::CallExpression(call) = inner_expr else {
-        return Ok(RenderCalleeShape::Dynamic);
-    };
-    if call.optional {
-        return Ok(RenderCalleeShape::Dynamic);
+    // Peel ALL outer parenthesised layers — the synthetic wrapper paren plus any author
+    // parens wrapping the WHOLE call — so the trailing-call peel and the per-argument
+    // spread scan reach the call's top-level arguments. A single unwrap would leave an
+    // author-parenthesised whole call (`(row(...xs))`, `((row(...xs)))`, `(row?.(...xs))`)
+    // as a residual `ParenthesizedExpression` that matches neither a Call nor a Chain and
+    // falls through to the empty-args dynamic shape, silently DROPPING a spread argument
+    // the caller must instead fail closed on.
+    let mut inner_expr = &stmt.expression;
+    while let Expression::ParenthesizedExpression(p) = inner_expr {
+        inner_expr = &p.expression;
     }
-    let Expression::Identifier(callee) = &call.callee else {
-        return Ok(RenderCalleeShape::Dynamic);
+    // Peel the trailing call — a plain `CallExpression` or the `CallExpression`
+    // inside a `ChainExpression` (an optional `fn?.()`). A non-call expression has
+    // no arguments to carry (the dynamic callee is the whole expression).
+    let call: &CallExpression = match inner_expr {
+        Expression::CallExpression(call) => call,
+        Expression::ChainExpression(chain) => match &chain.expression {
+            ChainElement::CallExpression(call) => call,
+            _ => return Ok(RenderCalleeShape::Dynamic { args: Vec::new() }),
+        },
+        _ => return Ok(RenderCalleeShape::Dynamic { args: Vec::new() }),
     };
     // The wrapper prefix is a single `(`.
     let prefix_len = 1u32;
     let mut args = Vec::with_capacity(call.arguments.len());
     for arg in &call.arguments {
         let Some(expr) = arg.as_expression() else {
-            // A spread argument is not a plain snippet arg — treat as dynamic.
-            return Ok(RenderCalleeShape::Dynamic);
+            // A spread argument (`row(...xs)`) is an official HARD ERROR
+            // (`render_tag_invalid_spread_argument`). Signal the fail-closed shape so
+            // the caller refuses, rather than silently dropping the (un-thunk-able)
+            // spread and emitting a wrong-arity `$.snippet` call.
+            return Ok(RenderCalleeShape::SpreadArguments);
         };
         let span = expr.span();
         args.push((
@@ -1139,10 +1209,18 @@ pub(crate) fn parse_render_call(inner_text: &str) -> Result<RenderCalleeShape, (
             span.end.saturating_sub(prefix_len),
         ));
     }
-    Ok(RenderCalleeShape::StaticName {
-        name: callee.name.to_string(),
-        args,
-    })
+    // A plain (non-optional) call with a plain-identifier callee is the static
+    // snippet-name candidate; an optional call or a member/computed callee stays
+    // the dynamic callee, carrying the same argument thunks.
+    if !call.optional {
+        if let Expression::Identifier(callee) = &call.callee {
+            return Ok(RenderCalleeShape::StaticName {
+                name: callee.name.to_string(),
+                args,
+            });
+        }
+    }
+    Ok(RenderCalleeShape::Dynamic { args })
 }
 
 /// A use-collector over a script body: it records, per tracked `$state` binding
@@ -1531,6 +1609,7 @@ pub(crate) fn collect_expr_references(text: &str) -> Result<ExprAnalysisFacts, (
     let mut collector = ExprReferenceCollector {
         refs: Vec::new(),
         local_frames: Vec::new(),
+        fn_depth: 0,
     };
     collector.visit_program(&parsed.program);
     // The whole expression body (the `({text});` wrapper's lone expression statement) —
@@ -1631,24 +1710,37 @@ fn unwrapped_root_kind_of(expr: &Expression) -> UnwrappedRootKind {
 struct ExprReferenceCollector {
     refs: Vec<ExprReference>,
     local_frames: Vec<rustc_hash::FxHashSet<String>>,
+    /// The current nested-function depth — incremented inside a `function` / arrow body
+    /// ONLY (NOT a plain block / catch / for), so a reference's `in_function` flag marks a
+    /// DEFERRED read (the official synchronous-`has_state` distinction).
+    fn_depth: usize,
 }
 
 impl ExprReferenceCollector {
     fn is_local(&self, name: &str) -> bool {
         self.local_frames.iter().any(|f| f.contains(name))
     }
+
+    /// Whether the collector is currently inside a nested function / arrow body.
+    fn in_function(&self) -> bool {
+        self.fn_depth > 0
+    }
 }
 
 impl<'a> Visit<'a> for ExprReferenceCollector {
     fn visit_function(&mut self, it: &Function<'a>, flags: oxc_syntax::scope::ScopeFlags) {
         self.local_frames.push(function_scope_names(it));
+        self.fn_depth += 1;
         walk::walk_function(self, it, flags);
+        self.fn_depth -= 1;
         self.local_frames.pop();
     }
 
     fn visit_arrow_function_expression(&mut self, it: &ArrowFunctionExpression<'a>) {
         self.local_frames.push(arrow_scope_names(it));
+        self.fn_depth += 1;
         walk::walk_arrow_function_expression(self, it);
+        self.fn_depth -= 1;
         self.local_frames.pop();
     }
 
@@ -1706,9 +1798,11 @@ impl<'a> Visit<'a> for ExprReferenceCollector {
                 if let Expression::Identifier(obj) = &m.object {
                     let name = obj.name.as_str();
                     if !self.is_local(name) {
+                        let in_function = self.in_function();
                         self.refs.push(ExprReference {
                             name: name.to_string(),
                             kind: ExprRefKind::DeepMutate,
+                            in_function,
                         });
                     }
                 }
@@ -1719,9 +1813,11 @@ impl<'a> Visit<'a> for ExprReferenceCollector {
                 if let Expression::Identifier(obj) = &m.object {
                     let name = obj.name.as_str();
                     if !self.is_local(name) {
+                        let in_function = self.in_function();
                         self.refs.push(ExprReference {
                             name: name.to_string(),
                             kind: ExprRefKind::DeepMutate,
+                            in_function,
                         });
                     }
                 }
@@ -1733,11 +1829,13 @@ impl<'a> Visit<'a> for ExprReferenceCollector {
                 // reassignments of `count` / `a`, not reads.
                 let mut names = rustc_hash::FxHashSet::default();
                 collect_reassigned_target_names(other, &mut names);
+                let in_function = self.in_function();
                 for name in &names {
                     if !self.is_local(name) {
                         self.refs.push(ExprReference {
                             name: name.clone(),
                             kind: ExprRefKind::Reassign,
+                            in_function,
                         });
                     }
                 }
@@ -1770,9 +1868,11 @@ impl<'a> Visit<'a> for ExprReferenceCollector {
                 if let Expression::Identifier(obj) = &m.object {
                     let name = obj.name.as_str();
                     if !self.is_local(name) {
+                        let in_function = self.in_function();
                         self.refs.push(ExprReference {
                             name: name.to_string(),
                             kind: ExprRefKind::DeepMutate,
+                            in_function,
                         });
                     }
                 }
@@ -1782,9 +1882,11 @@ impl<'a> Visit<'a> for ExprReferenceCollector {
                 if let Expression::Identifier(obj) = &m.object {
                     let name = obj.name.as_str();
                     if !self.is_local(name) {
+                        let in_function = self.in_function();
                         self.refs.push(ExprReference {
                             name: name.to_string(),
                             kind: ExprRefKind::DeepMutate,
+                            in_function,
                         });
                     }
                 }
@@ -1795,9 +1897,11 @@ impl<'a> Visit<'a> for ExprReferenceCollector {
             other => {
                 if let Some(name) = simple_target_wrapped_ident(other) {
                     if !self.is_local(name) {
+                        let in_function = self.in_function();
                         self.refs.push(ExprReference {
                             name: name.to_string(),
                             kind: ExprRefKind::Reassign,
+                            in_function,
                         });
                     }
                 }
@@ -1809,9 +1913,11 @@ impl<'a> Visit<'a> for ExprReferenceCollector {
     fn visit_identifier_reference(&mut self, it: &IdentifierReference<'a>) {
         let name = it.name.as_str();
         if !self.is_local(name) {
+            let in_function = self.in_function();
             self.refs.push(ExprReference {
                 name: name.to_string(),
                 kind: ExprRefKind::Read,
+                in_function,
             });
         }
         walk::walk_identifier_reference(self, it);

@@ -36,6 +36,9 @@ pub(super) enum SupportedHtmlElement {
     Input,
     /// `<p>`.
     P,
+    /// `<span>` — a plain inline element (no special content model, no `importNode`),
+    /// the common host for component slot / `{#snippet}` body content.
+    Span,
     /// `<video>` — the media host for the `muted` DOM-property write . It
     /// requires `importNode` (the official `from_html(…, TEMPLATE_USE_IMPORT_NODE)`
     /// flag), so the template flag is set by the skeleton planner, not here.
@@ -70,6 +73,7 @@ impl SupportedHtmlElement {
             "h1" => Some(Self::H1),
             "input" => Some(Self::Input),
             "p" => Some(Self::P),
+            "span" => Some(Self::Span),
             "video" => Some(Self::Video),
             "textarea" => Some(Self::Textarea),
             "select" => Some(Self::Select),
@@ -94,6 +98,7 @@ impl SupportedHtmlElement {
             Self::H1 => "h1",
             Self::Input => "input",
             Self::P => "p",
+            Self::Span => "span",
             Self::Video => "video",
             Self::Textarea => "textarea",
             Self::Select => "select",
@@ -396,26 +401,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn try_from_accepts_exactly_the_twelve_core_tags() {
-        // The SOLE element-acceptance authority accepts EXACTLY the core set (§1.2
-        // six, the `video` media host for the `muted` property write, plus the
-        // bindings-breadth hosts the 5c DOM-bind family adds:
-        // `textarea`/`select`/`option`/`audio`/`details`).
+    fn try_from_accepts_exactly_the_thirteen_core_tags() {
+        // The SOLE element-acceptance authority accepts EXACTLY the core set (the §1.2
+        // six, the `video` media host for the `muted` property write, the bindings-breadth
+        // DOM-bind hosts (`textarea`/`select`/`option`/`audio`/`details`), plus the plain
+        // inline `span` host the component slot / `{#snippet}` body fixtures need (no
+        // special content model).
         let expected = [
-            "a", "button", "div", "h1", "input", "p", "video", "textarea", "select", "option",
-            "audio", "details",
+            "a", "button", "div", "h1", "input", "p", "span", "video", "textarea", "select",
+            "option", "audio", "details",
         ];
         let accepted: Vec<&str> = expected
             .into_iter()
             .filter(|t| SupportedHtmlElement::try_from(t).is_some())
             .collect();
         assert_eq!(accepted, expected);
-        // A representative spread of out-of-allowlist tags is STILL rejected —
-        // including the still-demoted breadth (`span` / `optgroup` / `img` / `slot` /
-        // `datalist`) and a reserved-word tag. (`textarea`/`select`/`option` MOVED to
-        // the accepted set above — the bindings-breadth allowlist additions.)
+        // A representative spread of out-of-allowlist tags is STILL rejected — including the
+        // still-demoted breadth (`ul` / `li` / `optgroup` / `img` / `slot` / `datalist`) and
+        // a reserved-word tag. (Only `span` is in the accepted set above — the plain inline
+        // structural host; `ul` / `li` have no live conformance need.)
         for tag in [
-            "span",
+            "ul",
+            "li",
             "optgroup",
             "img",
             "slot",
@@ -423,8 +430,6 @@ mod tests {
             "var",
             "class",
             "section",
-            "ul",
-            "li",
             "svg",
             "my-widget",
         ] {
@@ -446,6 +451,7 @@ mod tests {
             SupportedHtmlElement::H1,
             SupportedHtmlElement::Input,
             SupportedHtmlElement::P,
+            SupportedHtmlElement::Span,
             SupportedHtmlElement::Video,
             SupportedHtmlElement::Textarea,
             SupportedHtmlElement::Select,

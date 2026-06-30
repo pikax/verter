@@ -1,0 +1,74 @@
+{
+  "slug": "components/snippet_to_component.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "./Child.svelte",
+      "kind": "default",
+      "names": [
+        "default:Child"
+      ]
+    },
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "snippet_to_component",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "noop",
+    "child",
+    "reset",
+    "template_effect",
+    "set_text",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "from_html",
+    "noop",
+    "reset",
+    "set_text",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "noop": 1,
+    "child": 1,
+    "reset": 1,
+    "template_effect": 1,
+    "set_text": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<span> </span>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; import Child from './Child.svelte'; var root = $.from_html(`<span> </span>`); export default function snippet_to_component($$anchor, $$props) {const tmpl = ($$anchor, item = $.noop) => {var span = root(); var text = $.child(span); $.reset(span); $.template_effect(() => $.set_text(text, `${item() ?? ''} ${$$props.p ?? ''}`)); $.append($$anchor, span);}; Child($$anchor, {get tmpl() {return tmpl;}});}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

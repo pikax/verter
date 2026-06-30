@@ -27,6 +27,7 @@
 
 use super::client_effect::{emit_text_effect, EffectBody, Memoizer};
 use super::client_event::{emit_delegate_epilogue, render_event_registration};
+use super::client_module_frame::{emit_imports, escape_template_literal};
 use super::client_plan::{
     AttrValue, ClientBlock, ClientDynAttrEmit, ClientModulePlan, ClientNode, ClientRuntimeOp,
     EventEmit,
@@ -36,8 +37,7 @@ use super::client_walk::{
     any_item_needs_name, first_descent, item_needs_name, sibling_descent, WalkBase,
 };
 use super::entity_decode::decode_text_entities;
-use super::helpers::{ImportPlan, RuntimeImport};
-use super::html::{StaticTemplatePlan, TemplateFlag};
+use super::html::StaticTemplatePlan;
 use super::ir::{IrNode, NodeId, SvelteRuntimeIr, TemplateScopeId};
 use super::topology::ClientTopologyPlan;
 use super::whitespace::{
@@ -58,6 +58,19 @@ pub use super::unsupported::UnsupportedSvelteRuntimeSurface;
 /// and the component-prelude `const binding_group = []` declaration is emitted here
 /// — both reference this single canonical accumulator name.
 pub(super) const GROUP_BINDING_NAME: &str = "binding_group";
+
+/// The official function-pair component-bind getter local STEM — the
+/// `scope.generate('bind_get')` name svelte mints for a `bind:x={get, set}`. Allocated
+/// through the shared scope-aware allocator (keyed by the pair index), so a user binding of
+/// the same name pushes the generated one to `bind_get_1`, … and two function-pair binds
+/// never alias the same `var`.
+pub(super) const FN_PAIR_BIND_GET_NAME: &str = "bind_get";
+
+/// The official function-pair component-bind setter local STEM — the
+/// `scope.generate('bind_set')` name (sibling to [`FN_PAIR_BIND_GET_NAME`]). Each stem is
+/// reserved INDEPENDENTLY, so a user `bind_get` renames only the getter (`bind_get_1`) while
+/// the free `bind_set` keeps its stem — matching official `scope.generate`.
+pub(super) const FN_PAIR_BIND_SET_NAME: &str = "bind_set";
 
 /// The emitted client module: the JS source plus the structural facts a caller
 /// (a topology gate / the carrier) reads back without re-parsing.
@@ -133,6 +146,13 @@ pub(super) struct ClientEmitter<'a> {
     /// alongside its rewritten getter/setter bodies.
     pub(super) inline_this_binds:
         rustc_hash::FxHashMap<NodeId, Vec<(BindGetSetForm, String, String)>>,
+    /// The function-pair component-bind locals (`bind_get` / `bind_set`) per
+    /// component-function-scoped pair INDEX, minted ONCE in [`Self::new`] through the shared
+    /// scope-aware allocator (so they avoid every user binding AND each other). The component
+    /// emitter reads the `(get, set)` names back by index for BOTH the hoisted `var`
+    /// declarations and the prop getter/setter bodies (one resolved name pair, never a
+    /// re-minted one). Empty when there is no function-pair component bind.
+    pub(super) fn_pair_bind_names: rustc_hash::FxHashMap<usize, (String, String)>,
     /// The per-region clone frame, keyed by [`TemplateScopeId`] — a module-hoisted
     /// `$.from_html` factory + walk base ([`RegionFrame::FromHtml`]), an in-closure
     /// `$.text(...)` text-first body ([`RegionFrame::TextNode`]), or an in-body
@@ -177,8 +197,16 @@ pub(super) enum RegionFrame {
         prelude_next: bool,
     },
     /// A `$.comment()` anchor created IN the body — a block-only / empty / lone-`{@html}`
-    /// / standalone region. The walk treats the comment as a fragment (`$.first_child`).
+    /// region. The walk treats the comment as a fragment (`$.first_child`).
     CommentAnchor,
+    /// A STANDALONE component / static-`{@render}` root (`is_standalone`): NO clone frame,
+    /// NO `$.append` — the region emits the component call / static render DIRECTLY against
+    /// the region anchor (`Child($$anchor, …)` / `pair($$anchor, …)`). The node is the
+    /// region's sole standalone root.
+    Standalone {
+        /// The standalone root node (a component or a resolved-snippet render).
+        node: NodeId,
+    },
 }
 
 /// Which coalesced reactive op an accumulator belongs to. A node has at most one
@@ -193,23 +221,43 @@ enum AccKind {
 impl<'a> ClientEmitter<'a> {
     fn new(plan: &'a ClientModulePlan<'a>) -> Self {
         let mut used = rustc_hash::FxHashSet::default();
-        // Reserve every user script binding name + the runtime-magic identifiers
-        // so a generated stem never collides with a user binding (matching the
-        // official `scope.generate`'s reservation of declared names). The GENERATED
-        // stems (`root`, `fragment`, tag names, `text`) are NOT pre-reserved — they
-        // are the names we want to allocate; a user binding of the same name pushes
-        // the generated one to a `_N` suffix via `alloc_name`.
+        // Reserve every user binding name + the runtime-magic identifiers so a generated
+        // stem never collides with ANY user/template binding that can share an emitted JS
+        // scope (matching the official `scope.generate`, which reserves ALL source
+        // bindings). The GENERATED stems (`root`, `fragment`, tag names, `text`,
+        // `binding_group`, `bind_get`/`bind_set`) are NOT pre-reserved — they are the names
+        // we want to allocate; a user binding of the same name pushes the generated one to a
+        // `_N` suffix via `alloc_name`.
         //
-        // The seed is the COMPLETE top-level user-binding set (`declared_roots`):
-        // imports, every `let`/`const`/`var`, function / class declarations, and the
-        // `$props()` destructure names across BOTH the module and instance scripts —
-        // NOT just the reactive `bindings.all()` rows (which omit a PLAIN non-rune
-        // local like `let fragment = 1`). A plain local that shares a generated stem
-        // (`let fragment` vs the multi-root clone frame, `let div` vs a `<div>` clone
-        // root) would otherwise emit a duplicate declaration (invalid JS); seeding the
-        // full set makes `alloc_name` rename the synthesized local instead.
+        // The reservation set is the UNION of three complementary sources, none of which
+        // alone is complete:
+        //
+        // (1) `declared_roots` — the complete top-level SCRIPT binding set: imports, every
+        //     `let`/`const`/`var`, function / class declarations, and the `$props()`
+        //     destructure names across BOTH the module and instance scripts. This is the
+        //     authority for PLAIN non-rune script locals (`let fragment = 1`), which the
+        //     reactive binding table omits.
+        // (2) the complete binding TABLE — every name the analysis recorded for ANY
+        //     binding-introducing construct, including the TEMPLATE-SCOPE bindings that
+        //     share an emitted closure/body scope with a generated local: `{#each}`
+        //     item/index locals, `{#await}` then/catch bindings, `{#snippet}` names +
+        //     params, slot `let:` locals, and `{const}`/`{let}` / `{@const}` declaration-tag
+        //     locals. A `let:` / decl-tag local has no free-reference row when nothing reads
+        //     it, and is never a script root, so neither (1) nor (3) sees it.
+        // (3) every FREE template-expression reference (below).
+        //
+        // A plain script local that shares a generated stem (`let fragment` vs the multi-root
+        // clone frame, `let div` vs a `<div>` clone root) would emit a duplicate declaration
+        // (invalid JS); a template-scope local that shares a generated stem (a slot
+        // `let:bind_get` / `{const bind_get}` vs a function-pair `var bind_get`, an each-item
+        // `bind_get` vs a `var bind_get` in the each body) would emit a duplicate lexical
+        // declaration (invalid JS) or clobber a callback PARAM. Seeding the full union makes
+        // `alloc_name` rename the generated stem (→ `bind_get_1`) instead.
         for name in &plan.build.declared_roots {
             used.insert(name.clone());
+        }
+        for binding in plan.build.ir.analysis.bindings.all() {
+            used.insert(binding.name.clone());
         }
         // ALSO reserve every FREE template-expression reference (reads AND writes), so a
         // generated DOM-var stem never collides with a free identifier the template emits.
@@ -235,6 +283,7 @@ impl<'a> ClientEmitter<'a> {
             group_binding_decls: Vec::new(),
             inline_this_binds: super::client_bind::build_inline_this_index(plan),
             region_frame: rustc_hash::FxHashMap::default(),
+            fn_pair_bind_names: rustc_hash::FxHashMap::default(),
         };
         // Allocate ONE collision-safe `bind:group` accumulator per DISTINCT group (keyed by
         // the structural bind target + scope), in source order, through the seeded DOM-var
@@ -242,6 +291,11 @@ impl<'a> ClientEmitter<'a> {
         // … (matching official `scope.generate`), and two independent groups get distinct
         // names. (Lives in `client_bind` with the rest of the bind emission machinery.)
         emitter.plan_group_accumulators();
+        // Mint the function-pair component-bind locals (`bind_get` / `bind_set`) through the
+        // SAME seeded allocator, keyed by each pair's component-function-scoped index — so a
+        // user `bind_get` pushes the generated getter to `bind_get_1`, and two function-pair
+        // binds get distinct `var`s (official `scope.generate` uniquing).
+        emitter.plan_fn_pair_bind_names();
         emitter
     }
 
@@ -302,10 +356,10 @@ impl<'a> ClientEmitter<'a> {
         let mut out = String::new();
 
         // (1) Module imports — disclose-version + flags + the runtime namespace, in
-        // official order. (A `<script module>` / instance `import` is fail-closed
-        // upstream — the script-hoisting deferral — so there are no user module
-        // imports to emit at module scope.)
-        emit_imports(&mut out, &topology.imports);
+        // official order, then the module-scope USER imports (the `.svelte`-component-default
+        // subset) in source order. (Every other import form is fail-closed upstream — the
+        // broad static-import prelude is not yet supported.)
+        emit_imports(&mut out, &topology.imports, &self.plan.user_imports);
         out.push('\n');
 
         // (2) Module hoists — the per-region `$.from_html(...)` template factories, allocated
@@ -316,8 +370,21 @@ impl<'a> ClientEmitter<'a> {
         // `$.comment()` frame is created in the body). The `html_plan` is no longer consulted
         // here — the emitter synthesizes each region's factory through the same
         // `synthesize_region` the plan uses.
+        //
+        // The hoists go to a SEPARATE buffer so the MODULE-scope snippet consts (which are
+        // emitted AFTER them in source order — `const pair = …; var root = $.from_html(…)`)
+        // can be written first while still reading the now-populated region frames.
         let _ = html_plan;
-        self.plan_region_factories(&mut out);
+        let mut hoists = String::new();
+        self.plan_region_factories(&mut hoists);
+        // (2a) Module-scope `{#snippet}` consts — between the imports and the `$.from_html`
+        // hoists (the official `module_level_snippets` slot). Emitted now that the region
+        // frames are planned (the snippet body region clones a hoisted `root`).
+        for snippet in self.plan.module_snippets.clone() {
+            self.emit_snippet_decl(&mut out, snippet);
+            out.push('\n');
+        }
+        out.push_str(&hoists);
         out.push('\n');
 
         // (3) The component body (the root region plus every nested block body, recursive).
@@ -366,6 +433,15 @@ impl<'a> ClientEmitter<'a> {
         // so each accepted group bind's key is what mints (and references) its accumulator.
         for group_name in &self.group_binding_decls {
             out.push_str(&format!("\tconst {group_name} = [];\n"));
+        }
+
+        // The INSTANCE-scope `{#snippet}` consts — emitted at the TOP of the body (before
+        // the script statements), the official `instance_level_snippets` slot. A capturing
+        // top-level snippet (`{#snippet label()}` reading component state) is local here.
+        for snippet in self.plan.instance_snippets.clone() {
+            out.push('\t');
+            self.emit_snippet_decl(out, snippet);
+            out.push('\n');
         }
 
         // The component-function BODY statements (already lowered by the plan).
@@ -635,11 +711,21 @@ impl<'a> ClientEmitter<'a> {
                             out.push_str(&format!("\t$.html({var}, {payload});\n"));
                         }
                     }
-                    // A control-flow block (`{#if}`/`{#each}`/`{#await}`/`{#key}`) at this
-                    // `<!>` anchor var: emit its runtime call INLINE here (interleaved into
-                    // the parent walk at the anchor position), recursing into the body
-                    // region(s). (`emit_block_call` lives in `client_block_emit`.)
-                    if matches!(self.client_node(*node), ClientNode::Block(_)) {
+                    // The dynamic anchor-var nodes are MUTUALLY EXCLUSIVE (a node is exactly
+                    // one `ClientNode` kind), so an `else if` chain classifies once and emits
+                    // the matching inline form against the walked `<!>` anchor var.
+                    if matches!(self.client_node(*node), ClientNode::Component(_)) {
+                        // A component invocation — emit the `Child(node, …)` call INLINE here.
+                        self.emit_component(out, *node, &var);
+                    } else if matches!(self.client_node(*node), ClientNode::Render(_)) {
+                        // A `{@render}` tag — emit the static snippet call / `$.snippet(node,
+                        // …)` INLINE here.
+                        self.emit_render(out, *node, &var);
+                    } else if matches!(self.client_node(*node), ClientNode::Block(_)) {
+                        // A control-flow block (`{#if}`/`{#each}`/`{#await}`/`{#key}`): emit
+                        // its runtime call INLINE here (interleaved into the parent walk at
+                        // the anchor position), recursing into the body region(s).
+                        // (`emit_block_call` lives in `client_block_emit`.)
                         self.emit_block_call(out, *node, &var, false);
                     }
                     // The element is a NARROW `ClientNode::Element` (the emission
@@ -1404,86 +1490,6 @@ enum RunPart {
     Literal(String),
     /// An interpolation NODE (the reactive-text op's target node id).
     Interp(NodeId),
-}
-
-/// Emit the module imports from the import plan, interleaving the `<script module>`
-/// user imports in the official slot.
-///
-/// The official import order is: the `disclose-version` side-effect import (the
-/// leading byte), the flag side-effect imports, then the `import * as $ from
-/// 'svelte/internal/client'` runtime namespace. (A `<script module>` / instance-script
-/// USER import is fail-closed upstream — the script-hoisting deferral — so the
-/// supported surface emits no user imports.)
-fn emit_imports(out: &mut String, imports: &ImportPlan) {
-    if imports.disclose_version {
-        out.push_str("import 'svelte/internal/disclose-version';\n");
-    }
-    if imports.legacy_flag {
-        out.push_str("import 'svelte/internal/flags/legacy';\n");
-    }
-    if imports.async_flag {
-        out.push_str("import 'svelte/internal/flags/async';\n");
-    }
-    if imports.tracing_flag {
-        out.push_str("import 'svelte/internal/flags/tracing';\n");
-    }
-    let ns = match imports.runtime {
-        RuntimeImport::Client => "svelte/internal/client",
-        RuntimeImport::Server => "svelte/internal/server",
-    };
-    out.push_str(&format!("import * as $ from '{ns}';\n"));
-}
-
-/// Emit the root template-factory hoist (`var root = $.from_html(...)`), returning
-/// whether the region mounts a multi-root FRAGMENT (vs a single clone-root element).
-///
-/// The fragment decision is the `TEMPLATE_FRAGMENT` bit ONLY — a flag carrying just
-/// `TEMPLATE_USE_IMPORT_NODE` (a lone `<video>`/custom-element template, flag `2`)
-/// is still a SINGLE clone-root element: `$.from_html` returns the element, so the
-/// walk must take the single-element path (`var video = root();`), NOT the fragment
-/// path (`$.first_child(root())` → null on a single element).
-pub(super) fn emit_root_hoist(
-    out: &mut String,
-    root_var: &str,
-    html: &str,
-    fragment_flag: Option<TemplateFlag>,
-) -> bool {
-    // ONLY a `$.from_html(...)` clone factory is module-hoisted. A text-first region emits
-    // its `$.text(...)` IN-CLOSURE (it is never a hoisted clone factory — calling a text
-    // node like `root()` is the X8 bug), and a comment-anchor / standalone region creates
-    // its `$.comment()` frame in the body, so neither reaches this hoist.
-    let escaped = escape_template_literal(html);
-    match fragment_flag {
-        Some(flag) => {
-            out.push_str(&format!(
-                "var {root_var} = $.from_html(`{escaped}`, {});\n",
-                flag.literal()
-            ));
-            flag.is_fragment()
-        }
-        None => {
-            out.push_str(&format!("var {root_var} = $.from_html(`{escaped}`);\n"));
-            false
-        }
-    }
-}
-
-/// Escape a string for embedding inside a backtick template literal (the
-/// `$.from_html` / `$.text` argument): backslash, backtick, and `${`.
-fn escape_template_literal(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '`' => out.push_str("\\`"),
-            '$' if chars.peek() == Some(&'{') => {
-                out.push_str("\\$");
-            }
-            _ => out.push(c),
-        }
-    }
-    out
 }
 
 #[cfg(test)]

@@ -55,14 +55,15 @@ fn emits_main(source: &str) -> bool {
 
 /// The EXACT supported element set (the finite client-core allowlist). Any change to
 /// this set is a deliberate enum + golden change, asserted by
-/// [`element_matrix_supports_exactly_the_twelve_core_tags`]. `video` joined as the
+/// [`element_matrix_supports_exactly_the_thirteen_core_tags`]. `video` joined as the
 /// media host for the `muted` DOM-property write; `textarea`/`select`/`option`/
-/// `audio`/`details` joined as the 5c bindings-breadth DOM-bind hosts (each emits a
+/// `audio`/`details` joined as the bindings-breadth DOM-bind hosts (each emits a
 /// bare clone frame with empty content; their special-content / non-bind interiors are
-/// content-gated, not element-gated).
+/// content-gated, not element-gated); `span` is the plain inline structural host the
+/// component slot / `{#snippet}` body fixtures need.
 const SUPPORTED_ELEMENTS: &[&str] = &[
-    "a", "audio", "button", "details", "div", "h1", "input", "option", "p", "select", "textarea",
-    "video",
+    "a", "audio", "button", "details", "div", "h1", "input", "option", "p", "select", "span",
+    "textarea", "video",
 ];
 
 /// The full HTML tag universe (the TS DOM lib `HTMLElementTagNameMap`,
@@ -291,13 +292,13 @@ fn skeleton_clones_tag(source: &str, tag: &str) -> bool {
 }
 
 #[test]
-fn element_matrix_supports_exactly_the_twelve_core_tags() {
-    // The POSITIVE half: EXACTLY the twelve allowlist tags emit a `Main` that CLONES
-    // the tag as an intrinsic element; the count and membership are both pinned (a
-    // shrink OR a widen fails here). The Svelte-special-parse tags (`script` / `style`
-    // / …) are excluded from the positive set — they never lower to an intrinsic
-    // element (a `<script>` becomes the script block), so they cannot be "supported
-    // elements". (The 5c bind hosts emit a bare clone frame for the empty-content
+fn element_matrix_supports_exactly_the_thirteen_core_tags() {
+    // The POSITIVE half: EXACTLY the allowlist tags emit a `Main` that CLONES the tag as
+    // an intrinsic element; the count and membership are both pinned (a shrink OR a widen
+    // fails here). The Svelte-special-parse tags (`script` / `style` / …) are excluded
+    // from the positive set — they never lower to an intrinsic element (a `<script>`
+    // becomes the script block), so they cannot be "supported elements". (The bindings-
+    // breadth DOM-bind hosts emit a bare clone frame for the empty-content
     // `component_with_element` source; their special-content interiors are content-
     // gated separately.)
     let mut supported: Vec<&str> = HTML_TAG_UNIVERSE
@@ -315,14 +316,17 @@ fn element_matrix_supports_exactly_the_twelve_core_tags() {
     assert_eq!(
         supported, expected,
         "the element allowlist must support EXACTLY {{a, audio, button, details, div, h1, \
-         input, option, p, select, textarea, video}} — a tag cloned into a Main outside \
-         that set is a leak; a tag in the set failing to emit is an over-reach"
+         input, option, p, select, span, textarea, video}} — a tag cloned into a Main outside \
+         that set is a leak; a tag in the set failing to emit is an over-reach. (`span` is the \
+         plain inline structural host the component-slot / `{{#snippet}}`-body fixtures need; \
+         `ul` / `li` have no live conformance need.)"
     );
     // Belt-and-suspenders on the cardinality (the convergence count gate).
     assert_eq!(
         supported.len(),
-        12,
-        "exactly twelve elements are in the client-core allowlist"
+        13,
+        "exactly thirteen elements are in the client-core allowlist (the §1.2 / bind-host \
+         tags + span)"
     );
 }
 
@@ -467,13 +471,14 @@ fn element_matrix_raw_slot_fails_closed() {
 
 #[test]
 fn element_matrix_svelte_special_elements_fail_closed() {
-    // Every renderable `<svelte:*>` special fails closed (it is a component/special
-    // surface, never an intrinsic element). `<svelte:options>` is a compile-option
-    // carrier (gated elsewhere); the renderable specials are the corpus here.
+    // The host / renderable `<svelte:*>` specials fail closed (5f-b), as does a STANDALONE
+    // `<svelte:fragment>` (the transparent-wrapper surface — the 5f-a fragment surface is
+    // the `slot=`-bearing NAMED slot, absorbed into its parent component). The
+    // component-INVOCATION specials `<svelte:component>` / `<svelte:self>` are NOW SUPPORTED
+    // (5f-a) and emit a `$.component(...)` / recursive call — they are NOT in this
+    // fail-closed corpus. `<svelte:options>` is a compile-option carrier (gated elsewhere).
     for tag in [
         "svelte:element",
-        "svelte:component",
-        "svelte:self",
         "svelte:fragment",
         "svelte:window",
         "svelte:document",

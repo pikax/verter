@@ -145,6 +145,50 @@ pub fn prepare_rune_bindings(
     }
 }
 
+/// Declare every admitted default `.svelte`-COMPONENT import local (`import Child from
+/// './Child.svelte'`) as a NON-REACTIVE [`BindingRuntimeKind::ComponentImport`] binding in
+/// `root_scope`, so a `<Child/>` invocation's static callee RESOLVES to the import (and a
+/// template read of the component name emits the bare callee, never `$.get`). A capitalized
+/// tag naming no such binding is an unsupported component SOURCE the projection fails closed.
+///
+/// The admit predicate is the SHARED `.svelte`-component-import predicate the
+/// [`UserImport::ComponentDefault`](super::client_plan_types::UserImport) prelude carrier
+/// also consults, so the binding a callee resolves against is exactly the import the module
+/// prelude emits. Every OTHER import form contributes no binding (it fails closed at the
+/// import classifier); only the instance script is scanned (a `<script module>` is the broad
+/// module-item deferral, refused upstream).
+pub fn prepare_component_import_bindings(
+    instance_source: Option<&str>,
+    alloc: &Allocator,
+    root_scope: ScopeId,
+    scopes: &mut ScopeGraph,
+    bindings: &mut BindingTable,
+) {
+    let Some(text) = instance_source else {
+        return;
+    };
+    let Some(program) = reparse_module(alloc, text) else {
+        return;
+    };
+    for stmt in &program.body {
+        let Statement::ImportDeclaration(import) = stmt else {
+            continue;
+        };
+        let Some(local) =
+            super::client_surface_imports::admitted_svelte_component_import_local(import)
+        else {
+            continue;
+        };
+        let binding = bindings.push(BindingInfo {
+            name: local.to_string(),
+            scope: root_scope,
+            kind: BindingRuntimeKind::ComponentImport,
+            state: None,
+        });
+        scopes.declare(root_scope, local, binding);
+    }
+}
+
 /// Build the one-hop proxy-init map for the program's TOP-LEVEL `let`/`const`/
 /// `var` bindings: each binding name → its [`ProxyInit`] (scope-aware reassignment,
 /// initializer proxiability, followability).

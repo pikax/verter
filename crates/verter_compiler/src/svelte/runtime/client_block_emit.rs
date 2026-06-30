@@ -10,16 +10,17 @@
 
 use rustc_hash::FxHashSet;
 
-use super::client::{emit_root_hoist, ClientEmitter, RegionFrame};
+use super::client::{ClientEmitter, RegionFrame};
 use super::client_block_plan::EACH_IS_CONTROLLED;
 use super::client_codegen_helpers::js_single_quoted;
+use super::client_module_frame::emit_root_hoist;
 use super::client_plan_types::{
     ClientAwait, ClientBlock, ClientDeclKeyword, ClientDeclaration, ClientEach, ClientIfBranch,
     ClientNode,
 };
 use super::html::{synthesize_region, TemplateFactory};
-use super::ir::{BlockIr, IrNode, NodeId, TemplateScopeId};
-use super::whitespace::{clean_nodes, clean_nodes_indexed, CleanContext};
+use super::ir::{BlockIr, IrNode, NodeId, SvelteRuntimeIr, TemplateScope, TemplateScopeId};
+use super::whitespace::{clean_nodes, clean_nodes_indexed, CleanContext, CleanItem};
 
 impl<'a> ClientEmitter<'a> {
     /// Plan + emit every region's module-hoisted template factory, in POST-ORDER (a block
@@ -54,11 +55,22 @@ impl<'a> ClientEmitter<'a> {
                     seed: seed.clone(),
                     prelude_next: each_scopes.contains(&scope_id),
                 },
-                // A comment-anchor (block-only / empty / lone-`{@html}`) or standalone region
-                // has NO module hoist — its `$.comment()` frame is created in the body, and
-                // the body treats the comment as a fragment (walk via `$.first_child`).
-                TemplateFactory::CommentAnchor { .. } | TemplateFactory::Standalone { .. } => {
-                    RegionFrame::CommentAnchor
+                // A comment-anchor (block-only / empty / lone-`{@html}`) region has NO
+                // module hoist — its `$.comment()` frame is created in the body, and the
+                // body treats the comment as a fragment (walk via `$.first_child`).
+                TemplateFactory::CommentAnchor { .. } => RegionFrame::CommentAnchor,
+                // A STANDALONE component / static-`{@render}` root emits NO clone frame and
+                // NO `$.append` — the component call / static render targets the region
+                // anchor directly. Record the sole standalone root node for `emit_region`.
+                TemplateFactory::Standalone { .. } => {
+                    let scope = self.ir().template_scope(scope_id);
+                    let node = standalone_root_node(self.ir(), scope);
+                    match node {
+                        Some(node) => RegionFrame::Standalone { node },
+                        // Defensive: a standalone factory with no resolvable node falls
+                        // back to a comment anchor (never reached on the accept path).
+                        None => RegionFrame::CommentAnchor,
+                    }
                 }
             };
             self.region_frame.insert(scope_id, region_frame);
@@ -107,15 +119,15 @@ impl<'a> ClientEmitter<'a> {
                     self.collect_child_regions(child, out, each_scopes);
                 }
             }
+            // A component-family node's regions are its SLOT regions (default + named) +
+            // its `{#snippet}`-def body regions — NOT its raw `children` (the slot content
+            // lives in the slot regions; recursing children would double-collect it into
+            // the parent region). Each is collected in its own post-order.
             IrNode::Component(component) => {
-                for &child in &component.children {
-                    self.collect_child_regions(child, out, each_scopes);
-                }
+                self.collect_component_slot_regions(&component.slots, out, each_scopes);
             }
             IrNode::Special(special) => {
-                for &child in &special.children {
-                    self.collect_child_regions(child, out, each_scopes);
-                }
+                self.collect_component_slot_regions(&special.slots, out, each_scopes);
             }
             IrNode::Block(block) => match block {
                 BlockIr::If { branches } => {
@@ -150,9 +162,38 @@ impl<'a> ClientEmitter<'a> {
                     }
                 }
                 BlockIr::Key { body, .. } => self.collect_post_order(*body, out, each_scopes),
-                BlockIr::Snippet { .. } => {}
+                // A `{#snippet}` body is its OWN region (its `$.from_html` factory must be
+                // hoisted) AND a render CALLBACK (`($$anchor, …) => {…}`), so a text-first
+                // body emits the `$.next()` prelude.
+                BlockIr::Snippet { body, .. } => {
+                    each_scopes.insert(*body);
+                    self.collect_post_order(*body, out, each_scopes);
+                }
             },
             _ => {}
+        }
+    }
+
+    /// Collect a component's slot regions (default + named) + its `{#snippet}`-def body
+    /// regions in post-order, recording each as a render-CALLBACK scope (so a text-first
+    /// slot / children / snippet body emits the official `$.next()` prelude — like an
+    /// `{#each}` render callback).
+    fn collect_component_slot_regions(
+        &self,
+        slots: &super::ir::ComponentSlots,
+        out: &mut Vec<TemplateScopeId>,
+        each_scopes: &mut FxHashSet<TemplateScopeId>,
+    ) {
+        for &snippet in &slots.snippet_defs {
+            self.collect_child_regions(snippet, out, each_scopes);
+        }
+        if let Some(default) = slots.default {
+            each_scopes.insert(default);
+            self.collect_post_order(default, out, each_scopes);
+        }
+        for named in &slots.named {
+            each_scopes.insert(named.region);
+            self.collect_post_order(named.region, out, each_scopes);
         }
     }
 
@@ -176,6 +217,14 @@ impl<'a> ClientEmitter<'a> {
         // (a) Block-local declarations (`{@const}` derived + `{const}`/`{let}` inert),
         // hoisted at the region top BEFORE the clone frame (the official `state.consts`).
         self.emit_region_consts(out, scope_id);
+
+        // (a2) Block-body `{#snippet}` consts — a snippet declared directly inside a block
+        // body (`{#if}` / `{#each}` / …) is a LOCAL `const` in that body region (the
+        // official `context.state.snippets`). The ROOT region's snippets are MODULE /
+        // INSTANCE consts (emitted by `emit`/`emit_body`), so they are skipped here.
+        if scope_id != self.ir().root {
+            self.emit_region_snippets(out, scope_id);
+        }
 
         // A region with NO DOM skeleton (a `{@debug}`-only / `{@const}`-only body): the
         // official emits a body of `state.consts` + `state.init` statements with NO clone
@@ -228,6 +277,13 @@ impl<'a> ClientEmitter<'a> {
                 self.emit_ops(out, scope_id);
                 out.push_str(&format!("\t$.append({anchor}, {region_var});\n"));
             }
+            // A STANDALONE component / static-`{@render}` root: NO clone frame, NO
+            // `$.append` — the call targets `anchor` directly.
+            RegionFrame::Standalone { node } => match self.client_node(node) {
+                ClientNode::Component(_) => self.emit_component(out, node, anchor),
+                ClientNode::Render(_) => self.emit_render(out, node, anchor),
+                _ => {}
+            },
         }
     }
 
@@ -288,7 +344,8 @@ impl<'a> ClientEmitter<'a> {
     fn region_emits_nothing(&self, scope_id: TemplateScopeId) -> bool {
         let roots = &self.ir().template_scope(scope_id).roots;
         // A non-rendering root that still emits output: a `{@const}`/`{const}`/`{let}`
-        // hoist (`Declarations`) or a `{@debug}` snapshot effect (`Debug`).
+        // hoist (`Declarations`), a `{@debug}` snapshot effect (`Debug`), or a `{#snippet}`
+        // DECLARATION (a block-body local `const`, emitted in a non-root region).
         for &root in roots {
             if matches!(
                 self.client_node(root),
@@ -296,9 +353,28 @@ impl<'a> ClientEmitter<'a> {
             ) {
                 return false;
             }
+            if scope_id != self.ir().root
+                && matches!(self.client_node(root), ClientNode::SnippetDecl { .. })
+            {
+                return false;
+            }
         }
         clean_nodes(self.ir(), roots, CleanContext::region_root()).is_empty()
             && self.plan().ops_in(scope_id).is_empty()
+    }
+
+    /// Emit a NON-ROOT region's block-body `{#snippet}` consts (the official
+    /// `context.state.snippets`): each `{#snippet name}` declared directly in the region's
+    /// roots emits as a local `const name = ($$anchor, …) => {…};`.
+    fn emit_region_snippets(&mut self, out: &mut String, scope_id: TemplateScopeId) {
+        let roots = self.ir().template_scope(scope_id).roots.clone();
+        for root in roots {
+            if matches!(self.client_node(root), ClientNode::SnippetDecl { .. }) {
+                out.push('\t');
+                self.emit_snippet_decl(out, root);
+                out.push('\n');
+            }
+        }
     }
 
     /// Emit a region's hoisted block-local declarations (the `{@const}` derived memos +
@@ -566,5 +642,17 @@ impl<'a> ClientEmitter<'a> {
         ));
         self.emit_region(out, body, "$$anchor");
         out.push_str("});\n");
+    }
+}
+
+/// The SOLE standalone root node of a region — the one cleaned `CleanItem::Node` (a
+/// component or a resolved-snippet `{@render}`) the `is_standalone` factory identifies.
+/// `None` when the region is not a single standalone node (never reached on the accept
+/// path for a `Standalone` factory).
+fn standalone_root_node(ir: &SvelteRuntimeIr, scope: &TemplateScope) -> Option<NodeId> {
+    let items = clean_nodes(ir, &scope.roots, CleanContext::region_root());
+    match items.as_slice() {
+        [CleanItem::Node(only)] => Some(*only),
+        _ => None,
     }
 }

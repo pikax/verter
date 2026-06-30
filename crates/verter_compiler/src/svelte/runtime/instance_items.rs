@@ -151,6 +151,14 @@ pub(super) fn classify_supported_instance_items(
 
     let mut items = Vec::new();
     for stmt in &program.body {
+        // An `import` reaching here is an ADMITTED `.svelte`-component default import (a
+        // non-`.svelte` / named / namespace / side-effect import already failed closed at
+        // `classify_instance_imports`, BEFORE this allowlist). It is HOISTED to module
+        // scope via the `UserImport` carrier — NOT a component-function body statement — so
+        // it contributes no `SupportedInstanceScriptItem`.
+        if matches!(stmt, Statement::ImportDeclaration(_)) {
+            continue;
+        }
         items.push(classify_instance_statement(
             stmt,
             instance_source,

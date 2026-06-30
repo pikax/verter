@@ -105,6 +105,20 @@ pub(super) fn node_or_descendant_dynamic(ir: &SvelteRuntimeIr, node_id: NodeId) 
         // call. A `{#snippet}` is a non-rendering DECLARATION (refused upstream / dropped
         // from the clean sequence), so it never reaches here.
         IrNode::Block(block) => !matches!(block, super::ir::BlockIr::Snippet { .. }),
+        // A `{@render}` tag is a dynamic node the walk must reach — its `<!>` anchor var
+        // hosts the static snippet call / `$.snippet`. (`{@attach}` stays refused — the
+        // attachment-directive surface is not yet supported.)
+        IrNode::Tag(super::ir::TagIr::Render { .. }) => true,
+        // A component invocation (`<Foo>` / `<svelte:component>` / `<svelte:self>` /
+        // `<svelte:fragment>`) is a dynamic node — its `<!>` anchor var hosts the
+        // `Child(node, …)` call.
+        IrNode::Component(_) => true,
+        IrNode::Special(s) => matches!(
+            s.kind,
+            super::ir::SpecialKind::Component
+                | super::ir::SpecialKind::SelfRef
+                | super::ir::SpecialKind::Fragment
+        ),
         IrNode::Element(el) => {
             el.attrs.iter().any(super::html::attr_is_dynamic_surface)
                 || el

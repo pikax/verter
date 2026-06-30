@@ -35,8 +35,11 @@ mod client_bind;
 mod client_block_emit;
 mod client_block_plan;
 mod client_codegen_helpers;
+mod client_component_emit;
+mod client_component_plan;
 mod client_effect;
 mod client_event;
+mod client_module_frame;
 mod client_plan;
 mod client_plan_bind;
 mod client_plan_rewrite;
@@ -46,6 +49,7 @@ mod client_shapes;
 mod client_spread_html_emit;
 mod client_surface;
 mod client_surface_element_query;
+mod client_surface_imports;
 mod client_surface_refuse;
 mod client_walk;
 mod css_reject;
@@ -60,6 +64,7 @@ mod host_attr_gate;
 pub mod html;
 mod instance_items;
 pub mod ir;
+mod lower_component;
 mod naming;
 mod official_reject;
 mod official_rule;
@@ -100,9 +105,9 @@ use expr::{
 };
 use html::StaticTemplatePlan;
 use ir::{
-    AttrIr, BlockIr, ComponentIr, ComponentIrNode, DebugArg, DeclKind, ElementIr, EscapeMode,
-    ExprId, IfBranch, IrNode, NodeId, PatternBindings, PatternId, RenderCallee, RuntimeAnalysis,
-    RuntimeOp, SpecialElementIr, SpecialKind, SvelteMode, SvelteRuntimeIr, TagIr,
+    AttrIr, BlockIr, ComponentIr, ComponentIrNode, ComponentSlots, DebugArg, DeclKind, ElementIr,
+    EscapeMode, ExprId, IfBranch, IrNode, NodeId, PatternBindings, PatternId, RenderCallee,
+    RuntimeAnalysis, RuntimeOp, SpecialElementIr, SpecialKind, SvelteMode, SvelteRuntimeIr, TagIr,
     TemplateDeclarator, TemplateRune, TemplateScope, TemplateScopeId,
 };
 use state_scan::script_uses_runes;
@@ -200,14 +205,14 @@ pub(super) struct LoweringCtx<'a> {
     pub(super) source: &'a str,
     nodes: Vec<IrNode>,
     ops: Vec<RuntimeOp>,
-    template_scopes: Vec<TemplateScope>,
+    pub(super) template_scopes: Vec<TemplateScope>,
     expressions: ExprArena<'a>,
     /// The binding-pattern arena: each entry is the declared binding ids a
     /// pattern introduces (one per declared name, so a destructure does not
     /// collapse onto a single binding). Retained on the final analysis.
     patterns: Vec<PatternBindings>,
-    scopes: ScopeGraph,
-    bindings: BindingTable,
+    pub(super) scopes: ScopeGraph,
+    pub(super) bindings: BindingTable,
     pub(super) errors: RuntimeLoweringErrors,
     /// Pending `{@render}` tags whose callee is resolved AFTER lowering (so a
     /// forward-referenced snippet declared later in the same scope still resolves).
@@ -483,6 +488,18 @@ pub fn lower_parsed_svelte_to_ir<'a>(
         &mut scopes,
         &mut bindings,
     );
+    // Declare every admitted `.svelte`-COMPONENT default-import local as a NON-reactive
+    // `ComponentImport` binding in the root scope, so a `<Child/>` static callee RESOLVES
+    // to the import (and a template read of the component name emits the bare callee, never
+    // `$.get`). An import name does not collide with a `$state`/rune/plain-local name in
+    // valid source, so the pass order relative to the local-binding passes is immaterial.
+    state_scan::prepare_component_import_bindings(
+        instance_source,
+        alloc,
+        root_scope_id,
+        &mut scopes,
+        &mut bindings,
+    );
     // Declare the remaining top-level PLAIN-local instance-script bindings
     // (`let v = …` that is NOT a `$state` / `$derived` / `$props()` rune) as
     // `PlainLocal`. Runs AFTER the `$state` / rune passes so a name already declared
@@ -577,7 +594,11 @@ pub fn lower_parsed_svelte_to_ir<'a>(
 /// Lower one template node into the IR, returning its node id (or `None` for a
 /// node that does not contribute a runtime node — e.g. whitespace handling is
 /// preserved as text).
-fn lower_node(ctx: &mut LoweringCtx, node: &SvelteNode, scope: ScopeId) -> Option<NodeId> {
+pub(super) fn lower_node(
+    ctx: &mut LoweringCtx,
+    node: &SvelteNode,
+    scope: ScopeId,
+) -> Option<NodeId> {
     match node {
         SvelteNode::Text(span) => {
             let text = span_text(ctx.source, *span).to_string();
@@ -612,12 +633,42 @@ fn lower_element(ctx: &mut LoweringCtx, el: &SvelteElement, scope: ScopeId) -> O
     // listener. Compute it from the parser element kind BEFORE lowering attributes.
     let host = attr_host_for(&el.kind);
     let attrs = lower_attributes(ctx, &el.attributes, scope, host);
-    let mut children = Vec::new();
-    for child in &el.children {
-        if let Some(id) = lower_node(ctx, child, scope) {
-            children.push(id);
+    // The special kind is resolved up front: a component-FAMILY node (a `<Foo>`
+    // component, `<svelte:component>`, `<svelte:self>`, or `<svelte:fragment>`)
+    // decomposes its children into SLOT regions (the official `Component.js`
+    // grouping); every other element / special lowers its children FLAT in `scope`.
+    let special_kind = match &el.kind {
+        SvelteElementKind::Special(special) => match lower_special_kind(*special) {
+            Some(kind) => Some(kind),
+            None => {
+                ctx.errors.push(
+                    "svelte-runtime-unknown-special-element",
+                    format!("unrecognised `<svelte:{}>` special element", el.name),
+                    el.open_span,
+                );
+                return None;
+            }
+        },
+        _ => None,
+    };
+    let is_component_family = matches!(el.kind, SvelteElementKind::Component)
+        || matches!(
+            special_kind,
+            Some(SpecialKind::Component | SpecialKind::SelfRef | SpecialKind::Fragment)
+        );
+
+    let (children, slots) = if is_component_family {
+        lower_component::lower_component_slots(ctx, el, scope)
+    } else {
+        let mut children = Vec::new();
+        for child in &el.children {
+            if let Some(id) = lower_node(ctx, child, scope) {
+                children.push(id);
+            }
         }
-    }
+        (children, ComponentSlots::default())
+    };
+
     let node = match &el.kind {
         SvelteElementKind::Intrinsic | SvelteElementKind::NestedStyle => {
             ctx.push_node(IrNode::Element(ElementIr {
@@ -634,16 +685,10 @@ fn lower_element(ctx: &mut LoweringCtx, el: &SvelteElement, scope: ScopeId) -> O
             attrs,
             children,
             scope,
+            slots,
         })),
-        SvelteElementKind::Special(special) => {
-            let Some(kind) = lower_special_kind(*special) else {
-                ctx.errors.push(
-                    "svelte-runtime-unknown-special-element",
-                    format!("unrecognised `<svelte:{}>` special element", el.name),
-                    el.open_span,
-                );
-                return None;
-            };
+        SvelteElementKind::Special(_) => {
+            let kind = special_kind.expect("special kind resolved above");
             // A `<svelte:element this={…}>` / `<svelte:component this={C}>` carries
             // its dynamic-tag / component selector in the `this` attribute. That is
             // NOT a DOM attribute — official reads `node.tag` / `node.expression` —
@@ -663,6 +708,7 @@ fn lower_element(ctx: &mut LoweringCtx, el: &SvelteElement, scope: ScopeId) -> O
                 this_expr,
                 children,
                 scope,
+                slots,
             }))
         }
     };
@@ -987,7 +1033,7 @@ fn lower_await_block(
 
 /// Lower a run of children into an EXISTING scope (used by await branches that
 /// declared their binding in the scope before lowering children).
-fn lower_children_in_scope(
+pub(super) fn lower_children_in_scope(
     ctx: &mut LoweringCtx,
     children: &[SvelteNode],
     body_scope: ScopeId,
@@ -1058,6 +1104,9 @@ fn lower_tag(ctx: &mut LoweringCtx, tag: &SvelteTag, scope: ScopeId) -> Option<N
             let node = ctx.push_node(IrNode::Tag(TagIr::Render {
                 callee: RenderCallee::Dynamic(provisional),
                 args: Vec::new(),
+                // Resolved in `resolve_render_callees`: set to the tag span only when a
+                // spread argument is detected (`render_tag_invalid_spread_argument`).
+                spread_arg_span: None,
             }));
             ctx.pending_renders.push(PendingRender {
                 node,
@@ -1269,6 +1318,7 @@ fn lower_declaration_tag(
 fn resolve_render_callees(ctx: &mut LoweringCtx) {
     let pending = std::mem::take(&mut ctx.pending_renders);
     for render in pending {
+        let node = render.node;
         let text = span_text(ctx.source, render.inner);
         let shape = match parse_render_call(text) {
             Ok(shape) => shape,
@@ -1281,28 +1331,49 @@ fn resolve_render_callees(ctx: &mut LoweringCtx) {
                 continue;
             }
         };
-        let RenderCalleeShape::StaticName { name, args } = shape else {
-            // Dynamic: the provisional `Dynamic(inner)` node is already correct.
-            continue;
+        // Both call shapes carry the trailing call's argument spans; the callee
+        // discriminant (a `{#snippet}` NAME vs the dynamic prop/member/optional
+        // callee) is the only difference. Build the argument ExprIds ONCE so EVERY
+        // callee keeps its argument thunks (the `$.snippet(node, callee, …args)`
+        // shape) — not just the static snippet-name callee.
+        let (static_name, arg_spans) = match shape {
+            RenderCalleeShape::StaticName { name, args } => (Some(name), args),
+            RenderCalleeShape::Dynamic { args } => (None, args),
+            // A SPREAD argument is an official HARD ERROR
+            // (`render_tag_invalid_spread_argument`). Mark the node with the tag span;
+            // the client-surface gate fails it closed (the callee/args stay provisional
+            // — they are never emitted). NEVER the silent arg-drop the empty-args path
+            // produced.
+            RenderCalleeShape::SpreadArguments => {
+                if let IrNode::Tag(TagIr::Render {
+                    spread_arg_span, ..
+                }) = &mut ctx.nodes[node.0 as usize]
+                {
+                    *spread_arg_span = Some(render.inner);
+                }
+                continue;
+            }
         };
-        // A static-name callee is a snippet call only when it resolves to a
-        // `{#snippet}` NAME binding in scope.
-        let Some(binding) = ctx.scopes.resolve(&ctx.bindings, render.scope, &name) else {
-            continue;
-        };
-        if ctx.bindings.get(binding).kind != BindingRuntimeKind::SnippetName {
-            continue;
-        }
-        let arg_ids: Vec<ExprId> = args
+        let arg_ids: Vec<ExprId> = arg_spans
             .into_iter()
             .map(|(s, e)| {
                 let span = Span::new(render.inner.start + s, render.inner.start + e);
                 ctx.push_expr(span, render.scope)
             })
             .collect();
-        let node = render.node;
-        if let IrNode::Tag(TagIr::Render { callee, args }) = &mut ctx.nodes[node.0 as usize] {
-            *callee = RenderCallee::Snippet(binding);
+        // A static-name callee is a snippet call ONLY when it resolves to a
+        // `{#snippet}` NAME binding in scope; a prop / dynamic-snippet-value callee
+        // stays the provisional `Dynamic(inner)` node.
+        let snippet_binding = static_name.and_then(|name| {
+            let binding = ctx.scopes.resolve(&ctx.bindings, render.scope, &name)?;
+            (ctx.bindings.get(binding).kind == BindingRuntimeKind::SnippetName).then_some(binding)
+        });
+        if let IrNode::Tag(TagIr::Render { callee, args, .. }) = &mut ctx.nodes[node.0 as usize] {
+            if let Some(binding) = snippet_binding {
+                *callee = RenderCallee::Snippet(binding);
+            }
+            // Otherwise the callee stays the provisional `Dynamic(inner)` — correct
+            // for a prop / member / optional / ternary callee.
             *args = arg_ids;
         }
     }

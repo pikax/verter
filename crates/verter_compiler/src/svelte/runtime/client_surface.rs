@@ -23,6 +23,7 @@ use oxc_allocator::Allocator;
 
 use super::client::UnsupportedSvelteRuntimeSurface;
 use super::client_allowlist::{is_svelte_reserved_word, SupportedHtmlElement, SupportedStaticAttr};
+use super::client_plan_types::UserImport;
 use super::client_shapes::{
     self, ClientBindShape, ClientDynamicAttrShape, ClientEventHandlerShape,
     ClientInterpolationShape, ClientPropsUsage,
@@ -32,7 +33,8 @@ use super::client_surface_element_query::{
     element_has_spread, element_has_style_directive, element_own_namespace,
 };
 use super::client_surface_refuse::{
-    namespace_label, refuse_block, refuse_tag, refuse_unsupported_special_content, special_label,
+    namespace_label, refuse_invalid_self_placement, refuse_tag, refuse_unsupported_special_content,
+    special_label,
 };
 use super::events::{validate_event_modifiers, EventModifierError};
 use super::expr::{BindingRuntimeKind, ExprRefKind};
@@ -40,7 +42,7 @@ use super::expr_emit::{self, PropsShape, StateDeclShape};
 use super::html::{synthesize_region, TemplateFactory};
 use super::instance_items::{self, SupportedInstanceScriptItem};
 use super::ir::{
-    AttrIr, BlockIr, EscapeMode, ExprId, IrNode, NodeId, SpecialKind, SvelteRuntimeIr, TagIr,
+    AttrIr, EscapeMode, ExprId, IrNode, NodeId, SpecialKind, SvelteRuntimeIr, TagIr,
     TemplateScopeId,
 };
 use super::whitespace::{
@@ -119,6 +121,10 @@ pub(super) struct ClassifiedClientSurface {
     /// out-of-allowlist statement (a function / class / enum / `$:` label / plain
     /// local fails closed at the classifier, never reaches lowering).
     pub(super) script_items: Vec<SupportedInstanceScriptItem>,
+    /// The admitted module-scope USER imports (the `.svelte`-component-default subset), in
+    /// SOURCE ORDER — the typed prelude carrier the plan emits above the component function.
+    /// Empty for a component with no `.svelte` imports.
+    pub(super) user_imports: Vec<UserImport>,
 }
 
 impl ClientSyntaxSurface {
@@ -159,9 +165,11 @@ impl ClientSyntaxSurface {
         // declarator/statement for an unsupported shape. The basic no-default
         // `$props()` form, ALL primitive-literal `$state` declarators
         // (multi-declarator scanned), and the advanced rune forms are gated here
-        // BEFORE lowering. An instance-script `import` and a `<script module>` are
-        // the script-hoisting deferral (5s) and fail closed here.
-        classify_script_items(ir)?;
+        // BEFORE lowering. A default `.svelte` component import is ADMITTED (the
+        // component-callee subset, returned as the typed prelude carrier); every other
+        // instance-script import form + a `<script module>` are the broad
+        // static-import-prelude deferral (not yet supported) and fail closed here.
+        let user_imports = classify_script_items(ir)?;
 
         // (4) `$props()` USAGE: the read-only fact. A written prop (official's
         // flag-7 setter-call form) or a bound prop (official's 2-arg
@@ -220,6 +228,16 @@ impl ClientSyntaxSurface {
             return Err(surface);
         }
 
+        // (6b) `<svelte:self>` PLACEMENT gate: the official `svelte_self_invalid_placement`
+        // rule — a `<svelte:self>` may only appear inside an `{#if}` / `{#each}` /
+        // `{#snippet}` block or a slot passed to a component. At the component root (or
+        // nested only in elements at the root, or in an `{#await}` / `{#key}` block with no
+        // valid ancestor) the official compiler HARD-ERRORS, so Verter fails it closed
+        // rather than emitting the recursive self-call for an input the official rejects.
+        if let Some(surface) = refuse_invalid_self_placement(ir) {
+            return Err(surface);
+        }
+
         // (7) Instance-script item allowlist: classify EVERY top-level instance-script
         // statement into the strict finite `SupportedInstanceScriptItem` set, or fail
         // closed on the first out-of-allowlist item (a function / class / enum /
@@ -260,6 +278,7 @@ impl ClientSyntaxSurface {
             spread_elements: facts.spread_elements,
             props_usage,
             script_items,
+            user_imports,
         })
     }
 }
@@ -491,31 +510,20 @@ impl<'a> oxc_ast_visit::Visit<'a> for PropRefScan<'_> {
     }
 }
 
-/// The span of the FIRST `import` declaration in an instance script, or `None`.
-/// Drives the script-hoisting deferral (5s) — an instance import is hoisted to
-/// module scope in official output, a script-completion follow-up.
-fn instance_script_import_span(instance_source: &str) -> Option<Span> {
-    let alloc = Allocator::default();
-    let program = super::expr::reparse_module(&alloc, instance_source)?;
-    for stmt in &program.body {
-        if let oxc_ast::ast::Statement::ImportDeclaration(import) = stmt {
-            return Some(Span::new(import.span.start, import.span.end));
-        }
-    }
-    None
-}
-
-/// Classify the instance + module script items. An instance-script `import` or a
-/// `<script module>` (the script-hoisting deferral, 5s), a non-basic / default-bearing
-/// `$props()` form, a destructured / non-primitive `$state`, or an advanced rune
-/// call/member fails closed (no wildcard accept).
-fn classify_script_items(ir: &SvelteRuntimeIr) -> Result<(), UnsupportedSvelteRuntimeSurface> {
-    // An instance-script `import` and a `<script module>` are the script-hoisting
-    // deferral (5s) — fail closed BEFORE the rune-shape gates. (Import-hoist + module
-    // hoist were supported; demoted to the §1.2-class instance-only core.)
-    // TODO(follow-up): hoist an instance-script `import` to module scope (before the
-    // component function) and emit a `<script module>` statement at module scope,
-    // instead of failing closed. Owned by the script-completion block (5s).
+/// Classify the instance + module script items, returning the admitted module-scope
+/// user imports (the `.svelte`-component-default subset). A `<script module>`,
+/// every NON-`.svelte`-default instance import (named / namespace / side-effect /
+/// mixed / default-non-`.svelte`), a non-basic / default-bearing `$props()` form, a
+/// destructured / non-primitive `$state`, or an advanced rune call/member fails closed
+/// (no wildcard accept).
+fn classify_script_items(
+    ir: &SvelteRuntimeIr,
+) -> Result<Vec<UserImport>, UnsupportedSvelteRuntimeSurface> {
+    // A `<script module>` is the broad static-import-prelude / module-item deferral —
+    // fail closed BEFORE the rune-shape gates. (The component `.svelte` default import
+    // is admitted below; every OTHER static import form — named / namespace /
+    // side-effect / non-`.svelte` default — plus arbitrary `<script module>` items stay
+    // closed until the broad script-import prelude is supported.)
     if let Some(module) = ir.analysis.scripts.module_source {
         let _ = module;
         return Err(UnsupportedSvelteRuntimeSurface::ScriptImport {
@@ -523,21 +531,20 @@ fn classify_script_items(ir: &SvelteRuntimeIr) -> Result<(), UnsupportedSvelteRu
             span: Span::new(0, 0),
         });
     }
-    if let Some(instance) = ir.analysis.scripts.instance_source {
-        if let Some(span) = instance_script_import_span(instance) {
-            return Err(UnsupportedSvelteRuntimeSurface::ScriptImport {
-                construct: "import",
-                span,
-            });
-        }
-    }
+    // Instance-script imports: ADMIT a default `.svelte` component import (hoisted to
+    // module scope as the component callee), REFUSE every other form (not yet supported).
+    let user_imports = if let Some(instance) = ir.analysis.scripts.instance_source {
+        super::client_surface_imports::classify_instance_imports(instance)?
+    } else {
+        Vec::new()
+    };
     // A non-basic `$props()` form (rest / whole-object / computed / numeric /
-    // nested / default / `$bindable`) fails closed (5g).
+    // nested / default / `$bindable`) is an advanced rune form that fails closed.
     if let Some(instance) = ir.analysis.scripts.instance_source {
         // A NON-`let` rune declarator (`var`/`const` `$state` / `$derived` /
         // `$props`) is a distinct official surface (`var` reads use `$.safe_get`; a
         // read-only `const $state` constant-folds to an empty reactive topology) —
-        // fail closed (5g) BEFORE the shape / static-interpolation checks, so a
+        // fail closed BEFORE the shape / static-interpolation checks, so a
         // `const c = $state(0)` read fails at the decl-kind gate, not as a
         // const-fold (the const-fold sub-contract).
         client_shapes::classify_rune_declaration_kind(instance)?;
@@ -607,7 +614,7 @@ fn classify_script_items(ir: &SvelteRuntimeIr) -> Result<(), UnsupportedSvelteRu
             return Err(reason);
         }
     }
-    Ok(())
+    Ok(user_imports)
 }
 
 /// Refuse a ROOT REGION whose emission shape is NOT a supported root shape. The
@@ -643,10 +650,10 @@ fn classify_script_items(ir: &SvelteRuntimeIr) -> Result<(), UnsupportedSvelteRu
 /// Returns `Some` to fail closed for a `TextNode` root or an EMPTY / comment-only
 /// (`AnchorReason::EmptyRoot`) `CommentAnchor` root, or `None` for a `from_html` /
 /// standalone / raw-markup-anchor / block-anchor root (a supported clone-frame shape).
-// TODO(follow-up): emit the official text-first root topology (a `$.text()` root
-// reached via `$.next()`, then — for a reactive text root — a `$.template_effect`
-// over it) and the empty-template comment-anchor shape, instead of refusing them.
-// Until then they fail closed (5q).
+// The official text-first root topology (a `$.text()` root reached via `$.next()`, then —
+// for a reactive text root — a `$.template_effect` over it) and the empty-template
+// comment-anchor shape are not yet emitted as a clone frame, so they fail closed here
+// instead of materializing.
 fn refuse_unsupported_root_region(ir: &SvelteRuntimeIr) -> Option<UnsupportedSvelteRuntimeSurface> {
     let scope = ir.root_scope();
     match synthesize_region(ir, scope) {
@@ -826,11 +833,10 @@ fn classify_node(
             // (2) Reject a HYPHENATED custom element (`<my-widget>`) OR any element
             // carrying an `is` attribute (a customized built-in `<button is="x">`):
             // both are the web-components surface (official clones via `importNode` +
-            // `$.set_custom_element_data`), a deferral-ledger follow-up. This fires
-            // BEFORE the attr walk so a no-attribute custom element does not leak (5h).
-            // TODO(follow-up): emit the custom-element output (`importNode` clone +
-            // `$.set_custom_element_data`) with a sanitized DOM local name instead of
-            // failing closed. Owned by the custom-element / web-components block (5h).
+            // `$.set_custom_element_data`). This fires BEFORE the attr walk so a
+            // no-attribute custom element does not leak. The custom-element output
+            // (`importNode` clone + `$.set_custom_element_data`, with a sanitized DOM
+            // local name) is not yet emitted, so a custom element fails closed here.
             if el.tag.contains('-') || element_carries_is_attribute(el) {
                 return Err(UnsupportedSvelteRuntimeSurface::HostOrCustomElement {
                     surface: "custom element",
@@ -932,16 +938,26 @@ fn classify_node(
             }
             Ok(())
         }
-        // A component reference is the 5f vertical.
-        IrNode::Component(c) => Err(UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
-            construct: "component",
-            span: c.span,
-        }),
-        // `<svelte:options>` is a compile-option carrier (the supported-axis
-        // classification is owned by the parse-domain gate, so a runes-only options
-        // element reaches here accepted). Every OTHER `<svelte:*>` special is a
-        // renderable surface (5f).
+        // A component invocation (`<Foo …/>`) is ACCEPTED. Its props / events / binds /
+        // `let:` are validated + rewritten at projection (fallible — an unsupported form
+        // fails closed there); its slot-content regions (default / named) are CLASSIFIED
+        // INDEPENDENTLY by the outer scope loop (they are their own template scopes).
+        // Children are NOT recursed here — the slot regions own that. Component `let:` is the
+        // component-context slot-prop path (NOT the element-context `let:` refusal, which
+        // stays closed).
+        IrNode::Component(_) => Ok(()),
+        // `<svelte:options>` is a compile-option carrier. The component-INVOCATION specials
+        // (`<svelte:component>` / `<svelte:self>`) are ACCEPTED, projected to a component
+        // call. A `<svelte:fragment>` reaching here is a STANDALONE transparent wrapper (the
+        // supported fragment surface is the `slot=`-bearing NAMED slot, which is ABSORBED
+        // into its parent component's `$$slots` at lowering and never becomes a node) — the
+        // standalone transparent-fragment surface stays CLOSED. Every OTHER `<svelte:*>`
+        // special — the host / renderable specials (`Head` / `Window` / `Document` / `Body` /
+        // `Element` / `Boundary`) — stays CLOSED (those hosts are not yet supported).
         IrNode::Special(s) if s.kind == SpecialKind::Options => Ok(()),
+        IrNode::Special(s) if matches!(s.kind, SpecialKind::Component | SpecialKind::SelfRef) => {
+            Ok(())
+        }
         IrNode::Special(s) => Err(UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
             construct: special_label(s.kind),
             span: s.span,
@@ -953,10 +969,9 @@ fn classify_node(
         // `<svelte:*>`) is still refused by its own node arm. The block-head expressions
         // (the `{#if}` test, the `{#each}` source/key, the `{#await}` promise, the `{#key}`
         // expression) are rewritten at plan time (an `await` expression / async rune inside
-        // them fails closed at the rewrite). A `{#snippet}` is a declaration of the
-        // component/snippet surface and stays refused.
-        IrNode::Block(block) if !matches!(block, BlockIr::Snippet { .. }) => Ok(()),
-        IrNode::Block(block) => Err(refuse_block(block)),
+        // them fails closed at the rewrite). A `{#snippet}` is a callable DEFINITION — the
+        // snippet surface, ACCEPTED; its body region is classified by the scope loop.
+        IrNode::Block(_) => Ok(()),
         // A `{@html expr}` raw-markup tag is the `$.html` surface — accept it, recording
         // the per-node acceptance proof. Its payload expression + the only-child topology
         // are read from the IR at plan time.
@@ -995,8 +1010,23 @@ fn classify_node(
                 Ok(())
             }
         }
-        // `{@html}` is accepted above; the component/snippet-surface tags (`{@render}` /
-        // `{@attach}`) stay refused via `refuse_tag`.
+        // A `{@render}` tag is the snippet-render surface — ACCEPTED (its callee + args are
+        // validated + rewritten at projection), EXCEPT a render call carrying a SPREAD
+        // argument (`{@render row(...xs)}`), which official `svelte@5.56.3` HARD-ERRORS
+        // (`render_tag_invalid_spread_argument`). It fails closed here rather than silently
+        // dropping the spread and emitting a wrong-arity `$.snippet` call. `{@attach}` stays
+        // CLOSED via `refuse_tag`.
+        IrNode::Tag(TagIr::Render {
+            spread_arg_span, ..
+        }) => match spread_arg_span {
+            Some(span) => Err(UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
+                construct: "{@render} spread argument",
+                span: *span,
+            }),
+            None => Ok(()),
+        },
+        // `{@html}` is accepted above; `{@attach}` (the attachment-directive surface, not yet
+        // supported) stays refused via `refuse_tag`.
         IrNode::Tag(tag) => Err(refuse_tag(tag)),
     }
 }

@@ -9,52 +9,36 @@
 //! `{#snippet}` to `ComponentOrSnippet`), [`refuse_tag`] (the per-standalone-tag
 //! refusal reason), [`refuse_unsupported_special_content`] (the special-content host
 //! gate for `<textarea>` / `<select>` / `<option>` interiors), and the
-//! [`namespace_label`] / [`special_label`] diagnostic-label formatters. Each is driven
+//! [`namespace_label`] / [`special_label`] diagnostic-label formatters, plus the
+//! [`refuse_invalid_self_placement`] `<svelte:self>` placement gate. Each is driven
 //! from the typed `IrNode` / `AttrIr` inventory plus the typed `SupportedHtmlElement`,
 //! never a raw-source scan.
 
 use super::client::UnsupportedSvelteRuntimeSurface;
 use super::client_allowlist::SupportedHtmlElement;
-use super::ir::{AttrIr, BlockIr, DeclKind, IrNode, SpecialKind, SvelteRuntimeIr, TagIr};
+use super::ir::{
+    AttrIr, BlockIr, ComponentSlots, DeclKind, IrNode, NodeId, SpecialKind, SvelteRuntimeIr, TagIr,
+    TemplateScopeId,
+};
 use super::whitespace::Namespace;
 use verter_span::Span;
 
-/// The fail-closed reason for a block construct (5e), or 5f for a snippet.
-pub(super) fn refuse_block(block: &BlockIr) -> UnsupportedSvelteRuntimeSurface {
-    let construct = match block {
-        BlockIr::If { .. } => "if",
-        BlockIr::Each { .. } => "each",
-        BlockIr::Await { .. } => "await",
-        BlockIr::Key { .. } => "key",
-        BlockIr::Snippet { .. } => "snippet",
-    };
-    if matches!(block, BlockIr::Snippet { .. }) {
-        UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
-            construct,
-            span: Span::new(0, 0),
-        }
-    } else {
-        UnsupportedSvelteRuntimeSurface::Block {
-            construct,
-            span: Span::new(0, 0),
-        }
-    }
-}
-
-/// The fail-closed reason for a standalone tag. A `{@html}` tag is the `$.html` surface
-/// and is accepted by the caller before this is reached, so it is not matched here.
+/// The fail-closed reason for a standalone tag. The `{@html}` (`$.html`) and `{@render}`
+/// (snippet-render) tags are ACCEPTED by `classify_node` BEFORE this is reached, so their
+/// arms are unreachable (retained only for `TagIr` match exhaustiveness); the live
+/// refusals are `{@attach}` (the attachment-directive surface, not yet supported) and a
+/// placement-invalid `{@const}` / `{const}` / `{let}`.
 pub(super) fn refuse_tag(tag: &TagIr) -> UnsupportedSvelteRuntimeSurface {
     match tag {
-        TagIr::Html { .. } => UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
-            // Unreachable: `{@html}` is accepted by `classify_node` before `refuse_tag`
-            // runs. The arm is retained so the match stays exhaustive over `TagIr`.
-            construct: "html",
-            span: Span::new(0, 0),
-        },
-        TagIr::Render { .. } => UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
-            construct: "render",
-            span: Span::new(0, 0),
-        },
+        // Unreachable: `{@html}` (`$.html`) and `{@render}` (the snippet-render surface) are
+        // both ACCEPTED by `classify_node` before `refuse_tag` runs. The arms are retained so
+        // the match stays exhaustive over `TagIr`.
+        TagIr::Html { .. } | TagIr::Render { .. } => {
+            UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
+                construct: "render-or-html",
+                span: Span::new(0, 0),
+            }
+        }
         TagIr::Attach { .. } => UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
             construct: "attach",
             span: Span::new(0, 0),
@@ -196,4 +180,127 @@ pub(super) fn special_label(kind: SpecialKind) -> &'static str {
         SpecialKind::SelfRef => "svelte:self",
         SpecialKind::Fragment => "svelte:fragment",
     }
+}
+
+/// Refuse a `<svelte:self>` placed with NO allowed enclosing context — the official
+/// `svelte_self_invalid_placement` rule. A `<svelte:self>` may only appear inside an
+/// `{#if}` / `{#each}` / `{#snippet}` block or a slot passed to a component; at the
+/// component ROOT (or nested only in elements at the root, or inside an `{#await}` /
+/// `{#key}` block with no valid ancestor) the official `svelte@5.56.3` compiler
+/// HARD-ERRORS. Verter fails closed rather than emitting the recursive self-call for an
+/// input the official rejects.
+///
+/// The check walks the node TREE from the root region, propagating an "inside a valid
+/// enclosing context" flag: `{#if}` / `{#each}` / `{#snippet}` bodies and component
+/// (incl. `<svelte:component>` / `<svelte:self>` / `<svelte:fragment>`) slot content set
+/// it true; `{#await}` / `{#key}` bodies and elements INHERIT it unchanged (so a
+/// `{#if}{#await}…{/await}{/if}` self-reference stays valid via the `{#if}` ancestor,
+/// matching the official ancestor-path check). Returns the FIRST invalidly-placed
+/// `<svelte:self>`, or `None`.
+pub(super) fn refuse_invalid_self_placement(
+    ir: &SvelteRuntimeIr,
+) -> Option<UnsupportedSvelteRuntimeSurface> {
+    fn visit_scope(
+        ir: &SvelteRuntimeIr,
+        scope: TemplateScopeId,
+        valid_ancestor: bool,
+    ) -> Option<UnsupportedSvelteRuntimeSurface> {
+        ir.template_scope(scope)
+            .roots
+            .iter()
+            .find_map(|&root| visit_node(ir, root, valid_ancestor))
+    }
+
+    fn visit_component_slots(
+        ir: &SvelteRuntimeIr,
+        slots: &ComponentSlots,
+    ) -> Option<UnsupportedSvelteRuntimeSurface> {
+        // Slot content (default + named) and `{#snippet}` defs are passed to a
+        // component — a VALID `<svelte:self>` enclosing context.
+        if let Some(default) = slots.default {
+            if let Some(s) = visit_scope(ir, default, true) {
+                return Some(s);
+            }
+        }
+        for named in &slots.named {
+            if let Some(s) = visit_scope(ir, named.region, true) {
+                return Some(s);
+            }
+        }
+        slots
+            .snippet_defs
+            .iter()
+            .find_map(|&def| visit_node(ir, def, true))
+    }
+
+    fn visit_block(
+        ir: &SvelteRuntimeIr,
+        block: &BlockIr,
+        valid_ancestor: bool,
+    ) -> Option<UnsupportedSvelteRuntimeSurface> {
+        match block {
+            // `{#if}` / `{#each}` / `{#snippet}` are VALID enclosing contexts (their
+            // bodies — including an `{:else}` branch, still inside the block per the
+            // official ancestor path — set the flag true).
+            BlockIr::If { branches } => branches
+                .iter()
+                .find_map(|branch| visit_scope(ir, branch.body, true)),
+            BlockIr::Each {
+                body, else_body, ..
+            } => visit_scope(ir, *body, true).or_else(|| {
+                else_body
+                    .as_ref()
+                    .and_then(|&else_b| visit_scope(ir, else_b, true))
+            }),
+            BlockIr::Snippet { body, .. } => visit_scope(ir, *body, true),
+            // `{#await}` / `{#key}` are NOT themselves valid contexts — they propagate
+            // the INHERITED validity into their branch bodies.
+            BlockIr::Await {
+                pending,
+                then_body,
+                catch_body,
+                ..
+            } => [pending, then_body, catch_body]
+                .into_iter()
+                .flatten()
+                .find_map(|&branch| visit_scope(ir, branch, valid_ancestor)),
+            BlockIr::Key { body, .. } => visit_scope(ir, *body, valid_ancestor),
+        }
+    }
+
+    fn visit_node(
+        ir: &SvelteRuntimeIr,
+        node_id: NodeId,
+        valid_ancestor: bool,
+    ) -> Option<UnsupportedSvelteRuntimeSurface> {
+        match ir.node(node_id) {
+            // An element introduces NO new scope and is NOT a valid enclosing context —
+            // its children inherit the same validity.
+            IrNode::Element(el) => el
+                .children
+                .iter()
+                .find_map(|&child| visit_node(ir, child, valid_ancestor)),
+            // A component's slot content is passed to a component — a valid context.
+            IrNode::Component(c) => visit_component_slots(ir, &c.slots),
+            IrNode::Special(s) => {
+                // `<svelte:self>` with no valid enclosing context is the official
+                // `svelte_self_invalid_placement` reject.
+                if s.kind == SpecialKind::SelfRef && !valid_ancestor {
+                    return Some(UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
+                        construct: "svelte:self at invalid placement",
+                        span: s.span,
+                    });
+                }
+                // A component-family special (`<svelte:component>` / `<svelte:self>` /
+                // `<svelte:fragment>`) is itself a component host — its slot content IS
+                // passed to a component, a valid context.
+                visit_component_slots(ir, &s.slots)
+            }
+            IrNode::Block(block) => visit_block(ir, block, valid_ancestor),
+            // Text / comment / interpolation / standalone tags own no child scope.
+            _ => None,
+        }
+    }
+
+    visit_scope(ir, ir.root, false)
 }

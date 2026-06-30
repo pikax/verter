@@ -31,19 +31,9 @@
 // Included by `diff_oracle_tests.rs` via `include!`.
 
 #[rustfmt::skip]
-const KNOWN_DIVERGENCES_DATA: [DivergenceRow; 122] = [
-    DivergenceRow {
-        fixture: "generated/001_root_component.svelte",
-        axis: DiffAxis::HelperSet,
-        root_cause: "Y18-region -> 5f (special-element-region layer): a <svelte:window>/body/document/head region comment-anchor SHAPE (Verter plans an append + comment anchor where official folds the global region) — the 5f special-element-region layer owns the region shape (the delegation is fixed)",
-        summary: "official owned-helper-set [\"append\"] != Verter []",
-    },
-    DivergenceRow {
-        fixture: "generated/001_root_component.svelte",
-        axis: DiffAxis::DecodedText,
-        root_cause: "Y19 -> 5f (standalone-slot-mount layer): a standalone <Component>/{@render} slot text node is mounted as a $.text seed by the 5f standalone-slot-mount layer (the IR text value is entity-decoded, so the seed is correct once 5f emits it)",
-        summary: "official decoded-text [\"hello\"] != Verter []",
-    },
+const KNOWN_DIVERGENCES_DATA: [DivergenceRow; 120] = [
+    // (`generated/001_root_component.svelte` — a standalone root `<Component>` — converged
+    // with the component vertical: its `HelperSet` + `DecodedText` rows were removed.)
     DivergenceRow {
         fixture: "generated/002_root_svelte_element.svelte",
         axis: DiffAxis::HelperSet,

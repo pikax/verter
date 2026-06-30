@@ -489,6 +489,133 @@ const SUPPORTED_DECLARATION_TAGS: &[&str] = &[
     "declaration_tags/debug_only_in_if",
 ];
 
+/// The native-client COMPONENT / SNIPPET / SLOT corpus — the 5f-a vertical's structural
+/// oracle: static component calls, `{#snippet}` definitions, `{@render}` (static + dynamic),
+/// component `let:` slot props, named slots / `<svelte:fragment>`, component bindings
+/// (`bind:this` / `bind:prop` / function-pair), and the component-family specials
+/// (`<svelte:component>` / `<svelte:self>` / `<svelte:fragment>`).
+///
+/// `components/standalone_child` is EXCLUDED — it is a LEGACY-mode (no-rune) component (Block
+/// 5i), NOT a runes 5f-a conformance target (it carries goldens for the directory guard, but
+/// the legacy import-flag prelude is not the runes-mode 5f-a surface).
+///
+/// `components/snippet_capture_state` and `components/child_and_snippet` are ALSO excluded —
+/// they emit correctly through the 5f-a snippet/component machinery, but their PINNED goldens
+/// require surfaces OUTSIDE the 5f-a vertical: `snippet_capture_state` const-folds a
+/// never-mutated `$state` interpolation (`<span>{count}</span>` → `span.textContent = '0'`,
+/// the reactive-text const-fold completion surface), and `child_and_snippet` uses an array
+/// `$state([1, 2, 3])` → `$.proxy([…])` (the advanced non-primitive-`$state` surface, Block
+/// 5g — gated at `state_decl_shape`). Both carry committed goldens for the directory guard;
+/// they become runes 5f-a conformance targets once those deferred surfaces land.
+const SUPPORTED_COMPONENTS: &[&str] = &[
+    // A plain element + `{$props}` interpolation child — the imported child the component
+    // fixtures call (already emittable by the 5a-5e element/prop surface; registered so the
+    // child's own emission stays pinned).
+    "components/Child",
+    // `<Child label="hi" {name} count={1 + 2} />` — static / reactive-shorthand / constant-expr
+    // props: `label: 'hi'`, `get name() { return $$props.name; }`, `count: 1 + 2` (sole-root
+    // standalone, no template clone).
+    "components/component_props",
+    // The full member-order oracle: `<Child a="s" b={x} bind:value={v} onclick={() => x}>body
+    // {x}</Child>` — plain attrs, then the bind get/set pair, then `children`, then `$$slots`.
+    "components/component_full",
+    // `<Child>hello {x}</Child>` — the default-slot `children: ($$anchor, $$slotProps) => {…}`
+    // callback + `$$slots: { default: true }`.
+    "components/component_children_default",
+    // `<Child>{#snippet header(item)}…{/snippet} default {p}</Child>` — a component-nested
+    // snippet def (local block const + `header` shorthand prop + `$$slots.header: true`) plus
+    // the default slot.
+    "components/component_snippet_children",
+    // `<Child bind:value />` — component `bind:prop`: `get value()/set value()` with the
+    // `$.set(value, $$value, true)` should-proxy axis.
+    "components/component_bind_prop",
+    // `<Child bind:this={child} />` — `$.bind_this(Child($$anchor, {}), set, get)`.
+    "components/component_bind_this",
+    // `<Child bind:value={() => v, (nv) => v = nv} />` — function-pair bind: `var bind_get` /
+    // `var bind_set` hoists + `get value() { return bind_get(); }`.
+    "components/component_bind_function",
+    // `<Child bind:value={…} bind:other={…} />` — TWO function-pair binds: the second pair
+    // allocates UNIQUE `bind_get_1` / `bind_set_1` locals (the component-function-scoped name
+    // uniquing) so the two props' getters/setters never alias the same `var`.
+    "components/component_bind_function_multi",
+    // `<Child {...rest} />` — `Child($$anchor, $.spread_props(() => $$props.rest))`.
+    "components/component_spread",
+    // `<Child on:foo={…} />` — the legacy `on:` directive forwards as `$$events: { foo: … }`.
+    "components/component_on_event",
+    // `<Child onfoo={() => p} />` — a runes callback prop is a PLAIN init (`onfoo: () =>
+    // $$props.p`), NOT `$$events`.
+    "components/component_callback_prop",
+    // `<Child let:item>{item}</Child>` — `let:` slot prop: `$$slots.default` callback with
+    // `const item = $.derived(() => $$slotProps.item)` + `children: $.invalid_default_snippet`.
+    "components/component_let",
+    // `<Child let:item={value}>{value}</Child>` — an ALIASED `let:` slot prop: the slot prop
+    // `item` renames to the local `value` (`const value = $.derived(() => $$slotProps.item)`).
+    "components/component_let_alias",
+    // `<Alpha /><Beta />{p}` — multiple imported components in SOURCE ORDER (`import Alpha`
+    // then `import Beta`, both after `* as $`) + the multi-root `<!><!> ` comment-anchor
+    // template.
+    "components/multi_component_import",
+    // `{#snippet pair(a, b)}<span>{a} {b}</span>{/snippet}` capturing only its params — a
+    // MODULE-scope `const pair = ($$anchor, a = $.noop, b = $.noop) => {…}` between the imports
+    // and the `$.from_html` hoists; reads params as thunks (`a()`).
+    "components/snippet_multi_param",
+    // `{#snippet tmpl(item)}…{/snippet}<Child {tmpl} />` — a snippet passed as a prop via the
+    // shorthand getter `get tmpl() { return tmpl; }`.
+    "components/snippet_to_component",
+    // `{@render children?.()}` — dynamic optional render: `$.snippet(node, () => $$props.children
+    // ?? $.noop)` (the `?? $.noop` is the ChainExpression form).
+    "components/render_optional",
+    // `{@render (cond ? a : b)()}` — dynamic ternary render: `$.snippet(node, () => cond ?
+    // $$props.a : $$props.b)` (NO `?? $.noop`, not a chain).
+    "components/render_dynamic_ternary",
+    // `{@render row(item)}` with `let { row, item } = $props()` — a PROP-callee render with an
+    // argument: the prop callee is NOT a `{#snippet}` name, so it stays the dynamic
+    // `$.snippet(node, () => $$props.row, () => $$props.item)` shape — the callee thunk PLUS the
+    // argument thunk (no `?? $.noop`, the callee is a non-optional prop read).
+    "components/render_dynamic_prop_arg",
+    // `{@render row?.(item)}` — an OPTIONAL prop-callee render with an argument:
+    // `$.snippet(node, () => $$props.row ?? $.noop, () => $$props.item)` — the `?? $.noop`
+    // ChainExpression guard on the callee thunk, PLUS the argument thunk.
+    "components/render_dynamic_optional_arg",
+    // `<svelte:component this={comp} label="hi" />` — `$.component(node, () => $$props.comp,
+    // ($$anchor, $$component) => { $$component($$anchor, { label: 'hi' }); })`.
+    "components/svelte_component",
+    // `<svelte:component this={comp} bind:this={inst} />` — a DYNAMIC component with `bind:this`:
+    // the inner `$$component($$anchor, {})` call is wrapped in `$.bind_this(<call>, ($$value) =>
+    // inst = $$value, () => inst)` (the SAME `$.bind_this(call, set, get)` wrap the static callee
+    // uses), proving the dynamic-host bind:this is not dropped.
+    "components/svelte_component_bind_this",
+    // `<svelte:component this={Child} {label} />` with `import Child from './Child.svelte'` — a
+    // `.svelte` DEFAULT IMPORT consumed as the DYNAMIC component value: the import is admitted to
+    // the prelude (`import Child from './Child.svelte';` after `import * as $`) and the `this`
+    // expression resolves the non-reactive `ComponentImport` binding to the BARE local
+    // (`$.component(node, () => Child, …)`, NOT `$.get`), while the threaded prop routes through
+    // `$$props.label` — the binding-kind contrast that proves the import is NOT treated as a
+    // reactive read. This is the dynamic-component-value half of the 5f-a `.svelte`-default-import
+    // subset (the static-callee half is `multi_component_import` / `component_full`).
+    "components/svelte_component_import",
+    // `{#if depth > 0}<svelte:self depth={depth - 1} />{/if}` — a recursive self-call using the
+    // compile-option name (`svelte_self(node_1, { get depth() { return $.get($0); } })`).
+    "components/svelte_self",
+    // `<Child><svelte:fragment slot="header"><span>h</span></svelte:fragment></Child>` — a
+    // named slot via `<svelte:fragment slot>`: `$$slots: { header: ($$anchor, $$slotProps) =>
+    // {…} }`.
+    "components/svelte_fragment",
+    // `<Child aria-label={x} />` — a HYPHENATED component prop key: a non-identifier prop name
+    // must QUOTE the getter accessor (`get 'aria-label'() { return $$props.x; }`), not emit the
+    // bare `get aria-label()` (unparseable JS).
+    "components/component_prop_hyphen",
+    // `<Child on:foo-bar={() => x} />` — a HYPHENATED legacy event key: the `$$events` entry key
+    // must QUOTE (`$$events: { 'foo-bar': () => $$props.x }`), not the bare `foo-bar:`
+    // (unparseable JS).
+    "components/component_event_hyphen",
+    // `<Child><svelte:fragment slot="foo-bar">{x}</svelte:fragment></Child>` — a HYPHENATED
+    // named-slot key (via the SUPPORTED `<svelte:fragment slot>` path): the `$$slots` entry key
+    // must QUOTE (`$$slots: { 'foo-bar': ($$anchor, $$slotProps) => {…} }`), not the bare
+    // `foo-bar:` (unparseable JS).
+    "components/fragment_slot_hyphen",
+];
+
 /// The repository root (two levels up from this crate's `tests/` dir).
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -5549,8 +5676,43 @@ fn all_supported_slugs() -> Vec<&'static str> {
         .chain(SUPPORTED_EVENTS.iter())
         .chain(SUPPORTED_BLOCKS.iter())
         .chain(SUPPORTED_DECLARATION_TAGS.iter())
+        .chain(SUPPORTED_COMPONENTS.iter())
         .copied()
         .collect()
+}
+
+#[test]
+fn supported_components_cover_the_full_component_corpus() {
+    // The component / snippet / slot corpus is the structural oracle for the 5f-a vertical; a
+    // dropped row is a coverage regression. This count gate fails LOUDLY if a row is dropped,
+    // and the no-duplicate check guards against a typo. THREE `components/*` fixtures are
+    // EXCLUDED — standalone_child (legacy-mode), snippet_capture_state (reactive-text
+    // const-fold) and child_and_snippet (array-$state / $.proxy) — so the count is the 26
+    // `components/*` fixtures minus 3.
+    assert_eq!(
+        SUPPORTED_COMPONENTS.len(),
+        29,
+        "the component corpus must enumerate the 29 runes-mode `components/*` 5f-a conformance \
+         fixtures (Child / component_props / component_full / component_children_default / \
+         component_snippet_children / component_bind_prop / component_bind_this / \
+         component_bind_function / component_bind_function_multi / component_spread / \
+         component_on_event / component_callback_prop / component_let / component_let_alias / \
+         multi_component_import / snippet_multi_param / snippet_to_component / render_optional / \
+         render_dynamic_ternary / render_dynamic_prop_arg / render_dynamic_optional_arg / \
+         svelte_component / svelte_component_bind_this / svelte_component_import / svelte_self / \
+         svelte_fragment / component_prop_hyphen / component_event_hyphen / fragment_slot_hyphen), \
+         excluding \
+         the legacy-mode standalone_child (Block 5i) AND the two deferred-surface fixtures \
+         snippet_capture_state (reactive-text const-fold) + child_and_snippet (array-$state / \
+         $.proxy, Block 5g)"
+    );
+    let mut seen = std::collections::BTreeSet::new();
+    for &slug in SUPPORTED_COMPONENTS {
+        assert!(
+            seen.insert(slug),
+            "duplicate supported-component slug {slug}"
+        );
+    }
 }
 
 #[test]
@@ -5787,6 +5949,30 @@ fn bind_5c_emit_hits_no_lossy_comparator_axis_d17() {
                 !sig.contains(token),
                 "5c bind emit for {slug} hit the LOSSY comparator axis `{token}` — a \
                  dropped structural axis (D-17): encode it + add a discriminator. \
+                 module_sig:\n{sig}\n--- emitted ---\n{code}"
+            );
+        }
+    }
+}
+
+#[test]
+fn component_emit_hits_no_lossy_comparator_axis() {
+    // The 5f-a component / snippet / slot / render / special emit introduces NEW
+    // constructs beyond the element surface — a `Child($$anchor, {…})` call, getter/setter
+    // prop members (`get value() {…}` / `set value($$value) {…}`), arrow slot callbacks
+    // (`($$anchor, $$slotProps) => {…}`), `$.spread_props` / `$.snippet` / `$.component` /
+    // `$.bind_this` calls, and the `let $0 = $.derived(…)` prop deriveds. This DISCRIMINATOR
+    // proves emission is STRUCTURAL (every construct signs through a real `program_sig` arm),
+    // never an opaque `Other(` (expr) / `Stmt(` (statement) / `Decl(` (declaration)
+    // discriminant-only passthrough — the same D-17 obligation the 5c bind emit carries.
+    for &slug in SUPPORTED_COMPONENTS {
+        let code = emit(slug);
+        let sig = conformance_sig(&code, "emitted").module_sig;
+        for token in ["Other(", "Stmt(", "Decl("] {
+            assert!(
+                !sig.contains(token),
+                "component emit for {slug} hit the LOSSY comparator axis `{token}` — a \
+                 dropped structural axis: encode it + add a discriminator. \
                  module_sig:\n{sig}\n--- emitted ---\n{code}"
             );
         }

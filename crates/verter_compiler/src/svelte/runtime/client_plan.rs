@@ -65,6 +65,18 @@ pub(super) struct ClientModulePlan<'a> {
     /// A block body's reactive surface is its OWN region: the emitter builds each region's
     /// combined `$.template_effect` + binds + events from its region's ops.
     pub(super) region_ops: Vec<RegionOps>,
+    /// The module-scope USER imports (the `.svelte`-component-default subset), in SOURCE
+    /// ORDER — emitted above the component function, immediately after the runtime namespace
+    /// import. Empty for a component with no `.svelte` imports.
+    pub(super) user_imports: Vec<super::client_plan_types::UserImport>,
+    /// Top-level `{#snippet}` defs that CAN hoist (capture only their params) — emitted as
+    /// MODULE-scope `const` declarations between the imports and the `$.from_html` hoists,
+    /// in source order. The node ids index `nodes` / the IR.
+    pub(super) module_snippets: Vec<NodeId>,
+    /// Top-level `{#snippet}` defs that CAPTURE component state / props — emitted as
+    /// INSTANCE-scope `const` declarations at the top of the component function body
+    /// (before the script statements), in source order.
+    pub(super) instance_snippets: Vec<NodeId>,
     /// Whether the component opens a component context (`$.push`/`$.pop`).
     pub(super) needs_context: bool,
     /// Whether the component function takes `$$props`.
@@ -128,6 +140,15 @@ pub(super) struct SupportedClientIr<'a> {
     /// [`ClientRuntimeOp::AttributeEffect`]; the per-attribute ops the IR also produced
     /// for these elements are suppressed.
     pub(super) spread_elements: Vec<NodeId>,
+    /// The COMPONENT-FUNCTION-scoped pair INDEX counter for function-pair component binds
+    /// (`bind:x={get, set}`). Each pair consumes one index in source order across EVERY
+    /// component call in the component function; the emitter mints the `var bind_get` / `var
+    /// bind_set` locals from that index through the shared scope-aware allocator (so two
+    /// function-binds never alias the same `var`, AND the names never collide with a user
+    /// binding — the official `state.scope.generate('bind_get')` per-function uniquing). This
+    /// is a stable INDEX, NOT a name: the names are minted at emit time, never here.
+    /// Interior-mutable because the projection walks nodes through `&self`.
+    pub(super) fn_pair_bind_seq: std::cell::Cell<usize>,
 }
 
 impl<'a> ClientModulePlan<'a> {
@@ -206,6 +227,7 @@ impl<'a> SupportedClientIr<'a> {
             script_items: classified.script_items.clone(),
             html_nodes: classified.html_nodes.clone(),
             spread_elements: classified.spread_elements.clone(),
+            fn_pair_bind_seq: std::cell::Cell::new(0),
         };
         // The `bind:group` DYNAMIC/mixed values — built here (not in the classifier) because
         // it needs the rewriter + reactivity analysis the projection owns. Each node's `value`
@@ -275,11 +297,16 @@ impl<'a> SupportedClientIr<'a> {
             .any(|b| b.kind == BindingRuntimeKind::Prop)
             || needs_context;
 
+        let (module_snippets, instance_snippets) = projection.collect_top_level_snippets();
+
         Ok(ClientModulePlan {
             component: ir.component.clone(),
             nodes,
             body_statements,
             region_ops,
+            user_imports: classified.user_imports.clone(),
+            module_snippets,
+            instance_snippets,
             needs_context,
             uses_props,
             build: projection,
@@ -428,6 +455,24 @@ impl<'a> SupportedClientIr<'a> {
             IrNode::Special(s) if s.kind == super::ir::SpecialKind::Options => {
                 Ok(ClientNode::OptionsMarker { span: s.span })
             }
+            // A static `<Foo …/>` component invocation — projected to a `Component` node.
+            IrNode::Component(c) => self.project_component(c),
+            // The component-invocation specials (`<svelte:component>` / `<svelte:self>`) —
+            // projected to a `Component` node. A standalone `<svelte:fragment>` (the
+            // transparent-wrapper surface) + the host / renderable `<svelte:*>` specials (not
+            // yet supported) are refused below.
+            IrNode::Special(s)
+                if matches!(
+                    s.kind,
+                    super::ir::SpecialKind::Component | super::ir::SpecialKind::SelfRef
+                ) =>
+            {
+                self.project_special_component(s)
+            }
+            // A `{@render}` tag — projected to a `Render` node.
+            IrNode::Tag(super::ir::TagIr::Render { callee, args, .. }) => {
+                self.project_render(callee, args)
+            }
             // The control-flow blocks (`{#if}`/`{#each}`/`{#await}`/`{#key}`) — projected
             // (head expressions rewritten, child regions carried by scope id) in
             // `client_block_plan`. A `{#snippet}` is the component/snippet surface, refused
@@ -435,6 +480,11 @@ impl<'a> SupportedClientIr<'a> {
             IrNode::Block(block) if !matches!(block, super::ir::BlockIr::Snippet { .. }) => {
                 self.project_block(block)
             }
+            // A `{#snippet}` DECLARATION — non-rendering (dropped from the walk); its const
+            // is emitted by `emit_snippet_decl`. The arena placeholder mirrors the node id.
+            IrNode::Block(super::ir::BlockIr::Snippet { .. }) => Ok(ClientNode::SnippetDecl {
+                span: Span::new(id.0, id.0),
+            }),
             // The declaration / debug tags: `{@const}` (block-local derived), the
             // `{const}/{let}` declaration tag (inert), and `{@debug}` (reactive snapshot
             // effect).
@@ -620,16 +670,12 @@ impl<'a> SupportedClientIr<'a> {
                     self.assign_node_region(child, scope_id, map);
                 }
             }
-            IrNode::Component(component) => {
-                for &child in &component.children {
-                    self.assign_node_region(child, scope_id, map);
-                }
-            }
-            IrNode::Special(special) => {
-                for &child in &special.children {
-                    self.assign_node_region(child, scope_id, map);
-                }
-            }
+            // A component-family node's SLOT content lives in its slot REGIONS (their own
+            // scopes), so it self-assigns via the per-scope loop in
+            // `build_node_region_map` — NOT here (recursing children would mis-assign the
+            // slot content to the PARENT region). The component node itself stays in this
+            // region.
+            IrNode::Component(_) | IrNode::Special(_) => {}
             _ => {}
         }
     }
@@ -1424,24 +1470,5 @@ impl<'a> SupportedClientIr<'a> {
             reactive,
             accumulator_stem,
         })
-    }
-
-    /// Whether the component needs a component context (`$.push`/`$.pop`) — the
-    /// official `needs_context` analysis over the instance script + every template
-    /// expression.
-    fn needs_context(&self, alloc: &Allocator) -> bool {
-        let template_expr_sources: Vec<&str> = self
-            .ir
-            .analysis
-            .expressions
-            .all()
-            .iter()
-            .map(|e| e.source)
-            .collect();
-        super::reactive_analysis::needs_context(
-            alloc,
-            self.ir.analysis.scripts.instance_source,
-            &template_expr_sources,
-        )
     }
 }

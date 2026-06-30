@@ -10,7 +10,30 @@ use verter_span::Span;
 
 use super::client_allowlist::SupportedHtmlElement;
 use super::client_shapes::{ClientBindShape, ClientEventHandlerShape};
-use super::ir::{ExprId, TemplateScopeId};
+use super::ir::{ExprId, LetBinding, TemplateScopeId};
+
+/// A typed module-scope USER import the client module hoists ABOVE the component
+/// function — the general prelude/import carrier (`ClientModulePlan.user_imports`).
+///
+/// This is the SHARED carrier the broader script-import prelude (arbitrary named /
+/// namespace / side-effect imports and module-script items, not yet supported) will
+/// broaden, NOT a component-only side channel. The admitted set is exactly the FIRST
+/// variant — a default import of a `.svelte` component module — and every other import
+/// form stays fail-closed at the classifier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum UserImport {
+    /// `import <local> from '<source>'` where `<source>` resolves to a `.svelte`
+    /// component module — the component callee for a `<Local … />` invocation. Emitted
+    /// in SOURCE ORDER immediately after the runtime namespace import (`import * as $`).
+    ComponentDefault {
+        /// The imported local binding name (the component callee, e.g. `Child`).
+        local: String,
+        /// The module specifier string (`'./Child.svelte'`), emitted verbatim.
+        source: String,
+        /// The import declaration's source span.
+        span: Span,
+    },
+}
 
 /// A node in the NARROW client node arena — the closed template-node vocabulary
 /// the emitter walks. Every supported [`IrNode`] projects to exactly one of these;
@@ -77,6 +100,14 @@ pub(super) enum ClientNode {
         /// The source span.
         span: Span,
     },
+    /// A `{#snippet}` DECLARATION marker — non-rendering (dropped from the DOM walk); the
+    /// snippet const is emitted separately (module / instance / a component's wrapping
+    /// block) by `emit_snippet_decl` reading the IR node. Carried so the node arena mirrors
+    /// the IR node-id space.
+    SnippetDecl {
+        /// The source span.
+        span: Span,
+    },
     /// A control-flow block (`{#if}`/`{#each}`/`{#await}`/`{#key}`). The head
     /// expressions are REWRITTEN at projection time (the fallible rewrite — an `await`
     /// expression / async rune in a head fails closed BEFORE the plan exists), so the
@@ -96,6 +127,230 @@ pub(super) enum ClientNode {
         /// One `{ key: $.snapshot(arg) }` entry per debug identifier, in source order.
         entries: Vec<ClientDebugEntry>,
     },
+    /// A component invocation (`<Foo …/>` / `<svelte:component>` / `<svelte:self>`) —
+    /// the projected `Child(<anchor>, { … })` call (its props rewritten, slot regions
+    /// carried by scope id). Emitted directly against the region anchor (a sole-root
+    /// STANDALONE component) or against a walked `<!>` node var (a sibling).
+    Component(ClientComponent),
+    /// A `{@render}` tag — a static snippet call (`pair(node, () => 1)`) or a dynamic
+    /// `$.snippet(node, () => fn, …)`, its callee + argument thunks rewritten.
+    Render(ClientRender),
+}
+
+/// A projected component invocation — the closed structural mirror of a `<Foo …/>` /
+/// `<svelte:component>` / `<svelte:self>` node, built (with every expression rewritten)
+/// in `client_component_plan`. The emitter assembles the `Child(<anchor>, <props>)` call
+/// from this typed structure; the slot callbacks are emitted through the shared
+/// region-callback emitter at their [`TemplateScopeId`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ClientComponent {
+    /// The callee identity (static imported local, `<svelte:self>` recursion, or a
+    /// dynamic `<svelte:component this={…}>`).
+    pub(super) callee: ComponentCallee,
+    /// The full open-tag source span.
+    pub(super) span: Span,
+    /// The function-pair component binds (`bind:x={get, set}`) — each carries its rewritten
+    /// get/set expressions plus a component-function-scoped pair INDEX. The emitter mints the
+    /// `var bind_get` / `var bind_set` locals from that index through the shared scope-aware
+    /// allocator (so they provably avoid every user binding and each other) and emits them at
+    /// the CALL's statement level, BEFORE it (the official `state.init` placement). `var`
+    /// hoists, so they sit beside the call without forcing a block.
+    pub(super) fn_pair_binds: Vec<ComponentFnPairBind>,
+    /// Statements emitted INSIDE the component's `{ … }` wrapping block, before the call —
+    /// the prop deriveds (`let $0 = $.derived(() => …)` for a compound reactive prop, the
+    /// official `memoizer.deriveds()` placement). A non-empty list forces the block.
+    pub(super) block_statements: Vec<String>,
+    /// The props payload — a plain `{ … }` object, or a `$.spread_props(…)` call when any
+    /// `{...spread}` attribute is present.
+    pub(super) props: ComponentProps,
+    /// The snippet-def child nodes (the `{#snippet}` blocks declared directly inside the
+    /// component) — emitted as local consts in the wrapping `{ … }` block BEFORE the call.
+    pub(super) snippet_defs: Vec<super::ir::NodeId>,
+    /// `bind:this={ref}` — the (setter, getter) bodies wrapping the call in
+    /// `$.bind_this(<call>, <setter>, <getter>)`.
+    pub(super) bind_this: Option<ComponentBindThis>,
+}
+
+/// A component function-pair `bind:x={get, set}` — the rewritten getter/setter expressions
+/// plus the component-function-scoped pair INDEX. The init `var bind_get` / `var bind_set`
+/// locals are NOT named here: the emitter mints them from this index through the shared
+/// scope-aware name allocator (the same `used`/`alloc_name` rail the DOM-var and `bind:group`
+/// accumulator names use), so the minted names provably avoid every user binding AND each
+/// other — matching the official per-component-function `scope.generate('bind_get')` uniquing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ComponentFnPairBind {
+    /// The component-function-scoped pair index (assigned in source order across EVERY
+    /// component call in the component function). The emitter's allocator pass keys the
+    /// `(bind_get, bind_set)` name pair on it, and the [`ComponentMember::FnPairGetSet`]
+    /// member links back to its names through the same index.
+    pub(super) index: usize,
+    /// The rewritten getter expression (the right-hand side of `var <bind_get> = …;`).
+    pub(super) get_expr: String,
+    /// The rewritten setter expression (the right-hand side of `var <bind_set> = …;`).
+    pub(super) set_expr: String,
+}
+
+/// The callee identity of a [`ClientComponent`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ComponentCallee {
+    /// A static component callee — the imported local (`Child`) or, for
+    /// `<svelte:self>`, the component's own compile-name. Emitted `Name(<anchor>, …)`.
+    Static {
+        /// The callee identifier.
+        name: String,
+    },
+    /// A dynamic `<svelte:component this={expr}>` — emitted `$.component(<anchor>, () =>
+    /// <this>, ($$anchor, $$component) => { $$component($$anchor, <props>); })`.
+    Dynamic {
+        /// The rewritten `this={…}` expression (the `() => <this>` thunk body).
+        this_expr: String,
+    },
+}
+
+/// The props payload of a [`ClientComponent`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ComponentProps {
+    /// A plain `{ <members> }` object literal (no spread attribute).
+    Object(Vec<ComponentMember>),
+    /// A `$.spread_props(<parts>)` call — present when ANY `{...spread}` attribute is on
+    /// the component. The parts interleave object groups and spread thunks in SOURCE
+    /// ORDER (the official `props_and_spreads`).
+    Spread(Vec<ComponentSpreadPart>),
+}
+
+/// One part of a `$.spread_props(…)` call — an object group of members or a spread
+/// thunk, in source order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ComponentSpreadPart {
+    /// A `{ <members> }` object group.
+    Group(Vec<ComponentMember>),
+    /// A spread thunk (`() => $$props.rest`) or bare expression.
+    Spread {
+        /// The already-rewritten spread argument (a `() => …` thunk, or a bare expr).
+        arg: String,
+    },
+}
+
+/// One member of a component's props object, in emission order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ComponentMember {
+    /// `key: value` — a plain init prop (a static literal, a constant-expr dynamic, or a
+    /// non-reactive value like a callback `onfoo: () => …`).
+    Init {
+        /// The prop key.
+        key: String,
+        /// The already-rewritten value expression.
+        value: String,
+    },
+    /// `get key() { return body; }` — a reactive prop value (a getter so the child
+    /// re-reads on change).
+    Getter {
+        /// The prop key.
+        key: String,
+        /// The already-rewritten getter body.
+        body: String,
+    },
+    /// `get key() { return get_body; } set key($$value) { set_body; }` — a SIMPLE component
+    /// `bind:prop` (the getter/setter bodies are already rewritten from the bound lvalue).
+    GetSet {
+        /// The bind prop key.
+        key: String,
+        /// The already-rewritten getter body.
+        get_body: String,
+        /// The already-rewritten setter body.
+        set_body: String,
+    },
+    /// `get key() { return <bind_get>(); } set key($$value) { <bind_set>($$value); }` — a
+    /// component FUNCTION-PAIR `bind:x={get, set}`. The local names are NOT baked here (the
+    /// allocator has not run at projection time); the emitter resolves the `(bind_get,
+    /// bind_set)` pair from `index` (minted through the shared scope-aware allocator), so they
+    /// never collide with a user binding.
+    FnPairGetSet {
+        /// The bind prop key.
+        key: String,
+        /// The component-function-scoped pair index (links to the owning
+        /// [`ComponentFnPairBind`] and its allocator-minted names).
+        index: usize,
+    },
+    /// `$$events: { <entries> }` — the `on:`-directive handlers forwarded to the component.
+    Events {
+        /// The `(event-type, handler)` entries in source order. The emitter routes each key
+        /// through [`object_key`](super::client_codegen_helpers::object_key), so a hyphenated
+        /// `on:foo-bar` quotes to `'foo-bar': …` (a bare `foo-bar:` is unparseable JS).
+        entries: Vec<(String, String)>,
+    },
+    /// A `{#snippet name}`-as-child shorthand prop (`name` — the object shorthand
+    /// `name: name`), the runes named-slot-via-snippet interop.
+    SnippetProp {
+        /// The snippet name (the shorthand key + value).
+        name: String,
+    },
+    /// `children: ($$anchor, $$slotProps) => { … }` — the default-slot region callback
+    /// (no `let:` directive on the component / default fragment).
+    DefaultChildren {
+        /// The default-slot region.
+        region: TemplateScopeId,
+    },
+    /// `children: $.invalid_default_snippet` — the sentinel emitted when the default slot
+    /// carries `let:` slot props (so the real default slot rides `$$slots.default`).
+    InvalidDefaultSnippet,
+    /// `$$slots: { <entries> }` — the slots object (named-slot callbacks, `name: true`
+    /// snippet/default markers, and the `let:`-default callback).
+    Slots {
+        /// The slot entries, in source order.
+        entries: Vec<SlotEntry>,
+    },
+}
+
+/// One entry of a component's `$$slots` object.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum SlotEntry {
+    /// `name: true` — a marker for a `{#snippet}`-as-prop or a `children`-prop default
+    /// slot (so the child's `<slot name>` resolves).
+    TrueMarker {
+        /// The slot name (`default` / `header` / …).
+        name: String,
+    },
+    /// `name: ($$anchor, $$slotProps) => { … }` — a named-slot region callback (a
+    /// `<svelte:fragment slot>` / `slot=`-bearing child) or the `let:`-default callback.
+    Callback {
+        /// The slot name.
+        name: String,
+        /// The slot-content region.
+        region: TemplateScopeId,
+        /// The slot's `let:` slot-prop bindings, prepended to the callback body as
+        /// `const <name> = $.derived(() => $$slotProps.<key>);` — PLANNED here (from the
+        /// component's `default_lets` / the named slot's `lets`) so the emitter consumes the
+        /// fact directly and never rescans the IR / binding table per slot closure.
+        lets: Vec<LetBinding>,
+    },
+}
+
+/// A component `bind:this={ref}` — the (setter, getter) bodies the emitter wraps the
+/// component call in (`$.bind_this(<call>, <setter>, <getter>)`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ComponentBindThis {
+    /// The setter body (`($$value) => ref = $$value`).
+    pub(super) setter: String,
+    /// The getter body (`() => ref`).
+    pub(super) getter: String,
+}
+
+/// A projected `{@render}` tag — a static snippet call or a dynamic `$.snippet`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ClientRender {
+    /// Whether the callee is DYNAMIC (`$.snippet(node, () => fn, …args)`) vs a STATIC
+    /// snippet-name call (`name(node, …args)`).
+    pub(super) dynamic: bool,
+    /// The rewritten callee — a static snippet name (`pair`), or the dynamic snippet
+    /// function thunk body (`$$props.children ?? $.noop` / `cond ? $$props.a : $$props.b`).
+    pub(super) callee: String,
+    /// Whether a STATIC callee is a direct call (`pair(node, …)`) vs a `$.maybe_call`
+    /// (`{@render maybeSnippet?.()}` — but a resolved static snippet is always a direct
+    /// call, so this is `false` in the supported surface).
+    pub(super) maybe_call: bool,
+    /// The rewritten argument thunks (`() => 1`, `() => $.get(n)`), in source order.
+    pub(super) args: Vec<String>,
 }
 
 /// The reactive ops for ONE template-scope region, in source order. A block body is

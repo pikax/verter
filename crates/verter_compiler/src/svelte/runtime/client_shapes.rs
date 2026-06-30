@@ -233,17 +233,24 @@ fn simple_target_ident(target: &oxc_ast::ast::SimpleAssignmentTarget<'_>) -> Opt
 /// the official `build_template_chunk` evaluator (the `has_call` memoizer, the
 /// `is_defined` nullish-coalesce, the parenthesization builder), which is owned by the
 /// reactive-text/interpolation completion surface — so it fails closed here.
-// TODO(follow-up): port the official `build_template_chunk` evaluator (the `has_call`
-// memoizer deps-array `$.template_effect`, the `is_defined` nullish-coalesce, the
-// parenthesization builder) so a binary / call / member / conditional interpolation
-// lowers instead of failing closed. Owned by the reactive-text/interpolation completion
+// The official `build_template_chunk` evaluator (the `has_call` memoizer deps-array
+// `$.template_effect`, the `is_defined` nullish-coalesce, the parenthesization builder) is
+// not yet ported here, so a binary / call / member / conditional interpolation fails closed
+// instead of lowering. That evaluator belongs to the reactive-text/interpolation completion
 // surface (the global interpolation-breadth owner), not this declaration-tag surface.
+// The `…Read` postfix is the semantically-meaningful shared trait of every variant (each
+// is a reactive READ form), not a naming accident — the lint is suppressed by design.
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ClientInterpolationShape {
     /// `{x}` where `x` resolves to a reactive `$state` signal — emitted `$.get(x)`.
     SignalIdentRead,
     /// `{x}` where `x` resolves to a no-default read-only prop — emitted `$$props.x`.
     NoDefaultPropRead,
+    /// `{x}` where `x` resolves to a `{#snippet}` PARAMETER — emitted as a thunk CALL
+    /// `x()` (the snippet receives its args as zero-arg getter thunks). Reactive (joins
+    /// the slot/snippet body's `$.template_effect`).
+    SnippetParamRead,
 }
 
 /// Classify a reactive interpolation's expression into its accepted
@@ -295,6 +302,9 @@ pub(super) fn classify_interpolation_shape(
         // already refused at the props-shape gate; a `BindableProp` is refused at the
         // binding-kind gate — so a `Prop` here is a no-default prop.)
         Some(BindingRuntimeKind::Prop) => Ok(ClientInterpolationShape::NoDefaultPropRead),
+        // A `{#snippet}` parameter read → a thunk CALL `x()` (reactive — the value rides
+        // the snippet arg). The rewrite emits `x()`; this shape is the acceptance proof.
+        Some(BindingRuntimeKind::SnippetParam) => Ok(ClientInterpolationShape::SnippetParamRead),
         // A bare identifier resolving to a NON-reactive binding (a plain local, a
         // module const, a never-reassigned `$state` lowered to PlainLet) is a
         // compile-time constant — official static-folds it to a `textContent` write,
@@ -798,7 +808,11 @@ fn classify_dom_value_bind(
 /// the identical plain-member form; a `$derived` member is a plain member write). An
 /// UNRESOLVED root (no binding row) likewise fails closed (a free / undeclared target is
 /// not an emittable lvalue here).
-fn bind_root_is_writable_target(
+///
+/// SHARED by both the element DOM-bind classifier and the component-bind projection, so a
+/// component `bind:x={root}` consumes the SAME writable-root policy instead of synthesizing a
+/// setter from raw source.
+pub(super) fn bind_root_is_writable_target(
     bindings: &BindingTable,
     scopes: &ScopeGraph,
     scope: ScopeId,

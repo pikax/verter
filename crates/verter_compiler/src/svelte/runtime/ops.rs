@@ -70,16 +70,26 @@ fn collect_node_ops(
                 collect_node_ops(nodes, child, ops, local);
             }
         }
-        IrNode::Component(c) => {
-            collect_attr_ops(node_id, &c.attrs, EventTarget::Node(node_id), ops, local);
-            for child in c.children {
-                collect_node_ops(nodes, child, ops, local);
-            }
-        }
+        // A component invocation carries NO reactive ops: its props / events / binds are
+        // projected into the `Child(<anchor>, …)` call (`client_component_plan`), and its
+        // slot-content children live in their OWN slot regions (collected when the op pass
+        // reaches those template scopes) — NOT in the component's enclosing region. Walking
+        // `c.children` here would DOUBLE-collect the slot content into the parent region.
+        IrNode::Component(_) => {}
         IrNode::Special(s) => {
-            // A special element's event listeners target the global the element
-            // represents (`<svelte:window>` ⇒ Window, `<svelte:document>` ⇒
-            // Document, `<svelte:body>` ⇒ Body), NOT the node — verified against
+            // The component-FAMILY specials (`<svelte:component>` / `<svelte:self>` /
+            // `<svelte:fragment>`) are component invocations — no ops, no child recursion
+            // (their slots are their own regions), exactly like `IrNode::Component`.
+            if matches!(
+                s.kind,
+                SpecialKind::Component | SpecialKind::SelfRef | SpecialKind::Fragment
+            ) {
+                return;
+            }
+            // A host / renderable special (the global `<svelte:*>` hosts): its event
+            // listeners target the global the element represents (`<svelte:window>` ⇒
+            // Window, `<svelte:document>` ⇒ Document, `<svelte:body>` ⇒ Body), NOT the
+            // node — verified against
             // svelte@5.56.3 (`$.window` / `$.document` / `$.document.body`).
             let event_target = special_event_target(&s, node_id);
             collect_attr_ops(node_id, &s.attrs, event_target, ops, local);

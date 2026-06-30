@@ -2562,7 +2562,7 @@ fn render_static_snippet_callee_resolves_to_snippet_with_args() {
         .nodes
         .iter()
         .find_map(|n| match n {
-            IrNode::Tag(TagIr::Render { callee, args }) => Some((callee.clone(), args.clone())),
+            IrNode::Tag(TagIr::Render { callee, args, .. }) => Some((callee.clone(), args.clone())),
             _ => None,
         })
         .expect("a render tag exists");
@@ -2595,6 +2595,37 @@ fn render_optional_call_stays_dynamic() {
     assert!(
         !matches!(callee, RenderCallee::Snippet(_)),
         "an optional-call render callee must NOT resolve to a static Snippet"
+    );
+}
+
+#[test]
+fn render_member_callee_carries_args() {
+    use super::ir::RenderCallee;
+    let alloc = Allocator::default();
+    // A MEMBER-callee render `{@render obj.snip(item)}` stays Dynamic (`obj.snip` is not a
+    // `{#snippet}` name) but MUST keep its argument expression — the official emits
+    // `$.snippet(node, () => $$props.obj.snip, () => $$props.item)`. This is the member-callee
+    // half of the dynamic-render-arg class (covered by IR here rather than a golden fixture
+    // because the official wraps the member-callee component in a `$.push`/`$.pop` context, an
+    // orthogonal `needs_context` behaviour). FAILS against the always-empty-args lowering.
+    let src = "<script>let { obj, item } = $props();</script>{@render obj.snip(item)}";
+    let ir = lower(src, &alloc);
+    let (callee, args) = ir
+        .nodes
+        .iter()
+        .find_map(|n| match n {
+            IrNode::Tag(TagIr::Render { callee, args, .. }) => Some((callee.clone(), args.clone())),
+            _ => None,
+        })
+        .expect("a render tag exists");
+    assert!(
+        matches!(callee, RenderCallee::Dynamic(_)),
+        "a member-callee render stays Dynamic (got {callee:?})"
+    );
+    assert_eq!(
+        args.len(),
+        1,
+        "`{{@render obj.snip(item)}}` carries its one argument thunk"
     );
 }
 

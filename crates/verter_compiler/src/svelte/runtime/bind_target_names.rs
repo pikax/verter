@@ -27,10 +27,15 @@ use super::ir::{AttrIr, IrNode, NodeId, SvelteRuntimeIr};
 pub(super) fn collect_bind_this_targets(ir: &SvelteRuntimeIr) -> Vec<String> {
     let mut targets = Vec::new();
     for node in &ir.nodes {
-        let IrNode::Element(el) = node else {
-            continue;
+        // An element `bind:this={el}` OR a component `bind:this={ref}` (the
+        // component-reference bind) contributes its target identifier.
+        let attrs = match node {
+            IrNode::Element(el) => &el.attrs,
+            IrNode::Component(c) => &c.attrs,
+            IrNode::Special(s) => &s.attrs,
+            _ => continue,
         };
-        for attr in &el.attrs {
+        for attr in attrs {
             let AttrIr::Bind {
                 target,
                 expr: Some(expr_id),

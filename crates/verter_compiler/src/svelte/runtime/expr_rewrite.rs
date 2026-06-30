@@ -586,6 +586,10 @@ impl BindingOccurrenceCollector<'_> {
     fn read_rewrite_text(&self, name: &str) -> Option<String> {
         match self.signal_kind(name) {
             Some(k) if is_signal_kind(k) => Some(format!("$.get({name})")),
+            // A `{#snippet}` PARAMETER reads as a THUNK CALL `name()` (the official
+            // `transform[arg] = { read: b.call }` — a snippet receives its args as
+            // zero-arg getter thunks defaulting to `$.noop`).
+            Some(BindingRuntimeKind::SnippetParam) => Some(format!("{name}()")),
             Some(BindingRuntimeKind::Prop) => Some(match self.ctx.prop_reads.get(name) {
                 // A default-bearing prop reads as a getter call `name()`.
                 Some(PropRead::Getter) => format!("{name}()"),

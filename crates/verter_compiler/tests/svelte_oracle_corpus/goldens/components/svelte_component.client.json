@@ -1,0 +1,52 @@
+{
+  "slug": "components/svelte_component.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "svelte_component",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "comment",
+    "first_child",
+    "component",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "comment",
+    "component",
+    "first_child"
+  ],
+  "helperCounts": {
+    "comment": 1,
+    "first_child": 1,
+    "component": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; export default function svelte_component($$anchor, $$props) {var fragment = $.comment(); var node = $.first_child(fragment); $.component(node, () => $$props.comp, ($$anchor, $$component) => {$$component($$anchor, {label: 'hi'});}); $.append($$anchor, fragment);}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

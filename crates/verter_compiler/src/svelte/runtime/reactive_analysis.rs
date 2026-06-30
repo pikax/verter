@@ -224,6 +224,39 @@ pub(super) fn expr_references_signal(
     })
 }
 
+/// Whether a COMPONENT-PROP value expression `has_state` — the official
+/// `metadata.expression.has_state` for the `Component.js` getter-vs-init decision
+/// (`has_state ? get name() {…} : name: value`). DISTINCT from
+/// [`expr_references_signal`] in two ways:
+///
+/// 1. SYNCHRONOUS-only: a read INSIDE a nested function / arrow body is DEFERRED and
+///    does NOT count, so `onclick={() => x}` is a plain prop init (`has_state = false`)
+///    while `b={x}` / `depth={depth - 1}` are reactive.
+/// 2. A `{#snippet}` NAME reference counts as state (a snippet passed as a prop emits
+///    the getter `get tmpl() { return tmpl; }`, matching the pinned svelte@5.56.3
+///    snippet-prop shape).
+#[must_use]
+pub(super) fn prop_value_has_state(
+    source: &str,
+    scope: ScopeId,
+    bindings: &BindingTable,
+    scopes: &ScopeGraph,
+) -> bool {
+    let Ok(facts) = super::expr::collect_expr_references(source) else {
+        return false;
+    };
+    facts.references.iter().any(|r| {
+        !r.in_function
+            && bindings
+                .resolve_kind(scopes, scope, &r.name)
+                .is_some_and(|k| {
+                    is_signal_kind(k)
+                        || k == BindingRuntimeKind::Prop
+                        || k == BindingRuntimeKind::SnippetName
+                })
+    })
+}
+
 /// Whether a template expression contains a MEMBER access whose leftmost identifier
 /// resolves (scope-awarely) to a declared binding — the official
 /// `phases/2-analyze/visitors/MemberExpression.js` `has_state ||= !is_pure(node)` rule.

@@ -149,22 +149,33 @@ fn walk_node_topology(
                 walk_node_topology(ir, child, helpers, delegated);
             }
         }
+        // A component invocation records ONLY the `$.bind_this` helper for a
+        // `bind:this={ref}` — its props / events / `bind:prop` are CLIENT-PROJECTED into
+        // the `Child(<anchor>, …)` call (a component `on:foo` is the `$$events` forward,
+        // NOT a DOM `$.event` listener; a component `bind:prop` is a getter/setter, NOT a
+        // `$.bind_*`; a spread is `$.spread_props`, a prop-builder, not a structural
+        // helper). The slot-content STRUCTURAL helpers come from the slot REGIONS (their
+        // factories ride `html.templates`; their block / render helpers ride this walk).
         IrNode::Component(c) => {
-            // A component-host bind is NOT a DOM-element bind (component hosts are not yet
-            // supported, owned by 5f); pass no DOM host tag so no DOM bind helper records.
-            for attr in &c.attrs {
-                record_attr_topology(attr, None, &[], helpers, delegated);
-            }
-            for &child in &c.children {
-                walk_node_topology(ir, child, helpers, delegated);
-            }
+            record_component_bind_this(&c.attrs, helpers);
+            walk_component_slot_topology(ir, &c.slots, helpers, delegated);
         }
         IrNode::Special(s) => {
+            // The component-FAMILY specials are component invocations (only `bind:this`
+            // records a helper, slot regions walked) — exactly like `IrNode::Component`.
+            if matches!(
+                s.kind,
+                SpecialKind::Component | SpecialKind::SelfRef | SpecialKind::Fragment
+            ) {
+                record_component_bind_this(&s.attrs, helpers);
+                walk_component_slot_topology(ir, &s.slots, helpers, delegated);
+                return;
+            }
             if s.kind == SpecialKind::Head {
                 helpers.call(SvelteHelper::Head);
             }
-            // A special-element (`<svelte:*>`) bind has no DOM host (special-element hosts
-            // are not yet supported, owned by 5f).
+            // A host / renderable special-element (`<svelte:*>`) bind has no DOM host
+            // (the global `<svelte:window|body|document|head|element|boundary>` hosts).
             for attr in &s.attrs {
                 record_attr_topology(attr, None, &[], helpers, delegated);
             }
@@ -216,6 +227,41 @@ fn walk_node_topology(
             _ => {}
         },
         IrNode::Text { .. } | IrNode::Comment { .. } | IrNode::Interpolation { .. } => {}
+    }
+}
+
+/// Record the ONLY structural helper a component invocation's attributes contribute: a
+/// `$.bind_this` per `bind:this={ref}`. Every other component attribute (prop / event /
+/// `bind:prop` / spread) is projected into the call body (no structural helper).
+fn record_component_bind_this(attrs: &[AttrIr], helpers: &mut HelperTrace) {
+    for attr in attrs {
+        if let AttrIr::Bind { target, .. } = attr {
+            if target == "this" {
+                helpers.call(SvelteHelper::BindThis);
+            }
+        }
+    }
+}
+
+/// Walk a component's slot regions (default + named) + its `{#snippet}`-def body regions
+/// for their block / render / event helper topology. The slot FACTORIES
+/// (`from_html` / `text` / `comment`) + their `$.append` mounts ride `html.templates`
+/// (collected via `collect_component_slot_template_scopes`), so this records only the
+/// in-region STRUCTURAL helpers, never a factory/append (which would double-count).
+fn walk_component_slot_topology(
+    ir: &SvelteRuntimeIr,
+    slots: &super::ir::ComponentSlots,
+    helpers: &mut HelperTrace,
+    delegated: &mut DelegatedEvents,
+) {
+    for &snippet in &slots.snippet_defs {
+        walk_node_topology(ir, snippet, helpers, delegated);
+    }
+    if let Some(default) = slots.default {
+        walk_topology(ir, default, helpers, delegated);
+    }
+    for named in &slots.named {
+        walk_topology(ir, named.region, helpers, delegated);
     }
 }
 

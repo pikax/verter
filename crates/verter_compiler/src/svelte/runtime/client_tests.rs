@@ -965,6 +965,22 @@ fn no_filename_derives_unknown() {
 /// `predicate` (the discriminating typed-surface check) and carrying the
 /// machine-stable `svelte-runtime-unsupported-` diagnostic id.
 fn assert_fail_closed(source: &str, predicate: impl Fn(&UnsupportedSvelteRuntimeSurface) -> bool) {
+    assert_fail_closed_labeled("", source, predicate);
+}
+
+/// [`assert_fail_closed`] with a CASE LABEL threaded into every panic message — so a
+/// table-driven refusal loop names WHICH case leaked when one regresses (e.g. which import
+/// form emitted instead of failing closed).
+fn assert_fail_closed_labeled(
+    label: &str,
+    source: &str,
+    predicate: impl Fn(&UnsupportedSvelteRuntimeSurface) -> bool,
+) {
+    let ctx = if label.is_empty() {
+        String::new()
+    } else {
+        format!(" [{label}]")
+    };
     match emit_result(source) {
         Err(ClientCompileError::Unsupported(surface)) => {
             // The discriminating `predicate` pins the EXACT typed surface variant (the
@@ -972,7 +988,7 @@ fn assert_fail_closed(source: &str, predicate: impl Fn(&UnsupportedSvelteRuntime
             // its enum shape + diagnostic code, never by a plan/phase label.
             assert!(
                 predicate(&surface),
-                "wrong fail-closed surface: {surface:?} (code {})",
+                "wrong fail-closed surface{ctx}: {surface:?} (code {})",
                 surface.diagnostic_code()
             );
             // The diagnostic id has the `svelte-runtime-unsupported-` prefix.
@@ -980,49 +996,48 @@ fn assert_fail_closed(source: &str, predicate: impl Fn(&UnsupportedSvelteRuntime
                 surface
                     .diagnostic_code()
                     .starts_with("svelte-runtime-unsupported-"),
-                "diagnostic id shape: {}",
+                "diagnostic id shape{ctx}: {}",
                 surface.diagnostic_code()
             );
         }
-        Ok(js) => panic!("expected fail-closed, got a module:\n{js}"),
-        Err(other) => panic!("expected an unsupported-surface error, got: {other:?}"),
+        Ok(js) => panic!("expected fail-closed{ctx}, got a module:\n{js}"),
+        Err(other) => panic!("expected an unsupported-surface error{ctx}, got: {other:?}"),
     }
 }
 
 #[test]
-fn snippet_inside_if_block_refuses() {
-    // The `{#if}`/`{#each}`/`{#await}`/`{#key}` control-flow blocks are SUPPORTED, but a
-    // `{#snippet}` DECLARATION inside a block body is an unsupported component/snippet
-    // surface — it must still refuse (the block being supported does not make its body's
-    // snippet declaration supported).
-    assert_fail_closed(
+fn snippet_inside_if_block_emits_a_block_local_const() {
+    // A `{#snippet}` DECLARATION inside a (supported) `{#if}` body is the snippet surface —
+    // it emits a BLOCK-LOCAL `const foo = ($$anchor, …) => {…}` inside the consequent region
+    // (the official `context.state.snippets`).
+    let js = emit_result(
         "<script>let on = $state(true);</script>\n{#if on}{#snippet foo()}<p>x</p>{/snippet}{/if}\n",
-        |s| {
-            matches!(
-                s,
-                UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
-                    construct: "snippet",
-                    ..
-                }
-            )
-        },
+    )
+    .expect("a {#snippet} inside a supported {#if} block emits a module");
+    assert!(js.contains("$.if("), "missing the {{#if}} block:\n{js}");
+    assert!(
+        js.contains("const foo = ($$anchor"),
+        "missing the block-local snippet const:\n{js}"
+    );
+    // NEGATIVE: the snippet declaration must NOT refuse (it is no longer the closed surface).
+    assert!(
+        !js.contains("svelte-runtime-unsupported"),
+        "a {{#snippet}} in a block body must not refuse:\n{js}"
     );
 }
 
 #[test]
-fn render_inside_each_block_refuses() {
-    // A `{@render}` tag inside a (supported) `{#each}` body is the 5f surface — still refused.
-    assert_fail_closed(
+fn render_inside_each_block_emits_a_dynamic_snippet_call() {
+    // A `{@render}` tag inside a (supported) `{#each}` body is the render surface — a
+    // dynamic-callee render emits `$.snippet(node, () => foo, …)` per item.
+    let js = emit_result(
         "<script>let { items } = $props();</script>\n{#each items as x}{@render foo(x)}{/each}\n",
-        |s| {
-            matches!(
-                s,
-                UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
-                    construct: "render",
-                    ..
-                }
-            )
-        },
+    )
+    .expect("a {@render} inside a supported {#each} block emits a module");
+    assert!(js.contains("$.each("), "missing the {{#each}} block:\n{js}");
+    assert!(
+        js.contains("$.snippet("),
+        "missing the dynamic-render $.snippet call:\n{js}"
     );
 }
 
@@ -2754,21 +2769,22 @@ fn props_rest_spread_still_refuses_as_advanced_rune_not_the_deleted_spread_surfa
 }
 
 #[test]
-fn component_spread_still_refuses_as_component_surface() {
-    // A component spread `<Foo {...p}>` is the component surface (component attrs
-    // route differently); element-spread acceptance must NOT leak into it. The unused
-    // `$state` marker forces runes mode so the component (not legacy mode) is the surface.
-    let err = emit_result("<script>let __rune = $state(0);</script>\n<Foo {...p} />\n")
-        .expect_err("a component spread must still refuse");
-    let ClientCompileError::Unsupported(surface) = err else {
-        panic!("expected an Unsupported refusal, got {err:?}");
-    };
+fn component_spread_emits_spread_props_not_attribute_effect() {
+    // A component spread `<Foo {...rest}>` is the component surface — it emits
+    // `$.spread_props(() => $$props.rest)`, NOT the element-spread `$.attribute_effect`
+    // fold (the two spread surfaces are distinct and must not leak into each other).
+    let js = emit_result(
+        "<script>import Foo from './Foo.svelte'; let { rest } = $props();</script>\n<Foo {...rest} />\n",
+    )
+    .expect("a component spread emits a module");
     assert!(
-        matches!(
-            surface,
-            UnsupportedSvelteRuntimeSurface::ComponentOrSnippet { .. }
-        ),
-        "a component spread must refuse as the component surface, got {surface:?}"
+        js.contains("$.spread_props(() => $$props.rest)"),
+        "missing the component $.spread_props call:\n{js}"
+    );
+    // NEGATIVE: a component spread is NOT the element `$.attribute_effect` fold.
+    assert!(
+        !js.contains("$.attribute_effect"),
+        "a component spread must NOT emit the element $.attribute_effect fold:\n{js}"
     );
 }
 
@@ -3280,18 +3296,23 @@ fn element_bind_this_named_function_pair_emits_direct_bind_this() {
 }
 
 #[test]
-fn component_bind_this_function_pair_fails_closed() {
-    // Finding C boundary (R4): COMPONENT `bind:this={get, set}` stays 5f (D-21) — it must
-    // FAIL CLOSED (the component element is an unsupported native-client surface). Only the
-    // INTRINSIC-element function-pair `bind:this` is opened in 5c. RED would be an emitted
-    // module for a component bind:this function-pair.
-    let res = emit_result(
-        "<script>let el = $state(null);</script>\n\
+fn component_bind_this_function_pair_emits_get_set_args() {
+    // A COMPONENT `bind:this={get, set}` emits `$.bind_this(<call>, set, get)` with the
+    // function-pair's two arrow elements as the (setter, getter) args (the official
+    // `build_bind_this` sequence form).
+    let js = emit_result(
+        "<script>import MyComponent from './MyComponent.svelte'; let el = $state(null);</script>\n\
          <MyComponent bind:this={() => el, (v) => el = v} />\n",
-    );
+    )
+    .expect("a component bind:this function-pair emits a module");
     assert!(
-        res.is_err(),
-        "a COMPONENT bind:this function-pair must fail closed (5f / D-21):\n{res:?}"
+        js.contains("$.bind_this(MyComponent("),
+        "missing the $.bind_this wrapper around the component call:\n{js}"
+    );
+    // The function-pair get/set arrows are the (setter, getter) args, signal-rewritten.
+    assert!(
+        js.contains("(v) => $.set(el, v") && js.contains("() => $.get(el)"),
+        "missing the function-pair (setter, getter) args:\n{js}"
     );
 }
 
@@ -4838,68 +4859,632 @@ fn customized_builtin_is_only_now_fails_closed_at_the_element_gate() {
 }
 
 #[test]
-fn component_fails_closed() {
-    // A component reference (a capitalized tag) is the component surface. No import is used
-    // (imports are demoted as script-import) so the component node is the surface under test.
-    assert_fail_closed("<script>let c = $state(0);</script>\n<Foo />\n", |s| {
+fn component_emits_a_direct_call() {
+    // A component reference (a capitalized tag) imported from a `.svelte` module emits a
+    // DIRECT `Foo($$anchor, {})` call (the component surface), NOT a `$.get` on the callee
+    // (the imported local is a non-reactive value binding).
+    // The `$props()` rune forces runes mode (an import-only component is legacy mode, 5i).
+    let js = emit_result(
+        "<script>import Foo from './Foo.svelte'; let { x } = $props();</script>\n<Foo />\n",
+    )
+    .expect("a component reference emits a module");
+    assert!(
+        js.contains("import Foo from './Foo.svelte';"),
+        "missing the component import:\n{js}"
+    );
+    assert!(
+        js.contains("Foo($$anchor, {})"),
+        "missing the direct component call:\n{js}"
+    );
+    // NEGATIVE: the imported callee is read as a bare name, NEVER `$.get(Foo)`.
+    assert!(
+        !js.contains("$.get(Foo)"),
+        "the component callee must be a bare name, not $.get:\n{js}"
+    );
+}
+
+#[test]
+fn component_unbound_callee_fails_closed() {
+    // The callee-resolution DISCRIMINATOR: a capitalized component tag whose name
+    // resolves to NO admitted `.svelte`-component import is an unsupported component SOURCE
+    // — it fails CLOSED, NOT a coincidental bare `Foo($$anchor, {})` call on an unbound
+    // global. This is the SAME fixture as `component_emits_a_direct_call` MINUS the import,
+    // so the only difference is whether `Foo` resolves to a `ComponentImport` binding — the
+    // `!$.get(Foo)` assertion alone is non-discriminating (an unbound global also emits bare
+    // `Foo`). The `$props()` rune forces runes mode.
+    assert_fail_closed("<script>let { p } = $props();</script>\n<Foo />\n", |s| {
         matches!(
             s,
-            UnsupportedSvelteRuntimeSurface::ComponentOrSnippet { .. }
+            UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
+                construct: "component",
+                ..
+            }
         )
     });
 }
 
-// ── Component-host + special-element binding surfaces (D-21): these hosts are not yet
-//    supported (owned by 5f), NOT 5c. 5c emits DOM-element binds ONLY; these surfaces STAY
-//    refused (the component / `<svelte:*>` HOST fails closed at `client_surface.rs`)
-//    until 5f opens the hosts. Each negative test is DISCRIMINATING — it would be RED
-//    if the unsupported host surface were wrongly accepted. ──
-
 #[test]
-fn component_bind_this_fails_closed_until_component_hosts_are_supported() {
-    // `<Child bind:this={inst}/>` — the COMPONENT host is refused (the component bind
-    // needs 5f's component-invocation host + instance-import hoisting). Official emits
-    // `$.bind_this(Child(...), set, get)` with a `$.set(inst, $$value, true)` proxy
-    // setter — a 5f shape. RED if the component host were accepted.
+fn component_dotted_callee_fails_closed() {
+    // A DOTTED static component name (`<Foo.Bar/>`) is a namespace/member-component source —
+    // an advanced form this vertical does not model. Only a BARE identifier resolving to an
+    // admitted `.svelte`-component import is authorized; the whole-name gate fails CLOSED on
+    // the dot even though the HEAD segment `Foo` IS an admitted `ComponentImport`. A default
+    // `.svelte` import is a component FUNCTION (not a namespace object), so `Foo.Bar` would be
+    // a likely-undefined member access — emitting `Foo.Bar($$anchor, …)` is wrong. This is
+    // the DISCRIMINATOR vs `component_emits_a_direct_call`: same admitted `Foo` import, but
+    // the dotted tag must refuse where the bare `<Foo/>` emits. The `$props()` rune forces
+    // runes mode so the fixture reaches the component projection (not the legacy-mode gate).
     assert_fail_closed(
-        "<script>let inst = $state();</script>\n<Child bind:this={inst} />\n",
+        "<script>import Foo from './Foo.svelte'; let { p } = $props();</script>\n<Foo.Bar />\n",
         |s| {
             matches!(
                 s,
-                UnsupportedSvelteRuntimeSurface::ComponentOrSnippet { .. }
+                UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
+                    construct: "component",
+                    ..
+                }
+            )
+        },
+    );
+}
+
+// ── Component-host binding surfaces: the component invocation host is now SUPPORTED — a
+//    component `bind:this` / `bind:prop` / function-pair emits the official
+//    `$.bind_this` / getter-setter-pair shapes. Each test is DISCRIMINATING (asserts the
+//    exact emitted shape + the absence of the DOM `$.bind_*` helper). ──
+
+#[test]
+fn component_bind_this_emits_bind_this_wrapper() {
+    // `<Child bind:this={inst}/>` — the COMPONENT host emits `$.bind_this(Child(...), set,
+    // get)`, NOT a DOM `$.bind_*` helper.
+    let js = emit_result(
+        "<script>import Child from './Child.svelte'; let inst = $state();</script>\n<Child bind:this={inst} />\n",
+    )
+    .expect("a component bind:this emits a module");
+    assert!(
+        js.contains("$.bind_this(Child("),
+        "missing the $.bind_this wrapper:\n{js}"
+    );
+    // NEGATIVE: a component bind:this is NOT a DOM element `$.bind_this(node)` on a cloned
+    // element, and never a `$.bind_value`-style DOM bind.
+    assert!(
+        !js.contains("$.bind_value"),
+        "a component bind:this must not emit a DOM value bind:\n{js}"
+    );
+}
+
+#[test]
+fn component_bind_prop_emits_getter_setter_pair() {
+    // `<Child bind:value={val}/>` — the COMPONENT host emits a getter/setter PAIR on the
+    // props object (`get value()/set value($$value)` with the `$.set(val, $$value, true)`
+    // should-proxy axis), NOT a `$.bind_*` helper.
+    let js = emit_result(
+        "<script>import Child from './Child.svelte'; let val = $state('');</script>\n<Child bind:value={val} />\n",
+    )
+    .expect("a component bind:prop emits a module");
+    assert!(
+        js.contains("get value() {return $.get(val);}")
+            && js.contains("set value($$value) {$.set(val, $$value, true);}"),
+        "missing the component bind:prop getter/setter pair:\n{js}"
+    );
+    // NEGATIVE: NOT a DOM `$.bind_value` helper.
+    assert!(
+        !js.contains("$.bind_value"),
+        "a component bind:prop must not emit a DOM value bind:\n{js}"
+    );
+}
+
+#[test]
+fn component_function_binding_emits_bind_get_set_locals() {
+    // `<Child bind:x={get, set}/>` — a component FUNCTION binding hoists `var bind_get` /
+    // `var bind_set` locals and the prop getter/setter call them.
+    let js = emit_result(
+        "<script>import Child from './Child.svelte'; let v = $state(0);</script>\n<Child bind:x={() => v, (nv) => v = nv} />\n",
+    )
+    .expect("a component function binding emits a module");
+    assert!(
+        js.contains("var bind_get = () => $.get(v);")
+            && js.contains("var bind_set = (nv) => $.set(v, nv, true);"),
+        "missing the function-pair bind locals:\n{js}"
+    );
+    assert!(
+        js.contains("get x() {return bind_get();}")
+            && js.contains("set x($$value) {bind_set($$value);}"),
+        "missing the prop getter/setter calling the bind locals:\n{js}"
+    );
+}
+
+#[test]
+fn component_multi_function_binding_emits_distinct_bind_locals() {
+    // TWO function-pair binds on ONE component allocate UNIQUE locals: the first pair is
+    // `bind_get`/`bind_set`, the SECOND `bind_get_1`/`bind_set_1` (the component-function
+    // name uniquing). A shared pair would make BOTH props call the LAST getter/setter — the
+    // codegen-correctness bug this guards against.
+    let js = emit_result(
+        "<script>import Child from './Child.svelte'; let v = $state(0); let w = $state(1);</script>\n<Child bind:value={() => v, (nv) => v = nv} bind:other={() => w, (nw) => w = nw} />\n",
+    )
+    .expect("two component function bindings emit a module");
+    // The first pair drives `value`.
+    assert!(
+        js.contains("var bind_get = () => $.get(v);")
+            && js.contains("get value() {return bind_get();}"),
+        "missing the first function-pair locals wired to `value`:\n{js}"
+    );
+    // The SECOND pair drives `other` with the SUFFIXED `_1` names.
+    assert!(
+        js.contains("var bind_get_1 = () => $.get(w);")
+            && js.contains("var bind_set_1 = (nw) => $.set(w, nw, true);")
+            && js.contains("get other() {return bind_get_1();}")
+            && js.contains("set other($$value) {bind_set_1($$value);}"),
+        "missing the suffixed second function-pair locals wired to `other`:\n{js}"
+    );
+    // NEGATIVE: the two binds must NOT alias the same local — `other`'s setter is the
+    // suffixed `bind_set_1`, NEVER the first pair's `bind_set`.
+    assert!(
+        !js.contains("set other($$value) {bind_set($$value);}"),
+        "the two function binds must not alias the same `bind_set` local:\n{js}"
+    );
+}
+
+#[test]
+fn component_function_binding_renames_past_user_bind_get_collision() {
+    // A USER local named `bind_get` must NOT collide with the generated function-pair bind
+    // local. The names are minted through the shared scope-aware allocator (seeded with every
+    // user binding), so the getter local renames to `bind_get_1` — emitting VALID JS with a
+    // SINGLE `bind_get` declaration. A bare counter (the pre-fix path) mints `bind_get`
+    // unconditionally, producing `let bind_get …; var bind_get …` = invalid duplicate-binding
+    // JS for a valid component. `bind_set` is free, so it keeps its stem (the allocator reserves
+    // each stem INDEPENDENTLY, matching official `scope.generate`).
+    let js = emit_result(
+        "<script>import Child from './Child.svelte'; let bind_get = $state(0); let v = $state(1);</script>\n<Child bind:x={() => v, (nv) => v = nv} />\n",
+    )
+    .expect("a component function binding with a colliding user local emits a module");
+    // The user `bind_get` local is declared (a `let`, distinct from the generated `var`s).
+    assert!(
+        js.contains("let bind_get = "),
+        "missing the user `bind_get` local declaration:\n{js}"
+    );
+    // The generated getter local RENAMES past the user `bind_get` → `bind_get_1`.
+    assert!(
+        js.contains("var bind_get_1 = () => $.get(v);")
+            && js.contains("get x() {return bind_get_1();}"),
+        "the generated getter local must rename to `bind_get_1`:\n{js}"
+    );
+    // The setter local keeps the free `bind_set` stem.
+    assert!(
+        js.contains("var bind_set = (nv) => $.set(v, nv, true);")
+            && js.contains("set x($$value) {bind_set($$value);}"),
+        "the setter local must keep the free `bind_set` stem:\n{js}"
+    );
+    // DISCRIMINATOR: there must be NO generated `var bind_get` (that would duplicate the user
+    // `let bind_get` → invalid JS). The generated local is the suffixed `var bind_get_1`.
+    assert!(
+        !js.contains("var bind_get = "),
+        "the generated bind local must not duplicate the user `bind_get` declaration:\n{js}"
+    );
+}
+
+// ── Component unit coverage: the `.svelte` default-import subset, the component-family
+//    specials, and the COMPONENT-vs-ELEMENT `let:` split. ──
+
+#[test]
+fn svelte_default_import_admitted_other_import_forms_refuse() {
+    // The component-import subset: a DEFAULT import of a `.svelte` module is ADMITTED
+    // (hoisted to module scope as the component callee). Every OTHER import form stays the
+    // broad static-import prelude (not yet supported) and fails closed at the script-import
+    // gate.
+    let ok = emit_result(
+        "<script>import Child from './Child.svelte'; let { p } = $props();</script>\n<Child />\n{p}\n",
+    )
+    .expect("a default .svelte import is admitted");
+    assert!(
+        ok.contains("import Child from './Child.svelte';"),
+        "the default .svelte import must be hoisted to module scope:\n{ok}"
+    );
+    // NEGATIVE: named / namespace / side-effect / default-NON-`.svelte` imports refuse.
+    for (label, src) in [
+        ("named", "import { Child } from './Child.svelte';"),
+        ("namespace", "import * as C from './Child.svelte';"),
+        ("side-effect", "import './setup.js';"),
+        ("default-non-svelte", "import helper from './helper.js';"),
+        (
+            "mixed-default-named",
+            "import Child, { x } from './Child.svelte';",
+        ),
+    ] {
+        let src = format!("<script>{src} let __r = $state(0);</script>\n<p>{{__r}}</p>\n");
+        assert_fail_closed_labeled(label, &src, |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::ScriptImport {
+                    construct: "import",
+                    ..
+                }
+            )
+        });
+    }
+}
+
+#[test]
+fn svelte_component_special_emits_dollar_component() {
+    // `<svelte:component this={comp}>` (a DYNAMIC component) emits the 3-arg
+    // `$.component(node, () => $$props.comp, ($$anchor, $$component) => { $$component(...) })`.
+    let js = emit_result(
+        "<script>let { comp } = $props();</script>\n<svelte:component this={comp} label=\"hi\" />\n",
+    )
+    .expect("svelte:component emits a module");
+    assert!(
+        js.contains("$.component(node, () => $$props.comp, ($$anchor, $$component) =>"),
+        "missing the $.component(node, () => this, callback) shape:\n{js}"
+    );
+    assert!(
+        js.contains("$$component($$anchor, {label: 'hi'})"),
+        "missing the inner $$component call with the props:\n{js}"
+    );
+}
+
+#[test]
+fn svelte_component_special_with_imported_default_uses_bare_callee() {
+    // The DYNAMIC-COMPONENT-VALUE half of the 5f-a `.svelte`-default-import subset: a `.svelte`
+    // DEFAULT import (`import Child from './Child.svelte'`) consumed as the `<svelte:component
+    // this={Child}>` selector. The import is admitted to the prelude REGARDLESS of being used as a
+    // dynamic value (not a static `<Child/>` callee), and the `this` expression resolves the
+    // non-reactive `ComponentImport` binding to the BARE local — `$.component(node, () => Child,
+    // …)`, NEVER `$.get(Child)` / `() => $$props.Child`. The `$props()` rune forces runes mode (an
+    // import-only component is legacy mode, 5i).
+    let js = emit_result(
+        "<script>import Child from './Child.svelte'; let { label } = $props();</script>\n<svelte:component this={Child} {label} />\n",
+    )
+    .expect("svelte:component with an imported default emits a module");
+    // (a) The `.svelte` default import is ADMITTED to the module prelude.
+    assert!(
+        js.contains("import Child from './Child.svelte';"),
+        "missing the admitted `.svelte` default import in the prelude:\n{js}"
+    );
+    // (b) The imported local drives the dynamic component value as a BARE name.
+    assert!(
+        js.contains("$.component(node, () => Child, ($$anchor, $$component) =>"),
+        "missing the bare-import dynamic component value `() => Child`:\n{js}"
+    );
+    // NEGATIVE: the imported callee is a non-reactive value binding — never a `$.get` read and
+    // never routed through `$$props` (which is what a PROP-sourced `this={comp}` would emit).
+    assert!(
+        !js.contains("$.get(Child)"),
+        "the imported dynamic component value must be a bare name, not $.get:\n{js}"
+    );
+    assert!(
+        !js.contains("() => $$props.Child"),
+        "the imported dynamic component value must not route through $$props:\n{js}"
+    );
+    // CONTRAST: the threaded prop `label` DOES route through `$$props.label` — proving the
+    // rewriter discriminates the import binding (bare) from a reactive prop read (so the bare
+    // `Child` is the ComponentImport binding-kind decision, not an everything-emits-bare accident).
+    assert!(
+        js.contains("$$props.label"),
+        "the threaded prop must route through $$props (the binding-kind contrast):\n{js}"
+    );
+}
+
+#[test]
+fn svelte_self_special_emits_a_recursive_call() {
+    // `<svelte:self>` emits a recursive call through the component's COMPILE-NAME (the
+    // filename-derived `App` here), NOT a `$.component` (it is a static self-reference).
+    let js = emit_result(
+        "<script>let { depth } = $props();</script>\n{#if depth > 0}<svelte:self depth={depth - 1} />{/if}\n",
+    )
+    .expect("svelte:self emits a module");
+    // The fixture compiles under `App.svelte` (the test harness filename) → callee `App`.
+    assert!(
+        js.contains("App(node"),
+        "missing the recursive svelte:self call through the compile-name:\n{js}"
+    );
+    // NEGATIVE: svelte:self is a STATIC self-reference, NOT a dynamic `$.component`.
+    assert!(
+        !js.contains("$.component("),
+        "svelte:self must not route through $.component:\n{js}"
+    );
+}
+
+#[test]
+fn render_spread_argument_fails_closed_for_every_callee() {
+    // Official `svelte@5.56.3` HARD-ERRORS on a SPREAD argument in a `{@render …}` tag
+    // (`render_tag_invalid_spread_argument`: "cannot use spread arguments in {@render
+    // ...} tags"). Verter must FAIL CLOSED with the typed component/snippet refusal —
+    // never silently DROP the spread and emit a wrong-arity `$.snippet(node, () => row)`
+    // call. Covers a PROP callee, a LOCAL-`{#snippet}` callee, and a DYNAMIC (optional-
+    // call) callee: every callee shape over-accepted the spread before this fix.
+    for (label, src) in [
+        (
+            "prop_callee",
+            "<script>let { row, xs } = $props();</script>\n{@render row(...xs)}\n",
+        ),
+        (
+            "local_snippet_callee",
+            "<script>let { xs } = $props();</script>\n{#snippet row()}<span>x</span>{/snippet}\n{@render row(...xs)}\n",
+        ),
+        (
+            "dynamic_callee",
+            "<script>let { row, xs } = $props();</script>\n{@render row?.(...xs)}\n",
+        ),
+    ] {
+        assert_fail_closed_labeled(label, src, |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::ComponentOrSnippet { construct, .. }
+                    if *construct == "{@render} spread argument"
+            )
+        });
+    }
+}
+
+#[test]
+fn render_non_spread_argument_still_emits_a_snippet_call() {
+    // The spread refusal is NARROWLY scoped to a SPREAD argument: a NON-spread render
+    // arg (`{@render row(item)}`) must STILL emit the `$.snippet(node, callee, () => …)`
+    // call carrying its argument thunk, never fail closed.
+    let js = emit(
+        "<script>let { row, item } = $props();</script>\n{@render row(item)}\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.snippet("),
+        "a NON-spread render argument must still emit the $.snippet call:\n{js}"
+    );
+    // NEGATIVE: the argument thunk survives as the PRECISE `() => $$props.item` thunk —
+    // not merely an incidental `item` substring of the `$props()` destructure — proving the
+    // spread refusal did not collapse the non-spread arg path.
+    assert!(
+        js.contains("() => $$props.item"),
+        "the non-spread render argument thunk `() => $$props.item` must survive:\n{js}"
+    );
+}
+
+#[test]
+fn render_parenthesized_whole_call_spread_fails_closed() {
+    // The render-spread refusal is closed over OUTER author parentheses wrapping the WHOLE
+    // call: official `svelte@5.56.3` HARD-ERRORS on the spread
+    // (`render_tag_invalid_spread_argument`) no matter how many parens wrap the call, so a
+    // parenthesized whole call must FAIL CLOSED exactly like the bare form — never peel to a
+    // non-call node and silently DROP the spread into a wrong-arity `$.snippet(node, () =>
+    // row)` emit. Covers a single paren, nested parens, a parenthesized OPTIONAL call, and a
+    // parenthesized LOCAL-`{#snippet}` callee.
+    for (label, src) in [
+        (
+            "paren_whole_call",
+            "<script>let { row, xs } = $props();</script>\n{@render (row(...xs))}\n",
+        ),
+        (
+            "double_paren_whole_call",
+            "<script>let { row, xs } = $props();</script>\n{@render ((row(...xs)))}\n",
+        ),
+        (
+            "paren_optional_whole_call",
+            "<script>let { row, xs } = $props();</script>\n{@render (row?.(...xs))}\n",
+        ),
+        (
+            "paren_local_snippet",
+            "<script>let { xs } = $props();</script>\n{#snippet row()}<span>x</span>{/snippet}\n{@render (row(...xs))}\n",
+        ),
+    ] {
+        assert_fail_closed_labeled(label, src, |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::ComponentOrSnippet { construct, .. }
+                    if *construct == "{@render} spread argument"
+            )
+        });
+    }
+}
+
+#[test]
+fn render_array_internal_spread_argument_still_emits() {
+    // NARROWNESS CONTROL: an ARRAY-INTERNAL spread (`{@render row([...xs])}`) is a normal
+    // array-expression argument, NOT a call-argument spread — official ACCEPTS it. It must
+    // STILL emit the `$.snippet` call with the array spread PRESERVED in its argument thunk
+    // (`() => [...$$props.xs]`); peeling outer author parens for the whole-call-spread
+    // refusal must not over-refuse this accepted shape.
+    let js = emit(
+        "<script>let { row, xs } = $props();</script>\n{@render row([...xs])}\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.snippet("),
+        "an array-internal spread render arg must still emit the $.snippet call:\n{js}"
+    );
+    assert!(
+        js.contains("() => [...$$props.xs]"),
+        "the array-internal spread `() => [...$$props.xs]` must be preserved:\n{js}"
+    );
+}
+
+#[test]
+fn svelte_self_root_placement_fails_closed() {
+    // Official `svelte@5.56.3` HARD-ERRORS on a `<svelte:self>` with NO allowed enclosing
+    // context (`svelte_self_invalid_placement`: it may only exist inside {#if}/{#each}/
+    // {#snippet} blocks or slots passed to components). A ROOT `<svelte:self>` — bare OR
+    // `bind:this` — must FAIL CLOSED with the typed component/snippet refusal, never emit
+    // the recursive `App(node, {})` / `$.bind_this(App(node, {}), …)` self-call.
+    for (label, src) in [
+        (
+            "root",
+            "<script>let { depth } = $props();</script>\n<svelte:self />\n",
+        ),
+        (
+            "root_bind_this",
+            "<script>let { depth } = $props(); let x;</script>\n<svelte:self bind:this={x} />\n",
+        ),
+    ] {
+        assert_fail_closed_labeled(label, src, |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::ComponentOrSnippet { construct, .. }
+                    if *construct == "svelte:self at invalid placement"
+            )
+        });
+    }
+}
+
+#[test]
+fn svelte_self_inside_each_block_still_emits() {
+    // The placement gate refuses ONLY the no-valid-context case: a `<svelte:self>`
+    // validly placed inside an `{#each}` block (an allowed enclosing context, exercised
+    // alongside the existing `{#if}` positive control) must STILL emit the recursive
+    // self-call — the gate's valid-ancestor propagation must not over-reject a block body.
+    let js = emit(
+        "<script>let { items } = $props();</script>\n{#each items as item}<svelte:self />{/each}\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("App("),
+        "a svelte:self inside an {{#each}} block must still emit the recursive call:\n{js}"
+    );
+    // NEGATIVE: still a STATIC self-reference, never a dynamic `$.component`.
+    assert!(
+        !js.contains("$.component("),
+        "an in-block svelte:self must not route through $.component:\n{js}"
+    );
+}
+
+#[test]
+fn component_let_directive_emits_a_slot_prop_derived() {
+    // A COMPONENT `let:item` is the slot-prop surface: the default slot becomes a
+    // `$$slots.default` callback prepending `const item = $.derived(() => $$slotProps.item)`,
+    // and `children` becomes the `$.invalid_default_snippet` sentinel.
+    let js = emit_result(
+        "<script>import Child from './Child.svelte'; let { p } = $props();</script>\n<Child let:item>{item}</Child>\n",
+    )
+    .expect("a component let: emits a module");
+    assert!(
+        js.contains("const item = $.derived(() => $$slotProps.item)"),
+        "missing the let: slot-prop derived:\n{js}"
+    );
+    assert!(
+        js.contains("children: $.invalid_default_snippet"),
+        "missing the invalid_default_snippet sentinel:\n{js}"
+    );
+}
+
+#[test]
+fn element_let_directive_still_fails_closed() {
+    // A `let:` directive on a PLAIN ELEMENT is invalid Svelte (the slot-prop surface is
+    // COMPONENT/fragment-only). The element-context `let:` MUST stay fail-closed — the
+    // component `let:` path is the component-attr slot-prop classifier, NOT the element
+    // refusal.
+    assert_fail_closed(
+        "<script>let __r = $state(0);</script>\n<div let:item>{__r}</div>\n",
+        |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
+                    construct: "let-directive",
+                    ..
+                }
             )
         },
     );
 }
 
 #[test]
-fn component_bind_prop_fails_closed_until_component_hosts_are_supported() {
-    // `<Child bind:value={val}/>` — the COMPONENT host is refused. Official emits a
-    // getter/setter pair on the component props object (`get value()/set value($$v)`
-    // with `$.set(val, $$value, true)`), NOT a `$.bind_*` helper — a 5f shape.
+fn component_let_alias_directive_emits_an_aliased_slot_prop_derived() {
+    // An ALIASED component `let:item={value}` renames the slot prop `item` to the local
+    // `value`: the default-slot callback prepends `const value = $.derived(() =>
+    // $$slotProps.item)` (key `item`, local `value`), and a read `{value}` resolves to it.
+    let js = emit_result(
+        "<script>import Child from './Child.svelte'; let { p } = $props();</script>\n<Child let:item={value}>{value}</Child>\n",
+    )
+    .expect("an aliased component let: emits a module");
+    assert!(
+        js.contains("const value = $.derived(() => $$slotProps.item)"),
+        "missing the aliased let: slot-prop derived (local `value`, key `item`):\n{js}"
+    );
+    // NEGATIVE: the local is the ALIAS `value`, NOT the slot-prop key `item`.
+    assert!(
+        !js.contains("const item = $.derived(() => $$slotProps.item)"),
+        "the aliased let: must bind the local `value`, not the key `item`:\n{js}"
+    );
+}
+
+#[test]
+fn component_destructuring_let_alias_fails_closed() {
+    // A DESTRUCTURING `let:item={…}` alias is a broader decomposition this vertical does not
+    // model — it fails CLOSED, never a silent drop. The refusal keys on the parsed pattern
+    // NODE KIND (only a bare binding identifier is a one-name rename), NOT the collected-name
+    // COUNT: a count gate wrongly accepts SINGLE-name destructures (`{ a }` / `[a]` each
+    // collect exactly one name) and emits `const a = $.derived(() => $$slotProps.item)`,
+    // silently swallowing the destructure. Every object/array pattern — single- OR multi-name
+    // — must refuse.
+    for (label, src) in [
+        (
+            "multi-name object",
+            "<script>import Child from './Child.svelte'; let { p } = $props();</script>\n<Child let:item={{ a, b }}>x</Child>\n",
+        ),
+        (
+            "single-name object",
+            "<script>import Child from './Child.svelte'; let { p } = $props();</script>\n<Child let:item={{ a }}>x</Child>\n",
+        ),
+        (
+            "single-name array",
+            "<script>import Child from './Child.svelte'; let { p } = $props();</script>\n<Child let:item={[a]}>x</Child>\n",
+        ),
+    ] {
+        assert_fail_closed_labeled(label, src, |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
+                    construct: "let-directive",
+                    ..
+                }
+            )
+        });
+    }
+}
+
+#[test]
+fn component_class_directive_fails_closed() {
+    // A `class:` directive on a COMPONENT is invalid Svelte (a component is not a DOM host) —
+    // it fails CLOSED, NOT silently dropped (a silent no-op would emit `<Child class:foo={x}/>`
+    // as `Child($$anchor, {})`, dropping the directive).
     assert_fail_closed(
-        "<script>let val = $state('');</script>\n<Child bind:value={val} />\n",
+        "<script>import Child from './Child.svelte'; let x = $state(0);</script>\n<Child class:foo={x} />\n",
         |s| {
             matches!(
                 s,
-                UnsupportedSvelteRuntimeSurface::ComponentOrSnippet { .. }
+                UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
+                    construct: "directive",
+                    ..
+                }
             )
         },
     );
 }
 
 #[test]
-fn component_function_binding_fails_closed_until_component_hosts_are_supported() {
-    // `<Child bind:x={get, set}/>` — a component FUNCTION binding. The component host
-    // is refused (5f). RED if accepted.
+fn component_style_directive_fails_closed() {
+    // A `style:` directive on a COMPONENT is likewise invalid — fail CLOSED, never a silent
+    // drop (sibling to the `class:` / `use:` / `transition:` component-directive refusal).
     assert_fail_closed(
-        "<script>let v = $state(0);</script>\n<Child bind:x={() => v, (nv) => v = nv} />\n",
+        "<script>import Child from './Child.svelte'; let x = $state(0);</script>\n<Child style:color={x} />\n",
         |s| {
             matches!(
                 s,
-                UnsupportedSvelteRuntimeSurface::ComponentOrSnippet { .. }
+                UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
+                    construct: "directive",
+                    ..
+                }
             )
         },
+    );
+}
+
+#[test]
+fn component_bind_prop_unwritable_root_fails_closed() {
+    // A component `bind:value={p}` whose root resolves to a `$props()` PROP (a non-writable
+    // root under the shared 5c writable-root policy) fails CLOSED — the component bind setter
+    // is never synthesized from a non-writable root. The prop-bind refusal sweep scans only
+    // `IrNode::Element`, so this gate is what catches a COMPONENT bind to a prop.
+    assert_fail_closed(
+        "<script>import Child from './Child.svelte'; let { p } = $props();</script>\n<Child bind:value={p} />\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "value"),
     );
 }
 
@@ -7706,5 +8291,153 @@ fn mixed_class_directive_value_rejects_as_directive_invalid_value() {
             ClientCompileError::OfficialReject(rej) if rej.rule == CoreOfficialValidationRule::DirectiveInvalidValue
         ),
         "a mixed class-directive value must reject as DirectiveInvalidValue:\n{err:?}"
+    );
+}
+
+// ── Function-pair component-bind locals must rename past EVERY TEMPLATE-SCOPE binding
+//    that can share the emitted closure/body scope (not just top-level script locals). The
+//    `bind_get`/`bind_set` stems are minted through the shared scope-aware allocator seeded
+//    with the COMPLETE binding-name universe — `declared_roots` (script) ∪ the analysis
+//    binding table (template scopes) ∪ free template references — so a generated `var
+//    bind_get` never duplicates a lexical local (invalid JS) nor clobbers a callback param.
+//    Each pre-fix tree emitted a bare `var bind_get` colliding with the template binding. ──
+
+#[test]
+fn component_function_bind_renames_past_slot_let_local_collision() {
+    // A `<Child let:bind_get>` slot prop becomes `const bind_get = $.derived(() =>
+    // $$slotProps.bind_get)` AT THE TOP of the default-slot callback; a function-pair bind on
+    // a component NESTED in that slot (`<Grand bind:x={get, set}>`) emits `var bind_get` in
+    // the SAME callback scope. A lexical `const` + a `var` of the same name in one scope is
+    // INVALID JS — so the generated getter must rename to `bind_get_1`. The slot-let local has
+    // NO free-reference row (nothing reads it), so only the binding-table seed catches it.
+    let js = emit_result(
+        "<script>import Child from './Child.svelte'; import Grand from './Grand.svelte'; let v = $state(0);</script>\n<Child let:bind_get><Grand bind:x={() => v, (nv) => v = nv} /></Child>\n",
+    )
+    .expect("a slot let: with a nested function-pair bind emits a module");
+    // The slot-let derived (the user binding) is preserved unchanged.
+    assert!(
+        js.contains("const bind_get = $.derived(() => $$slotProps.bind_get)"),
+        "the slot-let derived local must be preserved:\n{js}"
+    );
+    // The generated getter RENAMES past the slot-let local → `bind_get_1`; the free `bind_set`
+    // keeps its stem.
+    assert!(
+        js.contains("var bind_get_1 = () => $.get(v)")
+            && js.contains("get x() {return bind_get_1();}")
+            && js.contains("var bind_set = (nv) => $.set(v, nv, true)"),
+        "the generated getter must rename to `bind_get_1`, the setter keep `bind_set`:\n{js}"
+    );
+    // DISCRIMINATOR: there must be NO generated `var bind_get` (that would duplicate the
+    // lexical slot-let `const bind_get` → invalid JS). `var bind_get_1 = ` does not match.
+    assert!(
+        !js.contains("var bind_get = "),
+        "the generated bind local must not duplicate the slot-let declaration:\n{js}"
+    );
+}
+
+#[test]
+fn component_function_bind_renames_past_const_decl_tag_local_collision() {
+    // A `{const bind_get = v}` region-root declaration tag emits a lexical `const bind_get =
+    // $.get(v)` in the component-fn body; a function-pair bind in the same scope emits `var
+    // bind_get` → a `const` + `var` duplicate (invalid JS). The decl-tag local must reserve the
+    // stem so the generated getter renames to `bind_get_1`.
+    let js = emit_result(
+        "<script>import Child from './Child.svelte'; let v = $state(0);</script>\n{const bind_get = v}<Child bind:x={() => v, (nv) => v = nv} />\n",
+    )
+    .expect("a {const} decl tag with a function-pair bind emits a module");
+    assert!(
+        js.contains("const bind_get = $.get(v)"),
+        "the {{const}} decl-tag local must be preserved:\n{js}"
+    );
+    assert!(
+        js.contains("var bind_get_1 = () => $.get(v)")
+            && js.contains("get x() {return bind_get_1();}"),
+        "the generated getter must rename to `bind_get_1`:\n{js}"
+    );
+    assert!(
+        !js.contains("var bind_get = "),
+        "the generated bind local must not duplicate the {{const}} decl-tag declaration:\n{js}"
+    );
+}
+
+#[test]
+fn component_function_bind_renames_past_let_decl_tag_local_collision() {
+    // The `{let bind_get = v}` declaration-tag variant of the decl-tag collision: a lexical
+    // `let bind_get = $.get(v)` + a function-pair `var bind_get` is the same invalid-JS
+    // duplicate, so the generated getter renames to `bind_get_1`.
+    let js = emit_result(
+        "<script>import Child from './Child.svelte'; let v = $state(0);</script>\n{let bind_get = v}<Child bind:x={() => v, (nv) => v = nv} />\n",
+    )
+    .expect("a {let} decl tag with a function-pair bind emits a module");
+    assert!(
+        js.contains("let bind_get = $.get(v)"),
+        "the {{let}} decl-tag local must be preserved:\n{js}"
+    );
+    assert!(
+        js.contains("var bind_get_1 = () => $.get(v)")
+            && js.contains("get x() {return bind_get_1();}"),
+        "the generated getter must rename to `bind_get_1`:\n{js}"
+    );
+    assert!(
+        !js.contains("var bind_get = "),
+        "the generated bind local must not duplicate the {{let}} decl-tag declaration:\n{js}"
+    );
+}
+
+#[test]
+fn component_function_bind_renames_past_snippet_param_collision() {
+    // A `{#snippet s(bind_get)}` PARAMETER is the snippet arrow's first declared local
+    // (`($$anchor, bind_get = $.noop) => …`); a function-pair bind in the snippet body emits
+    // `var bind_get`, which CLOBBERS the param (the prop getter would call the reassigned var,
+    // not the snippet arg — a correctness bug official `scope.generate` avoids by renaming). The
+    // snippet is rendered (`{@render s(v)}`) so the body reaches emit. The generated getter must
+    // rename to `bind_get_1`, leaving the param intact.
+    let js = emit_result(
+        "<script>import Child from './Child.svelte'; let v = $state(0);</script>\n{#snippet s(bind_get)}<Child bind:x={() => v, (nv) => v = nv} />{/snippet}\n{@render s(v)}\n",
+    )
+    .expect("a snippet with a param-colliding function-pair bind emits a module");
+    // The snippet param is preserved as the arrow's first declared local.
+    assert!(
+        js.contains("($$anchor, bind_get = $.noop) =>"),
+        "the snippet param `bind_get` must be preserved:\n{js}"
+    );
+    assert!(
+        js.contains("var bind_get_1 = () => $.get(v)")
+            && js.contains("get x() {return bind_get_1();}"),
+        "the generated getter must rename to `bind_get_1`:\n{js}"
+    );
+    // DISCRIMINATOR: no `var bind_get` reassigning the snippet param.
+    assert!(
+        !js.contains("var bind_get = "),
+        "the generated bind local must not clobber the snippet param:\n{js}"
+    );
+}
+
+#[test]
+fn component_function_bind_renames_past_each_item_binding_collision() {
+    // COMPREHENSIVENESS (a binding kind BEYOND the named slot-let / decl-tag / snippet-param
+    // cases): an `{#each items as bind_get}` ITEM binding is the each callback's param
+    // (`($$anchor, bind_get) => …`); a function-pair bind in the each body emits `var bind_get`,
+    // clobbering the item param. Because the seed is the COMPLETE binding table — not a patch
+    // for the three named kinds — the each-item is reserved too, and the generated getter
+    // renames to `bind_get_1`. This proves the seed forecloses the WHOLE collision class.
+    let js = emit_result(
+        "<script>import Child from './Child.svelte'; let { items } = $props(); let v = $state(0);</script>\n{#each items as bind_get}<Child bind:x={() => v, (nv) => v = nv} />{/each}\n",
+    )
+    .expect("an each-item-colliding function-pair bind emits a module");
+    // The each-item param is preserved.
+    assert!(
+        js.contains("($$anchor, bind_get) =>"),
+        "the each-item param `bind_get` must be preserved:\n{js}"
+    );
+    assert!(
+        js.contains("var bind_get_1 = () => $.get(v)")
+            && js.contains("get x() {return bind_get_1();}"),
+        "the generated getter must rename to `bind_get_1`:\n{js}"
+    );
+    // DISCRIMINATOR: no `var bind_get` clobbering the each-item param.
+    assert!(
+        !js.contains("var bind_get = "),
+        "the generated bind local must not clobber the each-item binding:\n{js}"
     );
 }

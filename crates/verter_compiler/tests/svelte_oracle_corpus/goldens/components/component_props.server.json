@@ -1,0 +1,39 @@
+{
+  "slug": "components/component_props.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "./Child.svelte",
+      "kind": "default",
+      "names": [
+        "default:Child"
+      ]
+    },
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "component_props",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [],
+  "helperSet": [],
+  "helperCounts": {},
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

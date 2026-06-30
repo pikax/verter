@@ -1,0 +1,52 @@
+{
+  "slug": "components/multi_component_import.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "./Alpha.svelte",
+      "kind": "default",
+      "names": [
+        "default:Alpha"
+      ]
+    },
+    {
+      "source": "./Beta.svelte",
+      "kind": "default",
+      "names": [
+        "default:Beta"
+      ]
+    },
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "multi_component_import",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "escape"
+  ],
+  "helperSet": [
+    "escape"
+  ],
+  "helperCounts": {
+    "escape": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

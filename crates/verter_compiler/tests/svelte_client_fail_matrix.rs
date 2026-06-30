@@ -273,13 +273,8 @@ const FAIL_MATRIX: &[FailRow] = &[
         source: "<script>let refs = []; let c = $state(0);</script>\n<div bind:this={refs[0]}></div>\n<button onclick={() => c++}>{c}</button>\n",
         code: "svelte-runtime-unsupported-binding",
     },
-    FailRow {
-        // A component reference (a capitalized tag) is the component surface; no import is
-        // used (imports are demoted) so the component node is the surface under test.
-        name: "bind_this_component",
-        source: "<script>let c = $state(0);</script>\n<Child bind:this={c} />\n",
-        code: "svelte-runtime-unsupported-component",
-    },
+    // (`bind_this_component` removed — a component `bind:this` is the 5f-a surface and now
+    // emits `$.bind_this(Child(...), set, get)`.)
     // ── runtime-unsupported DEDICATED-helper binds (fail closed at the runtime router) ──
     // Each of these has a real IDE contract row whose OFFICIAL svelte@5.56.3 helper is a
     // DEDICATED helper (a generic `$.bind_property` form would emit RUNTIME-BROKEN output
@@ -620,13 +615,9 @@ const FAIL_MATRIX: &[FailRow] = &[
         source: "<script>let c = $state(0); c = 1;</script>\n<slot></slot>\n",
         code: "svelte-runtime-unsupported-element",
     },
-    FailRow {
-        // A common flow tag outside the allowlist (`<span>`) fails closed — the
-        // allowlist is finite, not "any identifier-safe tag".
-        name: "span_element",
-        source: "<script>let c = $state(0);</script>\n<span>{c}</span><button onclick={() => c++}>x</button>\n",
-        code: "svelte-runtime-unsupported-element",
-    },
+    // (`span_element` removed — `<span>` / `<ul>` / `<li>` were added to the element
+    // allowlist as the plain structural hosts the 5f-a component-slot / `{#snippet}`-body
+    // fixtures need, so a `<span>` no longer fails closed.)
     FailRow {
         name: "svg_root",
         source: "<script>let c = $state(0);</script>\n<svg onclick={() => c++}><circle r=\"5\" /></svg>\n",
@@ -732,21 +723,9 @@ const FAIL_MATRIX: &[FailRow] = &[
         code: "svelte-runtime-unsupported-magic-identifier",
     },
     // ── structure (component) ─────────────────────────────────────────────
-    FailRow {
-        // The control-flow blocks (`{#if}`/`{#each}`/`{#await}`/`{#key}`) are SUPPORTED
-        // (5e); a `{#snippet}` DECLARATION inside a block body is the 5f surface — it still
-        // fails closed (the block being supported does not make its body's snippet
-        // declaration supported).
-        name: "snippet_in_if_block",
-        source: "<script>let on = $state(true);</script>\n{#if on}{#snippet foo()}<p>x</p>{/snippet}{/if}\n",
-        code: "svelte-runtime-unsupported-component",
-    },
-    FailRow {
-        // A `{@render}` tag inside a (supported) `{#each}` body is the 5f surface — still refused.
-        name: "render_in_each_block",
-        source: "<script>let { items } = $props();</script>\n{#each items as x}{@render foo(x)}{/each}\n",
-        code: "svelte-runtime-unsupported-component",
-    },
+    // (`snippet_in_if_block` + `render_in_each_block` removed — a `{#snippet}` declaration
+    // and a `{@render}` tag inside a control-flow block body are the 5f-a surface and now
+    // emit a block-local snippet const / `$.snippet` render.)
     // ── Declaration-tag PLACEMENT (5e) — non-region-root fails closed ────────
     FailRow {
         // A `{@const}` NESTED inside an element (not a block-body region root). The official
@@ -795,13 +774,8 @@ const FAIL_MATRIX: &[FailRow] = &[
         source: "<script>let { items } = $props();</script>\n{#each items as item}<p>{item.x}</p>{/each}\n",
         code: "svelte-runtime-unsupported-complex-interpolation",
     },
-    FailRow {
-        // A component reference (a capitalized tag) is the component surface; no import is
-        // used (imports are demoted) so the component node is the surface.
-        name: "component",
-        source: "<script>let c = $state(0);</script>\n<Foo />\n",
-        code: "svelte-runtime-unsupported-component",
-    },
+    // (`component` removed — a component reference is the 5f-a surface and now emits a
+    // direct `Foo($$anchor, {})` call.)
     // ── Complex interpolations are fail-closed (complex-interpolation surface) ─
     FailRow {
         name: "interp_logical",
@@ -955,6 +929,70 @@ const FAIL_MATRIX: &[FailRow] = &[
         name: "paragraph_autoclose_h1_implicit",
         source: "<script>let c = $state(0);</script>\n<p><h1>x</h1>\n<button onclick={() => c++}>{c}</button>\n",
         code: "svelte-runtime-unsupported-paragraph-autoclose",
+    },
+    // ── `{@render …(…spread)}` — a SPREAD argument in a render tag ───────────
+    // Official `svelte@5.56.3` HARD-ERRORS (`render_tag_invalid_spread_argument`:
+    // "cannot use spread arguments in {@render ...} tags"). Verter must FAIL CLOSED
+    // rather than silently DROP the spread args and emit a wrong-arity `$.snippet`
+    // call. The refusal is NARROW: a non-spread render arg (`{@render row(item)}`)
+    // still emits the argument thunk. Covers a PROP, a LOCAL-snippet, and a DYNAMIC
+    // (optional-call) callee — every callee shape over-accepts the spread today.
+    FailRow {
+        name: "render_spread_prop_callee",
+        source: "<script>let { row, xs } = $props();</script>\n{@render row(...xs)}\n",
+        code: "svelte-runtime-unsupported-component",
+    },
+    FailRow {
+        name: "render_spread_local_snippet_callee",
+        source: "<script>let { xs } = $props();</script>\n{#snippet row()}<span>x</span>{/snippet}\n{@render row(...xs)}\n",
+        code: "svelte-runtime-unsupported-component",
+    },
+    FailRow {
+        name: "render_spread_dynamic_callee",
+        source: "<script>let { row, xs } = $props();</script>\n{@render row?.(...xs)}\n",
+        code: "svelte-runtime-unsupported-component",
+    },
+    // The same render-spread refusal is closed over OUTER author parens wrapping the WHOLE
+    // call: official HARD-ERRORS on the spread regardless of how many parens wrap the call,
+    // so a parenthesized (single, nested, or optional) whole call — and a parenthesized
+    // LOCAL-snippet callee — must fail closed identically to the bare form, never peel to a
+    // non-call node and silently drop the spread.
+    FailRow {
+        name: "render_spread_paren_whole_call",
+        source: "<script>let { row, xs } = $props();</script>\n{@render (row(...xs))}\n",
+        code: "svelte-runtime-unsupported-component",
+    },
+    FailRow {
+        name: "render_spread_double_paren_whole_call",
+        source: "<script>let { row, xs } = $props();</script>\n{@render ((row(...xs)))}\n",
+        code: "svelte-runtime-unsupported-component",
+    },
+    FailRow {
+        name: "render_spread_paren_optional_call",
+        source: "<script>let { row, xs } = $props();</script>\n{@render (row?.(...xs))}\n",
+        code: "svelte-runtime-unsupported-component",
+    },
+    FailRow {
+        name: "render_spread_paren_local_snippet",
+        source: "<script>let { xs } = $props();</script>\n{#snippet row()}<span>x</span>{/snippet}\n{@render (row(...xs))}\n",
+        code: "svelte-runtime-unsupported-component",
+    },
+    // ── `<svelte:self>` at INVALID (root) placement ─────────────────────────
+    // Official `svelte@5.56.3` HARD-ERRORS (`svelte_self_invalid_placement`:
+    // "<svelte:self> can only exist inside {#if}/{#each}/{#snippet} blocks or slots
+    // passed to components"). A ROOT `<svelte:self>` (bare or `bind:this`) has NO
+    // allowed enclosing context — Verter must FAIL CLOSED rather than emit the
+    // recursive `App(node, …)` / `$.bind_this(App(node, …), …)` self-call. Valid
+    // placement (inside a block / component slot) still emits the recursive call.
+    FailRow {
+        name: "svelte_self_root_placement",
+        source: "<script>let { depth } = $props();</script>\n<svelte:self />\n",
+        code: "svelte-runtime-unsupported-component",
+    },
+    FailRow {
+        name: "svelte_self_root_bind_this",
+        source: "<script>let { depth } = $props(); let x;</script>\n<svelte:self bind:this={x} />\n",
+        code: "svelte-runtime-unsupported-component",
     },
 ];
 
@@ -1836,11 +1874,31 @@ fn fail_matrix_covers_every_documented_sub_shape() {
     // `unsupported_correct_helper_rows_fail_closed_at_the_runtime_router` test covers
     // them) — NO fail-matrix row, which would fail at the element gate instead of the bind
     // gate. +8 rows.
+    // The render reject-parity + `<svelte:self>` placement rows add NINE fail-closed rows
+    // (net +9, 128 → 137), STRENGTHENING the matrix: SEVEN `{@render …(…spread)}` rows refuse
+    // a SPREAD argument the official compiler hard-errors
+    // (`render_tag_invalid_spread_argument`) instead of silently dropping it — the three
+    // direct forms (`render_spread_prop_callee` / `render_spread_local_snippet_callee` /
+    // `render_spread_dynamic_callee`) PLUS the four parenthesized-whole-call forms
+    // (`render_spread_paren_whole_call` / `render_spread_double_paren_whole_call` /
+    // `render_spread_paren_optional_call` / `render_spread_paren_local_snippet`), which peel
+    // ALL outer author parens before the spread scan so a parenthesized whole call fails
+    // closed identically to the bare form rather than peeling to a non-call node and dropping
+    // the spread. Two `<svelte:self>` ROOT-placement rows (`svelte_self_root_placement` /
+    // `svelte_self_root_bind_this`) refuse a self-reference with NO allowed enclosing context
+    // (the official `svelte_self_invalid_placement`) instead of emitting the recursive
+    // self-call — both formerly over-accepted (emitted a divergent Main).
     assert_eq!(
         FAIL_MATRIX.len(),
-        133,
-        "the fail matrix must enumerate all 133 documented unsupported-feature \
-         fail-closed sub-shapes. The declaration-tag PLACEMENT gate adds four rows: a \
+        137,
+        "the fail matrix must enumerate all 137 documented unsupported-feature \
+         fail-closed sub-shapes. The 5f-a component/snippet/slot vertical removed FIVE rows \
+         (now accepted-positive with topology/emit goldens): `component` (a `<Foo />` direct \
+         call), `bind_this_component` (a component `bind:this` → `$.bind_this`), \
+         `snippet_in_if_block` (a block-body `{{#snippet}}` const), `render_in_each_block` (a \
+         block-body `{{@render}}` → `$.snippet`), and `span_element` (`<span>`/`<ul>`/`<li>` \
+         joined the element allowlist as the plain slot/snippet structural hosts) — net −5 \
+         rows from the prior 133. The declaration-tag PLACEMENT gate adds four rows: a \
          `{{@const}}` / `{{const}}` / `{{let}}` NESTED inside an element \
          (`const_tag_nested_in_element` / `decl_const_nested_in_element` / \
          `decl_let_nested_in_element`) fails closed (`svelte-runtime-unsupported-block`) \

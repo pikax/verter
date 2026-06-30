@@ -175,12 +175,73 @@ pub struct ComponentIrNode {
     pub name: String,
     /// The full open-tag source span.
     pub span: Span,
-    /// The component's attributes (props / events / spreads / binds).
+    /// The component's attributes (props / events / spreads / binds / `let:`).
     pub attrs: Vec<AttrIr>,
-    /// The component's children (default-slot content) in source order.
+    /// The component's children (ALL of them) in source order — the structural mirror
+    /// plus the source for the slot partition in [`ComponentSlots`]. The slot-content
+    /// children ALSO appear in their slot region's roots (a default / named-slot
+    /// region), and the `{#snippet}` child defs in [`ComponentSlots::snippet_defs`].
     pub children: Vec<NodeId>,
     /// The lexical scope the component's children bind in.
     pub scope: ScopeId,
+    /// The component's slot decomposition — the default-slot region, named-slot
+    /// regions, and `{#snippet}`-child definitions (built at lowering).
+    pub slots: ComponentSlots,
+}
+
+/// The slot decomposition of a component / component-family special — the official
+/// `Component.js` child grouping (`{#snippet}` defs hoisted to local consts + props,
+/// `slot=`-bearing children into named slots, the rest into the default slot).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ComponentSlots {
+    /// The default-slot content region (everything not a `{#snippet}` def or a
+    /// `slot=`-bearing child), or `None` when the default slot is empty.
+    pub default: Option<TemplateScopeId>,
+    /// The `let:` slot-prop directives on the component itself — applied to the DEFAULT
+    /// slot (each lowers to `const <name> = $.derived(() => $$slotProps.<key>)` prepended
+    /// to the default-slot callback). Empty for a component with no `let:`.
+    pub default_lets: Vec<LetBinding>,
+    /// The named slots (a `<svelte:fragment slot="x">` or a `slot="x"`-bearing child),
+    /// in source order — each its own content region.
+    pub named: Vec<NamedSlot>,
+    /// The `{#snippet}` definitions declared DIRECTLY as component children — hoisted to
+    /// local consts and passed as shorthand props (`header` + `$$slots.header: true`).
+    pub snippet_defs: Vec<NodeId>,
+    /// Whether any `let:` slot-prop directive on the component OR a named-slot child used an
+    /// UNSUPPORTED form — a destructuring / non-identifier alias (`let:item={{a, b}}`) or a
+    /// non-expression value. The shorthand `let:item` and the simple-identifier alias
+    /// `let:item={alias}` decompose into [`default_lets`](Self::default_lets) /
+    /// [`NamedSlot::lets`]; any other form sets this flag so the (fallible) component
+    /// projection fails CLOSED, never silently dropping the binding — the let decomposition
+    /// itself is infallible at lowering, so it carries this fact to the projection gate.
+    pub has_unsupported_let: bool,
+}
+
+/// One `let:` slot-prop directive on a component — the local binding name and the
+/// `$$slotProps` key it derives from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LetBinding {
+    /// The introduced local binding name — `item` for the shorthand `let:item`, or the
+    /// alias `value` for `let:item={value}`.
+    pub name: String,
+    /// The `$$slotProps` key the local derives from — `item` for BOTH `let:item` (where
+    /// `key == name`) and the aliased `let:item={value}` (where `key` is `item` and `name`
+    /// is the alias `value`). Each lowers to `const <name> = $.derived(() =>
+    /// $$slotProps.<key>)`.
+    pub key: String,
+}
+
+/// A named slot on a component — the slot name and its content region.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedSlot {
+    /// The slot name (`header` in `slot="header"`).
+    pub name: String,
+    /// The slot-content region.
+    pub region: TemplateScopeId,
+    /// The named slot's OWN `let:` slot-prop bindings (shorthand `let:item` or aliased
+    /// `let:item={alias}`), carried at PLAN time so the slot-callback emitter consumes the
+    /// planned fact directly and never rescans the IR / binding table for them.
+    pub lets: Vec<LetBinding>,
 }
 
 /// A `<svelte:*>` special-element node.
@@ -204,6 +265,11 @@ pub struct SpecialElementIr {
     pub children: Vec<NodeId>,
     /// The lexical scope the special element's children bind in.
     pub scope: ScopeId,
+    /// The slot decomposition — used by the component-family specials
+    /// (`<svelte:component>` / `<svelte:self>` / `<svelte:fragment>`); empty (the
+    /// `Default`) for the host / renderable specials (the `<svelte:window|body|document|
+    /// head|element|boundary>` hosts, not yet supported).
+    pub slots: ComponentSlots,
 }
 
 /// The closed family of `<svelte:*>` special-element kinds the runtime IR
@@ -756,6 +822,12 @@ pub enum TagIr {
         callee: RenderCallee,
         /// The call arguments.
         args: Vec<ExprId>,
+        /// `Some(span)` when the render call carries a SPREAD argument
+        /// (`{@render row(...xs)}`) — official `svelte@5.56.3` HARD-ERRORS on it
+        /// (`render_tag_invalid_spread_argument`), so the client-surface gate fails
+        /// closed at this span rather than silently dropping the spread. `None` for a
+        /// spread-free render call (the normal static/dynamic snippet-call surface).
+        spread_arg_span: Option<Span>,
     },
     /// `{@html expr}`.
     Html {

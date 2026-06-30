@@ -351,6 +351,18 @@ pub(super) fn is_non_rendering_node(node: &IrNode) -> bool {
 /// root.
 fn is_static_html_root(node: &IrNode) -> bool {
     match node {
+        // The component-FAMILY specials (`<svelte:component>` / `<svelte:self>` /
+        // `<svelte:fragment>`) are COMPONENT invocations, NOT static-HTML roots — a
+        // sole-root one is a `$.comment()`-anchored `$.component(node, …)` / recursive call
+        // (like a dynamic `{@render}`), never a `<!>` `from_html` clone.
+        IrNode::Special(s)
+            if matches!(
+                s.kind,
+                SpecialKind::Component | SpecialKind::SelfRef | SpecialKind::Fragment
+            ) =>
+        {
+            false
+        }
         IrNode::Special(_) => !is_non_body_special(node),
         IrNode::Element(_) | IrNode::Component(_) | IrNode::Comment { .. } => true,
         // HTML-significance uses the ASCII `is_html_ws` set, NOT `str::trim`
@@ -850,26 +862,32 @@ fn collect_node_slots(
                 kind: DynamicSlotKind::Block,
             });
         }
-        IrNode::Component(c) => {
-            // A component's dynamic props / binds / spreads are part of the shared
-            // SSR dynamic surface — the server renders them just as it does an
-            // intrinsic element's dynamic attributes. Collect them, then recurse.
-            collect_attr_slots(scope, node_id, &c.attrs, slots);
-            for &child in &c.children {
-                collect_node_slots(ir, scope, child, slots);
-            }
-        }
+        // A component-family node (a `<Foo>` component, `<svelte:component>` /
+        // `<svelte:self>` / `<svelte:fragment>`): its OWN dynamic props / binds / spreads
+        // are part of the shared SSR dynamic surface (`Attribute` / `Bind` / `Spread`
+        // slots, which carry NO client DOM path), so collect them. But its SLOT-content
+        // children live in their OWN slot regions (collected when `plan_static_templates`
+        // iterates those scopes) — folding `c.children` here would mis-attribute the slot
+        // content's DOM-reachability slots (`Text` / `Block`) to the PARENT region (a slot
+        // with no client path in that region), so the children are NOT recursed.
+        IrNode::Component(c) => collect_attr_slots(scope, node_id, &c.attrs, slots),
         IrNode::Special(s) => {
-            // A special element's OWN dynamic attributes / binds (`<svelte:window
-            // bind:innerWidth={w}>`, `<svelte:element this={tag}>`) are part of the
-            // shared dynamic surface — collect them.
+            // A component-family special is a component invocation: collect its own attr
+            // slots, but its slot content rides its slot regions (no child recursion).
+            if matches!(
+                s.kind,
+                SpecialKind::Component | SpecialKind::SelfRef | SpecialKind::Fragment
+            ) {
+                collect_attr_slots(scope, node_id, &s.attrs, slots);
+                return;
+            }
+            // A host / renderable special's OWN dynamic attributes / binds (`<svelte:window
+            // bind:innerWidth={w}>`, `<svelte:element this={tag}>`) are part of the shared
+            // SSR dynamic surface — collect them.
             collect_attr_slots(scope, node_id, &s.attrs, slots);
-            // A NON-BODY special (`<svelte:head>` / window / …) renders its CHILD
-            // content in its OWN region (the special-element region-lowering layer
-            // plans those region-local slots), so do NOT fold its children into the
-            // body slot list (a head `<title>{x}</title>` interpolation is a
-            // head-region slot, not a body-DOM slot). A renderable special
-            // (`<svelte:element>` / boundary) DOES host body children, so recurse.
+            // A NON-BODY special (`<svelte:head>` / window / …) renders its CHILD content
+            // in its OWN region, so do NOT fold its children into the body slot list. A
+            // renderable special (`<svelte:element>` / boundary) DOES host body children.
             if !is_non_body_special(ir.node(node_id)) {
                 for &child in &s.children {
                     collect_node_slots(ir, scope, child, slots);
@@ -1172,6 +1190,25 @@ fn collect_template_scopes(
     }
 }
 
+/// Collect a component's slot regions (default + named) + its `{#snippet}`-def body
+/// regions as template scopes (so each contributes its `from_html` / `text` / `comment`
+/// factory to the static-template plan + the topology helper trace).
+fn collect_component_slot_template_scopes(
+    ir: &SvelteRuntimeIr,
+    slots: &crate::svelte::runtime::ir::ComponentSlots,
+    out: &mut Vec<crate::svelte::runtime::ir::TemplateScopeId>,
+) {
+    for &snippet in &slots.snippet_defs {
+        collect_node_template_scopes(ir, snippet, out);
+    }
+    if let Some(default) = slots.default {
+        collect_template_scopes(ir, default, out);
+    }
+    for named in &slots.named {
+        collect_template_scopes(ir, named.region, out);
+    }
+}
+
 /// Collect the nested template scopes a node introduces (block bodies / branches).
 fn collect_node_template_scopes(
     ir: &SvelteRuntimeIr,
@@ -1185,16 +1222,11 @@ fn collect_node_template_scopes(
                 collect_node_template_scopes(ir, child, out);
             }
         }
-        IrNode::Component(c) => {
-            for &child in &c.children {
-                collect_node_template_scopes(ir, child, out);
-            }
-        }
-        IrNode::Special(s) => {
-            for &child in &s.children {
-                collect_node_template_scopes(ir, child, out);
-            }
-        }
+        // A component-family node's template regions are its SLOT regions (default +
+        // named) + its `{#snippet}`-def body regions — NOT its raw `children` (the slot
+        // content lives in those regions). Mirrors the emit-side `collect_child_regions`.
+        IrNode::Component(c) => collect_component_slot_template_scopes(ir, &c.slots, out),
+        IrNode::Special(s) => collect_component_slot_template_scopes(ir, &s.slots, out),
         IrNode::Block(block) => match block {
             BlockIr::If { branches } => {
                 for b in branches {
