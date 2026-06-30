@@ -713,10 +713,14 @@ pub enum PoolSpawn {
     LazyOnFirstUse,
 }
 
-/// How many worker threads a host-owned pool resolves to at spawn time.
+/// How many worker threads a host-owned pool resolves to.
 ///
-/// Resolution happens once, when the pool actually spawns (eagerly at
-/// construction or lazily on first demand, per [`PoolSpawn`]).
+/// The size resolves once, eagerly at host construction, in BOTH spawn modes:
+/// [`resolve`](Self::resolve) (the `available_parallelism()` call) runs up
+/// front and the resolved count is handed to the pool regardless of
+/// [`PoolSpawn`]. Under [`PoolSpawn::LazyOnFirstUse`] that count is passed to
+/// the lazy pool constructor; only the OS-thread spawn itself is deferred —
+/// never the size resolution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PoolSize {
     /// [`std::thread::available_parallelism`] (final-fallback `1` when the
