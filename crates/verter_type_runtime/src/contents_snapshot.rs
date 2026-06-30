@@ -110,8 +110,8 @@ pub fn tsserver_rename_target_paths(response: &serde_json::Value) -> HashSet<Str
 /// Each URI is converted to a canonical filesystem path exactly as
 /// `parse_rename_edit` / `parse_text_edit_to_code_edit` key their content lookup.
 ///
-/// Used for the LSP-shape responses (tgo rename's top-level workspace edit and
-/// the workspace edit nested under a tgo code action's `edit`).
+/// Used for the LSP-shape responses (tsgo rename's top-level workspace edit and
+/// the workspace edit nested under a tsgo code action's `edit`).
 pub fn lsp_workspace_edit_target_paths(workspace_edit: &serde_json::Value) -> HashSet<String> {
     let mut paths = HashSet::new();
     if let Some(changes) = workspace_edit.get("changes").and_then(|v| v.as_object()) {

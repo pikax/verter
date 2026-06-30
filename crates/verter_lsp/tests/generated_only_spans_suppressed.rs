@@ -110,7 +110,6 @@ fn span_subject_kind_is_derived_from_role_structurally() {
     for role in [
         SnapshotRole::CarrierIde,
         SnapshotRole::CarrierApi,
-        SnapshotRole::CarrierBatch,
         SnapshotRole::Shadow,
     ] {
         assert_eq!(

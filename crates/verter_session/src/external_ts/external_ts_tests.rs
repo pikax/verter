@@ -596,17 +596,14 @@ fn in_memory_carrier_registry_round_trips_artifact() {
 }
 
 #[test]
-fn carrier_role_has_provisional_batch_variant() {
-    // CarrierBatch is present as a provisional variant alongside the four
-    // existing roles (its keep-or-merge decision is downstream).
+fn carrier_role_variants_are_distinct() {
+    // The carrier roles are 1:1 distinct (CarrierIde / CarrierApi / Shadow / Real).
     let roles = [
         CarrierRole::CarrierIde,
         CarrierRole::CarrierApi,
-        CarrierRole::CarrierBatch,
         CarrierRole::Shadow,
         CarrierRole::Real,
     ];
-    // All five are distinct.
     for (i, a) in roles.iter().enumerate() {
         for (j, b) in roles.iter().enumerate() {
             assert_eq!(i == j, a == b, "role identity must be 1:1");

@@ -92,9 +92,9 @@ impl Drop for ForcedTraceEnv {
 // not a real scalar boundary, so an EDIT placed there cannot be proven and must be DROPPED.
 // `'😀'` occupies 0-based UTF-16 cols 9 (start) and 10 (the trailing surrogate half) on this line:
 // `l e t   x   =   '` = cols 0..=8, `😀` = cols 9,10, closing `'` = col 11, `;` = col 12.
-// tgo positions are 0-based.
+// tsgo positions are 0-based.
 #[test]
-fn tgo_checked_drops_mid_surrogate_column() {
+fn tsgo_checked_drops_mid_surrogate_column() {
     let content = "let x = '😀';";
     assert_eq!(
         position_to_offset_checked(content, 0, 10),
@@ -104,7 +104,7 @@ fn tgo_checked_drops_mid_surrogate_column() {
 }
 
 #[test]
-fn tgo_checked_accepts_position_after_astral() {
+fn tsgo_checked_accepts_position_after_astral() {
     let content = "let x = '😀';";
     // Col 11 is the closing quote, immediately AFTER the emoji.
     let off = position_to_offset_checked(content, 0, 11)
@@ -115,7 +115,7 @@ fn tgo_checked_accepts_position_after_astral() {
 }
 
 #[test]
-fn tgo_checked_accepts_eol_insertion_on_astral_line() {
+fn tsgo_checked_accepts_eol_insertion_on_astral_line() {
     let content = "let x = '😀';";
     // EOL insertion: 0-based col == line UTF-16 length (13).
     let off = position_to_offset_checked(content, 0, 13)
@@ -123,11 +123,11 @@ fn tgo_checked_accepts_eol_insertion_on_astral_line() {
     assert_eq!(off as usize, content.len());
 }
 
-/// The tgo `initialize` client capabilities must advertise the diagnostic
+/// The tsgo `initialize` client capabilities must advertise the diagnostic
 /// `tagSupport` on BOTH the push (`publishDiagnostics`) and pull (`diagnostic`)
 /// channels with `valueSet [1, 2]`. An LSP server only attaches `DiagnosticTag`s
 /// (1 = Unnecessary fade, 2 = Deprecated strikethrough) when the client declares
-/// support; with empty capabilities tgo silently drops the tags.
+/// support; with empty capabilities tsgo silently drops the tags.
 ///
 /// Note: only the PUSH-channel `publishDiagnostics.tagSupport` is spec-defined; the
 /// PULL-channel `diagnostic.tagSupport` is a NON-SPEC field (LSP 3.17's
@@ -153,11 +153,11 @@ fn client_capabilities_advertise_diagnostic_tag_support() {
     );
 }
 
-/// The tgo `initialize` client capabilities must advertise
+/// The tsgo `initialize` client capabilities must advertise
 /// `publishDiagnostics.relatedInformation: true` (the spec-defined gate for the
 /// secondary "see declaration here" spans). An LSP server only attaches
 /// `Diagnostic.relatedInformation` when the client declares support; with it
-/// absent tgo silently strips the related spans `parse_lsp_diagnostic` reads, so
+/// absent tsgo silently strips the related spans `parse_lsp_diagnostic` reads, so
 /// the `.vue` `<script>` block loses the clickable related links a `.ts` file has.
 ///
 /// The pull-channel `diagnostic.relatedInformation` is a NON-SPEC field (LSP
@@ -174,8 +174,8 @@ fn client_capabilities_advertise_diagnostic_related_information() {
     assert_eq!(
         td["publishDiagnostics"]["relatedInformation"],
         serde_json::json!(true),
-        "publishDiagnostics.relatedInformation must be advertised so tgo includes \
-         the related spans (without it tgo strips them)"
+        "publishDiagnostics.relatedInformation must be advertised so tsgo includes \
+         the related spans (without it tsgo strips them)"
     );
     assert_eq!(
         td["diagnostic"]["relatedInformation"],
@@ -184,15 +184,15 @@ fn client_capabilities_advertise_diagnostic_related_information() {
     );
 }
 
-/// The tgo `initialize` client capabilities must advertise
+/// The tsgo `initialize` client capabilities must advertise
 /// `textDocument.completion.completionItem.resolveSupport` listing EXACTLY the
-/// properties tgo's `completionItem/resolve` handlers fold back.
+/// properties tsgo's `completionItem/resolve` handlers fold back.
 ///
-/// tgo consumes the resolve round-trip at two sites — `get_completion_details`
+/// tsgo consumes the resolve round-trip at two sites — `get_completion_details`
 /// folds back `detail` + `documentation`; `resolve_completion` folds back
 /// `additionalTextEdits` (the auto-import edits) plus the refined `labelDetails`.
 /// Per the LSP spec, a server only computes a resolve property lazily when the
-/// client lists it in `resolveSupport.properties`; with empty capabilities tgo
+/// client lists it in `resolveSupport.properties`; with empty capabilities tsgo
 /// silently drops `additionalTextEdits`, so completion-driven auto-import never
 /// applies its import edit. `command` is NOT a standard resolve property and is
 /// NOT advertised here (resolve_completion still folds it opportunistically).
@@ -222,13 +222,13 @@ fn client_capabilities_advertise_completion_item_resolve_support() {
     let props: std::collections::BTreeSet<&str> =
         properties.iter().filter_map(|p| p.as_str()).collect();
 
-    // EXACTLY the STANDARD resolve properties tgo's resolve handlers fold back —
+    // EXACTLY the STANDARD resolve properties tsgo's resolve handlers fold back —
     // no more. `documentation` + `detail` from get_completion_details;
     // `additionalTextEdits` from resolve_completion (auto-import); `labelDetails`
     // from resolve_completion's enrichment (folded onto the item by the LSP
     // layer). `command` is deliberately EXCLUDED — it is not a standard resolve
     // property, so we never claim resolve-support for it (resolve_completion still
-    // folds it opportunistically). Advertising a property tgo does not need would
+    // folds it opportunistically). Advertising a property tsgo does not need would
     // invite the server to compute work the client discards.
     let expected: std::collections::BTreeSet<&str> = [
         "documentation",
@@ -250,22 +250,22 @@ fn client_capabilities_advertise_completion_item_resolve_support() {
         "must NOT advertise `command` resolve-support — it is not a standard \
          resolve property (it is folded opportunistically, never claimed)"
     );
-    // Negative — do NOT over-claim properties tgo has no handler for. `textEdit`
+    // Negative — do NOT over-claim properties tsgo has no handler for. `textEdit`
     // resolve is never folded (only additionalTextEdits), so it must be absent.
     assert!(
         !props.contains("textEdit"),
-        "must NOT advertise `textEdit` resolve — tgo only folds additionalTextEdits"
+        "must NOT advertise `textEdit` resolve — tsgo only folds additionalTextEdits"
     );
 }
 
-/// The tgo `initialize` client capabilities must advertise
+/// The tsgo `initialize` client capabilities must advertise
 /// `textDocument.completion.contextSupport: true`.
 ///
 /// `get_completions` ALWAYS sends `CompletionParams.context` (the trigger
 /// kind/character — `triggerKind: 2 + triggerCharacter` on a trigger-character
 /// completion, `triggerKind: 1` on an invoked one). Per LSP 3.17 a server only
 /// honours `CompletionParams.context` when the client advertises
-/// `textDocument.completion.contextSupport: true`; without it tgo may ignore the
+/// `textDocument.completion.contextSupport: true`; without it tsgo may ignore the
 /// trigger context entirely, so completions stop being trigger-aware.
 ///
 /// Discriminating: the pre-fix capabilities (no `contextSupport` key under
@@ -283,9 +283,9 @@ fn client_capabilities_advertise_completion_context_support() {
     );
 }
 
-/// The tgo `initialize` client capabilities must advertise
+/// The tsgo `initialize` client capabilities must advertise
 /// `textDocument.completion.completionItemKind.valueSet` covering EXACTLY the
-/// `CompletionItemKind` integers the tgo completion parser
+/// `CompletionItemKind` integers the tsgo completion parser
 /// (`parse_completion_item`) can carry through.
 ///
 /// Per LSP, omitting `completionItemKind.valueSet` means the client only supports
@@ -340,12 +340,12 @@ fn client_capabilities_advertise_completion_item_kind_value_set() {
     }
 }
 
-/// Negative over-claim guard for the whole capabilities surface: tgo issues no
+/// Negative over-claim guard for the whole capabilities surface: tsgo issues no
 /// `documentSymbol`, `foldingRange`, `callHierarchy`, `typeHierarchy`,
 /// `selectionRange`, `linkedEditingRange`, or `workspace/symbol` request (see the
 /// request inventory in `ipc.rs`), so the client must NOT advertise those
-/// capabilities. Advertising a capability whose handler tgo cannot fulfill would
-/// let tgo register/return data the client silently ignores.
+/// capabilities. Advertising a capability whose handler tsgo cannot fulfill would
+/// let tsgo register/return data the client silently ignores.
 ///
 /// Also guards the `completionItem` shapes this provider's completion parser does
 /// NOT read — `insertReplaceSupport` (the parser maps a single `textEdit` range,
@@ -369,18 +369,18 @@ fn client_capabilities_do_not_overclaim_unhandled_features() {
     ] {
         assert!(
             td.get(unhandled).is_none(),
-            "must NOT advertise textDocument.{unhandled} — tgo has no handler for it"
+            "must NOT advertise textDocument.{unhandled} — tsgo has no handler for it"
         );
     }
     assert!(
         caps.get("workspace")
             .and_then(|w| w.get("symbol"))
             .is_none(),
-        "must NOT advertise workspace.symbol — tgo issues no workspace/symbol request"
+        "must NOT advertise workspace.symbol — tsgo issues no workspace/symbol request"
     );
 
     // Completion `completionItem` shapes the parser does not read must be absent —
-    // advertising one invites tgo to emit a shape this provider silently discards.
+    // advertising one invites tsgo to emit a shape this provider silently discards.
     let completion_item = &td["completion"]["completionItem"];
     for unread in [
         // The parser maps a single `textEdit` range, not an insert/replace pair.
@@ -1125,7 +1125,7 @@ fn parse_completion_item_parses_label_details() {
     );
 }
 
-/// `commitCharacters` parses through the shared strict helper at the tgo parse
+/// `commitCharacters` parses through the shared strict helper at the tsgo parse
 /// boundary: a non-empty all-string array yields `Some(..)`; an empty array
 /// yields `None` (NOT `Some(vec![])`); a malformed element drops the whole array.
 /// Discriminating against the pre-fix `filter_map(...).collect()` which returned
@@ -1760,10 +1760,10 @@ fn test_parse_signature_help_fn() {
     assert_eq!(sig.active_signature, Some(0));
 }
 
-/// tgo (LSP) may send a parameter `label` as a `[start, end)` offset pair into the
+/// tsgo (LSP) may send a parameter `label` as a `[start, end)` offset pair into the
 /// signature label AND a per-signature `activeParameter`; both are parsed.
 ///
-/// Discriminates against the pre-K2 tgo parser, which only read `label.as_str()`
+/// Discriminates against the pre-K2 tsgo parser, which only read `label.as_str()`
 /// (dropping any array-form param entirely via `filter_map`) and never read
 /// per-signature `activeParameter`.
 #[test]
@@ -2121,7 +2121,7 @@ fn parse_code_action_drops_action_when_all_edits_unresolvable() {
     // directory name is made unique (process id + nanos) so the test never relies
     // on a fixed shared temp path happening to be absent on the host.
     let unique = format!(
-        "verter-tgo-codeaction-absent-{}-{}",
+        "verter-tsgo-codeaction-absent-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -3364,7 +3364,7 @@ async fn test_read_loop_skips_diagnostics_for_unknown_files() {
     );
 }
 
-// ── GAP-1: tgo completion-detail enrichment (completionItem/resolve) ──
+// ── GAP-1: tsgo completion-detail enrichment (completionItem/resolve) ──
 
 fn bare_completion(label: &str) -> Completion {
     Completion {
@@ -3410,7 +3410,7 @@ fn extract_resolve_detail_reads_detail_and_string_documentation() {
 
 #[test]
 fn extract_resolve_detail_reads_markupcontent_documentation() {
-    // tgo/LSP returns documentation as MarkupContent { kind, value }.
+    // tsgo/LSP returns documentation as MarkupContent { kind, value }.
     let resolve_response = serde_json::json!({
         "label": "ref",
         "detail": "function ref<T>(value: T): Ref<T>",
@@ -3703,7 +3703,7 @@ async fn spawn_label_details_only_responder(
     }
 }
 
-/// The tgo `resolve_completion` restructure returns `Some` when a
+/// The tsgo `resolve_completion` restructure returns `Some` when a
 /// `completionItem/resolve` response carries ONLY enrichment (here `labelDetails`)
 /// and NO `additionalTextEdits`. Guards the restructure that stopped returning
 /// `None` on an empty edit set — a regression to "edits required" would drop the
@@ -4046,4 +4046,27 @@ fn find_tsgo_binary_honors_explicit_env_override() {
         Some(override_bin),
         "bare find_tsgo_binary must honor the VERTER_TSGO_BIN override"
     );
+}
+
+#[test]
+fn cache_root_key_folds_case_per_fs_policy() {
+    // npm cache-root dedup folds case IFF the host filesystem is case-insensitive —
+    // the single shared `verter_span::path::fs_is_case_insensitive` policy. Pre-fix
+    // the fold was `cfg!(windows)`-only, so on case-insensitive macOS two case-variant
+    // roots keyed distinct and the same cache root was tracked twice. Routing through
+    // the shared policy dedups them there too; a case-sensitive FS (Linux) keeps them
+    // distinct. Platform-faithful + discriminating on macOS.
+    let upper = cache_root_key(std::path::Path::new("/Users/Dev/.npm"));
+    let lower = cache_root_key(std::path::Path::new("/Users/dev/.npm"));
+    if verter_span::path::fs_is_case_insensitive() {
+        assert_eq!(
+            upper, lower,
+            "case-variant npm cache roots dedup to one key on a case-insensitive filesystem"
+        );
+    } else {
+        assert_ne!(
+            upper, lower,
+            "case-variant npm cache roots stay distinct on a case-sensitive filesystem"
+        );
+    }
 }

@@ -178,30 +178,6 @@ fn record_custom(
 }
 
 #[test]
-fn carrier_batch_request_resolves_to_the_merged_ide_surface() {
-    // MERGE: a CarrierBatch request reads the CarrierIde slot (no distinct batch
-    // slot). The resolver only knows the IDE path; the registry's merge alias maps
-    // the batch request onto it.
-    let store = ProviderSurfaceStore::new();
-    record(&store, IDE_PATH, ProviderSurfaceKind::CarrierIde, "ide\n");
-    let registry = StoreBackedCarrierRegistry::new(store, resolver());
-
-    let batch = registry
-        .carrier_for_role(SOURCE, CarrierRole::CarrierBatch)
-        .expect("a CarrierBatch request resolves to the merged CarrierIde surface");
-    assert_eq!(
-        &*batch.provider_uri, IDE_PATH,
-        "served from the IDE slot (merge)"
-    );
-    assert_eq!(&*batch.content, "ide\n");
-    assert_eq!(
-        batch.role,
-        CarrierRole::CarrierBatch,
-        "the artifact reports the requested batch role over the merged IDE surface"
-    );
-}
-
-#[test]
 fn source_canonical_mismatch_fails_closed() {
     // A resolver/path bug points the IDE companion at a surface recorded for a
     // DIFFERENT source. The registry must NOT serve another source's carrier.

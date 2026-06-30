@@ -62,16 +62,8 @@ impl<R: CarrierPathResolver> StoreBackedCarrierRegistry<R> {
     /// The carrier artifact for `source_uri` at a SPECIFIC role, or `None` if the
     /// source has no carrier of that role currently in the store.
     ///
-    /// `CarrierBatch` is MERGED into `CarrierIde` (the measurement found no
-    /// material cold-perf gain and no valid diagnostic-preserving minimal codegen
-    /// profile): there is NO distinct `CarrierBatch` storage slot, so a
-    /// `CarrierBatch` request reads the `CarrierIde` surface — the cold TSC path
-    /// and the interactive path resolve to the SAME stored carrier. The returned
-    /// artifact reports the REQUESTED `role` (the caller asked for batch) while
-    /// reading the IDE-stored content; they are one surface.
-    ///
     /// FAIL CLOSED on every uncertainty: no companion path, no current snapshot, a
-    /// stored kind that does not match the effective read role, a snapshot whose
+    /// stored kind that does not match the requested role, a snapshot whose
     /// `source_canonical` does not match the requested `source_uri` (a resolver /
     /// path bug must never serve a DIFFERENT source's carrier), or a snapshot with
     /// no recorded `project_owner` (a project-bound contract result must not be
@@ -79,16 +71,12 @@ impl<R: CarrierPathResolver> StoreBackedCarrierRegistry<R> {
     /// binding) — each returns `None`.
     #[must_use]
     pub fn carrier_for_role(&self, source_uri: &str, role: CarrierRole) -> Option<CarrierArtifact> {
-        // Merge alias: CarrierBatch reads the CarrierIde surface (one surface).
-        let read_role = effective_read_role(role);
-        let provider_path = self
-            .path_resolver
-            .provider_path_for(source_uri, read_role)?;
+        let provider_path = self.path_resolver.provider_path_for(source_uri, role)?;
         let snapshot = self.store.current_snapshot(&provider_path)?;
-        // The snapshot's recorded kind must match the EFFECTIVE read role — the
-        // store is the single authority, so a kind mismatch means there is no
-        // carrier of that role at that path (fail closed).
-        if !role_matches_kind(read_role, snapshot.kind) {
+        // The snapshot's recorded kind must match the requested role — the store is
+        // the single authority, so a kind mismatch means there is no carrier of that
+        // role at that path (fail closed).
+        if !role_matches_kind(role, snapshot.kind) {
             return None;
         }
         // Source-identity gate: the stored surface must belong to the requested
@@ -103,20 +91,7 @@ impl<R: CarrierPathResolver> StoreBackedCarrierRegistry<R> {
         // binding (it carries a project owner). A legacy `project_owner: None`
         // rename-mapping record must NOT leak into the contract (fail closed).
         snapshot.project_owner.as_ref()?;
-        // The artifact reports the REQUESTED role (batch stays batch) over the
-        // IDE-stored content under the merge.
         Some(artifact_from_snapshot(role, &provider_path, &snapshot))
-    }
-}
-
-/// The store role a request for `requested` actually READS. `CarrierBatch` is
-/// merged into `CarrierIde`, so a batch request reads the `CarrierIde` slot; every
-/// other role reads its own slot. This is the single merge-alias point.
-#[must_use]
-fn effective_read_role(requested: CarrierRole) -> CarrierRole {
-    match requested {
-        CarrierRole::CarrierBatch => CarrierRole::CarrierIde,
-        other => other,
     }
 }
 
@@ -137,7 +112,6 @@ fn role_matches_kind(role: CarrierRole, kind: ProviderSurfaceKind) -> bool {
         (role, kind),
         (CarrierRole::CarrierIde, ProviderSurfaceKind::CarrierIde)
             | (CarrierRole::CarrierApi, ProviderSurfaceKind::CarrierApi)
-            | (CarrierRole::CarrierBatch, ProviderSurfaceKind::CarrierBatch)
             | (CarrierRole::Shadow, ProviderSurfaceKind::Shadow)
             | (CarrierRole::Real, ProviderSurfaceKind::Real)
     )

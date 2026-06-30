@@ -623,11 +623,16 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // A `Foo.svelte` component beside a real same-stem `Foo.svelte.ts`
             // rune is a DETECTED ambiguity (fail closed, no silently-wrong edge).
             "same_stem_svelte_component_rune_fails_closed",
-            // The tsserver inferred-project knobs
-            // (`compilerOptionsForInferredProjects`, the tsserver
-            // `configure_paths` impl, synthetic inferred-project carrier opens)
-            // are gone — the plugin's project-bound membership replaces them.
-            "no_inferred_project_knobs_on_tsserver",
+            // The external-TS engine is project-bound on EVERY backend: the
+            // GLOBAL guard bans inferred-project construction/open knobs
+            // (`openExternalProject`, `useSingleInferredProject`,
+            // `createInferredProject`, `inferredProjectCompilerOptions`, the
+            // tsserver `configure_paths` impl, the config-less owned tsgo restart
+            // backend) across the LSP / TSC / type-runtime source, and asserts the
+            // tsgo carrier path reaches configured membership via `open_project` +
+            // `project.root_files`. The ONE `compilerOptionsForInferredProjects`
+            // CONFIG call (extension provider) is allow-listed.
+            "no_fallback_to_inferred_anywhere",
         ],
     ),
     // ──────────────────── SKILL.md additions ──────────────────────

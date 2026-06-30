@@ -256,18 +256,18 @@ async fn namespaced_component_tag_resolves_member_props_tsgo() {
     session.shutdown().await;
 }
 
-// TRACKED GAP (tgo-only): tgo's pull-diagnostics for a Verter-generated carrier
+// TRACKED GAP (tsgo-only): tsgo's pull-diagnostics for a Verter-generated carrier
 // `.tsx` do NOT resolve tsconfig `paths` aliases, so a `@/`-aliased import
 // surfaces `TS2307 Cannot find module '@/...'` in the merged diagnostics —
-// even though tgo HOVER on the same carrier resolves `@/` correctly, and
-// tsserver's diagnostics DO resolve it. The carrier-diagnostics program tgo
+// even though tsgo HOVER on the same carrier resolves `@/` correctly, and
+// tsserver's diagnostics DO resolve it. The carrier-diagnostics program tsgo
 // builds is missing the tsconfig path-mapping the hover request has. This test
 // asserts the DESIRED behavior (no TS2307 for the `@/` module) so it FAILS
-// today on tgo and PASSES once tgo's carrier-diagnostics program is configured
+// today on tsgo and PASSES once tsgo's carrier-diagnostics program is configured
 // with the project's path mappings; it is discriminating, not a stub.
-#[ignore = "ESCALATED tgo-provider-program gap: tgo's pull-diagnostics program for the carrier .tsx omits the tsconfig `paths` mapping the hover program has (emits TS2307 for @/ where hover + tsserver-diagnostics resolve it) — a tgo provider program-construction wiring issue in the TypeProvider layer, not a Verter-owned analysis/codegen/resolver fix"]
+#[ignore = "ESCALATED tsgo-provider-program gap: tsgo's pull-diagnostics program for the carrier .tsx omits the tsconfig `paths` mapping the hover program has (emits TS2307 for @/ where hover + tsserver-diagnostics resolve it) — a tsgo provider program-construction wiring issue in the TypeProvider layer, not a Verter-owned analysis/codegen/resolver fix"]
 #[tokio::test(flavor = "multi_thread")]
-async fn tgo_carrier_diagnostics_resolve_path_alias_tsgo() {
+async fn carrier_diagnostics_resolve_path_alias_tsgo() {
     let Some(session) =
         crate::test_harness::TestSessionBuilder::new(crate::test_harness::TestProviderKind::Tsgo)
             .fixture("path-aliases")
@@ -291,7 +291,7 @@ async fn tgo_carrier_diagnostics_resolve_path_alias_tsgo() {
         });
         assert!(
             !alias_not_found,
-            "tgo carrier diagnostics must resolve the `@/components` alias \
+            "tsgo carrier diagnostics must resolve the `@/components` alias \
              (no TS2307); got: {diags:?}"
         );
     }
@@ -324,8 +324,8 @@ async fn tgo_carrier_diagnostics_resolve_path_alias_tsgo() {
 /// companion; here we assert the same `Some(..)` inline.
 ///
 /// Tsserver-only: the nodenext+package-`exports` program shape is exercised on
-/// the configured tsserver project. (A tgo companion gap test characterizes the
-/// tgo carrier-diagnostics divergence separately.)
+/// the configured tsserver project. (A tsgo companion gap test characterizes the
+/// tsgo carrier-diagnostics divergence separately.)
 #[tokio::test(flavor = "multi_thread")]
 async fn import_nodenext_packages_tsserver() {
     let _root = crate::test_harness::materialize_pkg_ui("import_nodenext_packages");
@@ -509,7 +509,7 @@ real_provider_test!(
 //
 // Characterizes that Verter's IDE-TSX codegen PRESERVES modern import syntax
 // through to the provider (rather than corrupting/dropping it). Both real
-// providers (TS 6.0.x tsserver, TS 7 tgo) behave identically:
+// providers (TS 6.0.x tsserver, TS 7 tsgo) behave identically:
 // `with { type: "json" }` resolves the JSON to its typed shape, `import defer
 // * as ns` keeps the deferred namespace binding resolvable, and a deprecated
 // `assert { type: "json" }` surfaces TS2880. Each form carries a POSITIVE

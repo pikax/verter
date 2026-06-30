@@ -81,7 +81,7 @@ impl CarrierProviderCommit {
 ///
 /// `Some` ⇒ the tsserver engine: the carrier reaches tsserver as a configured-project
 /// member through the on-disk publish store + plugin, so the gateway runs the
-/// membership reconciliation through the [`CarrierPublishCoordinator`]. `None` ⇒ TGO
+/// membership reconciliation through the [`CarrierPublishCoordinator`]. `None` ⇒ tsgo
 /// (no store): the gateway returns a [`CarrierSyncDecision::DirectOpen`] and the site
 /// opens the companion buffers directly.
 pub(crate) struct CarrierMembershipCtx<'a> {
@@ -113,7 +113,7 @@ pub(crate) struct CarrierSyncRequest<'a> {
     pub is_jsx: bool,
     /// The compiled IDE output, when available (the IDE companion content).
     pub ide: Option<&'a IdeResponse>,
-    /// The engine membership context. `None` ⇒ TGO direct-open.
+    /// The engine membership context. `None` ⇒ tsgo direct-open.
     pub membership: Option<CarrierMembershipCtx<'a>>,
     /// Why this reconcile was triggered (source edit / config change / …).
     pub reason: ReconcileReason,
@@ -129,7 +129,7 @@ pub(crate) enum CarrierSyncDecision {
         /// The receipt gating the commit.
         receipt: CarrierProviderCommit,
     },
-    /// TGO: no store; the site does the per-kind direct open using `transition`, then
+    /// tsgo: no store; the site does the per-kind direct open using `transition`, then
     /// commits the result with the `receipt`.
     DirectOpen {
         /// The prepared transition (next state + stale paths) for the direct open.
@@ -151,7 +151,7 @@ pub(crate) enum CarrierSyncDecision {
 
 impl CarrierSyncDecision {
     /// The receipt gating an OWNED carrier commit, when this decision advertised one
-    /// (tsserver [`Published`](Self::Published) / TGO [`DirectOpen`](Self::DirectOpen)).
+    /// (tsserver [`Published`](Self::Published) / tsgo [`DirectOpen`](Self::DirectOpen)).
     ///
     /// `None` for [`Unowned`](Self::Unowned) (membership-free open-document liveness
     /// commits need no receipt) and [`Pending`](Self::Pending) (nothing advertised —
@@ -173,7 +173,7 @@ impl CarrierSyncDecision {
 ///
 /// * owner resolved + tsserver ⇒ build companions, record surfaces, reconcile
 ///   membership; on an advertised outcome return [`CarrierSyncDecision::Published`].
-/// * owner resolved + TGO ⇒ return [`CarrierSyncDecision::DirectOpen`].
+/// * owner resolved + tsgo ⇒ return [`CarrierSyncDecision::DirectOpen`].
 /// * no owner ⇒ retract/defer the membership (tsserver) and return
 ///   [`CarrierSyncDecision::Unowned`].
 pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> CarrierSyncDecision {
@@ -211,7 +211,7 @@ pub(crate) async fn reconcile_carrier_source(req: CarrierSyncRequest<'_>) -> Car
     };
 
     let Some(membership) = req.membership.as_ref() else {
-        // TGO: the carrier reaches the provider as directly-opened companion buffers.
+        // tsgo: the carrier reaches the provider as directly-opened companion buffers.
         // Return the transition for the site's per-kind open; the receipt still gates
         // the commit.
         let transition =

@@ -168,7 +168,7 @@ impl VerterLanguageServer {
         // Clone the VFS handle out of the guard so no lock is held across the await.
         let vfs = self.vfs_workspace.read().clone();
         // tsserver: the carrier reaches the provider as a store-backed configured-
-        // project member, so the gateway runs the membership reconcile. tgo (no
+        // project member, so the gateway runs the membership reconcile. tsgo (no
         // coordinator) ⇒ `None` ⇒ the gateway returns a direct-open transition.
         let membership = match (
             matches!(self.type_provider_kind, crate::TypeProviderKind::Tsserver),

@@ -54,8 +54,6 @@ pub enum SnapshotRole {
     CarrierIde,
     /// The redirect-reached `{name}.vue.verter.ts` public-API carrier.
     CarrierApi,
-    /// The minimal-diagnostic batch carrier (provisional — decided downstream).
-    CarrierBatch,
     /// A self-file shadow / rune-module surface.
     Shadow,
     /// A genuine non-carrier `.ts`/`.tsx` synced verbatim for context.

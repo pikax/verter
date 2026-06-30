@@ -261,10 +261,10 @@ const usedVue = 2
 
         let actions = code_action(session, &uri, range, vec![ts6133(range, "unusedVue")]).await;
 
-        // tgo FIRST, tolerant of a None/empty result: typescript-go has not ported
+        // tsgo FIRST, tolerant of a None/empty result: typescript-go has not ported
         // the unused-identifier codefix, so it returns no remove-unused action (an
         // empty/None response) even with the wire fully populated. This branch MUST
-        // run before the empty-result skip, or under `VERTER_REQUIRE_TGO=1` the skip
+        // run before the empty-result skip, or under `VERTER_REQUIRE_TSGO=1` the skip
         // path panics before the canary is ever reached.
         if session.is_tsgo() {
             let has = actions
@@ -343,7 +343,7 @@ const usedSvelte = 2
 
         let actions = code_action(session, &uri, range, vec![ts6133(range, "unusedSvelte")]).await;
 
-        // tgo FIRST, tolerant of a None/empty result (see the Vue test): the canary
+        // tsgo FIRST, tolerant of a None/empty result (see the Vue test): the canary
         // must run before the empty-result skip so require-mode does not panic first.
         if session.is_tsgo() {
             let has = actions

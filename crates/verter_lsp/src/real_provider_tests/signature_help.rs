@@ -1,4 +1,4 @@
-//! Signature-help fidelity tests against real providers (tsserver + tgo).
+//! Signature-help fidelity tests against real providers (tsserver + tsgo).
 //!
 //! Verifies the script-block TS-parity bar for `textDocument/signatureHelp`: a
 //! call site inside a `<script setup>` block behaves like the equivalent
@@ -64,11 +64,11 @@ real_provider_test!(
         // Place the cursor at the START of the `SIG_CURSOR` filler — i.e. the
         // 2nd-argument slot, immediately after the first comma — so the active
         // parameter is index 1 (`beta`). The marker is NOT stripped; it is harmless
-        // filler occupying the 2nd-arg position, and tsserver/tgo resolve the active
+        // filler occupying the 2nd-arg position, and tsserver/tsgo resolve the active
         // param from the comma count BEFORE the cursor, which is unaffected by the
         // identifier sitting at/after the cursor.
         let marker_pos = session.find_position(&uri, "SIG_CURSOR", 0);
-        let backend = if session.is_tsgo() { "tgo" } else { "tsserver" };
+        let backend = if session.is_tsgo() { "tsgo" } else { "tsserver" };
         let Some(help) = signature_help_with_retry(session, &uri, marker_pos).await else {
             // Fail-closed: under the require-env gate the harness build already
             // hard-failed on a missing provider, so reaching here with no result
@@ -121,7 +121,7 @@ real_provider_test!(
         // the label and the per-param UTF-16 offset spans from tsserver's display
         // parts and stamps the per-signature active parameter, so we assert the
         // FULL fidelity (every param in offset form, each slice exact, per-sig
-        // active param stamped directly). tgo speaks raw LSP and passes the
+        // active param stamped directly). tsgo speaks raw LSP and passes the
         // server's chosen form through (it may send Simple labels and may omit the
         // per-signature activeParameter), so there we assert only the cross-backend
         // active-param signal and validate offsets opportunistically when present.
@@ -169,34 +169,34 @@ real_provider_test!(
                  directly (the 2nd-arg slot, index 1)"
             );
         } else {
-            // --- tgo: tolerant cross-backend active-param signal ---
-            // tgo's top-level activeParameter is the real cross-backend signal;
+            // --- tsgo: tolerant cross-backend active-param signal ---
+            // tsgo's top-level activeParameter is the real cross-backend signal;
             // accept the per-sig value when present, else the top-level value.
             let effective_active = sig.active_parameter.or(help.active_parameter);
             assert_eq!(
                 effective_active,
                 Some(EXPECTED_ACTIVE),
-                "tgo active parameter must be index 1 (the 2nd arg slot); per-sig={:?} \
+                "tsgo active parameter must be index 1 (the 2nd arg slot); per-sig={:?} \
                  top-level={:?}",
                 sig.active_parameter,
                 help.active_parameter
             );
 
-            // tgo may emit EITHER label form. If it DID send offsets, they must be
+            // tsgo may emit EITHER label form. If it DID send offsets, they must be
             // in-bounds, non-empty, and slice the exact param text (fail-closed in
             // the parser already rejects out-of-bounds/inverted spans).
             for (i, p) in params.iter().enumerate() {
                 if let ParameterLabel::LabelOffsets([start, end]) = p.label {
                     assert!(
                         start < end && end <= label_u16_len,
-                        "tgo param {i} offset span must be in-bounds and non-empty \
+                        "tsgo param {i} offset span must be in-bounds and non-empty \
                          (start {start} end {end} len {label_u16_len})"
                     );
                     let slice =
                         String::from_utf16(&label_u16[start as usize..end as usize]).unwrap();
                     assert_eq!(
                         slice, EXPECTED_PARAMS[i],
-                        "tgo param {i} offset slice (when present) must equal the exact param text"
+                        "tsgo param {i} offset slice (when present) must equal the exact param text"
                     );
                 }
             }

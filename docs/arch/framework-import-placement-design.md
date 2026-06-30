@@ -26,7 +26,7 @@ not a B.7/B.8 deliverable in itself.
 
 > Codex's own sequencing verdict is stronger than "defer wholesale": it recommends amending
 > the plan *now* with a narrow substrate repair, on the grounds that near-term completion stays
-> delegated to tsserver/tgo and that delegated path must already place edits correctly for
+> delegated to tsserver/tsgo and that delegated path must already place edits correctly for
 > supported SFCs. This document records that recommendation faithfully; the decision to *schedule*
 > it (now vs. at the B.7/U14 window) is the open sequencing question — see §7. Per the
 > `verter_session`-confirmation rule, the actual edit to `verter_session` must be confirmed with
@@ -329,7 +329,7 @@ This work crosses three plan areas:
   not reinvent script-block selection/synthesis.
 
 Codex's explicit sequencing recommendation: **do not wait for B.7/B.8.** Because near-term
-completion stays delegated to tsserver/tgo (the U15 path that STAYS until B.7 reaches parity),
+completion stays delegated to tsserver/tsgo (the U15 path that STAYS until B.7 reaches parity),
 that delegated auto-import path must already place edits correctly for supported SFCs today —
 so the shared placement primitive is needed before B.7/B.8 and is *consumed*, not produced, by
 them. The risk (high-regression `verter_session`, parse-artifact cache invalidation) is real but

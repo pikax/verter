@@ -162,7 +162,7 @@ pub(super) enum ChildPropDeclarationProof {
         /// child's `defineProps` MACRO field (not an imported-type member), this is
         /// the prop's file-absolute child `.vue` declaration span the API generator
         /// keys its source-map token on, so Verter can SYNTHESIZE the child-`.vue`
-        /// rename leg the provider may not enumerate (tgo does not). `None` for the
+        /// rename leg the provider may not enumerate (tsgo does not). `None` for the
         /// imported-type member case (the provider's own native rename edits the
         /// third file; there is no inline child-`.vue` member to synthesize).
         inline_decl_span: Option<verter_span::Span>,
@@ -316,7 +316,7 @@ impl VerterLanguageServer {
     /// [`ChildPropDeclarationProof::Known`] WITH an `inline_decl_span` Verter can
     /// SYNTHESIZE the child-`.vue` rename leg from (a provider's own
     /// `textDocument/rename` may not enumerate it across the synthesized API surface
-    /// — tgo does not). A `defineProps<ImportedType>()` surface (props are a bare
+    /// — tsgo does not). A `defineProps<ImportedType>()` surface (props are a bare
     /// imported type ref with no inline member span) resolves here to
     /// [`ChildPropDeclarationProof::Unknown`]; the async caller then UPGRADES it to
     /// `Known` via [`Self::upgrade_imported_child_prop_declaration`] (a provider
@@ -436,7 +436,7 @@ impl VerterLanguageServer {
 
         // The initiating parent usage location(s) a resolved candidate must be
         // DISTINCT from: a provider whose cross-file project membership cannot reach
-        // the imported member (tgo does not, for an imported-type prop) resolves
+        // the imported member (tsgo does not, for an imported-type prop) resolves
         // `get_definition` back to the prop's OWN usage occurrence in the parent
         // carrier — that is NOT a declaration. Accepting it would make the gate's
         // declaration-leg and parent-usage-leg checks pass on the SAME parent edit,

@@ -11,7 +11,7 @@
 //! still holds**. When a limitation is fixed (the broken condition becomes false), the canary
 //! **panics** — signaling the fix should be promoted to a real `assert!`.
 //!
-//! Cross-file Vue-prop rename reaches parity on BOTH providers: tgo's native rename does not
+//! Cross-file Vue-prop rename reaches parity on BOTH providers: tsgo's native rename does not
 //! enumerate the child component's synthesized `{carrier}.ts` `defineProps` surface, so Verter
 //! synthesizes that child-declaration leg provider-agnostically and maps it back onto the child
 //! `.vue` through the generation-pinned snapshot. The `rename_*` lanes therefore assert ≥2-file

@@ -1,6 +1,6 @@
-//! Proactive transitive declaration-overlay graph for the tgo resolution path.
+//! Proactive transitive declaration-overlay graph for the tsgo resolution path.
 //!
-//! tgo resolves a bare framework-carrier import (`import B from "./B.vue"`) to
+//! tsgo resolves a bare framework-carrier import (`import B from "./B.vue"`) to
 //! the virtual `B.d.<ext>.ts` declaration via its native basename-append probe,
 //! but it has NO module-resolution hook — so every declaration an importing
 //! carrier (transitively) needs must already be OPEN as an overlay when that
@@ -83,6 +83,7 @@
 //! close-side orphan (slot drained, provider never closed) re-closed.
 
 use super::*;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -108,8 +109,27 @@ struct DeclOverlaySlot {
     /// Strictly-advancing close-lifecycle generation; bumped on every open.
     generation: u64,
     /// The OPEN carrier root canonicals whose transitive closure reaches this
-    /// overlay. The overlay is closed once this drains to empty.
-    roots: HashSet<String>,
+    /// overlay, EACH stamped with the closure-pass generation that last established
+    /// its edge. The overlay is closed once this drains to empty.
+    ///
+    /// The per-root stamp is the defense against a STALE closure pass erasing a
+    /// reaching edge a NEWER pass established: a pass running at generation `G` may
+    /// REMOVE a root's edge only when that root's recorded stamp is `<= G` (the edge
+    /// was last touched no later than this pass). A root re-established by a newer
+    /// pass (stamp `> G`) is left intact — the stale pass's analysis is out of date
+    /// for that root, so it must not drop the edge. An ADD records `max(existing,
+    /// pass_generation)`, so a root's stamp never moves backward.
+    roots: HashMap<String, u64>,
+    /// The highest closure-pass generation that ever established a reaching edge into
+    /// this overlay (`max` over every `roots` stamp this slot has carried, RETAINED
+    /// across a drain to empty). It gates the close of an EMPTY tombstone: a close
+    /// DECIDED by a pass at generation `G` is superseded when `reach_epoch > G`, i.e.
+    /// a NEWER pass established reachability since the deciding pass — even though the
+    /// set looks empty at the gate (a newer pass that re-added then the per-root
+    /// removal raced). It is the empty-slot analogue of the per-root stamps (which are
+    /// gone once the set drains), so a stale pass can never close an overlay a newer
+    /// live pass reaches.
+    reach_epoch: u64,
     /// `true` while a guarded close for THIS overlay is committed and awaiting its
     /// provider `close_dts`. Set under the slot lock the instant the close passes
     /// the supersession gate (before the provider await), cleared when that close
@@ -122,15 +142,49 @@ struct DeclOverlaySlot {
     close_pending: bool,
 }
 
-/// A declaration overlay to close, paired with the close GENERATION observed at the
-/// moment the close was DECIDED (the reconcile/release that drained the slot, read
-/// under that slot's held entry lock). The guarded close re-checks this against the
-/// live generation before issuing the destructive provider close: a generation that
-/// has advanced means an open landed since the decision, so the close is superseded.
+impl DeclOverlaySlot {
+    /// Record that `root` reaches this overlay under closure pass `pass_generation`,
+    /// stamping the root's edge with `max(existing, pass_generation)` and advancing
+    /// the slot's monotonic `reach_epoch`. An ADD never moves a stamp backward.
+    fn record_root(&mut self, root: &str, pass_generation: u64) {
+        let stamp = self
+            .roots
+            .entry(root.to_string())
+            .or_insert(pass_generation);
+        *stamp = (*stamp).max(pass_generation);
+        self.reach_epoch = self.reach_epoch.max(pass_generation);
+    }
+}
+
+/// A declaration overlay to close, paired with the two supersession baselines read
+/// under the slot's held entry lock at the moment the close was DECIDED:
+///   * the close GENERATION (the close-lifecycle ABA baseline) — a generation that
+///     advanced means an open landed since the decision, so the close is superseded;
+///   * the DECIDING PASS GENERATION — the closure-pass generation the deciding
+///     reconcile/release ran as. The guarded close re-checks the slot's `reach_epoch`
+///     against it: a `reach_epoch` that advanced past the deciding pass means a NEWER
+///     live pass established reachability since the decision, so the close is
+///     superseded (a stale pass must not close an overlay a newer pass reaches). The
+///     `did_close` release decides at [`LIVE_RELEASE_PASS_GENERATION`] (`u64::MAX`),
+///     so a closed root's release — the current ownership truth — is never superseded
+///     by a stale-pass reachability stamp.
 ///
 /// Owner-internal: produced by the slot-surgery methods and consumed by
 /// [`DeclOverlayOwner::guarded_close`]; never a public mutation surface.
-pub(crate) type DeclCloseTarget = (String, u64);
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DeclCloseTarget {
+    pub(crate) decl_path: String,
+    pub(crate) close_generation: u64,
+    pub(crate) decided_pass_generation: u64,
+}
+
+/// The deciding-pass generation a NON-pass-scoped close (the `did_close`-side
+/// `release_root` / the direct `close_target_for`) decides at. A closed root's
+/// release is the CURRENT ownership truth — never a stale closure pass — so it must
+/// win the `reach_epoch` supersession gate against any pass: `u64::MAX` is greater
+/// than every real closure-pass generation, so `reach_epoch > u64::MAX` is never
+/// true.
+pub(crate) const LIVE_RELEASE_PASS_GENERATION: u64 = u64::MAX;
 
 /// THE declaration-overlay lifecycle owner — the SOLE authority for the proactive
 /// `.d.<ext>.ts` overlay graph and the only code that issues a provider `close_dts`
@@ -152,6 +206,27 @@ pub(crate) struct DeclOverlayOwner {
     /// only that path. Kept for any path ever seen (the value is cheap and GCing it
     /// is not waiter-safe) — only the slot VALUE is GC'd.
     locks: DashMap<String, Arc<Mutex<()>>>,
+    /// Per-ROOT authoritative-reconciliation high-water mark: the highest closure-pass
+    /// generation that has COMPLETED an authoritative reachability reconciliation for
+    /// that root (advanced by [`DeclOverlayOwner::reconcile_root_reachability`]). It
+    /// gates the ADD side — the reconcile add loop AND [`DeclOverlayOwner::open_overlay`]'s
+    /// record/open — so a STALE pass (generation OLDER than the high-water) can neither
+    /// re-record nor re-open a root→overlay edge a NEWER pass already determined
+    /// unreachable and closed.
+    ///
+    /// This is the SYMMETRIC peer of the per-edge REMOVE gate carried by the `roots`
+    /// stamps: REMOVE is gated per edge (a stale pass cannot drop a newer edge), ADD is
+    /// gated per root (a stale pass cannot re-create what a newer pass closed). Keyed on
+    /// the root canonical (NOT a decl path) because the staleness is a property of the
+    /// ROOT's analysis, independent of the individual slot edge stamps — a stale pass's
+    /// per-slot stamps would otherwise re-monotonic-max their way back in. Advanced
+    /// under the entry lock; BOTH add paths — [`DeclOverlayOwner::open_overlay`]'s
+    /// single-edge add AND [`DeclOverlayOwner::reconcile_root_reachability`]'s add loop —
+    /// record each edge through [`DeclOverlayOwner::gate_and_record_root_edge`], which
+    /// reads this high-water and records the edge under ONE shared per-root entry guard,
+    /// so a concurrent advance cannot interleave between an add's gate and its record and
+    /// let a stale pass re-record/re-open an overlay a newer pass already closed.
+    root_reconcile_epochs: DashMap<String, u64>,
     /// Test-only contention probe: a one-shot per-path [`tokio::sync::Notify`] fired
     /// the instant an [`Self::open_overlay`] for that exact path finds the path's
     /// serialization lock already HELD (a concurrent close/open holds the strand) and
@@ -159,6 +234,81 @@ pub(crate) struct DeclOverlayOwner {
     /// `#[cfg(test)]`-gated, so production carries no field and no probe overhead.
     #[cfg(test)]
     open_lock_contention_signals: DashMap<String, Arc<tokio::sync::Notify>>,
+    /// Test-only ADD-gate interleave seam: a per-root [`AddGateInterleave`] handshake
+    /// armed by a test so a concurrent high-water advance can be FORCED to land in the
+    /// window between an [`Self::open_overlay`] reaching its add-gate and recording —
+    /// the exact interleave [`Self::gate_and_record_root_edge`]'s shared entry guard
+    /// closes. `#[cfg(test)]`-gated, so production carries no field.
+    #[cfg(test)]
+    add_gate_interleave_signals: DashMap<String, Arc<AddGateInterleave>>,
+    /// Test-only RECONCILE add-loop interleave seam: a per-root [`ReconcileAddInterleave`]
+    /// handshake armed by a test so a concurrent newer reconcile can be FORCED to advance
+    /// the high-water + drain the slot in the window between a
+    /// [`Self::reconcile_root_reachability`] reaching its authoritative decide and its
+    /// add-loop record — the exact interleave the add loop's per-edge
+    /// [`Self::gate_and_record_root_edge`] re-gate closes. Synchronous (Condvar-based)
+    /// because the reconcile is a synchronous slot-surgery method. `#[cfg(test)]`-gated,
+    /// so production carries no field.
+    #[cfg(test)]
+    reconcile_add_interleave_signals: DashMap<String, Arc<ReconcileAddInterleave>>,
+}
+
+/// Test-only two-phase handshake for the [`DeclOverlayOwner::open_overlay`] add-gate
+/// interleave seam: `reached` fires the instant an armed open arrives at the seam
+/// (after its path-lock + root-open revalidation, BEFORE the atomic gate-record);
+/// `proceed` releases it onward. Between the two a test advances the root's
+/// authoritative high-water, exercising the concurrent-advance interleave the shared
+/// gate-and-record entry guard makes impossible in production.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct AddGateInterleave {
+    pub(crate) reached: tokio::sync::Notify,
+    pub(crate) proceed: tokio::sync::Notify,
+}
+
+/// Test-only SYNCHRONOUS handshake for the [`DeclOverlayOwner::reconcile_root_reachability`]
+/// add-loop interleave seam: `reached` is raised the instant an armed reconcile arrives at
+/// the seam (after its authoritative decide, BEFORE its add-loop record); the test then
+/// drives a concurrent newer reconcile (advancing the high-water + draining the slot) and
+/// releases the stale pass via `proceed`. Synchronous (Condvar-based, not
+/// [`tokio::sync::Notify`]) because `reconcile_root_reachability` is a synchronous
+/// slot-surgery method with no `.await` point at which to park.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct ReconcileAddInterleave {
+    reached: (std::sync::Mutex<bool>, std::sync::Condvar),
+    proceed: (std::sync::Mutex<bool>, std::sync::Condvar),
+}
+
+#[cfg(test)]
+impl ReconcileAddInterleave {
+    /// Raise `reached` (the armed reconcile has arrived at the add-loop seam).
+    fn mark_reached(&self) {
+        *self.reached.0.lock().expect("reached mutex") = true;
+        self.reached.1.notify_all();
+    }
+
+    /// Block until an armed reconcile has reached the add-loop seam.
+    pub(crate) fn wait_reached(&self) {
+        let mut at = self.reached.0.lock().expect("reached mutex");
+        while !*at {
+            at = self.reached.1.wait(at).expect("reached condvar");
+        }
+    }
+
+    /// Release the blocked reconcile onward into its add-loop record.
+    pub(crate) fn signal_proceed(&self) {
+        *self.proceed.0.lock().expect("proceed mutex") = true;
+        self.proceed.1.notify_all();
+    }
+
+    /// Block (inside the seam) until the test signals `proceed`.
+    fn wait_proceed(&self) {
+        let mut go = self.proceed.0.lock().expect("proceed mutex");
+        while !*go {
+            go = self.proceed.1.wait(go).expect("proceed condvar");
+        }
+    }
 }
 
 impl DeclOverlayOwner {
@@ -172,6 +322,65 @@ impl DeclOverlayOwner {
                 .or_insert_with(|| Arc::new(Mutex::new(())))
                 .value(),
         )
+    }
+
+    /// Advance `root`'s authoritative-reconciliation high-water mark to at least
+    /// `pass_generation` (monotonic-max — never regresses) and return the resulting
+    /// value, in ONE entry critical section. Called at the top of an authoritative
+    /// reconciliation so the SAME call's add loop can gate against the post-advance
+    /// value: a current pass becomes EQUAL to the high-water (its add is admitted), a
+    /// stale pass stays strictly BELOW it (its add is gated).
+    fn advance_root_authoritative_epoch(&self, root: &str, pass_generation: u64) -> u64 {
+        let mut entry = self
+            .root_reconcile_epochs
+            .entry(root.to_string())
+            .or_insert(0);
+        *entry = (*entry).max(pass_generation);
+        *entry
+    }
+
+    /// ATOMICALLY gate-and-record one `root`→overlay reaching edge: read `root`'s
+    /// authoritative high-water mark AND, when this pass is not stale for it, record
+    /// `{decl_path -> root}` (+ bump the slot's close-lifecycle generation) under ONE
+    /// held `root_reconcile_epochs` entry guard — the SAME guard
+    /// [`Self::advance_root_authoritative_epoch`] mutates under. Returns `true` when the
+    /// edge was recorded, `false` when the add is STALE (`pass_generation` is strictly
+    /// below the root's high-water) and the edge was NOT recorded
+    /// ([`Self::open_overlay`] uses this to skip its provider (re-)open).
+    ///
+    /// The ADD-side symmetric peer of the per-edge reconcile REMOVE gate, shared by BOTH
+    /// add callers — [`Self::open_overlay`]'s single-edge add and
+    /// [`Self::reconcile_root_reachability`]'s add loop. The gate read and the record
+    /// share one critical section ON PURPOSE: a concurrent
+    /// [`Self::reconcile_root_reachability`] advancing the high-water can never land
+    /// BETWEEN this add's gate check and its slot record. It either advances FIRST
+    /// (this add reads the advanced value and is gated) or AFTER (this add's edge is
+    /// then dropped by that newer pass's remove loop). Without the shared guard a newer
+    /// pass could advance-and-close in that window, letting a stale add
+    /// re-record/re-open an overlay the newer pass already closed — a lingering
+    /// re-recorded overlay with no future closer until the next reconcile of this root.
+    ///
+    /// Lock discipline: the epoch entry guard (`root_reconcile_epochs`) and the slot
+    /// entry guard (`slots`) are DIFFERENT DashMaps, both held WITHOUT any `.await`, and
+    /// acquired only in the uniform `epoch → slot` order owner-wide, so no slot-vs-epoch
+    /// inversion is possible.
+    fn gate_and_record_root_edge(
+        &self,
+        root_canonical: &str,
+        decl_path: &str,
+        pass_generation: u64,
+    ) -> bool {
+        let epoch_entry = self
+            .root_reconcile_epochs
+            .entry(root_canonical.to_string())
+            .or_insert(0);
+        if pass_generation < *epoch_entry {
+            return false;
+        }
+        let mut slot = self.slots.entry(decl_path.to_string()).or_default();
+        slot.record_root(root_canonical, pass_generation);
+        slot.generation += 1;
+        true
     }
 
     /// Drop an open root from every declaration-overlay reaching set, returning the
@@ -197,7 +406,12 @@ impl DeclOverlayOwner {
                 self.slots.entry(decl_path.clone())
             {
                 let slot = occupied.get_mut();
-                let removed = slot.roots.remove(root_canonical);
+                // A `did_close` release is the CURRENT ownership truth: the root is
+                // GONE, so its edge is dropped unconditionally (no pass-generation
+                // gate — unlike a closure pass's stale-analysis removal). The release
+                // decides at `LIVE_RELEASE_PASS_GENERATION` so the resulting close is
+                // never superseded by a stale-pass `reach_epoch`.
+                let removed = slot.roots.remove(root_canonical).is_some();
                 // Return the overlay only when THIS release actually drained it —
                 // `removed && empty`. An already-empty tombstone (a prior drain whose
                 // close has not yet confirmed) is NOT re-returned, so a no-op release
@@ -206,39 +420,92 @@ impl DeclOverlayOwner {
                 // this same held entry lock as the close baseline. The guarded close
                 // GCs the slot on a confirmed close.
                 if removed && slot.roots.is_empty() {
-                    now_unreferenced.push((decl_path, slot.generation));
+                    now_unreferenced.push(DeclCloseTarget {
+                        decl_path,
+                        close_generation: slot.generation,
+                        decided_pass_generation: LIVE_RELEASE_PASS_GENERATION,
+                    });
                 }
             }
         }
         now_unreferenced
     }
 
-    /// Make a single root's reachability edges EQUAL its CURRENT closure: add an
-    /// edge for every `current_decl_paths` entry, and DROP the root from every other
-    /// overlay it previously reached but no longer does. Returns the overlays whose
-    /// reaching set drained to empty (the caller must close them).
+    /// Make a single root's reachability edges EQUAL its CURRENT closure UNDER CLOSURE
+    /// PASS `pass_generation`: add an edge (stamped `pass_generation`) for every
+    /// `current_decl_paths` entry, and DROP the root from every other overlay it
+    /// previously reached but no longer does — BUT ONLY when this pass's analysis is
+    /// not stale for that edge. Returns the overlays whose reaching set drained to
+    /// empty (the caller must close them).
     ///
     /// This keeps the graph from being append-only: when a root stops importing a
     /// carrier, the dropped overlay loses this root and closes if no other open root
     /// reaches it. An overlay still reached by a DIFFERENT root is retained (NOT
     /// returned). Pure slot surgery — no provider I/O.
+    ///
+    /// STALE-PASS DEFENSE (the overlapping-`background_init` race): a removal of this
+    /// root proceeds ONLY when the root's recorded edge stamp is `<= pass_generation`.
+    /// If a NEWER pass re-established this root's edge into the overlay (stamp
+    /// `> pass_generation`), this pass's `current_decl_paths` reflect STALE analysis
+    /// for that root, so the edge is LEFT INTACT — this pass must not erase a reaching
+    /// edge a newer live analysis owns (which would strand the newer root's bare
+    /// import on TS2307). The newer pass's own reconcile correctly drops the edges it
+    /// actually no longer reaches.
+    ///
+    /// STALE-ADD DEFENSE (the symmetric peer): each `current_decl_paths` edge is added
+    /// through the per-edge atomic [`Self::gate_and_record_root_edge`], which RE-READS the
+    /// root's authoritative high-water and records the edge under ONE shared
+    /// `root_reconcile_epochs` entry guard. A newer reconcile advancing the high-water (and
+    /// closing the overlay) BETWEEN this pass's authoritative decide and an edge's record
+    /// therefore GATES that edge — this pass must not re-record a reaching edge a newer
+    /// pass reconciled away, which would resurrect a closed overlay with no future closer.
     pub(crate) fn reconcile_root_reachability(
         &self,
         root_canonical: &str,
         current_decl_paths: &[String],
+        pass_generation: u64,
     ) -> Vec<DeclCloseTarget> {
         let current: HashSet<&str> = current_decl_paths.iter().map(String::as_str).collect();
 
-        // 1) Add this root to every overlay in its current closure.
-        for decl_path in current_decl_paths {
-            self.slots
-                .entry(decl_path.clone())
-                .or_default()
-                .roots
-                .insert(root_canonical.to_string());
+        // Advance THIS root's authoritative high-water mark and decide, in the same
+        // step, whether this pass owns the ADD side. A pass at/over the high-water is
+        // current (its add is admitted); an OLDER pass is stale (a newer pass already
+        // reconciled this root, so its add is gated). `advance` is monotonic-max, so a
+        // stale pass leaves the high-water at the newer pass's value and reads back a
+        // value strictly greater than its own generation.
+        let authoritative_epoch =
+            self.advance_root_authoritative_epoch(root_canonical, pass_generation);
+        let add_is_authoritative = pass_generation >= authoritative_epoch;
+
+        // Test-only interleave seam: fire here (after the authoritative decide, BEFORE the
+        // add-loop record) so a test can drive a concurrent newer reconcile that advances
+        // the high-water + drains the slot in this exact window, then assert the per-edge
+        // gate below refuses the now-stale add. A no-op for production-shaped (unarmed)
+        // passes.
+        #[cfg(test)]
+        self.signal_reconcile_add_interleave_for_test(root_canonical);
+
+        // 1) Add this root to every overlay in its current closure, stamping the edge
+        //    with this pass's generation (never moving an existing stamp backward) —
+        //    but ONLY when this pass is still authoritative for each edge. `add_is_
+        //    authoritative` is a FAST-PATH skip (this pass was already stale at the
+        //    decide); the AUTHORITATIVE check is the per-edge `gate_and_record_root_edge`,
+        //    which RE-READS the root's high-water AND records the edge under ONE shared
+        //    `root_reconcile_epochs` entry guard — the same atomic gate-and-record
+        //    `open_overlay` uses for its single-edge add. A concurrent reconcile advancing
+        //    the high-water BETWEEN this pass's decide and this record therefore cannot let
+        //    a now-stale add re-record an edge a newer pass reconciled away (the symmetric
+        //    peer of the per-edge remove gate in step 2); without the re-read it would
+        //    resurrect a closed overlay until the next reconcile of this root. A gated edge
+        //    (the newer pass already owns the root) is simply not recorded.
+        if add_is_authoritative {
+            for decl_path in current_decl_paths {
+                self.gate_and_record_root_edge(root_canonical, decl_path, pass_generation);
+            }
         }
 
-        // 2) Drop this root from every overlay NOT in its current closure.
+        // 2) Drop this root from every overlay NOT in its current closure — but only
+        //    when this pass is NOT stale for the edge.
         let mut now_unreferenced = Vec::new();
         let all_paths: Vec<String> = self.slots.iter().map(|entry| entry.key().clone()).collect();
         for decl_path in all_paths {
@@ -249,9 +516,24 @@ impl DeclOverlayOwner {
                 self.slots.entry(decl_path.clone())
             {
                 let slot = occupied.get_mut();
-                let removed = slot.roots.remove(root_canonical);
+                // STALE-PASS GATE: remove the edge only when this pass's analysis is
+                // at least as new as the edge's stamp. A newer pass's edge (stamp
+                // `> pass_generation`) is left intact — leaving the slot non-empty, so
+                // no close is decided for it under this stale pass.
+                let edge_is_this_pass_or_older = slot
+                    .roots
+                    .get(root_canonical)
+                    .is_some_and(|stamp| *stamp <= pass_generation);
+                if !edge_is_this_pass_or_older {
+                    continue;
+                }
+                let removed = slot.roots.remove(root_canonical).is_some();
                 if removed && slot.roots.is_empty() {
-                    now_unreferenced.push((decl_path, slot.generation));
+                    now_unreferenced.push(DeclCloseTarget {
+                        decl_path,
+                        close_generation: slot.generation,
+                        decided_pass_generation: pass_generation,
+                    });
                 }
             }
         }
@@ -289,6 +571,7 @@ impl DeclOverlayOwner {
     pub(crate) fn reconcile_open_roots(
         &self,
         live_roots: &HashSet<String>,
+        pass_generation: u64,
     ) -> Vec<DeclCloseTarget> {
         let mut now_unreferenced = Vec::new();
         let all_paths: Vec<String> = self.slots.iter().map(|entry| entry.key().clone()).collect();
@@ -297,7 +580,14 @@ impl DeclOverlayOwner {
                 self.slots.entry(decl_path.clone())
             {
                 let slot = occupied.get_mut();
-                slot.roots.retain(|root| live_roots.contains(root));
+                // Retain only roots still in the LIVE open-document set. This drop is
+                // keyed on genuine OPENNESS (a closed root is gone from `live_roots`),
+                // NOT on this pass's possibly-stale analysis — so no per-root pass
+                // gate applies here (unlike `reconcile_root_reachability`). The
+                // `reach_epoch` close gate (applied in `guarded_close` against
+                // `decided_pass_generation`) still protects an empty tombstone a NEWER
+                // pass reaches.
+                slot.roots.retain(|root, _stamp| live_roots.contains(root));
                 // Return a currently-empty slot UNLESS a close for it is already
                 // in-flight. Empty + not-pending is either an overlay this reconcile
                 // just drained or a surviving tombstone whose earlier close finished
@@ -305,7 +595,11 @@ impl DeclOverlayOwner {
                 // committed close holding the path lock; re-issuing would only
                 // contend on that lock, so leave it to the in-flight close.
                 if slot.roots.is_empty() && !slot.close_pending {
-                    now_unreferenced.push((decl_path, slot.generation));
+                    now_unreferenced.push(DeclCloseTarget {
+                        decl_path,
+                        close_generation: slot.generation,
+                        decided_pass_generation: pass_generation,
+                    });
                 }
             }
         }
@@ -317,16 +611,18 @@ impl DeclOverlayOwner {
     /// BOTH the `did_close`-side release and the closure-pass-side reconcile route
     /// their Decl closes here, so the supersession gate is applied uniformly.
     ///
-    /// For each `(decl_path, gen_at_decision)`, under that path's serialization lock:
+    /// For each target, under that path's serialization lock:
     ///   1. RE-CHECK under the slot entry lock: if the overlay's reaching set is
-    ///      NON-EMPTY (a reference reappeared) OR its generation has ADVANCED past
-    ///      `gen_at_decision` (an open landed since the close was decided), SKIP — the
+    ///      NON-EMPTY (a reference reappeared) OR its close-lifecycle generation has
+    ///      ADVANCED past the decision baseline (an open landed since the close was
+    ///      decided) OR its `reach_epoch` has advanced past the DECIDING PASS
+    ///      generation (a NEWER closure pass established reachability), SKIP — the
     ///      close is superseded.
     ///   2. Strip the `Decl` kind from the owner carrier's committed provider state
     ///      and issue the provider `close_dts` WHILE HOLDING the path lock (so a
     ///      concurrent open of the same path waits behind it, then revalidates).
     ///   3. On success, GC the slot only if it is STILL empty AND its generation is
-    ///      unchanged from `gen_at_decision` (otherwise an open landed — keep the
+    ///      unchanged from `close_generation` (otherwise an open landed — keep the
     ///      live slot). On failure, keep the tombstone (fail closed).
     ///
     /// The provider close needs only the carrier `sync` handle and the committed
@@ -339,7 +635,12 @@ impl DeclOverlayOwner {
         provider_sync_states: &DashMap<String, ProviderSyncState>,
         targets: &[DeclCloseTarget],
     ) {
-        for (decl_path, gen_at_decision) in targets {
+        for DeclCloseTarget {
+            decl_path,
+            close_generation,
+            decided_pass_generation,
+        } in targets
+        {
             let lock = self.path_lock(decl_path);
             let _path_guard = lock.lock().await;
 
@@ -348,12 +649,23 @@ impl DeclOverlayOwner {
             //    mark the slot's close IN-FLIGHT in the SAME critical section, so a
             //    concurrent `reconcile_open_roots` does not re-issue a redundant close
             //    that would only contend on the path lock this close is about to hold.
+            //
+            //    THREE supersession conditions:
+            //      * a reaching root reappeared (`!roots.is_empty()`);
+            //      * the close-lifecycle generation advanced (`generation !=
+            //        close_generation`) — an open landed since the decision (ABA);
+            //      * a NEWER closure pass established reachability (`reach_epoch >
+            //        decided_pass_generation`) — even with an empty set, a stale pass
+            //        must not close an overlay a newer live pass reaches. A
+            //        `did_close` release decides at `LIVE_RELEASE_PASS_GENERATION`
+            //        (`u64::MAX`), so its release is never superseded by this gate.
             let superseded = {
                 match self.slots.entry(decl_path.clone()) {
                     dashmap::mapref::entry::Entry::Occupied(mut occupied) => {
                         let slot = occupied.get_mut();
-                        let superseded =
-                            !slot.roots.is_empty() || slot.generation != *gen_at_decision;
+                        let superseded = !slot.roots.is_empty()
+                            || slot.generation != *close_generation
+                            || slot.reach_epoch > *decided_pass_generation;
                         if !superseded {
                             slot.close_pending = true;
                         }
@@ -363,7 +675,7 @@ impl DeclOverlayOwner {
                     // only if the decision baseline was a real (non-zero) generation
                     // that has since been GC'd; a 0-baseline close of an absent slot
                     // is a no-op either way.
-                    dashmap::mapref::entry::Entry::Vacant(_) => *gen_at_decision != 0,
+                    dashmap::mapref::entry::Entry::Vacant(_) => *close_generation != 0,
                 }
             };
             if superseded {
@@ -402,7 +714,7 @@ impl DeclOverlayOwner {
             if let dashmap::mapref::entry::Entry::Occupied(mut occupied) =
                 self.slots.entry(decl_path.clone())
             {
-                if occupied.get().roots.is_empty() && occupied.get().generation == *gen_at_decision
+                if occupied.get().roots.is_empty() && occupied.get().generation == *close_generation
                 {
                     occupied.remove();
                 } else {
@@ -440,6 +752,7 @@ impl DeclOverlayOwner {
         documents: &DocumentRegistry,
         provider_sync_states: &DashMap<String, ProviderSyncState>,
         snapshot: &super::PublishedResolverSnapshot,
+        pass_generation: u64,
     ) -> bool {
         let host = documents.host();
         let mut synced_any = false;
@@ -480,7 +793,15 @@ impl DeclOverlayOwner {
                 }
 
                 if let Some(decl_path) = self
-                    .open_overlay(sync, documents, provider_sync_states, snapshot, root, &node)
+                    .open_overlay(
+                        sync,
+                        documents,
+                        provider_sync_states,
+                        snapshot,
+                        root,
+                        &node,
+                        pass_generation,
+                    )
                     .await
                 {
                     synced_any = true;
@@ -499,7 +820,8 @@ impl DeclOverlayOwner {
             // `did_close` already released its edges; this re-records them, and the
             // post-loop reconcile against the FRESHLY re-read open set drops `root`
             // again iff it is no longer open.
-            let now_unreferenced = self.reconcile_root_reachability(root, &reached_decl_paths);
+            let now_unreferenced =
+                self.reconcile_root_reachability(root, &reached_decl_paths, pass_generation);
             self.guarded_close(sync, provider_sync_states, &now_unreferenced)
                 .await;
         }
@@ -511,7 +833,7 @@ impl DeclOverlayOwner {
         // `did_close` released its edges, which the per-root reconcile re-recorded)
         // is dropped here, so a closed root leaves NOTHING behind.
         let current_live_roots = collect_open_carrier_roots();
-        let now_unreferenced = self.reconcile_open_roots(&current_live_roots);
+        let now_unreferenced = self.reconcile_open_roots(&current_live_roots, pass_generation);
         self.guarded_close(sync, provider_sync_states, &now_unreferenced)
             .await;
 
@@ -536,6 +858,7 @@ impl DeclOverlayOwner {
     /// the root's per-pass reached set for reconciliation), or `None` when the
     /// carrier was not loadable / projects no declaration / the root closed / the
     /// open failed.
+    #[allow(clippy::too_many_arguments)]
     async fn open_overlay(
         &self,
         sync: &ProjectSync,
@@ -544,6 +867,7 @@ impl DeclOverlayOwner {
         snapshot: &super::PublishedResolverSnapshot,
         root_canonical: &str,
         dep_canonical_id: &str,
+        pass_generation: u64,
     ) -> Option<String> {
         let host = documents.host();
         if !host.ensure_loaded(dep_canonical_id) {
@@ -551,7 +875,7 @@ impl DeclOverlayOwner {
         }
         let decl_path = host.declaration_carrier_path(dep_canonical_id)?; // adapter projects no decl
 
-        // tgo resolves the declaration through path config; mirror the API/IDE
+        // tsgo resolves the declaration through path config; mirror the API/IDE
         // carrier path configuration so the overlay is resolvable in the owner project.
         configure_provider_paths_for_source(sync, snapshot, dep_canonical_id, true).await;
 
@@ -605,14 +929,29 @@ impl DeclOverlayOwner {
             return None;
         }
 
-        // Record `{decl_path -> root}` + bump the generation in ONE slot critical
-        // section, BEFORE the provider open — so the record/bump is visible the
-        // instant a concurrent guarded close re-checks (and that close is, in any
-        // case, serialized behind this path lock).
-        {
-            let mut slot = self.slots.entry(decl_path.clone()).or_default();
-            slot.roots.insert(root_canonical.to_string());
-            slot.generation += 1;
+        // Test-only interleave seam: fire here (after the path lock + root-open
+        // revalidation, BEFORE the atomic add-gate record) so a test can advance this
+        // root's authoritative high-water CONCURRENTLY and assert the gate below catches
+        // it. A no-op for production-shaped (unarmed) passes.
+        #[cfg(test)]
+        self.await_add_gate_interleave_for_test(root_canonical)
+            .await;
+
+        // ADD gate + record, ATOMIC against a concurrent reconcile advance: the
+        // high-water read and the slot record (+ generation bump) share ONE
+        // `root_reconcile_epochs` entry critical section (see `gate_and_record_root_edge`)
+        // — the SAME guard `advance_root_authoritative_epoch` mutates under — so a newer
+        // pass advancing the high-water (and deciding/closing this overlay) can never
+        // land BETWEEN this open's gate and its record. A pass OLDER than the root's
+        // high-water is GATED (the symmetric peer of the per-edge reconcile remove
+        // gate): re-opening would resurrect a provider overlay no current analysis
+        // reaches, with no future closer until the next reconcile of this root. Stamping
+        // the recorded edge with `pass_generation` also advances the slot's
+        // `reach_epoch`, so a stale pass's close is superseded by this open. Run under
+        // the held path lock, so it is consistent with the provider open below (the path
+        // strand serializes this open against any concurrent close of the same overlay).
+        if !self.gate_and_record_root_edge(root_canonical, &decl_path, pass_generation) {
+            return None;
         }
 
         // Open the overlay (or update it in place when already background-loaded),
@@ -672,10 +1011,17 @@ impl DeclOverlayOwner {
         self.slots.get(decl_path).map(|s| s.generation).unwrap_or(0)
     }
 
-    /// Build the [`DeclCloseTarget`] for a direct close of `decl_path`, pairing it
-    /// with the current generation as the supersession baseline.
+    /// Build the [`DeclCloseTarget`] for a direct close of `decl_path` (a carrier-state
+    /// close that surfaced a `Decl` path), pairing it with the current close-lifecycle
+    /// generation as the ABA baseline and [`LIVE_RELEASE_PASS_GENERATION`] as the
+    /// deciding-pass baseline — a direct close is the CURRENT carrier-state truth, not
+    /// a stale closure pass, so it must win the `reach_epoch` supersession gate.
     pub(crate) fn close_target_for(&self, decl_path: &str) -> DeclCloseTarget {
-        (decl_path.to_string(), self.current_generation(decl_path))
+        DeclCloseTarget {
+            decl_path: decl_path.to_string(),
+            close_generation: self.current_generation(decl_path),
+            decided_pass_generation: LIVE_RELEASE_PASS_GENERATION,
+        }
     }
 
     /// Test-only: the reaching-root set recorded for `decl_path`, or `None` when no
@@ -683,7 +1029,119 @@ impl DeclOverlayOwner {
     /// reachability graph directly without exposing the private slot map.
     #[cfg(test)]
     pub(crate) fn test_slot_roots(&self, decl_path: &str) -> Option<HashSet<String>> {
-        self.slots.get(decl_path).map(|s| s.roots.clone())
+        self.slots
+            .get(decl_path)
+            .map(|s| s.roots.keys().cloned().collect())
+    }
+
+    /// Test-only: the closure-pass generation STAMP recorded for `root` on
+    /// `decl_path`'s slot (`None` when no slot or no such root edge). Used by the
+    /// stale-pass regression tests to assert a newer pass's edge stamp.
+    #[cfg(test)]
+    pub(crate) fn test_slot_root_generation(&self, decl_path: &str, root: &str) -> Option<u64> {
+        self.slots
+            .get(decl_path)
+            .and_then(|s| s.roots.get(root).copied())
+    }
+
+    /// Test-only: the slot's monotonic `reach_epoch` (0 when no slot is tracked) — the
+    /// highest closure-pass generation that ever reached this overlay. Used by the
+    /// stale-pass close-gate regression tests.
+    #[cfg(test)]
+    pub(crate) fn test_slot_reach_epoch(&self, decl_path: &str) -> u64 {
+        self.slots
+            .get(decl_path)
+            .map(|s| s.reach_epoch)
+            .unwrap_or(0)
+    }
+
+    /// Test-only: the per-ROOT authoritative-reconciliation high-water mark (0 when
+    /// the root has never been reconciled). Used by the symmetric-ADD-gate regression
+    /// tests to assert the gate baseline.
+    #[cfg(test)]
+    pub(crate) fn test_root_authoritative_epoch(&self, root: &str) -> u64 {
+        self.root_reconcile_epochs
+            .get(root)
+            .map(|e| *e.value())
+            .unwrap_or(0)
+    }
+
+    /// Test-only: directly advance a root's authoritative high-water mark, so a
+    /// behavioral test can pre-establish "a newer pass already reconciled this root"
+    /// before driving a STALE pass through the real closure entry point.
+    #[cfg(test)]
+    pub(crate) fn test_advance_root_authoritative_epoch(&self, root: &str, pass_generation: u64) {
+        let _ = self.advance_root_authoritative_epoch(root, pass_generation);
+    }
+
+    /// Test-only: ARM the add-gate interleave seam for `root`, returning the handshake
+    /// handle. A subsequent [`Self::open_overlay`] that reaches the seam for `root`
+    /// fires `reached` and BLOCKS on `proceed`, so a test can — in that exact window
+    /// between the open's gate and its record — advance the root's authoritative
+    /// high-water (modelling a concurrent newer reconcile) and then release the open
+    /// via `proceed`. The atomic gate-and-record then observes the advanced high-water
+    /// and the open is GATED; without the shared entry guard the open would record/open
+    /// after the advance (the stale re-open this fix closes).
+    #[cfg(test)]
+    pub(crate) fn arm_add_gate_interleave_for_test(&self, root: &str) -> Arc<AddGateInterleave> {
+        let handle = Arc::new(AddGateInterleave::default());
+        self.add_gate_interleave_signals
+            .insert(root.to_string(), Arc::clone(&handle));
+        handle
+    }
+
+    /// Test-only: at the add-gate interleave seam, if armed for `root`, signal
+    /// `reached` and AWAIT `proceed` (so a test can advance the high-water in between),
+    /// then DISARM (one-shot) so a later pass over the same root is not re-blocked. A
+    /// no-op when unarmed, so production-shaped passes run unobserved. The map guard
+    /// from `get` is dropped before the await — never held across it.
+    #[cfg(test)]
+    async fn await_add_gate_interleave_for_test(&self, root: &str) {
+        let handle = self
+            .add_gate_interleave_signals
+            .get(root)
+            .map(|h| Arc::clone(h.value()));
+        if let Some(handle) = handle {
+            handle.reached.notify_one();
+            handle.proceed.notified().await;
+            self.add_gate_interleave_signals.remove(root);
+        }
+    }
+
+    /// Test-only: ARM the RECONCILE add-loop interleave seam for `root`, returning the
+    /// handshake handle. The NEXT [`Self::reconcile_root_reachability`] for `root` to reach
+    /// the seam REMOVES the arming (one-shot — so a concurrent reconcile for the same root
+    /// sails straight through), raises `reached`, and BLOCKS on `proceed`, so a test can —
+    /// in that exact window between the reconcile's authoritative decide and its add-loop
+    /// record — drive a concurrent newer reconcile (advancing the root's high-water +
+    /// draining the slot) and then release the stale pass via `proceed`. The add loop's
+    /// per-edge atomic gate-and-record then observes the advanced high-water and refuses
+    /// the now-stale add; without it the stale add resurrects the closed overlay.
+    #[cfg(test)]
+    pub(crate) fn arm_reconcile_add_interleave_for_test(
+        &self,
+        root: &str,
+    ) -> Arc<ReconcileAddInterleave> {
+        let handle = Arc::new(ReconcileAddInterleave::default());
+        self.reconcile_add_interleave_signals
+            .insert(root.to_string(), Arc::clone(&handle));
+        handle
+    }
+
+    /// Test-only: at the reconcile add-loop seam, if armed for `root`, REMOVE the arming
+    /// (one-shot — so a concurrent reconcile for the same root sails through), raise
+    /// `reached`, and BLOCK on `proceed`. A no-op when unarmed, so production-shaped passes
+    /// run unobserved. Synchronous: `reconcile_root_reachability` is sync.
+    #[cfg(test)]
+    fn signal_reconcile_add_interleave_for_test(&self, root: &str) {
+        let handle = self
+            .reconcile_add_interleave_signals
+            .remove(root)
+            .map(|(_, handle)| handle);
+        if let Some(handle) = handle {
+            handle.mark_reached();
+            handle.wait_proceed();
+        }
     }
 
     /// Test-only: the close generation recorded for `decl_path` (0 when no slot is
@@ -699,7 +1157,7 @@ impl DeclOverlayOwner {
     pub(crate) fn test_slots_snapshot(&self) -> Vec<(String, HashSet<String>)> {
         self.slots
             .iter()
-            .map(|e| (e.key().clone(), e.value().roots.clone()))
+            .map(|e| (e.key().clone(), e.value().roots.keys().cloned().collect()))
             .collect()
     }
 
@@ -711,7 +1169,25 @@ impl DeclOverlayOwner {
         let mut slot = self.slots.entry(decl_path.to_string()).or_default();
         slot.generation = generation;
         for root in roots {
-            slot.roots.insert((*root).to_string());
+            slot.record_root(root, generation);
+        }
+    }
+
+    /// Test-only: seed a `{decl_path -> root}` edge stamping the root edge with an
+    /// explicit closure-PASS generation distinct from the close-lifecycle generation,
+    /// so a stale-pass test can craft a slot whose per-root stamp / `reach_epoch`
+    /// exceeds a deciding pass's generation.
+    #[cfg(test)]
+    pub(crate) fn test_seed_slot_with_pass(
+        &self,
+        decl_path: &str,
+        roots: &[(&str, u64)],
+        close_generation: u64,
+    ) {
+        let mut slot = self.slots.entry(decl_path.to_string()).or_default();
+        slot.generation = close_generation;
+        for (root, pass_generation) in roots {
+            slot.record_root(root, *pass_generation);
         }
     }
 
@@ -722,7 +1198,13 @@ impl DeclOverlayOwner {
     pub(crate) fn test_replace_slot(&self, decl_path: &str, roots: &[&str], generation: u64) {
         let mut slot = self.slots.entry(decl_path.to_string()).or_default();
         slot.generation = generation;
-        slot.roots = roots.iter().map(|r| (*r).to_string()).collect();
+        slot.roots = roots
+            .iter()
+            .map(|r| ((*r).to_string(), generation))
+            .collect();
+        // `reach_epoch` is monotonic across the slot's life; a replace REPLACES the
+        // set but does not lower the high-water mark — fold the new stamps in.
+        slot.reach_epoch = slot.reach_epoch.max(generation);
     }
 
     /// Test-only: ARM a one-shot CONTENTION probe for `decl_path` and return its
@@ -805,3 +1287,7 @@ pub(crate) fn carrier_dependency_ids(
     }
     deps
 }
+
+#[cfg(test)]
+#[path = "background_drain_decl_closure_tests.rs"]
+mod overlay_epoch_tests;

@@ -36,8 +36,8 @@ fn provider_absence_is_hard_fail_when_required_else_skip() {
 }
 
 /// `handle_absent_provider` PANICS (fail-closed) when the provider's require
-/// env is set — proven by forcing tgo absent via the require env regardless of
-/// whether tgo is installed. Reverting the require check (always-skip) makes
+/// env is set — proven by forcing tsgo absent via the require env regardless of
+/// whether tsgo is installed. Reverting the require check (always-skip) makes
 /// this test stop panicking, so it is discriminating.
 ///
 /// Serialized via a process-global mutex because it mutates a process env var,
@@ -93,12 +93,12 @@ fn handle_absent_provider_skips_without_require_env() {
 }
 
 /// `handle_absent_provider` PANICS (fail-closed) when `VERTER_REQUIRE_TSSERVER`
-/// is set — the symmetric counterpart of the tgo gate, proven by forcing the
+/// is set — the symmetric counterpart of the tsgo gate, proven by forcing the
 /// tsserver kind absent via its require env regardless of whether tsserver is
 /// installed. Reverting the require check (always-skip) makes this test stop
 /// panicking, so it is discriminating.
 ///
-/// Serialized via the same process-global mutex as the tgo require tests because
+/// Serialized via the same process-global mutex as the tsgo require tests because
 /// it mutates a process env var that other env-reading tests could observe.
 #[test]
 fn tsserver_handle_absent_provider_fails_closed_under_require_env() {
@@ -106,7 +106,7 @@ fn tsserver_handle_absent_provider_fails_closed_under_require_env() {
     let key = TestProviderKind::Tsserver.require_env();
     assert_eq!(
         key, "VERTER_REQUIRE_TSSERVER",
-        "the tsserver require knob must be VERTER_REQUIRE_TSSERVER (symmetric with tgo)"
+        "the tsserver require knob must be VERTER_REQUIRE_TSSERVER (symmetric with tsgo)"
     );
     let prev = std::env::var_os(key);
     std::env::set_var(key, "1");

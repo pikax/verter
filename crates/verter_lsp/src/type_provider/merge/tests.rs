@@ -2002,7 +2002,7 @@ fn merge_signature_help_carries_active_param_and_offset_label() {
 }
 
 /// A `Simple` carrier label still maps to `ParameterLabel::Simple` (fail-closed
-/// passthrough form — e.g. a tgo provider that sends string labels).
+/// passthrough form — e.g. a tsgo provider that sends string labels).
 #[test]
 fn merge_signature_help_simple_label_passthrough() {
     use tower_lsp_server::ls_types::ParameterLabel;

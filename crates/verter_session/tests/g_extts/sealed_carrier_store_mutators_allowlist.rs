@@ -89,13 +89,13 @@ const GATEWAY_RESOLVERS: &[&str] = &["carrier_sync_state_for_source"];
 
 /// The carrier-companion ProjectSync CONTENT verbs (establish a carrier `.tsx`/`.dts`
 /// companion as a provider content authority). They may run ONLY from the bounded
-/// carrier-sync surface (the TGO direct-open handlers + the `ProjectSync` definition
+/// carrier-sync surface (the tsgo direct-open handlers + the `ProjectSync` definition
 /// itself) — never from a new unrelated file that would sync carrier buffers behind
 /// the gateway's back. Close verbs are NOT policed (closing is always safe).
 const CARRIER_CONTENT_VERBS: &[&str] = &["load_dts", "load_tsx", "open_dts", "open_tsx"];
 
 /// Files permitted to call the carrier-companion CONTENT verbs: the carrier-sync
-/// gateway, the TGO direct-open + interactive + drain + coordinator + scanner sync
+/// gateway, the tsgo direct-open + interactive + drain + coordinator + scanner sync
 /// sites (each holds a gateway receipt before committing), the open-document-liveness
 /// preserve path, and the `ProjectSync` definition/its own inline tests.
 const CONTENT_VERB_ALLOWLIST: &[&str] = &[

@@ -50,13 +50,13 @@ fn source_content_change_forces_recodegen() {
 
 #[test]
 fn compile_profile_change_forces_recodegen() {
-    // The CarrierIde vs CarrierBatch distinction is a distinct compile_profile:
-    // the SAME source under a different profile is a DIFFERENT carrier text and
-    // must not be served from the peer slot.
-    let ide = regen_key(0xAA, 1);
-    let batch = regen_key(0xAA, 2);
+    // A distinct compile_profile is a distinct carrier slot: the SAME source under a
+    // different profile is a DIFFERENT carrier text and must not be served from the
+    // peer slot.
+    let profile_a = regen_key(0xAA, 1);
+    let profile_b = regen_key(0xAA, 2);
     assert!(
-        !RegenKey::carrier_regeneration_is_fresh(&ide, &batch),
+        !RegenKey::carrier_regeneration_is_fresh(&profile_a, &profile_b),
         "a distinct compile profile must key a distinct carrier slot"
     );
 }

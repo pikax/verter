@@ -704,7 +704,7 @@ pub(super) async fn handle_did_change(
             // fire the change notification) — NOT open the synthetic TSX as a
             // second content authority (the eager `sync_tsx` is a no-op for
             // tsserver). The publish is fail-closed (a no-owner carrier publishes
-            // nothing). tgo keeps the eager `sync_tsx` content open.
+            // nothing). tsgo keeps the eager `sync_tsx` content open.
             if matches!(server.type_provider_kind, crate::TypeProviderKind::Tsserver) {
                 if carrier_language_for(&canonical_id).is_some() {
                     server.publish_carrier_to_external_ts(&canonical_id).await;
@@ -824,7 +824,7 @@ pub(super) async fn handle_did_close(
     // `.d.<ext>.ts` overlay its closure opened that NO other open root still
     // reaches is closed now. An overlay still reachable from another open root
     // is retained (closing it would strand that root's bare carrier imports).
-    // A no-op for tsserver (the refcount is only populated on the tgo closure
+    // A no-op for tsserver (the refcount is only populated on the tsgo closure
     // pass) and when the closed file was never a carrier root. Runs AFTER
     // `did_close` so the closure pass already sees the root as closed (above).
     if server.project_sync.is_some() {

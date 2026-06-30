@@ -50,6 +50,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::{Deserialize, Serialize};
 
 use verter_session::external_ts::{PublishSnapshot, ScriptKind, SnapshotFile, SnapshotRole};
+// The single workspace filesystem-case-identity policy (Windows + default macOS fold
+// case, Linux is exact) — shared with the tsgo `--api` membership comparator.
+use verter_span::path::fs_is_case_insensitive;
 
 /// The directory name segment for the whole carrier store (under the system temp
 /// dir). A single fixed segment so every host version's stores cluster under it.
@@ -198,21 +201,6 @@ fn blob_ext(script_kind: ScriptKind) -> &'static str {
     }
 }
 
-/// Whether the host filesystem folds case in path lookups.
-///
-/// Windows (NTFS) and the default macOS volume (APFS case-INsensitive) treat
-/// `/repo/App` and `/repo/app` as the SAME path; Linux (ext4/xfs/btrfs) treats them
-/// as DISTINCT. The workspace-hash fold MUST match: case-folding on a
-/// case-sensitive FS would collide two genuinely-distinct workspaces into one store
-/// (and a Cross-Platform Portability defect). This is a coarse platform check — the
-/// exact per-mount fold is not consulted (a case-sensitive volume on Windows, or a
-/// case-sensitive APFS volume on macOS, is rare and only over-separates stores,
-/// never collides them, which is the safe direction).
-#[must_use]
-const fn fs_is_case_insensitive() -> bool {
-    cfg!(any(target_os = "windows", target_os = "macos"))
-}
-
 /// Compute the per-workspace store dir name from the workspace root path.
 ///
 /// `blake3` over the CANONICALIZED path bytes, case-folded ONLY on a
@@ -274,7 +262,6 @@ impl From<ScriptKind> for ManifestScriptKind {
 pub enum ManifestRole {
     CarrierIde,
     CarrierApi,
-    CarrierBatch,
     Shadow,
     Real,
 }
@@ -284,7 +271,6 @@ impl From<SnapshotRole> for ManifestRole {
         match r {
             SnapshotRole::CarrierIde => ManifestRole::CarrierIde,
             SnapshotRole::CarrierApi => ManifestRole::CarrierApi,
-            SnapshotRole::CarrierBatch => ManifestRole::CarrierBatch,
             SnapshotRole::Shadow => ManifestRole::Shadow,
             SnapshotRole::Real => ManifestRole::Real,
         }

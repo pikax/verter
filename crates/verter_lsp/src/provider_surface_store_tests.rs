@@ -1649,11 +1649,10 @@ fn legacy_carrier_api_record_has_no_project_owner() {
 
 #[test]
 fn reserved_roles_are_recordable_and_round_trip_kind() {
-    // CarrierIde / CarrierBatch / Shadow / Real are now wired into the single
-    // store (no second store).
+    // CarrierIde / Shadow / Real are now wired into the single store (no second
+    // store).
     for (path, kind) in [
         ("/src/A.vue.tsx", ProviderSurfaceKind::CarrierIde),
-        ("/src/A.vue.batch.tsx", ProviderSurfaceKind::CarrierBatch),
         ("/src/A.svelte.ts", ProviderSurfaceKind::Shadow),
         ("/src/real.ts", ProviderSurfaceKind::Real),
     ] {

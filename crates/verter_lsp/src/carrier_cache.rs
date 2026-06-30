@@ -66,9 +66,8 @@ pub struct RegenKey {
     pub source_content_hash: Hash16,
     /// Parse-environment hash (parser options affecting the AST shape).
     pub parse_env_hash: Hash16,
-    /// The codegen compile-profile hash. Distinct profiles (e.g. the `CarrierIde`
-    /// interactive profile vs the `CarrierBatch` minimal-diagnostic profile)
-    /// produce DIFFERENT text and therefore DIFFERENT keys for the same source.
+    /// The codegen compile-profile hash. Distinct profiles produce DIFFERENT text
+    /// and therefore DIFFERENT keys for the same source.
     pub compile_profile_hash: u64,
     /// The per-file `FileLanguage` row hash (the R21 per-file classification
     /// dimension of artifact identity).

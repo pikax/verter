@@ -7,32 +7,46 @@ use super::*;
 use crate::protocol::TypeDiagnosticSeverity;
 
 #[test]
-fn path_eq_normalizes_slashes_and_distinguishes_distinct_files() {
-    // Backslash vs forward-slash is always normalized away (same file, any OS).
-    assert!(path_eq(r"C:\ws\src\A.ts", "c:/ws/src/A.ts"));
-    // Distinct files (different basename) never match.
-    assert!(!path_eq("/ws/src/A.ts", "/ws/src/B.ts"));
+fn fs_paths_equal_normalizes_slashes_and_distinguishes_distinct_files() {
+    // Backslash vs forward-slash is normalized away on every OS (identical case here,
+    // so the filesystem case policy does not enter the comparison).
+    assert!(fs_paths_equal(r"C:\ws\src\A.ts", "C:/ws/src/A.ts"));
+    // Distinct files (different basename) never match on any OS.
+    assert!(!fs_paths_equal("/ws/src/A.ts", "/ws/src/B.ts"));
 }
 
-/// On a case-INSENSITIVE filesystem (Windows) a case fold in the path — drive
-/// letter OR a segment — must still match (the engine may report `C:` while the
-/// configured path uses `c:`, and NTFS folds case).
+/// On a case-INSENSITIVE filesystem (Windows / NTFS) a case fold in the path — drive
+/// letter OR a segment — must still match: the engine may report `C:` while the
+/// configured path uses `c:`, and NTFS folds case, so membership must hold.
 #[cfg(target_os = "windows")]
 #[test]
-fn path_eq_folds_case_on_case_insensitive_fs() {
-    assert!(path_eq("c:/WS/Src/A.ts", "C:/ws/src/a.ts"));
+fn fs_paths_equal_folds_case_on_windows_case_insensitive_fs() {
+    assert!(fs_paths_equal("c:/WS/Src/A.ts", "C:/ws/src/a.ts"));
 }
 
-/// On a case-SENSITIVE filesystem (Linux / case-sensitive APFS) two files
-/// differing ONLY by case are DISTINCT and must NOT be conflated — the pre-fix
-/// unconditional `eq_ignore_ascii_case` wrongly merged them. Discriminating: this
-/// assertion holds only with the platform-conditional comparison.
-#[cfg(not(target_os = "windows"))]
+/// On macOS the default APFS volume is case-INSENSITIVE, so a carrier whose
+/// engine-reported `root_files` path differs only by case from the configured path
+/// is the SAME file and MUST stay a configured-project member. The pre-unification
+/// `cfg!(target_os = "windows")` predicate compared case-SENSITIVELY here, so a
+/// macOS case variant missed `root_files` membership and silently dropped its
+/// diagnostics. Discriminating: this assertion FAILS on the old Windows-only
+/// predicate and passes only under the unified `fs_is_case_insensitive()` policy.
+#[cfg(target_os = "macos")]
 #[test]
-fn path_eq_is_case_sensitive_on_case_sensitive_fs() {
-    assert!(!path_eq("/ws/src/A.ts", "/ws/src/a.ts"));
+fn fs_paths_equal_folds_case_on_macos_case_insensitive_fs() {
+    assert!(fs_paths_equal("/ws/Src/A.ts", "/ws/src/a.ts"));
+}
+
+/// On Linux (case-SENSITIVE) two files differing ONLY by case are DISTINCT and must
+/// NOT be conflated — an unconditional `eq_ignore_ascii_case` would wrongly merge
+/// them. Discriminating: this holds only with the case-sensitive Linux branch of the
+/// unified policy.
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+#[test]
+fn fs_paths_equal_is_case_sensitive_on_linux() {
+    assert!(!fs_paths_equal("/ws/src/A.ts", "/ws/src/a.ts"));
     // Same exact path still matches.
-    assert!(path_eq("/ws/src/A.ts", "/ws/src/A.ts"));
+    assert!(fs_paths_equal("/ws/src/A.ts", "/ws/src/A.ts"));
 }
 
 /// `TypeDiagnosticSeverity` does not derive `PartialEq`, so match it by name.
@@ -89,4 +103,74 @@ fn map_api_diagnostic_severity_table() {
         ..base.clone()
     });
     assert_eq!(severity_name(&message.severity), "info");
+}
+
+/// Build a fake `--api` snapshot with a single configured project whose root set is
+/// `root_files`. Mirrors what `update_snapshot_open_project` returns from the engine,
+/// constructed offline (all DTO fields are public).
+fn fake_snapshot(
+    config_file: &str,
+    root_files: &[&str],
+) -> verter_tsgo_api::api_attach::AttachSnapshot {
+    use verter_tsgo_api::proto::types::{OpaqueHandle, ProjectResponse};
+    verter_tsgo_api::api_attach::AttachSnapshot {
+        snapshot: OpaqueHandle(7),
+        projects: vec![ProjectResponse {
+            id: "p.tsconfig".to_string(),
+            config_file_name: config_file.to_string(),
+            compiler_options: serde_json::Map::new(),
+            root_files: root_files.iter().map(|f| (*f).to_string()).collect(),
+        }],
+    }
+}
+
+/// The tsgo carrier path is PROJECT-BOUND: `select_configured_project_carrier` returns
+/// the engine carrier IFF the carrier is in the CONFIGURED project's root set —
+/// ABSENCE is `None` (fail closed), NEVER a fallback to an inferred/single-file
+/// project. (The boundary that matters, per the project-bound contract: not "was
+/// open_project called", but "membership is required and its absence is an error.")
+#[test]
+fn carrier_membership_in_configured_project_root_files_is_required_not_inferred() {
+    let tsconfig = "/ws/tsconfig.json";
+    let carrier = "/ws/src/Widget.vue.tsx";
+
+    // (1) Carrier IS in the configured project's root set ⇒ Some(engine carrier).
+    let snap = fake_snapshot(tsconfig, &[carrier, "/ws/src/Other.ts"]);
+    let resolved = select_configured_project_carrier(&snap, tsconfig, carrier);
+    assert_eq!(
+        resolved,
+        Some(("p.tsconfig".to_string(), carrier.to_string())),
+        "a carrier present in the configured project's root_files resolves to the \
+         engine carrier under that project"
+    );
+
+    // (2) Carrier ABSENT from the configured project's root set ⇒ None (fail closed).
+    // This is the discriminating boundary: a fallback-to-inferred design would still
+    // return Some by minting a single-file project; project-bound returns None.
+    let snap_absent = fake_snapshot(tsconfig, &["/ws/src/Other.ts"]);
+    assert_eq!(
+        select_configured_project_carrier(&snap_absent, tsconfig, carrier),
+        None,
+        "a carrier ABSENT from the configured project's root_files is None — NOT a \
+         fallback to an inferred/single-file project"
+    );
+
+    // (3) No project matches the tsconfig ⇒ None (the configured project gate fails
+    // closed; never serve a different / inferred project).
+    let snap_wrong_config = fake_snapshot("/other/tsconfig.json", &[carrier]);
+    assert_eq!(
+        select_configured_project_carrier(&snap_wrong_config, tsconfig, carrier),
+        None,
+        "no project matching the requested tsconfig is None — never a wrong-project / \
+         inferred fallback"
+    );
+
+    // (4) The selected project is THE configured one for the tsconfig: a snapshot
+    // whose only project is for a DIFFERENT config does not satisfy a request for
+    // `tsconfig`, even though that project DOES contain the carrier.
+    assert!(
+        select_configured_project_carrier(&snap_wrong_config, tsconfig, carrier).is_none(),
+        "membership is checked against the project SELECTED BY the requested tsconfig, \
+         not any project that happens to contain the carrier"
+    );
 }

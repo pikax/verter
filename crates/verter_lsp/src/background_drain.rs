@@ -40,8 +40,9 @@ pub(super) enum SyncOutcome {
 /// engine. When present, a carrier's companions are PUBLISHED into the on-disk
 /// store the `@verter/typescript-plugin` reads (making the carrier a configured-
 /// project member) INSTEAD of being opened directly into the provider via
-/// `provider.open_file`. `None` for tgo (which keeps the inferred carrier-open
-/// path) and for unit tests that assert the mock provider's open/sync calls.
+/// `provider.open_file`. `None` for tsgo (whose carrier companions reach the
+/// engine through the project-bound `--api` direct open — `open_project` +
+/// `root_files`) and for unit tests that assert the mock provider's open/sync calls.
 pub(super) struct CarrierPublishCtx<'a> {
     /// The coordinator that resolves ownership + publishes the companions.
     pub(super) coordinator: &'a crate::external_ts::CarrierPublishCoordinator,
@@ -87,7 +88,8 @@ pub(super) async fn drain_pending_snapshot_provider_sync(
         )
     };
     // The tsserver carrier-publish context (the store-publish membership path).
-    // `None` for tgo (inferred carrier-open) and when no coordinator is wired.
+    // `None` for tsgo (project-bound `--api` direct carrier-companion open) and when
+    // no coordinator is wired.
     let carrier_publish = carrier_publish_coordinator.map(|coordinator| CarrierPublishCtx {
         coordinator,
         vfs: Arc::clone(&vfs_handle),
@@ -163,6 +165,7 @@ pub(super) async fn resync_aliased_imports_for_open_files(
     is_tsgo: bool,
     carrier_publish_coordinator: Option<&crate::external_ts::CarrierPublishCoordinator>,
     decl_overlay_owner: &DeclOverlayOwner,
+    pass_generation: u64,
 ) -> bool {
     let Some(sync) = project_sync else {
         return false;
@@ -327,7 +330,7 @@ pub(super) async fn resync_aliased_imports_for_open_files(
         };
 
         // Route the owner-resolved carrier (or an owner lost mid-flight) through the
-        // SINGLE carrier-sync gateway: tsserver publishes the membership, tgo opens
+        // SINGLE carrier-sync gateway: tsserver publishes the membership, tsgo opens
         // the companions directly, and a mid-flight owner loss is reconciled inside
         // (`Unowned`). Any synced kind counts as progress.
         if let CarrierApplyOutcome::Applied { synced, .. } = apply_owner_resolved_carrier_sync(
@@ -535,7 +538,7 @@ pub(super) async fn resync_aliased_imports_for_open_files(
     // reachability so the `did_close` lifecycle can release them.
     //
     // tsserver serves carrier companions through the publish store (not direct
-    // overlay opens), so the proactive overlay graph is a tgo-only concern —
+    // overlay opens), so the proactive overlay graph is a tsgo-only concern —
     // scoped exactly like the carrier-open passes above.
     if is_tsgo {
         synced_any |= decl_overlay_owner
@@ -544,6 +547,7 @@ pub(super) async fn resync_aliased_imports_for_open_files(
                 documents,
                 provider_sync_states,
                 &snapshot,
+                pass_generation,
             )
             .await;
     }
@@ -666,7 +670,7 @@ pub(super) async fn sync_pending_carrier_provider_file(
 
     // Route through the SINGLE carrier-sync gateway: tsserver PUBLISHES the carrier
     // companions into the on-disk store the plugin reads (the configured-project
-    // membership), tgo opens the companions directly, and an owner loss RETRACTS the
+    // membership), tsgo opens the companions directly, and an owner loss RETRACTS the
     // membership + preserves an open document / removes a closed one. The receipt
     // gates every commit (the gap-E bug class).
     match apply_owner_resolved_carrier_sync(
@@ -929,7 +933,7 @@ async fn reconcile_unowned_carrier_provider_file(
 
 /// The applied result of an owner-resolved both-kinds carrier gateway sync.
 enum CarrierApplyOutcome {
-    /// Committed (tsserver `Published` membership, or tgo `DirectOpen` buffer sync).
+    /// Committed (tsserver `Published` membership, or tsgo `DirectOpen` buffer sync).
     /// `attempted` = the kinds with a target path this pass; `synced` = those that
     /// actually landed (a tsserver publish marks both store-resident ⇒ attempted ==
     /// synced).
@@ -949,7 +953,7 @@ enum CarrierApplyOutcome {
 /// aliased-import resync, and the barrel Vue-dependency pass:
 ///   * tsserver ⇒ `Published`: the store membership serves both companions; commit
 ///     the both-resident state with the receipt (no buffer I/O).
-///   * tgo ⇒ `DirectOpen`: per-kind open/sync (open if not background-loaded, else
+///   * tsgo ⇒ `DirectOpen`: per-kind open/sync (open if not background-loaded, else
 ///     update), revert any failed kind to its prior live path, commit with the
 ///     receipt, and close only the genuinely-stale paths.
 ///   * owner-loss ⇒ `Unowned`: the gateway retracted the membership; the buffer-side
@@ -1143,7 +1147,7 @@ pub(super) async fn sync_api_to_provider_background_task(
         configure_provider_paths_for_source(&sync, &snapshot, &canonical_id, true).await;
     }
     // Route through the SINGLE carrier-sync gateway. This API-only background task
-    // is the TGO path (the tsserver coordinator route returns before spawning it),
+    // is the tsgo path (the tsserver coordinator route returns before spawning it),
     // so the gateway returns `DirectOpen` carrying the transition + the receipt that
     // gates the commit below. No membership context ⇒ no store publish.
     let (transition, receipt) =

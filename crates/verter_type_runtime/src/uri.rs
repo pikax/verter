@@ -67,22 +67,20 @@ pub fn file_uri_to_path(uri: &str) -> String {
 /// Normalize a file URI for TSGO diagnostics-cache equivalence matching.
 ///
 /// This is the TSGO URI-cache key ONLY — NOT the shared canonical file ID, and
-/// intentionally NOT routed through `verter_span::path::canonicalize_path`. TSGO
-/// may lowercase whole URI path segments on Windows (it sends
+/// intentionally NOT routed through `verter_span::path::canonicalize_path` (which
+/// only lowercases the drive letter, preserving case-sensitive Linux paths, so it
+/// cannot serve this whole-URI equivalence role). On a case-insensitive filesystem
+/// (Windows / default macOS) TSGO may lowercase whole URI path segments (it sends
 /// `file:///c%3A/users/...` where our `path_to_file_uri_string` emits
-/// `file:///C:/Users/...`), so this folds the WHOLE decoded URI under
-/// `cfg(windows)` to make both forms hit the same cache bucket on the
-/// case-insensitive Windows filesystem. The owner only lowercases the drive
-/// letter (it preserves case-sensitive Linux paths), so it cannot serve this
-/// equivalence role. Shared file identity still uses `canonicalize_path`.
+/// `file:///C:/Users/...`), so this folds the WHOLE decoded URI through the single
+/// shared `verter_span::path::fs_is_case_insensitive` policy to make both forms hit
+/// the same cache bucket; a case-sensitive filesystem (Linux) preserves case.
+/// Shared file identity still uses `canonicalize_path`.
 pub fn normalize_file_uri_for_cache(uri: &str) -> String {
     let decoded = percent_decode(uri);
-    #[cfg(windows)]
-    {
+    if verter_span::path::fs_is_case_insensitive() {
         decoded.to_lowercase()
-    }
-    #[cfg(not(windows))]
-    {
+    } else {
         decoded
     }
 }
@@ -259,9 +257,26 @@ mod tests {
     }
 
     #[test]
-    fn normalize_file_uri_for_cache_decodes_percent() {
-        let result = normalize_file_uri_for_cache("file:///c%3A/Users/test");
-        // On Windows this would be lowercased, on Unix it stays as-is
-        assert!(result.contains("c:/Users/test") || result.contains("c:/users/test"));
+    fn normalize_file_uri_for_cache_folds_case_per_fs_policy() {
+        // The cache key decodes percent-escapes, then folds case IFF the host
+        // filesystem is case-insensitive — the single shared
+        // `verter_span::path::fs_is_case_insensitive` policy (Windows + default
+        // macOS fold; Linux preserves). Platform-faithful + discriminating: on
+        // macOS the pre-fix `cfg(windows)`-only fold left a mixed-case URI
+        // UNfolded, so the case-variant form missed the bucket; routing through
+        // the shared policy folds it there too.
+        let result = normalize_file_uri_for_cache("file:///c%3A/Users/Test");
+        if verter_span::path::fs_is_case_insensitive() {
+            assert_eq!(
+                result, "file:///c:/users/test",
+                "a case-insensitive filesystem folds the whole decoded URI to lowercase \
+                 so a case-variant URI hits the same cache bucket"
+            );
+        } else {
+            assert_eq!(
+                result, "file:///c:/Users/Test",
+                "a case-sensitive filesystem preserves the decoded URI case"
+            );
+        }
     }
 }

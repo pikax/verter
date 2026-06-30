@@ -72,7 +72,7 @@ mod synthesized_rename_injection_tests {
 
     #[test]
     fn injects_when_provider_did_not_report_the_child_decl() {
-        // tgo: the provider did NOT enumerate the child-declaration leg, so the
+        // tsgo: the provider did NOT enumerate the child-declaration leg, so the
         // synthesized location is the ONLY one for the prop decl — it must be added.
         let mut locs: Vec<RenameLocation> = vec![loc("/src/App.vue.tsx", 1000, 1003)];
         inject_synthesized_carrier_rename_location(&mut locs, API, 40, 43);
@@ -281,7 +281,7 @@ mod cross_file_rename_gate_tests {
     #[test]
     fn confirmed_usage_only_merge_fails_closed_to_none() {
         // A CONFIRMED child-prop rename whose merged edit contains ONLY the parent
-        // usage leg (the tgo synthesis-failure shape: declaration leg dropped,
+        // usage leg (the tsgo synthesis-failure shape: declaration leg dropped,
         // provider did not enumerate it). The gate MUST fail closed → None, never the
         // usage-only partial.
         //
@@ -428,7 +428,7 @@ mod cross_file_rename_gate_tests {
     fn confirmed_child_leg_from_provider_passes_without_synthesis() {
         // The gate is provider-AGNOSTIC — it inspects the merged result, not whether
         // Verter synthesis ran. A both-legs-present edit passes regardless of the
-        // declaration leg's ORIGIN (tsserver native, tgo synthesis, or imported
+        // declaration leg's ORIGIN (tsserver native, tsgo synthesis, or imported
         // member). Proves the gate does NOT regress tsserver.
         let merged = edit_with(vec![
             (parent_uri(), vec![te(parent_usage_range(), "fooRenamed")]),

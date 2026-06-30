@@ -231,7 +231,7 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
 
     // The tsserver carrier-membership context: the debounced carrier reaches the
     // provider as a store-backed configured-project member. Clone the VFS handle in
-    // its own statement so the `RwLockReadGuard` is dropped BEFORE any await. tgo
+    // its own statement so the `RwLockReadGuard` is dropped BEFORE any await. tsgo
     // (no coordinator) ⇒ `None` ⇒ the gateway returns a direct-open transition.
     let vfs = deps.vfs_workspace.read().clone();
     let membership = match (
@@ -249,7 +249,7 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
 
     // Route the freshly-debounced carrier through the SINGLE carrier-sync gateway:
     // tsserver PUBLISHES the companions into the store the plugin reads (refreshing
-    // the store content for the next pull), tgo opens the companions directly, and an
+    // the store content for the next pull), tsgo opens the companions directly, and an
     // owner loss RETRACTS the membership + preserves an open document / clears a
     // closed one. The receipt gates every commit.
     match crate::external_ts::reconcile_carrier_source(crate::external_ts::CarrierSyncRequest {

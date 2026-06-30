@@ -102,7 +102,7 @@ fn generate_public_api_stubs(
             .unwrap_or("Component");
         let component_name = sanitize_component_name(raw_name);
         let hash = simple_hash(canonical_id.as_bytes());
-        // The stub's on-disk name is internal: `rewrite_vue_ts_imports` connects
+        // The stub's on-disk name is internal: `lower_tsc_validation_carrier_specifiers` connects
         // the codegen's carrier-API specifier to this file via `vue_ts_map`, so
         // the `.vue.ts` extension here only needs `allowImportingTsExtensions`.
         let stub_name = format!("{component_name}_{hash:016x}.vue.ts");
@@ -290,14 +290,15 @@ pub fn run(
     // This catches type errors that the minimal macro-only .tsc.tsx would miss.
     let mut validation_generated = generate_all_tsx(&config.vue_files, temp_dir.path());
 
-    // ── Rewrite carrier public-API imports ───────────────────────────
-    // The IDE codegen targets a carrier's public API via the reserved
-    // `.verter.ts` virtual suffix (`Foo.vue.verter.ts`). Remap known
-    // carrier-API paths to temp-dir stubs (for real cross-component type
-    // checking) and strip the suffix back to the carrier path for unknown
-    // paths (falling back to the wildcard shim).
+    // ── Lower the GENERATED validation TSX's own carrier specifiers ──────
+    // TSC-validation carrier-specifier lowering (NOT user-import rewriting):
+    // Verter's IDE codegen emitted carrier-API specifiers via the reserved
+    // `.verter.ts` virtual suffix (`Foo.vue.verter.ts`). Lower known carrier-API
+    // paths to temp-dir stubs (for real cross-component type checking) and strip
+    // the suffix back to the carrier path for unknown paths (falling back to the
+    // wildcard shim). Only the generated TSX's OWN specifiers are touched.
     for (_, code, tsx_path) in &mut validation_generated {
-        let rewritten = rewrite_vue_ts_imports(code, &vue_ts_map);
+        let rewritten = lower_tsc_validation_carrier_specifiers(code, &vue_ts_map);
         if rewritten != *code {
             *code = rewritten;
             let _ = fs::write(tsx_path, &*code);
@@ -936,30 +937,38 @@ const CARRIER_VIRTUAL_IMPORT_SUFFIXES: &[&str] = &[
     ".jsx",
 ];
 
-/// Rewrite carrier virtual-file import paths in generated IDE TSX code.
+/// TSC-validation carrier-specifier lowering: rewrite the GENERATED validation
+/// TSX's OWN carrier-API import specifiers so the plugin-less `verter_tsc`
+/// validation Program resolves them.
 ///
-/// The IDE codegen targets a sibling carrier's virtual file via one of two
-/// surfaces (see [`CARRIER_VIRTUAL_IMPORT_SUFFIXES`]): the API carrier
-/// (`Foo.vue.verter.ts`) for the public-default re-export and `$instance`
-/// self-import, and the IDE carrier (`Foo.vue.tsx`) for in-project component
-/// imports. By the time this runs the specifier has already been resolved to an
-/// absolute carrier-virtual path by [`rewrite_relative_imports`].
+/// This is NOT the forbidden "post-hoc import rewriting" of USER/project source
+/// (rewriting a user's imports to paper over project binding). It operates ONLY on
+/// the carrier-virtual specifiers Verter's OWN IDE codegen EMITTED into the
+/// generated validation TSX — the `Foo.vue.verter.ts` API carrier (public-default
+/// re-export + `$instance` self-import) and the `Foo.vue.tsx` IDE carrier
+/// (in-project component imports), see [`CARRIER_VIRTUAL_IMPORT_SUFFIXES`]. By the
+/// time this runs the specifier has already been resolved to an absolute
+/// carrier-virtual path by [`rewrite_relative_imports`].
 ///
 /// For known carriers (present in `vue_ts_map`, keyed by canonical carrier path),
-/// rewrites the import to point to the temp-dir public API stub — the stub
-/// re-exports the component's public default, so it satisfies both surfaces. For
-/// unknown carrier paths (e.g., from node_modules), strips the virtual suffix
-/// back to the bare carrier path (`Bar.vue` / `Bar.svelte`) so the `*.vue` /
-/// `*.svelte` wildcard shim matches.
+/// it lowers the import to the temp-dir public-API stub — the stub re-exports the
+/// component's public default, so it satisfies both surfaces. For unknown carrier
+/// paths (e.g. from node_modules), it strips the virtual suffix back to the bare
+/// carrier path (`Bar.vue` / `Bar.svelte`) so the `*.vue` / `*.svelte` wildcard
+/// shim matches.
 ///
-/// ONLY real module-specifier positions are classified: the quoted path after a
+/// ONLY real module-specifier positions are lowered: the quoted path after a
 /// `from` clause (static `import …`/`export … from`), the dynamic `import("…")`
-/// argument, and the side-effect `import "…"` specifier. The validation TSX
-/// lowers the user's `<script setup>` body verbatim, so an ordinary string
-/// literal, a comment, or a template literal that merely SPELLS a carrier path is
-/// NOT a specifier and is left byte-for-byte untouched (see
-/// [`rewrite_module_specifiers`]).
-fn rewrite_vue_ts_imports(code: &str, vue_ts_map: &HashMap<String, PathBuf>) -> String {
+/// argument, and the side-effect `import "…"` specifier. The validation TSX lowers
+/// the user's `<script setup>` body verbatim, so an ordinary string literal, a
+/// comment, or a template literal that merely SPELLS a carrier path is NOT a
+/// specifier and is left BYTE-FOR-BYTE untouched (see
+/// [`lower_carrier_specifiers_in_module_positions`]) — user source is never
+/// touched, only the generated carrier specifiers Verter itself emitted.
+fn lower_tsc_validation_carrier_specifiers(
+    code: &str,
+    vue_ts_map: &HashMap<String, PathBuf>,
+) -> String {
     // Fast path: skip files that mention neither a carrier-virtual suffix nor a
     // bare carrier source extension anywhere. A bare in-project carrier import
     // (`./Comp.vue`, no virtual suffix) must still be examined — the precise
@@ -977,7 +986,7 @@ fn rewrite_vue_ts_imports(code: &str, vue_ts_map: &HashMap<String, PathBuf>) -> 
         return code.to_string();
     }
 
-    rewrite_module_specifiers(code, vue_ts_map)
+    lower_carrier_specifiers_in_module_positions(code, vue_ts_map)
 }
 
 /// What a freshly-read `import`/`export` keyword is waiting to consume next.
@@ -993,11 +1002,12 @@ enum SpecifierExpect {
     NextString,
 }
 
-/// Lexical module-specifier rewriter: copies `code` to the output verbatim,
-/// rewriting ONLY the string literal that occupies a genuine module-specifier
-/// position. It recognizes the specifier-introducing token shapes and skips all
-/// non-specifier context (comments, ordinary string literals, template literals)
-/// so user code that merely mentions a carrier path is never corrupted.
+/// Lexical carrier-specifier lowering over module-specifier positions: copies
+/// `code` to the output verbatim, lowering ONLY the carrier specifier that
+/// occupies a genuine module-specifier position. It recognizes the
+/// specifier-introducing token shapes and skips all non-specifier context
+/// (comments, ordinary string literals, template literals) so user code that
+/// merely mentions a carrier path is never corrupted.
 ///
 /// This is `verter_tsc`'s own minimal syntactic position scanner over the
 /// generated validation TSX — a focused specifier-position lexer, NOT a type-text
@@ -1018,7 +1028,10 @@ enum SpecifierExpect {
 /// never treated as a specifier introducer. Byte-level scanning is safe: every
 /// syntactic token is ASCII, and non-ASCII bytes appear only inside
 /// strings/comments/identifiers, which are copied through unaltered.
-fn rewrite_module_specifiers(code: &str, vue_ts_map: &HashMap<String, PathBuf>) -> String {
+fn lower_carrier_specifiers_in_module_positions(
+    code: &str,
+    vue_ts_map: &HashMap<String, PathBuf>,
+) -> String {
     let bytes = code.as_bytes();
     let len = bytes.len();
     let mut result = String::with_capacity(len);
@@ -1246,7 +1259,7 @@ fn next_significant_byte(bytes: &[u8], mut i: usize) -> Option<u8> {
 ///
 /// The lexical state at `start` is established by scanning FORWARD from the
 /// beginning of `bytes` with the SAME string / template / block-comment / line-
-/// comment state machine the forward specifier scan ([`rewrite_module_specifiers`])
+/// comment state machine the forward specifier scan ([`lower_carrier_specifiers_in_module_positions`])
 /// uses — not a backward line-local heuristic. This is the only correct way to
 /// classify a `//`, a `.`, or a quote that lies on a continuation line of a
 /// MULTILINE construct: a `//` inside an unterminated template literal (or a block
@@ -2227,7 +2240,7 @@ const props = defineProps<{ msg: string }>()
     // ── carrier public-API import rewriting tests ──────────────
 
     #[test]
-    fn rewrite_vue_ts_imports_rewrites_known_and_strips_unknown() {
+    fn lower_tsc_validation_carrier_specifiers_rewrites_known_and_strips_unknown() {
         let mut map = HashMap::new();
         map.insert(
             "D:/project/src/components/Foo.vue".to_string(),
@@ -2238,7 +2251,7 @@ const props = defineProps<{ msg: string }>()
         let code = r#"import('D:/project/src/components/Foo.vue.verter.ts')['default']
 import type { Props } from 'D:/project/src/components/Bar.vue.verter.ts'"#;
 
-        let result = rewrite_vue_ts_imports(code, &map);
+        let result = lower_tsc_validation_carrier_specifiers(code, &map);
 
         // Positive: known Foo carrier-API should be rewritten to its temp stub.
         assert!(
@@ -2267,7 +2280,7 @@ import type { Props } from 'D:/project/src/components/Bar.vue.verter.ts'"#;
     /// wildcard shim), regardless of any basename coincidence (the ambiguous
     /// basename fallback was removed).
     #[test]
-    fn rewrite_vue_ts_imports_matches_verter_suffix_exact_canonical() {
+    fn lower_tsc_validation_carrier_specifiers_matches_verter_suffix_exact_canonical() {
         let mut map = HashMap::new();
         map.insert(
             "D:/project/src/Foo.vue".to_string(),
@@ -2277,7 +2290,7 @@ import type { Props } from 'D:/project/src/components/Bar.vue.verter.ts'"#;
         // Known carrier-API, EXACT canonical path → stub (the real-pipeline path:
         // post-`rewrite_relative_imports` specifiers are absolute and exact-hit).
         let known = r#"import('D:/project/src/Foo.vue.verter.ts')['default']"#;
-        let known_out = rewrite_vue_ts_imports(known, &map);
+        let known_out = lower_tsc_validation_carrier_specifiers(known, &map);
         assert!(
             known_out.contains("'C:/tmp/Foo_abc.vue.ts'"),
             "exact-canonical known carrier-API should map to its stub: {known_out}"
@@ -2291,7 +2304,7 @@ import type { Props } from 'D:/project/src/components/Bar.vue.verter.ts'"#;
         // does NOT exact-hit the canonical map key → strips to the bare carrier
         // path (NOT the stub: the ambiguous basename fallback is gone).
         let bare_basename = r#"import('Foo.vue.verter.ts')['default']"#;
-        let bare_out = rewrite_vue_ts_imports(bare_basename, &map);
+        let bare_out = lower_tsc_validation_carrier_specifiers(bare_basename, &map);
         assert!(
             bare_out.contains("'Foo.vue'"),
             "a bare-basename carrier-API that does not exact-hit must strip to the \
@@ -2304,7 +2317,7 @@ import type { Props } from 'D:/project/src/components/Bar.vue.verter.ts'"#;
 
         // Unknown carrier-API, bare basename → stripped to the carrier path.
         let unknown = r#"import('Bar.vue.verter.ts')['default']"#;
-        let unknown_out = rewrite_vue_ts_imports(unknown, &map);
+        let unknown_out = lower_tsc_validation_carrier_specifiers(unknown, &map);
         assert!(
             unknown_out.contains("'Bar.vue'"),
             "unknown carrier-API should strip back to Bar.vue: {unknown_out}"
@@ -2317,7 +2330,7 @@ import type { Props } from 'D:/project/src/components/Bar.vue.verter.ts'"#;
         // A legacy `.vue.ts` specifier is NOT a carrier-API import and is left
         // untouched (proves the matcher keys on `.verter.ts`, not `.vue.ts`).
         let legacy = r#"import('D:/project/src/Foo.vue.ts')['default']"#;
-        let legacy_out = rewrite_vue_ts_imports(legacy, &map);
+        let legacy_out = lower_tsc_validation_carrier_specifiers(legacy, &map);
         assert_eq!(
             legacy_out, legacy,
             "a legacy `.vue.ts` specifier must not be treated as carrier-API: {legacy_out}"
@@ -2330,7 +2343,7 @@ import type { Props } from 'D:/project/src/components/Bar.vue.verter.ts'"#;
     /// and a plain `.tsx` import that is NOT a carrier companion must be left
     /// alone (the `path_is_carrier` gate).
     #[test]
-    fn rewrite_vue_ts_imports_maps_ide_carrier_and_ignores_plain_tsx() {
+    fn lower_tsc_validation_carrier_specifiers_maps_ide_carrier_and_ignores_plain_tsx() {
         let mut map = HashMap::new();
         map.insert(
             "D:/project/src/Child.vue".to_string(),
@@ -2339,7 +2352,7 @@ import type { Props } from 'D:/project/src/components/Bar.vue.verter.ts'"#;
 
         // Known IDE carrier import → stub.
         let known = r#"import Child from 'D:/project/src/Child.vue.tsx'"#;
-        let known_out = rewrite_vue_ts_imports(known, &map);
+        let known_out = lower_tsc_validation_carrier_specifiers(known, &map);
         assert!(
             known_out.contains("'C:/tmp/Child_abc.vue.ts'"),
             "known `.vue.tsx` IDE carrier should map to its stub: {known_out}"
@@ -2351,7 +2364,7 @@ import type { Props } from 'D:/project/src/components/Bar.vue.verter.ts'"#;
 
         // Unknown IDE carrier → strip `.tsx` back to the carrier path for the shim.
         let unknown = r#"import Other from 'D:/vendor/Other.vue.tsx'"#;
-        let unknown_out = rewrite_vue_ts_imports(unknown, &map);
+        let unknown_out = lower_tsc_validation_carrier_specifiers(unknown, &map);
         assert!(
             unknown_out.contains("'D:/vendor/Other.vue'"),
             "unknown `.vue.tsx` should strip back to the carrier path: {unknown_out}"
@@ -2359,7 +2372,7 @@ import type { Props } from 'D:/project/src/components/Bar.vue.verter.ts'"#;
 
         // A plain `.tsx` import (not a carrier companion) must be untouched.
         let plain = r#"import W from './Widget.tsx'"#;
-        let plain_out = rewrite_vue_ts_imports(plain, &map);
+        let plain_out = lower_tsc_validation_carrier_specifiers(plain, &map);
         assert_eq!(
             plain_out, plain,
             "a non-carrier `.tsx` import must be left untouched: {plain_out}"
@@ -2442,13 +2455,13 @@ import type { Props } from 'D:/project/src/components/Bar.vue.verter.ts'"#;
     }
 
     /// The CLASS contract: once the bare-carrier classifier and the fast-path
-    /// gate are fixed, `rewrite_vue_ts_imports` rewrites EVERY quoted specifier
+    /// gate are fixed, `lower_tsc_validation_carrier_specifiers` rewrites EVERY quoted specifier
     /// shape that targets a bare in-project carrier — a default import, a dynamic
     /// `import("…")`, and a re-export `export … from "…"` — to the public-API
     /// stub. A code string whose ONLY carrier reference is bare `.vue` (no
     /// `.tsx`/`.jsx`/`.verter.ts` anywhere) must NOT be early-returned unchanged.
     #[test]
-    fn rewrite_vue_ts_imports_rewrites_bare_in_project_carrier_class() {
+    fn lower_tsc_validation_carrier_specifiers_rewrites_bare_in_project_carrier_class() {
         let mut map = HashMap::new();
         map.insert(
             "/ws/src/GenericComp.vue".to_string(),
@@ -2457,7 +2470,7 @@ import type { Props } from 'D:/project/src/components/Bar.vue.verter.ts'"#;
 
         // Default import of a bare in-project carrier (the regression case).
         let default_import = r#"import GenericComp from "/ws/src/GenericComp.vue";"#;
-        let default_out = rewrite_vue_ts_imports(default_import, &map);
+        let default_out = lower_tsc_validation_carrier_specifiers(default_import, &map);
         assert!(
             default_out.contains(r#""/tmp/GenericComp_abc.vue.ts""#),
             "bare default import must be rewritten to the stub: {default_out}"
@@ -2469,7 +2482,7 @@ import type { Props } from 'D:/project/src/components/Bar.vue.verter.ts'"#;
 
         // Dynamic import of the same bare carrier.
         let dynamic = r#"const C = import("/ws/src/GenericComp.vue");"#;
-        let dynamic_out = rewrite_vue_ts_imports(dynamic, &map);
+        let dynamic_out = lower_tsc_validation_carrier_specifiers(dynamic, &map);
         assert!(
             dynamic_out.contains(r#""/tmp/GenericComp_abc.vue.ts""#),
             "bare dynamic import must be rewritten to the stub: {dynamic_out}"
@@ -2477,7 +2490,7 @@ import type { Props } from 'D:/project/src/components/Bar.vue.verter.ts'"#;
 
         // Re-export `export { default } from "…"` of the same bare carrier.
         let reexport = r#"export { default } from "/ws/src/GenericComp.vue";"#;
-        let reexport_out = rewrite_vue_ts_imports(reexport, &map);
+        let reexport_out = lower_tsc_validation_carrier_specifiers(reexport, &map);
         assert!(
             reexport_out.contains(r#""/tmp/GenericComp_abc.vue.ts""#),
             "bare re-export must be rewritten to the stub: {reexport_out}"
@@ -2488,7 +2501,7 @@ import type { Props } from 'D:/project/src/components/Bar.vue.verter.ts'"#;
         // assert the gate independently against a single bare import.
         let bare_only = r#"import C from "/ws/src/GenericComp.vue";"#;
         assert_ne!(
-            rewrite_vue_ts_imports(bare_only, &map),
+            lower_tsc_validation_carrier_specifiers(bare_only, &map),
             bare_only,
             "a file whose only carrier import is bare `.vue` must not be \
              early-returned unchanged by the fast-path gate"
@@ -2496,11 +2509,11 @@ import type { Props } from 'D:/project/src/components/Bar.vue.verter.ts'"#;
     }
 
     /// Negative class coverage for the bare-carrier path: unknown bare carriers
-    /// and non-carrier specifiers must survive `rewrite_vue_ts_imports`
+    /// and non-carrier specifiers must survive `lower_tsc_validation_carrier_specifiers`
     /// unchanged (so the `*.vue` wildcard shim resolves the unknown carrier and
     /// real modules are untouched).
     #[test]
-    fn rewrite_vue_ts_imports_leaves_unknown_bare_carrier_and_non_carriers() {
+    fn lower_tsc_validation_carrier_specifiers_leaves_unknown_bare_carrier_and_non_carriers() {
         let mut map = HashMap::new();
         map.insert(
             "/ws/src/GenericComp.vue".to_string(),
@@ -2510,7 +2523,7 @@ import type { Props } from 'D:/project/src/components/Bar.vue.verter.ts'"#;
         // Unknown bare carrier (not in the map) → left bare for the wildcard shim.
         let unknown = r#"import U from "/ws/src/Unknown.vue";"#;
         assert_eq!(
-            rewrite_vue_ts_imports(unknown, &map),
+            lower_tsc_validation_carrier_specifiers(unknown, &map),
             unknown,
             "an unknown bare carrier must be left bare for the `*.vue` shim"
         );
@@ -2519,7 +2532,7 @@ import type { Props } from 'D:/project/src/components/Bar.vue.verter.ts'"#;
         let non_carrier = r#"import { a } from "./types";
 import _ from "lodash";"#;
         assert_eq!(
-            rewrite_vue_ts_imports(non_carrier, &map),
+            lower_tsc_validation_carrier_specifiers(non_carrier, &map),
             non_carrier,
             "non-carrier specifiers must be unchanged"
         );
@@ -2527,7 +2540,7 @@ import _ from "lodash";"#;
         // A `.d.ts` whose stem is not a carrier → untouched.
         let dts = r#"import type { F } from "./foo.d.ts";"#;
         assert_eq!(
-            rewrite_vue_ts_imports(dts, &map),
+            lower_tsc_validation_carrier_specifiers(dts, &map),
             dts,
             "a non-carrier `.d.ts` import must be unchanged"
         );
@@ -2543,7 +2556,7 @@ import _ from "lodash";"#;
         }
     }
 
-    /// CONTEXT-SCOPING (Part 1): `rewrite_vue_ts_imports` must rewrite ONLY the
+    /// CONTEXT-SCOPING (Part 1): `lower_tsc_validation_carrier_specifiers` must rewrite ONLY the
     /// quoted string that occupies a real module-specifier position — the path
     /// after an import/export-from token, the dynamic `import("…")` argument, and
     /// the side-effect `import "…"` specifier. A user string literal whose VALUE
@@ -2553,7 +2566,7 @@ import _ from "lodash";"#;
     /// `<script setup>` body, so those positions are real user code that the
     /// type-checker must see unaltered.
     #[test]
-    fn rewrite_vue_ts_imports_rewrites_only_module_specifiers() {
+    fn lower_tsc_validation_carrier_specifiers_rewrites_only_module_specifiers() {
         let mut map = HashMap::new();
         map.insert(
             "/ws/src/GenericComp.vue".to_string(),
@@ -2573,7 +2586,7 @@ const rel = "./GenericComp.vue";
 const tmpl = `/ws/src/GenericComp.vue`;
 const nested = `path is ${other} for /ws/src/GenericComp.vue`;
 "#;
-        let out = rewrite_vue_ts_imports(code, &map);
+        let out = lower_tsc_validation_carrier_specifiers(code, &map);
 
         // The real import specifier IS rewritten to the stub.
         assert!(
@@ -2621,13 +2634,60 @@ const nested = `path is ${other} for /ws/src/GenericComp.vue`;
         );
     }
 
+    /// TSC-VALIDATION-LOWERING SCOPE: the lowering touches ONLY generated carrier
+    /// MODULE SPECIFIERS, never user source. When the generated TSX contains a
+    /// KNOWN carrier path (present in `vue_ts_map`) ONLY in NON-specifier positions —
+    /// a user string literal, a `//`/`/* */` comment, a template literal, a JSX text
+    /// node, an object-property VALUE — the lowering must return the input
+    /// BYTE-FOR-BYTE IDENTICAL (no specifier ⇒ no rewrite ⇒ no mutation). This is the
+    /// guard against the forbidden "rewrite user source to paper over binding": a
+    /// version that rewrote inside a string/comment/template, or treated a
+    /// non-specifier carrier mention as a specifier, would mutate these bytes and
+    /// FAIL the exact-equality assertion.
+    #[test]
+    fn tsc_validation_lowering_leaves_user_source_byte_for_byte_when_no_specifier() {
+        let mut map = HashMap::new();
+        // `KnownComp.vue` IS a known carrier — so if the lowering wrongly treated any
+        // of the NON-specifier occurrences below as a specifier, it would rewrite
+        // them to this stub, mutating the bytes.
+        map.insert(
+            "/ws/src/KnownComp.vue".to_string(),
+            PathBuf::from("/tmp/KnownComp_xyz.vue.ts"),
+        );
+
+        // A file that MENTIONS the known carrier path in every non-specifier
+        // position but contains NO module specifier at all.
+        let user_source = r#"const label = "/ws/src/KnownComp.vue is the widget";
+// import note: /ws/src/KnownComp.vue (do not touch)
+/* block ref: /ws/src/KnownComp.vue */
+const route = { path: "/ws/src/KnownComp.vue", lazy: true };
+const tmpl = `render /ws/src/KnownComp.vue here`;
+const jsxish = <div>/ws/src/KnownComp.vue</div>;
+const ident = KnownComp_vue_thing;
+"#;
+
+        let out = lower_tsc_validation_carrier_specifiers(user_source, &map);
+
+        // BYTE-FOR-BYTE identical — the strongest negative assertion: not one byte of
+        // user source moved, and the stub never leaked into a non-specifier position.
+        assert_eq!(
+            out, user_source,
+            "user source with NO module specifier must be returned byte-for-byte identical \
+             (the lowering must never rewrite a carrier path that is not a specifier)"
+        );
+        assert!(
+            !out.contains("/tmp/KnownComp_xyz.vue.ts"),
+            "the stub must NEVER appear — no specifier position existed to lower"
+        );
+    }
+
     /// CONTEXT-SCOPING (Part 1), per specifier shape: each genuine specifier shape
     /// is rewritten, while a same-text NON-specifier string literal on the next
     /// line is left verbatim. Covers default, `import type … from`,
     /// `import * as … from`, `export * from`, `export { … } from`, dynamic
     /// `import("…")` (whitespace-tolerant), and side-effect `import "…"`.
     #[test]
-    fn rewrite_vue_ts_imports_covers_specifier_shapes() {
+    fn lower_tsc_validation_carrier_specifiers_covers_specifier_shapes() {
         let mut map = HashMap::new();
         map.insert(
             "/ws/src/C.vue".to_string(),
@@ -2662,7 +2722,7 @@ const nested = `path is ${other} for /ws/src/GenericComp.vue`;
         ];
 
         for input in shapes {
-            let out = rewrite_vue_ts_imports(input, &map);
+            let out = lower_tsc_validation_carrier_specifiers(input, &map);
             // The specifier was rewritten exactly once; the trailing non-specifier
             // literal `"/ws/src/C.vue"` survives verbatim, so the original carrier
             // path still appears exactly once (the literal) and the stub once.
@@ -2688,7 +2748,7 @@ const nested = `path is ${other} for /ws/src/GenericComp.vue`;
     /// `vue_ts_map`. The negative control in the same test confirms a GENUINE
     /// `import(…)` (no leading `.`) still rewrites, so the guard did not over-correct.
     #[test]
-    fn rewrite_vue_ts_imports_skips_member_access_import_call() {
+    fn lower_tsc_validation_carrier_specifiers_skips_member_access_import_call() {
         let mut map = HashMap::new();
         map.insert(
             "/ws/src/GenericComp.vue".to_string(),
@@ -2699,7 +2759,7 @@ const nested = `path is ${other} for /ws/src/GenericComp.vue`;
         // Member-access `.import("x")` — `import` is a property, the prior
         // significant byte is `.`, so the string argument is left verbatim.
         let member = r#"const c = loader.import("/ws/src/GenericComp.vue");"#;
-        let out = rewrite_vue_ts_imports(member, &map);
+        let out = lower_tsc_validation_carrier_specifiers(member, &map);
         assert!(
             !out.contains(stub),
             "a `.import(\"x\")` member-access call must NOT route its argument to \
@@ -2713,7 +2773,7 @@ const nested = `path is ${other} for /ws/src/GenericComp.vue`;
         // Optional-chaining `?.import("x")` — the prior significant byte is still
         // `.`, so the same guard applies.
         let optional = r#"const c = loader?.import("/ws/src/GenericComp.vue");"#;
-        let out_opt = rewrite_vue_ts_imports(optional, &map);
+        let out_opt = lower_tsc_validation_carrier_specifiers(optional, &map);
         assert!(
             !out_opt.contains(stub),
             "a `?.import(\"x\")` optional-chaining member call must NOT route its \
@@ -2728,7 +2788,7 @@ const nested = `path is ${other} for /ws/src/GenericComp.vue`;
         // real specifier position and MUST still rewrite to the stub — the guard
         // only suppresses member-access keywords, not real introducers.
         let genuine = r#"const c = import("/ws/src/GenericComp.vue");"#;
-        let out_real = rewrite_vue_ts_imports(genuine, &map);
+        let out_real = lower_tsc_validation_carrier_specifiers(genuine, &map);
         assert!(
             out_real.contains(&format!(r#"import("{stub}")"#)),
             "a genuine dynamic import specifier must still rewrite to the stub: {out_real}"
@@ -2749,7 +2809,7 @@ const nested = `path is ${other} for /ws/src/GenericComp.vue`;
     /// on its OWN line, with no `.` qualifier) still rewrites, proving the lookback
     /// did not over-suppress real introducers.
     #[test]
-    fn rewrite_vue_ts_imports_member_access_lookback_skips_line_comments() {
+    fn lower_tsc_validation_carrier_specifiers_member_access_lookback_skips_line_comments() {
         let mut map = HashMap::new();
         map.insert(
             "/ws/src/GenericComp.vue".to_string(),
@@ -2762,7 +2822,7 @@ const nested = `path is ${other} for /ws/src/GenericComp.vue`;
         // and the newline) is `.`, so `import` is a property — the argument is verbatim.
         let line_comment =
             "const c = loader. // pick the carrier\n  import(\"/ws/src/GenericComp.vue\");";
-        let out_line = rewrite_vue_ts_imports(line_comment, &map);
+        let out_line = lower_tsc_validation_carrier_specifiers(line_comment, &map);
         assert!(
             !out_line.contains(stub),
             "a `.import(\"x\")` member call with an intervening // line comment must NOT \
@@ -2775,7 +2835,7 @@ const nested = `path is ${other} for /ws/src/GenericComp.vue`;
 
         // Member-access `.import("x")` with an intervening `/* */` BLOCK comment.
         let block_comment = "const c = loader. /* pick */ import(\"/ws/src/GenericComp.vue\");";
-        let out_block = rewrite_vue_ts_imports(block_comment, &map);
+        let out_block = lower_tsc_validation_carrier_specifiers(block_comment, &map);
         assert!(
             !out_block.contains(stub),
             "a `.import(\"x\")` member call with an intervening /* */ block comment must NOT \
@@ -2791,7 +2851,7 @@ const nested = `path is ${other} for /ws/src/GenericComp.vue`;
         // real specifier position and MUST still rewrite — the lookback skips the
         // comment and lands on a non-`.` byte (the `;`), so the guard does not fire.
         let genuine = "const prev = 1;\n// load it dynamically\nconst c = import(\"/ws/src/GenericComp.vue\");";
-        let out_real = rewrite_vue_ts_imports(genuine, &map);
+        let out_real = lower_tsc_validation_carrier_specifiers(genuine, &map);
         assert!(
             out_real.contains(&format!(r#"import("{stub}")"#)),
             "a genuine dynamic import preceded only by a line comment must still rewrite \
@@ -2815,7 +2875,7 @@ const nested = `path is ${other} for /ws/src/GenericComp.vue`;
     /// scan up to the keyword, so the real `import(...)` after the closing backtick
     /// is recognised as a true specifier position and rewritten.
     #[test]
-    fn rewrite_vue_ts_imports_lookback_respects_multiline_template_state() {
+    fn lower_tsc_validation_carrier_specifiers_lookback_respects_multiline_template_state() {
         let mut map = HashMap::new();
         map.insert(
             "/ws/src/GenericComp.vue".to_string(),
@@ -2829,7 +2889,7 @@ const nested = `path is ${other} for /ws/src/GenericComp.vue`;
         // specifier position and MUST rewrite to the stub.
         let multiline =
             "const s = `first\n. // literal text`; import(\"/ws/src/GenericComp.vue\");";
-        let out = rewrite_vue_ts_imports(multiline, &map);
+        let out = lower_tsc_validation_carrier_specifiers(multiline, &map);
         assert!(
             out.contains(&format!(r#"import("{stub}")"#)),
             "a genuine dynamic import following a multiline template (whose continuation \
@@ -2854,7 +2914,7 @@ const nested = `path is ${other} for /ws/src/GenericComp.vue`;
         // heuristic would mis-read the continuation line as code.
         let multiline_block =
             "const s = 1; /* first\n. // still comment */ import(\"/ws/src/GenericComp.vue\");";
-        let out_block = rewrite_vue_ts_imports(multiline_block, &map);
+        let out_block = lower_tsc_validation_carrier_specifiers(multiline_block, &map);
         assert!(
             out_block.contains(&format!(r#"import("{stub}")"#)),
             "a genuine dynamic import after a multiline /* */ block comment (whose \
@@ -2866,7 +2926,7 @@ const nested = `path is ${other} for /ws/src/GenericComp.vue`;
         // level must still be left verbatim — the cross-line fix must not regress the
         // genuine member-access suppression.
         let member = r#"const c = loader.import("/ws/src/GenericComp.vue");"#;
-        let out_member = rewrite_vue_ts_imports(member, &map);
+        let out_member = lower_tsc_validation_carrier_specifiers(member, &map);
         assert!(
             !out_member.contains(stub),
             "a genuine `.import(\"x\")` member access must STILL be left verbatim after \
@@ -2882,7 +2942,7 @@ const nested = `path is ${other} for /ws/src/GenericComp.vue`;
         // are STILL inside the template — the whole thing is template text, nothing
         // is rewritten and the body is preserved.
         let escaped = "const s = `a\\`b\n. // import(\"/ws/src/GenericComp.vue\")`; const x = 1;";
-        let out_escaped = rewrite_vue_ts_imports(escaped, &map);
+        let out_escaped = lower_tsc_validation_carrier_specifiers(escaped, &map);
         assert!(
             !out_escaped.contains(stub),
             "an import that is INSIDE a template (kept open by an escaped backtick) must \
@@ -2945,23 +3005,23 @@ const nested = `path is ${other} for /ws/src/GenericComp.vue`;
     }
 
     #[test]
-    fn rewrite_vue_ts_imports_preserves_non_carrier_imports() {
+    fn lower_tsc_validation_carrier_specifiers_preserves_non_carrier_imports() {
         let map = HashMap::new();
         let code = r#"import { ref } from 'vue'
 import type { Foo } from './types'"#;
 
-        let result = rewrite_vue_ts_imports(code, &map);
+        let result = lower_tsc_validation_carrier_specifiers(code, &map);
 
         // Non-carrier imports should be untouched.
         assert_eq!(result, code, "non-carrier imports should be unchanged");
     }
 
     #[test]
-    fn rewrite_vue_ts_imports_preserves_non_string_occurrences() {
+    fn lower_tsc_validation_carrier_specifiers_preserves_non_string_occurrences() {
         let map = HashMap::new();
         // A carrier-API suffix not inside quotes (e.g. in a comment) is unchanged.
         let code = "// This references a Foo.vue.verter.ts file\nconst x = 1;";
-        let result = rewrite_vue_ts_imports(code, &map);
+        let result = lower_tsc_validation_carrier_specifiers(code, &map);
         assert_eq!(
             result, code,
             "non-string carrier-API suffix should be unchanged: {result}"
@@ -2969,7 +3029,7 @@ import type { Foo } from './types'"#;
     }
 
     #[test]
-    fn rewrite_vue_ts_imports_handles_double_quotes() {
+    fn lower_tsc_validation_carrier_specifiers_handles_double_quotes() {
         let mut map = HashMap::new();
         map.insert(
             "D:/project/Child.vue".to_string(),
@@ -2977,7 +3037,7 @@ import type { Foo } from './types'"#;
         );
 
         let code = r#"import Child from "D:/project/Child.vue.verter.ts""#;
-        let result = rewrite_vue_ts_imports(code, &map);
+        let result = lower_tsc_validation_carrier_specifiers(code, &map);
         assert!(
             result.contains(r#""C:/tmp/Child_xyz.vue.ts""#),
             "double-quoted known carrier-API should be rewritten: {result}"
@@ -3714,7 +3774,7 @@ defineProps<{ msg: string }>()
     }
 
     #[test]
-    fn rewrite_vue_ts_imports_maps_known_paths() {
+    fn lower_tsc_validation_carrier_specifiers_maps_known_paths() {
         let mut map = HashMap::new();
         map.insert(
             "D:/project/src/Child.vue".to_string(),
@@ -3724,7 +3784,7 @@ defineProps<{ msg: string }>()
         // Post-`rewrite_relative_imports` the carrier-API specifier carries the
         // canonical carrier path plus the reserved `.verter.ts` suffix.
         let code = r#"import('D:/project/src/Child.vue.verter.ts')['default']"#;
-        let result = rewrite_vue_ts_imports(code, &map);
+        let result = lower_tsc_validation_carrier_specifiers(code, &map);
 
         // Positive: should rewrite to temp path
         assert!(
@@ -3739,11 +3799,11 @@ defineProps<{ msg: string }>()
     }
 
     #[test]
-    fn rewrite_vue_ts_imports_preserves_unknown() {
+    fn lower_tsc_validation_carrier_specifiers_preserves_unknown() {
         let map = HashMap::new(); // empty — no known paths
 
         let code = r#"import('D:/node_modules/some-lib/Comp.vue.verter.ts')['default']"#;
-        let result = rewrite_vue_ts_imports(code, &map);
+        let result = lower_tsc_validation_carrier_specifiers(code, &map);
 
         // Unknown carrier-API path → strip `.verter.ts` back to the carrier path
         // (fallback to the `*.vue` wildcard shim).
@@ -3758,7 +3818,7 @@ defineProps<{ msg: string }>()
     }
 
     #[test]
-    fn rewrite_vue_ts_imports_handles_from_syntax() {
+    fn lower_tsc_validation_carrier_specifiers_handles_from_syntax() {
         let mut map = HashMap::new();
         map.insert(
             "D:/project/src/Child.vue".to_string(),
@@ -3766,7 +3826,7 @@ defineProps<{ msg: string }>()
         );
 
         let code = r#"import type { Props } from 'D:/project/src/Child.vue.verter.ts'"#;
-        let result = rewrite_vue_ts_imports(code, &map);
+        let result = lower_tsc_validation_carrier_specifiers(code, &map);
 
         // Positive: should rewrite from-syntax imports too
         assert!(
@@ -3781,11 +3841,11 @@ defineProps<{ msg: string }>()
     }
 
     #[test]
-    fn rewrite_vue_ts_imports_ignores_non_carrier_imports() {
+    fn lower_tsc_validation_carrier_specifiers_ignores_non_carrier_imports() {
         let map = HashMap::new();
 
         let code = r#"import type { Foo } from 'D:/project/src/types.ts'"#;
-        let result = rewrite_vue_ts_imports(code, &map);
+        let result = lower_tsc_validation_carrier_specifiers(code, &map);
 
         // Non-carrier imports should remain unchanged.
         assert_eq!(

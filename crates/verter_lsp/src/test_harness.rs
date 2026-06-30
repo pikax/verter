@@ -33,7 +33,7 @@ pub(crate) enum TestProviderKind {
 impl TestProviderKind {
     /// The require-mode env var that turns this provider's absence into a HARD
     /// failure instead of a graceful skip. CI sets `VERTER_REQUIRE_TSGO=1` (see
-    /// `.github/workflows/ci.yml`), so the tgo real-provider parity tests
+    /// `.github/workflows/ci.yml`), so the tsgo real-provider parity tests
     /// genuinely gate there and can never skip-as-pass on a runner where the
     /// asset is expected. `VERTER_REQUIRE_TSSERVER` is the analogous knob for
     /// the tsserver variant.

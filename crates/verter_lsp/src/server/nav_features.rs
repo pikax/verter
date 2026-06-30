@@ -682,7 +682,7 @@ pub(super) async fn handle_completion(
                 //     companions (the change notification fires inside
                 //     `publish_carrier`) to refresh the store + evict the stale
                 //     resolution; the carrier-companion open verbs are no-ops here.
-                //   * tgo — the carrier is an open buffer, so reopen it (close +
+                //   * tsgo — the carrier is an open buffer, so reopen it (close +
                 //     open) and re-sync the API to re-establish the lost content.
                 if matches!(
                     server.type_provider_kind,

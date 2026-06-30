@@ -20,7 +20,14 @@ use crate::{ProjectSyncMode, TypeProviderKind};
 /// verbs, the non-carrier real-file shadow verbs (`sync_file`/`load_file`/
 /// `close_file`), and `configure_paths` stay active for every engine (a close /
 /// a real-file shadow / a path config is not a carrier-companion content open).
-/// tgo keeps the inferred carrier-open path until its own migration.
+///
+/// tsgo is ALSO project-bound, not a single-file fallback: a tsgo carrier-companion's
+/// CONTENT flows through the shared `--lsp` session (the contentful verbs are NOT
+/// suppressed for tsgo), while the `--api` checker reaches the carrier as a member of
+/// the configured project it OPENS — `update_snapshot_open_project(tsconfig)` selects
+/// the configured project for that tsconfig and REQUIRES the carrier in
+/// `project.root_files`, failing closed when it is absent. tsgo therefore routes
+/// carrier membership through `open_project`, never an inferred/single-file Program.
 #[derive(Clone)]
 pub struct ProjectSync {
     provider: Arc<dyn TypeProvider>,
@@ -30,23 +37,27 @@ pub struct ProjectSync {
 
 impl ProjectSync {
     /// Build a `ProjectSync` whose carrier-companion content opens are NOT
-    /// suppressed (the tgo/inferred-open semantics). Production code routes
-    /// through [`Self::new_with_kind`] with the real engine kind; this remains
-    /// for the in-process provider-sync unit tests that assert the raw
-    /// `open_file`/`update_file` carrier verbs.
+    /// suppressed (the tsgo content-transport semantics: a carrier-companion's content
+    /// flows through the shared `--lsp` session, while project membership is owned by
+    /// the `--api` checker's `open_project`). Production code routes through
+    /// [`Self::new_with_kind`] with the real engine kind; this remains for the
+    /// in-process provider-sync unit tests that assert the raw `open_file`/
+    /// `update_file` carrier verbs.
     pub fn new(provider: Arc<dyn TypeProvider>, mode: ProjectSyncMode) -> Self {
         Self {
             provider,
             mode,
-            // Default to tgo semantics: the carrier-companion opens flow through.
-            // tsserver suppression is opt-in via `new_with_kind`.
+            // Default to the tsgo content-transport semantics: the carrier-companion
+            // content opens flow through (membership is owned separately by the
+            // `--api` checker's configured-project `open_project`). tsserver's
+            // store-publish suppression is opt-in via `new_with_kind`.
             kind: TypeProviderKind::Tsgo,
         }
     }
 
     /// Build a `ProjectSync` bound to the active engine kind. For tsserver the
     /// contentful carrier-companion verbs are suppressed (the plugin serves the
-    /// carrier from the publish store); for tgo / no-provider they flow through.
+    /// carrier from the publish store); for tsgo / no-provider they flow through.
     pub fn new_with_kind(
         provider: Arc<dyn TypeProvider>,
         mode: ProjectSyncMode,
@@ -442,7 +453,7 @@ mod tests {
     fn make_sync_failing(provider: &FailingTypeProvider, mode: ProjectSyncMode) -> ProjectSync {
         // FailingTypeProvider is not Clone, so wrap directly. These tests assert
         // the carrier verbs reach the provider (error propagation), so the kind
-        // must NOT suppress the carrier-companion opens — use the tgo default.
+        // must NOT suppress the carrier-companion opens — use the tsgo default.
         ProjectSync {
             provider: Arc::new(FailingTypeProvider::new(&provider.error_message)),
             mode,
@@ -728,7 +739,7 @@ mod tests {
     /// a `provider.open_file`/`update_file`/`load_file` of a generated companion
     /// would be a second carrier-content authority. This is the discriminating
     /// guard for the publish-only contract: reverting the suppression (routing
-    /// tsserver through the tgo open path) makes every assertion below fail.
+    /// tsserver through the tsgo open path) makes every assertion below fail.
     #[tokio::test]
     async fn tsserver_suppresses_carrier_companion_content_opens() {
         let mock = MockTypeProvider::new();
@@ -848,8 +859,8 @@ mod tests {
         );
     }
 
-    /// tgo control: the SAME background/normal carrier verbs DO reach the provider —
-    /// proving the m8 suppression is gated to tsserver and does not regress the tgo
+    /// tsgo control: the SAME background/normal carrier verbs DO reach the provider —
+    /// proving the m8 suppression is gated to tsserver and does not regress the tsgo
     /// priority-lane open paths.
     #[tokio::test]
     async fn tsgo_still_opens_carrier_companions_in_priority_lanes() {
@@ -870,14 +881,15 @@ mod tests {
             .count();
         assert_eq!(
             opens, 2,
-            "tgo must still open carrier companions in the background/normal lanes \
+            "tsgo must still open carrier companions in the background/normal lanes \
              (m8 suppression is tsserver-only)"
         );
     }
 
-    /// tgo (the inferred-open engine) is the discriminating control: the SAME
+    /// tsgo (the content-transport engine — its carrier-companion content flows
+    /// through the shared `--lsp` session) is the discriminating control: the SAME
     /// carrier verbs DO reach the provider. Proves the suppression is gated to
-    /// tsserver only and does not regress the tgo open path.
+    /// tsserver only and does not regress the tsgo open path.
     #[tokio::test]
     async fn tsgo_still_opens_carrier_companions() {
         let mock = MockTypeProvider::new();
@@ -897,7 +909,7 @@ mod tests {
             .count();
         assert_eq!(
             opens, 2,
-            "tgo must still open the carrier companions (suppression is tsserver-only)"
+            "tsgo must still open the carrier companions (suppression is tsserver-only)"
         );
     }
 

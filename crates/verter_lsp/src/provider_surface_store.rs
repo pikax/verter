@@ -59,14 +59,15 @@ use crate::documents::DocumentRegistry;
 /// capture path ([`ProviderSurfaceStore::capture_current_carrier_api_set`]) is
 /// `CarrierApi`-specific by design (a non-`CarrierApi` `Current` path captures as
 /// `KnownNonMappable`). The [`CarrierIde`](Self::CarrierIde),
-/// [`CarrierBatch`](Self::CarrierBatch), [`Shadow`](Self::Shadow), and
+/// [`Shadow`](Self::Shadow), and
 /// [`Real`](Self::Real) variants are recordable surfaces with the same
 /// generation-stamped / content-addressed identity and the extended
-/// project-bound cache columns (project owner, `map_hash`, regen key, engine-recheck state); the store is the
+/// owner columns (project owner, `map_hash`, regen key, engine-recheck state); the store is the
 /// SINGLE record of all provider content/maps/ownership across every role (no
-/// second store). They participate in the §2.7 split cache (regeneration skip +
-/// dependency-driven engine re-check) but are not part of the `CarrierApi`-only
-/// rename-mapping capture.
+/// second store). `map_hash` is set on the live path; the project owner / regen key
+/// / engine-recheck columns the §2.7 split cache (regeneration skip +
+/// dependency-driven engine re-check) reads stay unset until the producer-wiring
+/// follow-on. These roles are not part of the `CarrierApi`-only rename-mapping capture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderSurfaceKind {
     /// `{carrier}.tsx` IDE surface (template + script TSX projection) — the
@@ -75,10 +76,6 @@ pub enum ProviderSurfaceKind {
     /// `{carrier}.ts` macro-derived PUBLIC-API surface (the `$props`/`new(props?)`
     /// declaration a cross-file prop rename resolves against).
     CarrierApi,
-    /// The minimal-diagnostic batch carrier for the cold TSC surface (§2.7).
-    /// PROVISIONAL: kept as a distinct role only if a material cold-perf gain over
-    /// sharing [`CarrierIde`](Self::CarrierIde) is measured; otherwise merged.
-    CarrierBatch,
     /// A self-file shadow / rune-module surface.
     Shadow,
     /// A real, non-carrier source file synced verbatim.
@@ -182,12 +179,12 @@ pub struct ProviderSurfaceSnapshot {
     /// Content hash of `carrier_source`.
     pub source_hash: ContentHash,
     /// The owning configured project (tsconfig URI) this surface is a member of
-    /// — the project-owner column. `None` for a surface recorded outside a
-    /// resolved [`ProjectBinding`](verter_session::external_ts::ProjectBinding)
-    /// (e.g. a legacy `CarrierApi` record that does not carry the project binding,
-    /// or a synthetic-scratch surface). The store carries the column so the
-    /// project-bound publish/overlay path is the single source of provider
-    /// content + maps + ownership (no second store).
+    /// — the project-owner column. On the WORKING live record path
+    /// (`RecordSurface::carrier_legacy`) this is always `None`; only the
+    /// owner-bearing `record_carrier_surface` producer sets it, and that producer is
+    /// reserved/unwired until the §2.7 producer-wiring follow-on. The store carries
+    /// the column so that, once wired, it is the single record of provider ownership
+    /// with no second store.
     pub project_owner: Option<Arc<str>>,
     /// The self-content carrier-regeneration key (§2.7(a)): if unchanged, the
     /// carrier text is byte-stable and need not be regenerated/re-sent. `None`
@@ -229,11 +226,13 @@ pub struct RecordSurface {
 }
 
 impl RecordSurface {
-    /// Build a `RecordSurface` for the legacy `CarrierApi` rename-mapping record
-    /// path — the surface kind/content/map the existing choke point already
-    /// captures, with the extended project-bound columns left unset (`None`/zero). Keeps the
-    /// many existing `CarrierApi` record sites unchanged while the live
-    /// project-bound publish path (which sets the new columns) lands downstream.
+    /// Build a `RecordSurface` for the `CarrierApi` rename-mapping record path —
+    /// the surface kind/content/map the existing choke point already captures, with
+    /// the owner columns (project owner, regen key, engine-recheck state) left UNSET
+    /// (`None`). This is the WORKING live record path; the owner-bearing
+    /// `record_carrier_surface` producer that would set those columns has no live
+    /// producer and stays reserved until the §2.7 producer-wiring follow-on (the
+    /// surface-store carrier-ownership deferral).
     #[must_use]
     pub fn carrier_api_legacy(
         provider_path: String,
@@ -252,8 +251,10 @@ impl RecordSurface {
         )
     }
 
-    /// Build a `RecordSurface` for ANY carrier role under the legacy capture (the
-    /// extended project-bound columns left unset (`None`/zero), set downstream).
+    /// Build a `RecordSurface` for ANY carrier role under the WORKING capture (the
+    /// owner columns — project owner, regen key, engine-recheck state — left UNSET
+    /// (`None`); the owner-bearing `record_carrier_surface` path that would set them
+    /// stays reserved/unwired, the §2.7 producer-wiring follow-on).
     /// Generalises [`carrier_api_legacy`](Self::carrier_api_legacy) over `kind` so
     /// the publish path can record the IDE role (not only the API role) through the
     /// same generation-stamped store — the IDE surface MUST be recorded so its
@@ -627,9 +628,11 @@ impl ProviderSurfaceStore {
 
     /// The owning configured project (tsconfig URI) of `provider_path`'s CURRENT
     /// surface — the project-owner column. `None` when the path has no current
-    /// snapshot, or its surface was recorded outside a resolved project binding.
-    /// The store is the SINGLE record of provider ownership; the project-bound
-    /// publish path reads this rather than a second ownership map.
+    /// snapshot, or its surface was recorded outside a resolved project binding (on
+    /// the working live path, always — the owner column is unset until the §2.7
+    /// producer-wiring follow-on). The store is the SINGLE record of provider
+    /// ownership; the (reserved/unwired) owner-bound path reads this accessor rather
+    /// than a second ownership map.
     #[must_use]
     pub fn project_owner_of(&self, provider_path: &str) -> Option<Arc<str>> {
         self.current_snapshot(provider_path)
@@ -639,9 +642,11 @@ impl ProviderSurfaceStore {
     /// Every CURRENT (`Current`-state) provider path whose surface is owned by the
     /// configured project `project` (its recorded `project_owner` equals
     /// `project`). The store is the SINGLE record of provider ownership, so this is
-    /// the authoritative project-scoped surface set — the project-bound sync layer
-    /// captures it BEFORE a request so a multi-file result can be validated against
-    /// every project surface, not only the queried file (no second ownership map).
+    /// the authoritative project-scoped surface set the (reserved/unwired)
+    /// owner-bound sync layer will capture BEFORE a request so a multi-file result
+    /// can be validated against every project surface, not only the queried file (no
+    /// second ownership map). Dormant today: with the owner column unset on the live
+    /// path it returns empty until the §2.7 producer-wiring follow-on lands.
     ///
     /// ATOMICITY: the lifecycle read guard is held for the whole scan, and each
     /// `Current` path's snapshot is resolved UNDER THAT SAME GUARD (sound because
@@ -878,7 +883,7 @@ pub fn external_ide_context_from_snapshot(
 /// identity (its `.vue` decl span + name) — never a text scan of the API content.
 ///
 /// This is the one piece a provider-agnostic cross-file Vue-prop rename needs that
-/// a provider's `textDocument/rename` may not itself enumerate (tgo does not): the
+/// a provider's `textDocument/rename` may not itself enumerate (tsgo does not): the
 /// child-declaration rename leg, synthesized by Verter as a [`RenameLocation`] whose
 /// `start..end` is the prop name's byte range in the SAME captured API content the
 /// merge maps through. The merge then maps that range back onto the `.vue` via the
@@ -1161,8 +1166,10 @@ pub fn record_carrier_api_surface(
 /// Record a published carrier companion surface of ANY role (`CarrierIde` /
 /// `CarrierApi` / …) under a fresh generation — the role-generalised core of
 /// [`record_carrier_api_surface`]. Stamps the source-map identity (`map_hash`)
-/// from the SAME JSON; the extended project-bound columns are left unset (set by
-/// the live project-bound publish path downstream).
+/// from the SAME JSON; the owner columns (project owner, regen key, engine-recheck
+/// state) are left UNSET — the owner-bearing `record_carrier_surface` path that
+/// would set them has no live producer and stays reserved until the §2.7
+/// producer-wiring follow-on.
 ///
 /// This is the publish-time choke the IDE role MUST flow through: recording only
 /// the API role pins the IDE companion's `getScriptVersion` at the `unwrap_or(1)`
@@ -1201,9 +1208,15 @@ pub fn record_carrier_companion_surface(
         carrier_source,
     );
     // Stamp the source-map identity (§2.7) so a map-only change is a distinct
-    // capture; the remaining project-bound columns (project owner, regen key,
-    // engine-recheck state) are set by the live project-bound publish path
-    // downstream.
+    // capture. The remaining project-bound columns (project owner, regen key,
+    // engine-recheck state) are left UNSET here: this live publish path records
+    // carrier companions through the working `RecordSurface::carrier_legacy`
+    // (`project_owner: None`, regen key and engine-recheck state `None`). The
+    // owner-bearing `record_carrier_surface` producer and the owner-gated consumers
+    // have no live producer yet, so nothing sets those columns downstream — wiring
+    // them is a tracked cross-crate §2.7 producer-wiring follow-on (the surface-store
+    // carrier-ownership deferral recorded in
+    // docs/arch/external-ts-engine-architecture.md).
     surface.map_hash = map_hash;
     // `record` returns the immutable snapshot it linearized under the lifecycle
     // lock — `stamp.generation` is the authoritative version for THIS capture.
@@ -1231,7 +1244,6 @@ pub fn record_and_version_carrier_companions(
         let kind = match companion.role {
             SnapshotRole::CarrierIde => ProviderSurfaceKind::CarrierIde,
             SnapshotRole::CarrierApi => ProviderSurfaceKind::CarrierApi,
-            SnapshotRole::CarrierBatch => ProviderSurfaceKind::CarrierBatch,
             SnapshotRole::Shadow => ProviderSurfaceKind::Shadow,
             SnapshotRole::Real => ProviderSurfaceKind::Real,
         };
@@ -1295,8 +1307,9 @@ pub fn record_carrier_api_surface_code_only(
 }
 
 /// Inputs to [`record_carrier_surface`] — a published carrier surface of ANY role
-/// with its full project-bound cache columns. The project-bound publish path builds one
-/// per file in a snapshot.
+/// with its full owner columns. RESERVED: the owner-bearing producer that would
+/// build one per file in a snapshot has no live producer (unwired); it lands with
+/// the §2.7 producer-wiring follow-on (the surface-store carrier-ownership deferral).
 pub struct PublishedCarrierSurface<'a> {
     pub provider_path: &'a str,
     pub kind: ProviderSurfaceKind,
@@ -1317,13 +1330,15 @@ pub struct PublishedCarrierSurface<'a> {
     pub engine_recheck: EngineRecheckState,
 }
 
-/// Record a published carrier surface of ANY role (`CarrierIde` / `CarrierBatch`
+/// Record a published carrier surface of ANY role (`CarrierIde`
 /// / `Shadow` / `Real`, or `CarrierApi`) under a fresh generation, with the full
-/// project-bound cache columns (project owner, `map_hash`, regen key, engine-recheck state).
-/// This is the project-bound publish-path choke point that WIRES the
-/// previously-reserved roles into the single store; the legacy
-/// [`record_carrier_api_surface`] path remains for the rename-mapping `CarrierApi`
-/// record sites that do not yet carry the project binding.
+/// owner columns (project owner, `map_hash`, regen key, engine-recheck state).
+/// RESERVED owner-bearing choke point: it has NO live producer yet — the env dims +
+/// dependency/recheck state it needs are unwired, so nothing in production calls it;
+/// it is wired by the §2.7 producer-wiring follow-on (the surface-store
+/// carrier-ownership deferral). The working live path records carrier companions
+/// through [`record_carrier_companion_surface`] / `RecordSurface::carrier_legacy`
+/// with the owner columns unset.
 ///
 /// The carrier source captured for the mapped-into target is the surface's own
 /// canonical source (open buffer or host/VFS). A surface whose carrier source is

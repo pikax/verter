@@ -299,3 +299,65 @@ fn trailing_slash_on_prefix_stripped_then_matches() {
     let prefix = CanonicalPath::new("d:/project/");
     assert!(path.starts_with_dir(&prefix));
 }
+
+// ── filesystem case-identity policy (the single FS-case authority) ──
+
+/// The unified policy is case-INSENSITIVE on Windows AND default macOS (APFS),
+/// case-SENSITIVE on Linux. This must agree with the carrier-store folding policy
+/// (`fs_is_case_insensitive() == cfg!(any(windows, macos))`); the pre-fix tsgo
+/// `path_eq` diverged by folding on Windows ONLY.
+#[test]
+fn fs_is_case_insensitive_folds_on_windows_and_default_macos_only() {
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    assert!(
+        fs_is_case_insensitive(),
+        "Windows + default macOS filesystems fold case"
+    );
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    assert!(
+        !fs_is_case_insensitive(),
+        "Linux filesystems are case-sensitive"
+    );
+}
+
+/// The pure FS-identity comparison, parameterized by the case-sensitivity bit so it
+/// runs and discriminates on EVERY host. Folding happens iff `case_insensitive`.
+#[test]
+fn fs_paths_equal_under_folds_iff_case_insensitive() {
+    // Case-insensitive FS (Windows / default macOS): a case variant is the SAME file.
+    assert!(fs_paths_equal_under("/ws/src/A.ts", "/ws/src/a.ts", true));
+    // Case-sensitive FS (Linux): a case variant is DISTINCT.
+    assert!(!fs_paths_equal_under("/ws/src/A.ts", "/ws/src/a.ts", false));
+    // Slash normalization is unconditional (backslash vs forward-slash, any host).
+    assert!(fs_paths_equal_under(r"C:\ws\A.ts", "c:/ws/A.ts", true));
+    assert!(fs_paths_equal_under(r"C:\ws\A.ts", "C:/ws/A.ts", false));
+    // Distinct basenames never match, regardless of the case policy.
+    assert!(!fs_paths_equal_under("/ws/src/A.ts", "/ws/src/B.ts", true));
+}
+
+/// Discriminating macOS-membership witness, runnable on EVERY host: the bug was the
+/// pre-fix tsgo `path_eq` folding case on Windows ONLY (`cfg!(target_os = "windows")`).
+/// On macOS (default case-insensitive APFS) that predicate evaluated FALSE, so a
+/// carrier whose engine-reported path differed only by case from the configured
+/// `root_files` entry compared UNEQUAL and was silently dropped from project
+/// membership (empty diagnostics). Modeled here with explicit policy values so the
+/// divergence is provable without a macOS host: the OLD macOS policy value (`false`)
+/// MISSES, the unified macOS policy value (`true`) HOLDS.
+#[test]
+fn macos_case_variant_membership_holds_under_unified_policy_not_old_windows_only() {
+    let configured = "/ws/src/A.ts";
+    let engine_reported = "/ws/src/a.ts"; // the SAME file on case-insensitive APFS
+
+    // OLD predicate on a macOS host: `cfg!(target_os = "windows") == false` ⇒
+    // case-sensitive ⇒ the carrier MISSES membership (the regression).
+    assert!(
+        !fs_paths_equal_under(configured, engine_reported, false),
+        "regression witness: the old Windows-only predicate drops the macOS case variant"
+    );
+    // UNIFIED policy on a macOS host: `fs_is_case_insensitive() == true` ⇒ folds ⇒
+    // the carrier stays a configured-project member.
+    assert!(
+        fs_paths_equal_under(configured, engine_reported, true),
+        "the unified policy folds case on macOS so the carrier stays a member"
+    );
+}

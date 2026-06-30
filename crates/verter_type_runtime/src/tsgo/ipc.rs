@@ -654,25 +654,24 @@ async fn read_loop(
                         // match our path_to_uri keys (literal colon, original case).
                         let uri = normalize_file_uri(raw_uri);
                         // Look up the file content so we can resolve LSP positions
-                        // to byte offsets. The content cache is keyed by file path,
-                        // so convert the URI first and normalize for case-insensitive
-                        // matching on Windows.
+                        // to byte offsets. The content cache is keyed by file path, so
+                        // convert the URI first; on a case-insensitive filesystem
+                        // (Windows / default macOS) fall back to a case-folded match so
+                        // a case-variant key still resolves.
                         let content = {
                             let path = uri_to_file_path(raw_uri);
                             let cache = contents_cache.lock().await;
-                            // Try exact match first, then case-insensitive on Windows.
-                            #[allow(clippy::unnecessary_lazy_evaluations)]
+                            // Exact match first, then — only on a case-insensitive
+                            // filesystem — a folded match through the single shared
+                            // FS-identity policy (`verter_span::path`), so the case
+                            // policy never diverges per OS at this call site.
                             cache.get(&path).cloned().or_else(|| {
-                                #[cfg(windows)]
-                                {
-                                    let lower = path.to_lowercase();
+                                if verter_span::path::fs_is_case_insensitive() {
                                     cache
                                         .iter()
-                                        .find(|(k, _)| k.to_lowercase() == lower)
+                                        .find(|(k, _)| verter_span::path::fs_paths_equal(k, &path))
                                         .map(|(_, v)| v.clone())
-                                }
-                                #[cfg(not(windows))]
-                                {
+                                } else {
                                     None
                                 }
                             })
@@ -1043,13 +1042,17 @@ fn percent_decode_uri(uri: &str) -> String {
 
 /// Normalize a `file://` URI for use as a cache key.
 ///
-/// TSGO sends URIs with percent-encoding and lowercase paths on Windows
-/// (e.g., `file:///c%3A/users/someone/...`), while our `path_to_uri` produces
-/// literal colons with original case (e.g., `file:///C:/Users/Someone/...`).
+/// On a case-insensitive filesystem (Windows + default macOS) TSGO may send URIs with
+/// percent-encoding and lowercased path segments (e.g., `file:///c%3A/users/someone/...`),
+/// while our `path_to_uri` produces literal colons with original case
+/// (e.g., `file:///C:/Users/Someone/...`).
 ///
 /// This function normalizes both forms to the same canonical representation:
 /// 1. Percent-decodes the URI (so `%3A` → `:`)
-/// 2. On Windows, lowercases the entire URI for case-insensitive matching
+/// 2. Folds the whole decoded URI to lowercase IFF the host filesystem is
+///    case-insensitive — the single shared `verter_span::path::fs_is_case_insensitive`
+///    policy (Windows + default macOS fold; a case-sensitive filesystem (Linux) preserves
+///    case).
 fn normalize_file_uri(uri: &str) -> String {
     normalize_file_uri_for_cache(uri)
 }
@@ -1111,7 +1114,7 @@ fn parse_completion_item(item: &serde_json::Value, content: Option<&str>) -> Opt
         .get("sortText")
         .and_then(|v| v.as_str())
         .map(String::from);
-    // tgo speaks LSP, so an item carries the real `insertTextFormat` (1 = plain,
+    // tsgo speaks LSP, so an item carries the real `insertTextFormat` (1 = plain,
     // 2 = snippet) when it is a snippet completion. Map the wire integer to the
     // neutral carrier; any unknown value is treated as no signal (fail-closed).
     let insert_text_format = item
@@ -1691,28 +1694,28 @@ impl TsgoTypeProvider {
     }
 }
 
-/// Build the LSP `ClientCapabilities` object sent in the tgo `initialize` request.
+/// Build the LSP `ClientCapabilities` object sent in the tsgo `initialize` request.
 ///
 /// An LSP server gates every optional feature on what the client advertises: a
-/// capability the client never declares is silently dropped, so tgo would never
+/// capability the client never declares is silently dropped, so tsgo would never
 /// emit data this provider's handlers are ready to consume. This helper owns the
 /// COMPLETION and DIAGNOSTIC channels, and advertises EXACTLY the completion- and
-/// diagnostic-channel capabilities tgo's handlers actually consume — no more (an
+/// diagnostic-channel capabilities tsgo's handlers actually consume — no more (an
 /// over-claimed completion/diagnostic capability invites the server to compute
 /// work the client discards, or register a sub-feature this thin provider cannot
 /// service):
 ///
-/// Scope note: this helper does NOT enumerate tgo's BASE features — hover,
+/// Scope note: this helper does NOT enumerate tsgo's BASE features — hover,
 /// definition, typeDefinition, references, rename, signatureHelp, codeAction,
 /// semanticTokens, documentHighlight, inlayHint, and the pull `textDocument/diagnostic`
 /// request itself. The provider fully consumes those responses today; they work
-/// because tgo statically registers those providers server-side regardless of
+/// because tsgo statically registers those providers server-side regardless of
 /// client capabilities, and no OPTIONAL gated sub-feature of them is consumed. They
-/// are intentionally left to tgo's static server-side registration and are not
+/// are intentionally left to tsgo's static server-side registration and are not
 /// advertised here.
 ///
 /// - `textDocument.publishDiagnostics.tagSupport` / `textDocument.diagnostic.tagSupport`
-///   (`valueSet [1, 2]`) — tgo attaches `DiagnosticTag`s (1 = Unnecessary fade,
+///   (`valueSet [1, 2]`) — tsgo attaches `DiagnosticTag`s (1 = Unnecessary fade,
 ///   2 = Deprecated strikethrough) only when the client understands them; the
 ///   `parse_lsp_diagnostic` tag mapping re-emits the fade / strikethrough on both
 ///   the push and pull channels. The `valueSet` enumerates the tags we render.
@@ -1720,27 +1723,27 @@ impl TsgoTypeProvider {
 ///   spec-defined capability (`PublishDiagnosticsClientCapabilities.tagSupport`).
 ///   The PULL-channel `textDocument.diagnostic.tagSupport` is NOT a field defined
 ///   by LSP 3.17 (`DiagnosticClientCapabilities` has no `tagSupport` member) — it
-///   is a NON-SPEC field retained for compatibility (tgo may read it as a private
+///   is a NON-SPEC field retained for compatibility (tsgo may read it as a private
 ///   extension to gate pull-diagnostic tags) and is intentionally kept as-is.
 /// - `textDocument.completion.completionItem.resolveSupport` (`documentation`,
-///   `detail`, `additionalTextEdits`) — tgo computes a `completionItem/resolve`
+///   `detail`, `additionalTextEdits`) — tsgo computes a `completionItem/resolve`
 ///   property lazily only when the client lists it. This provider folds `detail` +
 ///   `documentation` back in [`TsgoTypeProvider::get_completion_details`] and
 ///   `additionalTextEdits` (the auto-import edits) in
-///   [`TsgoTypeProvider::resolve_completion`]; WITHOUT this, tgo silently drops
+///   [`TsgoTypeProvider::resolve_completion`]; WITHOUT this, tsgo silently drops
 ///   `additionalTextEdits` and completion-driven auto-import never applies its
 ///   import edit.
 /// - `textDocument.completion.contextSupport` (`true`) —
 ///   [`TsgoTypeProvider::get_completions`] ALWAYS sends `CompletionParams.context`
 ///   (the trigger kind/character). Per LSP 3.17 a server honours that field only
-///   when the client declares `contextSupport: true`; WITHOUT it tgo may ignore
+///   when the client declares `contextSupport: true`; WITHOUT it tsgo may ignore
 ///   the trigger context entirely, so completions stop being trigger-aware.
 /// - `textDocument.completion.completionItemKind.valueSet` (`1..=25`) — the
 ///   completion parser [`parse_completion_item`] maps the full standard
 ///   `CompletionItemKind` range generically. The LSP DEFAULT value set when this
 ///   field is omitted is `Text..Reference` (1..=18), so Class (7) — the kind
 ///   component-tag completions depend on — is INSIDE the default range and is
-///   preserved regardless. The valueSet is advertised to stop tgo DOWNGRADING the
+///   preserved regardless. The valueSet is advertised to stop tsgo DOWNGRADING the
 ///   UPPER standard kinds 19..=25 (Folder, EnumMember, Constant, Struct, Event,
 ///   Operator, TypeParameter), which fall OUTSIDE the default range. The `valueSet`
 ///   is EXACTLY the parser's range `1..=25` (no over-claim past it).
@@ -1751,8 +1754,8 @@ impl TsgoTypeProvider {
 /// same blob back on `completionItem/resolve` regardless of any advertised
 /// capability. Both resolve sites here ([`TsgoTypeProvider::get_completion_details`]
 /// and [`TsgoTypeProvider::resolve_completion`]) replay the item's opaque `data`
-/// verbatim, and tgo's resolve handler reads `params.Data` unconditionally (it
-/// embeds the file name there to re-locate the language service); tgo never reads
+/// verbatim, and tsgo's resolve handler reads `params.Data` unconditionally (it
+/// embeds the file name there to re-locate the language service); tsgo never reads
 /// a `dataSupport` flag, so advertising it would be a meaningless non-spec field.
 ///
 /// Completion fidelity: the parser DOES read `insertTextFormat` (snippet vs
@@ -1781,7 +1784,7 @@ fn build_client_capabilities() -> serde_json::Value {
             // `relatedInformation: true` is the spec-defined gate for the secondary
             // "see declaration here" spans (`PublishDiagnosticsClientCapabilities.
             // relatedInformation`): a server only attaches `Diagnostic.
-            // relatedInformation` when the client advertises it, so without this tgo
+            // relatedInformation` when the client advertises it, so without this tsgo
             // silently strips the related spans `parse_lsp_diagnostic` is ready to
             // consume (the same silent-degradation class as the tag/completion gates).
             "publishDiagnostics": {
@@ -1790,11 +1793,11 @@ fn build_client_capabilities() -> serde_json::Value {
             },
             // PULL channel: `diagnostic.tagSupport` is NOT defined by LSP 3.17
             // (`DiagnosticClientCapabilities` has no `tagSupport`). It is a NON-SPEC
-            // field retained for compatibility — tgo may read it as a private
+            // field retained for compatibility — tsgo may read it as a private
             // extension to gate pull-diagnostic tags — and is intentionally kept.
             // `diagnostic.relatedInformation` is likewise NOT an LSP 3.17 field
             // (`DiagnosticClientCapabilities` has no `relatedInformation` member); it
-            // is retained alongside the tag flag as a private-extension hint so tgo
+            // is retained alongside the tag flag as a private-extension hint so tsgo
             // may gate pull-channel related spans the same way as the push channel.
             "diagnostic": {
                 "tagSupport": { "valueSet": [1, 2] },
@@ -1804,13 +1807,13 @@ fn build_client_capabilities() -> serde_json::Value {
                 // `get_completions` ALWAYS sends `CompletionParams.context` (the
                 // trigger kind/character). Per LSP 3.17 a server only honours that
                 // field when the client advertises `contextSupport: true`; without
-                // it tgo may ignore the trigger context and stop being trigger-aware.
+                // it tsgo may ignore the trigger context and stop being trigger-aware.
                 "contextSupport": true,
                 // The completion parser (`parse_completion_item`) maps the full
                 // standard `CompletionItemKind` range (1..=25) generically. The LSP
                 // default value set (when omitted) is `Text..Reference` (1..=18), so
                 // Class = 7 — on which component-tag completions depend — is INSIDE
-                // that default range and preserved regardless. The valueSet stops tgo
+                // that default range and preserved regardless. The valueSet stops tsgo
                 // DOWNGRADING the UPPER kinds 19..=25 (outside the default range) to
                 // `Text`. Advertise EXACTLY the parser's range 1..=25.
                 "completionItemKind": {
@@ -2822,7 +2825,7 @@ impl TypeProvider for TsgoTypeProvider {
                             // this block requests the TS6133 unused-declaration
                             // QUICKFIX surface only. The `source.removeUnused` SOURCE
                             // action is deferred to the `source.*` backlog — not
-                            // requested here. (When tgo ports the per-diagnostic
+                            // requested here. (When tsgo ports the per-diagnostic
                             // remove-unused codefix it returns under `quickfix`.)
                             "only": ["quickfix"],
                         },
@@ -4106,11 +4109,21 @@ fn normalize_npm_cache_root(root: PathBuf) -> PathBuf {
 }
 
 fn cache_root_key(path: &Path) -> String {
+    // Windows `\` separators normalize to `/` so the same root reached via either
+    // separator dedups; backslash is a valid filename char on Unix, so that part
+    // stays Windows-only. Case folds on a case-insensitive filesystem (Windows /
+    // default macOS) through the single shared FS-identity policy so case-variant
+    // roots dedup, and is preserved on a case-sensitive one (Linux).
     let value = path.to_string_lossy();
-    if cfg!(windows) {
-        value.replace('\\', "/").to_ascii_lowercase()
+    let separator_normalized = if cfg!(windows) {
+        value.replace('\\', "/")
     } else {
         value.into_owned()
+    };
+    if verter_span::path::fs_is_case_insensitive() {
+        separator_normalized.to_ascii_lowercase()
+    } else {
+        separator_normalized
     }
 }
 
@@ -4204,7 +4217,7 @@ mod dto_path_canonicalization_tests {
 
         // Write the target to a real temp file, derive its canonical path + matching file:// URI.
         let dir = std::env::temp_dir().join(format!(
-            "verter_tgo_rename_pertarget_{}_{}",
+            "verter_tsgo_rename_pertarget_{}_{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -4264,7 +4277,7 @@ mod dto_path_canonicalization_tests {
         assert_eq!(want_line, 2, "fixture precondition: symbol on line 2");
 
         let dir = std::env::temp_dir().join(format!(
-            "verter_tgo_codeaction_pertarget_{}_{}",
+            "verter_tsgo_codeaction_pertarget_{}_{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -4333,7 +4346,7 @@ mod dto_path_canonicalization_tests {
     fn absent_target_uri(tag: &str) -> String {
         use super::{path_to_file_uri_string, uri_to_file_path};
         let dir = std::env::temp_dir().join(format!(
-            "verter_tgo_{}_{}_{}",
+            "verter_tsgo_{}_{}_{}",
             tag,
             std::process::id(),
             std::time::SystemTime::now()

@@ -220,7 +220,11 @@ fn oracle_consumption_path_has_no_tsgo_spawn() {
     // `required-features` bin gate). Exclude it from the CONSUMPTION-path scan;
     // every OTHER `oracle_core` file must stay tsgo-free.
     files.retain(|p| {
-        let s = p.to_string_lossy();
+        // Normalize separators so the exclusion matches on Windows too: `Path::join`
+        // / directory walks yield `\` components there, so a forward-slash literal
+        // `contains` check would miss `oracle_core\gen.rs` and wrongly scan the
+        // generation file (a cross-platform-portability bug in the retain filter).
+        let s = p.to_string_lossy().replace('\\', "/");
         !s.contains("oracle_core/gen.rs") && !s.contains("oracle_core/gen/")
     });
     if registry.exists() {

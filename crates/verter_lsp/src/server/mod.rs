@@ -357,8 +357,9 @@ pub struct VerterLanguageServer {
     /// `@verter/typescript-plugin` reads. `Some` only when the active provider is
     /// tsserver: for tsserver the carrier companions reach the engine through the
     /// store + plugin membership (NOT a direct `provider.open_file`); for tsgo the
-    /// existing inferred carrier-open path is used. The backend it holds resolves
-    /// the SAME store dir the tsserver spawn delivers to the plugin.
+    /// carrier companions reach the engine through the project-bound `--api` direct
+    /// open (`open_project` + `root_files`). The backend it holds resolves the SAME
+    /// store dir the tsserver spawn delivers to the plugin.
     carrier_publish_coordinator: Option<crate::external_ts::CarrierPublishCoordinator>,
 }
 
@@ -367,7 +368,7 @@ impl VerterLanguageServer {
         let project_sync = config.type_provider.as_ref().map(|tp| {
             // Bind the sync to the active engine kind so the carrier-companion
             // content opens are suppressed for tsserver (the plugin serves the
-            // carrier from the publish store) and flow through for tgo.
+            // carrier from the publish store) and flow through for tsgo.
             ProjectSync::new_with_kind(
                 Arc::clone(tp),
                 config.project_sync_mode,
@@ -388,8 +389,8 @@ impl VerterLanguageServer {
         > = Arc::new(parking_lot::RwLock::new(None));
 
         // The live carrier-publish coordinator: built ONLY for the tsserver engine
-        // (tsgo keeps the inferred carrier-open path until its own migration). It
-        // holds a `TsserverEngineBackend` whose store dir is derived from the SAME
+        // (tsgo uses the project-bound `--api` direct carrier-companion open instead).
+        // It holds a `TsserverEngineBackend` whose store dir is derived from the SAME
         // shared resolver the tsserver spawn uses to point the plugin at the store,
         // so the LSP publishes exactly the store the plugin reads.
         let carrier_publish_coordinator = match (&config.type_provider, config.type_provider_kind) {
@@ -570,7 +571,7 @@ impl VerterLanguageServer {
     /// exercise the production `[RELEASE]`-vs-`[DIDCLOSE]` ordering on one shared
     /// owner. Returns `false` (no-op) when no project sync or published snapshot is
     /// available.
-    pub(crate) async fn test_run_declaration_closure_pass(&self) -> bool {
+    pub(crate) async fn test_run_declaration_closure_pass(&self, pass_generation: u64) -> bool {
         let Some(sync) = self.project_sync.as_ref() else {
             return false;
         };
@@ -583,6 +584,7 @@ impl VerterLanguageServer {
                 &self.documents,
                 &self.provider_sync_states,
                 &snapshot,
+                pass_generation,
             )
             .await
     }

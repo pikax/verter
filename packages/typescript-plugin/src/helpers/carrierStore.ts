@@ -51,8 +51,8 @@ import { carrierSourceToCompanion, normalizePath } from "./utils";
  * ```
  *
  * The `role` / `script_kind` JSON values are the Rust `ManifestRole` /
- * `ManifestScriptKind` serde renames (`CarrierIde`/`CarrierApi`/`CarrierBatch`/
- * `Shadow`/`Real`; `TSX`/`TS`/`JSX`/`JS`).
+ * `ManifestScriptKind` serde renames (`CarrierIde`/`CarrierApi`/`Shadow`/`Real`;
+ * `TSX`/`TS`/`JSX`/`JS`).
  *
  * ## Read consistency
  *
@@ -66,7 +66,7 @@ import { carrierSourceToCompanion, normalizePath } from "./utils";
  */
 
 /** The carrier role as serialized in the manifest. */
-export type ManifestRole = "CarrierIde" | "CarrierApi" | "CarrierBatch" | "Shadow" | "Real";
+export type ManifestRole = "CarrierIde" | "CarrierApi" | "Shadow" | "Real";
 
 /** The TypeScript script kind as serialized in the manifest. */
 export type ManifestScriptKind = "TSX" | "TS" | "JSX" | "JS";

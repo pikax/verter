@@ -163,9 +163,9 @@ export const out = obj.;
 // ---------------------------------------------------------------------------
 
 // Auto-import edits ride `completionItem/resolve.additionalTextEdits`, which an
-// LSP server (tgo) computes lazily ONLY when the client advertises
+// LSP server (tsgo) computes lazily ONLY when the client advertises
 // `textDocument.completion.completionItem.resolveSupport.properties` containing
-// `additionalTextEdits`. Before that capability was advertised, tgo's near-empty
+// `additionalTextEdits`. Before that capability was advertised, tsgo's near-empty
 // handshake made it silently drop the import edit, so accepting an auto-import
 // completion inserted the identifier WITHOUT its `import { … }` statement. (The
 // resolve `data` blob rides every round-trip transparently per the LSP spec — no
@@ -193,7 +193,7 @@ export const out = obj.;
 // The macro runs this for BOTH providers and vacuously skips when the backend /
 // node_modules is absent.
 //
-// Discriminating: reverting the `resolveSupport` capability (tgo) or neutering
+// Discriminating: reverting the `resolveSupport` capability (tsgo) or neutering
 // the provider's `resolve_completion` additionalTextEdits mapping (tsserver)
 // makes resolve return no import edit, so the assertion fails (under require-mode)
 // instead of passing.
@@ -345,7 +345,7 @@ real_provider_test!(
         // them carries a fabricated import edit. The guard FIRES on the resolved
         // edit set: if the resolve path wrongly invented `import … from …` for a
         // symbol that needs none, this assertion fails. (A provider correctly
-        // attaches NO resolve handle to a purely-local symbol — tgo does this, so
+        // attaches NO resolve handle to a purely-local symbol — tsgo does this, so
         // its resolve never runs and trivially fabricates nothing — while tsserver
         // does resolve the local entry, exercising the assertion live.)
         let mut saw_local_candidate = false;
@@ -390,7 +390,7 @@ real_provider_test!(
         // symbol (proving the negative guard ran against a real result set), else
         // it is a provider/materialization regression. Whether the resolve leg
         // fired depends on the provider attaching a handle to a no-import symbol —
-        // both outcomes (resolved-with-no-import on tsserver, no-handle on tgo) are
+        // both outcomes (resolved-with-no-import on tsserver, no-handle on tsgo) are
         // correct and the import-fabrication assertion covers the resolved case.
         if !saw_local_candidate {
             let _skipped = session.allow_empty_result_skip(&format!(
@@ -403,7 +403,7 @@ real_provider_test!(
         // tsserver attaches a resolve handle to the local entry too, so its resolve
         // leg MUST have fired — proving the no-fabrication assertion ran against a
         // REAL resolved-edit set rather than vacuously (a `data: None` regression
-        // would skip the resolve and silently neuter this guard). tgo correctly
+        // would skip the resolve and silently neuter this guard). tsgo correctly
         // attaches no handle to a purely-local symbol, so it has nothing to resolve.
         if saw_local_candidate && !session.is_tsgo() {
             assert!(

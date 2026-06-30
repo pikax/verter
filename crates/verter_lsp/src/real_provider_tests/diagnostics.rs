@@ -397,10 +397,10 @@ return {};
 //  - TSGO (LSP) only attaches `Diagnostic.relatedInformation` when the client
 //    advertises `publishDiagnostics.relatedInformation` (the same silent-degrade
 //    class as the tag/completion capabilities) — now advertised in
-//    `build_client_capabilities`. WITHOUT that capability tgo strips the related
+//    `build_client_capabilities`. WITHOUT that capability tsgo strips the related
 //    spans entirely (the pre-fix tree), so this test is discriminating: pre-fix
 //    the carrier `related_information` was always empty under both backends (no
-//    parser read it; tgo additionally never sent it).
+//    parser read it; tsgo additionally never sent it).
 //
 // The related span resolves to a REAL same-file byte offset on the SECOND `x`
 // (not a [0,0] degenerate / line-0 packed fallback). Vacuous-skip aware: the

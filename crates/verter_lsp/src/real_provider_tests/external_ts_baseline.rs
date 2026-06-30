@@ -11,7 +11,7 @@
 //! companions into the on-disk store the `@verter/typescript-plugin` reads, and
 //! the plugin advertises them via `getExternalFiles` under the `extraFileExtensions`
 //! the LSP configures), so the aliased import + ambient global resolve. The
-//! `*_tsgo` tests stay `#[ignore]`d until the tgo engine is migrated onto the same
+//! `*_tsgo` tests stay `#[ignore]`d until the tsgo engine is migrated onto the same
 //! contract. They are REAL fixtures + REAL assertions (not stubs): the assertions
 //! describe the correct configured-project outcome.
 //!

@@ -16,10 +16,8 @@ mod carrier_ownership_extension_rules;
 mod component_bare_import_resolves_to_declaration_carrier;
 #[path = "g_extts/ledger_is_off_the_serve_path.rs"]
 mod ledger_is_off_the_serve_path;
-#[path = "g_extts/no_inferred_project_init_on_tsgo.rs"]
-mod no_inferred_project_init_on_tsgo;
-#[path = "g_extts/no_inferred_project_knobs_on_tsserver.rs"]
-mod no_inferred_project_knobs_on_tsserver;
+#[path = "g_extts/no_fallback_to_inferred_anywhere.rs"]
+mod no_fallback_to_inferred_anywhere;
 #[path = "g_extts/provider_op_requires_resolved_project.rs"]
 mod provider_op_requires_resolved_project;
 #[path = "g_extts/resilient_single_writer_actor_shape.rs"]

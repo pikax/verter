@@ -215,10 +215,6 @@ fn span_subject_kind_from_role_is_structural() {
         SpanSubjectKind::Companion
     );
     assert_eq!(
-        SpanSubjectKind::from_role(SnapshotRole::CarrierBatch),
-        SpanSubjectKind::Companion
-    );
-    assert_eq!(
         SpanSubjectKind::from_role(SnapshotRole::Shadow),
         SpanSubjectKind::Companion
     );

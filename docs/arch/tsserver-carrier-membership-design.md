@@ -1,6 +1,6 @@
 # tsserver carrier configured-project membership
 
-Status: DESIGN (uncommitted draft for CTO/user review). Provider: tsserver only — tgo is unaffected and must stay unchanged.
+Status: Architecture design — the tsserver carrier configured-project membership contract. Provider: tsserver only — tsgo is unaffected and must stay unchanged.
 
 ## Problem
 
@@ -12,7 +12,7 @@ tsserver assigns each separately-`open`ed in-memory virtual carrier to its **own
 - **(B) imported-type cross-file rename** — renaming a prop usage on `<Child headline=…>` in a parent `.vue` whose prop type is an imported interface in a third `.ts` file must reach that third file. This requires the relevant carrier surfaces to share a program with the parent.
 - **(C) closed-child cross-file rename via `handle_rename`'s own sync** — `ensure_provider_synced` opens the parent first then children, but at rename time the parent program is already built, so a child opened after it lands in its own inferred project and tsserver returns only the parent's rename group.
 
-tgo (the other provider) does not have this problem: it uses a whole-folder LSP project model where every file under the initialized root is implicitly in scope.
+tsgo (the other provider) does not have this problem: it uses a whole-folder LSP project model where every file under the initialized root is implicitly in scope.
 
 ## Confirmed root-cause analysis (raw-tsserver `projectInfo` evidence)
 
@@ -170,8 +170,8 @@ The implementation block runs **one focused feasibility probe**: does a plugin's
 
 **`verter_session` is NOT required.** Carrier content production (`get_public_api`, IDE TSX compile via `CompileTarget::IDE`) already exists in `verter_session` and is reused unchanged for content only. The membership architecture lives in:
 
-- **`verter_workspace`** — owns real-config parsing, `ConfiguredMembership.materialized_files`, the carrier path scheme (`resolver::provider_id_for_source` / `provider_ide_id_for_source` / `source_id_from_provider_id`, `resolver.rs:245-299`), the shadow-project plan (cache layout, per-configured-project manifest), and the generated `tsconfig.json` contents. The carrier-path scheme becomes **provider-specific**: for tsserver it returns the relocated shadow path (`<cache>/…/vroot/src/App.vue.tsx`); tgo keeps the co-located path. The reverse map (`source_id_from_provider_id`) must invert the shadow path.
-- **`verter_type_runtime`** — owns tsserver behavior: a new **defaulted no-op** `TypeProvider` lifecycle method (e.g. `configure_project_membership(manifests)`) that tsserver implements to ensure the generated configs exist/are loaded and to target requests via `projectFileName`; tgo no-ops it (consistent with existing defaulted lifecycle methods `resync_open_files`, `configure_paths`, `update_workspace_folders`, `load_file`). tsserver opens relocated carriers with in-memory content and never relies on `openExternalProject` for membership. (If the plugin path is chosen, this instead wires plugin loading + `getExternalFiles` snapshot delivery.)
+- **`verter_workspace`** — owns real-config parsing, `ConfiguredMembership.materialized_files`, the carrier path scheme (`resolver::provider_id_for_source` / `provider_ide_id_for_source` / `source_id_from_provider_id`, `resolver.rs:245-299`), the shadow-project plan (cache layout, per-configured-project manifest), and the generated `tsconfig.json` contents. The carrier-path scheme becomes **provider-specific**: for tsserver it returns the relocated shadow path (`<cache>/…/vroot/src/App.vue.tsx`); tsgo keeps the co-located path. The reverse map (`source_id_from_provider_id`) must invert the shadow path.
+- **`verter_type_runtime`** — owns tsserver behavior: a new **defaulted no-op** `TypeProvider` lifecycle method (e.g. `configure_project_membership(manifests)`) that tsserver implements to ensure the generated configs exist/are loaded and to target requests via `projectFileName`; tsgo no-ops it (consistent with existing defaulted lifecycle methods `resync_open_files`, `configure_paths`, `update_workspace_folders`, `load_file`). tsserver opens relocated carriers with in-memory content and never relies on `openExternalProject` for membership. (If the plugin path is chosen, this instead wires plugin loading + `getExternalFiles` snapshot delivery.)
 - **`verter_lsp`** — owns sync orchestration (`ensure_provider_synced`, the `did_open` prewarm, `carrier_sync_state_for_source`, `provider_sync.rs`): apply the membership manifest and ensure required carrier content is synced before queries, then map diagnostics/edits/locations between the shadow carrier paths and the real `.vue`/`.svelte` sources (the existing `external_ide_context` / `resolve_carrier_ide_range_strict` mapping layer extends to the shadow path).
 
 `verter_session` is touched only if its public API turns out to be the sole place to carry new provider/sync metadata (e.g. a batch public-API generation API for performance) — not required by the membership architecture itself, and gated on user sign-off if it arises.
@@ -186,7 +186,7 @@ This is **one architectural fix**, staged. It is **not** "ordering first" — or
    - Prove the plugin `getExternalFiles` membership path OR the shadow `rootDirs` auto-import correctness (the latter is already validated by the diagnostic probes; the implementation re-proves it as a committed Rust test).
    - Land the discriminating REQUIRE-mode tests **red** first (see below).
 2. **Workspace shadow-project model** — `verter_workspace`: shadow cache layout, per-configured-project manifest, generated `tsconfig.json` contents, provider-specific carrier path scheme + reverse map.
-3. **Provider membership wiring** — `verter_type_runtime`: the defaulted `configure_project_membership` lifecycle method, tsserver generated-config materialization/load + `projectFileName` targeting (or the plugin wiring), tgo no-op.
+3. **Provider membership wiring** — `verter_type_runtime`: the defaulted `configure_project_membership` lifecycle method, tsserver generated-config materialization/load + `projectFileName` targeting (or the plugin wiring), tsgo no-op.
 4. **LSP orchestration + path/edit mapping** — `verter_lsp`: apply manifest before queries; map diagnostics/edits/locations shadow↔real.
 5. **Remove the masking** — drop the `did_open` prewarm ordering and the settle loops as *correctness* mechanisms once membership is real; the unprewarmed lane (C) becomes a required regression test.
 

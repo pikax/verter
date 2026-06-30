@@ -98,7 +98,7 @@ impl SpanClass {
 /// time FACT, not a string sniff at classification time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpanSubjectKind {
-    /// A Verter-generated carrier companion (`CarrierIde`/`CarrierApi`/`CarrierBatch`)
+    /// A Verter-generated carrier companion (`CarrierIde`/`CarrierApi`)
     /// or a self-file rune-module surface (`Shadow`). Synthetic regions suppress;
     /// mapped regions map back.
     Companion,
@@ -113,10 +113,9 @@ impl SpanSubjectKind {
     #[must_use]
     pub fn from_role(role: SnapshotRole) -> Self {
         match role {
-            SnapshotRole::CarrierIde
-            | SnapshotRole::CarrierApi
-            | SnapshotRole::CarrierBatch
-            | SnapshotRole::Shadow => SpanSubjectKind::Companion,
+            SnapshotRole::CarrierIde | SnapshotRole::CarrierApi | SnapshotRole::Shadow => {
+                SpanSubjectKind::Companion
+            }
             SnapshotRole::Real => SpanSubjectKind::External,
         }
     }
@@ -583,7 +582,6 @@ fn snapshot_role_of(kind: crate::provider_surface_store::ProviderSurfaceKind) ->
     match kind {
         K::CarrierIde => SnapshotRole::CarrierIde,
         K::CarrierApi => SnapshotRole::CarrierApi,
-        K::CarrierBatch => SnapshotRole::CarrierBatch,
         K::Shadow => SnapshotRole::Shadow,
         K::Real => SnapshotRole::Real,
     }

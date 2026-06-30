@@ -14,9 +14,7 @@ use rustc_hash::FxHashMap;
 use verter_semantic::analysis::types::Hash16;
 
 /// The role of a carrier surface. Mirrors the existing `ProviderSurfaceStore`
-/// roles (`CarrierIde`/`CarrierApi`/`Shadow`/`Real`) plus the PROVISIONAL
-/// `CarrierBatch` (a distinct minimal-diagnostic batch surface that may later be
-/// merged into `CarrierIde` if it shows no material cold-perf gain).
+/// roles (`CarrierIde`/`CarrierApi`/`Shadow`/`Real`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CarrierRole {
     /// `{name}.vue.tsx` / `{name}.svelte.tsx` — the interactive IDE surface
@@ -26,9 +24,6 @@ pub enum CarrierRole {
     /// `{name}.vue.verter.ts` / `{name}.svelte.verter.ts` — the redirect-reached
     /// macro-derived public-API surface a cross-file rename resolves against.
     CarrierApi,
-    /// The minimal-diagnostic carrier for the cold TSC surface. PROVISIONAL:
-    /// present as a variant, its keep-or-merge decision is downstream.
-    CarrierBatch,
     /// A self-file shadow / rune-module surface (the `.svelte.ts`/`.svelte.js`
     /// rune source rewritten in place).
     Shadow,

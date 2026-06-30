@@ -214,7 +214,7 @@ impl VerterLanguageServer {
         };
         // Route through the SINGLE carrier-sync gateway: the membership decision
         // (store-backed configured-project member for tsserver) is FUSED with the
-        // provider-state commit. tsserver ⇒ `Published`; tgo ⇒ `DirectOpen` (open the
+        // provider-state commit. tsserver ⇒ `Published`; tsgo ⇒ `DirectOpen` (open the
         // IDE companion buffer directly).
         match self
             .reconcile_carrier_via_gateway(&canonical_id, ide.is_jsx, Some(&ide))
@@ -286,7 +286,7 @@ impl VerterLanguageServer {
             .unwrap_or_else(|| self.documents.is_jsx(uri));
         // Route through the SINGLE carrier-sync gateway: membership fused with the
         // provider-state commit. tsserver ⇒ `Published` (the plugin serves both
-        // companions); tgo ⇒ `DirectOpen` (open the API companion buffer directly).
+        // companions); tsgo ⇒ `DirectOpen` (open the API companion buffer directly).
         match self
             .reconcile_carrier_via_gateway(&canonical_id, is_jsx, ide.as_ref())
             .await
@@ -354,7 +354,7 @@ impl VerterLanguageServer {
     ///
     /// Returns `true` when the tsserver publish path HANDLED this carrier (the
     /// caller must NOT also open the companions directly), `false` when there is
-    /// no coordinator (tgo / no provider) so the caller runs the direct
+    /// no coordinator (tsgo / no provider) so the caller runs the direct
     /// `open_file`/`sync_*` path. Resolution is fail-closed inside the coordinator
     /// (a no-owner/ambiguous source publishes nothing — but it is still
     /// "handled": the carrier is intentionally not a member, never opened).
@@ -365,7 +365,7 @@ impl VerterLanguageServer {
     /// two-phase store publish, and evicts the post-warm sticky resolution).
     pub(super) async fn publish_carrier_to_external_ts(&self, canonical_id: &str) -> bool {
         // Only a framework carrier (`.vue`/`.svelte`) with a tsserver coordinator is
-        // published; a non-carrier file (or tgo / no provider) is NOT handled here —
+        // published; a non-carrier file (or tsgo / no provider) is NOT handled here —
         // it falls through to the caller's direct-open path.
         if self.carrier_publish_coordinator.is_none() {
             return false;
@@ -401,7 +401,7 @@ impl VerterLanguageServer {
     /// reconciler's `remove_source_membership`, which retracts the durable on-disk
     /// store, closes the provider companion buffers, and tombstones the ledger so the
     /// carrier disappears from the ledger-backed `getExternalFiles`. `Ok(())` when
-    /// there is no tsserver coordinator (tgo / no provider); a reconcile failure is
+    /// there is no tsserver coordinator (tsgo / no provider); a reconcile failure is
     /// PROPAGATED (never swallowed) so a delete caller can surface it.
     pub(super) async fn retract_carrier_from_external_ts(
         &self,
@@ -418,7 +418,7 @@ impl VerterLanguageServer {
     }
 
     /// The source-membership ledger — INTERNAL transition bookkeeping (the
-    /// reconciler's sole writer is its `commit`). `None` for tgo / no-provider (no
+    /// reconciler's sole writer is its `commit`). `None` for tsgo / no-provider (no
     /// external-TS engine). It is NOT the production serve path: live `getExternalFiles`
     /// is served CROSS-PROCESS from the on-disk store `ready_files`. This in-process
     /// ledger read is the TEST-SIDE authority the production-path tests assert
@@ -434,7 +434,7 @@ impl VerterLanguageServer {
     /// The carrier-companion provider paths advertised for `project` per the in-process
     /// ledger — a TEST-SIDE view of the reconciler's membership bookkeeping, NOT the
     /// production `getExternalFiles` path (which the plugin serves cross-process from
-    /// the on-disk store `ready_files`). Empty for tgo / no-provider.
+    /// the on-disk store `ready_files`). Empty for tsgo / no-provider.
     #[cfg(test)]
     #[must_use]
     pub(super) fn external_ts_advertised_for_project(&self, project: &str) -> Vec<String> {
@@ -722,7 +722,7 @@ impl VerterLanguageServer {
         // tsserver: the API companion reaches the engine through the store-backed
         // membership (the background ProjectSync content task below is a no-op for
         // tsserver), so queue the carrier for the drain, which reconciles it through
-        // the single membership reconciler. The direct background task is the tgo
+        // the single membership reconciler. The direct background task is the tsgo
         // route.
         if self.carrier_publish_coordinator.is_some() {
             self.pending_snapshot_provider_sync.insert(canonical_id);
@@ -734,7 +734,7 @@ impl VerterLanguageServer {
         };
         let is_tsgo = matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo);
         let is_jsx = self.documents.is_jsx(&uri);
-        // The background task routes through the SINGLE carrier-sync gateway (TGO
+        // The background task routes through the SINGLE carrier-sync gateway (tsgo
         // direct-open) for its transition + receipt, then applies the per-kind
         // close-after-successful-sync discipline: it manages ONLY the API kind,
         // reverts the IDE kind to its prior live path, and must never close or
@@ -849,7 +849,7 @@ impl VerterLanguageServer {
         // tsserver: PUBLISHES the carrier's companions into the store the plugin reads
         // (the configured-project membership) and returns `Published`; the IDE
         // companion is STILL opened below (tsserver `geterr` runs on open buffers) —
-        // membership (plugin) + open buffer (diagnostics) complement. tgo: returns
+        // membership (plugin) + open buffer (diagnostics) complement. tsgo: returns
         // `DirectOpen` (no store), minting the receipt for the direct open+commit. An
         // owner-loss (`Unowned`) RETRACTS the membership inside the gateway and yields
         // no receipt (the open-document liveness commit below is membership-free).
@@ -1904,7 +1904,7 @@ impl VerterLanguageServer {
                 // Route through the SINGLE carrier-sync gateway (membership fused with
                 // the provider-state transition + receipt). An imported child carrier
                 // reaches tsserver as a store-backed configured-project member
-                // (`Published`); tgo opens the companions directly (`DirectOpen`).
+                // (`Published`); tsgo opens the companions directly (`DirectOpen`).
                 match self
                     .reconcile_carrier_via_gateway(canonical_id, is_jsx, ide.as_ref())
                     .await
@@ -2149,7 +2149,7 @@ impl VerterLanguageServer {
         // Route the owner-resolved sync through the SINGLE carrier-sync gateway: the
         // membership decision is FUSED with the provider-state transition + the
         // sealed receipt that gates the commit. tsserver advertised ⇒ `Published`
-        // (commit the store-resident state); tgo ⇒ `DirectOpen` (per-kind open +
+        // (commit the store-resident state); tsgo ⇒ `DirectOpen` (per-kind open +
         // commit); owner loss ⇒ `Unowned` (retract done in the gateway; preserve the
         // open-document liveness state or clear a non-open file); bootstrap/degraded
         // ⇒ `Pending` (keep queued).

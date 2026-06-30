@@ -26,7 +26,7 @@ Each workstream is a **comparison against a reference**. The reference is a *bas
 
 | # | Workstream | Replaces | "Correct" means | Reference baseline |
 |---|---|---|---|---|
-| **A** | **DX / IDE** | Volar | For every supported mapped TS/JS expression position, Verter's IDE features behave like the equivalent standalone `.ts`/`.tsx`/`.jsx` program, mapped back to the SFC — on **both tsserver and tgo**. Features: diagnostics, hover, definition/type-definition, references, rename, completion + resolve, signature help, document highlights, semantic tokens, inlay hints, and code-actions whose edits map exactly. | Volar |
+| **A** | **DX / IDE** | Volar | For every supported mapped TS/JS expression position, Verter's IDE features behave like the equivalent standalone `.ts`/`.tsx`/`.jsx` program, mapped back to the SFC — on **both tsserver and tsgo**. Features: diagnostics, hover, definition/type-definition, references, rename, completion + resolve, signature help, document highlights, semantic tokens, inlay hints, and code-actions whose edits map exactly. | Volar |
 | **B** | **TSC** | vue-tsc | Verter reports the correct type-error / diagnostic **set** for the project's SFCs. | vue-tsc (Volar SFC→TS) |
 | **C** | **build** | `@vue/compiler-sfc` | Verter's compiled render functions are **functionally identical** to the official output — same runtime behavior. Formatting, variable names, and structure may differ and that is acceptable; we deliberately do **not** make the output textually identical. | official `@vue/compiler-sfc` |
 
@@ -69,7 +69,7 @@ Known reference imperfections to encode up front:
 
 Three comparison harnesses + an extraction pipeline, built on what already exists (the real-provider test harness, the dx-harness, the compile-parity infra, `CompileTarget::IDE`/`VDOM`/`Vapor`):
 
-- **IDE comparison harness** (workstream A): drive Verter's LSP (tsserver + tgo) over project files at sampled mapped positions; capture results; diff vs the expected `.ts`-equivalent / Volar; classify deviations.
+- **IDE comparison harness** (workstream A): drive Verter's LSP (tsserver + tsgo) over project files at sampled mapped positions; capture results; diff vs the expected `.ts`-equivalent / Volar; classify deviations.
 - **TSC comparison harness** (workstream B): run Verter's typecheck + vue-tsc over a project; normalize + diff the diagnostic sets; classify (Verter-correct vs Verter-bug).
 - **Build equivalence harness** (workstream C): compile with Verter + the official compiler; compare **functional** behavior of the render functions (semantic/behavioral, not textual); document deviations.
 - **Hermetic extraction pipeline**: turn a project-specific deviation into a generic vendored repro + a discriminating regression test.
@@ -116,7 +116,7 @@ extension*, not green-field. Reuse-first is mandatory (Shared Optimized Codebase
 ### D.1.1 DX/IDE — REUSABLE: the dx-harness + dx-baseline differential stack
 
 - `crates/verter_dx_baseline/` — standalone Rust binary, the **sole provider owner**
-  (spawns tgo/tsserver against Verter-emitted `.vue.tsx`), newline-delimited JSON protocol
+  (spawns tsgo/tsserver against Verter-emitted `.vue.tsx`), newline-delimited JSON protocol
   (`Hello`/`Open`/`SyncArtifacts`/`Query`/`Diagnostics`); fail-closed on missing
   providers / stale artifacts / map-absent.
 - `packages/dx-harness/src/` — the TS orchestration:
@@ -139,15 +139,15 @@ extension*, not green-field. Reuse-first is mandatory (Shared Optimized Codebase
   - Sweep entry: `test/dxCorpusSweep.run.test.ts`, gated
     `describe.skipIf(!DX_LSP_BIN || !DX_BASELINE_BIN)`.
 - `crates/verter_lsp/src/test_harness.rs` — `real_provider_test!` emits **two** variants
-  (tsserver, tgo); `TestSessionBuilder` (`.fixture` / `.open_fixture_file` /
+  (tsserver, tsgo); `TestSessionBuilder` (`.fixture` / `.open_fixture_file` /
   `.open_virtual`); getters `hover_text`, `definitions`, `definition_locations`,
   `references`, `prepare_rename`, `rename_edits`, `completion_labels`, `document_symbols`,
   `signature_help`. Per-feature suites under `crates/verter_lsp/src/real_provider_tests/`.
-  tgo discovery `find_tsgo_binary_canonical`; tsserver `find_tsserver` + `find_node`
+  tsgo discovery `find_tsgo_binary_canonical`; tsserver `find_tsserver` + `find_node`
   (`crates/verter_type_runtime/src/discovery.rs`). `VERTER_REQUIRE_TSGO` /
   `VERTER_REQUIRE_TSSERVER` force CI fail-closed; else graceful skip.
 
-**Gaps (DX):** (1) **no Volar baseline** — the dx-baseline owns tgo+tsserver; the
+**Gaps (DX):** (1) **no Volar baseline** — the dx-baseline owns tsgo+tsserver; the
 differential today is Verter-vs-provider-on-TSX (the standalone-`.ts` oracle), not
 Verter-vs-Volar. (2) **No external-project loader** — the sweep is hardwired to committed
 hermetic fixtures; `DX_HARNESS_EXTERNAL_CORPUS` is a **reserved-but-inert** env name
@@ -159,8 +159,8 @@ it must be built. (3) Single-root-per-session workspace model (monorepo multi-ro
 - `crates/verter_tsc/` — the CLI: `load_tsconfig` (`tsconfig.rs`) → `VerterHost::upsert`
   per `.vue` → `generate_public_api_stubs` (cross-component `.vue.ts` stubs) →
   `generate_all_tsx` (`CompileTarget::IDE` + `TSX`, **inline base64 source maps**) →
-  tgo/tsc subprocess → `reporter.rs::parse_tsc_output` → `error_map.rs::map_tsc_position`
-  (remap TSX line/col → `.vue`). Defaults to tgo, falls back to tsc; `--use-tsc` forces
+  tsgo/tsc subprocess → `reporter.rs::parse_tsc_output` → `error_map.rs::map_tsc_position`
+  (remap TSX line/col → `.vue`). Defaults to tsgo, falls back to tsc; `--use-tsc` forces
   tsc. Distributed via `packages/verter-tsc/`.
 - `scripts/integration-test/diagnostics.mjs` — the **dual-tool comparison harness**:
   runs BOTH `vue-tsc` and `verter-tsc`, `parseTypeScriptDiagnostics` (per tool),
@@ -172,7 +172,7 @@ it must be built. (3) Single-root-per-session workspace model (monorepo multi-ro
   `.tsx` path leakage). `vue-tsc` is in the lockfile; real projects pin their own 3.2.x.
 
 **Gaps (TSC):** (1) the dual-tool diff is an ephemeral CI script, not a corpus-wide
-classified harness; (2) `verter-tsc` discovers tgo by walking up from the **project** dir
+classified harness; (2) `verter-tsc` discovers tsgo by walking up from the **project** dir
 → a cross-drive project silently drops to the project's `tsc` (slower / possibly different
 TS major) — the harness must pin the checker per run; (3) auto-import environments
 (Nuxt / `unplugin-auto-import`) need their generated ambient `.d.ts` fed to verter-tsc to
@@ -244,7 +244,7 @@ inside the established `.integration-tests/` — CTO picks one root at ratificat
 ```jsonc
 {
   "schema": "verter.analysis-projects.v1",
-  "checkerBin": "<abs path to a pinned tgo/tsc for apples-to-apples TSC runs>",
+  "checkerBin": "<abs path to a pinned tsgo/tsc for apples-to-apples TSC runs>",
   "projects": [
     {
       "id": "proj-a",                // OPAQUE id — used in ALL generic outputs / ledger
@@ -422,7 +422,7 @@ Extend the dx-harness, do not rebuild it.
   `v-model`/`v-slot` + dynamic args), and script identifiers — exercising the full Carrier
   IDE TS Surface, not a text grep.
 - **Two oracles (§D.3.4):** Oracle 1 (provider/mapping parity) = the dx-baseline provider
-  (tgo AND tsserver, tgo-preferred) on the projected TSX, compared against Verter-LSP's
+  (tsgo AND tsserver, tsgo-preferred) on the projected TSX, compared against Verter-LSP's
   mapped result; Oracle 2 (independent semantic correctness) = hand-authored minimal repros
   asserting the expected Vue/TS semantics directly. A position passes only when both agree —
   this defends against oracle collapse. Run every feature: diagnostics, hover,
@@ -580,7 +580,7 @@ The closed loop **physically runs end-to-end today** (verified hermetically on t
   harness fidelity §D.3.3, partly a candidate Verter gap), `TS2339` property-not-exist,
   `TS2367` always-true comparison.
 - **Oracles reachable:** `@vue/compiler-sfc` 3.5.34 `parse()` works (build); `vue-tsc`
-  reachable (6.0.3 via npx; projects pin 3.2.x) (TSC); tgo at `node_modules/.bin/tsgo.cmd`
+  reachable (6.0.3 via npx; projects pin 3.2.x) (TSC); tsgo at `node_modules/.bin/tsgo.cmd`
   + tsserver via discovery (IDE).
 
 Tooling gaps surfaced (all addressed in §D.4): (1) no implemented external-corpus driver
@@ -617,7 +617,7 @@ generically.
   `exit` notification (known background-teardown issue). Any harness spawning `verter-lsp`
   must force-kill after a graceful attempt (the dx-baseline / stdio-smoke pattern already
   does). Harness-robustness requirement, not a campaign blocker.
-- **R6 — Reference version pinning.** vue-tsc, `@vue/compiler-sfc`, tgo, tsserver all move.
+- **R6 — Reference version pinning.** vue-tsc, `@vue/compiler-sfc`, tsgo, tsserver all move.
   Pin each version in the config + doc; a reference upgrade is a deliberate ledger event,
   not silent drift.
 - **R7 — Project scale / perf.** Larger Nuxt projects may stress timing. Mitigation: Phase 1

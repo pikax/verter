@@ -56,7 +56,7 @@ pub(super) struct BackgroundInitArgs {
     pub(super) vfs_workspace:
         Arc<parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>>,
     /// The tsserver carrier-publish coordinator (the store-publish membership
-    /// path). `Some` only for the tsserver engine; `None` for tgo and when no
+    /// path). `Some` only for the tsserver engine; `None` for tsgo and when no
     /// type provider is connected.
     pub(super) carrier_publish_coordinator: Option<crate::external_ts::CarrierPublishCoordinator>,
     /// The proactive declaration-overlay lifecycle owner (shared with the server's
@@ -304,6 +304,10 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         is_tsgo,
         carrier_publish_coordinator.as_ref(),
         &decl_overlay_owner,
+        // The closure pass runs UNDER this init's generation. A stale (superseded)
+        // init pass that reaches the overlay reconcile must not close an overlay a
+        // newer live init pass re-established reachability for.
+        my_gen,
     )
     .await;
 

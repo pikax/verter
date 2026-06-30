@@ -86,7 +86,8 @@ pub struct WorkspaceScannerConfig {
     /// The tsserver carrier-publish coordinator (the store-publish membership
     /// authority). `Some` for the tsserver engine so the background scan PUBLISHES /
     /// RETRACTS carrier membership through the single carrier-sync gateway; `None`
-    /// for TGO (which keeps the inferred carrier-open path).
+    /// for tsgo (whose carriers reach the engine through the project-bound `--api`
+    /// direct open — `open_project` + `root_files`).
     pub carrier_publish_coordinator: Option<crate::external_ts::CarrierPublishCoordinator>,
     /// Compile profile for IDE output.
     pub tsx_profile: CompileProfile,
@@ -833,7 +834,7 @@ async fn sync_file_to_provider(
     // provider-state commit. The background full-project scan previously committed a
     // tsserver carrier's state WITHOUT publishing its membership (and never retracted
     // on owner-loss) — gap E. The gateway closes that: the receipt is required to
-    // commit, and only a reconcile mints it. `None` coordinator ⇒ TGO direct-open.
+    // commit, and only a reconcile mints it. `None` coordinator ⇒ tsgo direct-open.
     let membership =
         carrier_publish_coordinator.map(|coordinator| crate::external_ts::CarrierMembershipCtx {
             coordinator,
@@ -893,7 +894,7 @@ async fn sync_file_to_provider(
             let mut committed_state = transition.next;
             let mut synced_kinds: Vec<ProviderPathKind> = Vec::new();
 
-            // Sync DTS (TGO opens the companion buffer directly).
+            // Sync DTS (tsgo opens the companion buffer directly).
             if let Some(api) = host.get_public_api(canonical_id) {
                 if let Some(dts_path) = committed_state.api_path.clone() {
                     let result = if is_tsgo {
@@ -2205,7 +2206,7 @@ defineProps<{ msg: string }>()
             &sync,
             &surfaces,
             &owning_vfs,
-            false, // tsserver (not tgo)
+            false, // tsserver (not tsgo)
             &sync_states,
             Some(&coordinator),
         )

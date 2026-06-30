@@ -80,9 +80,9 @@ real_provider_test!(
         let ws_edit = edits.unwrap();
         let file_count = count_files(&ws_edit);
         // BOTH providers: the cross-file Vue-prop rename MUST touch >= 2 files
-        // (App.vue usage + MyComp.vue defineProps decl). For tgo this is the
+        // (App.vue usage + MyComp.vue defineProps decl). For tsgo this is the
         // child-declaration leg Verter SYNTHESIZES itself (provider-agnostic) —
-        // tgo's own rename API does not enumerate it across the synthesized
+        // tsgo's own rename API does not enumerate it across the synthesized
         // `{carrier}.ts` surface, so the synthesis is what closes the parity gap.
         // It fails (not skips) if the child edit is dropped.
         assert!(
@@ -126,8 +126,8 @@ real_provider_test!(
 // gap tracked as Block H-membership. This lane remains broad end-to-end coverage
 // (apply + text assertions across both files), and runs for BOTH providers: under
 // tsserver the provider's own rename enumerates the child `{carrier}.ts` location,
-// while under tgo the child-declaration leg is the one Verter SYNTHESIZES
-// (provider-agnostic) — tgo's native rename does not enumerate it. Either way the
+// while under tsgo the child-declaration leg is the one Verter SYNTHESIZES
+// (provider-agnostic) — tsgo's native rename does not enumerate it. Either way the
 // child edit maps back onto MyComp.vue through the same generation-pinned snapshot.
 real_provider_test!(
     rename_cross_file_prop_child_closed,
@@ -145,7 +145,7 @@ real_provider_test!(
         let edits = session.rename_edits(&app, pos, "fooRenamed").await;
 
         // BOTH providers: BOTH files must be edited (App.vue usage + MyComp.vue
-        // decl). For tgo, the child-declaration leg is the one Verter SYNTHESIZES
+        // decl). For tsgo, the child-declaration leg is the one Verter SYNTHESIZES
         // (provider-agnostic) — its own rename API does not enumerate the child
         // edit across the synthesized `{carrier}.ts` surface. The child MyComp.vue
         // is CLOSED, so this also exercises the closed-carrier snapshot mapping.
@@ -250,21 +250,21 @@ real_provider_test!(
 // regressed, the rename would ship a usage-only partial or fail entirely; either way
 // the third-file edit assertion below fails.
 //
-// tsserver-only (written directly, not via `real_provider_test!`): tgo cannot reach
+// tsserver-only (written directly, not via `real_provider_test!`): tsgo cannot reach
 // the imported type's member declaration from the parent's program — it resolves the
 // prop usage only to its OWN occurrence (the cross-file project-MEMBERSHIP gap
-// tracked as Block H-membership). tgo therefore correctly FAILS CLOSED for this case
+// tracked as Block H-membership). tsgo therefore correctly FAILS CLOSED for this case
 // (see `rename_cross_file_imported_prop_fails_closed` below, which runs for BOTH
-// providers, and the tgo future-parity tracker
-// `rename_cross_file_imported_prop_tgo_member_parity`). The imported member declaration
+// providers, and the tsgo future-parity tracker
+// `rename_cross_file_imported_prop_tsgo_member_parity`). The imported member declaration
 // EXISTS in the generated carrier surfaces and Verter advertises BOTH the parent and
 // child carriers in the on-disk store `ready_files` (the `getExternalFiles` serve set —
 // carrier publish/membership is complete and proven). But tsserver hits the SAME Block-H
-// program-membership gap as tgo: it does not materialize the advertised parent
+// program-membership gap as tsgo: it does not materialize the advertised parent
 // `.vue.tsx` into a queryable program SourceFile at query time (`getValidSourceFile` =>
 // "Could not find source file"), so the rename's first provider hop ERRORS, the
 // declaration stays `Unknown`, and the merged-edit completeness gate fails closed. So
-// this is `#[ignore]`'d on the same cross-file program-membership gap as the tgo sibling.
+// this is `#[ignore]`'d on the same cross-file program-membership gap as the tsgo sibling.
 // Mirrors the macro's skip/build gating (build() returns None when absent; hard-fails
 // under VERTER_REQUIRE_TSSERVER=1).
 #[tokio::test(flavor = "multi_thread")]
@@ -273,7 +273,7 @@ real_provider_test!(
             materialize the advertised parent `.vue.tsx` into a queryable program \
             SourceFile (`getValidSourceFile`: could not find source file), so the first \
             provider hop errors and cross-file imported-type rename fails closed. Same \
-            class as `rename_cross_file_imported_prop_tgo_member_parity`; remove this \
+            class as `rename_cross_file_imported_prop_tsgo_member_parity`; remove this \
             `#[ignore]` when Block-H program-membership lands."]
 async fn rename_cross_file_imported_prop_tsserver() {
     use crate::test_harness::{TestProviderKind, TestSessionBuilder};
@@ -367,31 +367,31 @@ async fn rename_cross_file_imported_prop_tsserver() {
     session.shutdown().await;
 }
 
-// IMPORTED-TYPE cross-file rename PARITY for tgo — the FUTURE expectation, gated
-// `#[ignore]` on a CONFIRMED tgo cross-file project-MEMBERSHIP gap (the same class as
+// IMPORTED-TYPE cross-file rename PARITY for tsgo — the FUTURE expectation, gated
+// `#[ignore]` on a CONFIRMED tsgo cross-file project-MEMBERSHIP gap (the same class as
 // `rename_cross_file_prop_child_closed_unprewarmed_tsserver`, tracked as Block
 // H-membership).
 //
-// MEASURED tgo behavior: `get_definition` AND `get_rename_locations` at the parent
+// MEASURED tsgo behavior: `get_definition` AND `get_rename_locations` at the parent
 // `<ImportedPropChild headline=…>` usage offset both return ONLY the parent's OWN
-// usage occurrence — tgo does not reach the imported type's member declaration in
+// usage occurrence — tsgo does not reach the imported type's member declaration in
 // `childImportedProps.ts` from the parent's program. So Verter's declaration
 // resolution stays `Unknown` and the completeness gate correctly FAILS CLOSED (no
 // usage-only partial — verified by `rename_cross_file_imported_prop_fails_closed`).
-// Achieving tgo member-parity needs the cross-cutting tgo program-membership /
+// Achieving tsgo member-parity needs the cross-cutting tsgo program-membership /
 // sync-ordering fix (affects every nav handler), which is out of scope for the
-// fail-closed gate work. When that lands, tgo will reach the member and this
+// fail-closed gate work. When that lands, tsgo will reach the member and this
 // expectation becomes assertable — remove `#[ignore]`.
 //
-// tgo-only, written directly (mirrors the macro's gating): build() returns None when
-// tgo is absent (skip), hard-fails under VERTER_REQUIRE_TSGO=1.
+// tsgo-only, written directly (mirrors the macro's gating): build() returns None when
+// tsgo is absent (skip), hard-fails under VERTER_REQUIRE_TSGO=1.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "confirmed tgo cross-file project-membership gap (Block H-membership): tgo resolves a \
+#[ignore = "confirmed tsgo cross-file project-membership gap (Block H-membership): tsgo resolves a \
             `<Child prop=…>` imported-type prop usage only to its own occurrence, never the imported \
-            member in the third file, so imported-type cross-file rename parity for tgo needs the \
-            out-of-scope tgo program-membership/sync-ordering fix. tgo correctly FAILS CLOSED today \
+            member in the third file, so imported-type cross-file rename parity for tsgo needs the \
+            out-of-scope tsgo program-membership/sync-ordering fix. tsgo correctly FAILS CLOSED today \
             (no usage-only partial); this lane asserts the future member-parity once membership lands."]
-async fn rename_cross_file_imported_prop_tgo_member_parity() {
+async fn rename_cross_file_imported_prop_tsgo_member_parity() {
     use crate::test_harness::{TestProviderKind, TestSessionBuilder};
 
     let Some(session) = TestSessionBuilder::new(TestProviderKind::Tsgo)
@@ -426,10 +426,10 @@ async fn rename_cross_file_imported_prop_tgo_member_parity() {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
     }
-    let ws_edit = ws_edit.expect("tgo imported-type cross-file rename must return edits");
+    let ws_edit = ws_edit.expect("tsgo imported-type cross-file rename must return edits");
     assert!(
         edit_touches(&ws_edit, &parent) && edit_touches(&ws_edit, &decl_uri),
-        "tgo imported-type rename must edit BOTH the parent usage and the third-file member: {ws_edit:?}"
+        "tsgo imported-type rename must edit BOTH the parent usage and the third-file member: {ws_edit:?}"
     );
 
     session.shutdown().await;
@@ -442,14 +442,14 @@ async fn rename_cross_file_imported_prop_tgo_member_parity() {
 //
 // Both providers satisfy the invariant by DIFFERENT routes, and BOTH are exercised
 // here: tsserver reaches the imported member and completes (parent + third-file
-// edits); tgo cannot reach the member (the tracked cross-file membership gap), so its
+// edits); tsgo cannot reach the member (the tracked cross-file membership gap), so its
 // declaration stays `Unknown` and the gate fails closed (None). Either way no
 // usage-only partial is shipped.
 //
 // DISCRIMINATES the fail-closed boundary end-to-end: with the gate reverted to the
-// old "unresolved declaration does not gate" behavior, tgo would return a usage-only
+// old "unresolved declaration does not gate" behavior, tsgo would return a usage-only
 // `WorkspaceEdit` here; the assertion that a parent edit IMPLIES the third-file edit
-// catches it (and the tgo-without-fix run produces exactly the usage-only shape this
+// catches it (and the tsgo-without-fix run produces exactly the usage-only shape this
 // rejects).
 real_provider_test!(
     rename_cross_file_imported_prop_fails_closed,
@@ -497,8 +497,8 @@ real_provider_test!(
 // LOUDLY — independent of the slower end-to-end rename lanes.
 //
 // tsserver-only: the imported-carrier prewarm is gated `matches!(.. Tsserver)`
-// (lifecycle.rs) — tgo never records here, so this is written directly (not via
-// `real_provider_test!`, which would also emit a tgo variant) and mirrors the
+// (lifecycle.rs) — tsgo never records here, so this is written directly (not via
+// `real_provider_test!`, which would also emit a tsgo variant) and mirrors the
 // macro's skip/build gating. Prewarm is LEFT ON (no `suppress_imported_carrier_prewarm`).
 //
 // DISCRIMINATION: setting `suppress_imported_carrier_prewarm(true)` (the inverse

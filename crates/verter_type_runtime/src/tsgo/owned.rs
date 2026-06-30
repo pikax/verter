@@ -38,6 +38,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use parking_lot::Mutex as SyncMutex;
+use verter_span::path::fs_paths_equal;
 use verter_tsgo_api::api_attach::ApiAttachClient;
 use verter_tsgo_api::client::probe_engine_version;
 use verter_tsgo_api::gate::{self, ObservedEngine};
@@ -176,24 +177,6 @@ fn slash(p: &str) -> String {
     p.replace('\\', "/")
 }
 
-/// Compare two engine paths for filesystem identity, slash-normalized.
-///
-/// Case handling is platform-correct (CLAUDE.md Cross-Platform Portability): on a
-/// case-INSENSITIVE filesystem (Windows) the comparison folds case so a `C:` vs
-/// `c:` drive letter (or an NTFS case fold) never spuriously misses the project /
-/// carrier; on a case-SENSITIVE filesystem (Linux, case-sensitive APFS) the
-/// comparison is exact, so two distinct files differing only by case are NOT
-/// conflated. An unconditional `eq_ignore_ascii_case` would wrongly merge them on
-/// Linux.
-fn path_eq(a: &str, b: &str) -> bool {
-    let (a, b) = (slash(a), slash(b));
-    if cfg!(target_os = "windows") {
-        a.eq_ignore_ascii_case(&b)
-    } else {
-        a == b
-    }
-}
-
 impl ApiSurface {
     /// Refresh the `--api` snapshot for the configured project and return
     /// `(snapshot_handle, project_id, engine_carrier_path)` for `carrier`, or `None`
@@ -221,16 +204,43 @@ impl ApiSurface {
                 return None;
             }
         };
-        let project = snap.project_for_config(|c| path_eq(c, &self.tsconfig_path))?;
+        // Select the CONFIGURED project for this tsconfig and require the carrier in
+        // its root set — configured-project membership, never an inferred/single-file
+        // fallback. ABSENCE of the carrier from `project.root_files` is a `None`
+        // (fail closed), not a degraded open.
+        let (project_id, engine_carrier) =
+            select_configured_project_carrier(&snap, &self.tsconfig_path, carrier)?;
         // Update the cached snapshot context (the handle is `Copy`).
-        *self.snapshot.lock() = Some((snap.snapshot, project.id.clone()));
-        let engine_carrier = project
-            .root_files
-            .iter()
-            .find(|f| path_eq(f, carrier))
-            .cloned()?;
-        Some((snap.snapshot, project.id.clone(), engine_carrier))
+        *self.snapshot.lock() = Some((snap.snapshot, project_id.clone()));
+        Some((snap.snapshot, project_id, engine_carrier))
     }
+}
+
+/// Select the configured project for `tsconfig_path` from an `--api` snapshot and
+/// return `(project_id, engine_carrier)` IFF `carrier` is a member of that
+/// project's root set — the project-bound membership decision, isolated for testing.
+///
+/// Two independent gates, both fail-closed to `None`:
+///   1. `project_for_config` must find a project whose `configFileName` matches
+///      `tsconfig_path` (path-normalized). No matching configured project ⇒ `None` —
+///      NEVER a fallback to an inferred/single-file project.
+///   2. The `carrier` must appear in that project's `root_files` (path-normalized).
+///      Absence ⇒ `None` — the carrier is not a member, NOT a degraded open.
+///
+/// The returned `engine_carrier` is the carrier AS THE ENGINE REPORTS IT in
+/// `root_files` (diagnostics must be requested with the engine's own canonical form).
+fn select_configured_project_carrier(
+    snap: &verter_tsgo_api::api_attach::AttachSnapshot,
+    tsconfig_path: &str,
+    carrier: &str,
+) -> Option<(String, String)> {
+    let project = snap.project_for_config(|c| fs_paths_equal(c, tsconfig_path))?;
+    let engine_carrier = project
+        .root_files
+        .iter()
+        .find(|f| fs_paths_equal(f, carrier))
+        .cloned()?;
+    Some((project.id.clone(), engine_carrier))
 }
 
 /// Map a tsgo `--api` diagnostic to the runtime `TypeDiagnostic`. The `--api`

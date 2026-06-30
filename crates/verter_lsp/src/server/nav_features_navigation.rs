@@ -731,7 +731,7 @@ pub(super) async fn handle_rename(
                             // `defineProps` declaration the provider's own
                             // `textDocument/rename` does not reliably enumerate the
                             // child-declaration leg across the synthesized
-                            // `{carrier}.ts` API surface (tgo does not), so Verter
+                            // `{carrier}.ts` API surface (tsgo does not), so Verter
                             // synthesizes that leg itself — from its OWN Vue resolution
                             // + the pinned snapshot's source map — giving the child
                             // edit a single deterministic Verter-owned origin for BOTH
@@ -844,7 +844,7 @@ pub(super) async fn handle_rename(
 /// carrier location(s) for the SAME prop declaration.
 ///
 /// The synthesized location and a provider's real carrier location (tsserver
-/// returns one; tgo does not) target the SAME `{carrier}.ts` byte range for the
+/// returns one; tsgo does not) target the SAME `{carrier}.ts` byte range for the
 /// same prop, so the synthesized leg must be the SINGLE deterministic origin.
 ///
 /// DEDUP BY OVERLAP, not just exact equality: drop EVERY provider location on the
@@ -898,7 +898,7 @@ fn inject_synthesized_carrier_rename_location(
 /// PROVIDER-AGNOSTIC by construction: it inspects only the merged, mapped source
 /// `WorkspaceEdit` (`changes: HashMap<Uri, Vec<TextEdit>>`) — it does NOT care
 /// whether the declaration edit came from Verter's inline synthesis or from the
-/// provider's own native leg (tsserver enumerates it; tgo does not; the imported
+/// provider's own native leg (tsserver enumerates it; tsgo does not; the imported
 /// member is the provider's native edit for both). So a result whose declaration
 /// leg is present passes even when Verter's own synthesis could not locate it — no
 /// `is_tsgo`/`is_tsserver` branch, no regression.
@@ -950,7 +950,7 @@ fn workspace_edit_satisfies_child_prop_rename(
 ///   not — including a [`ChildPropDeclarationProof::Unknown`] declaration (no
 ///   resolved target to prove) — the whole rename fails closed → `None`. This is
 ///   the fix for the usage-only-partial gap: a confirmed child-prop rename whose
-///   merged edit lacks the declaration (e.g. tgo, synthesis leg could not be
+///   merged edit lacks the declaration (e.g. tsgo, synthesis leg could not be
 ///   produced; or an unresolvable imported type) returns NO edit rather than a
 ///   usage-only partial. Provider-AGNOSTIC: a result whose declaration leg already
 ///   lands (a tsserver native leg, or a provider's imported-member edit) passes even

@@ -17,7 +17,8 @@
 
 pub mod path;
 pub use path::{
-    canonicalize_path, canonicalize_path_cow, is_under_dir, longest_project_root, CanonicalPath,
+    canonicalize_path, canonicalize_path_cow, fs_is_case_insensitive, fs_paths_equal, is_under_dir,
+    longest_project_root, CanonicalPath,
 };
 
 // ======================== Span (SFC-absolute) ========================

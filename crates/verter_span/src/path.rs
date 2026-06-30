@@ -101,6 +101,48 @@ pub fn canonicalize_path(raw: &str) -> String {
     canonicalize_path_cow(raw).into_owned()
 }
 
+/// Whether the host's default filesystem folds path case — the SINGLE
+/// filesystem-case-identity policy for the whole workspace.
+///
+/// `true` on Windows (NTFS) and macOS (default case-insensitive APFS), `false` on
+/// Linux. Every consumer that decides whether two paths denote the SAME file —
+/// configured-project / `root_files` membership in the tsgo `--api` adapter, the
+/// carrier-publish store directory fold — routes through this one predicate, so the
+/// case policy can never diverge per call site. (The rare case-sensitive APFS volume
+/// only over-separates, never collides, which is the safe direction; a precise
+/// runtime probe is out of scope.)
+#[must_use]
+pub const fn fs_is_case_insensitive() -> bool {
+    cfg!(any(target_os = "windows", target_os = "macos"))
+}
+
+/// Filesystem-identity equality of two paths under THIS host's case policy
+/// ([`fs_is_case_insensitive`]). Slash-normalized, then compared case-insensitively
+/// on a case-insensitive filesystem (Windows / default macOS) and exactly on a
+/// case-sensitive one (Linux).
+///
+/// This is the membership-comparison primitive: two engine-reported paths that fold
+/// to the same file must compare equal so a carrier is never dropped from its
+/// configured project, while two genuinely distinct case-sensitive files never
+/// conflate.
+#[must_use]
+pub fn fs_paths_equal(a: &str, b: &str) -> bool {
+    fs_paths_equal_under(a, b, fs_is_case_insensitive())
+}
+
+/// The pure FS-identity comparison core, parameterized by the case-sensitivity bit
+/// so it is host-independent (and unit-testable on every platform). Slash-normalizes
+/// both sides, then folds ASCII case iff `case_insensitive`.
+fn fs_paths_equal_under(a: &str, b: &str, case_insensitive: bool) -> bool {
+    let a = a.replace('\\', "/");
+    let b = b.replace('\\', "/");
+    if case_insensitive {
+        a.eq_ignore_ascii_case(&b)
+    } else {
+        a == b
+    }
+}
+
 /// A normalized filesystem path.
 ///
 /// Invariants:

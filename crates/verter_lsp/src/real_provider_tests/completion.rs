@@ -522,9 +522,9 @@ real_provider_test!(
 // `protocol::Completion` fields exactly as the provider's wire reports them —
 // never fabricated. The wire reality (empirically pinned here):
 //
-// * tgo speaks LSP and (with the now-advertised `commitCharactersSupport`
+// * tsgo speaks LSP and (with the now-advertised `commitCharactersSupport`
 //   client capability) attaches `commitCharacters` to every member completion
-//   — `[".", ",", ";"]` for the standard member-access context. So under tgo
+//   — `[".", ",", ";"]` for the standard member-access context. So under tsgo
 //   this test asserts the POSITIVE: at least one member carries a non-empty
 //   `commit_characters`. This fails on the pre-fix tree (the field did not
 //   exist, and the capability was not advertised so the wire dropped it).
@@ -599,7 +599,7 @@ export const out = obj.;
 
         match session.provider().provider_id() {
             "tsgo" => {
-                // POSITIVE: tgo attaches commitCharacters to member completions.
+                // POSITIVE: tsgo attaches commitCharacters to member completions.
                 // Discriminating — pre-fix the carrier had no `commit_characters`
                 // field and the client did not advertise `commitCharactersSupport`,
                 // so the wire value was dropped.
@@ -609,7 +609,7 @@ export const out = obj.;
                     .collect();
                 assert!(
                     !with_commit.is_empty(),
-                    "tgo member completions must carry non-empty commit_characters \
+                    "tsgo member completions must carry non-empty commit_characters \
                      (the real LSP wire signal), got none across {} items",
                     items.len()
                 );
@@ -623,10 +623,10 @@ export const out = obj.;
                 let commit = alpha
                     .commit_characters
                     .as_ref()
-                    .expect("tgo member carries commit_characters");
+                    .expect("tsgo member carries commit_characters");
                 assert!(
                     commit.iter().any(|c| c == "." || c == ";" || c == ","),
-                    "tgo member commit_characters should include member-chain chars, got: {commit:?}"
+                    "tsgo member commit_characters should include member-chain chars, got: {commit:?}"
                 );
             }
             "tsserver" => {

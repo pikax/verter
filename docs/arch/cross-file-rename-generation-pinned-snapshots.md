@@ -201,7 +201,7 @@ UTF-8 / UTF-16 / UTF-32 sessions.
   edits in place and is never mapped into the `.vue`; an unsynced surface with no
   backing file drops; the UTF-8 non-ASCII-prefix mapping returns the correct
   range.
-- E2E (`real_provider_tests/rename.rs`, tsserver-only; tgo keeps a `== 1` canary):
+- E2E (`real_provider_tests/rename.rs`, tsserver-only; tsgo keeps a `== 1` canary):
   `rename_cross_file_prop_child_closed` opens ONLY the parent, keeps the child
   CLOSED, runs **with the `did_open` imported-carrier prewarm ACTIVE**, invokes the
   PRODUCTION rename handler (no test-only sync helper), asserts the workspace edit
