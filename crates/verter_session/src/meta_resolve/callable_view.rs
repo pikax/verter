@@ -23,6 +23,7 @@
 
 use std::sync::Arc;
 
+use rustc_hash::FxHashSet;
 use verter_span::Span;
 
 use crate::meta_resolve::dispatch_helpers::realize_callable_member;
@@ -197,6 +198,16 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
                         // `Fn & undefined` = `never` ⇒ the whole intersection is
                         // non-callable; refuse (do NOT strip-and-keep). A `Union`
                         // narrows the nullish arm away and keeps scanning.
+                        //
+                        // CANONICAL-CONSISTENCY: this `None` is INTENTIONAL and
+                        // matches the shared resolver `realize_callable_member`
+                        // (whose Intersection arm `?`-fails the whole composite on
+                        // any non-callable arm, so `(Fn & undefined) | Fn` is
+                        // `None`). Do NOT "fix" it into a view-only tri-state
+                        // `never`-elision that keeps the surviving `Fn` — that
+                        // would make this view DIVERGE from the single shared
+                        // resolver. Tri-state precision, if ever wanted, must
+                        // change `realize_callable_member` FIRST.
                         if is_intersection {
                             return None;
                         }
@@ -289,53 +300,102 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
     pub(crate) fn event_names(&self, context: ProjectionReductionContext) -> Option<Vec<Arc<str>>> {
         let first_ty = self.signature(context)?.first_param()?;
         let mut names = Vec::new();
-        self.collect_string_literal_names(first_ty, context, 0, &mut names);
-        if names.is_empty() {
-            None
-        } else {
+        let mut visited = FxHashSet::default();
+        // FAIL-CLOSED-WHOLE: a depth-fuse trip OR a cycle revisit ANYWHERE in the
+        // enumeration discards the WHOLE name set — presenting a partial
+        // enumeration as complete is a poisoned fact. Only a FULLY-enumerated,
+        // non-empty set surfaces; a partial result (even with names already
+        // collected) yields `None`.
+        let complete =
+            self.collect_string_literal_names(first_ty, context, 0, &mut visited, &mut names);
+        if complete && !names.is_empty() {
             Some(names)
+        } else {
+            None
         }
     }
 
+    /// Collect the string-literal event names reachable from `node` into `out`,
+    /// carrier-resolving each hop through the shared structural-fact primitive.
+    ///
+    /// Returns `true` when the subtree was FULLY enumerated (complete) and
+    /// `false` when enumeration FAILED — a depth-fuse trip OR an active-path
+    /// cycle revisit. A `false` return makes [`Self::event_names`] discard the
+    /// WHOLE (possibly partial) `out` and yield `None` (fail-closed-whole): an
+    /// incomplete enumeration must NEVER be presented as a complete name set.
     fn collect_string_literal_names(
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
         depth: u32,
+        visited: &mut FxHashSet<SemanticNodeId>,
         out: &mut Vec<Arc<str>>,
-    ) {
+    ) -> bool {
         // Fail-closed recursion fuse — the SAME `CALLABLE_VIEW_DEPTH_FUSE` bound
-        // `classify_single_callable` / `collect_callable_arms` carry. Unlike
-        // those classifiers this Union recursion has NO `visited` set, so after
-        // carrier resolution a self-referential union (`type S = 'x' | S`, which
-        // `normalized_fact_node` resolves to `Union(Literal('x'), DeclRef(S))`
-        // every hop, re-yielding the same hash-consed union) would recurse
-        // unboundedly. Past the fuse we stop contributing names (NEVER panic),
-        // so the caller fails closed on the names collected so far rather than
-        // overflowing the stack.
+        // `classify_single_callable` / `collect_callable_arms` carry. A trip is a
+        // WHOLE failure (`false`), NEVER a silent truncation that leaves the
+        // already-collected names looking complete.
         if depth > CALLABLE_VIEW_DEPTH_FUSE {
-            return;
+            return false;
         }
         // Carrier-resolve before EVERY structural match — a `DeclRef` /
         // `InstantiationRef` event-name union resolves to its `Union` here, and
         // each union arm is normalized again on recursion.
         let normalized = self.normalized_fact_node(node, context);
-        let Some(data) = self.data(normalized) else {
-            return;
-        };
-        match data.as_ref() {
-            SemanticNodeData::Literal(LiteralValue::String(name)) => {
-                out.push(Arc::from(name.as_str()));
-            }
-            SemanticNodeData::Union(members) => {
-                let members = Arc::clone(members);
-                drop(data);
-                for member in members.iter() {
-                    self.collect_string_literal_names(*member, context, depth + 1, out);
-                }
-            }
-            _ => {}
+        // ACTIVE-PATH cycle guard keyed by the NORMALIZED node id. An INDIRECT
+        // (mutual) union cycle — `type A = 'a' | B; type B = 'b' | A` — re-yields
+        // the SAME hash-consed union node on the back-edge (`normalize` walks
+        // `A -> Union('a', B) -> Union('b', A) -> Union('a', B)`), revisiting a
+        // node already on the active path: a cycle, so fail closed (`false`)
+        // rather than enumerate forever or surface a partial set. (A DIRECT self
+        // reference `type S = 'x' | S` does NOT reach here — the shared resolver
+        // carrier-stops the self-edge to `Opaque(RecursiveRef)`, a complete
+        // no-name leaf.) The id is REMOVED on unwind below, so a SHARED (DAG)
+        // subtree reachable via two distinct sibling branches is NOT a false
+        // cycle.
+        if !visited.insert(normalized) {
+            return false;
         }
+        let complete = match self.data(normalized) {
+            // Missing node data is fail-closed — matches the sibling
+            // `classify_single_callable` / `collect_callable_arms` `?`-on-data.
+            None => false,
+            Some(data) => match data.as_ref() {
+                SemanticNodeData::Literal(LiteralValue::String(name)) => {
+                    out.push(Arc::from(name.as_str()));
+                    true
+                }
+                SemanticNodeData::Union(members) => {
+                    let members = Arc::clone(members);
+                    drop(data);
+                    // Fail-closed-WHOLE: the FIRST arm that fails to fully
+                    // enumerate fails the whole union (stop scanning).
+                    let mut all = true;
+                    for member in members.iter() {
+                        if !self.collect_string_literal_names(
+                            *member,
+                            context,
+                            depth + 1,
+                            visited,
+                            out,
+                        ) {
+                            all = false;
+                            break;
+                        }
+                    }
+                    all
+                }
+                // A non-string-literal, non-union leaf (e.g. a `number` arm of a
+                // mixed `'save' | number` union) contributes no name but is NOT a
+                // failure — it is a legitimately-enumerated branch yielding none.
+                _ => true,
+            },
+        };
+        // Remove on unwind: the visited set is an ACTIVE-PATH cycle guard, not a
+        // global seen-set — a shared subtree reachable via a sibling branch must
+        // remain enumerable.
+        visited.remove(&normalized);
+        complete
     }
 
     /// Project the realized callable's FIRST-param node to its one-level object

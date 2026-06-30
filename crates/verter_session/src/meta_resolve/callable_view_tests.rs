@@ -339,6 +339,51 @@ fn single_callable_arm_intersection_with_nullish_refuses() {
     );
 }
 
+#[test]
+fn single_callable_arm_never_intersection_under_union_refuses() {
+    // DECIDED behavior (codex-architect adjudication, fix cycle 3): the view's
+    // `(Fn & undefined) | Fn` resolves to `None`, NOT the surviving `Fn`. The
+    // `Fn & undefined` arm is `never` (non-callable), so the union carries no
+    // single unambiguous callable.
+    //
+    // This documents the REFUTED tri-state proposal: a view-only tri-state that
+    // elided the `never` intersection and returned `Fn` would make the view
+    // DIVERGE from the single shared resolver `realize_callable_member` (which
+    // ALSO returns `None` here — asserted below). Canonical-consistency with the
+    // shared resolver is the invariant; tri-state precision, if ever wanted, must
+    // change the shared resolver FIRST (out of §5a scope). FLIP: a tri-state
+    // implementation that returned `Some(f)` here fails this `None` assertion.
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let void = prim(&graph, PrimitiveKind::Void);
+    let row = prim(&graph, PrimitiveKind::Number);
+    let f = function(&graph, vec![param(Some("r"), row, false, false)], void);
+    let undefined = prim(&graph, PrimitiveKind::Undefined);
+    let fn_and_undefined = intersection(&graph, vec![f, undefined]);
+    let composite = union(&graph, vec![fn_and_undefined, f]);
+
+    assert_eq!(
+        CallableNodeView::new(&dispatch, composite).single_callable_arm(navigate()),
+        None,
+        "`(Fn & undefined) | Fn` refuses: the intersection arm is `never`, so no single unambiguous callable remains"
+    );
+
+    // CANONICAL-CONSISTENCY (the adjudicated crux): the SHARED resolver
+    // `realize_callable_member` ALSO returns `None` for this composite (its
+    // Intersection arm `?`-fails the whole composite on the `undefined` arm). The
+    // view MATCHES the shared resolver — a view-only tri-state would break this
+    // parity. (The legacy TypeExpr helper `callable_arm_from_raised` is more
+    // lenient and would return `Some(f)`; the view deliberately follows the
+    // shared resolver, not the legacy helper.)
+    assert_eq!(
+        realize_callable_member(&dispatch, composite, navigate()),
+        None,
+        "realize_callable_member ALSO refuses `(Fn & undefined) | Fn` — the view is canonical-consistent with the shared resolver"
+    );
+}
+
 // ──────────────────────────── event_names ────────────────────────────────
 
 #[test]
@@ -1614,6 +1659,26 @@ fn normalize_node_for_fact_demand_circular_and_deep_fail_closed() {
             .value
     };
 
+    // PRECONDITION (#4): the raw nodes are genuinely `DeclRef` carriers BEFORE
+    // the primitive resolves them, so a future lowering change can't make these
+    // boundedness assertions pass for the wrong reason (a pre-resolved node would
+    // never exercise the cycle / fuse paths). `mutual: MutA` and `deepchain: T0`
+    // are both alias `DeclRef`s.
+    assert!(
+        matches!(
+            node_data_for(dispatch.ctx, member("mutual")).as_deref(),
+            Some(SemanticNodeData::DeclRef { .. })
+        ),
+        "the `mutual` member raw node is a `DeclRef` carrier (the `MutA` alias) before resolution"
+    );
+    assert!(
+        matches!(
+            node_data_for(dispatch.ctx, member("deepchain")).as_deref(),
+            Some(SemanticNodeData::DeclRef { .. })
+        ),
+        "the `deepchain` member raw node is a `DeclRef` carrier (the `T0` alias) before resolution"
+    );
+
     // Mutual recursion → carrier-stop (a `DeclRef`, NOT a fabricated concrete
     // Function / Object / Literal).
     let mutual = dispatch.normalize_node_for_structural_fact_demand(member("mutual"), navigate());
@@ -1673,14 +1738,22 @@ fn normalize_node_for_fact_demand_unresolvable_declref_fails_closed() {
 }
 
 #[test]
-fn event_names_self_referential_union_carrier_is_bounded() {
-    // BOUNDEDNESS (#1, real carrier): `type SelfUnion = 'x' | SelfUnion`
-    // referenced as the first param of `onself` is a self-referential union
-    // carrier. The shared resolver breaks the self-reference (recursive types
-    // stay carrier-shaped), so `event_names` — which carrier-resolves then
-    // recurses the union arms — TERMINATES and surfaces the concrete `'x'`
-    // literal rather than hanging. The hand-interned over-deep-union test below is
-    // the fuse-discriminating companion.
+fn event_names_direct_self_reference_terminates_complete() {
+    // BOUNDEDNESS via the SHARED RESOLVER's recursive-type carrier-stop (NOT the
+    // view's visited set): `type SelfUnion = 'x' | SelfUnion` referenced as the
+    // first param of `onself`. `normalized_fact_node` resolves the DIRECT self
+    // reference to `Union(Literal('x'), Opaque(RecursiveRef { name: "SelfUnion" }))`
+    // — the resolver carrier-stops the self-edge to an `Opaque(RecursiveRef)`,
+    // which is a non-literal/non-union LEAF that `collect_string_literal_names`
+    // treats as a COMPLETE branch contributing no name. So the enumeration
+    // TERMINATES cleanly with the COMPLETE literal set `["x"]` (the recursive arm
+    // adds no new literal) — `Some(["x"])`, never a hang, never a partial. This
+    // is the resolver's own bound, distinct from the mutual-cycle case below
+    // which DOES reach the view's active-path visited set.
+    //
+    // DISCRIMINATING: if `collect_string_literal_names` treated the
+    // `Opaque(RecursiveRef)` leaf as a FAILURE (rather than a complete no-name
+    // branch), `event_names` would wrongly return `None` here.
     let component = "/workspace/SelfUnion.svelte";
     let source = "<script lang=\"ts\">\n\
          import type { SelfUnion } from './types';\n\
@@ -1715,46 +1788,118 @@ fn event_names_self_referential_union_carrier_is_bounded() {
         .expect("the `onself` member is present")
         .value;
 
-    let names = CallableNodeView::new(&dispatch, onself)
-        .event_names(navigate())
-        .expect("the self-referential union carrier terminates and surfaces a name");
-    assert!(
-        names.iter().any(|n| n.as_ref() == "x"),
-        "the bounded recursion surfaces the concrete `'x'` literal, got {names:?}"
+    assert_eq!(
+        CallableNodeView::new(&dispatch, onself).event_names(navigate()),
+        Some(vec![Arc::<str>::from("x")]),
+        "a direct self-referential union is bounded by the resolver's `Opaque(RecursiveRef)` carrier-stop and enumerates the COMPLETE literal set `[\"x\"]`"
+    );
+}
+
+#[test]
+fn event_names_mutual_cycle_fails_whole_via_visited_set() {
+    // FAIL-CLOSED-WHOLE on a GENUINE cycle the view's visited set must catch
+    // (real carrier): an INDIRECT/mutual cycle `type A = 'a' | B; type B = 'b' | A`
+    // referenced as `onmut: (e: A) => void`. Unlike a DIRECT self reference (which
+    // the resolver carrier-stops to `Opaque(RecursiveRef)` — see the test above),
+    // the resolver RE-YIELDS the SAME hash-consed union node on the back-edge:
+    // `normalize` walks `A -> Union('a', B-ref) -> Union('b', A-ref) ->
+    // Union('a', B-ref)` and the third hop REVISITS the first union node. The
+    // ACTIVE-PATH visited set in `collect_string_literal_names` (keyed by
+    // normalized id) fires on that revisit and fails the WHOLE enumeration, so
+    // `event_names` returns `None` — NOT a partial `Some(["a", "b"])` (a partial
+    // enumeration presented as complete is a poisoned fact), and NOT a stack
+    // overflow.
+    //
+    // FLIP: revert `event_names` to ignore the collect-status (the pre-fix
+    // partial-return keyed only on `names.is_empty()`); the visited set still
+    // returns failure but `event_names` would surface the already-collected
+    // `Some(["a", "b"])`, FAILING this `None` assertion. So this discriminates the
+    // fail-closed-whole behavior layered on the visited-set cycle break.
+    let component = "/workspace/Mutual.svelte";
+    let source = "<script lang=\"ts\">\n\
+         import type { A } from './types';\n\
+         interface Props {\n\
+           onmut: (e: A) => void;\n\
+         }\n\
+         let props: Props = $props();\n\
+         void props;\n\
+         </script>\n\
+         <div />";
+    let (host, view) = workspace_host_with_svelte(
+        component,
+        source,
+        &[(
+            "/workspace/types.ts",
+            "export type A = 'a' | B;\n\
+             export type B = 'b' | A;\n",
+        )],
+    );
+    let overlay = Arc::new(CanonicalCompletionOverlay::new());
+    let ctx = HostResolverContext::from_current(&host, &view, overlay);
+    let facts = host
+        .resolve_svelte_script_facts_with_ctx(&ctx, component)
+        .expect("svelte facts");
+    let props_type = facts.props_type.as_ref().expect("props type");
+    let surface =
+        navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
+    let dispatch = ctx.dispatch();
+    let onmut = surface
+        .members
+        .iter()
+        .find(|m| m.name.as_ref() == "onmut")
+        .expect("the `onmut` member is present")
+        .value;
+
+    assert_eq!(
+        CallableNodeView::new(&dispatch, onmut).event_names(navigate()),
+        None,
+        "a genuine mutual cycle (`A` references `B`, `B` references `A`) re-yields the same union node on the back-edge → the active-path visited set fails the WHOLE enumeration (not a partial `Some([\"a\", \"b\"])`, not a stack overflow)"
     );
 }
 
 #[test]
 fn event_names_over_deep_nested_union_trips_collect_fuse() {
-    // BOUNDEDNESS (#1, FLIP test): `collect_string_literal_names` recurses on
-    // Union members with NO `visited` set — only the depth fuse bounds it. A
-    // string literal buried under (`CALLABLE_VIEW_DEPTH_FUSE` + 5) nested unions
-    // is NOT reached: the fuse fail-closes (stops contributing names past the
-    // bound) → `event_names` returns `None`. WITHOUT the fuse the recursion
-    // descends to the bottom and surfaces the literal — so this test FLIPS
-    // (None ↔ Some) and FAILS if the fuse is removed.
+    // FAIL-CLOSED-WHOLE (FLIP test): a union with ONE immediately-reachable
+    // literal (`present`) and ONE literal buried deeper than the fuse. The depth
+    // fuse trips on the buried arm; because collection FAILS-CLOSED-WHOLE the
+    // whole enumeration fails and `event_names` returns `None` — it does NOT
+    // return `Some(["present"])` (a partial enumeration presented as complete is
+    // a poisoned fact). This FLIPS: revert `event_names` to ignore the
+    // collect-status (the pre-fix partial-return that keyed only on
+    // `names.is_empty()`) and it yields `Some(["present"])`, failing this `None`
+    // assertion.
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let void = prim(&graph, PrimitiveKind::Void);
-    // Bury a string literal under more than the fuse's worth of nested unions
+    let present = string_literal(&graph, "present");
+    // Bury a SECOND literal under more than the fuse's worth of nested unions
     // (each a distinct interned single-arm union, so the recursion truly
-    // descends one level per hop).
+    // descends one level per hop and trips the fuse).
     let mut buried = string_literal(&graph, "deep");
     for _ in 0..(super::CALLABLE_VIEW_DEPTH_FUSE + 5) {
         buried = union(&graph, vec![buried]);
     }
-    let f = function(&graph, vec![param(Some("e"), buried, false, false)], void);
+    // `present` is FIRST so it is collected BEFORE the buried arm trips the fuse
+    // — the partial set is NON-EMPTY, which is exactly what fail-closed-whole
+    // must still discard.
+    let names_union = union(&graph, vec![present, buried]);
+    let f = function(
+        &graph,
+        vec![param(Some("e"), names_union, false, false)],
+        void,
+    );
     assert_eq!(
         CallableNodeView::new(&dispatch, f).event_names(navigate()),
         None,
-        "a union nested deeper than CALLABLE_VIEW_DEPTH_FUSE fail-closes (the buried name is not reached)"
+        "a fuse trip on ANY arm fails the WHOLE enumeration — never a partial `Some([\"present\"])`"
     );
 
-    // DISCRIMINATING control: the SAME literal nested only a FEW levels (well
-    // under the fuse) IS surfaced — proving the `None` above is the fuse
-    // boundary, not a blanket failure to read nested unions.
+    // DISCRIMINATING control: the same `present`-style literal nested only a FEW
+    // levels (well under the fuse), with NO over-deep sibling, IS surfaced —
+    // proving the `None` above is the fuse boundary, not a blanket failure to
+    // read nested unions.
     let mut shallow_nest = string_literal(&graph, "shallow");
     for _ in 0..3 {
         shallow_nest = union(&graph, vec![shallow_nest]);
@@ -1768,5 +1913,54 @@ fn event_names_over_deep_nested_union_trips_collect_fuse() {
         CallableNodeView::new(&dispatch, f2).event_names(navigate()),
         Some(vec![Arc::<str>::from("shallow")]),
         "a shallowly-nested union (under the fuse) still surfaces the literal"
+    );
+}
+
+#[test]
+fn event_names_finite_deep_dag_union_enumerates_completely() {
+    // CONTROL (#2 fail-closed-whole must NOT over-reject): a legitimate FINITE
+    // union — DEEP (a chain nested nearly to the fuse) AND with a SHARED subtree
+    // reached via two distinct sibling branches (a DAG, not a cycle) — enumerates
+    // COMPLETELY. This discriminates BOTH boundedness hardenings:
+    //   (a) the depth fuse does NOT truncate a finite-but-deep chain (< fuse), and
+    //   (b) the ACTIVE-PATH visited set is removed on unwind, so a shared node
+    //       reached via two branches is NOT a false cycle — a GLOBAL (never-removed)
+    //       visited set would WRONGLY fail here (→ `None` → the `.expect` panics).
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let void = prim(&graph, PrimitiveKind::Void);
+    // A shared 2-literal union, reached via TWO sibling branches below (a DAG).
+    let s1 = string_literal(&graph, "s1");
+    let s2 = string_literal(&graph, "s2");
+    let shared = union(&graph, vec![s1, s2]);
+    // A deep-but-FINITE chain ending in a literal, well under the fuse (the leaf
+    // lands at depth ~26 < 32).
+    let mut chain = string_literal(&graph, "bottom");
+    for _ in 0..24 {
+        chain = union(&graph, vec![chain]);
+    }
+    // `shared` appears via the left AND the right branch (DAG); `chain` is the
+    // deep-but-finite arm.
+    let left = union(&graph, vec![shared, chain]);
+    let right = union(&graph, vec![shared]);
+    let outer = union(&graph, vec![left, right]);
+    let f = function(&graph, vec![param(Some("e"), outer, false, false)], void);
+
+    let names = CallableNodeView::new(&dispatch, f)
+        .event_names(navigate())
+        .expect(
+            "a finite deep DAG union enumerates completely (no false cycle, no fuse truncation)",
+        );
+    // Dedup-insensitive: the shared subtree legitimately yields its names twice
+    // (dedup is optional per the fix brief). Assert the SET is exactly complete.
+    let mut set: Vec<&str> = names.iter().map(|n| n.as_ref()).collect();
+    set.sort_unstable();
+    set.dedup();
+    assert_eq!(
+        set,
+        vec!["bottom", "s1", "s2"],
+        "the finite deep DAG union surfaces EVERY name (depth fuse doesn't truncate the deep chain; the active-path visited set doesn't false-trip on the shared subtree)"
     );
 }
