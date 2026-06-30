@@ -693,8 +693,7 @@ fn admit_fn_param_types(src: &str) -> Vec<(String, Vec<String>)> {
 ///
 /// GUARD-LOCAL SC-FIRST RECORD:
 /// - scanner_invariant: each `route_admission::admit_*` has EXACTLY its expected
-///   parameter-TYPE list (the node-bound witness, plus `ProjectionMode` for the
-///   mode-aware arm) and no extra parameter.
+///   parameter-TYPE list (the node-bound witness) and no extra parameter.
 /// - scanner_justification: a `syn`-parsed regression tripwire over the exact
 ///   parameter-TYPE list (`admit_fn_param_types` via `syn::parse_file`). The
 ///   STRUCTURAL PRIMARY is the witness TYPE itself + `E0451` (its private fields):
@@ -723,8 +722,8 @@ fn route_admission_admit_helpers_take_no_node_param() {
     const SRC: &str = include_str!("route_admission.rs");
     let sigs = admit_fn_param_types(SRC);
     assert!(
-        sigs.len() >= 4,
-        "anti-vacuity: expected the four gated admit_* mint helpers, found {}",
+        sigs.len() >= 3,
+        "anti-vacuity: expected the three gated admit_* mint helpers, found {}",
         sigs.len()
     );
     // Each helper's EXACT expected parameter-TYPE list (names elided — the gate is
@@ -732,10 +731,6 @@ fn route_admission_admit_helpers_take_no_node_param() {
     let expected: &[(&str, &[&str])] = &[
         ("admit_expanded_surface", &["&RaisedNodeShapeFacts"]),
         ("admit_expanded_surface_changed", &["&NodeShapeEq"]),
-        (
-            "admit_mode_aware",
-            &["&RaisedNodeShapeFacts", "ProjectionMode"],
-        ),
         ("admit_materialized", &["&RaisedNodeShapeFacts"]),
     ];
     // Every found admit_* must be a known helper with EXACTLY its expected param

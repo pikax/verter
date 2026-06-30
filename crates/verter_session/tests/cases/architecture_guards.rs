@@ -936,26 +936,38 @@ fn phase_05m_class_b_callers_migrated_through_bridge_helpers() {
     );
 }
 
-/// Analyze the `dispatch_projected_surface_to_type_expr` ENGINE METHOD body in
-/// `registry_decl.rs` (the sink-local composition the root-surface bridge
-/// delegates to) and return a violation per structural deviation. The method
-/// MUST be exactly `dispatch_projected_surface(...)` + `projected_surface_to_type_expr(...)`
-/// composed once each, with NO fallback / rescue / retired token — a future
-/// prepared-decl fallback moved INTO this method body (rather than the bridge)
-/// would otherwise slip past the bridge-only scan.
+/// Analyze the `materialize_registry_whole_surface_candidate` ENGINE METHOD body
+/// in `node_materialize.rs` (the surviving root-surface authority the retired
+/// host-threaded surface bridges were folded into) and return a violation per
+/// structural deviation. The method MUST route through
+/// `dispatch_projected_surface_with_node` (EXACTLY once) +
+/// `projected_surface_to_type_expr` (EXACTLY once), with NO fallback / rescue /
+/// retired token — a prepared-decl fallback re-added INTO this method body would
+/// otherwise resurrect the retired walker.
 ///
-/// Parameterised over the source so the self-test drives it with synthetic
-/// method bodies. `forbidden_method_extra` are the method-call names that, if
-/// they appear in the body, are a deviation (the rescue / `.or_else` escape);
-/// `retired_tokens` is the same retired-symbol set the bridge bans.
-fn dispatch_to_type_expr_method_violations(src: &str, retired_tokens: &[&str]) -> Vec<String> {
+/// Parameterised over the source so the self-test drives it with synthetic method
+/// bodies. `retired_tokens` is the retired-symbol set the authority bans.
+fn registry_whole_surface_candidate_violations(src: &str, retired_tokens: &[&str]) -> Vec<String> {
     use syn::visit::Visit;
     use syn::{Expr, ExprCall, ExprMethodCall};
 
-    const METHOD: &str = "dispatch_projected_surface_to_type_expr";
-    // The ONLY calls the composition body may make.
-    const ALLOWED_METHOD_CALLS: &[&str] = &["dispatch_projected_surface"];
-    const ALLOWED_FREE_CALLS: &[&str] = &["projected_surface_to_type_expr", "Some", "Ok", "Err"];
+    const METHOD: &str = "materialize_registry_whole_surface_candidate";
+    // The ONLY method calls the authority body may make: the whole-surface
+    // dispatch projector + the cooperative budget guard.
+    const ALLOWED_METHOD_CALLS: &[&str] = &[
+        "dispatch_projected_surface_with_node",
+        "projection_op_budget_exhausted",
+    ];
+    // The ONLY free / associated-fn calls the authority body may make: the
+    // surface->expr converter, the node-domain object-surface predicate, and the
+    // std enum constructors (structurally inert — they cannot hide a rescue).
+    const ALLOWED_FREE_CALLS: &[&str] = &[
+        "projected_surface_to_type_expr",
+        "component_meta_registry_node_has_explicit_object_surface",
+        "Some",
+        "Ok",
+        "Err",
+    ];
 
     let Ok(file) = syn::parse_file(src) else {
         return vec![format!(
@@ -989,7 +1001,7 @@ fn dispatch_to_type_expr_method_violations(src: &str, retired_tokens: &[&str]) -
     syn::visit::Visit::visit_file(&mut finder, &file);
     let Some(block) = finder.body else {
         return vec![format!(
-            "engine method `{METHOD}` not found in registry_decl.rs — the FIX-4 anchor moved"
+            "engine method `{METHOD}` not found in node_materialize.rs — the root-surface guard anchor moved"
         )];
     };
 
@@ -1029,16 +1041,16 @@ fn dispatch_to_type_expr_method_violations(src: &str, retired_tokens: &[&str]) -
     c.visit_block(&block);
 
     let mut violations = Vec::new();
-    // Exactly one `dispatch_projected_surface` method call.
+    // Exactly one `dispatch_projected_surface_with_node` method call.
     let dispatch_calls = c
         .method_calls
         .iter()
-        .filter(|m| m.as_str() == "dispatch_projected_surface")
+        .filter(|m| m.as_str() == "dispatch_projected_surface_with_node")
         .count();
     if dispatch_calls != 1 {
         violations.push(format!(
-            "`{METHOD}` body must call `dispatch_projected_surface` EXACTLY once (the sole \
-             root-surface authority); found {dispatch_calls}. Method calls: {:?}",
+            "`{METHOD}` body must call `dispatch_projected_surface_with_node` EXACTLY once (the \
+             sole root-surface authority); found {dispatch_calls}. Method calls: {:?}",
             c.method_calls
         ));
     }
@@ -1050,7 +1062,7 @@ fn dispatch_to_type_expr_method_violations(src: &str, retired_tokens: &[&str]) -
         .count();
     if converter_calls != 1 {
         violations.push(format!(
-            "`{METHOD}` body must call `projected_surface_to_type_expr` EXACTLY once (the surface→\
+            "`{METHOD}` body must call `projected_surface_to_type_expr` EXACTLY once (the surface->\
              expr converter); found {converter_calls}. Free calls: {:?}",
             c.free_calls
         ));
@@ -1060,8 +1072,8 @@ fn dispatch_to_type_expr_method_violations(src: &str, retired_tokens: &[&str]) -
     for m in &c.method_calls {
         if !ALLOWED_METHOD_CALLS.contains(&m.as_str()) {
             violations.push(format!(
-                "`{METHOD}` body makes a non-approved method call `.{m}(...)` — the composition must \
-                 be `dispatch_projected_surface` + `projected_surface_to_type_expr` ALONE, no \
+                "`{METHOD}` body makes a non-approved method call `.{m}(...)` — the authority must \
+                 resolve the root surface through `dispatch_projected_surface_with_node` ALONE, no \
                  `.or_else(...)` fallback / rescue. Approved methods: {ALLOWED_METHOD_CALLS:?}."
             ));
         }
@@ -1086,304 +1098,133 @@ fn dispatch_to_type_expr_method_violations(src: &str, retired_tokens: &[&str]) -
     violations
 }
 
-/// The surviving root-surface bridge
-/// (`project_type_surface_expr_via_host_threaded`) resolves a root symbol's
-/// surface through the shared dispatch surface projector ALONE. The
-/// walker-cluster deletion removed its prepared-decl root-surface rescue
-/// (`.or_else(cached_prepared_root_surface)`) — dispatch composes Object /
-/// Alias roots directly and compound roots from the decl anchor through the
-/// shared empty-path Shallow walker. This guard asserts the rescue stays
-/// absent: the bridge body may not reference `cached_prepared_root_surface`.
-///
-/// The walker is retired: `cached_prepared_root_surface` and the deleted
-/// shape/prepared bridges (`project_type_surface_shape_via_host_threaded`,
-/// `project_prepared_type_surface_{expr,shape}_via_host_threaded`) must not
-/// reappear anywhere in `dispatch_helpers.rs` (absence assertion below).
-///
-/// It ALSO inspects the `dispatch_projected_surface_to_type_expr` ENGINE METHOD
-/// BODY in `registry_decl.rs` (the sink-local composition the bridge delegates
-/// to): exactly one `dispatch_projected_surface` + one
-/// `projected_surface_to_type_expr`, no fallback / rescue / retired token — so a
-/// prepared-decl fallback moved INTO that method body (rather than the bridge)
-/// is caught too.
+/// The surviving root-surface authority `materialize_registry_whole_surface_candidate`
+/// (node_materialize.rs) resolves a root symbol's whole surface through the shared
+/// dispatch surface projector ALONE: one `dispatch_projected_surface_with_node`
+/// call plus one `projected_surface_to_type_expr` call, with NO prepared-decl
+/// root-surface rescue (`cached_prepared_root_surface`) and NO `.or_else(...)`
+/// escape. The retired host-threaded surface bridges and the prepared-decl walker
+/// stay deleted from `dispatch_helpers.rs` (tombstone absence assertion below), so
+/// neither the bridge nor the rescue can reappear.
 #[test]
 fn root_surface_bridges_carry_no_prepared_decl_fallback() {
-    use syn::visit::Visit;
-    use syn::{Expr, ExprCall, ExprMethodCall, Item, ItemFn};
-
-    const BRIDGE_FNS: [&str; 1] = ["project_type_surface_expr_via_host_threaded"];
-    // The retired bridges + the walker method must stay deleted from the file.
-    const RETIRED_TOKENS: [&str; 4] = [
+    // The rescue + the retired root-surface bridges / walker that were folded into
+    // the node-domain authority must stay deleted. (The two `project_prepared_*`
+    // names were retired earlier; `project_type_surface_expr_via_host_threaded` /
+    // `project_expr_surface_shape_via_host_threaded` /
+    // `dispatch_projected_surface_to_type_expr` are the host-threaded surface
+    // bridges + sink method folded into the authority.)
+    const RETIRED_TOKENS: [&str; 6] = [
         "cached_prepared_root_surface",
-        "project_type_surface_shape_via_host_threaded",
         "project_prepared_type_surface_expr_via_host_threaded",
         "project_prepared_type_surface_shape_via_host_threaded",
-    ];
-    // The ONLY method calls a bridge body may make.
-    // `dispatch_projected_surface_to_type_expr` is the sink-local composition
-    // that IS the sole root-surface authority — it internally resolves through
-    // `dispatch_projected_surface` (exactly once) + the
-    // `projected_surface_to_type_expr` converter, both now confined to the
-    // query-engine subtree (the raw `SurfaceView` / `SemanticNodeId` projection
-    // is sink-local; out-of-subtree bridges reach it ONLY through this engine
-    // method). It is asserted to appear exactly once;
-    // `projection_op_budget_exhausted` is the cooperative budget guard. Any
-    // OTHER method call (`.or_else(...)`, `engine.cached_prepared_root_surface(...)`,
-    // an `engine.<other>()` rescue, …) is a structural deviation and FAILS.
-    const ALLOWED_METHOD_CALLS: [&str; 2] = [
+        "project_type_surface_expr_via_host_threaded",
+        "project_expr_surface_shape_via_host_threaded",
         "dispatch_projected_surface_to_type_expr",
-        "projection_op_budget_exhausted",
     ];
-    // The ONLY free-function / variant-constructor calls a bridge body may make:
-    // the std enum constructors (`Some` / `Ok` / `Err`). Variant constructors
-    // are structurally inert — they cannot hide a rescue — so they are approved.
-    // The surface converters are NO LONGER called directly here (they fused into
-    // the `dispatch_projected_surface_to_type_expr` sink-local method); any
-    // free-fn call (including a local helper introduced to hide a
-    // `cached_prepared_root_surface` rescue behind an indirection) is a
-    // structural deviation and FAILS.
-    const ALLOWED_FREE_CALLS: [&str; 3] = ["Some", "Ok", "Err"];
-    const FORBIDDEN_TOKEN: &str = "cached_prepared_root_surface";
 
-    let src = read_workspace_file("crates/verter_session/src/meta_resolve/dispatch_helpers.rs");
-    let file = syn::parse_file(&src).expect("parse dispatch_helpers.rs");
+    // (1) The live root-surface authority routes through dispatch ALONE — no
+    //     rescue, exactly-once dispatch + converter, no retired token in its body.
+    let node_mat_src = read_workspace_file(
+        "crates/verter_session/src/resolver_core/component_meta_query_engine/node_materialize.rs",
+    );
+    let violations = registry_whole_surface_candidate_violations(&node_mat_src, &RETIRED_TOKENS);
+    assert!(
+        violations.is_empty(),
+        "`materialize_registry_whole_surface_candidate` root-surface authority violation(s) — a \
+         prepared-decl root-surface rescue or retired bridge must not move into the authority:\n{}",
+        violations.join("\n")
+    );
 
-    // Index every free `fn` in the file by name so a body's one-level local
-    // callees can be inspected (approach (b): a helper reachable from a bridge
-    // body must not itself reference the forbidden rescue).
-    let mut free_fns: std::collections::HashMap<String, &ItemFn> = std::collections::HashMap::new();
-    for item in &file.items {
-        if let Item::Fn(f) = item {
-            free_fns.insert(f.sig.ident.to_string(), f);
-        }
-    }
-
-    /// Collects every method-call name, free-function-call name, and any
-    /// path segment equal to a forbidden token, within one fn body.
-    struct CallCollector {
-        method_calls: Vec<String>,
-        free_calls: Vec<String>,
-        forbidden_hits: usize,
-    }
-    impl<'ast> Visit<'ast> for CallCollector {
-        fn visit_expr_method_call(&mut self, mc: &'ast ExprMethodCall) {
-            self.method_calls.push(mc.method.to_string());
-            syn::visit::visit_expr_method_call(self, mc);
-        }
-        fn visit_expr_call(&mut self, call: &'ast ExprCall) {
-            // Record the terminal path segment of a free / associated call
-            // (`foo(...)`, `module::foo(...)`, `Type::assoc(...)`).
-            if let Expr::Path(p) = call.func.as_ref() {
-                if let Some(last) = p.path.segments.last() {
-                    self.free_calls.push(last.ident.to_string());
-                }
-            }
-            syn::visit::visit_expr_call(self, call);
-        }
-        fn visit_path_segment(&mut self, seg: &'ast syn::PathSegment) {
-            if seg.ident == FORBIDDEN_TOKEN {
-                self.forbidden_hits += 1;
-            }
-            syn::visit::visit_path_segment(self, seg);
-        }
-    }
-
-    for bridge_name in BRIDGE_FNS {
-        let bridge = free_fns.get(bridge_name).unwrap_or_else(|| {
-            panic!(
-                "bridge fn `{bridge_name}` not found in dispatch_helpers.rs — \
-                 the guard's anchor moved"
-            )
-        });
-
-        let mut collector = CallCollector {
-            method_calls: Vec::new(),
-            free_calls: Vec::new(),
-            forbidden_hits: 0,
-        };
-        collector.visit_block(&bridge.block);
-
-        // (1) The forbidden rescue must not appear anywhere in the body.
-        assert_eq!(
-            collector.forbidden_hits, 0,
-            "Stage 4-disp: `{bridge_name}` references `{FORBIDDEN_TOKEN}` — the \
-             prepared-decl root-surface rescue was removed and must stay dead. \
-             Fix any compound-root composition gap in the shared walker (the \
-             merge / heritage / Omit functions), NOT by re-adding the rescue."
-        );
-
-        // (2) Exactly one `dispatch_projected_surface_to_type_expr` call — the
-        //     sink-local composition that IS the sole root-surface authority
-        //     (it resolves through `dispatch_projected_surface` internally). Zero
-        //     would mean the bridge stopped resolving through dispatch; more than
-        //     one is an unexpected shape.
-        let dispatch_calls = collector
-            .method_calls
-            .iter()
-            .filter(|m| m.as_str() == "dispatch_projected_surface_to_type_expr")
-            .count();
-        assert_eq!(
-            dispatch_calls, 1,
-            "Stage 4-disp: `{bridge_name}` must call \
-             `dispatch_projected_surface_to_type_expr` EXACTLY once (the sink-local \
-             composition over the sole root-surface authority); found \
-             {dispatch_calls}. Method calls observed: {:?}",
-            collector.method_calls
-        );
-
-        // (3) STRUCTURAL no-evasion gate: every method call in the body must be
-        //     on the approved list. A `.or_else(...)` fallback (direct OR behind
-        //     a helper), a re-added `engine.cached_prepared_root_surface(...)`,
-        //     or any other engine-method rescue introduces a non-approved
-        //     method call here and FAILS — closing the indirection evasion the
-        //     prior literal-only scan allowed.
-        for method in &collector.method_calls {
-            assert!(
-                ALLOWED_METHOD_CALLS.contains(&method.as_str()),
-                "Stage 4-disp: `{bridge_name}` makes a non-approved method call \
-                 `.{method}(...)`. The bridge body must resolve the root surface \
-                 through `dispatch_projected_surface` ALONE — no `.or_else(...)` \
-                 fallback, no `cached_prepared_root_surface` rescue, no other \
-                 engine-method escape hatch. Approved: {ALLOWED_METHOD_CALLS:?}."
-            );
-        }
-
-        // (4) STRUCTURAL no-evasion gate: every free / associated function call
-        //     must be on the approved converter list. A helper-indirection
-        //     evasion (`fn h(){ cached_prepared_root_surface } ;
-        //     dispatch_projected_surface(...).or_else(|| h(...))`, or a
-        //     `let s = h(...)?;` form) introduces a non-approved free call here
-        //     and FAILS even if the helper avoids `.or_else`.
-        for call in &collector.free_calls {
-            assert!(
-                ALLOWED_FREE_CALLS.contains(&call.as_str()),
-                "Stage 4-disp: `{bridge_name}` calls non-approved free function \
-                 `{call}(...)`. The bridge body must call ONLY \
-                 `dispatch_projected_surface` (method) + a surface converter \
-                 ({ALLOWED_FREE_CALLS:?}); routing through any other helper can \
-                 hide a `cached_prepared_root_surface` rescue. Inline the work \
-                 or fix the shared walker instead."
-            );
-
-            // (b) Defense in depth: even an approved-named call is re-checked,
-            //     and any LOCAL helper reachable from the body must not itself
-            //     reference the forbidden rescue. (The approved converters are
-            //     not local fns here, so this loop is normally a no-op; it
-            //     future-proofs against an approved-list entry that later
-            //     becomes a local fn.)
-            if let Some(helper) = free_fns.get(call) {
-                let mut helper_collector = CallCollector {
-                    method_calls: Vec::new(),
-                    free_calls: Vec::new(),
-                    forbidden_hits: 0,
-                };
-                helper_collector.visit_block(&helper.block);
-                assert_eq!(
-                    helper_collector.forbidden_hits, 0,
-                    "`{bridge_name}` calls local helper `{call}`, \
-                     whose body references `{FORBIDDEN_TOKEN}` — the rescue cannot \
-                     be re-introduced through a one-level helper indirection."
-                );
-            }
-        }
-    }
-
-    // Absence assertion: the retired walker method + deleted shape/prepared
-    // bridges must not reappear anywhere in dispatch_helpers.rs. Re-introducing
-    // any of them would resurrect a walker resolution path the one-engine rule
-    // forbids — route through the shared dispatch surface projector instead.
+    // (2) Tombstone: the retired host-threaded surface bridges + the prepared-decl
+    //     walker must not reappear in dispatch_helpers.rs. Re-introducing any would
+    //     resurrect a walker resolution path the one-engine rule forbids — resolve
+    //     the root surface through `materialize_registry_whole_surface_candidate`
+    //     (dispatch alone) instead.
+    let dispatch_src =
+        read_workspace_file("crates/verter_session/src/meta_resolve/dispatch_helpers.rs");
     for token in RETIRED_TOKENS {
         assert!(
-            !src.contains(token),
-            "retired walker symbol `{token}` reappeared in dispatch_helpers.rs — \
-             the prepared-surface/routed walker is deleted; resolve through \
-             `dispatch_projected_surface` / `dispatch_routed_expr_surface_expr`, \
-             never by re-adding the walker bridge."
+            !dispatch_src.contains(token),
+            "retired root-surface symbol `{token}` reappeared in dispatch_helpers.rs — the \
+             prepared-surface / host-threaded surface bridge is deleted; resolve the root surface \
+             through `materialize_registry_whole_surface_candidate` (dispatch alone), never by \
+             re-adding the bridge or the prepared-decl rescue."
         );
     }
-
-    // The sink-local composition body: the bridge calls
-    // `dispatch_projected_surface_to_type_expr` (asserted above), which lives in
-    // `registry_decl.rs` and IS the sole root-surface authority. Inspect ITS
-    // method body so a prepared-decl fallback cannot hide there (the bridge-only
-    // scan would still pass). It must be exactly `dispatch_projected_surface` +
-    // `projected_surface_to_type_expr`, no rescue / retired token.
-    let registry_src = read_workspace_file(
-        "crates/verter_session/src/resolver_core/component_meta_query_engine/registry_decl.rs",
-    );
-    let method_violations = dispatch_to_type_expr_method_violations(&registry_src, &RETIRED_TOKENS);
-    assert!(
-        method_violations.is_empty(),
-        "`dispatch_projected_surface_to_type_expr` engine-method-body violation(s) — a \
-         prepared-decl root-surface rescue must not move into the sink-local composition \
-         method:\n{}",
-        method_violations.join("\n")
-    );
 }
 
 #[test]
-fn dispatch_to_type_expr_method_body_self_test_discriminates() {
+fn registry_whole_surface_candidate_self_test_discriminates() {
     const RETIRED: &[&str] = &[
         "cached_prepared_root_surface",
-        "project_prepared_type_surface_expr_via_host_threaded",
+        "project_type_surface_expr_via_host_threaded",
     ];
 
-    // GREEN: the exact composition — one `dispatch_projected_surface` + one
-    // `projected_surface_to_type_expr`, nothing else.
+    // GREEN: the exact composition — budget guard + one
+    // `dispatch_projected_surface_with_node` + one `projected_surface_to_type_expr`
+    // + the node-domain object-surface predicate.
     let good = r#"
         impl E {
-            pub(crate) fn dispatch_projected_surface_to_type_expr(
+            pub(crate) fn materialize_registry_whole_surface_candidate(
                 &mut self, scope: &str, symbol: &str,
-            ) -> Option<TypeExpr> {
-                let surface = self.dispatch_projected_surface(scope, symbol)?;
-                projected_surface_to_type_expr(&surface)
+            ) -> Option<(TypeExpr, bool)> {
+                if self.projection_op_budget_exhausted() {
+                    return None;
+                }
+                let (surface, node) = self.dispatch_projected_surface_with_node(scope, symbol)?;
+                let type_expr = projected_surface_to_type_expr(&surface)?;
+                let is_object =
+                    component_meta_registry_node_has_explicit_object_surface(self.ctx, node);
+                Some((type_expr, is_object))
             }
         }
     "#;
     assert!(
-        dispatch_to_type_expr_method_violations(good, RETIRED).is_empty(),
+        registry_whole_surface_candidate_violations(good, RETIRED).is_empty(),
         "self-test: the exact composition body MUST pass; got: {:?}",
-        dispatch_to_type_expr_method_violations(good, RETIRED)
+        registry_whole_surface_candidate_violations(good, RETIRED)
     );
 
-    // RED: a `cached_prepared_root_surface` fallback planted in the method body.
+    // RED: a `cached_prepared_root_surface` fallback planted in the body.
     let fallback = r#"
         impl E {
-            fn dispatch_projected_surface_to_type_expr(&mut self, scope: &str, symbol: &str) -> Option<TypeExpr> {
-                let surface = self.dispatch_projected_surface(scope, symbol)
+            fn materialize_registry_whole_surface_candidate(&mut self, scope: &str, symbol: &str) -> Option<(TypeExpr, bool)> {
+                let (surface, node) = self.dispatch_projected_surface_with_node(scope, symbol)
                     .or_else(|| self.cached_prepared_root_surface(scope, symbol))?;
-                projected_surface_to_type_expr(&surface)
+                let type_expr = projected_surface_to_type_expr(&surface)?;
+                Some((type_expr, false))
             }
         }
     "#;
-    let v = dispatch_to_type_expr_method_violations(fallback, RETIRED);
+    let v = registry_whole_surface_candidate_violations(fallback, RETIRED);
     assert!(
         v.iter().any(
             |m| m.contains("cached_prepared_root_surface") || m.contains("non-approved method")
         ),
-        "self-test: a `cached_prepared_root_surface` fallback in the method body MUST FIRE; \
-         got: {v:?}"
+        "self-test: a `cached_prepared_root_surface` fallback in the body MUST FIRE; got: {v:?}"
     );
 
-    // RED: a missing `dispatch_projected_surface` call (the body stopped routing
-    // through dispatch).
+    // RED: a missing `dispatch_projected_surface_with_node` call (the body stopped
+    // routing through dispatch).
     let no_dispatch = r#"
         impl E {
-            fn dispatch_projected_surface_to_type_expr(&mut self, scope: &str, symbol: &str) -> Option<TypeExpr> {
+            fn materialize_registry_whole_surface_candidate(&mut self, scope: &str, symbol: &str) -> Option<(TypeExpr, bool)> {
                 let surface = self.cached_prepared_root_surface(scope, symbol)?;
-                projected_surface_to_type_expr(&surface)
+                let type_expr = projected_surface_to_type_expr(&surface)?;
+                Some((type_expr, false))
             }
         }
     "#;
-    let v = dispatch_to_type_expr_method_violations(no_dispatch, RETIRED);
+    let v = registry_whole_surface_candidate_violations(no_dispatch, RETIRED);
     assert!(
         v.iter().any(|m| m.contains("EXACTLY once")),
-        "self-test: a body missing the `dispatch_projected_surface` call MUST FIRE; got: {v:?}"
+        "self-test: a body missing the `dispatch_projected_surface_with_node` call MUST FIRE; got: {v:?}"
     );
 
     // RED: the method missing entirely (anchor moved).
     let missing = "impl E { fn other(&self) {} }";
-    let v = dispatch_to_type_expr_method_violations(missing, RETIRED);
+    let v = registry_whole_surface_candidate_violations(missing, RETIRED);
     assert!(
         v.iter().any(|m| m.contains("not found")),
         "self-test: a missing method MUST FIRE the anchor-moved violation; got: {v:?}"
@@ -1882,8 +1723,7 @@ fn component_meta_resolution_path_has_no_eager_materializer_or_member_fallback()
 
     // Owner-local dispatch-seal guard: BOTH owner-local macro-root entry points
     // in jsdoc_resolve.rs resolve their root surface through the SOLE query-time
-    // resolver (the shared dispatch surface projector
-    // `project_expr_surface_shape_via_host_threaded`), NOT the retired
+    // resolver (the shared dispatch surface projection), NOT the retired
     // prepared-decl walker (`cached_prepared_root_surface` via
     // `project_prepared_type_surface_*`):
     //
@@ -1915,11 +1755,10 @@ fn component_meta_resolution_path_has_no_eager_materializer_or_member_fallback()
                 owner_local_fn,
                 prepared_walker_symbol,
                 &format!(
-                    "Stage 4a: the owner-local entry point `{owner_local_fn}` \
+                    "the owner-local entry point `{owner_local_fn}` \
                      references the prepared-decl walker `{prepared_walker_symbol}` \
                      — both owner-local macro-root entry points were retargeted to \
-                     the shared dispatch surface projector \
-                     `project_expr_surface_shape_via_host_threaded` and must stay \
+                     the shared dispatch surface projection and must stay \
                      there (one resolver). Do NOT route the owner-local \
                      projectable/authority decision back through the prepared-surface \
                      walker."

@@ -3891,8 +3891,8 @@ defineProps<Props>()
 
 /// Directly discriminates the surface-shape projector gate fix: the cold
 /// resolver's owner-local authority gate (`owner_local_macro_root_has_surface`)
-/// resolves the named root through `project_expr_surface_shape_via_host_threaded`
-/// and returns `false` when that projector yields no shape. The projector
+/// resolves the named root through the shared dispatch surface projection
+/// and returns `false` when that projection yields no shape. The projector
 /// previously gated on `properties / call_signatures` only and returned `None`
 /// for an index-signature-only surface, so the gate reported "no surface" for
 /// an index-sig-only owner-local props root — dropping its authoritative
@@ -3945,9 +3945,9 @@ defineProps<Props>()
 
 /// The owner-local projectable-roots PRE-FILTER
 /// (`projectable_owner_local_macro_roots`) resolves each candidate root through
-/// the SOLE query-time resolver — the shared dispatch surface projector
-/// `project_expr_surface_shape_via_host_threaded` — NOT the retired prepared-decl
-/// walker. This pass runs UPSTREAM of the owner-local authority gate, so it is a
+/// the SOLE query-time resolver — the shared dispatch surface projection — NOT
+/// the retired prepared-decl walker. This pass runs UPSTREAM of the owner-local
+/// authority gate, so it is a
 /// production resolution path in its own right; it must agree with the authority
 /// gate on what "projectable" means.
 ///
@@ -22716,26 +22716,23 @@ defineProps<{
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// C5 route-fixpoint behaviour-parity characterization.
+// Imported-alias indexed-access / generic-helper route published-surface pins.
 //
-// `solve_or_project_leaf_node_until_stable` (route_keys.rs) is the route-key
-// leaf stabiliser: it re-projects a node-domain cursor through the
-// target scope on each iteration (the C5 fixpoint) to stabilise imported-alias
-// helper indexed-access / utility routes. These tests PIN the published prop
-// surface for the C5-exercising fixtures — an imported-alias `Button['ui']`
-// generic-helper route and a multi-hop `Foo['a']['b']` indexed access through
-// imported aliases — with discriminating assertions on the exact terminal
-// shape, so the published output is locked against any change to how the
-// fixpoint decides convergence (e.g. moving it onto a node-domain interned-key
-// compare with no per-iteration materialisation). The strongest risk such a
-// move carries is that a node cursor retains provenance the materialized
-// round-trip erased; these fixtures discriminate exactly that.
+// These tests PIN the published prop surface for imported-alias indexed-access /
+// generic-helper routes — an imported-alias `Button['ui']` generic-helper route
+// and a multi-hop `Foo['a']['b']` indexed access through imported aliases — with
+// discriminating assertions on the exact terminal shape, so the published output
+// of the shared resolver is locked against any change to how it decides
+// convergence (a node-domain interned-key compare with no per-iteration
+// materialisation). The strongest risk such a move carries is that a node cursor
+// retains provenance the materialized round-trip erased; these fixtures
+// discriminate exactly that.
 // ─────────────────────────────────────────────────────────────────────────
 
-/// C5 parity: a multi-hop `Foo['a']['b']` indexed access whose root is an
-/// IMPORTED ALIAS (`type ButtonAlias = Outer`) — the leaf stabilises through
-/// the route-key fixpoint against the alias's source scope. The published
-/// terminal is the path-precise primitive; sibling hops never enter the surface.
+/// Parity: a multi-hop `Foo['a']['b']` indexed access whose root is an
+/// IMPORTED ALIAS (`type ButtonAlias = Outer`) — the shared resolver stabilises
+/// the leaf against the alias's source scope. The published terminal is the
+/// path-precise primitive; sibling hops never enter the surface.
 #[test]
 fn c5_parity_imported_alias_chain_indexed_access_pins_terminal_primitive() {
     let project = make_project();
@@ -22885,44 +22882,41 @@ defineProps<{
     );
 }
 
-/// §1a DISCRIMINATION: the C5 route fixpoint
-/// (`solve_or_project_leaf_node_until_stable`) converges in NODE DOMAIN — every
-/// iteration projects through the node adapters and convergence compares
-/// successive admitted nodes by interned `RaisedShapeKey`
+/// DISCRIMINATION: the live intrinsic-member route fixpoint
+/// (`solve_or_project_intrinsic_member_node_until_stable`, intrinsic_surface.rs)
+/// converges in NODE DOMAIN — every iteration projects through the node adapters
+/// and convergence compares successive admitted nodes by interned `RaisedShapeKey`
 /// (`route_projection_node_eq_to_expr` vs the input on iteration 1,
-/// `route_projection_nodes_eq` vs the prior node after), and returns the
-/// converged NODE directly: NO `TypeExpr` is materialised inside the fixpoint at
-/// all — the sole publication materialise happens later, at the consumer's
-/// surface sink.
+/// `route_projection_nodes_eq` vs the prior node after), and returns the converged
+/// NODE directly: NO `TypeExpr` is materialised inside the fixpoint at all — the
+/// sole publication materialise happens later, at the caller's surface sink
+/// (`stabilize_intrinsic_member_surface`).
 ///
-/// The two C5 parity tests above pin the published OUTPUT, which a
-/// per-iteration-materialise fixpoint would ALSO satisfy (the node cursor and
-/// the legacy materialise-per-iteration cursor are behaviour-equivalent on the
-/// published surface). This test characterises the CONVERGENCE PATH itself, so
-/// it discriminates: it FAILS against a tree whose loop calls the materialising
-/// `lower_and_project_to_expanded_via_host_threaded` bridge or converges with
-/// `if next == current` (a `==` compare on a materialised cursor) and PASSES
-/// against the node cursor. Re-introducing ANY per-iteration materialise — a
-/// materialising host-threaded bridge call, or a `==`/`!=` convergence compare —
-/// fails this test.
+/// The two parity tests above pin the published OUTPUT, which a
+/// per-iteration-materialise fixpoint would ALSO satisfy. This test characterises
+/// the CONVERGENCE PATH itself, so it discriminates: it FAILS against a loop that
+/// materialises per iteration (a `materialize_route_projection_node` call inside
+/// the loop, or a `==`/`!=` compare on a materialised `TypeExpr` cursor) and
+/// PASSES against the node cursor.
 #[test]
-fn c5_route_fixpoint_converges_in_node_domain_not_per_iteration_materialize() {
+fn intrinsic_member_fixpoint_converges_in_node_domain_not_per_iteration_materialize() {
     use std::collections::BTreeSet;
     use syn::visit::Visit;
 
-    const C5_SRC: &str = include_str!("resolver_core/component_meta_query_engine/route_keys.rs");
-    let file = syn::parse_file(C5_SRC).expect("route_keys.rs must parse");
+    const FIXPOINT_SRC: &str =
+        include_str!("resolver_core/component_meta_query_engine/intrinsic_surface.rs");
+    let file = syn::parse_file(FIXPOINT_SRC).expect("intrinsic_surface.rs must parse");
 
     #[derive(Default)]
-    struct C5Characterization {
+    struct FixpointCharacterization {
         depth: usize,
         found: bool,
         eq_ne_binops: usize,
         called: BTreeSet<String>,
     }
-    impl<'ast> Visit<'ast> for C5Characterization {
+    impl<'ast> Visit<'ast> for FixpointCharacterization {
         fn visit_impl_item_fn(&mut self, f: &'ast syn::ImplItemFn) {
-            let is_target = f.sig.ident == "solve_or_project_leaf_node_until_stable";
+            let is_target = f.sig.ident == "solve_or_project_intrinsic_member_node_until_stable";
             if is_target {
                 self.found = true;
                 self.depth += 1;
@@ -22950,76 +22944,63 @@ fn c5_route_fixpoint_converges_in_node_domain_not_per_iteration_materialize() {
         }
     }
 
-    let mut characterization = C5Characterization::default();
+    let mut characterization = FixpointCharacterization::default();
     characterization.visit_file(&file);
 
     // Anti-vacuity: the fixpoint fn must exist (a rename/removal must not pass).
     assert!(
         characterization.found,
-        "C5 fixpoint fn `solve_or_project_leaf_node_until_stable` not found in route_keys.rs \
-         (renamed/removed?) — the characterization must not vacuously pass"
+        "intrinsic member fixpoint `solve_or_project_intrinsic_member_node_until_stable` not \
+         found in intrinsic_surface.rs (renamed/removed?) — the characterization must not \
+         vacuously pass"
     );
 
     // POSITIVE — the node-domain projection + convergence path. The fixpoint
-    // returns the converged NODE; it does NOT materialise (no
-    // `materialize_route_projection_node` call) — the consumer materialises once.
+    // returns the converged NODE; it does NOT materialise — the caller materialises once.
     for ident in [
-        "lower_and_project_to_expanded_node_via_host_threaded",
-        "project_admitted_node_to_expanded_node_via_host_threaded",
+        "project_expr_class_a_node_via_dispatch_threaded",
+        "project_admitted_node_to_expanded_node",
         "route_projection_node_eq_to_expr",
         "route_projection_nodes_eq",
     ] {
         assert!(
             characterization.called.contains(ident),
-            "C5 fixpoint must call `{ident}` (node-domain projection / convergence); calls seen: \
-             {:?}",
+            "intrinsic member fixpoint must call `{ident}` (node-domain projection / convergence); \
+             calls seen: {:?}",
             characterization.called
         );
     }
-    // NEGATIVE — the fixpoint returns the node and does NOT materialise; the
-    // sole publication materialise happens at the consumer's surface sink.
+    // NEGATIVE — the fixpoint returns the node and does NOT materialise; the sole
+    // publication materialise happens at the caller's surface sink.
     assert!(
         !characterization
             .called
             .contains("materialize_route_projection_node"),
-        "C5 fixpoint must NOT materialise inside the loop — it returns the converged NODE and the \
-         consumer materialises once at the surface sink; calls seen: {:?}",
+        "intrinsic member fixpoint must NOT materialise inside the loop — it returns the converged \
+         NODE and the caller materialises once at the surface sink; calls seen: {:?}",
         characterization.called
     );
-
-    // NEGATIVE — no per-iteration `TypeExpr` materialise inside the loop.
+    // NEGATIVE — no per-iteration `TypeExpr` materialise compare inside the loop.
     assert_eq!(
         characterization.eq_ne_binops, 0,
-        "C5 fixpoint must NOT converge by `==`/`!=` on a materialised `TypeExpr` cursor — \
-         re-introducing the legacy `if next == current` per-iteration compare FAILS here"
-    );
-    assert!(
-        !characterization
-            .called
-            .contains("lower_and_project_to_expanded_via_host_threaded"),
-        "C5 fixpoint must NOT call the materialising host-threaded bridge \
-         `lower_and_project_to_expanded_via_host_threaded` (a per-iteration `TypeExpr` materialise)"
+        "intrinsic member fixpoint must NOT converge by `==`/`!=` on a materialised `TypeExpr` \
+         cursor — re-introducing a per-iteration compare FAILS here"
     );
 }
 
-/// §1a DISCRIMINATION: the two surface-shape projections
-/// (`route_keys.rs` `project_direct_utility_surface_shape::projected_target_shape`
-/// and `registry_decl.rs` `project_expr_to_surface_shape`) build their
-/// `ExpandedObjectShape` in NODE DOMAIN — they resolve an admitted route /
-/// surface NODE and project it through `project_admitted_route_node_to_expanded_object_shape`
-/// (which reads the node's `SurfaceView` and materialises only terminal leaves),
-/// NEVER by materialising the whole object `TypeExpr` and calling
-/// `type_expr_to_object_shape` or the materialising host-threaded surface
-/// bridges.
+/// DISCRIMINATION: the live routed Pick/Omit surface owner
+/// (`dispatch_routed_pick_omit_via_shared_engine_node`, registry_decl.rs) projects
+/// in NODE DOMAIN — it routes the `Pick` / `Omit` route through the SHARED semantic
+/// builtin engine (`builtin_type_slot` + the `Instantiate` query) and admits the
+/// resulting NODE through the node-domain `admit_materialized` gate, NEVER by
+/// materialising the whole object `TypeExpr` and calling `type_expr_to_object_shape`.
 ///
-/// Discrimination: FAILS against the pre-change tree (where `projected_target_shape`
-/// calls the `project_expr_surface_*_via_host_threaded` bridges +
-/// `type_expr_to_object_shape`, and `project_expr_to_surface_shape` calls
-/// `dispatch_routed_expr_surface_expr` + `type_expr_to_object_shape`) and PASSES
-/// against the node-domain conversion. Re-introducing ANY materialize-then-shape
-/// bridge / standalone gate in either fn FAILS here.
+/// Discrimination: re-introducing a materialize-then-`type_expr_to_object_shape`
+/// shape derivation on this live path FAILS the forbidden-call assertion; dropping
+/// the shared-builtin-engine routing FAILS the required-call assertion; a
+/// rename/removal of the owner FAILS the anti-vacuity `found` assertion.
 #[test]
-fn surface_shape_conversions_run_node_domain_not_materialize_then_shape() {
+fn routed_pick_omit_projects_in_node_domain_via_shared_engine() {
     use std::collections::BTreeSet;
     use syn::visit::Visit;
 
@@ -23089,54 +23070,27 @@ fn surface_shape_conversions_run_node_domain_not_materialize_then_shape() {
         collector.calls
     }
 
-    const ROUTE_KEYS_SRC: &str =
-        include_str!("resolver_core/component_meta_query_engine/route_keys.rs");
     const REGISTRY_DECL_SRC: &str =
         include_str!("resolver_core/component_meta_query_engine/registry_decl.rs");
 
-    // ── Direct-utility `projected_target_shape` (nested fn in route_keys.rs) ──
-    let pts = collect_calls(ROUTE_KEYS_SRC, "projected_target_shape");
-    for forbidden in [
-        "type_expr_to_object_shape",
-        "project_expr_surface_shape_via_host_threaded",
-    ] {
+    let calls = collect_calls(
+        REGISTRY_DECL_SRC,
+        "dispatch_routed_pick_omit_via_shared_engine_node",
+    );
+    // FORBIDDEN: a materialize-then-shape derivation on the live Pick/Omit path.
+    assert!(
+        !calls.contains("type_expr_to_object_shape"),
+        "dispatch_routed_pick_omit_via_shared_engine_node must NOT call \
+         `type_expr_to_object_shape` (materialize-then-shape on the live Pick/Omit path); \
+         calls seen: {calls:?}"
+    );
+    // REQUIRED: route through the SHARED builtin engine + the node-domain
+    // admission gate — never a materialised-value decide.
+    for required in ["builtin_type_slot", "admit_materialized"] {
         assert!(
-            !pts.contains(forbidden),
-            "projected_target_shape must NOT call `{forbidden}` (materialize-then-shape); \
-             calls seen: {pts:?}"
-        );
-    }
-    for required in [
-        "project_admitted_route_node_to_expanded_object_shape",
-        "project_expr_surface_expr_node_via_host_threaded",
-    ] {
-        assert!(
-            pts.contains(required),
-            "projected_target_shape must call `{required}` (node-domain projection); \
-             calls seen: {pts:?}"
-        );
-    }
-
-    // ── Registry `project_expr_to_surface_shape` (impl method in registry_decl.rs) ──
-    let pes = collect_calls(REGISTRY_DECL_SRC, "project_expr_to_surface_shape");
-    for forbidden in [
-        "type_expr_to_object_shape",
-        "dispatch_routed_expr_surface_expr",
-    ] {
-        assert!(
-            !pes.contains(forbidden),
-            "project_expr_to_surface_shape must NOT call `{forbidden}` (materialize-then-shape); \
-             calls seen: {pes:?}"
-        );
-    }
-    for required in [
-        "dispatch_routed_expr_surface_node",
-        "project_admitted_route_node_to_expanded_object_shape",
-    ] {
-        assert!(
-            pes.contains(required),
-            "project_expr_to_surface_shape must call `{required}` (node-domain projection); \
-             calls seen: {pes:?}"
+            calls.contains(required),
+            "dispatch_routed_pick_omit_via_shared_engine_node must call `{required}` (shared \
+             builtin engine routing / node-domain admission); calls seen: {calls:?}"
         );
     }
 }

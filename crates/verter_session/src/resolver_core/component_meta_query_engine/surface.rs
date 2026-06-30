@@ -16,8 +16,7 @@ use verter_semantic::analysis::type_solver::query_engine::{ProjectedMember, Proj
 use verter_type_expr::TypeExpr;
 
 use super::route_admission::{
-    admit_expanded_surface, admit_expanded_surface_changed, admit_mode_aware,
-    AdmittedRouteProjectionNode,
+    admit_expanded_surface, admit_expanded_surface_changed, AdmittedRouteProjectionNode,
 };
 use super::{
     BUDGET_EXCEEDED_SENTINEL_PREFIX, SEMANTIC_MISS, SEMANTIC_OBJECT_SURFACE,
@@ -66,46 +65,6 @@ fn materialize_published_node(
         .map(|raised| raised.into_type_expr(&cap))
 }
 
-/// A freshly-lowered route-key SOURCE node held in node domain for the SINGLE
-/// shared dispatch keyspace enumerator
-/// ([`enumerate_keyspace_names_from_keyspace_node`]).
-///
-/// DELIBERATELY DISTINCT from [`AdmittedRouteProjectionNode`]: that carrier
-/// asserts its node passed a route/surface adapter's
-/// `materialized && expanded_surface` acceptance gate, whereas a keyspace source
-/// is INTENTIONALLY an un-admitted `keyof` / `IndexedAccess` carrier (a keyspace
-/// type is NOT a materialized + expanded surface) so the `KeyOf` producer +
-/// structural-transit can reduce it inside the shared dispatch. Minting this
-/// carrier therefore makes NO admission claim — it only NAMES the lowered
-/// keyspace node for the enumerator, keeping the `AdmittedRouteProjectionNode`
-/// post-gate invariant honest.
-///
-/// SEALED + subtree-mint-scoped exactly like [`AdmittedRouteProjectionNode`]: the
-/// `node` field is module-private and `new` / `node` are
-/// `pub(in …::component_meta_query_engine)`, so only the in-subtree route-key
-/// lowerer mints it and only the keyspace enumerator reads it. The carrier never
-/// reaches a materialise sink (key enumeration reads NAMES, not a `TypeExpr`).
-#[derive(Debug, Clone, Copy)]
-pub(in crate::resolver_core::component_meta_query_engine) struct RouteKeyspaceNode {
-    node: SemanticNodeId,
-}
-
-impl RouteKeyspaceNode {
-    /// Mint the carrier around a freshly-lowered keyspace SOURCE node. Makes no
-    /// admission claim (no `materialized && expanded_surface` gate) — a keyspace
-    /// carrier is un-admitted by design.
-    #[must_use]
-    pub(in crate::resolver_core::component_meta_query_engine) fn new(node: SemanticNodeId) -> Self {
-        Self { node }
-    }
-
-    /// The lowered keyspace node, for the shared dispatch keyspace enumerator.
-    #[must_use]
-    pub(in crate::resolver_core::component_meta_query_engine) fn node(&self) -> SemanticNodeId {
-        self.node
-    }
-}
-
 /// A registry member-surface PUBLICATION node held in node domain for the
 /// single registry publication sink ([`materialize_registry_publication_node`]).
 ///
@@ -120,8 +79,8 @@ impl RouteKeyspaceNode {
 /// honest while still routing the one publication materialisation through the SAME
 /// cap-gated `materialize_published_node` surface sink.
 ///
-/// SEALED + subtree-mint-scoped exactly like [`AdmittedRouteProjectionNode`] /
-/// [`RouteKeyspaceNode`]: the `node` field is module-private and `new` / `node` are
+/// SEALED + subtree-mint-scoped exactly like [`AdmittedRouteProjectionNode`]: the
+/// `node` field is module-private and `new` / `node` are
 /// `pub(in …::component_meta_query_engine)`, so only the in-subtree registry
 /// candidate path mints it and only the registry publication sink reads it — and the
 /// materialisation it feeds stays cap-gated regardless of who holds the carrier.
@@ -247,70 +206,6 @@ pub(crate) fn route_projection_nodes_eq(
         == Some(true)
 }
 
-/// Route-key keyspace enumeration over a freshly-lowered keyspace SOURCE node:
-/// read the node's literal key NAMES through the SINGLE shared dispatch keyspace
-/// enumerator ([`crate::project_semantic_dispatch::ProjectSemanticDispatch::key_names_from_keyspace_node`]
-/// — the same enumerator the `Pick` / `Omit` dispatch reducers consume). This
-/// is the narrow query-engine wrapper: the route-key enumerator hands its
-/// un-admitted keyspace carrier ([`RouteKeyspaceNode`]) here instead of forking
-/// a second `TypeExpr`-domain key walker. It takes the keyspace carrier (NOT an
-/// [`AdmittedRouteProjectionNode`]) precisely because a keyspace source is an
-/// un-admitted `keyof` / `IndexedAccess` carrier the `KeyOf` producer reduces.
-/// `None` when the node is not a keyspace type (a member SURFACE — the caller
-/// falls back to [`enumerate_public_surface_member_names_from_admitted_node`]).
-/// Names sorted + deduped so the derived route-key set is order-stable.
-pub(in crate::resolver_core::component_meta_query_engine) fn enumerate_keyspace_names_from_keyspace_node(
-    ctx: &dyn ResolverContext,
-    node: &RouteKeyspaceNode,
-) -> Option<Vec<String>> {
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
-    let names = dispatch.key_names_from_keyspace_node(node.node())?;
-    let mut keys: Vec<String> = names
-        .into_iter()
-        .map(|name| name.as_ref().to_string())
-        .collect();
-    keys.sort();
-    keys.dedup();
-    Some(keys)
-}
-
-/// Enumerate the PUBLIC member NAMES of a stabilised route node's one-level
-/// member SURFACE — the node-domain successor of the retired
-/// `helpers::projected_surface_member_names` `TypeExpr` walker. Reads the
-/// node's [`SurfaceView`] through the shared empty-path `Shallow` synthesiser
-/// ([`crate::project_semantic_dispatch::ProjectSemanticDispatch::resolve_typeinfo_surface_view`])
-/// and returns the public `members` names — INDEX SIGNATURES are ignored (they
-/// live on a separate `SurfaceView` field, never in `members`) and NO member
-/// leaf is materialised. `keyof <surface>` over a class is the public keyspace
-/// only (TS semantics), so non-public members are excluded.
-///
-/// Gate correctness: a MISSING / NON-OBJECT root surface returns `None`
-/// (`resolve_typeinfo_surface_view` returns `None` for a non-`Object`
-/// terminal); a surface merely carrying a nested semantic miss in some member
-/// VALUE is NOT rejected — reading `members` is the right gate here, where
-/// `RaisedShapeFacts.materialized` would be too broad.
-pub(in crate::resolver_core::component_meta_query_engine) fn enumerate_public_surface_member_names_from_admitted_node(
-    ctx: &dyn ResolverContext,
-    node: &AdmittedRouteProjectionNode,
-) -> Option<Vec<String>> {
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
-    let view = dispatch.resolve_typeinfo_surface_view(
-        node.node(),
-        crate::semantic_query::ProjectionReductionContext::published(
-            crate::semantic_query::ProjectionMode::Shallow,
-        ),
-    )?;
-    let mut names: Vec<String> = view
-        .members
-        .iter()
-        .filter(|member| member.visibility.is_public())
-        .map(|member| member.name.as_ref().to_string())
-        .collect();
-    names.sort();
-    names.dedup();
-    Some(names)
-}
-
 /// Demand-bound adapter for the empty-terminal Expanded publication path.
 /// Lower `expr` at `Expanded`, dispatch `ProjectPath { base, [],
 /// Published(Expanded) }`, gate on NODE-DOMAIN facts
@@ -350,59 +245,6 @@ pub(crate) fn lower_and_project_to_expanded_node(
     // against `expr`) is encoded in `admit_expanded_surface_changed`.
     let shape = node_raised_shape_for_eq_with_dispatch(&dispatch, result_node, expr)?;
     admit_expanded_surface_changed(&shape)
-}
-
-/// Demand-bound adapter for the mode-explicit dispatch-direct surface
-/// projection. Lower `expr` at `base_mode`, dispatch
-/// `ProjectPath { base, [], { terminal_mode, demand } }`, refuse a
-/// `semanticMiss`-bearing result (node-domain `!materialized`), then apply the
-/// mode-aware acceptance and materialise the accepted node ONCE at this sink.
-pub(crate) fn project_expr_surface_expr_node(
-    ctx: &dyn ResolverContext,
-    scope_canonical_id: &str,
-    expr: &TypeExpr,
-    base_mode: crate::semantic_query::ProjectionMode,
-    terminal_mode: crate::semantic_query::ProjectionMode,
-    demand: crate::semantic_query::ReductionDemand,
-) -> Option<AdmittedRouteProjectionNode> {
-    use crate::project_semantic_dispatch::raise::node_raised_shape_facts_with_dispatch;
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::{
-        PathSegment, ProjectionReductionContext, QueryResult, SemanticQueryKey,
-    };
-
-    let dispatch = ProjectSemanticDispatch::new(ctx);
-    let base = dispatch.lower_type_expr_in_scope_with_context(
-        scope_canonical_id,
-        expr,
-        ProjectionReductionContext {
-            mode: base_mode,
-            demand,
-            provenance: crate::semantic_query::SurfaceProvenanceContext::Structural,
-            merge_role: crate::semantic_query::MemberMergeRole::Authored,
-        },
-    )?;
-    let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
-        base,
-        path: std::sync::Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-        context: ProjectionReductionContext {
-            mode: terminal_mode,
-            demand,
-            provenance: crate::semantic_query::SurfaceProvenanceContext::Structural,
-            merge_role: crate::semantic_query::MemberMergeRole::Authored,
-        },
-    });
-    let result_node = match read.value {
-        QueryResult::Value(node) => node,
-        QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
-    };
-    // Facts-only gate — reuses the dispatch above; no structural key interned.
-    // The mode-aware acceptance (`materialized` plus, for an `Expanded` terminal,
-    // `expanded_surface`; Shallow / Identity / Navigate / Skeleton admit the
-    // carrier shape) is encoded in `admit_mode_aware`, which also refuses a
-    // `semanticMiss`-bearing result (node-domain `!materialized`).
-    let witness = node_raised_shape_facts_with_dispatch(&dispatch, result_node)?;
-    admit_mode_aware(&witness, terminal_mode)
 }
 
 /// Demand-bound NODE adapter for the Class-A path-precise projection (the
@@ -544,8 +386,8 @@ fn projected_surface_from_semantic_node_inner(
         // carry no single `Object` surface on the post-`Published(Expanded)`
         // instantiated node, and that node can collapse a generic heritage /
         // `Omit` carrier arm to `Opaque(Miss)`. So this projector returns
-        // `None` here; the seam (`dispatch_projected_surface`) composes the
-        // compound root via `projected_compound_root_surface_via_dispatch`
+        // `None` here; the seam (`dispatch_projected_surface_with_node`) composes
+        // the compound root via `projected_compound_root_surface_via_dispatch`
         // driven from the decl anchor (carrier intact).
         _ => None,
     }

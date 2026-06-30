@@ -1527,10 +1527,9 @@ impl VerterHost {
                     explicit_object_surface,
                 });
             }
-            // Whole-surface projection via the node-domain query-engine sibling
-            // (the former `project_type_surface_expr_via_host_threaded` bridge),
-            // returning the surface PLUS its object-surface fact off the producing
-            // node.
+            // Whole-surface projection via the node-domain query-engine
+            // root-surface authority, returning the surface PLUS its object-surface
+            // fact off the producing node.
             query_engine
                 .materialize_registry_whole_surface_candidate(scope_canonical_id, symbol_name)
                 .map(|(materialized, explicit_object_surface)| {

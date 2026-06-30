@@ -879,12 +879,11 @@ fn pathological_typeof_substitution_cycle() {
 
 const PATHOLOGICAL_ENGINE_STATE_PROMOTION_VUE: &str = r#"<script setup lang="ts">
 // A self-referential type alias whose body re-instantiates itself
-// through a Pick wrapper. The bridge migration routes the resolver
-// through `project_type_surface_expr_via_host_threaded`; the
-// underlying engine retains its `push_instantiate_active` same-
-// identity guard, so the self-reference must terminate with a
-// `Recursive` sentinel rather than stack-overflowing through the
-// bridge call frames.
+// through a Pick wrapper. The resolver routes this through the
+// node-domain whole-surface authority; the underlying engine retains
+// its `push_instantiate_active` same-identity guard, so the
+// self-reference must terminate with a `Recursive` sentinel rather
+// than stack-overflowing through the projection call frames.
 interface SelfRecConfig {
   // Outer prop is observable regardless of the inner cycle.
   marker: number;

@@ -116,7 +116,6 @@ mod node_materialize;
 mod registry_decl;
 mod registry_structural;
 mod route_admission;
-mod route_keys;
 mod shallow_preserve;
 mod surface;
 
@@ -127,8 +126,8 @@ mod surface;
 // `projected_surface_to_expanded_shape` are their DTO-side companions. None are
 // re-exported (the `surface` module is private; in-subtree callers reach them
 // via `use super::surface::`). Out-of-subtree callers route through the
-// engine's sink-local methods (`dispatch_projected_surface_to_type_expr` /
-// `projected_expanded_shape_from_node` / the routed-surface methods).
+// engine's sink-local methods (`materialize_registry_whole_surface_candidate`
+// for the whole-surface candidate / the routed-surface methods).
 // `materialize_route_projection_node` is NOT re-exported: it is scoped
 // `pub(in …::component_meta_query_engine)` so only in-subtree route/surface
 // adapters and the route fixpoint reach the node→`TypeExpr` materialisation
@@ -141,10 +140,9 @@ mod surface;
 // re-export; they cannot widen the mint.
 pub(crate) use route_admission::AdmittedRouteProjectionNode;
 pub(crate) use surface::{
-    lower_and_project_to_expanded_node, project_admitted_node_to_expanded_node,
-    project_class_a_published, project_class_a_terminal_node, project_expr_surface_expr_node,
-    route_projection_node_eq_to_expr, route_projection_nodes_eq, semantic_query_error_raw,
-    type_expr_contains_semantic_miss, type_expr_is_budget_exceeded_sentinel,
+    lower_and_project_to_expanded_node, project_class_a_published, project_class_a_terminal_node,
+    semantic_query_error_raw, type_expr_contains_semantic_miss,
+    type_expr_is_budget_exceeded_sentinel,
 };
 // `type_expr_is_expanded_surface` and `type_expr_root_is_unmaterialized_sentinel`
 // survive only as `#[cfg(test)]` parity ORACLES the raised-shape suite compares
@@ -444,29 +442,6 @@ pub(crate) fn engine_dep_signature_for_two_canonicals(
 
 #[cfg(test)]
 use std::cell::Cell;
-
-/// Composite-scope context for prepared-member-path projection.
-/// Bundles the scopes the route-key leaf stabiliser keeps live:
-///
-/// - `decl_scope`: the canonical id of the file where the prepared
-///   declaration (e.g., `type Button = ComponentConfig<typeof theme>`)
-///   was originally defined. Helper-body-internal refs (like the inner
-///   `ComponentUI` in `ComponentConfig`'s body) resolve against this
-///   scope because that's where the helper imports are visible.
-/// - `arg_scope`: the canonical id of the caller — the file that
-///   instantiated the prepared decl. `typeof value_ref` references and
-///   type arguments passed at the call site resolve in this scope.
-///
-/// Built and consumed by the route-key leaf stabilisers in
-/// `route_keys.rs`: `enumerate_route_literal_keys` constructs it from the
-/// engine's live scope state and
-/// [`ComponentMetaQueryEngine::solve_or_project_leaf_node_with_context`]
-/// reads its two scopes for the per-`TypeExpr` node-domain dispatch rules.
-#[derive(Debug, Clone)]
-struct PreparedProjectionContext {
-    decl_scope: String,
-    arg_scope: String,
-}
 
 #[derive(Debug, Clone)]
 pub struct ResolvedImportedRegistrySymbol {

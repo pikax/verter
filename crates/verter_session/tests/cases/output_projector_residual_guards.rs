@@ -12008,18 +12008,12 @@ const HOT_MAT_DIRECT_IDENTS: &[&str] = &[
 /// Host-threaded surface BRIDGE idents — calling one reverse-materializes a
 /// `TypeExpr` / `ExpandedObjectShape` into the hot caller. A bridge call from a
 /// non-terminal body is a location-rail violation on its own: every production
-/// caller decides on the result. The set includes the two real host-threaded
-/// bridge entrypoints `project_type_surface_expr_via_host_threaded` and
-/// `project_route_surface_expr_via_host_threaded` (called from the registry
-/// materializer and the class-A dispatch conduit) so a bridge call cannot evade
-/// the rail. The bridge DEFINITIONS themselves delegate to an engine sink method
-/// (not to another bridge in this set), so they are not self-flagged.
-const HOT_MAT_BRIDGE_IDENTS: &[&str] = &[
-    "lower_and_project_to_expanded_via_host_threaded",
-    "project_expr_surface_shape_via_host_threaded",
-    "project_type_surface_expr_via_host_threaded",
-    "project_route_surface_expr_via_host_threaded",
-];
+/// caller decides on the result. The materialising surface bridges have been
+/// retired (the live host-threaded surface bridges are node-returning and never
+/// materialise a `TypeExpr` / `ExpandedObjectShape`), so this set now holds only
+/// the synthetic bridge name the detector self-test plants — the rail still fires
+/// on any materialising bridge call that reappears.
+const HOT_MAT_BRIDGE_IDENTS: &[&str] = &["lower_and_project_to_expanded_via_host_threaded"];
 
 /// The STANDALONE semantic-gate ident — calling it AT ALL is a decide. Defined
 /// in `verter_semantic`, only ever called on a materialized `TypeExpr` to derive
@@ -12082,21 +12076,19 @@ const HOT_EXTRACTING_GATE_IDENTS: &[&str] = &[
 /// `TypeExpr` param is a symbolic-input mint boundary (its input-shape guards
 /// are publication classification, not a materialized-value decide).
 ///
-/// The list includes the three node-domain ROUTE-PROJECTION adapters
-/// (`lower_and_project_to_expanded_node` / `project_expr_surface_expr_node` /
-/// `project_class_a_terminal_node`): each lowers its `expr` input through
-/// `lower_type_expr_in_scope*` INTERNALLY, projects it, and returns the admitted
-/// `AdmittedRouteProjectionNode` (never a `TypeExpr`). The thin `*_published`
-/// publication terminals delegate their `expr` lowering to these adapters, so
-/// feeding `expr` to one is a pipeline feed — exactly the same symbolic-input
-/// mint boundary as a direct `lower_type_expr_in_scope*` call — not a
-/// materialized-value decide.
+/// The list includes the two node-domain ROUTE-PROJECTION adapters
+/// (`lower_and_project_to_expanded_node` / `project_class_a_terminal_node`): each
+/// lowers its `expr` input through `lower_type_expr_in_scope*` INTERNALLY, projects
+/// it, and returns the admitted `AdmittedRouteProjectionNode` (never a `TypeExpr`).
+/// The thin `*_published` publication terminals delegate their `expr` lowering to
+/// these adapters, so feeding `expr` to one is a pipeline feed — exactly the same
+/// symbolic-input mint boundary as a direct `lower_type_expr_in_scope*` call — not
+/// a materialized-value decide.
 const HOT_LOWERING_IDENTS: &[&str] = &[
     "lower_type_expr_in_scope",
     "lower_type_expr_in_scope_with_mode",
     "lower_type_expr_in_scope_with_context",
     "lower_and_project_to_expanded_node",
-    "project_expr_surface_expr_node",
     // Class-A path-precise node adapter: decomposes the IndexedAccess chain,
     // lowers its `expr` / chain-root input through `lower_type_expr_in_scope*`
     // INTERNALLY, projects `ProjectPath`, and returns the admitted node (never a

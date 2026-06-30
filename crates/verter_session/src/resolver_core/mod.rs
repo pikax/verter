@@ -86,11 +86,10 @@ pub use component_meta_query_engine::ComponentMetaQueryEngine;
 // `resolver_core`: the raw `SemanticNodeId` / `&SurfaceView` → surface
 // projection stays confined to the query-engine subtree (in-subtree callers
 // reach them via `super::surface::`; out-of-subtree callers route through the
-// engine's sink-local methods `dispatch_projected_surface_to_type_expr` /
-// `projected_expanded_shape_from_node` / the routed-surface methods).
+// engine's sink-local methods (`materialize_registry_whole_surface_candidate`
+// for the whole-surface candidate / the routed-surface methods).
 pub(crate) use component_meta_query_engine::{
-    lower_and_project_to_expanded_node, project_admitted_node_to_expanded_node,
-    project_class_a_published, project_class_a_terminal_node, project_expr_surface_expr_node,
+    lower_and_project_to_expanded_node, project_class_a_published, project_class_a_terminal_node,
     type_expr_contains_semantic_miss, AdmittedRouteProjectionNode,
 };
 // `type_expr_root_is_unmaterialized_sentinel` survives only as the `#[cfg(test)]`

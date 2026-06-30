@@ -26,13 +26,12 @@
 //!
 //! The surface bridge helpers thread the caller's `ResolverContext` through
 //! dispatch and compose the surviving `pub(crate)` cycle-protected dispatch
-//! helpers (`dispatch_projected_surface`, `dispatch_routed_expr_surface_node`,
-//! `project_direct_utility_surface_shape`, etc.) plus the surface→expr /
+//! helpers (`dispatch_projected_surface_with_node`,
+//! `dispatch_routed_expr_surface_node`, etc.) plus the surface→expr /
 //! surface→shape raises. Dispatch is the sole resolution authority on these
 //! paths.
 
 use crate::resolver_core::ResolverContext;
-use crate::types::ProjectionMode;
 use std::sync::Arc;
 
 // ─────────────────────────────────────────────────────────────────────
@@ -661,55 +660,17 @@ pub(crate) fn decompose_indexed_access_chain_node(
 // variants below are the canonical entrypoints.
 // =============================================================================
 
-// The root-surface bridge resolves a root symbol's surface through the
-// shared dispatch surface projector ALONE — `dispatch_projected_surface`
-// composes Object / Alias roots directly and compound (Union /
-// Intersection / InstantiationRef) roots from the decl anchor through the
-// shared empty-path Shallow walker. Dispatch is the sole root-surface
-// authority here; there is no prepared-decl root-surface rescue behind
-// dispatch. The `root_surface_bridges_carry_no_prepared_decl_fallback`
-// architecture guard enforces this absence.
-pub(crate) fn project_type_surface_expr_via_host_threaded<'ctx>(
-    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
-    scope_canonical_id: &str,
-    symbol_name: &str,
-) -> Option<verter_type_expr::TypeExpr> {
-    if engine.projection_op_budget_exhausted() {
-        return None;
-    }
-    // The raw `SurfaceView` / `SemanticNodeId` projection is confined to the
-    // query-engine sink; this host-threaded wrapper reaches it ONLY through the
-    // engine's sink-local composition method.
-    engine.dispatch_projected_surface_to_type_expr(scope_canonical_id, symbol_name)
-}
-
-pub(crate) fn project_expr_surface_shape_via_host_threaded<'ctx>(
-    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
-    scope_canonical_id: &str,
-    expr: &verter_type_expr::TypeExpr,
-) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
-    if engine.projection_op_budget_exhausted() {
-        return None;
-    }
-    // The `expr -> lower -> ProjectPath -> node -> shape` resolution lives behind
-    // the query-engine demand API: the caller passes a scope + `&TypeExpr`, never
-    // a resolved node, so the raw `SemanticNodeId`-to-surface projection stays
-    // confined to the query-engine sink (the forgeable node never crosses here).
-    engine.project_expr_to_surface_shape(scope_canonical_id, expr)
-}
-
 // ===========================================================================
-// Node-returning route fixpoint adapters.
+// Node-returning route projection adapters.
 //
-// The route fixpoint (`solve_or_project_leaf_node_until_stable`) stabilises on
-// node-domain `RaisedShapeKey` identity with NO per-iteration materialisation:
-// each iteration projects through these node wrappers (which return the admitted
-// `AdmittedRouteProjectionNode`, never a `TypeExpr`), the fixpoint compares
-// successive nodes by interned raised-shape key, and the sole publication
-// materialisation happens ONCE after convergence at the surface sink. The
-// node wrappers mirror the `*_via_host_threaded` TypeExpr wrappers above arm for
-// arm (same budget guard, same registry fast-path, same primary/fallback order)
-// minus the terminal raise.
+// These wrappers return the admitted `AdmittedRouteProjectionNode` (never a
+// `TypeExpr`): the node-domain Class-A dispatch
+// (`project_expr_class_a_node_via_dispatch_threaded`) and the intrinsic
+// member fixpoint (`solve_or_project_intrinsic_member_node_until_stable`)
+// stabilise on interned `RaisedShapeKey` identity with NO per-iteration
+// materialisation, and the sole publication materialisation happens ONCE,
+// downstream, at the surface sink. Each wrapper carries the same budget guard
+// as the resolver entry it adapts.
 // ===========================================================================
 
 /// Node-domain empty-terminal `Expanded` projection: returns the admitted route
@@ -737,67 +698,6 @@ pub(crate) fn project_route_surface_node_via_host_threaded<'ctx>(
         return None;
     }
     engine.dispatch_routed_expr_surface_node(scope_canonical_id, root_symbol, route)
-}
-
-/// Node-domain mode-explicit dispatch-direct surface projection: the caller
-/// states `(base_mode, terminal_mode, demand)` and the registry fast-path
-/// returns the admitted route node while the pure-dispatch path returns the
-/// admitted surface node — neither materialises. The sole publication
-/// materialisation happens once, downstream, at the surface sink.
-pub(crate) fn project_expr_surface_expr_node_via_host_threaded<'ctx>(
-    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
-    scope_canonical_id: &str,
-    expr: &verter_type_expr::TypeExpr,
-    base_mode: ProjectionMode,
-    terminal_mode: ProjectionMode,
-    demand: crate::semantic_query::ReductionDemand,
-) -> Option<crate::resolver_core::AdmittedRouteProjectionNode> {
-    use crate::resolver_core::component_meta_registry::{
-        component_meta_registry_public_indexed_access_route,
-        component_meta_registry_public_utility_route,
-    };
-
-    if engine.projection_op_budget_exhausted() {
-        return None;
-    }
-    if let Some((root_symbol, route)) = component_meta_registry_public_indexed_access_route(expr)
-        .or_else(|| component_meta_registry_public_utility_route(expr))
-    {
-        if let Some(projected) = project_route_surface_node_via_host_threaded(
-            engine,
-            scope_canonical_id,
-            &root_symbol,
-            &route,
-        ) {
-            return Some(projected);
-        }
-        if let Some(solved) =
-            lower_and_project_to_expanded_node_via_host_threaded(engine, scope_canonical_id, expr)
-        {
-            return Some(solved);
-        }
-    }
-    crate::resolver_core::project_expr_surface_expr_node(
-        engine.ctx(),
-        scope_canonical_id,
-        expr,
-        base_mode,
-        terminal_mode,
-        demand,
-    )
-}
-
-/// Re-project an already-admitted route node one fixpoint step (node-base
-/// re-projection, no re-lowering, no materialisation). Used by the fixpoint for
-/// iterations after the first, where the cursor is already an admitted node.
-pub(crate) fn project_admitted_node_to_expanded_node_via_host_threaded<'ctx>(
-    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
-    prior: &crate::resolver_core::AdmittedRouteProjectionNode,
-) -> Option<crate::resolver_core::AdmittedRouteProjectionNode> {
-    if engine.projection_op_budget_exhausted() {
-        return None;
-    }
-    crate::resolver_core::project_admitted_node_to_expanded_node(engine.ctx(), prior)
 }
 
 #[cfg(test)]

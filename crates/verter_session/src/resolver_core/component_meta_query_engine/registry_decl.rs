@@ -17,7 +17,6 @@
 //!   on the engine, callable from outside the crate.
 //! - `pub(crate) fn materialize_member_surface_expr`,
 //!   `pub(crate) fn prepared_type_decl`, `pub(crate) fn ctx`,
-//!   `pub(crate) fn dispatch_projected_surface`,
 //!   `pub(crate) fn dispatch_routed_expr_surface_node` — crate-visible
 //!   helpers used by `meta_resolve` and other engine impl methods.
 //! - Private methods (`semantic_dispatch`, `dispatch_root_instantiated`)
@@ -35,9 +34,7 @@ use super::helpers::{
 };
 use super::route_admission::{self, AdmittedRouteProjectionNode};
 use super::surface::{
-    project_admitted_route_node_to_expanded_object_shape,
     projected_compound_root_surface_via_dispatch, projected_surface_from_semantic_node,
-    projected_surface_to_expanded_shape, projected_surface_to_type_expr,
 };
 use super::{
     empty_semantic_args, engine_fact_signature_for_exported_type,
@@ -592,7 +589,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// footprint outside test builds (the production node-core stays
     /// module-private, and out-of-subtree production callers reach the surface
     /// only through the demand APIs `materialize_pick_member_surface` /
-    /// `project_expr_to_surface_shape`).
+    /// `materialize_registry_whole_surface_candidate`).
     #[cfg(test)]
     pub(crate) fn materialize_member_surface_node_for_test(
         &mut self,
@@ -1049,16 +1046,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
     }
 
-    pub(crate) fn dispatch_projected_surface(
-        &mut self,
-        scope_canonical_id: &str,
-        symbol_name: &str,
-    ) -> Option<ProjectedSurface> {
-        self.dispatch_projected_surface_with_node(scope_canonical_id, symbol_name)
-            .map(|(surface, _node)| surface)
-    }
-
-    /// As [`Self::dispatch_projected_surface`], but also returns the graph node
+    /// Project a root symbol's whole surface AND return the graph node
     /// whose raised surface IS the projected surface: the instantiated root
     /// (whose own `Object` surface the projector read), or — when the
     /// compound-root composition fallback fires — the terminal `Object` node the
@@ -1170,145 +1158,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 ),
             _ => None,
         }
-    }
-
-    /// Project a root symbol's surface to its whole-surface [`TypeExpr`].
-    ///
-    /// The sink-local composition of [`Self::dispatch_projected_surface`] +
-    /// `projected_surface_to_type_expr`. Out-of-subtree callers (the
-    /// `dispatch_helpers` host-threaded wrappers) reach this engine method rather
-    /// than naming the subtree-confined raw `SurfaceView` / `SemanticNodeId`
-    /// projection helpers — the forgeable-input projection stays inside the
-    /// query-engine sink.
-    pub(crate) fn dispatch_projected_surface_to_type_expr(
-        &mut self,
-        scope_canonical_id: &str,
-        symbol_name: &str,
-    ) -> Option<TypeExpr> {
-        let surface = self.dispatch_projected_surface(scope_canonical_id, symbol_name)?;
-        projected_surface_to_type_expr(&surface)
-    }
-
-    /// Project an already-resolved surface node to its
-    /// [`ExpandedObjectShape`](verter_semantic::analysis::type_expand::ExpandedObjectShape).
-    ///
-    /// The sink-local composition of `projected_surface_from_semantic_node` +
-    /// `projected_surface_to_expanded_shape`. MODULE-PRIVATE node-core: the
-    /// `node` is forgeable in safe Rust, so this never crosses the query-engine
-    /// boundary. Out-of-subtree callers reach the shape through the demand API
-    /// [`Self::project_expr_to_surface_shape`], which resolves `expr` to a node
-    /// INTERNALLY.
-    fn projected_expanded_shape_from_node_core(
-        &self,
-        node: SemanticNodeId,
-    ) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
-        let surface = projected_surface_from_semantic_node(self.ctx, node)?;
-        Some(projected_surface_to_expanded_shape(&surface))
-    }
-
-    /// Demand-based surface-shape API: project a root/surface EXPRESSION to its
-    /// [`ExpandedObjectShape`](verter_semantic::analysis::type_expand::ExpandedObjectShape).
-    ///
-    /// The OUT-OF-SUBTREE entry point (the `dispatch_helpers` host-threaded
-    /// wrapper): the caller passes a scope + `&TypeExpr`, never a resolved node.
-    /// This resolves the expression to a surface node through the shared
-    /// dispatch INTERNALLY, then projects via the private
-    /// [`Self::projected_expanded_shape_from_node_core`] — the forgeable
-    /// `SemanticNodeId` never leaves the query-engine sink.
-    ///
-    /// Three resolution arms, in priority order (matching the publication
-    /// surface-gate contract):
-    /// 1. a registry public-indexed-access / public-utility ROUTE
-    ///    (`Foo['a']` / `Pick<Foo, …>`) projects through
-    ///    [`Self::dispatch_routed_expr_surface_node`] then to an object shape;
-    /// 2. a direct utility surface ([`Self::project_direct_utility_surface_shape`]);
-    /// 3. the general path — lower at `Navigate` (intermediate-base), run the
-    ///    terminal empty-path `ProjectPath { .., Shallow }` (the publication
-    ///    demand), then project the resolved node to its expanded shape.
-    pub(crate) fn project_expr_to_surface_shape(
-        &mut self,
-        scope_canonical_id: &str,
-        expr: &verter_type_expr::TypeExpr,
-    ) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
-        use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-        use crate::resolver_core::component_meta_registry::{
-            component_meta_registry_public_indexed_access_route,
-            component_meta_registry_public_utility_route,
-        };
-        use crate::semantic_query::{
-            PathSegment, ProjectionMode, QueryResult, SemanticQueryApi, SemanticQueryKey,
-            SemanticQueryOutput,
-        };
-
-        // (1) Registry public-indexed-access / public-utility route — projected in
-        // NODE DOMAIN: resolve the admitted route NODE (routes here are only
-        // MemberPath / Pick / Omit, never `Whole`), then build the shape from its
-        // SurfaceView; a non-object node → empty shape.
-        //
-        // `unwrap_or_else(empty)` is this arm's correct terminal, not a swallow of
-        // arms 2/3: the admitted node already passed the route's node-domain
-        // `materialized` gate, so the route DID resolve. A non-`Object` terminal (a
-        // primitive / function leaf) projects to no one-level object surface and
-        // yields `None`, which this arm publishes as the empty shape — a
-        // resolved-but-non-object route has an empty object surface; it does not
-        // fall through. The arm is only ENTERED when the route admits a materialised
-        // node: a route that admits no node (`dispatch_routed_expr_surface_node ==
-        // None`) skips this arm and still reaches arms 2/3.
-        if let Some((root_symbol, route)) =
-            component_meta_registry_public_indexed_access_route(expr)
-                .or_else(|| component_meta_registry_public_utility_route(expr))
-        {
-            if let Some(node) =
-                self.dispatch_routed_expr_surface_node(scope_canonical_id, &root_symbol, &route)
-            {
-                return Some(
-                    project_admitted_route_node_to_expanded_object_shape(self.ctx, &node)
-                        .unwrap_or_else(
-                            verter_semantic::analysis::type_expand::ExpandedObjectShape::empty,
-                        ),
-                );
-            }
-        }
-        // (2) Direct utility surface.
-        if let Some(shape) = self.project_direct_utility_surface_shape(scope_canonical_id, expr) {
-            return Some(shape);
-        }
-        // (3) General path: resolve the surface node through the shared dispatch
-        // (intermediate-base lowering is `Navigate`; the terminal empty-path
-        // `ProjectPath { .., Shallow }` carries the publication demand), then
-        // project it via the private node-core — the raw `SemanticNodeId` never
-        // leaves the sink.
-        let node = {
-            let dispatch = ProjectSemanticDispatch::new(self.ctx);
-            let base = dispatch.lower_type_expr_in_scope_with_mode(
-                scope_canonical_id,
-                expr,
-                ProjectionMode::Navigate,
-            )?;
-            let QueryResult::Value(SemanticQueryOutput { value: node, .. }) = dispatch
-                .execute_type_node(SemanticQueryKey::ProjectPath {
-                    base,
-                    path: std::sync::Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-                    context: crate::semantic_query::ProjectionReductionContext::published(
-                        ProjectionMode::Shallow,
-                    ),
-                })
-            else {
-                return None;
-            };
-            node
-        };
-        let shape = self.projected_expanded_shape_from_node_core(node)?;
-        // An index-signature-only surface (`{ [k: string]: string }`) is a
-        // genuine props surface — `defineProps<{ [k: string]: string }>()`
-        // admits every string key. Admitting it here lets the owner-local root
-        // gate (which already counts index signatures) see a non-empty shape;
-        // gating on properties / call-signatures alone would drop an
-        // index-sig-only root.
-        (!shape.properties.is_empty()
-            || !shape.call_signatures.is_empty()
-            || !shape.index_signatures.is_empty())
-        .then_some(shape)
     }
 
     /// Route a `RouteDemand::Pick` / `RouteDemand::Omit` through the SHARED

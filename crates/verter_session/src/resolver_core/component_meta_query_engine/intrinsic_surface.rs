@@ -31,10 +31,9 @@ impl ComponentMetaQueryEngine<'_> {
     /// - PRIMARY (root-symbol whole-surface): resolve the root NODE through the
     ///   shared dispatch surface projector, then read its one-level
     ///   `Published(Shallow)` `SurfaceView` and build the shape — the same
-    ///   surface composition `project_expr_to_surface_shape`'s general arm
-    ///   produces. Budget-guarded exactly as the former root-symbol bridge was:
-    ///   an exhausted projection budget yields no primary surface and the
-    ///   Class-A fallback is tried.
+    ///   one-level surface composition the registry whole-surface candidate
+    ///   produces. Budget-guarded so an exhausted projection budget yields no
+    ///   primary surface and the Class-A fallback is tried.
     /// - FALLBACK (Class-A): re-export / namespace-qualified globals
     ///   (e.g. `JSX.IntrinsicElements`) the root-symbol path declines resolve
     ///   through the node-domain Class-A projector and its admitted-node →

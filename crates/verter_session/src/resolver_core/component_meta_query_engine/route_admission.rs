@@ -30,7 +30,7 @@
 //!
 //! The route/surface adapters mint EXCLUSIVELY through the gated
 //! [`admit_expanded_surface`] / [`admit_expanded_surface_changed`] /
-//! [`admit_mode_aware`] / [`admit_materialized`] helpers below, each of which
+//! [`admit_materialized`] helpers below, each of which
 //! encodes ONE call site's node-domain acceptance gate and is the only code that
 //! can reach the private constructor. The helpers take the caller's
 //! ALREADY-COMPUTED (and now sealed, node-bound) [`RaisedNodeShapeFacts`] /
@@ -45,7 +45,7 @@
 //! stays cap-gated at the surface sink).
 
 use crate::project_semantic_dispatch::raise::{NodeShapeEq, RaisedNodeShapeFacts};
-use crate::semantic_query::{ProjectionMode, SemanticNodeId};
+use crate::semantic_query::SemanticNodeId;
 
 /// A node-domain route-projection result: the admitted [`SemanticNodeId`] a
 /// route/surface adapter produced AFTER its node-domain acceptance gate, held in
@@ -58,9 +58,7 @@ use crate::semantic_query::{ProjectionMode, SemanticNodeId};
 /// raised shape is `materialized` — the gate the registry route arms admit on
 /// ([`admit_materialized`]). The surface / empty-terminal / class-A arms admit on
 /// the STRONGER `materialized && expanded_surface` ([`admit_expanded_surface`] /
-/// [`admit_expanded_surface_changed`]); the mode-explicit arm admits on
-/// `materialized` plus, for an `Expanded` terminal, `expanded_surface`
-/// ([`admit_mode_aware`]). The carrier does NOT itself assert the stronger
+/// [`admit_expanded_surface_changed`]). The carrier does NOT itself assert the stronger
 /// expanded-surface property for every node it holds — the registry / Shallow-
 /// terminal arms can mint a materialized-but-not-expanded node — so consumers
 /// must not infer expanded-surface from possession of the carrier.
@@ -120,33 +118,6 @@ pub(in crate::resolver_core::component_meta_query_engine) fn admit_expanded_surf
 ) -> Option<AdmittedRouteProjectionNode> {
     (shape.facts().materialized() && shape.facts().expanded_surface() && shape.changed())
         .then(|| AdmittedRouteProjectionNode::new(shape.node()))
-}
-
-/// Gate: `materialized && (terminal_mode == Expanded ? expanded_surface : true)`.
-/// The mode-explicit dispatch-direct surface projection admits on this gate: an
-/// `Expanded` terminal requires a fully-materialised expanded surface, while a
-/// `Shallow` / `Identity` / `Navigate` / `Skeleton` terminal admits the
-/// materialised carrier shape directly (so a Shallow-terminal carrier is
-/// materialized-but-not-necessarily-expanded — the reason the carrier invariant is
-/// `materialized`, not the stronger expanded-surface, for every holder).
-#[must_use]
-pub(in crate::resolver_core::component_meta_query_engine) fn admit_mode_aware(
-    witness: &RaisedNodeShapeFacts,
-    terminal_mode: ProjectionMode,
-) -> Option<AdmittedRouteProjectionNode> {
-    if !witness.materialized() {
-        return None;
-    }
-    let accept = match terminal_mode {
-        // Expanded terminal — only fully materialised surfaces qualify.
-        ProjectionMode::Expanded => witness.expanded_surface(),
-        // Shallow / Identity / Navigate / Skeleton — admit the carrier shape.
-        ProjectionMode::Shallow
-        | ProjectionMode::Identity
-        | ProjectionMode::Navigate
-        | ProjectionMode::Skeleton => true,
-    };
-    accept.then(|| AdmittedRouteProjectionNode::new(witness.node()))
 }
 
 /// Gate: `materialized` only — the registry route arms (`MemberPath` / `Pick` /

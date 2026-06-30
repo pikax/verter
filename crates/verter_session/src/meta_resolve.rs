@@ -92,11 +92,7 @@ pub(crate) use dep_signature::{
 #[cfg(any(test, debug_assertions))]
 pub(crate) use dep_signature::accumulate_dispatch_dep_signature;
 pub(crate) use dispatch_helpers::{
-    lower_and_project_to_expanded_node_via_host_threaded,
-    project_admitted_node_to_expanded_node_via_host_threaded,
     project_expr_class_a_node_via_dispatch_threaded, project_expr_class_a_via_dispatch,
-    project_expr_surface_expr_node_via_host_threaded, project_expr_surface_shape_via_host_threaded,
-    project_type_surface_expr_via_host_threaded,
 };
 pub(crate) use graph_predicates::{
     build_keys_union_node, component_meta_ref_resolves_to_package_node,

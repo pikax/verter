@@ -1001,12 +1001,3 @@ fn dispatch_only_omit_recursive_target_self_reference_define_shape() {
         );
     }
 }
-
-// The JSX intrinsic projection regression test lives in-crate
-// (`meta_resolve_tests.rs::reexported_intrinsic_shape_resolves_via_dispatch_only`)
-// because it must call the `pub(crate)`
-// `project_type_surface_expr_via_host_threaded` bridge directly — that
-// bridge carries no `cached_prepared_root_surface` walker fallback, and
-// the JSX-intrinsic consumer
-// (`host_manage/intrinsic_projection.rs`) resolves the re-exported
-// intrinsic attribute shape through it.

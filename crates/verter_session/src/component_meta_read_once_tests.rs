@@ -658,11 +658,10 @@ const ENGINE_PROMOTION_UNRELATED_TS: &str = r#"export interface UnrelatedZ {
 }
 "#;
 
-/// 5m §5.D.2 — `engine_state_promotion` read-once / shallow-first /
-/// lazy-expansion. The owner /A.vue uses `defineProps<ChildProps>()`
-/// so /lib.ts is transitively needed via the bridge helper
-/// (`project_type_surface_expr_via_host_threaded`); /unrelated.ts is
-/// not referenced and MUST NOT be loaded — proving the bridge does
+/// `engine_state_promotion` read-once / shallow-first / lazy-expansion.
+/// The owner /A.vue uses `defineProps<ChildProps>()` so /lib.ts is
+/// transitively needed via the whole-surface resolution; /unrelated.ts is
+/// not referenced and MUST NOT be loaded — proving resolution does
 /// not introduce unrelated-file walks (e.g. via the engine route
 /// fast-path's barrel chasing).
 #[test]

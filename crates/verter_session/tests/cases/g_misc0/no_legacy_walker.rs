@@ -337,10 +337,10 @@ const RETIRED_SYMBOLS: &[&str] = &[
     // Walker-cluster deletion: the prepared-surface / routed walker modules
     // (routed_expr.rs + prepared_surface.rs) and their request-local + host
     // caches are DELETED. Pick/Omit/member literal-key enumeration resolves
-    // through the dispatch-backed `enumerate_route_literal_keys` chain; macro
-    // surfaces resolve through `dispatch_routed_expr_surface_expr` /
-    // `dispatch_projected_surface`. Re-introducing any of these resurrects a
-    // walker resolution path the one-engine rule forbids.
+    // through the shared dispatch keyspace enumerator; macro surfaces resolve
+    // through `dispatch_routed_expr_surface_node` /
+    // `materialize_registry_whole_surface_candidate`. Re-introducing any of these
+    // resurrects a walker resolution path the one-engine rule forbids.
     "project_routed_expr_surface_expr",
     "project_routed_expr_surface_expr_direct",
     "project_pick_route_surface_expr_via_routed_expr",
@@ -381,7 +381,7 @@ const RETIRED_SYMBOLS: &[&str] = &[
     "expr_needs_projection_rescue",
     "MacroShapeSource",
     // The retired prepared/transit-shallow bridge helpers (the surviving
-    // root-surface bridge is `project_type_surface_expr_via_host_threaded`).
+    // root-surface authority is `materialize_registry_whole_surface_candidate`).
     "project_type_surface_shape_via_host_threaded",
     "project_type_surface_shape_transit_shallow_via_host_threaded",
     "project_prepared_type_surface_expr_via_host_threaded",

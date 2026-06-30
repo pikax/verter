@@ -42,10 +42,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     // ===================================================================
 
     /// Whole-surface registry candidate for `symbol` in `scope`: the node-domain
-    /// replacement for the former `project_type_surface_expr_via_host_threaded`
-    /// bridge. Projects the symbol's whole surface (the same budget-gated
-    /// `dispatch_projected_surface_with_node`), returns its `TypeExpr` plus the
-    /// producing node's object-surface fact.
+    /// root-surface authority. Projects the symbol's whole surface (the
+    /// budget-gated `dispatch_projected_surface_with_node`), returns its `TypeExpr`
+    /// plus the producing node's object-surface fact.
     pub(crate) fn materialize_registry_whole_surface_candidate(
         &mut self,
         scope_canonical_id: &str,
