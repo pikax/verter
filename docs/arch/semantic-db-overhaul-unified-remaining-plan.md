@@ -1321,6 +1321,77 @@ Deferred follow-ups (lead-architect ruled, tracked here):
   gpt-5.5/xhigh, neutral-verified + best-not-lowest-effort-explicit): DEFER —
   pre-existing, outside the final-cache block scope, but the pinned scalar invariant
   is wrong and must be revisited.
+- **`PROJECTPATH_INTERSECTION_OPAQUE_LAUNDERING`**: global, PRE-EXISTING
+  node-domain reducer debt — NOT intrinsic-C-specific. The shared
+  `join_intersection` (`project_semantic_dispatch/walk.rs:2503`) DROPS `Opaque(_)`
+  arms ("opaque arms drop, surviving contributors intersect; zero contributors →
+  `Opaque(Miss)`"), and decl-body lowering maps EVERY unrepresentable
+  `TypeExpr::Unknown { raw }` arm to `Opaque(QueryError::Miss)`
+  (`project_semantic_dispatch/lower.rs:1739`, catch-all
+  `_ => self.opaque(QueryError::Miss)`). So an intersection arm that failed to
+  resolve for a NON-miss reason (budget exhaustion, a `QueryError::Other`
+  import-type error, an unstable / open surface) is laundered into a dropped
+  opaque arm: `UnresolvedBase & { x }` reduces to `{ x }` and is published as a
+  wrong-confident COMPLETE surface that is too narrow. This affects ALL converted
+  intersection surfaces routed through the node-domain reducer, not just
+  intrinsic tags. codex Q1 (disposition-leg1) code-verified the hazard is
+  pre-existing: the OLD `type_expr_to_object_shape` path ALSO produced `{ x }`
+  for `UnresolvedBase & { x }` (non-object arms fall to
+  `ExpandedObjectShape::empty()` at
+  `verter_semantic/src/analysis/type_expand/mod.rs:160,188`), so this is NOT a
+  site-2 conversion regression. Best follow-up: thread a typed degradation
+  taxonomy so the reducer distinguishes confident-vacuous arms (droppable) from
+  incomplete arms (must mark the result partial / return-only) instead of
+  silently laundering non-miss `Unknown` into a dropped opaque. Owner:
+  `PROJECTPATH_INTERSECTION_OPAQUE_LAUNDERING`. codex-DEFER ruling 2026-06-30
+  (`.feedback/intrinsic-c/disposition-leg1-OUTPUT.txt`, disposition-leg1;
+  gpt-5.5/xhigh, neutral-verified + best-not-lowest-effort-explicit): DEFER —
+  global pre-existing reducer debt, deferrable like
+  `RESOLVED_META_SCALAR_NO_POISON`.
+- **`INTRINSIC_STATIC_FALLBACK_WARM_CACHE`**: PRE-EXISTING, a sibling of
+  `RESOLVED_META_SCALAR_NO_POISON`. The host warms the projected intrinsic
+  surface via an UNCONDITIONAL `store_node` (`host_manage.rs:975`,
+  `self.host.resolver_runtime().fallthrough.store_node(...)`) with NO completeness
+  gate, so a too-narrow / partial intrinsic surface would be admitted warm and
+  replayed as authoritative with no record of its incompleteness. It is LATENT
+  today: the reverted-to plain intrinsic tag path
+  (`project_intrinsic_tag_member_shape`) returns either `None` or a complete
+  Class-A surface — it never produces a partial-recovery surface — so no partial
+  producer currently feeds this hole. It becomes an IN-SCOPE blocker only if a
+  NEW partial producer is added (e.g. a future no-poison-safe partial recovery;
+  see `INTRINSIC_PARTIAL_RECOVERY_NO_POISON` below), at which point the
+  `store_node` must be gated complete-only (the same structural
+  complete-only-admission pattern owed to the intermediate resolved-meta cache).
+  Owner: `INTRINSIC_STATIC_FALLBACK_WARM_CACHE`. codex-DEFER ruling 2026-06-30
+  (`.feedback/intrinsic-c/disposition-leg1-OUTPUT.txt`, disposition-leg1;
+  gpt-5.5/xhigh, neutral-verified + best-not-lowest-effort-explicit): DEFER —
+  pre-existing unconditional store_node at `host_manage.rs:975`; in-scope-blocker
+  only if a new partial producer is added, and the FIX-A revert ensures none is.
+- **`INTRINSIC_PARTIAL_RECOVERY_NO_POISON`**: the no-poison-safe partial
+  intrinsic-tag recovery FEATURE — recovering the resolvable inline-arm members
+  of a partially-resolvable intrinsic tag value (`MissingBase & { projectOnly }`)
+  instead of dropping the whole tag surface — deferred to its OWN block. This
+  feature was scope-ADDED to intrinsic-C by a prior continuation manager (NOT the
+  block's node-domain fence-conversion goal) and was REVERTED out of intrinsic-C:
+  the bounded HEAD helper (`resolvable_intersection_remainder` + a post-primary
+  arm classifier) was a real REACHABLE no-poison BLOCKER that a bounded fix
+  cannot close — it classified arms AFTER the Class-A primary, but the primary
+  already launders `Unknown(raw) & { x }` into `{ x }` (via `lower.rs:1739` →
+  `Opaque(Miss)` → `walk.rs:2503` drop) and returns the too-narrow surface BEFORE
+  the classifier runs, and a bare `None` flows into the unconditional `store_node`
+  warm-cache hole (`INTRINSIC_STATIC_FALLBACK_WARM_CACHE`). The CORRECT design
+  (per the disposition decider): classify `tag_type` BEFORE the Class-A primary;
+  treat a miss / other-`Unknown`-arm recovery as a LOWER-BOUND / return-only
+  result (never published or cached as complete); SUPPRESS warm admission of any
+  recovered-partial surface; and DROP only truly-vacuous complete arms (the
+  confident-empty object-surface sentinel), never a non-miss incomplete arm. This
+  is multi-module completeness-threading well beyond intrinsic-C's fence-conversion
+  scope. Owner: `INTRINSIC_PARTIAL_RECOVERY_NO_POISON`. codex-DEFER ruling
+  2026-06-30 (`.feedback/intrinsic-c/disposition-leg1-OUTPUT.txt`,
+  disposition-leg1; gpt-5.5/xhigh, neutral-verified +
+  best-not-lowest-effort-explicit): DEFER under Option B — it must NOT remain live
+  in intrinsic-C (hence the revert); the future fix is the classify-before-Class-A
+  + lower-bound/return-only + suppress-warm-admission design above.
 - **`DYNAMIC_ROOT_TYPE_WALKER_BOUNDING`**: the dynamic-root TYPE-domain walker
   `collect_dynamic_root_candidates_from_type` (`resolver_core/fallthrough.rs:1037`,
   live via `host_manage/fallthrough.rs:843`) still uses raw uncharged `.flat_map`
