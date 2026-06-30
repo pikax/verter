@@ -144,14 +144,12 @@ impl VerterHost {
         scope_canonical_id: &str,
         nested_surface: bool,
     ) -> verter_type_expr::TypeExpr {
-        // Node-domain member stabilisation (the successor of the former
-        // `solve_project_intrinsic_member_type` + `solved != *expr` `TypeExpr`
-        // fixpoint): a NESTED member value stabilises to its converged surface
-        // in node domain and materialises ONCE at the engine's surface sink. The
-        // TOP-LEVEL surface (`nested_surface == false`) is NOT stabilised — it
-        // stays SHALLOW, so a top-level reference member is never eagerly
-        // expanded (the structural arm below preserves the exact `nested_surface`
-        // gating that kept it shallow).
+        // Node-domain member stabilisation: a NESTED member value stabilises to
+        // its converged surface in node domain and materialises ONCE at the
+        // engine's surface sink. The TOP-LEVEL surface (`nested_surface == false`)
+        // is NOT stabilised — it stays SHALLOW, so a top-level reference member is
+        // never eagerly expanded (the structural arm below preserves the
+        // `nested_surface` gating that keeps it shallow).
         let stabilized = if nested_surface {
             engine.stabilize_intrinsic_member_surface(scope_canonical_id, expr)
         } else {

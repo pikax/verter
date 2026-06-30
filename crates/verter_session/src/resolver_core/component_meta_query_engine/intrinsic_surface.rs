@@ -24,10 +24,9 @@ use crate::semantic_query::{ProjectionMode, ProjectionReductionContext};
 
 impl ComponentMetaQueryEngine<'_> {
     /// Project a root symbol's whole-surface to its [`ExpandedObjectShape`] in
-    /// NODE DOMAIN — the node-domain successor of the host's former root-symbol
-    /// bridge + Class-A fallback + `type_expr_to_object_shape` chain.
+    /// NODE DOMAIN.
     ///
-    /// Preserves the former PRIMARY/FALLBACK order exactly:
+    /// PRIMARY/FALLBACK order:
     /// - PRIMARY (root-symbol whole-surface): resolve the root NODE through the
     ///   shared dispatch surface projector, then read its one-level
     ///   `Published(Shallow)` `SurfaceView` and build the shape — the same
@@ -66,26 +65,57 @@ impl ComponentMetaQueryEngine<'_> {
 
     /// Project an intrinsic TAG's value `TypeExpr` (the `JSX.IntrinsicElements`
     /// member value, e.g. `HTMLAttributes & { … }`) to its [`ExpandedObjectShape`]
-    /// in NODE DOMAIN, in the supplied (`NativeElements`) scope. Mirrors the
-    /// Class-A fallback arm of [`Self::project_intrinsic_root_shape`]: project the
-    /// tag value's admitted route NODE through the shared node-domain Class-A
-    /// projector, then build the object shape from that admitted node. The
-    /// node-domain surface synthesiser merges an anonymous property-type
-    /// intersection role-awarely (Authored arms value-INTERSECT — `number &
-    /// string` — never last-arm-override), the TS-correct merge for `A & B`.
+    /// in NODE DOMAIN, in the supplied (`NativeElements`) scope. PRIMARY: the
+    /// shared node-domain Class-A projector's admitted route node → object shape.
+    /// FALLBACK (route admission declines for a partially-resolvable value): the
+    /// value's Shallow `SurfaceView` via the shared empty-path walker, recovering
+    /// the resolvable one-level surface (the resolvable intersection arms survive;
+    /// unresolved arms drop) — no whole-object materialise. The node-domain
+    /// surface synthesiser merges an anonymous property-type intersection
+    /// role-awarely (Authored arms value-INTERSECT — `number & string` — never
+    /// last-arm-override), the TS-correct merge for `A & B`.
     pub(crate) fn project_intrinsic_tag_member_shape(
         &mut self,
         scope_canonical_id: &str,
         tag_type: &TypeExpr,
     ) -> Option<ExpandedObjectShape> {
         let ctx = self.ctx;
-        let node = crate::meta_resolve::project_expr_class_a_node_via_dispatch_threaded(
+        // PRIMARY — the admitted route node carries the fully-resolved tag value
+        // surface (the resolvable `HTMLAttributes & { … }` case value-intersects
+        // conflicting members here).
+        if let Some(node) = crate::meta_resolve::project_expr_class_a_node_via_dispatch_threaded(
             ctx,
             Some(self),
             scope_canonical_id,
             tag_type,
+        ) {
+            if let Some(shape) = project_admitted_route_node_to_expanded_object_shape(ctx, &node) {
+                return Some(shape);
+            }
+        }
+        // FALLBACK — a value whose route admission declines (e.g. a partially
+        // resolvable `MissingBase & { projectOnly?: string }`, or a body with
+        // unresolved nested leaf refs) still carries a recoverable one-level
+        // surface. Lower the value to a base node and read its Shallow
+        // `SurfaceView` through the shared empty-path walker — the same
+        // node-domain sink the root-shape primary arm reads — which keeps the
+        // resolvable intersection arms and drops the unresolved ones. `None` only
+        // when the recovered surface is empty.
+        let dispatch = ProjectSemanticDispatch::new(ctx);
+        let base = dispatch.lower_type_expr_in_scope_with_mode(
+            scope_canonical_id,
+            tag_type,
+            ProjectionMode::Navigate,
         )?;
-        project_admitted_route_node_to_expanded_object_shape(ctx, &node)
+        let view = dispatch.resolve_typeinfo_surface_view(
+            base,
+            ProjectionReductionContext::published(ProjectionMode::Shallow),
+        )?;
+        let shape = surface_view_to_expanded_shape(ctx, &view);
+        (!shape.properties.is_empty()
+            || !shape.call_signatures.is_empty()
+            || !shape.index_signatures.is_empty())
+        .then_some(shape)
     }
 
     /// PRIMARY arm of [`Self::project_intrinsic_root_shape`]: the root-symbol
@@ -97,8 +127,8 @@ impl ComponentMetaQueryEngine<'_> {
         scope_canonical_id: &str,
         type_name: &str,
     ) -> Option<ExpandedObjectShape> {
-        // Budget guard preserved from the former root-symbol bridge (it bailed
-        // on an exhausted projection budget before projecting).
+        // An exhausted projection budget yields no primary surface (the Class-A
+        // fallback is tried instead).
         if self.projection_op_budget_exhausted() {
             return None;
         }
@@ -114,11 +144,10 @@ impl ComponentMetaQueryEngine<'_> {
     }
 
     /// Stabilise a nested intrinsic member value to its converged surface and
-    /// materialise it ONCE at the surface sink — the node-domain successor of the
-    /// host's former `solve_project_intrinsic_member_type` + `solved != *expr`
-    /// `TypeExpr` fixpoint.
+    /// materialise it ONCE at the surface sink — a node-domain fixpoint with no
+    /// per-iteration `TypeExpr` materialisation.
     ///
-    /// Projects the member value to its converged route NODE through the existing
+    /// Projects the member value to its converged route NODE through the
     /// route-fixpoint convergence helpers (no per-iteration materialisation), then
     /// materialises the converged node exactly once. `None` when the value does
     /// not project to a route node (the host keeps the input shallow).
