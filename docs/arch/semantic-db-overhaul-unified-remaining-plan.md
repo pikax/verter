@@ -1337,9 +1337,11 @@ Deferred follow-ups (lead-architect ruled, tracked here):
   intrinsic tags. codex Q1 (disposition-leg1) code-verified the hazard is
   pre-existing: the OLD `type_expr_to_object_shape` path ALSO produced `{ x }`
   for `UnresolvedBase & { x }` (non-object arms fall to
-  `ExpandedObjectShape::empty()` at
-  `verter_semantic/src/analysis/type_expand/mod.rs:160,188`), so this is NOT a
-  site-2 conversion regression. Best follow-up: thread a typed degradation
+  `ExpandedObjectShape::empty()` — the `Intersection` merge arm at
+  `verter_semantic/src/analysis/type_expand/mod.rs:161` folds each part's shape,
+  and a non-object part falls to the `_ => ExpandedObjectShape::empty()` catch-all
+  at `type_expand/mod.rs:188`, contributing no members), so this is NOT a site-2
+  conversion regression. Best follow-up: thread a typed degradation
   taxonomy so the reducer distinguishes confident-vacuous arms (droppable) from
   incomplete arms (must mark the result partial / return-only) instead of
   silently laundering non-miss `Unknown` into a dropped opaque. Owner:
@@ -1348,25 +1350,36 @@ Deferred follow-ups (lead-architect ruled, tracked here):
   gpt-5.5/xhigh, neutral-verified + best-not-lowest-effort-explicit): DEFER —
   global pre-existing reducer debt, deferrable like
   `RESOLVED_META_SCALAR_NO_POISON`.
-- **`INTRINSIC_STATIC_FALLBACK_WARM_CACHE`**: PRE-EXISTING, a sibling of
-  `RESOLVED_META_SCALAR_NO_POISON`. The host warms the projected intrinsic
+- **`INTRINSIC_STATIC_FALLBACK_WARM_CACHE`**: PRE-EXISTING and GLOBAL, a sibling
+  of `RESOLVED_META_SCALAR_NO_POISON`. The host warms the projected intrinsic
   surface via an UNCONDITIONAL `store_node` (`host_manage.rs:975`,
   `self.host.resolver_runtime().fallthrough.store_node(...)`) with NO completeness
-  gate, so a too-narrow / partial intrinsic surface would be admitted warm and
-  replayed as authoritative with no record of its incompleteness. It is LATENT
-  today: the reverted-to plain intrinsic tag path
-  (`project_intrinsic_tag_member_shape`) returns either `None` or a complete
-  Class-A surface — it never produces a partial-recovery surface — so no partial
-  producer currently feeds this hole. It becomes an IN-SCOPE blocker only if a
-  NEW partial producer is added (e.g. a future no-poison-safe partial recovery;
-  see `INTRINSIC_PARTIAL_RECOVERY_NO_POISON` below), at which point the
-  `store_node` must be gated complete-only (the same structural
-  complete-only-admission pattern owed to the intermediate resolved-meta cache).
-  Owner: `INTRINSIC_STATIC_FALLBACK_WARM_CACHE`. codex-DEFER ruling 2026-06-30
+  gate, so a too-narrow / partial intrinsic surface is admitted warm and replayed
+  as authoritative with no record of its incompleteness. This hole is LIVE TODAY,
+  NOT latent: the plain Class-A intrinsic tag path
+  (`project_intrinsic_tag_member_shape`) already produces a too-narrow surface for
+  a partially-resolvable tag value — `UnresolvedBase & { x }` launders to `{ x }`
+  through the node-domain intersection reducer (see
+  `PROJECTPATH_INTERSECTION_OPAQUE_LAUNDERING` above) — and that `{ x }` flows
+  straight into the ungated `store_node` and is warm-cached as authoritative. It
+  is nevertheless PRE-EXISTING and GLOBAL, NOT an intrinsic-C regression: codex Q1
+  (disposition-leg1) code-verified that the OLD `type_expr_to_object_shape` path
+  produced the SAME `{ x }` for `UnresolvedBase & { x }` and warm-cached it
+  identically. The FIX-A revert ensures intrinsic-C adds NO NEW partial producer
+  on top of this pre-existing laundering — FIX-A's
+  `resolvable_intersection_remainder` would have explicitly recovered and
+  published a known-too-narrow remainder as complete, a SECOND partial producer.
+  The eventual fix gates the `store_node` complete-only (the same structural
+  complete-only-admission pattern owed to the intermediate resolved-meta cache)
+  AND fixes the upstream `PROJECTPATH_INTERSECTION_OPAQUE_LAUNDERING` so the plain
+  path stops producing the too-narrow surface in the first place. Owner:
+  `INTRINSIC_STATIC_FALLBACK_WARM_CACHE`. codex-DEFER ruling 2026-06-30
   (`.feedback/intrinsic-c/disposition-leg1-OUTPUT.txt`, disposition-leg1;
   gpt-5.5/xhigh, neutral-verified + best-not-lowest-effort-explicit): DEFER —
-  pre-existing unconditional store_node at `host_manage.rs:975`; in-scope-blocker
-  only if a new partial producer is added, and the FIX-A revert ensures none is.
+  pre-existing / global unconditional store_node at `host_manage.rs:975`, deferred
+  because it predates intrinsic-C and the revert adds no new partial producer; the
+  warm-cache-of-too-narrow is live today via the pre-existing plain Class-A
+  laundering, not gated on a future producer.
 - **`INTRINSIC_PARTIAL_RECOVERY_NO_POISON`**: the no-poison-safe partial
   intrinsic-tag recovery FEATURE — recovering the resolvable inline-arm members
   of a partially-resolvable intrinsic tag value (`MissingBase & { projectOnly }`)

@@ -96,8 +96,8 @@ impl ComponentMetaQueryEngine<'_> {
         scope_canonical_id: &str,
         type_name: &str,
     ) -> Option<ExpandedObjectShape> {
-        // Budget guard preserved from the former root-symbol bridge (it bailed
-        // on an exhausted projection budget before projecting).
+        // An exhausted projection budget yields no primary surface (the Class-A
+        // fallback is tried instead).
         if self.projection_op_budget_exhausted() {
             return None;
         }
@@ -113,9 +113,8 @@ impl ComponentMetaQueryEngine<'_> {
     }
 
     /// Stabilise a nested intrinsic member value to its converged surface and
-    /// materialise it ONCE at the surface sink — the node-domain successor of the
-    /// host's former `solve_project_intrinsic_member_type` + `solved != *expr`
-    /// `TypeExpr` fixpoint.
+    /// materialise it ONCE at the surface sink — a node-domain fixpoint with no
+    /// per-iteration `TypeExpr` materialisation.
     ///
     /// Projects the member value to its converged route NODE through the existing
     /// route-fixpoint convergence helpers (no per-iteration materialisation), then
