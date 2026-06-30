@@ -1385,14 +1385,14 @@ Deferred follow-ups (lead-architect ruled, tracked here):
   instead of dropping the whole tag surface — deferred to its OWN block. This
   feature was scope-ADDED to intrinsic-C by a prior continuation manager (NOT the
   block's node-domain fence-conversion goal) and was REVERTED out of intrinsic-C:
-  the bounded HEAD helper (`resolvable_intersection_remainder` + a post-primary
+  the reverted FIX-A helper (`resolvable_intersection_remainder` + a post-primary
   arm classifier) was judged a real REACHABLE no-poison BLOCKER that a bounded fix
-  cannot close — it classified arms AFTER the Class-A primary (disposition-leg1
-  Q2: the primary can already narrow `Unknown(raw) & { x }` to `{ x }` and return
-  before the classifier runs), and a bare `None` reaches the `is_partial`-gated
-  `store_node` (`INTRINSIC_STATIC_FALLBACK_WARM_CACHE`) without an explicit partial
-  signal, so the recovery feature added a new degraded producer the existing gate
-  would not catch. The CORRECT design
+  cannot close — a classifier that runs AFTER the Class-A primary cannot protect a
+  producer that has ALREADY degraded before the classifier sees it, and a bare
+  `None` reaches the `is_partial`-gated `store_node`
+  (`INTRINSIC_STATIC_FALLBACK_WARM_CACHE`) without an explicit partial signal, so
+  the recovery feature added a new degraded producer the existing gate would not
+  catch. The CORRECT design
   (per the disposition decider): classify `tag_type` BEFORE the Class-A primary;
   treat a miss / other-`Unknown`-arm recovery as a LOWER-BOUND / return-only
   result (never published or cached as complete); SUPPRESS warm admission of any
