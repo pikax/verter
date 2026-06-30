@@ -1843,6 +1843,91 @@ impl VerterHost {
         self.get_public_api_with_mode(canonical_id, PublicApiMode::Public, None)
     }
 
+    /// Batch public-API render: ONE [`crate::resolver_store::BatchFixedView`]
+    /// captured for the WHOLE batch, threaded into every item. Preserves input
+    /// order; one slot per input (`None` for a non-carrier / missing canonical).
+    ///
+    /// Items run SEQUENTIALLY under the one fixed view (no batch-coordinator
+    /// fan-out): the public-API path mutates the dependency cache + workspace
+    /// edges via [`Self::sync_transitive_macro_type_dependencies`], so
+    /// parallelizing it would make the dependency updates nondeterministic.
+    /// Sequential + one shared view already gives O(N). Cross-item correctness is
+    /// served by per-item ON-DEMAND materialization + GLOBAL artifact
+    /// publication, NOT a shared batch overlay: each item's render builds its OWN
+    /// fresh [`crate::resolver_core::CanonicalCompletionOverlay`] (it does NOT
+    /// inherit prior items' overlays). The shared cold seed only supplies the
+    /// stable base snapshot that avoids the O(N) per-call store-view rebuild; a
+    /// later item importing an earlier item's type resolves it through the
+    /// on-demand `ensure_indexed_ready_serve` / `ensure_loaded` path against
+    /// globally-published artifacts. Default `Public` mode / no profile — the
+    /// scalar surface verter-tsc consumes.
+    pub fn get_public_api_batch(&self, canonical_ids: &[&str]) -> Vec<Option<TscResponse>> {
+        if canonical_ids.is_empty() {
+            return Vec::new();
+        }
+        // ONE store-view read for the whole batch (the O(N²) cliff collapse):
+        // the legacy per-call `resolver_store_view_read()` on the macro-deps
+        // render path is gone — every item threads this one capture's cold
+        // seed. The host-level public-API path carries no session overlay, so
+        // the base `HostViewRef` is the session view (an empty-overlay capture).
+        //
+        // CAVEAT: threading the BASE host view is correct ONLY because the
+        // public-API surface has no session-scoped entry. A future
+        // session-scoped public-API entry MUST thread the real overlay/session
+        // view (and likely a `SessionResolverContext`) here, NOT this base view.
+        let view = crate::session_view::HostViewRef::new(self);
+        let fixed = self.capture_batch_fixed_view(&view);
+        self.render_public_api_items(canonical_ids, PublicApiMode::Public, None, &fixed, &view)
+    }
+
+    /// The shared per-item public-API render body (scalar `N=1` + batch `N`).
+    ///
+    /// Each item is dispatched through the framework registry's component-API
+    /// projector leg (`api_projector_for` — registry dispatch by resolved
+    /// adapter id, NOT a hard Vue branch), with the batch-shared cold seed +
+    /// session view threaded via the `render_seed` ctx carrier so the render
+    /// takes ZERO per-call store-view reads. Scalar and batch are byte-identical
+    /// by construction (both are THIS body).
+    fn render_public_api_items(
+        &self,
+        canonical_ids: &[&str],
+        mode: PublicApiMode,
+        profile: Option<&CompileProfile>,
+        fixed: &crate::resolver_store::BatchFixedView,
+        view: &dyn crate::session_view::SessionView,
+    ) -> Vec<Option<TscResponse>> {
+        canonical_ids
+            .iter()
+            .map(|canonical_id| {
+                // The classification AUTHORITY is the RUNTIME-loaded source
+                // language (the explicit `UpsertRequest.file_language` the file
+                // was loaded with), resolved over the ALIAS-resolved canonical.
+                // A canonical whose source is not loaded, whose language has no
+                // framework adapter id, or whose adapter registers no
+                // api-projector leg projects no public-API surface — a `None`
+                // slot (the pre-registry non-Vue behavior).
+                let canonical = self.resolve_alias_or_canonical(canonical_id);
+                let file_language = self.scheduler.try_get_source(&canonical).and_then(|snap| {
+                    snap.downcast_data::<crate::host_executor::HostSourceData>()
+                        .map(|hd| hd.file_language.clone())
+                })?;
+                let adapter_id = file_language.adapter_id()?;
+                let projector = self.framework_registry().api_projector_for(adapter_id)?;
+                projector.render_api(crate::framework::api_projector::ComponentApiProjectorCtx {
+                    host: self,
+                    resolved_canonical: &canonical,
+                    file_language: &file_language,
+                    mode,
+                    profile,
+                    render_seed: Some(crate::framework::api_projector::PublicApiRenderSeed {
+                        cold_seed: fixed.cold_seed(),
+                        session_view: view,
+                    }),
+                })
+            })
+            .collect()
+    }
+
     /// The consumer-facing declaration companion path (`.d.<ext>.ts`) for a
     /// framework-carrier `canonical_id` — `Foo.vue` -> `Foo.d.vue.ts`,
     /// `Foo.svelte` -> `Foo.d.svelte.ts`.
@@ -1886,31 +1971,33 @@ impl VerterHost {
         mode: PublicApiMode,
         profile: Option<&CompileProfile>,
     ) -> Option<TscResponse> {
-        // Dispatch through the framework registry's component-API projector
-        // leg, selected by the canonical's framework adapter id. The
-        // classification AUTHORITY is the RUNTIME-loaded source language (the
-        // explicit `UpsertRequest.file_language` the file was loaded with),
-        // resolved over the ALIAS-resolved canonical — exactly what the
-        // pre-registry Vue gate consulted, so aliases and explicit
-        // load-language stay byte-faithful. A canonical whose source is not
-        // loaded, whose language has no framework adapter id, or whose adapter
-        // registers no api-projector leg, projects no public-API surface —
-        // the pre-registry non-Vue behavior. The host method stays the single
-        // entry every consumer calls.
-        let canonical = self.resolve_alias_or_canonical(canonical_id);
-        let file_language = self.scheduler.try_get_source(&canonical).and_then(|snap| {
-            snap.downcast_data::<crate::host_executor::HostSourceData>()
-                .map(|hd| hd.file_language.clone())
-        })?;
-        let adapter_id = file_language.adapter_id()?;
-        let projector = self.framework_registry().api_projector_for(adapter_id)?;
-        projector.render_api(crate::framework::api_projector::ComponentApiProjectorCtx {
-            host: self,
-            resolved_canonical: &canonical,
-            file_language: &file_language,
+        // `N=1` of the batch body. Capture ONE `BatchFixedView` and thread its
+        // shared cold seed + the base session view through the shared per-item
+        // render path ([`Self::render_public_api_items`], which dispatches
+        // through the framework registry's component-API projector leg —
+        // registry dispatch by resolved adapter id, NOT a hard Vue branch).
+        // Scalar == batch BY CONSTRUCTION (both are `render_public_api_items`),
+        // and the render takes ZERO per-call store-view reads. The host method
+        // stays the single entry every consumer calls. The host-level
+        // public-API path carries no session overlay, so the base `HostViewRef`
+        // is the session view (an empty-overlay capture).
+        //
+        // CAVEAT (see `get_public_api_batch`): the base host view is correct
+        // ONLY because there is no session-scoped public-API entry; a future
+        // session-scoped entry must thread the real overlay/session view (and
+        // likely a `SessionResolverContext`), not this base view.
+        let view = crate::session_view::HostViewRef::new(self);
+        let fixed = self.capture_batch_fixed_view(&view);
+        self.render_public_api_items(
+            std::slice::from_ref(&canonical_id),
             mode,
             profile,
-        })
+            &fixed,
+            &view,
+        )
+        .into_iter()
+        .next()
+        .flatten()
     }
 
     /// The Vue public-API extraction body — the EXEMPT legacy producer the
@@ -1932,6 +2019,7 @@ impl VerterHost {
         resolved_canonical: &str,
         mode: PublicApiMode,
         profile: Option<&CompileProfile>,
+        render_seed: Option<crate::framework::api_projector::PublicApiRenderSeed<'_>>,
     ) -> Option<TscResponse> {
         // Already alias-resolved by the caller; own it for the body's
         // existing `&canonical` / `.clone()` consumers without re-resolving.
@@ -1987,25 +2075,33 @@ impl VerterHost {
         let (external_types, transitive_macro_type_deps) = if macro_type_deps.is_empty() {
             (None, std::collections::BTreeSet::<String>::new())
         } else {
-            // Cold external-type collection context (compile-prep): seed
-            // from the cold-seed's inner view; nested probes fail closed on
-            // a stale seed.
-            let store_view = self.resolver_store_view_read().into_cold_seed_view();
+            // The batch-shared cold seed + session view from the ctx carrier —
+            // NO per-call store-view read on this path (the O(N²) cliff
+            // collapse). Production ALWAYS threads a seed (scalar `N=1` / batch
+            // both capture one fixed view up front); a macro-bearing render
+            // reaching here without one is a wiring error — fail closed (return
+            // `None` via `?`) rather than re-introduce a per-call
+            // `resolver_store_view_read()`.
+            let seed = render_seed.as_ref()?;
             let overlay =
                 std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
             let host_ctx = crate::resolver_core::HostResolverContext::from_cold_seed(
                 self,
-                &store_view,
+                seed.cold_seed,
                 overlay,
             );
             let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
-            let (external_types, _, transitive) = self.collect_external_types_from_loaded_files(
-                ctx,
-                &canonical,
-                &macro_type_deps,
-                &script_imports,
-                profile_hash,
-            );
+            // Session-aware collection threading the active view (NEVER `None`
+            // on the render path).
+            let (external_types, _, transitive) = self
+                .collect_external_types_from_loaded_files_with_view(
+                    ctx,
+                    &canonical,
+                    &macro_type_deps,
+                    &script_imports,
+                    profile_hash,
+                    Some(seed.session_view),
+                );
             (external_types, transitive)
         };
         // Unconditional: `replace_semantic_transitive(canonical, {})`

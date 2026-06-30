@@ -66,6 +66,10 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
             file_language,
             mode,
             profile: _,
+            // The Svelte shim renders purely from cached shallow state — it
+            // runs no cross-file macro-type resolution, so the batch-shared
+            // cold seed / session view is accepted and ignored here.
+            render_seed: _,
         } = cx;
 
         // Carrier-narrowness: the public-API surface is produced only for the

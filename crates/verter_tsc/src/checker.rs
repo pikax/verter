@@ -83,10 +83,26 @@ fn generate_public_api_stubs(
     let mut vue_ts_paths = Vec::new();
     let mut vue_ts_map = HashMap::new();
 
-    for vue_path in vue_files {
-        let canonical_id = vue_path.to_string_lossy().replace('\\', "/");
+    // ONE batched public-API call for every .vue file: the batch captures a
+    // single per-batch fixed store view and threads its shared cold seed into
+    // every item, collapsing the per-call O(N²) store-view cliff that the
+    // per-file `get_public_api` loop incurred (each macro-bearing call took its
+    // own store-view read, which missed the warm cache because the call's first
+    // deep semantic demand advanced the store-view token). Slots come back in
+    // input order, one per id.
+    let canonical_ids: Vec<String> = vue_files
+        .iter()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .collect();
+    let responses = {
+        let id_refs: Vec<&str> = canonical_ids.iter().map(String::as_str).collect();
+        host.get_public_api_batch(&id_refs)
+    };
 
-        let tsc_response = match host.get_public_api(&canonical_id) {
+    for ((vue_path, canonical_id), tsc_response) in
+        vue_files.iter().zip(canonical_ids).zip(responses)
+    {
+        let tsc_response = match tsc_response {
             Some(r) => r,
             None => continue,
         };
@@ -194,23 +210,28 @@ fn generate_all_tsc(
     vue_files: &[PathBuf],
     temp_dir: &Path,
 ) -> Vec<(PathBuf, String, PathBuf)> {
-    let queued: Vec<(PathBuf, String, String)> = vue_files
+    // ONE batched public-API call for every .vue file (mirrors
+    // `generate_public_api_stubs`): the batch captures a single per-batch fixed
+    // store view and threads its shared cold seed into every item, collapsing
+    // the per-file `get_public_api` O(N²) store-view cliff that a per-file loop
+    // re-incurred (each macro-bearing call took its own store-view read, which
+    // missed the warm cache because the call's first deep semantic demand
+    // advanced the store-view token). Slots come back in input order, one per id.
+    let canonical_ids: Vec<String> = vue_files
         .iter()
-        .map(|vue_path| {
-            let canonical_id = vue_path.to_string_lossy().replace('\\', "/");
-            let raw_name = vue_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("Component");
-            let component_name = sanitize_component_name(raw_name);
-            (vue_path.clone(), canonical_id, component_name)
-        })
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
         .collect();
+    let responses = {
+        let id_refs: Vec<&str> = canonical_ids.iter().map(String::as_str).collect();
+        host.get_public_api_batch(&id_refs)
+    };
 
-    queued
-        .into_iter()
-        .filter_map(|(vue_path, canonical_id, component_name)| {
-            let tsc_out = host.get_public_api(&canonical_id)?;
+    vue_files
+        .iter()
+        .zip(canonical_ids)
+        .zip(responses)
+        .filter_map(|((vue_path, _canonical_id), tsc_response)| {
+            let tsc_out = tsc_response?;
 
             // Rewrite relative import() paths in the generated code to absolute paths.
             // The .tsc.tsx files live in a temp dir, so relative imports like
@@ -218,6 +239,11 @@ fn generate_all_tsc(
             let vue_dir = vue_path.parent().unwrap_or(Path::new("."));
             let code = rewrite_relative_imports(&tsc_out.code, vue_dir);
 
+            let raw_name = vue_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("Component");
+            let component_name = sanitize_component_name(raw_name);
             let hash = simple_hash(vue_path.to_string_lossy().as_bytes());
             let tsc_tsx_name = format!("{component_name}_{hash:016x}.tsc.tsx");
             let tsc_tsx_path = temp_dir.join(&tsc_tsx_name);
@@ -226,7 +252,7 @@ fn generate_all_tsc(
                 return None;
             }
 
-            Some((vue_path, code, tsc_tsx_path))
+            Some((vue_path.clone(), code, tsc_tsx_path))
         })
         .collect()
 }
@@ -3894,6 +3920,127 @@ defineProps<{ msg: string }>()
         // Positive: generated file should exist
         let (_, _, tsc_path) = &results[0];
         assert!(tsc_path.exists(), "generated .tsc.tsx should exist on disk");
+    }
+
+    /// The declaration stage (`generate_all_tsc`) routes through ONE
+    /// `get_public_api_batch`, NOT a per-file `get_public_api` loop.
+    ///
+    /// DISCRIMINATION — two independent properties:
+    ///  1. **O(1)-not-per-N store-view reads.** `host.provenance()
+    ///     .store_view_from_host_reads` (a per-`VerterHost` atomic bumped in the
+    ///     `HostStoreView::from_host` chokepoint) is reachable from this crate.
+    ///     A per-file loop takes ≥ N reads (each macro-bearing render re-reads
+    ///     the store view); the batch collapses to ONE per-batch fixed-view
+    ///     capture. A WARM declaration stage of N files must read `< N` (and
+    ///     `>= 1`, so a dead counter cannot trivially satisfy the bound). This
+    ///     is exactly the cliff the migration removes — a regression to a
+    ///     per-file `host.get_public_api(` loop drives this `>= N` → RED.
+    ///  2. **Cross-item materialization.** A LATER file (`Parent.vue`) imports an
+    ///     EARLIER file's (`Child.vue`) emit interface; its declaration output
+    ///     MATERIALIZES the sibling SFC's `(e: 'childEvt', payload: number)`
+    ///     signature. A failed cross-item walk drops `payload: number` → RED.
+    #[test]
+    fn generate_all_tsc_routes_through_batch_o1_reads_and_resolves_cross_item() {
+        use std::sync::atomic::Ordering::Relaxed;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        // Child.vue exports an emit call-signature interface from its plain
+        // `<script>` block (the cross-item dependency).
+        let child_path = temp.path().join("Child.vue");
+        fs::write(
+            &child_path,
+            r#"<script lang="ts">
+export interface ChildEmits { (e: 'childEvt', payload: number): void }
+</script>
+<script setup lang="ts">
+defineProps<{ a: string }>()
+</script>
+<template><div /></template>
+"#,
+        )
+        .unwrap();
+        // Three consumers import Child's emit interface (a mid-batch cross-item
+        // dependency on the FIRST file). N=4 gives the `< N` bound margin.
+        let mut vue_files = vec![child_path.clone()];
+        for i in 0..3 {
+            let consumer_path = temp.path().join(format!("Consumer{i}.vue"));
+            fs::write(
+                &consumer_path,
+                r#"<script setup lang="ts">
+import type { ChildEmits } from './Child.vue'
+defineEmits<ChildEmits>()
+</script>
+<template><div /></template>
+"#,
+            )
+            .unwrap();
+            vue_files.push(consumer_path);
+        }
+
+        let host = VerterHost::new_standalone(HostConfig::default());
+        for path in &vue_files {
+            let canonical_id = path.to_string_lossy().replace('\\', "/");
+            let source = fs::read_to_string(path).unwrap();
+            let _ = host
+                .upsert(UpsertRequest {
+                    canonical_id: Some(canonical_id.clone()),
+                    input_id: canonical_id,
+                    source: std::sync::Arc::<str>::from(source),
+                    file_language: FileLanguage::vue(),
+                    aliases: Vec::new(),
+                })
+                .unwrap();
+        }
+
+        let out_dir = temp.path().join("tsc_out");
+        fs::create_dir_all(&out_dir).unwrap();
+
+        // Cold pass warms the extract + transitive-dep caches.
+        let _cold = generate_all_tsc(&host, &vue_files, &out_dir);
+
+        // WARM pass: measure this host's `from_host` reads in isolation.
+        const N: u64 = 4;
+        host.provenance()
+            .store_view_from_host_reads
+            .store(0, Relaxed);
+        let results = generate_all_tsc(&host, &vue_files, &out_dir);
+        let warm_from_host = host.provenance().store_view_from_host_reads.load(Relaxed);
+
+        assert_eq!(
+            results.len(),
+            4,
+            "all four .vue files produce declaration output"
+        );
+        assert!(
+            warm_from_host >= 1,
+            "the warm declaration stage must perform at least one real `from_host` \
+             read (the per-batch fixed-view capture), so a dead counter cannot \
+             trivially satisfy the bound; observed {warm_from_host}",
+        );
+        assert!(
+            warm_from_host < N,
+            "generate_all_tsc must route through ONE `get_public_api_batch` (O(1) \
+             `from_host` reads — the single per-batch capture), NOT a per-file \
+             `get_public_api` loop (≥ N={N} reads). Observed {warm_from_host}",
+        );
+
+        // Cross-item correctness: every consumer's declaration output
+        // MATERIALIZES the sibling `Child.vue`'s `ChildEmits` payload.
+        for i in 0..3 {
+            let consumer_name = format!("Consumer{i}.vue");
+            let code = results
+                .iter()
+                .find(|(p, _, _)| {
+                    p.file_name().and_then(|s| s.to_str()) == Some(consumer_name.as_str())
+                })
+                .map(|(_, code, _)| code.clone())
+                .unwrap_or_else(|| panic!("{consumer_name} declaration output present"));
+            assert!(
+                code.contains("payload: number") && code.contains("'childEvt'"),
+                "{consumer_name} declaration output must MATERIALIZE the sibling \
+                 SFC's `ChildEmits` `(e: 'childEvt', payload: number)`; got:\n{code}",
+            );
+        }
     }
 
     #[test]

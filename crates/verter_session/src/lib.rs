@@ -264,6 +264,8 @@ pub(crate) mod project_semantic_dispatch;
 pub mod project_type_store;
 #[cfg(test)]
 mod project_type_store_tests;
+#[cfg(test)]
+mod public_api_batch_fixed_view_tests;
 mod request_budget;
 pub mod request_context;
 pub mod resolver_core;

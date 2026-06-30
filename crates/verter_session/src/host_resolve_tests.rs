@@ -4812,6 +4812,10 @@ fn vue_api_projector_rejects_a_non_carrier_vue_language() {
         file_language: &carrier,
         mode: PublicApiMode::Public,
         profile: None,
+        // This SFC's `defineProps<{ a: string }>()` is an inline literal (no
+        // macro-type deps), so the legacy body never reaches the seed-bearing
+        // macro-deps branch — `None` is sufficient for this carrier-gate test.
+        render_seed: None,
     });
     assert!(
         via_carrier.is_some(),
@@ -4831,6 +4835,9 @@ fn vue_api_projector_rejects_a_non_carrier_vue_language() {
         file_language: &vue_non_carrier,
         mode: PublicApiMode::Public,
         profile: None,
+        // Rejected by the carrier-narrowness gate BEFORE the legacy body, so
+        // the seed is never consulted.
+        render_seed: None,
     });
     assert!(
         rejected.is_none(),
@@ -4860,14 +4867,22 @@ fn render_legacy_body_operates_on_the_resolved_canonical_without_re_resolving() 
         })
         .unwrap();
 
+    // This SFC's `defineProps<{ a: string }>()` is an inline literal (no
+    // macro-type deps), so the legacy body never reaches the seed-bearing
+    // macro-deps branch — `None` for the render seed is sufficient here.
     assert!(
-        host.render_vue_public_api_legacy("/src/Coherent.vue", PublicApiMode::Public, None)
+        host.render_vue_public_api_legacy("/src/Coherent.vue", PublicApiMode::Public, None, None)
             .is_some(),
         "the legacy body must render the resolved canonical it is given"
     );
     assert!(
-        host.render_vue_public_api_legacy("/virtual/coherent-handle", PublicApiMode::Public, None)
-            .is_none(),
+        host.render_vue_public_api_legacy(
+            "/virtual/coherent-handle",
+            PublicApiMode::Public,
+            None,
+            None
+        )
+        .is_none(),
         "the legacy body must NOT resolve an alias itself — the host resolves once up-front"
     );
 
