@@ -9,8 +9,9 @@
 //! divergence-is-the-bug class).
 //!
 //! This module owns the IDENTITY (a `verter_workspace` policy concern). The
-//! overlay MATERIALIZATION (the augmented bytes) lives in the `verter_lsp`
-//! integration; the `verter_tsgo_api` overlay seam stays policy-free.
+//! overlay MATERIALIZATION (the augmented bytes) lives in the sibling
+//! `tsgo_virtual_config` module; the `verter_tsgo_api` overlay seam stays
+//! policy-free.
 //!
 //! The identity composes three observable inputs:
 //!

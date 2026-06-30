@@ -95,6 +95,8 @@ pub mod relative_path;
 pub mod resolver;
 pub mod snapshot_builder;
 pub mod traits;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod tsgo_virtual_config;
 pub mod types;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod virtual_config;

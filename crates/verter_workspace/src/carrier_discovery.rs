@@ -24,8 +24,8 @@
 //! IDENTITY model (a distinct project identity per virtualized config, so a
 //! virtualized config never aliases the non-virtualized config in any cache
 //! slot). It is policy in `verter_workspace`. The overlay MATERIALIZATION
-//! (computing and serving the augmented tsconfig bytes) lives in the
-//! `verter_lsp` integration; the `verter_tsgo_api` overlay seam stays
+//! (computing and serving the augmented tsconfig bytes) lives in the sibling
+//! `tsgo_virtual_config` module; the `verter_tsgo_api` overlay seam stays
 //! policy-free.
 //!
 //! The decision REUSES the exact production membership-expansion primitives

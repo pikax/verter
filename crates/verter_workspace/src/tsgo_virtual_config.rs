@@ -1,11 +1,11 @@
-//! tsgo virtual-tsconfig MATERIALIZATION (LSP integration side).
+//! tsgo virtual-tsconfig MATERIALIZATION.
 //!
 //! When `verter_workspace`'s carrier-discovery decides a configured project must
 //! be virtualized (its `include`/`files` do not enumerate the carrier companion
 //! surface), the configured tsconfig is served to the tsgo `--api` engine with
 //! the companion paths injected — Verter-computed, NEVER written to user disk.
 //!
-//! This module owns the two LSP-side materialization concerns:
+//! This module owns the two materialization concerns:
 //!
 //! 1. **Augmented bytes.** [`augment_tsconfig_bytes`] takes the user tsconfig
 //!    JSON and the companion paths and produces the virtual config: byte-wise it
@@ -24,13 +24,14 @@
 //!
 //! The `verter_tsgo_api` overlay seam stays policy-free: it serves whatever
 //! bytes this module computes. The discovery DECISION and the virtual-config
-//! IDENTITY live in `verter_workspace`.
+//! IDENTITY live alongside this module in `verter_workspace`.
 
 use std::sync::Arc;
 
 use verter_tsgo_api::proto::types::Diagnostic;
 use verter_tsgo_api::snapshot::{OverlaySnapshot, RealDirSource};
-use verter_workspace::strip_json_comments;
+
+use crate::config::strip_json_comments;
 
 /// Produce the virtual (augmented) tsconfig bytes for a project that must be
 /// virtualized: the user config with `companion_paths` injected into `files`,

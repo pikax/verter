@@ -17,7 +17,6 @@ pub mod membership_ledger;
 pub mod membership_reconciler;
 pub mod publish_coordinator;
 pub mod tsgo_backend;
-pub mod tsgo_virtual_config;
 pub mod tsserver_backend;
 
 pub use carrier_publish_store::{

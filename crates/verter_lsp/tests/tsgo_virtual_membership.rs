@@ -4,7 +4,7 @@
 //! the `.vue.tsx` companion — VIA tsconfig virtualization.
 //!
 //! This drives the PRODUCTION materialization path
-//! (`verter_lsp::external_ts::tsgo_virtual_config`) against a live tsgo `--api`
+//! (`verter_workspace::tsgo_virtual_config`) against a live tsgo `--api`
 //! engine through the production `verter_tsgo_api` transport + actor.
 //!
 //! DISCRIMINATING. The test has two legs over the SAME fixture:
@@ -26,9 +26,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use verter_lsp::external_ts::tsgo_virtual_config::{
-    augment_tsconfig_bytes, build_virtual_overlay_snapshot,
-};
 use verter_tsgo_api::actor::spawn_actor;
 use verter_tsgo_api::proto::types::{
     method, Diagnostic, InitializeResponse, UpdateSnapshotResponse,
@@ -37,6 +34,9 @@ use verter_tsgo_api::snapshot::{AccessibleEntries, OverlaySnapshot, RealDirSourc
 use verter_tsgo_api::transport::pipe::StdioPipeTransport;
 use verter_tsgo_api::transport::spawn::discover_tsgo;
 use verter_tsgo_api::{ClientHandle, RequestOptions};
+use verter_workspace::tsgo_virtual_config::{
+    augment_tsconfig_bytes, build_virtual_overlay_snapshot,
+};
 
 /// A real-dir source backed by `std::fs`, scoped to the fixture. This is the
 /// role Verter's VFS fills in production; the test uses `std::fs` directly so

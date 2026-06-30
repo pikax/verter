@@ -4305,6 +4305,7 @@ dependencies = [
  "verter_language",
  "verter_scheduler",
  "verter_span",
+ "verter_tsgo_api",
  "walkdir",
  "xxhash-rust",
 ]
