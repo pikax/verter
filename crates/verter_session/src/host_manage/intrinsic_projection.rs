@@ -88,36 +88,15 @@ impl VerterHost {
         type_name: &str,
         ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
     ) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
-        // JSX intrinsics resolve through the
-        // bridge helper so the §5.14.1 pre-flight gate sees zero
-        // external engine-method callers. The bridge body retains
-        // the engine call through the migration window per §5.13a.2;
-        // the prepared-decl fallback for re-exported /
-        // namespace-qualified globals (e.g. `JSX.IntrinsicElements`)
-        // is engine-internal until 5l atomic engine retirement.
-        // The engine binds to the supplied request-bound `ctx` so
-        // cache validators inside the engine inherit the overlay-aware
-        // view.
+        // The root shape resolves in NODE DOMAIN through the query engine's
+        // intrinsic rail (`project_intrinsic_root_shape`): the root-symbol
+        // whole-surface PRIMARY, then the Class-A FALLBACK for re-exported /
+        // namespace-qualified globals (e.g. `JSX.IntrinsicElements`). The engine
+        // binds to the supplied request-bound `ctx` so cache validators inside
+        // the engine inherit the overlay-aware view; member surfaces are then
+        // materialised shallow-by-default through the node-domain member rail.
         let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(ctx);
-        let expanded = crate::meta_resolve::project_type_surface_expr_via_host_threaded(
-            &mut engine,
-            canonical_id,
-            type_name,
-        )
-        .or_else(|| {
-            let expr = verter_type_expr::TypeExpr::named(type_name);
-            // Route the dispatch helper through the
-            // request-bound `ctx` rather than `self: &VerterHost`.
-            // Passing `self` here coerced into the bare-host
-            // `<&VerterHost as ResolverContext>` impl, which panics
-            // under `cfg(not(any(test, debug_assertions)))` (release)
-            // once `project_expr_class_a_via_dispatch` reaches
-            // `ctx.prepared_decl_bundle(...)` deeper in the call
-            // graph.
-            crate::meta_resolve::project_expr_class_a_via_dispatch(ctx, canonical_id, &expr)
-        })?;
-        let mut shape =
-            verter_semantic::analysis::type_expand::type_expr_to_object_shape(&expanded);
+        let mut shape = engine.project_intrinsic_root_shape(canonical_id, type_name)?;
         Self::materialize_project_intrinsic_shape_members(&mut shape, &mut engine, canonical_id);
         Some(shape)
     }
@@ -145,16 +124,21 @@ impl VerterHost {
             .filter(|resolved_id| resolved_id != canonical_id);
         let scope = tag_scope_canonical.as_deref().unwrap_or(canonical_id);
         let _ = self.ensure_indexed_ready_serve(scope);
-        // Class A path via
-        // the shared dispatch helper. The intrinsic-member
-        // materialiser still uses the engine for its own bundle-level
-        // scope cache.
-        //
-        // Route through the request-bound `ctx` rather
-        // than `self: &VerterHost`. Same rationale as line 109 above:
-        // the bare-host coercion panics under
-        // `cfg(not(any(test, debug_assertions)))` deeper in the
-        // dispatch.
+        // TODO(follow-up — intrinsic tag-value node-domain merge): this site is the
+        // one intrinsic-C fence site NOT yet converted to node domain. The tag
+        // value is re-resolved through the materialising Class-A bridge +
+        // `type_expr_to_object_shape`, whose intersection merge is LAST-ARM-WINS:
+        // an inline `HTMLAttributes & { override }` arm OVERWRITES the heritage
+        // ref's same-named members. The shared node-domain surface synthesiser
+        // merges an ANONYMOUS property-type intersection role-awarely (both arms
+        // are `Authored`, so same-named members value-INTERSECT — `number & string`
+        // — rather than override), so no node-domain projection demand reproduces
+        // the override the intrinsic contract requires
+        // (`project_local_intrinsics_tag_members_override_fallback_duplicates`).
+        // Converting this site needs the shared intersection merge to apply
+        // own-body-shadows-heritage to the intrinsic tag value's anonymous
+        // intersection (an owner-layer merge-semantics decision), which is out of
+        // scope for the per-site fence conversion.
         let expanded =
             crate::meta_resolve::project_expr_class_a_via_dispatch(ctx, scope, &tag_type)
                 .unwrap_or_else(|| tag_type.clone());
@@ -166,42 +150,47 @@ impl VerterHost {
         Some(Self::owned_intrinsic_members_from_shape(tag_shape))
     }
 
-    fn solve_project_intrinsic_member_type(
-        engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-        scope_canonical_id: &str,
-        expr: &verter_type_expr::TypeExpr,
-    ) -> verter_type_expr::TypeExpr {
-        // Class A via shared
-        // dispatch helper. The engine here is still kept on the
-        // calling intrinsic member-surface materialiser path.
-        crate::meta_resolve::project_expr_class_a_via_dispatch(
-            engine.ctx(),
-            scope_canonical_id,
-            expr,
-        )
-        .unwrap_or_else(|| expr.clone())
-    }
-
     pub(crate) fn materialize_project_intrinsic_member_surface_expr(
         expr: &verter_type_expr::TypeExpr,
         engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
         scope_canonical_id: &str,
         nested_surface: bool,
     ) -> verter_type_expr::TypeExpr {
-        use verter_type_expr::{ObjectMember, TypeExpr};
+        // Node-domain member stabilisation (the successor of the former
+        // `solve_project_intrinsic_member_type` + `solved != *expr` `TypeExpr`
+        // fixpoint): a NESTED member value stabilises to its converged surface
+        // in node domain and materialises ONCE at the engine's surface sink. The
+        // TOP-LEVEL surface (`nested_surface == false`) is NOT stabilised — it
+        // stays SHALLOW, so a top-level reference member is never eagerly
+        // expanded (the structural arm below preserves the exact `nested_surface`
+        // gating that kept it shallow).
+        let stabilized = if nested_surface {
+            engine.stabilize_intrinsic_member_surface(scope_canonical_id, expr)
+        } else {
+            None
+        };
+        let target = stabilized.as_ref().unwrap_or(expr);
+        Self::materialize_project_intrinsic_member_structural(
+            target,
+            engine,
+            scope_canonical_id,
+            nested_surface,
+        )
+    }
 
-        if nested_surface {
-            let solved =
-                Self::solve_project_intrinsic_member_type(engine, scope_canonical_id, expr);
-            if solved != *expr {
-                return Self::materialize_project_intrinsic_member_surface_expr(
-                    &solved,
-                    engine,
-                    scope_canonical_id,
-                    true,
-                );
-            }
-        }
+    /// Member-wise structural re-materialisation of an ALREADY-STABILISED
+    /// intrinsic member surface. Operates on `expr` as a plain value (the engine
+    /// fixpoint already converged it), recursing into function / object / array /
+    /// tuple / union / intersection / mapped / conditional sub-surfaces and
+    /// preserving the `nested_surface` gating that keeps a top-level reference
+    /// member shallow.
+    fn materialize_project_intrinsic_member_structural(
+        expr: &verter_type_expr::TypeExpr,
+        engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+        scope_canonical_id: &str,
+        nested_surface: bool,
+    ) -> verter_type_expr::TypeExpr {
+        use verter_type_expr::{ObjectMember, TypeExpr};
 
         match expr {
             // A function type and a bare constructor type (`new (...) => R`)
@@ -775,5 +764,64 @@ mod intrinsic_projection_tests {
             "constructor param",
         );
         assert_projected_to_inner_object(ctor_inner.return_type.as_deref(), "constructor return");
+    }
+
+    /// TRAP 4 (top-level shallow preservation): the intrinsic member-surface
+    /// materialiser keeps a TOP-LEVEL reference member SHALLOW
+    /// (`nested_surface == false`) — it is NOT stabilised/expanded. This is the
+    /// exact `nested_surface || matches!(property.ty, Function | ConstructorType |
+    /// Object)` gating the node-domain conversion preserves: only function /
+    /// constructor / object members (or already-nested surfaces) recurse, never a
+    /// bare top-level reference.
+    ///
+    /// Discriminating: a top-level `foo: Inner` stays the bare
+    /// `Ref { name: "Inner" }`. Widening the object-arm recursion gate (e.g. to
+    /// `if true { … }`, recursing every property regardless of `nested_surface`)
+    /// projects `foo` to the resolved `{ x: number }` body — proven by mutation —
+    /// which this assertion rejects.
+    #[test]
+    fn intrinsic_member_surface_keeps_top_level_ref_shallow() {
+        let host = host_with_inner_alias();
+        let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(&host);
+
+        let inner_ref = TypeExpr::Ref {
+            name: Arc::from("Inner"),
+            type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+        };
+        let object = TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
+            properties: vec![ObjectMember::Property(
+                verter_type_expr::ObjectProperty::synthetic_public(
+                    "foo".to_string(),
+                    inner_ref,
+                    false,
+                    false,
+                ),
+            )],
+        }));
+
+        // Top-level surface (`nested_surface = false`).
+        let result = VerterHost::materialize_project_intrinsic_member_surface_expr(
+            &object,
+            &mut engine,
+            "/src/inner.ts",
+            false,
+        );
+        let TypeExpr::Object(obj) = &result else {
+            panic!("expected an Object surface, got {result:?}");
+        };
+        let foo_ty = obj
+            .properties
+            .iter()
+            .find_map(|member| match member {
+                ObjectMember::Property(property) if property.name == "foo" => Some(&property.ty),
+                _ => None,
+            })
+            .expect("the `foo` property must survive the materialisation");
+        assert!(
+            matches!(foo_ty, TypeExpr::Ref { name, .. } if name.as_ref() == "Inner"),
+            "TRAP 4: a TOP-LEVEL reference member must stay the bare shallow \
+             `Ref {{ name: \"Inner\" }}` — NOT eagerly projected to the resolved \
+             `{{ x: number }}` body; got {foo_ty:?}",
+        );
     }
 }

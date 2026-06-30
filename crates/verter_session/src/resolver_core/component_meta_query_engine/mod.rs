@@ -111,6 +111,7 @@ use crate::semantic_query::SemanticNodeId;
 mod engine_accessors;
 mod fallthrough_value_eval;
 mod helpers;
+mod intrinsic_surface;
 mod node_materialize;
 mod registry_decl;
 mod registry_structural;
