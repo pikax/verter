@@ -1,0 +1,20 @@
+import { defineComponent } from "vue"
+type __OmitNew<T> = { [K in keyof T]: T[K] }
+import type { ChildProps } from './types'
+import type { ChildEmits } from './types'
+
+const __comp = defineComponent({
+  emits: ['change'],
+})
+
+declare const Child: __OmitNew<typeof __comp> & {
+  new(props?: import("vue").PublicProps & ChildProps & { "onChange"?: (value: number) => void }): {
+    $props: import("vue").PublicProps & ChildProps & { "onChange"?: (value: number) => void },
+    $emit: ((event: 'change', value: number) => void),
+    $data: {},
+    $attrs: import("vue").HTMLAttributes,
+    $refs: {},
+  }
+}
+export default Child
+//# sourceMappingURL=data:application/json;base64,eyJ2ZXJzaW9uIjozLCJuYW1lcyI6W10sInNvdXJjZXMiOlsiL3Byb2ovQ2hpbGQudnVlIl0sInNvdXJjZXNDb250ZW50IjpbIjxzY3JpcHQgc2V0dXAgbGFuZz1cInRzXCI+XG5pbXBvcnQgdHlwZSB7IENoaWxkUHJvcHMsIENoaWxkRW1pdHMgfSBmcm9tICcuL3R5cGVzJ1xuZGVmaW5lUHJvcHM8Q2hpbGRQcm9wcz4oKVxuZGVmaW5lRW1pdHM8Q2hpbGRFbWl0cz4oKVxuPC9zY3JpcHQ+XG48dGVtcGxhdGU+PGRpdiAvPjwvdGVtcGxhdGU+XG4iXSwibWFwcGluZ3MiOiI7Ozs7Ozs7Ozs7eURBR1k7dURBQUE7b0JBQUEifQ==

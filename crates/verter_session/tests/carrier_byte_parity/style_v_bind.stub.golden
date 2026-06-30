@@ -1,0 +1,17 @@
+import { defineComponent } from "vue"
+type __OmitNew<T> = { [K in keyof T]: T[K] }
+
+const __comp = defineComponent({
+})
+
+declare const Accent: __OmitNew<typeof __comp> & {
+  new(props?: import("vue").PublicProps & {}): {
+    $props: import("vue").PublicProps & {},
+    $emit: (event: string, ...args: unknown[]) => void,
+    $data: {},
+    $attrs: import("vue").HTMLAttributes,
+    $refs: {},
+  }
+}
+export default Accent
+//# sourceMappingURL=data:application/json;base64,eyJ2ZXJzaW9uIjozLCJuYW1lcyI6W10sInNvdXJjZXMiOlsiL3Byb2ovQWNjZW50LnZ1ZSJdLCJzb3VyY2VzQ29udGVudCI6WyI8c2NyaXB0IHNldHVwIGxhbmc9XCJ0c1wiPlxuY29uc3QgYWNjZW50ID0gJ3JlZCdcbjwvc2NyaXB0PlxuPHRlbXBsYXRlPjxkaXYgLz48L3RlbXBsYXRlPlxuPHN0eWxlIHNjb3BlZD4ueCB7IGNvbG9yOiB2LWJpbmQoYWNjZW50KTsgfTwvc3R5bGU+XG4iXSwibWFwcGluZ3MiOiIifQ==
