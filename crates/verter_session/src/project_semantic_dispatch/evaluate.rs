@@ -305,6 +305,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let Some(data) = self.graph().node_data(n) else {
                 break;
             };
+            // No-poison partiality fold (verified to match `realize_callable_member`):
+            // each residual-carrier `execute_read` below pairs
+            // `observe_component_meta_read_suppress` + `emit_dispatch_dep_signature_facts`,
+            // exactly as the canonical resolver does at its own `ResolveDecl` /
+            // `Instantiate` sites — so a partial / suppressed sub-resolution taints
+            // the caller's request / cold-compute warm gate identically. Treating a
+            // `QueryResult::Value(id)` as usable here (rather than threading
+            // `evaluate_deferred_outcome`'s entry-scoped `result_is_partial`) is
+            // therefore correct AND faithful to the canonical resolver: the
+            // entry-scoped memo-admission bit is owned INSIDE
+            // `evaluate_deferred_outcome` (it gates its OWN publish), and the
+            // intervening `evaluate_deferred_semantic_node_with_context` calls
+            // propagate the same suppress signal through their internal
+            // `observe_component_meta_read_suppress` sites.
             let resolved = match data.as_ref() {
                 // Residual DeclRef → the canonical shallow `ResolveDecl` query
                 // (the same `ScopeId { canonical_id, local_scope: None }` shape

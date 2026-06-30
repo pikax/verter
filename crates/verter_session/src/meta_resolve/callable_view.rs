@@ -172,25 +172,44 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
             // A realized callable — return verbatim.
             SemanticNodeData::Function { .. } => Some(normalized),
 
-            // The view OWNS the arm recursion. Skip nullish arms, RECURSE per
-            // surviving arm (so a nested nullish composite —
-            // `Union([Union([f, undefined]), …])` — has its inner `undefined`
-            // stripped too, rather than failing the strict composite realize),
-            // then require exactly one distinct callable function node.
+            // The view OWNS the arm recursion. RECURSE per surviving arm (so a
+            // nested nullish composite — `Union([Union([f, undefined]), …])` —
+            // has its inner `undefined` stripped too, rather than failing the
+            // strict composite realize), then require exactly one distinct
+            // callable function node.
+            //
+            // Nullish policy SPLITS by composite kind: a `Union` NARROWS away a
+            // nullish arm (`Fn | undefined` ⇒ `Fn`, the surviving callable); an
+            // `Intersection` COLLAPSES to `never` on one (`Fn & undefined` =
+            // `never`) and is therefore NOT callable — matching
+            // `realize_callable_member`, whose intersection arm already refuses
+            // when any arm (incl. `undefined`) fails to realize.
             SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
+                let is_intersection = matches!(data.as_ref(), SemanticNodeData::Intersection(_));
                 let arms = Arc::clone(arms);
                 drop(data);
                 let mut callable: Option<SemanticNodeId> = None;
                 for arm in arms.iter() {
-                    // Normalize the arm enough to detect / strip a nullish arm
+                    // Normalize the arm enough to detect a nullish arm
                     // (`undefined` / `null`), incl. one behind a carrier.
                     let arm_norm = self.normalized_fact_node(*arm, context);
                     if self.node_is_nullish_primitive(arm_norm) {
+                        // `Fn & undefined` = `never` ⇒ the whole intersection is
+                        // non-callable; refuse (do NOT strip-and-keep). A `Union`
+                        // narrows the nullish arm away and keeps scanning.
+                        if is_intersection {
+                            return None;
+                        }
                         continue;
                     }
                     // A non-nullish arm must itself classify to a single callable
                     // (recursion handles nested composites AND realizes leaf
                     // callables); a non-callable non-nullish arm refuses.
+                    // TODO(perf): `arm_norm` is already normalized but the
+                    // recursive entry re-normalizes it (a `normalized_fact_node`
+                    // memo hit — harmless). A `_from_normalized` entry helper
+                    // could skip the redundant hop; deferred to keep the recursion
+                    // signature + fuse placement simple.
                     let found = self.classify_single_callable(arm_norm, context, depth + 1)?;
                     match callable {
                         // A second, distinct callable arm is ambiguous — refuse
@@ -270,7 +289,7 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
     pub(crate) fn event_names(&self, context: ProjectionReductionContext) -> Option<Vec<Arc<str>>> {
         let first_ty = self.signature(context)?.first_param()?;
         let mut names = Vec::new();
-        self.collect_string_literal_names(first_ty, context, &mut names);
+        self.collect_string_literal_names(first_ty, context, 0, &mut names);
         if names.is_empty() {
             None
         } else {
@@ -282,8 +301,21 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
+        depth: u32,
         out: &mut Vec<Arc<str>>,
     ) {
+        // Fail-closed recursion fuse — the SAME `CALLABLE_VIEW_DEPTH_FUSE` bound
+        // `classify_single_callable` / `collect_callable_arms` carry. Unlike
+        // those classifiers this Union recursion has NO `visited` set, so after
+        // carrier resolution a self-referential union (`type S = 'x' | S`, which
+        // `normalized_fact_node` resolves to `Union(Literal('x'), DeclRef(S))`
+        // every hop, re-yielding the same hash-consed union) would recurse
+        // unboundedly. Past the fuse we stop contributing names (NEVER panic),
+        // so the caller fails closed on the names collected so far rather than
+        // overflowing the stack.
+        if depth > CALLABLE_VIEW_DEPTH_FUSE {
+            return;
+        }
         // Carrier-resolve before EVERY structural match — a `DeclRef` /
         // `InstantiationRef` event-name union resolves to its `Union` here, and
         // each union arm is normalized again on recursion.
@@ -299,7 +331,7 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
                 let members = Arc::clone(members);
                 drop(data);
                 for member in members.iter() {
-                    self.collect_string_literal_names(*member, context, out);
+                    self.collect_string_literal_names(*member, context, depth + 1, out);
                 }
             }
             _ => {}
@@ -410,15 +442,25 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
                 Some(())
             }
             SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
+                // Same nullish split as `classify_single_callable`: a `Union`
+                // narrows a nullish arm away; an `Intersection` collapses to
+                // `never` on one (`Fn & undefined`) → not slot-callable.
+                let is_intersection = matches!(data.as_ref(), SemanticNodeData::Intersection(_));
                 let arms = Arc::clone(arms);
                 drop(data);
                 for arm in arms.iter() {
                     let arm_norm = self.normalized_fact_node(*arm, context);
-                    // Nullish arms (`undefined` / `null`) are stripped, incl. one
-                    // behind a carrier.
+                    // Nullish arms (`undefined` / `null`), incl. one behind a
+                    // carrier: a `Union` strips them; an `Intersection` is `never`.
                     if self.node_is_nullish_primitive(arm_norm) {
+                        if is_intersection {
+                            return None;
+                        }
                         continue;
                     }
+                    // TODO(perf): `arm_norm` re-normalizes at the recursive entry
+                    // (a memo hit). See the matching note in
+                    // `classify_single_callable`.
                     self.collect_callable_arms(arm_norm, context, depth + 1, out)?;
                 }
                 Some(())

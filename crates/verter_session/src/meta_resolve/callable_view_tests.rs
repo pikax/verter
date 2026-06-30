@@ -16,8 +16,9 @@ use crate::project_semantic_dispatch::{node_data_for, ProjectSemanticDispatch};
 use crate::resolver_core::{CanonicalCompletionOverlay, HostResolverContext, ResolverContext};
 use crate::resolver_store::CurrentHostStoreView;
 use crate::semantic_query::{
-    FunctionParam, LiteralValue, PrimitiveKind, ProjectionMode, ProjectionReductionContext,
-    SemanticNodeData, SemanticNodeId, SurfaceMember, SurfaceView, TupleElement,
+    DeclIdentity, FunctionParam, LiteralValue, PrimitiveKind, ProjectionMode,
+    ProjectionReductionContext, SemanticNodeData, SemanticNodeId, SurfaceMember, SurfaceView,
+    TupleElement,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 use crate::typeinfo::framework_surface::vue_exec::navigate_param_to_object_surface;
@@ -65,6 +66,12 @@ fn function_with_return_span(
 
 fn union(graph: &SemanticGraphStore, arms: Vec<SemanticNodeId>) -> SemanticNodeId {
     graph.intern_node(SemanticNodeData::Union(Arc::from(arms.into_boxed_slice())))
+}
+
+fn intersection(graph: &SemanticGraphStore, arms: Vec<SemanticNodeId>) -> SemanticNodeId {
+    graph.intern_node(SemanticNodeData::Intersection(Arc::from(
+        arms.into_boxed_slice(),
+    )))
 }
 
 fn alias(graph: &SemanticGraphStore, inner: SemanticNodeId) -> SemanticNodeId {
@@ -295,6 +302,40 @@ fn single_callable_arm_matches_callable_arm_from_raised() {
         view_func.as_ref(),
         helper_func.as_ref(),
         "the view's node-domain callable equals callable_arm_from_raised's materialized callable"
+    );
+}
+
+#[test]
+fn single_callable_arm_intersection_with_nullish_refuses() {
+    // SOUNDNESS (#2): `Fn & undefined` = `never` — NOT callable. Pre-fix the
+    // view stripped nullish arms UNIFORMLY for both `Union` and `Intersection`,
+    // so an `Intersection(Function, undefined)` wrongly returned `Some(f)`.
+    // Post-fix only a `Union` narrows a nullish arm away; an `Intersection` with
+    // a nullish arm refuses (`None`).
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let void = prim(&graph, PrimitiveKind::Void);
+    let row = prim(&graph, PrimitiveKind::Number);
+    let f = function(&graph, vec![param(Some("r"), row, false, false)], void);
+    let undefined = prim(&graph, PrimitiveKind::Undefined);
+    let isect = intersection(&graph, vec![f, undefined]);
+
+    assert_eq!(
+        CallableNodeView::new(&dispatch, isect).single_callable_arm(navigate()),
+        None,
+        "`Fn & undefined` = never — an Intersection with a nullish arm is not callable"
+    );
+
+    // DISCRIMINATING contrast: the SAME two arms as a UNION still narrow the
+    // nullish arm away and yield the callable — so the refusal above is the
+    // Intersection-specific `never` collapse, NOT a blanket reject of the arms.
+    let as_union = union(&graph, vec![f, undefined]);
+    assert_eq!(
+        CallableNodeView::new(&dispatch, as_union).single_callable_arm(navigate()),
+        Some(f),
+        "`Fn | undefined` narrows the nullish arm away to the surviving callable"
     );
 }
 
@@ -556,6 +597,46 @@ fn slot_param_and_return_non_callable_arm_fails_closed() {
         view.slot_param_and_return_by_arm(ArmCombineNode::Intersection, shallow()),
         None,
         "a non-callable arm makes the member not slot-callable -> fail closed"
+    );
+}
+
+#[test]
+fn slot_param_and_return_intersection_with_nullish_fails_closed() {
+    // SOUNDNESS (#2) on the slot-callable path: `Slot & undefined` = `never`,
+    // not slot-callable. `collect_callable_arms` refuses an `Intersection` with a
+    // nullish arm (matching `classify_single_callable`); a `Union` still strips
+    // the nullish arm and yields parts.
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let void = prim(&graph, PrimitiveKind::Void);
+    let props = prim(&graph, PrimitiveKind::Object);
+    let f = function(
+        &graph,
+        vec![param(Some("props"), props, false, false)],
+        void,
+    );
+    let undefined = prim(&graph, PrimitiveKind::Undefined);
+
+    let isect = intersection(&graph, vec![f, undefined]);
+    assert_eq!(
+        CallableNodeView::new(&dispatch, isect)
+            .slot_param_and_return_by_arm(ArmCombineNode::Intersection, shallow()),
+        None,
+        "`Slot & undefined` = never — fails closed (not slot-callable)"
+    );
+
+    // DISCRIMINATING contrast: the SAME arms as a UNION strip the nullish arm
+    // and still yield parts with the surviving binding.
+    let as_union = union(&graph, vec![f, undefined]);
+    let parts = CallableNodeView::new(&dispatch, as_union)
+        .slot_param_and_return_by_arm(ArmCombineNode::Intersection, shallow())
+        .expect("`Slot | undefined` strips the nullish arm and yields parts");
+    assert_eq!(
+        parts.first_param,
+        Some(props),
+        "the surviving callable supplies the first-param binding"
     );
 }
 
@@ -950,6 +1031,32 @@ fn event_names_resolves_declref_and_instantiationref_event_unions() {
             .value
     };
 
+    // PRECONDITION (#4): assert the relevant RAW node IS the expected carrier
+    // variant BEFORE the fixed reader resolves it, so a future lowering change
+    // can't silently make these pass without exercising the carrier path. Here
+    // the carrier sits in the FIRST-PARAM position of the realized callable.
+    let first_param_raw = |name: &str| -> SemanticNodeId {
+        CallableNodeView::new(&dispatch, member(name))
+            .signature(navigate())
+            .unwrap_or_else(|| panic!("`{name}` realizes to a signature"))
+            .first_param()
+            .unwrap_or_else(|| panic!("`{name}` signature has a first param"))
+    };
+    assert!(
+        matches!(
+            node_data_for(dispatch.ctx, first_param_raw("onsave")).as_deref(),
+            Some(SemanticNodeData::DeclRef { .. })
+        ),
+        "the `onsave` raw first-param node is a `DeclRef` carrier (the `Event` alias) before resolution"
+    );
+    assert!(
+        matches!(
+            node_data_for(dispatch.ctx, first_param_raw("ongen")).as_deref(),
+            Some(SemanticNodeData::InstantiationRef { .. })
+        ),
+        "the `ongen` raw first-param node is an `InstantiationRef` carrier before resolution"
+    );
+
     // DeclRef-aliased event-name union → its names.
     assert_eq!(
         CallableNodeView::new(&dispatch, member("onsave")).event_names(navigate()),
@@ -1015,6 +1122,32 @@ fn positional_params_expands_declref_and_instantiationref_rest_tuples() {
             .unwrap_or_else(|| panic!("the `{name}` member is present"))
             .value
     };
+
+    // PRECONDITION (#4): the rest-param carrier IS the expected variant BEFORE
+    // `positional_params_expanded` resolves it to a `Tuple`. The rest param is
+    // the signature's first (and only) param, so `first_param()` is its raw
+    // carrier type.
+    let rest_param_raw = |name: &str| -> SemanticNodeId {
+        CallableNodeView::new(&dispatch, member(name))
+            .signature(navigate())
+            .unwrap_or_else(|| panic!("`{name}` realizes to a signature"))
+            .first_param()
+            .unwrap_or_else(|| panic!("`{name}` signature has a (rest) first param"))
+    };
+    assert!(
+        matches!(
+            node_data_for(dispatch.ctx, rest_param_raw("onrest")).as_deref(),
+            Some(SemanticNodeData::DeclRef { .. })
+        ),
+        "the `onrest` raw rest-param node is a `DeclRef` carrier (the `Args` alias) before resolution"
+    );
+    assert!(
+        matches!(
+            node_data_for(dispatch.ctx, rest_param_raw("ongentuple")).as_deref(),
+            Some(SemanticNodeData::InstantiationRef { .. })
+        ),
+        "the `ongentuple` raw rest-param node is an `InstantiationRef` carrier before resolution"
+    );
 
     // DeclRef rest-tuple → expanded element labels.
     let rest = CallableNodeView::new(&dispatch, member("onrest"))
@@ -1093,6 +1226,18 @@ fn single_callable_arm_resolves_carrier_wrapped_nullish_callable() {
             .unwrap_or_else(|| panic!("the `{name}` member is present"))
             .value
     };
+
+    // PRECONDITION (#4): the `onmaybe` member RAW node IS a `DeclRef` carrier
+    // (the `MaybeFn` alias) BEFORE `single_callable_arm` resolves it — so the
+    // test genuinely exercises the carrier-resolution path, not a pre-resolved
+    // union.
+    assert!(
+        matches!(
+            node_data_for(dispatch.ctx, member("onmaybe")).as_deref(),
+            Some(SemanticNodeData::DeclRef { .. })
+        ),
+        "the `onmaybe` member raw node is a `DeclRef` carrier before resolution"
+    );
 
     // The carrier-wrapped nullish callback resolves to a single callable arm.
     let arm = CallableNodeView::new(&dispatch, member("onmaybe"))
@@ -1336,5 +1481,292 @@ fn first_param_object_surface_keeps_root_carrier_shaped() {
         )),
         names(shallow()),
         "an Expanded caller context does NOT expand the (always-Shallow) surface"
+    );
+}
+
+// ───────── normalize_node_for_structural_fact_demand: direct contract ─────────
+//
+// Direct boundedness / fail-closed tests for the shared demand primitive
+// (`normalize_node_for_structural_fact_demand`) the view composes. Each asserts
+// BOUNDED termination + the contract: a resolvable chain materialises, an
+// unresolvable / circular / over-deep carrier carrier-stops fail-closed
+// (returns a carrier / opaque, NEVER panics, NEVER fabricates a concrete type).
+// These also pin finding #1 — the same residual-carrier resolution feeds the
+// view-side recursions whose fuses this cycle hardens.
+
+/// Workspace host carrying the carrier-shape fixtures used by the primitive
+/// contract tests: a 2-hop `DeclRef→DeclRef` chain that terminates at a string
+/// literal, a mutual-recursion cycle, an identity generic, and a `T0..T80`
+/// alias chain LONGER than `STRUCTURAL_FACT_DEMAND_FUSE` (64).
+fn primitive_carrier_host() -> (Arc<VerterHost>, CurrentHostStoreView) {
+    let mut deep = String::new();
+    for i in 0..80u32 {
+        deep.push_str(&format!("export type T{i} = T{};\n", i + 1));
+    }
+    deep.push_str("export type T80 = 'leaf';\n");
+    let types = format!(
+        "export type DeclChainA = DeclChainB;\n\
+         export type DeclChainB = 'leaf';\n\
+         export type MutA = MutB;\n\
+         export type MutB = MutA;\n\
+         export type GenIdent<T> = T;\n\
+         {deep}"
+    );
+    let component = "/workspace/Carriers.svelte";
+    let source = "<script lang=\"ts\">\n\
+         import type { DeclChainA, MutA, GenIdent, T0 } from './types';\n\
+         interface Props {\n\
+           chain: DeclChainA;\n\
+           mutual: MutA;\n\
+           geninst: GenIdent<DeclChainA>;\n\
+           deepchain: T0;\n\
+         }\n\
+         let props: Props = $props();\n\
+         void props;\n\
+         </script>\n\
+         <div />";
+    workspace_host_with_svelte(
+        component,
+        source,
+        &[("/workspace/types.ts", types.as_str())],
+    )
+}
+
+#[test]
+fn normalize_node_for_fact_demand_resolves_carrier_chains() {
+    // BOUNDED RESOLUTION: a `DeclRef→DeclRef` chain (`DeclChainA → DeclChainB →
+    // 'leaf'`) and an `InstantiationRef` whose body is itself a carrier
+    // (`GenIdent<DeclChainA>` → `DeclChainA` → the same chain) both materialise
+    // through the shared primitive to the terminal `Literal('leaf')`. A
+    // non-resolving primitive would return the input carrier instead.
+    let (host, view) = primitive_carrier_host();
+    let overlay = Arc::new(CanonicalCompletionOverlay::new());
+    let ctx = HostResolverContext::from_current(&host, &view, overlay);
+    let facts = host
+        .resolve_svelte_script_facts_with_ctx(&ctx, "/workspace/Carriers.svelte")
+        .expect("svelte facts");
+    let props_type = facts.props_type.as_ref().expect("props type");
+    let surface = navigate_param_to_object_surface(&ctx, "/workspace/Carriers.svelte", props_type)
+        .expect("props surface");
+    let dispatch = ctx.dispatch();
+    let member = |name: &str| -> SemanticNodeId {
+        surface
+            .members
+            .iter()
+            .find(|m| m.name.as_ref() == name)
+            .unwrap_or_else(|| panic!("the `{name}` member is present"))
+            .value
+    };
+
+    // Precondition: the raw nodes are genuinely carriers.
+    assert!(
+        matches!(
+            node_data_for(dispatch.ctx, member("chain")).as_deref(),
+            Some(SemanticNodeData::DeclRef { .. })
+        ),
+        "the `chain` member raw node is a `DeclRef` carrier"
+    );
+    assert!(
+        matches!(
+            node_data_for(dispatch.ctx, member("geninst")).as_deref(),
+            Some(SemanticNodeData::InstantiationRef { .. })
+        ),
+        "the `geninst` member raw node is an `InstantiationRef` carrier"
+    );
+
+    for name in ["chain", "geninst"] {
+        let resolved = dispatch.normalize_node_for_structural_fact_demand(member(name), navigate());
+        assert!(
+            matches!(
+                node_data_for(dispatch.ctx, resolved).as_deref(),
+                Some(SemanticNodeData::Literal(LiteralValue::String(s))) if s == "leaf"
+            ),
+            "`{name}` resolves through its carrier chain to the terminal `'leaf'` literal, got {:?}",
+            node_data_for(dispatch.ctx, resolved).as_deref()
+        );
+    }
+}
+
+#[test]
+fn normalize_node_for_fact_demand_circular_and_deep_fail_closed() {
+    // FAIL-CLOSED boundedness: a mutual-recursion cycle (`MutA = MutB; MutB =
+    // MutA`) terminates via the primitive's `visited` set and carrier-stops at a
+    // `DeclRef` (never a fabricated concrete type, never a hang). A `T0..T80`
+    // alias chain LONGER than `STRUCTURAL_FACT_DEMAND_FUSE` (64) trips the step
+    // fuse and carrier-stops at an INTERMEDIATE `DeclRef` — it does NOT reach the
+    // `'leaf'` terminal, proving the fuse fired rather than running to completion.
+    let (host, view) = primitive_carrier_host();
+    let overlay = Arc::new(CanonicalCompletionOverlay::new());
+    let ctx = HostResolverContext::from_current(&host, &view, overlay);
+    let facts = host
+        .resolve_svelte_script_facts_with_ctx(&ctx, "/workspace/Carriers.svelte")
+        .expect("svelte facts");
+    let props_type = facts.props_type.as_ref().expect("props type");
+    let surface = navigate_param_to_object_surface(&ctx, "/workspace/Carriers.svelte", props_type)
+        .expect("props surface");
+    let dispatch = ctx.dispatch();
+    let member = |name: &str| -> SemanticNodeId {
+        surface
+            .members
+            .iter()
+            .find(|m| m.name.as_ref() == name)
+            .unwrap_or_else(|| panic!("the `{name}` member is present"))
+            .value
+    };
+
+    // Mutual recursion → carrier-stop (a `DeclRef`, NOT a fabricated concrete
+    // Function / Object / Literal).
+    let mutual = dispatch.normalize_node_for_structural_fact_demand(member("mutual"), navigate());
+    assert!(
+        matches!(
+            node_data_for(dispatch.ctx, mutual).as_deref(),
+            Some(SemanticNodeData::DeclRef { .. })
+        ),
+        "a mutual-recursion cycle terminates fail-closed at a `DeclRef` carrier, got {:?}",
+        node_data_for(dispatch.ctx, mutual).as_deref()
+    );
+
+    // Over-fuse alias chain → carrier-stop at an intermediate `DeclRef`, NOT the
+    // `'leaf'` literal terminal (the discriminator: a short chain WOULD reach the
+    // leaf — see `normalize_node_for_fact_demand_resolves_carrier_chains`).
+    let deep = dispatch.normalize_node_for_structural_fact_demand(member("deepchain"), navigate());
+    assert!(
+        matches!(
+            node_data_for(dispatch.ctx, deep).as_deref(),
+            Some(SemanticNodeData::DeclRef { .. })
+        ),
+        "a >FUSE-deep alias chain carrier-stops at an intermediate `DeclRef`, got {:?}",
+        node_data_for(dispatch.ctx, deep).as_deref()
+    );
+    assert!(
+        !matches!(
+            node_data_for(dispatch.ctx, deep).as_deref(),
+            Some(SemanticNodeData::Literal(_))
+        ),
+        "the step fuse prevented the deep chain from reaching the `'leaf'` literal terminal"
+    );
+}
+
+#[test]
+fn normalize_node_for_fact_demand_unresolvable_declref_fails_closed() {
+    // ERROR-path fail-closed: a `DeclRef` to a non-existent declaration (a
+    // synthetic identity whose `canonical_id` names no workspace file) MISSES the
+    // `ResolveDecl` query; the primitive breaks fail-closed, returning the input
+    // carrier (or an `Opaque` miss) — never a panic, never a fabricated concrete
+    // type. Standalone host: no workspace file backs the synthetic identity.
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let fake = graph.intern_node(SemanticNodeData::DeclRef {
+        identity: DeclIdentity::synthetic("Nonexistent"),
+    });
+    let resolved = dispatch.normalize_node_for_structural_fact_demand(fake, navigate());
+    assert!(
+        matches!(
+            node_data_for(dispatch.ctx, resolved).as_deref(),
+            Some(SemanticNodeData::DeclRef { .. }) | Some(SemanticNodeData::Opaque(_))
+        ),
+        "an unresolvable `DeclRef` fails closed to a carrier / opaque (never a fabricated type), got {:?}",
+        node_data_for(dispatch.ctx, resolved).as_deref()
+    );
+}
+
+#[test]
+fn event_names_self_referential_union_carrier_is_bounded() {
+    // BOUNDEDNESS (#1, real carrier): `type SelfUnion = 'x' | SelfUnion`
+    // referenced as the first param of `onself` is a self-referential union
+    // carrier. The shared resolver breaks the self-reference (recursive types
+    // stay carrier-shaped), so `event_names` — which carrier-resolves then
+    // recurses the union arms — TERMINATES and surfaces the concrete `'x'`
+    // literal rather than hanging. The hand-interned over-deep-union test below is
+    // the fuse-discriminating companion.
+    let component = "/workspace/SelfUnion.svelte";
+    let source = "<script lang=\"ts\">\n\
+         import type { SelfUnion } from './types';\n\
+         interface Props {\n\
+           onself: (e: SelfUnion) => void;\n\
+         }\n\
+         let props: Props = $props();\n\
+         void props;\n\
+         </script>\n\
+         <div />";
+    let (host, view) = workspace_host_with_svelte(
+        component,
+        source,
+        &[(
+            "/workspace/types.ts",
+            "export type SelfUnion = 'x' | SelfUnion;\n",
+        )],
+    );
+    let overlay = Arc::new(CanonicalCompletionOverlay::new());
+    let ctx = HostResolverContext::from_current(&host, &view, overlay);
+    let facts = host
+        .resolve_svelte_script_facts_with_ctx(&ctx, component)
+        .expect("svelte facts");
+    let props_type = facts.props_type.as_ref().expect("props type");
+    let surface =
+        navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
+    let dispatch = ctx.dispatch();
+    let onself = surface
+        .members
+        .iter()
+        .find(|m| m.name.as_ref() == "onself")
+        .expect("the `onself` member is present")
+        .value;
+
+    let names = CallableNodeView::new(&dispatch, onself)
+        .event_names(navigate())
+        .expect("the self-referential union carrier terminates and surfaces a name");
+    assert!(
+        names.iter().any(|n| n.as_ref() == "x"),
+        "the bounded recursion surfaces the concrete `'x'` literal, got {names:?}"
+    );
+}
+
+#[test]
+fn event_names_over_deep_nested_union_trips_collect_fuse() {
+    // BOUNDEDNESS (#1, FLIP test): `collect_string_literal_names` recurses on
+    // Union members with NO `visited` set — only the depth fuse bounds it. A
+    // string literal buried under (`CALLABLE_VIEW_DEPTH_FUSE` + 5) nested unions
+    // is NOT reached: the fuse fail-closes (stops contributing names past the
+    // bound) → `event_names` returns `None`. WITHOUT the fuse the recursion
+    // descends to the bottom and surfaces the literal — so this test FLIPS
+    // (None ↔ Some) and FAILS if the fuse is removed.
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let void = prim(&graph, PrimitiveKind::Void);
+    // Bury a string literal under more than the fuse's worth of nested unions
+    // (each a distinct interned single-arm union, so the recursion truly
+    // descends one level per hop).
+    let mut buried = string_literal(&graph, "deep");
+    for _ in 0..(super::CALLABLE_VIEW_DEPTH_FUSE + 5) {
+        buried = union(&graph, vec![buried]);
+    }
+    let f = function(&graph, vec![param(Some("e"), buried, false, false)], void);
+    assert_eq!(
+        CallableNodeView::new(&dispatch, f).event_names(navigate()),
+        None,
+        "a union nested deeper than CALLABLE_VIEW_DEPTH_FUSE fail-closes (the buried name is not reached)"
+    );
+
+    // DISCRIMINATING control: the SAME literal nested only a FEW levels (well
+    // under the fuse) IS surfaced — proving the `None` above is the fuse
+    // boundary, not a blanket failure to read nested unions.
+    let mut shallow_nest = string_literal(&graph, "shallow");
+    for _ in 0..3 {
+        shallow_nest = union(&graph, vec![shallow_nest]);
+    }
+    let f2 = function(
+        &graph,
+        vec![param(Some("e"), shallow_nest, false, false)],
+        void,
+    );
+    assert_eq!(
+        CallableNodeView::new(&dispatch, f2).event_names(navigate()),
+        Some(vec![Arc::<str>::from("shallow")]),
+        "a shallowly-nested union (under the fuse) still surfaces the literal"
     );
 }
