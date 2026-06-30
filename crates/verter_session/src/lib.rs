@@ -675,9 +675,13 @@ pub struct VerterHost {
     /// from the scheduler's own CPU pool — workers register as
     /// [`verter_scheduler::caller_kind::CallerKind::External`] so
     /// `wait_or_drive` parks instead of inline-executing scheduler CPU
-    /// tasks. Built once at host construction and reused across every
-    /// batch call (a regressed per-call rebuild would bump
-    /// [`verter_scheduler::HostCpuPool::build_count`] on every batch).
+    /// tasks. The pool object is built once at host construction and
+    /// reused across every batch call (a regressed per-call rebuild would
+    /// bump [`verter_scheduler::HostCpuPool::build_count`] on every batch);
+    /// its worker THREADS spawn eagerly at construction under the default /
+    /// `lsp_interactive` resource policy, or lazily on the first batch
+    /// `install` under `batch_typecheck`
+    /// ([`crate::types::HostResourcePolicy`]).
     ///
     /// Not present on `wasm32` — `compile_many` is gated behind
     /// `#[cfg(not(target_arch = "wasm32"))]` and the host-pool field
@@ -687,8 +691,12 @@ pub struct VerterHost {
     /// Scheduler-side lazy declaration-lowering service: dedicated
     /// worker threads own the retained (!Send) eval-program parses per
     /// content generation and run pure per-declaration lowering jobs
-    /// for the declaration-body memos. Built once at host construction;
-    /// shared by every `IndexedReady` artifact's memo. Retention is
+    /// for the declaration-body memos. The service object is built once at
+    /// host construction and shared by every `IndexedReady` artifact's
+    /// memo; its worker THREADS spawn eagerly at construction under the
+    /// default / `lsp_interactive` resource policy, or lazily on the first
+    /// lowering demand under `batch_typecheck`
+    /// ([`crate::types::HostResourcePolicy`]). Retention is
     /// LEASE-PINNED — a memo holds the snapshot for its content
     /// generation, so a live artifact reuses one parse instead of
     /// re-parsing per body demand. On `wasm32` there are no worker

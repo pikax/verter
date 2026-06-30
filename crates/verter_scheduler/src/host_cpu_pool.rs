@@ -26,6 +26,16 @@
 //! discriminating tests: a singleton host pool reports `1`; a regressed
 //! per-call rebuild would report `n`.
 //!
+//! Spawn timing is policy-driven. [`HostCpuPool::new`] spawns the worker
+//! threads EAGERLY at construction (the default / `lsp_interactive`
+//! resource policy); [`HostCpuPool::new_lazy`] defers the spawn to the
+//! first [`HostCpuPool::install`] (the `batch_typecheck` policy), behind a
+//! `OnceLock` so cold construction of a one-shot batch host creates zero
+//! host-pool threads. Either way the pool is a singleton owned by the host
+//! and reused across every batch. `pool_thread_count` / `pool_spawned`
+//! observe the spawn transition (0 / `false` before the first lazy
+//! `install`, non-zero / `true` after).
+//!
 //! Per-pool identity token (test-only): every successful
 //! [`HostCpuPool::new`] assigns a process-unique `pool_id`. Workers
 //! stash the id into a thread-local on `start_handler`, exposed via
@@ -36,7 +46,7 @@
 
 #[cfg(any(test, feature = "test-support"))]
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::caller_kind::CallerKind;
 
@@ -107,7 +117,17 @@ pub fn host_cpu_pool_token() -> Option<usize> {
 /// host batch fan-out). See module documentation for the dual-pool
 /// isolation invariant.
 pub struct HostCpuPool {
-    pool: rayon::ThreadPool,
+    /// The underlying rayon pool, behind a `OnceLock` so the worker
+    /// threads can spawn LAZILY on the first [`Self::install`] (the
+    /// `batch_typecheck` resource policy) instead of EAGERLY at
+    /// construction (the default / `lsp_interactive` policy, where
+    /// [`Self::new`] forces the spawn immediately). The spawn point is the
+    /// single `get_or_init` in [`Self::ensure_pool`].
+    pool: OnceLock<rayon::ThreadPool>,
+    /// Resolved worker count, captured at construction and used when the
+    /// pool actually spawns (eagerly in `new`, or on first `install` for
+    /// `new_lazy`).
+    threads: usize,
     /// Process-unique id for this pool. Workers stash this into
     /// `HOST_CPU_POOL_TOKEN` on `start_handler` so tests can assert
     /// a worker is THIS pool's worker, not just any `External`
@@ -122,63 +142,112 @@ pub struct HostCpuPool {
 }
 
 impl HostCpuPool {
-    /// Build a new host CPU pool with `threads` workers, each with an
-    /// 8 MiB stack. `threads == 0` is rejected (callers should resolve
-    /// `Option<usize>` to a positive count before calling).
+    /// Build a new EAGER host CPU pool with `threads` workers, each with
+    /// an 8 MiB stack: the worker threads spawn immediately at
+    /// construction. `threads == 0` is rejected (callers resolve
+    /// `Option<usize>` to a positive count before calling). This is the
+    /// default / `lsp_interactive` resource policy — WHEN the pool spawns
+    /// is unchanged from before lazy spawning existed, so Full-mode
+    /// construction is timing-identical.
     pub fn new(threads: usize) -> Arc<Self> {
+        let this = Self::alloc(threads);
+        // Eager policy: force the worker threads to spawn now.
+        this.ensure_pool();
+        this
+    }
+
+    /// Build a new LAZY host CPU pool with `threads` workers: the worker
+    /// threads do NOT spawn until the first [`Self::install`]. This is the
+    /// `batch_typecheck` resource policy — cold host construction spawns
+    /// ZERO host-pool threads, dropping a cost a one-shot batch never
+    /// amortises.
+    pub fn new_lazy(threads: usize) -> Arc<Self> {
+        // Lazy policy: the `OnceLock` stays empty until first demand.
+        Self::alloc(threads)
+    }
+
+    /// Allocate the pool handle (and, in test builds, its identity)
+    /// WITHOUT spawning workers. The eager constructor forces the spawn
+    /// immediately via [`Self::ensure_pool`]; the lazy constructor defers
+    /// it to the first `install`.
+    fn alloc(threads: usize) -> Arc<Self> {
         assert!(
             threads > 0,
             "HostCpuPool requires at least one worker thread"
         );
         #[cfg(any(test, feature = "test-support"))]
         let pool_id = NEXT_POOL_ID.fetch_add(1, Ordering::Relaxed);
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(threads)
-            .stack_size(8 * 1024 * 1024)
-            .thread_name(|i| format!("verter-host-cpu-{i}"))
-            .start_handler(move |_| {
-                // Workers register as `External` so `wait_or_drive`
-                // parks on the completion handle rather than inline-
-                // executing scheduler CPU tasks. `dispatch_ready_job`'s
-                // inline branch excludes `External`, so host workers
-                // never run scheduler CPU work — this is the dual-pool
-                // isolation invariant.
-                //
-                // `External` is the default TLS state for un-marked
-                // threads, but the explicit handler documents the
-                // contract and survives any future change to the
-                // default initialiser.
-                let _ = CallerKind::set(CallerKind::External);
-                // Stash the pool-id token so integration tests can
-                // prove a worker is THIS pool's worker (not any
-                // `External`-defaulting thread). Gated behind
-                // `cfg(any(test, feature = "test-support"))` so the
-                // TLS write only runs in builds that expose the
-                // matching reader — production builds skip it.
-                #[cfg(any(test, feature = "test-support"))]
-                HOST_CPU_POOL_TOKEN.with(|c| c.set(Some(pool_id)));
-            })
-            .build()
-            .expect("failed to build host CPU pool");
+        // `BUILD_COUNT` counts pool OBJECTS (one per `new` / `new_lazy`) —
+        // the signal the back-to-back `compile_many` test uses to prove
+        // the host owns ONE pool across batches, independent of WHEN the
+        // worker threads actually spawn (which `pool_thread_count`
+        // observes separately).
         #[cfg(any(test, feature = "test-support"))]
         BUILD_COUNT.fetch_add(1, Ordering::Relaxed);
         Arc::new(Self {
-            pool,
+            pool: OnceLock::new(),
+            threads,
             #[cfg(any(test, feature = "test-support"))]
             pool_id,
         })
     }
 
-    /// Run `f` on the host CPU pool, blocking the caller until `f`
-    /// returns. Same semantics as `rayon::ThreadPool::install`.
-    pub fn install<R: Send>(&self, f: impl FnOnce() -> R + Send) -> R {
-        self.pool.install(f)
+    /// Spawn (once) and return the underlying rayon pool. The first caller
+    /// builds the 8 MiB worker threads; concurrent callers block on the
+    /// `OnceLock` until that build completes. This is the SINGLE spawn
+    /// point — `new` calls it eagerly at construction, `new_lazy` defers
+    /// it to the first `install`. Spawning only creates OS threads (no
+    /// host re-entry, no lock acquisition), so a lazy spawn under a batch
+    /// demand site cannot deadlock.
+    fn ensure_pool(&self) -> &rayon::ThreadPool {
+        self.pool.get_or_init(|| {
+            #[cfg(any(test, feature = "test-support"))]
+            let pool_id = self.pool_id;
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(self.threads)
+                .stack_size(8 * 1024 * 1024)
+                .thread_name(|i| format!("verter-host-cpu-{i}"))
+                .start_handler(move |_| {
+                    // Workers register as `External` so `wait_or_drive`
+                    // parks on the completion handle rather than inline-
+                    // executing scheduler CPU tasks. `dispatch_ready_job`'s
+                    // inline branch excludes `External`, so host workers
+                    // never run scheduler CPU work — this is the dual-pool
+                    // isolation invariant.
+                    //
+                    // `External` is the default TLS state for un-marked
+                    // threads, but the explicit handler documents the
+                    // contract and survives any future change to the
+                    // default initialiser.
+                    let _ = CallerKind::set(CallerKind::External);
+                    // Stash the pool-id token so integration tests can
+                    // prove a worker is THIS pool's worker (not any
+                    // `External`-defaulting thread). Gated behind
+                    // `cfg(any(test, feature = "test-support"))` so the
+                    // TLS write only runs in builds that expose the
+                    // matching reader — production builds skip it.
+                    #[cfg(any(test, feature = "test-support"))]
+                    HOST_CPU_POOL_TOKEN.with(|c| c.set(Some(pool_id)));
+                })
+                .build()
+                .expect("failed to build host CPU pool")
+        })
     }
 
-    /// Cumulative count of successful [`HostCpuPool::new`] builds across
-    /// the host process. Exposed for the back-to-back compile_many test
-    /// that asserts host-owned (singleton) ownership instead of per-call
-    /// rebuilds.
+    /// Run `f` on the host CPU pool, blocking the caller until `f`
+    /// returns. Same semantics as `rayon::ThreadPool::install`. The first
+    /// call on a lazily-constructed pool ([`Self::new_lazy`]) spawns the
+    /// worker threads here.
+    pub fn install<R: Send>(&self, f: impl FnOnce() -> R + Send) -> R {
+        self.ensure_pool().install(f)
+    }
+
+    /// Cumulative count of pool OBJECTS built across the host process — one
+    /// per [`HostCpuPool::new`] OR [`HostCpuPool::new_lazy`], since
+    /// `BUILD_COUNT` increments in the shared `alloc()` constructor
+    /// regardless of WHEN the worker threads actually spawn. Exposed for the
+    /// back-to-back compile_many test that asserts host-owned (singleton)
+    /// ownership instead of per-call rebuilds.
     ///
     /// Test-only — gated behind `cfg(any(test, feature =
     /// "test-support"))`. Production binaries do not link this accessor
@@ -205,22 +274,43 @@ impl HostCpuPool {
     }
 
     /// Number of worker threads in the underlying `rayon::ThreadPool`.
-    /// Reports the resolved worker count after `HostConfig`'s
-    /// `Option<usize>` → `usize` resolution: `None` and `Some(0)` both
-    /// land on `available_parallelism()` (final-fallback `1`), and
-    /// `Some(n)` for `n >= 1` lands on exactly `n`.
     ///
-    /// Discriminator for `host_cpu_threads_some_zero_constructs_default_pool`:
-    /// a regression that swallowed `Some(0)` into `Some(1)` would
-    /// report `1` here even on a multi-core machine, contradicting
-    /// the documented "treated as None" contract.
+    /// Returns `0` until the pool's worker threads have actually spawned —
+    /// i.e. a [`Self::new_lazy`] pool reports `0` at construction and a
+    /// non-zero count only after the first [`Self::install`]. An eager
+    /// [`Self::new`] pool reports the resolved worker count immediately.
+    /// This 0-vs-N transition is the discriminating observable the
+    /// lazy-resource-policy tests assert on (construction does NOT spawn
+    /// batch-pool threads; first demand does).
+    ///
+    /// On a spawned pool the count reflects the resolved worker count after
+    /// `HostConfig`'s `Option<usize>` → `usize` resolution: `None` and
+    /// `Some(0)` both land on `available_parallelism()` (final-fallback
+    /// `1`), and `Some(n)` for `n >= 1` lands on exactly `n` — the
+    /// discriminator for `host_cpu_threads_some_zero_constructs_default_pool`.
     ///
     /// Test-only — gated behind `cfg(any(test, feature =
     /// "test-support"))`. Production binaries do not link this
     /// accessor.
     #[cfg(any(test, feature = "test-support"))]
     pub fn pool_thread_count(&self) -> usize {
-        self.pool.current_num_threads()
+        self.pool
+            .get()
+            .map(|pool| pool.current_num_threads())
+            .unwrap_or(0)
+    }
+
+    /// Whether the underlying rayon pool's worker threads have spawned
+    /// yet. `false` for a freshly-constructed [`Self::new_lazy`] pool;
+    /// `true` after the first [`Self::install`], and always `true` for an
+    /// eager [`Self::new`] pool. The boolean form of [`Self::pool_thread_count`]
+    /// `> 0` for tests that only care about the spawn transition.
+    ///
+    /// Test-only — gated behind `cfg(any(test, feature =
+    /// "test-support"))`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn pool_spawned(&self) -> bool {
+        self.pool.get().is_some()
     }
 }
 
@@ -378,6 +468,61 @@ mod tests {
             a.pool_id(),
             b.pool_id(),
             "two distinct HostCpuPool instances must claim different pool_id values"
+        );
+    }
+
+    /// Discriminating test for the LAZY spawn policy (`new_lazy`): the
+    /// worker threads MUST NOT spawn at construction, and MUST spawn on the
+    /// first `install`. A regression that reverted the laziness (built the
+    /// rayon pool in `new_lazy`/`alloc` instead of deferring to
+    /// `ensure_pool`) would observe a non-zero thread count BEFORE the
+    /// install and fail the construction-time assertions.
+    #[test]
+    fn host_cpu_pool_new_lazy_defers_thread_spawn_until_first_install() {
+        let pool = HostCpuPool::new_lazy(2);
+        // Construction must spawn ZERO worker threads.
+        assert!(
+            !pool.pool_spawned(),
+            "new_lazy must NOT spawn worker threads at construction"
+        );
+        assert_eq!(
+            pool.pool_thread_count(),
+            0,
+            "new_lazy thread count must be 0 before the first install \
+             (workers spawn lazily on demand)"
+        );
+
+        // First demand spawns the workers.
+        let ran = pool.install(|| 7usize);
+        assert_eq!(ran, 7, "install must run the closure on the spawned pool");
+        assert!(
+            pool.pool_spawned(),
+            "the first install must spawn the lazy pool's worker threads"
+        );
+        assert_eq!(
+            pool.pool_thread_count(),
+            2,
+            "after the first install the lazy pool must report its resolved \
+             worker count (2)"
+        );
+    }
+
+    /// Pins the EAGER spawn policy (`new`): worker threads spawn at
+    /// construction, so the count is non-zero BEFORE any install. This is
+    /// the Full / `lsp_interactive` invariant — reverting `new` to lazy
+    /// would flip these to 0 and fail here.
+    #[test]
+    fn host_cpu_pool_new_spawns_threads_eagerly_at_construction() {
+        let pool = HostCpuPool::new(2);
+        assert!(
+            pool.pool_spawned(),
+            "eager `new` must spawn worker threads at construction"
+        );
+        assert_eq!(
+            pool.pool_thread_count(),
+            2,
+            "eager `new` must report its resolved worker count (2) before \
+             any install"
         );
     }
 }

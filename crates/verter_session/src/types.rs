@@ -471,8 +471,13 @@ pub struct HostConfig {
     /// - [`AnalysisScope::LINTER`](verter_semantic::analysis::AnalysisScope::LINTER) — for lint rules
     ///
     /// **Migration**: Prefer [`QueryProfile`](verter_semantic::profile::QueryProfile) via
-    /// [`from_query_profile()`](Self::from_query_profile) which sets both this and the
-    /// session-level query profile automatically.
+    /// [`from_query_profile()`](Self::from_query_profile), which sets both
+    /// this field (from the profile's recommended scope bits) AND the
+    /// [`query_profile`](Self::query_profile) field. For a one-shot
+    /// project typecheck use [`batch_typecheck()`](Self::batch_typecheck)
+    /// instead — it sets `analysis_scope` to the carrier-affecting
+    /// `AnalysisScope::BUILD` bitset explicitly, NOT from the `Build`
+    /// profile's recommended bits.
     pub analysis_scope: Option<verter_semantic::analysis::AnalysisScope>,
     /// Enable shared Rust-side generic root propagation for fallthrough resolution.
     ///
@@ -628,11 +633,38 @@ pub struct HostConfig {
     /// surfaces still gets a working host pool. Other positive
     /// values cap the pool's worker count.
     ///
-    /// The host pool is built once at host construction and reused
-    /// across every host batch call. The pool is distinct from the
-    /// scheduler's own CPU pool — see the module documentation on
-    /// [`verter_scheduler`] for the dual-pool isolation invariant.
+    /// The host pool is built (or, under a lazy resource policy, lazily
+    /// spawned on first use) and reused across every host batch call. The
+    /// pool is distinct from the scheduler's own CPU pool — see the module
+    /// documentation on [`verter_scheduler`] for the dual-pool isolation
+    /// invariant.
+    ///
+    /// This is a legacy compat SCALAR that FEEDS [`Self::resource_policy`]:
+    /// [`Self::resolved_host_cpu_pool_policy`] is the single source of
+    /// truth for the host CPU pool's spawn+size. When `Some(n)` with
+    /// `n > 0`, it pins the resolved size to [`PoolSize::Fixed(n)`];
+    /// `None` / `Some(0)` leave the structured policy size untouched. The
+    /// scalar exists only so the FFI / NAPI surfaces
+    /// (`FfiHostConfig::host_cpu_threads`, `NapiHostConfig::hostCpuThreads`)
+    /// can size the pool without depending on the policy types. It is NOT a
+    /// second resource knob — it has a defined precedence over the policy,
+    /// not a parallel one.
     pub host_cpu_threads: Option<usize>,
+    /// Session-level query profile (prewarm / latency / cross-file policy).
+    ///
+    /// Sourced into the host's live `query_profile` slot at construction.
+    /// Defaults to [`QueryProfile::LspInteractive`](verter_semantic::profile::QueryProfile::LspInteractive)
+    /// — the interactive default — NOT `Build` (which is the bundler / CI
+    /// typecheck profile, selected by [`Self::batch_typecheck`]). Profiles
+    /// never change the meaning of a query result; they are execution hints.
+    pub query_profile: verter_semantic::profile::QueryProfile,
+    /// Spawn-timing + sizing of the host-owned, non-correctness worker
+    /// pools (the batch-coordinator CPU pool and the decl-lowering
+    /// service). Defaults to eager/historical sizes (see
+    /// [`HostResourcePolicy::default`]); [`Self::batch_typecheck`] selects
+    /// lazy-on-first-use so a one-shot batch host does not pay the cold
+    /// thread-spawn cost it never amortises.
+    pub resource_policy: HostResourcePolicy,
 }
 
 /// Test / advanced-tuning hooks for resolver budgets. Each field is
@@ -659,6 +691,141 @@ pub struct RecursionBudgetOverrides {
     /// to drive the cap-fire path on a hermetic fixture without
     /// requiring a 10_000-node corpus.
     pub walker_pathological_cap: Option<usize>,
+}
+
+/// When a host-owned worker pool spawns its OS threads.
+///
+/// Spawn timing is orthogonal to [`PoolSize`] (how many workers): a pool
+/// can be lazily-spawned but fixed-size, or eagerly-spawned but
+/// fraction-sized. Separating the two is deliberate — conflating them in a
+/// single enum would force a sizing decision onto every spawn-timing
+/// choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PoolSpawn {
+    /// Build the worker threads at host construction. The historical
+    /// behaviour for every host-owned pool; the `lsp_interactive` / default
+    /// preset keeps it so Full-mode construction is timing-identical.
+    Eager,
+    /// Defer worker-thread creation until the pool's first real demand
+    /// (first `install` for the host CPU pool, first lowering job for the
+    /// decl-lowering service). The `batch_typecheck` preset uses this to
+    /// drop the cold thread-spawn cost a one-shot batch never amortises.
+    LazyOnFirstUse,
+}
+
+/// How many worker threads a host-owned pool resolves to at spawn time.
+///
+/// Resolution happens once, when the pool actually spawns (eagerly at
+/// construction or lazily on first demand, per [`PoolSpawn`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PoolSize {
+    /// [`std::thread::available_parallelism`] (final-fallback `1` when the
+    /// platform cannot report it).
+    AvailableParallelism,
+    /// Exactly `n` workers (`0` is clamped up to `1`; the pool always has
+    /// at least one worker).
+    Fixed(usize),
+    /// `(available_parallelism / divisor)` clamped to the `{ min, max }`
+    /// bounds. The bounds are ORDERED before clamping (an inverted `min > max`
+    /// is tolerated) and `divisor == 0` is floored to `1`, so every public
+    /// value resolves without panicking. The decl-lowering default is
+    /// `Fraction { divisor: 4, min: 1, max: 4 }`. When the platform cannot
+    /// report parallelism the fallback is `2`, likewise clamped to the ordered
+    /// bounds (matching the historical decl-lowering sizing).
+    Fraction {
+        divisor: usize,
+        min: usize,
+        max: usize,
+    },
+}
+
+impl PoolSize {
+    /// Resolve this size to a concrete worker count (always `>= 1`).
+    ///
+    /// TOTAL over all public inputs: a malformed [`PoolSize::Fraction`]
+    /// (`divisor == 0`, or `min > max`) never panics. The divisor is floored
+    /// to `1` (no divide-by-zero) and the `{ min, max }` bounds are ORDERED
+    /// before clamping, so inverted bounds resolve to a sane in-range value
+    /// instead of tripping `clamp`'s `min <= max` requirement. BOTH the
+    /// computed value AND the `available_parallelism` fallback are clamped to
+    /// the caller's ordered bounds and floored at `1`.
+    pub fn resolve(self) -> usize {
+        match self {
+            PoolSize::AvailableParallelism => std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1),
+            PoolSize::Fixed(n) => n.max(1),
+            PoolSize::Fraction { divisor, min, max } => {
+                // Order the bounds so an inverted `{ min, max }` cannot trip
+                // `clamp` (which requires `min <= max`), and floor the divisor
+                // so `divisor == 0` cannot divide-by-zero.
+                let lo = min.min(max);
+                let hi = min.max(max);
+                let divisor = divisor.max(1);
+                std::thread::available_parallelism()
+                    .map(|n| n.get() / divisor)
+                    .unwrap_or(2)
+                    .clamp(lo, hi)
+                    .max(1)
+            }
+        }
+    }
+}
+
+/// Spawn-timing + sizing for a single host-owned worker pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PoolPolicy {
+    /// When the pool spawns its OS threads.
+    pub spawn: PoolSpawn,
+    /// How many workers the pool resolves to at spawn time.
+    pub size: PoolSize,
+}
+
+/// The default decl-lowering pool size — `clamp(available_parallelism / 4,
+/// 1, 4)` 8 MiB workers, the historical sizing. The single definition both
+/// [`HostResourcePolicy::default`] and the decl-lowering service's no-arg
+/// constructor key off, so the two can never drift.
+pub(crate) const DECL_LOWERING_DEFAULT_POOL_SIZE: PoolSize = PoolSize::Fraction {
+    divisor: 4,
+    min: 1,
+    max: 4,
+};
+
+/// Resource policy for a [`VerterHost`](crate::VerterHost): the spawn
+/// timing + sizing of the host-owned worker pools that are NOT required
+/// for cross-file correctness.
+///
+/// The scheduler correctness pools (driver + CPU stage pool + IO pool) are
+/// NOT policy-gated — they are always built for a session-bearing host, so
+/// cross-file resolution and cache materialisation never lose a worker.
+/// Only the throughput-oriented host CPU pool and the demand-driven
+/// decl-lowering service are governed here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostResourcePolicy {
+    /// Host-owned batch-coordinator CPU pool
+    /// ([`verter_scheduler::HostCpuPool`]). Throughput-only.
+    pub host_cpu_pool: PoolPolicy,
+    /// Scheduler-side lazy declaration-lowering worker pool
+    /// ([`crate::decl_lowering`]).
+    pub decl_lowering: PoolPolicy,
+}
+
+impl Default for HostResourcePolicy {
+    fn default() -> Self {
+        // The Full / `lsp_interactive` defaults: both pools EAGER at the
+        // historical sizes, so default-host construction is byte- and
+        // timing-identical to before the resource policy existed.
+        Self {
+            host_cpu_pool: PoolPolicy {
+                spawn: PoolSpawn::Eager,
+                size: PoolSize::AvailableParallelism,
+            },
+            decl_lowering: PoolPolicy {
+                spawn: PoolSpawn::Eager,
+                size: DECL_LOWERING_DEFAULT_POOL_SIZE,
+            },
+        }
+    }
 }
 
 /// Eviction policy tunables for the project-global cache cluster.
@@ -848,15 +1015,83 @@ pub enum HostConfigError {
 impl HostConfig {
     /// Create a config from a query profile.
     ///
-    /// Sets `analysis_scope` from the profile's recommended scope mapping.
-    /// This is the preferred migration path from AnalysisScope to QueryProfile.
+    /// Sets BOTH `analysis_scope` (from the profile's recommended scope
+    /// mapping) AND `query_profile` (to `profile`) — the two together are
+    /// the preferred migration path from raw `AnalysisScope` to
+    /// `QueryProfile`. Distinct from [`Self::batch_typecheck`], which sets
+    /// `analysis_scope` to the carrier-affecting [`AnalysisScope::BUILD`]
+    /// bitset EXPLICITLY (NOT `QueryProfile::Build`'s recommended bits,
+    /// which omit the style facts that feed carrier bytes).
     pub fn from_query_profile(profile: verter_semantic::profile::QueryProfile) -> Self {
         let scope_bits = profile.recommended_analysis_scope_bits();
         let scope = verter_semantic::analysis::AnalysisScope::from_bits_truncate(scope_bits);
         Self {
             analysis_scope: Some(scope),
+            query_profile: profile,
             ..Default::default()
         }
+    }
+
+    /// The interactive LSP preset — EXACTLY today's Full default
+    /// ([`HostConfig::default`]): effective analysis scope
+    /// [`AnalysisScope::LSP`](verter_semantic::analysis::AnalysisScope::LSP)
+    /// (all passes), [`QueryProfile::LspInteractive`](verter_semantic::profile::QueryProfile::LspInteractive),
+    /// and eager host-owned pools. One source of truth — it delegates to
+    /// `default()`.
+    pub fn lsp_interactive() -> Self {
+        Self::default()
+    }
+
+    /// The batch-typecheck preset for a one-shot, full-project type check
+    /// (CI / bundler / `verter-tsc`).
+    ///
+    /// Keeps the SAME shared `VerterHost` / resolver / cache substrate as
+    /// [`Self::lsp_interactive`]; it only re-presets the orthogonal axes:
+    ///
+    /// - **analysis scope** = [`AnalysisScope::BUILD`](verter_semantic::analysis::AnalysisScope::BUILD)
+    ///   — the carrier-affecting fact set (imports, bindings, macros,
+    ///   macro-type-deps, export signatures, AND `STYLE_VBIND` +
+    ///   `STYLE_SCOPED`). It is set EXPLICITLY here, NOT derived from
+    ///   `QueryProfile::Build.recommended_analysis_scope_bits()` (which
+    ///   omits the style bits and so would drop carrier bytes), and NOT
+    ///   `BUILD_OPTIMIZED` (which adds template/cross facts beyond the
+    ///   typecheck boundary). Same carrier bytes as Full ⇒ same tsc input.
+    /// - **query profile** = [`QueryProfile::Build`](verter_semantic::profile::QueryProfile::Build).
+    /// - **resource policy** = both host-owned pools lazy-on-first-use at
+    ///   the historical sizes, so cold construction spawns zero throughput
+    ///   threads (the scheduler correctness pools are still eager).
+    /// - **audit** off (the default).
+    pub fn batch_typecheck() -> Self {
+        Self {
+            analysis_scope: Some(verter_semantic::analysis::AnalysisScope::BUILD),
+            query_profile: verter_semantic::profile::QueryProfile::Build,
+            resource_policy: HostResourcePolicy {
+                host_cpu_pool: PoolPolicy {
+                    spawn: PoolSpawn::LazyOnFirstUse,
+                    size: PoolSize::AvailableParallelism,
+                },
+                decl_lowering: PoolPolicy {
+                    spawn: PoolSpawn::LazyOnFirstUse,
+                    size: DECL_LOWERING_DEFAULT_POOL_SIZE,
+                },
+            },
+            ..Default::default()
+        }
+    }
+
+    /// The single source of truth for the host CPU pool's resolved
+    /// spawn+size policy. Starts from `resource_policy.host_cpu_pool` and
+    /// applies the legacy [`Self::host_cpu_threads`] compat scalar:
+    /// `Some(n)` with `n > 0` pins [`PoolSize::Fixed(n)`]; `None` /
+    /// `Some(0)` leave the structured policy size unchanged. The scalar
+    /// FEEDS the policy with a defined precedence — there is never a second
+    /// competing pool-size knob.
+    pub fn resolved_host_cpu_pool_policy(&self) -> PoolPolicy {
+        let mut policy = self.resource_policy.host_cpu_pool;
+        if let Some(n) = self.host_cpu_threads.filter(|&n| n > 0) {
+            policy.size = PoolSize::Fixed(n);
+        }
+        policy
     }
 }
 
@@ -896,6 +1131,11 @@ impl Default for HostConfig {
             recursion_budget_overrides: RecursionBudgetOverrides::default(),
             typeinfo_scratch_cache_capacity: None,
             host_cpu_threads: None,
+            // Interactive is the correct default profile — `Build` is the
+            // bundler/CI typecheck profile, selected only by
+            // `batch_typecheck()`.
+            query_profile: verter_semantic::profile::QueryProfile::LspInteractive,
+            resource_policy: HostResourcePolicy::default(),
         }
     }
 }
@@ -3643,6 +3883,66 @@ mod tests {
     #[test]
     fn host_config_default_external_resolution_step_budget_is_none() {
         assert_eq!(HostConfig::default().external_resolution_step_budget, None);
+    }
+
+    // -----------------------------------------------------------------------
+    // PoolSize::resolve totality
+    // -----------------------------------------------------------------------
+
+    /// `PoolSize::Fraction` is a public field-struct variant, so a caller can
+    /// pass a malformed `{ divisor: 0, min: 4, max: 1 }` (zero divisor AND
+    /// inverted bounds). `resolve()` must be TOTAL: it must NOT panic — a
+    /// `min > max` would trip `clamp`'s `min <= max` requirement and a zero
+    /// divisor would divide-by-zero — and must land inside the caller's
+    /// ORDERED bounds, never below 1. Reverting the ordering / divisor floor
+    /// makes the inverted-bounds cases panic (RED).
+    #[test]
+    fn pool_size_fraction_resolve_is_total_on_malformed_bounds() {
+        // Zero divisor + inverted bounds: must not panic; ordered bounds are
+        // [min(4,1), max(4,1)] == [1, 4].
+        let resolved = PoolSize::Fraction {
+            divisor: 0,
+            min: 4,
+            max: 1,
+        }
+        .resolve();
+        assert!(
+            (1..=4).contains(&resolved),
+            "malformed Fraction must resolve in the ordered bounds [1, 4], got {resolved}"
+        );
+
+        // Inverted bounds with a valid divisor — isolates the `min > max`
+        // clamp panic from the divisor guard. Ordered bounds [2, 8].
+        let inverted = PoolSize::Fraction {
+            divisor: 4,
+            min: 8,
+            max: 2,
+        }
+        .resolve();
+        assert!(
+            (2..=8).contains(&inverted),
+            "inverted-bounds Fraction must resolve in [2, 8], got {inverted}"
+        );
+
+        // A well-formed Fraction still resolves exactly as before the fix:
+        // (available_parallelism / 4) clamped to [1, 4]. The ordering /
+        // fallback-clamp must NOT change well-formed resolution, so this
+        // equals the decl-lowering default sizing.
+        let normal = PoolSize::Fraction {
+            divisor: 4,
+            min: 1,
+            max: 4,
+        }
+        .resolve();
+        assert!(
+            (1..=4).contains(&normal),
+            "well-formed Fraction must resolve in [1, 4], got {normal}"
+        );
+        assert_eq!(
+            normal,
+            DECL_LOWERING_DEFAULT_POOL_SIZE.resolve(),
+            "well-formed Fraction resolution must be unchanged by the totality fix"
+        );
     }
 
     // -----------------------------------------------------------------------

@@ -219,10 +219,48 @@ fn shard_index(key: &SnapshotKey, worker_count: usize) -> usize {
     (hasher.finish() as usize) % worker_count
 }
 
+/// Spawn `worker_count` decl-lowering worker threads, each owning its own
+/// retained-parse [`SnapshotShard`] and looping on a job channel. Returns
+/// the per-worker job senders. The 8 MiB stack matches the host CPU pool:
+/// lowering recursion over deeply nested type bodies must not regress
+/// stack capacity vs. the former inline path. This is the eager-or-lazy
+/// spawn body — called at construction for an eager service, or on first
+/// demand (through [`DeclLoweringService::workers`]) for a lazy one.
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn_decl_workers(worker_count: usize) -> Vec<std::sync::mpsc::Sender<WorkerJob>> {
+    let worker_count = worker_count.max(1);
+    let mut workers = Vec::with_capacity(worker_count);
+    for index in 0..worker_count {
+        let (tx, rx) = std::sync::mpsc::channel::<WorkerJob>();
+        std::thread::Builder::new()
+            .name(format!("verter-decl-lower-{index}"))
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || {
+                let mut shard = SnapshotShard::new();
+                while let Ok(job) = rx.recv() {
+                    job(&mut shard);
+                }
+            })
+            .expect("failed to spawn decl-lowering worker");
+        workers.push(tx);
+    }
+    workers
+}
+
 /// The lazy declaration-lowering service. See module docs.
 pub(crate) struct DeclLoweringService {
+    /// Resolved worker count, captured at construction and used when the
+    /// worker threads actually spawn (eagerly at construction or lazily on
+    /// the first lowering demand).
     #[cfg(not(target_arch = "wasm32"))]
-    workers: Vec<std::sync::mpsc::Sender<WorkerJob>>,
+    worker_count: usize,
+    /// Worker job channels, behind a `OnceLock` so the worker threads can
+    /// spawn LAZILY on the first lowering demand (the `batch_typecheck`
+    /// resource policy) instead of EAGERLY at construction (the default /
+    /// `lsp_interactive` policy). The single spawn point is the
+    /// `get_or_init` in [`Self::workers`].
+    #[cfg(not(target_arch = "wasm32"))]
+    workers: std::sync::OnceLock<Vec<std::sync::mpsc::Sender<WorkerJob>>>,
     // On `wasm32` the service is FIELDLESS: the retained shard lives in
     // the `WASM_DECL_LOWERING_SHARD` thread-local, never here, so the
     // service stays `Send + Sync` without any `unsafe impl`.
@@ -236,52 +274,83 @@ impl std::fmt::Debug for DeclLoweringService {
 }
 
 impl DeclLoweringService {
+    /// Eager service at the default decl-lowering pool size — workers
+    /// spawn at construction. Keyed off the same
+    /// [`crate::types::DECL_LOWERING_DEFAULT_POOL_SIZE`] the default
+    /// [`crate::types::HostResourcePolicy`] uses, so the no-arg default and
+    /// the resource policy can never drift.
+    ///
+    /// Production host construction goes through [`Self::new_with`] (the
+    /// resource-policy-driven path); this no-arg eager convenience is used
+    /// only by the crate's `#[cfg(test)]` decl-lowering / memo suites.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn new() -> Self {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let worker_count = std::thread::available_parallelism()
-                .map(|n| (n.get() / 4).clamp(1, 4))
-                .unwrap_or(2);
-            Self::with_workers(worker_count)
+        Self::new_with(
+            /* lazy = */ false,
+            crate::types::DECL_LOWERING_DEFAULT_POOL_SIZE.resolve(),
+        )
+    }
+
+    /// Build a service under an explicit spawn policy. `lazy == false`
+    /// spawns the `worker_count` worker threads now (the default /
+    /// `lsp_interactive` policy); `lazy == true` defers the spawn to the
+    /// first lowering demand ([`Self::run`] / [`Self::acquire_lease`]) —
+    /// the `batch_typecheck` policy, where cold host construction spawns
+    /// zero decl-lowering threads.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn new_with(lazy: bool, worker_count: usize) -> Self {
+        let worker_count = worker_count.max(1);
+        let workers = std::sync::OnceLock::new();
+        if !lazy {
+            // Eager policy: spawn the workers now. `set` on a fresh
+            // `OnceLock` always succeeds.
+            let _ = workers.set(spawn_decl_workers(worker_count));
         }
-        #[cfg(target_arch = "wasm32")]
-        {
-            // Fieldless on wasm — retention lives in the
-            // `WASM_DECL_LOWERING_SHARD` thread-local.
-            Self {}
+        Self {
+            worker_count,
+            workers,
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    fn with_workers(worker_count: usize) -> Self {
-        let worker_count = worker_count.max(1);
-        let mut workers = Vec::with_capacity(worker_count);
-        for index in 0..worker_count {
-            let (tx, rx) = std::sync::mpsc::channel::<WorkerJob>();
-            // 8 MiB stack, matching the host CPU pool: lowering
-            // recursion over deeply nested type bodies must not
-            // regress stack capacity vs. the former inline path.
-            std::thread::Builder::new()
-                .name(format!("verter-decl-lower-{index}"))
-                .stack_size(8 * 1024 * 1024)
-                .spawn(move || {
-                    let mut shard = SnapshotShard::new();
-                    while let Ok(job) = rx.recv() {
-                        job(&mut shard);
-                    }
-                })
-                .expect("failed to spawn decl-lowering worker");
-            workers.push(tx);
-        }
-        Self { workers }
+    /// wasm has no worker threads (the `!Send` parse cannot cross a thread
+    /// boundary and the service must stay `Send + Sync`); the retained
+    /// shard lives in the `WASM_DECL_LOWERING_SHARD` thread-local. The
+    /// spawn policy is inert here — both arguments are ignored.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn new_with(_lazy: bool, _worker_count: usize) -> Self {
+        Self {}
     }
 
     /// Test-only single-worker constructor: forces every key onto one
     /// shard so retention tests are deterministic regardless of host
-    /// parallelism.
+    /// parallelism. Eager (workers spawn immediately).
     #[cfg(all(test, not(target_arch = "wasm32")))]
     fn new_single_worker() -> Self {
-        Self::with_workers(1)
+        Self::new_with(/* lazy = */ false, 1)
+    }
+
+    /// Spawn (once) and return the worker job channels. The first caller
+    /// spawns the 8 MiB worker threads; concurrent callers block on the
+    /// `OnceLock` until that spawn completes. This is the SINGLE spawn
+    /// point — an eager service forces it at construction, a lazy service
+    /// reaches it on the first lowering demand. Spawning only creates OS
+    /// threads + the job channels and never re-enters the host (workers
+    /// run pure lowering jobs), so a lazy spawn under a resolve demand
+    /// cannot deadlock.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn workers(&self) -> &[std::sync::mpsc::Sender<WorkerJob>] {
+        self.workers
+            .get_or_init(|| spawn_decl_workers(self.worker_count))
+    }
+
+    /// Whether the worker threads have spawned yet. `false` for a
+    /// freshly-constructed lazy service; `true` after the first lowering
+    /// demand, and always `true` for an eager service. Test-only signal of
+    /// a REAL thread spawn — the `OnceLock` is populated only by
+    /// `spawn_decl_workers`, never by hand.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) fn workers_spawned(&self) -> bool {
+        self.workers.get().is_some()
     }
 
     /// Acquire a [`SnapshotLease`] pinning the retained parse for `key`.
@@ -295,7 +364,10 @@ impl DeclLoweringService {
     ) -> LeaseOutcome {
         #[cfg(not(target_arch = "wasm32"))]
         let parsed_now = {
-            let shard_index = shard_index(key, self.workers.len());
+            // First lowering demand spawns the worker threads if the
+            // service was constructed lazily (`batch_typecheck`).
+            let workers = self.workers();
+            let shard_index = shard_index(key, workers.len());
             let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
             let key_for_job = key.clone();
             let source = Arc::clone(source);
@@ -303,7 +375,7 @@ impl DeclLoweringService {
                 let parsed_now = shard.acquire(&key_for_job, &source, source_type);
                 let _ = result_tx.send(parsed_now);
             });
-            self.workers[shard_index]
+            workers[shard_index]
                 .send(job)
                 .expect("decl-lowering worker channel must outlive the service");
             result_rx
@@ -329,13 +401,18 @@ impl DeclLoweringService {
     fn release_key(&self, key: &SnapshotKey) {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let shard_index = shard_index(key, self.workers.len());
+            // A release only happens through a `SnapshotLease` drop, and a
+            // lease is only ever produced by `acquire_lease` (which already
+            // spawned the workers), so `workers()` here is always a cheap
+            // `get` — it never spawns on a release.
+            let workers = self.workers();
+            let shard_index = shard_index(key, workers.len());
             let key_for_job = key.clone();
             let job: WorkerJob = Box::new(move |shard| shard.release(&key_for_job));
             // Ignore a send error: the only way the channel is closed is
             // the worker (and its shard, including this key's entry) is
             // already gone.
-            let _ = self.workers[shard_index].send(job);
+            let _ = workers[shard_index].send(job);
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -379,7 +456,10 @@ impl DeclLoweringService {
         {
             use std::panic::AssertUnwindSafe;
 
-            let shard_index = shard_index(key, self.workers.len());
+            // First lowering demand spawns the worker threads if the
+            // service was constructed lazily (`batch_typecheck`).
+            let workers = self.workers();
+            let shard_index = shard_index(key, workers.len());
             let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
             let key = key.clone();
             let source = Arc::clone(source);
@@ -391,7 +471,7 @@ impl DeclLoweringService {
                 let value = std::panic::catch_unwind(AssertUnwindSafe(|| job(parsed.as_deref())));
                 let _ = result_tx.send(value.map(|value| LoweringOutcome { value, parsed_now }));
             });
-            self.workers[shard_index]
+            workers[shard_index]
                 .send(worker_job)
                 .expect("decl-lowering worker channel must outlive the service");
             match result_rx
@@ -695,5 +775,51 @@ mod tests {
         for handle in handles {
             assert!(handle.join().expect("no panics"));
         }
+    }
+
+    /// Discriminating test for the LAZY spawn policy (`new_with(true, …)`):
+    /// the worker threads MUST NOT spawn at construction, and MUST spawn on
+    /// the first lowering demand. A regression that reverted the laziness
+    /// (spawned in `new_with` instead of deferring to `workers()`) would
+    /// observe `workers_spawned() == true` BEFORE the first run.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn lazy_service_defers_worker_spawn_until_first_run() {
+        let service = DeclLoweringService::new_with(/* lazy = */ true, 2);
+        assert!(
+            !service.workers_spawned(),
+            "a lazy service must NOT spawn worker threads at construction"
+        );
+
+        // First lowering demand spawns the workers.
+        let source: Arc<str> = Arc::from("type A = 1;\n");
+        let k = key("/ws/lazy.ts", 5);
+        let outcome = service.run(&k, &source, oxc_span::SourceType::ts(), |p| p.is_some());
+        assert!(
+            outcome.value,
+            "the lowering job must run on the spawned pool"
+        );
+        assert!(
+            service.workers_spawned(),
+            "the first lowering demand must spawn the lazy service's workers"
+        );
+    }
+
+    /// Pins the EAGER spawn policy: `new()` (the default-host constructor)
+    /// and `new_with(false, …)` spawn workers at construction. Reverting
+    /// the default to lazy would flip these to `false` and fail here.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn eager_service_spawns_workers_at_construction() {
+        let eager_default = DeclLoweringService::new();
+        assert!(
+            eager_default.workers_spawned(),
+            "`new()` must spawn worker threads eagerly at construction"
+        );
+        let eager_explicit = DeclLoweringService::new_with(/* lazy = */ false, 2);
+        assert!(
+            eager_explicit.workers_spawned(),
+            "`new_with(false, …)` must spawn worker threads eagerly"
+        );
     }
 }

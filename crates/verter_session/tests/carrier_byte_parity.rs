@@ -53,8 +53,17 @@ use verter_session::{
 /// `files` are upserted into one host (stable canonical IDs); the IDE carrier for
 /// `target` is then ensured + read. `get_ide` returns `None` only when the file is
 /// not a resolvable carrier — a panic here is a real regression, not flake.
+///
+/// Defaults to the Full / `HostConfig::default()` preset (the golden baseline).
 fn ide_tsx(files: &[(&str, &str, FileLanguage)], target: &str) -> String {
-    let host = VerterHost::new_standalone(HostConfig::default());
+    ide_tsx_with(HostConfig::default(), files, target)
+}
+
+/// `ide_tsx` parametrised on the host preset, so the Full-vs-Batch parity test can
+/// build the SAME carrier under `HostConfig::batch_typecheck()` and byte-compare it
+/// against the `lsp_interactive()` (= default / golden) output.
+fn ide_tsx_with(config: HostConfig, files: &[(&str, &str, FileLanguage)], target: &str) -> String {
+    let host = VerterHost::new_standalone(config);
     for (canonical, source, lang) in files {
         let _ = host.upsert(UpsertRequest {
             canonical_id: Some((*canonical).to_string()),
@@ -91,8 +100,20 @@ fn ide_tsx(files: &[(&str, &str, FileLanguage)], target: &str) -> String {
 /// `files` are upserted into one host (stable canonical IDs); the stub for
 /// `target` is then read. `get_public_api` returns `None` only when the file is
 /// not a resolvable carrier — a panic here is a real regression, not flake.
+///
+/// Defaults to the Full / `HostConfig::default()` preset (the golden baseline).
 fn public_api_stub(files: &[(&str, &str, FileLanguage)], target: &str) -> String {
-    let host = VerterHost::new_standalone(HostConfig::default());
+    public_api_stub_with(HostConfig::default(), files, target)
+}
+
+/// `public_api_stub` parametrised on the host preset, for the Full-vs-Batch parity
+/// test (same cross-component stub under `batch_typecheck()` vs `lsp_interactive()`).
+fn public_api_stub_with(
+    config: HostConfig,
+    files: &[(&str, &str, FileLanguage)],
+    target: &str,
+) -> String {
+    let host = VerterHost::new_standalone(config);
     for (canonical, source, lang) in files {
         let _ = host.upsert(UpsertRequest {
             canonical_id: Some((*canonical).to_string()),
@@ -333,5 +354,93 @@ fn generics_public_api_stub_matches_golden() {
         code, golden,
         "generics public-API stub drifted. If intentional, regenerate \
          tests/carrier_byte_parity/generics.stub.golden.\n--- ACTUAL ---\n{code}"
+    );
+}
+
+// ── Full-vs-Batch parity (the load-bearing Batch-correctness proof) ──
+
+/// For every oracle fixture, a host built with `HostConfig::batch_typecheck()`
+/// must produce byte-identical IDE carrier bytes AND public-API stub bytes to a
+/// host built with `HostConfig::lsp_interactive()` (the Full / default golden path,
+/// the same `ensure_ide_compiled` + `get_ide` / `get_public_api` ship path the
+/// goldens above pin). This is the core Batch invariant — Full and Batch emit the
+/// SAME carrier bytes — proven directly on the carrier surface.
+///
+/// Diagnostic-set parity (Rail B, `crates/verter_tsc/tests/diagnostic_set_parity.rs`)
+/// follows transitively: Batch keeps the carrier-affecting analysis facts
+/// (`AnalysisScope::BUILD` includes STYLE_VBIND/STYLE_SCOPED), so identical carrier
+/// + stub bytes under identical scope feed tsgo identical input ⇒ the same
+/// diagnostic set. (verter-tsc still runs the default host until it adopts the Batch
+/// preset, so a direct Batch diagnostic run is not wireable here.)
+///
+/// DISCRIMINATING: this parity test guards script-fact scope and
+/// query-profile-induced cross-file differences — the `cross_file_child` fixture
+/// exercises exactly that, and its pass confirms the default `LspInteractive` query
+/// profile yields carrier bytes identical to `Build`. (The STYLE_VBIND
+/// analysis-scope membership is pinned separately by the boundary tests in
+/// `host_preset_policy.rs`, NOT here: the IDE carrier re-derives style v-bind from
+/// the parse, so this test is invariant to that scope bit.)
+/// Assert Batch ≡ Full for ONE fixture, on BOTH carrier surfaces (IDE TSX
+/// carrier + public-API stub). Factored out so the per-fixture call sites
+/// stay a flat list (and clippy's `type_complexity` stays happy).
+fn assert_full_batch_parity(label: &str, files: &[(&str, &str, FileLanguage)], target: &str) {
+    let full_carrier = norm(&ide_tsx_with(HostConfig::lsp_interactive(), files, target));
+    let batch_carrier = norm(&ide_tsx_with(HostConfig::batch_typecheck(), files, target));
+    assert_eq!(
+        batch_carrier, full_carrier,
+        "[{label}] batch_typecheck() IDE carrier bytes must equal lsp_interactive() \
+         (Full) carrier bytes\n--- FULL ---\n{full_carrier}\n--- BATCH ---\n{batch_carrier}"
+    );
+
+    let full_stub = norm(&public_api_stub_with(
+        HostConfig::lsp_interactive(),
+        files,
+        target,
+    ));
+    let batch_stub = norm(&public_api_stub_with(
+        HostConfig::batch_typecheck(),
+        files,
+        target,
+    ));
+    assert_eq!(
+        batch_stub, full_stub,
+        "[{label}] batch_typecheck() public-API stub bytes must equal lsp_interactive() \
+         (Full) stub bytes\n--- FULL ---\n{full_stub}\n--- BATCH ---\n{batch_stub}"
+    );
+}
+
+#[test]
+fn full_vs_batch_carrier_and_stub_byte_parity() {
+    assert_full_batch_parity(
+        "style_v_bind",
+        &[("/proj/Accent.vue", STYLE_V_BIND, FileLanguage::vue())],
+        "/proj/Accent.vue",
+    );
+    assert_full_batch_parity(
+        "cross_file_child",
+        &[
+            (
+                "/proj/types.ts",
+                CROSS_FILE_TYPES,
+                FileLanguage::script_ts(),
+            ),
+            ("/proj/Child.vue", CROSS_FILE_CHILD, FileLanguage::vue()),
+        ],
+        "/proj/Child.vue",
+    );
+    assert_full_batch_parity(
+        "with_defaults",
+        &[("/proj/WithDefaults.vue", WITH_DEFAULTS, FileLanguage::vue())],
+        "/proj/WithDefaults.vue",
+    );
+    assert_full_batch_parity(
+        "slots",
+        &[("/proj/Slots.vue", SLOTS, FileLanguage::vue())],
+        "/proj/Slots.vue",
+    );
+    assert_full_batch_parity(
+        "generics",
+        &[("/proj/Generics.vue", GENERICS, FileLanguage::vue())],
+        "/proj/Generics.vue",
     );
 }
