@@ -1323,7 +1323,7 @@ Deferred follow-ups (lead-architect ruled, tracked here):
   is wrong and must be revisited.
 - **`PROJECTPATH_INTERSECTION_OPAQUE_LAUNDERING`**: global, PRE-EXISTING
   node-domain reducer debt — NOT intrinsic-C-specific. The shared
-  `join_intersection` (`project_semantic_dispatch/walk.rs:2503`) DROPS `Opaque(_)`
+  `join_intersection` (`project_semantic_dispatch/walk.rs:2506`) DROPS `Opaque(_)`
   arms ("opaque arms drop, surviving contributors intersect; zero contributors →
   `Opaque(Miss)`"), and decl-body lowering maps EVERY unrepresentable
   `TypeExpr::Unknown { raw }` arm to `Opaque(QueryError::Miss)`
@@ -1351,35 +1351,41 @@ Deferred follow-ups (lead-architect ruled, tracked here):
   global pre-existing reducer debt, deferrable like
   `RESOLVED_META_SCALAR_NO_POISON`.
 - **`INTRINSIC_STATIC_FALLBACK_WARM_CACHE`**: PRE-EXISTING and GLOBAL, a sibling
-  of `RESOLVED_META_SCALAR_NO_POISON`. The host warms the projected intrinsic
-  surface via an UNCONDITIONAL `store_node` (`host_manage.rs:975`,
-  `self.host.resolver_runtime().fallthrough.store_node(...)`) with NO completeness
-  gate, so a too-narrow / partial intrinsic surface is admitted warm and replayed
-  as authoritative with no record of its incompleteness. This hole is LIVE TODAY,
-  NOT latent: the plain Class-A intrinsic tag path
-  (`project_intrinsic_tag_member_shape`) already produces a too-narrow surface for
-  a partially-resolvable tag value — `UnresolvedBase & { x }` launders to `{ x }`
+  of `RESOLVED_META_SCALAR_NO_POISON`. The intrinsic tag surface is warm-cached
+  through `host_manage.rs:975`
+  (`self.host.resolver_runtime().fallthrough.store_node(...)`). That `store_node`
+  (`resolver_core/fallthrough_resolver.rs:193`) DOES carry a no-poison gate — it
+  refuses admission when `current_cold_compute_completeness().is_partial()`
+  (`fallthrough_resolver.rs:202-205`, the typed completeness rail "shared with the
+  component-meta materialiser"). The hole is that this gate is BLIND for the
+  Class-A laundering case: the plain Class-A intrinsic tag path
+  (`project_intrinsic_tag_member_shape`) produces a too-narrow surface for a
+  partially-resolvable tag value — `UnresolvedBase & { x }` launders to `{ x }`
   through the node-domain intersection reducer (see
-  `PROJECTPATH_INTERSECTION_OPAQUE_LAUNDERING` above) — and that `{ x }` flows
-  straight into the ungated `store_node` and is warm-cached as authoritative. It
-  is nevertheless PRE-EXISTING and GLOBAL, NOT an intrinsic-C regression: codex Q1
+  `PROJECTPATH_INTERSECTION_OPAQUE_LAUNDERING` above) — WITHOUT folding any
+  partial / degradation signal into the cold-compute completeness scope, so the
+  `is_partial` gate sees `Complete` and admits the too-narrow `{ x }` as
+  authoritative. The poison is therefore LIVE TODAY (the laundering and the
+  partial-signal-blind gate are both reachable on the plain path), NOT latent, but
+  PRE-EXISTING and GLOBAL, NOT an intrinsic-C regression: codex Q1
   (disposition-leg1) code-verified that the OLD `type_expr_to_object_shape` path
-  produced the SAME `{ x }` for `UnresolvedBase & { x }` and warm-cached it
-  identically. The FIX-A revert ensures intrinsic-C adds NO NEW partial producer
-  on top of this pre-existing laundering — FIX-A's
-  `resolvable_intersection_remainder` would have explicitly recovered and
-  published a known-too-narrow remainder as complete, a SECOND partial producer.
-  The eventual fix gates the `store_node` complete-only (the same structural
-  complete-only-admission pattern owed to the intermediate resolved-meta cache)
-  AND fixes the upstream `PROJECTPATH_INTERSECTION_OPAQUE_LAUNDERING` so the plain
-  path stops producing the too-narrow surface in the first place. Owner:
+  produced the SAME `{ x }` for `UnresolvedBase & { x }` and recorded no partial
+  signal either, so it warm-cached identically. The FIX-A revert ensures
+  intrinsic-C adds NO NEW partial producer on top of this pre-existing laundering
+  — FIX-A's `resolvable_intersection_remainder` would have explicitly recovered
+  and published a known-too-narrow remainder as complete, a SECOND
+  blind-to-the-gate producer. The eventual fix is NOT to add a gate (one already
+  exists) but to make the laundering path RECORD partial / `ReturnOnly` so the
+  existing `is_partial` gate fires, AND to fix the upstream
+  `PROJECTPATH_INTERSECTION_OPAQUE_LAUNDERING` so the plain path stops producing
+  the too-narrow surface in the first place. Owner:
   `INTRINSIC_STATIC_FALLBACK_WARM_CACHE`. codex-DEFER ruling 2026-06-30
   (`.feedback/intrinsic-c/disposition-leg1-OUTPUT.txt`, disposition-leg1;
   gpt-5.5/xhigh, neutral-verified + best-not-lowest-effort-explicit): DEFER —
-  pre-existing / global unconditional store_node at `host_manage.rs:975`, deferred
-  because it predates intrinsic-C and the revert adds no new partial producer; the
-  warm-cache-of-too-narrow is live today via the pre-existing plain Class-A
-  laundering, not gated on a future producer.
+  pre-existing / global; the warm-cache-of-too-narrow is live today via the
+  pre-existing plain Class-A laundering plus the partial-signal-blind `is_partial`
+  gate, not gated on a future producer, and the revert adds no new partial
+  producer.
 - **`INTRINSIC_PARTIAL_RECOVERY_NO_POISON`**: the no-poison-safe partial
   intrinsic-tag recovery FEATURE — recovering the resolvable inline-arm members
   of a partially-resolvable intrinsic tag value (`MissingBase & { projectOnly }`)
