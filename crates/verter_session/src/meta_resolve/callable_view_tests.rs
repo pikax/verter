@@ -1817,9 +1817,10 @@ fn event_names_mutual_cycle_fails_whole_via_visited_set() {
     // fail-closed-whole behavior layered on the visited-set cycle break.
     let component = "/workspace/Mutual.svelte";
     let source = "<script lang=\"ts\">\n\
-         import type { A } from './types';\n\
+         import type { A, Ack } from './types';\n\
          interface Props {\n\
            onmut: (e: A) => void;\n\
+           onack: (e: Ack) => void;\n\
          }\n\
          let props: Props = $props();\n\
          void props;\n\
@@ -1830,8 +1831,13 @@ fn event_names_mutual_cycle_fails_whole_via_visited_set() {
         source,
         &[(
             "/workspace/types.ts",
+            // `A`/`B` are the mutual cycle. `Ack`/`AckTail` are an ACYCLIC 2-hop
+            // carrier chain of the SAME shape and depth (a literal + a 1-hop
+            // alias ref) — the visited-set proof control below.
             "export type A = 'a' | B;\n\
-             export type B = 'b' | A;\n",
+             export type B = 'b' | A;\n\
+             export type Ack = 'ack0' | AckTail;\n\
+             export type AckTail = 'ack1' | 'ack2';\n",
         )],
     );
     let overlay = Arc::new(CanonicalCompletionOverlay::new());
@@ -1843,17 +1849,40 @@ fn event_names_mutual_cycle_fails_whole_via_visited_set() {
     let surface =
         navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
     let dispatch = ctx.dispatch();
-    let onmut = surface
-        .members
-        .iter()
-        .find(|m| m.name.as_ref() == "onmut")
-        .expect("the `onmut` member is present")
-        .value;
+    let member = |name: &str| -> SemanticNodeId {
+        surface
+            .members
+            .iter()
+            .find(|m| m.name.as_ref() == name)
+            .unwrap_or_else(|| panic!("the `{name}` member is present"))
+            .value
+    };
 
     assert_eq!(
-        CallableNodeView::new(&dispatch, onmut).event_names(navigate()),
+        CallableNodeView::new(&dispatch, member("onmut")).event_names(navigate()),
         None,
         "a genuine mutual cycle (`A` references `B`, `B` references `A`) re-yields the same union node on the back-edge → the active-path visited set fails the WHOLE enumeration (not a partial `Some([\"a\", \"b\"])`, not a stack overflow)"
+    );
+
+    // [P3] PROOF THE VISITED SET FIRED (not the depth fuse): the SAME 2-hop
+    // carrier shape (`Ack = 'ack0' | AckTail; AckTail = 'ack1' | 'ack2'`) but
+    // ACYCLIC. Its back-edge-free enumeration descends to the SAME shallow depth
+    // (~2-3 hops) at which the mutual cycle's revisit fires — far below
+    // `CALLABLE_VIEW_DEPTH_FUSE` (32). It enumerates COMPLETELY →
+    // `Some(["ack0", "ack1", "ack2"])`. Because enumeration SUCCEEDS at this depth
+    // when acyclic, the `None` above CANNOT be a depth-fuse trip — it is the
+    // active-path visited set firing on the cycle's back-edge. (A regression that
+    // replaced the visited set with the depth fuse would still return `None` for
+    // `onmut` but would NOT enumerate `onack` at this depth — this control
+    // discriminates the two mechanisms.)
+    assert_eq!(
+        CallableNodeView::new(&dispatch, member("onack")).event_names(navigate()),
+        Some(vec![
+            Arc::<str>::from("ack0"),
+            Arc::<str>::from("ack1"),
+            Arc::<str>::from("ack2")
+        ]),
+        "an ACYCLIC 2-hop carrier chain of the same depth enumerates completely — proving the mutual-cycle `None` is the active-path visited set, NOT the depth fuse"
     );
 }
 
@@ -1962,5 +1991,96 @@ fn event_names_finite_deep_dag_union_enumerates_completely() {
         set,
         vec!["bottom", "s1", "s2"],
         "the finite deep DAG union surfaces EVERY name (depth fuse doesn't truncate the deep chain; the active-path visited set doesn't false-trip on the shared subtree)"
+    );
+}
+
+#[test]
+fn event_names_residual_carrier_arm_fails_whole_not_partial() {
+    // [P1] residual-carrier partial poison: a union `'present' | <residual
+    // carrier>` whose second arm is a `DeclRef` the demand primitive CANNOT
+    // resolve (a synthetic identity naming no workspace file — the same
+    // unresolvable carrier `normalize_node_for_fact_demand_unresolvable_declref_
+    // fails_closed` exercises). Pre-fix the blanket `_ => true` arm treated the
+    // unresolved carrier as a COMPLETE no-name leaf, so `'present'` was pushed,
+    // the carrier arm returned `true`, and `event_names` surfaced
+    // `Some(["present"])` — a PARTIAL enumeration presented as COMPLETE (the
+    // exact poison cycle 3 closed for depth/cycle, here reached via a residual
+    // carrier that carrier-stopped on its OWN fuse / miss). Post-fix the residual
+    // carrier fails-closed (`false`) → the whole union fails → `event_names`
+    // yields `None`.
+    //
+    // FLIP: revert the residual-carrier arm to `_ => true` and the `DeclRef` arm
+    // returns `true` → the union enumerates `["present"]` as complete →
+    // `Some(["present"])`, FAILING this `None` assertion. So this discriminates
+    // the residual-carrier fail-closed behaviour specifically (NOT the depth /
+    // cycle paths the sibling fail-closed tests cover).
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let void = prim(&graph, PrimitiveKind::Void);
+    let present = string_literal(&graph, "present");
+    // A `DeclRef` to a non-existent declaration: the demand primitive misses the
+    // `ResolveDecl` query and carrier-stops, leaving a residual carrier.
+    let unresolvable = graph.intern_node(SemanticNodeData::DeclRef {
+        identity: DeclIdentity::synthetic("Nonexistent"),
+    });
+
+    // PRECONDITION (#4): the second arm genuinely normalizes to a RESIDUAL
+    // CARRIER (a `DeclRef` / `Opaque` miss), NOT a literal — so the test
+    // exercises the residual-carrier arm, not a pre-resolved literal that would
+    // pass regardless of the fix.
+    let normalized_arm =
+        dispatch.normalize_node_for_structural_fact_demand(unresolvable, navigate());
+    assert!(
+        matches!(
+            node_data_for(dispatch.ctx, normalized_arm).as_deref(),
+            Some(SemanticNodeData::DeclRef { .. }) | Some(SemanticNodeData::Opaque(_))
+        ),
+        "precondition: the unresolvable `DeclRef` arm carrier-stops to a residual carrier (DeclRef / Opaque), not a literal, got {:?}",
+        node_data_for(dispatch.ctx, normalized_arm).as_deref()
+    );
+
+    let names_union = union(&graph, vec![present, unresolvable]);
+    let f = function(
+        &graph,
+        vec![param(Some("e"), names_union, false, false)],
+        void,
+    );
+    assert_eq!(
+        CallableNodeView::new(&dispatch, f).event_names(navigate()),
+        None,
+        "`'present' | <unresolvable residual carrier>` fails the WHOLE enumeration (the carrier could hide a literal) — NEVER a partial `Some([\"present\"])`"
+    );
+}
+
+#[test]
+fn event_names_concrete_non_literal_arm_is_skipped_not_failed() {
+    // CONTROL against over-failing: a mixed union `'a' | number` — the `number`
+    // arm is a CONCRETE non-literal that is definitively NOT (and cannot hide) a
+    // string literal, so it is SKIPPED (complete-no-name), NOT fail-closed.
+    // `event_names` surfaces `["a"]`. This guards the residual-carrier fix from
+    // OVER-rejecting: a concrete `Primitive` arm must stay `true` (the `build.rs`
+    // `_ => {}` precedent), so only genuinely-unresolved carriers fail closed.
+    //
+    // DISCRIMINATING: if the fix wrongly classified `Primitive` as fail-closed,
+    // this would return `None` and the assertion would fail.
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let void = prim(&graph, PrimitiveKind::Void);
+    let a = string_literal(&graph, "a");
+    let number = prim(&graph, PrimitiveKind::Number);
+    let names_union = union(&graph, vec![a, number]);
+    let f = function(
+        &graph,
+        vec![param(Some("e"), names_union, false, false)],
+        void,
+    );
+    assert_eq!(
+        CallableNodeView::new(&dispatch, f).event_names(navigate()),
+        Some(vec![Arc::<str>::from("a")]),
+        "a concrete non-literal arm (`number`) is SKIPPED (complete-no-name), not fail-closed — `'a' | number` yields `[\"a\"]`"
     );
 }

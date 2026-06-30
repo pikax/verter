@@ -32,7 +32,7 @@ use crate::project_semantic_dispatch::{node_data_for, ProjectSemanticDispatch};
 use crate::resolver_core::ResolverContext;
 use crate::semantic_query::{
     LiteralValue, PathSegment, PrimitiveKind, ProjectionMode, ProjectionReductionContext,
-    SemanticNodeData, SemanticNodeId,
+    QueryError, SemanticNodeData, SemanticNodeId,
 };
 use crate::typeinfo::surface::TypeInfoSurface;
 
@@ -294,9 +294,10 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
     /// event-name alias (an `InstantiationRef`) surfaces its names. This
     /// RESOLVES MORE than the legacy `fold_node` materializer, which keeps
     /// `DeclRef` / `InstantiationRef` shallow and would miss those names — the
-    /// decided correct Vue semantics. A residual carrier where a literal is
-    /// required contributes no name (fail-closed). Zero `TypeExpr`
-    /// materialization.
+    /// decided correct Vue semantics. A residual carrier the demand primitive
+    /// could NOT resolve — where a string literal could still hide — fails the
+    /// WHOLE enumeration (fail-closed-whole → `None`), never a partial name set
+    /// presented as complete. Zero `TypeExpr` materialization.
     pub(crate) fn event_names(&self, context: ProjectionReductionContext) -> Option<Vec<Arc<str>>> {
         let first_ty = self.signature(context)?.first_param()?;
         let mut names = Vec::new();
@@ -319,10 +320,13 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
     /// carrier-resolving each hop through the shared structural-fact primitive.
     ///
     /// Returns `true` when the subtree was FULLY enumerated (complete) and
-    /// `false` when enumeration FAILED — a depth-fuse trip OR an active-path
-    /// cycle revisit. A `false` return makes [`Self::event_names`] discard the
-    /// WHOLE (possibly partial) `out` and yield `None` (fail-closed-whole): an
-    /// incomplete enumeration must NEVER be presented as a complete name set.
+    /// `false` when enumeration FAILED — a depth-fuse trip, an active-path
+    /// cycle revisit, OR a residual unresolved carrier (a `DeclRef` /
+    /// `InstantiationRef` / `BareRef` / `Opaque(Miss)` the demand primitive
+    /// could not resolve) where a string literal could still hide. A `false`
+    /// return makes [`Self::event_names`] discard the WHOLE (possibly partial)
+    /// `out` and yield `None` (fail-closed-whole): an incomplete enumeration
+    /// must NEVER be presented as a complete name set.
     fn collect_string_literal_names(
         &self,
         node: SemanticNodeId,
@@ -385,10 +389,41 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
                     }
                     all
                 }
-                // A non-string-literal, non-union leaf (e.g. a `number` arm of a
-                // mixed `'save' | number` union) contributes no name but is NOT a
-                // failure — it is a legitimately-enumerated branch yielding none.
-                _ => true,
+                // CONCRETE NON-LITERAL leaf — a definitively-resolved shape that
+                // is not, and cannot hide, a string literal (the `number` arm of
+                // a mixed `'save' | number` union, an object / tuple / array /
+                // function param, a non-string literal). Contributes no name but
+                // is a legitimately-enumerated COMPLETE branch — the `build.rs`
+                // precedent's `_ => {}` skip: `'a' | number` → `["a"]`.
+                SemanticNodeData::Primitive(_)
+                | SemanticNodeData::Literal(_)
+                | SemanticNodeData::Object(_)
+                | SemanticNodeData::Tuple { .. }
+                | SemanticNodeData::Array { .. }
+                | SemanticNodeData::Function { .. } => true,
+                // CLOSED-CYCLE carve-out — the shared resolver's DIRECT
+                // self-reference carrier-stop (`type S = 'x' | S` resolves to
+                // `Union(Literal('x'), Opaque(RecursiveRef))`). A CLOSED back-edge
+                // to a node already enumerated on the active path: it hides NO new
+                // literal, so it is COMPLETE (keeps `event_names` = `Some(["x"])`).
+                // Distinct from an UNRESOLVED carrier below — this is a *decided*
+                // recursion stop, NOT a "could-not-resolve".
+                SemanticNodeData::Opaque(QueryError::RecursiveRef { .. }) => true,
+                // RESIDUAL UNRESOLVED CARRIER / open operator / any other
+                // not-definitively-resolved shape → FAIL CLOSED (`false`). A node
+                // the demand primitive could NOT resolve — a `DeclRef` /
+                // `InstantiationRef` / `BareRef` / `ImportType` / `MergedDecl`
+                // carrier it carrier-stopped on (its own fuse / cycle / miss), an
+                // `Opaque(Miss / DeclPlaceholder / BudgetExceeded / …)` miss, or an
+                // open `KeyOf` / `IndexedAccess` / `Mapped` / `Conditional` /
+                // `TemplateLiteral` / `TypeParam` / `Infer` / `TypeOf` operator
+                // `normalize` left shaped — where a string literal COULD still
+                // hide. We don't KNOW it isn't (or doesn't hide) a literal, so we
+                // must NOT present the enumeration as complete: fail-closed-whole
+                // (`event_names` → `None`), never a partial-as-complete poison.
+                // New `SemanticNodeData` variants land here and fail closed by
+                // default (no-poison).
+                _ => false,
             },
         };
         // Remove on unwind: the visited set is an ACTIVE-PATH cycle guard, not a
