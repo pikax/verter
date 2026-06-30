@@ -1769,6 +1769,310 @@ fn component_meta_resolution_path_has_no_eager_materializer_or_member_fallback()
 }
 
 // ===========================================================================
+// Production-wide tombstone — retired utility-shape / route-fixpoint cluster
+// ===========================================================================
+
+/// The retired utility-shape / route-fixpoint cluster idents. These were
+/// deleted when the four owner-local intrinsic / jsdoc macro-root sites moved
+/// onto the node-domain Class-A rail; the whole connected utility-shape
+/// subgraph (the host-threaded surface bridges, the route-key fixpoint
+/// machinery, the expr-surface projectors, and their carrier node types) was
+/// retired in the same change. Re-introducing ANY of them resurrects a second
+/// query-time resolution path the one-engine rule forbids — resolve a root /
+/// tag surface through the surviving node-domain Class-A rail
+/// (`project_expr_class_a_node_via_dispatch_threaded` +
+/// `materialize_registry_whole_surface_candidate`) instead.
+///
+/// The PRESERVED-live siblings are deliberately ABSENT from this list and stay
+/// reachable: `project_route_surface_node_via_host_threaded`,
+/// `lower_and_project_to_expanded_node_via_host_threaded`,
+/// `project_expr_class_a_node_via_dispatch_threaded`,
+/// `dispatch_projected_surface_with_node`, `dispatch_routed_expr_surface_node`,
+/// `dispatch_routed_pick_omit_via_shared_engine_node`,
+/// `materialize_registry_whole_surface_candidate`,
+/// `project_admitted_route_node_to_expanded_object_shape`,
+/// `surface_view_to_expanded_shape`, `materialize_pick_member_surface`,
+/// `solve_or_project_intrinsic_member_node_until_stable`,
+/// `project_class_a_terminal_node`, `lower_and_project_to_expanded_node`,
+/// `project_admitted_node_to_expanded_node`. Whole-identifier matching keeps the
+/// retired `dispatch_projected_surface` from colliding with the live
+/// `dispatch_projected_surface_with_node`.
+const RETIRED_UTILITY_SHAPE_CLUSTER: &[&str] = &[
+    "project_type_surface_expr_via_host_threaded",
+    "project_expr_surface_shape_via_host_threaded",
+    "project_route_surface_expr_via_host_threaded",
+    "project_expr_surface_expr_via_host_threaded",
+    "project_expr_surface_expr_node_via_host_threaded",
+    "project_admitted_node_to_expanded_node_via_host_threaded",
+    "project_expr_surface_expr_node",
+    "dispatch_projected_surface",
+    "dispatch_projected_surface_to_type_expr",
+    "projected_expanded_shape_from_node_core",
+    "project_expr_to_surface_shape",
+    "project_direct_utility_surface_shape",
+    "enumerate_route_literal_keys",
+    "lower_route_key_source_node",
+    "enumerate_keyspace_names_from_keyspace_node",
+    "enumerate_public_surface_member_names_from_admitted_node",
+    "RouteFixpointCursor",
+    "RouteKeyspaceNode",
+    "StableRouteLeafNode",
+    "PreparedProjectionContext",
+    "admit_mode_aware",
+    "solve_or_project_leaf_node_until_stable",
+];
+
+/// Whole-IDENTIFIER scan of one PARSED source file for any
+/// [`RETIRED_UTILITY_SHAPE_CLUSTER`] ident, SKIPPING `#[cfg(test)]` modules /
+/// impls / fns (and a `mod tests`). Returns the matched idents (deduped).
+///
+/// syn tokenisation gives whole-identifier matching for free, so the retired
+/// `dispatch_projected_surface` never false-matches the LIVE
+/// `dispatch_projected_surface_with_node`, and an ident inside a `//` / `///`
+/// comment is not a token (a comment mention is not a reintroduction).
+/// `#[cfg(test)]` code is skipped — a retired ident may legitimately survive in
+/// a characterization-test comment / fixture. `macro_rules!` invocation bodies
+/// are opaque to `visit_ident`, so their token trees are walked separately;
+/// only `Ident` tokens are checked (a retired NAME inside a `format!` /
+/// `stringify!` string literal is a `Literal`, never flagged).
+fn retired_cluster_idents_in_file(file: &syn::File) -> Vec<String> {
+    use std::collections::BTreeSet;
+    use syn::visit::Visit;
+
+    fn has_cfg_test(attrs: &[syn::Attribute]) -> bool {
+        attrs.iter().any(|a| {
+            if !a.path().is_ident("cfg") {
+                return false;
+            }
+            let rendered = match &a.meta {
+                syn::Meta::List(list) => list.tokens.to_string(),
+                _ => return false,
+            };
+            rendered
+                .split(|c: char| !c.is_alphanumeric() && c != '_')
+                .any(|tok| tok == "test")
+        })
+    }
+
+    fn scan_macro_tokens(tokens: proc_macro2::TokenStream, hits: &mut BTreeSet<String>) {
+        for tt in tokens {
+            match tt {
+                proc_macro2::TokenTree::Ident(id) => {
+                    let name = id.to_string();
+                    if RETIRED_UTILITY_SHAPE_CLUSTER.contains(&name.as_str()) {
+                        hits.insert(name);
+                    }
+                }
+                proc_macro2::TokenTree::Group(g) => scan_macro_tokens(g.stream(), hits),
+                _ => {}
+            }
+        }
+    }
+
+    struct Scan {
+        cfg_test_depth: usize,
+        hits: BTreeSet<String>,
+    }
+    impl<'ast> Visit<'ast> for Scan {
+        fn visit_ident(&mut self, ident: &'ast syn::Ident) {
+            if self.cfg_test_depth == 0 {
+                let name = ident.to_string();
+                if RETIRED_UTILITY_SHAPE_CLUSTER.contains(&name.as_str()) {
+                    self.hits.insert(name);
+                }
+            }
+        }
+        fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+            if self.cfg_test_depth == 0 {
+                scan_macro_tokens(mac.tokens.clone(), &mut self.hits);
+            }
+            syn::visit::visit_macro(self, mac);
+        }
+        fn visit_item_mod(&mut self, m: &'ast syn::ItemMod) {
+            let entered = has_cfg_test(&m.attrs) || m.ident == "tests";
+            if entered {
+                self.cfg_test_depth += 1;
+            }
+            syn::visit::visit_item_mod(self, m);
+            if entered {
+                self.cfg_test_depth -= 1;
+            }
+        }
+        fn visit_item_impl(&mut self, i: &'ast syn::ItemImpl) {
+            let entered = has_cfg_test(&i.attrs);
+            if entered {
+                self.cfg_test_depth += 1;
+            }
+            syn::visit::visit_item_impl(self, i);
+            if entered {
+                self.cfg_test_depth -= 1;
+            }
+        }
+        fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
+            let entered = has_cfg_test(&f.attrs);
+            if entered {
+                self.cfg_test_depth += 1;
+            }
+            syn::visit::visit_item_fn(self, f);
+            if entered {
+                self.cfg_test_depth -= 1;
+            }
+        }
+        fn visit_impl_item_fn(&mut self, f: &'ast syn::ImplItemFn) {
+            let entered = has_cfg_test(&f.attrs);
+            if entered {
+                self.cfg_test_depth += 1;
+            }
+            syn::visit::visit_impl_item_fn(self, f);
+            if entered {
+                self.cfg_test_depth -= 1;
+            }
+        }
+    }
+
+    let mut scan = Scan {
+        cfg_test_depth: 0,
+        hits: BTreeSet::new(),
+    };
+    scan.visit_file(file);
+    scan.hits.into_iter().collect()
+}
+
+/// Production-WIDE tombstone: the retired utility-shape / route-fixpoint cluster
+/// idents (see [`RETIRED_UTILITY_SHAPE_CLUSTER`]) must not reappear as a
+/// definition, call, type reference, `use` import, or macro-expanded ident token
+/// in ANY non-test production source under `crates/verter_session/src/`.
+///
+/// The earlier scoped tombstones each covered ONE file (the
+/// `dispatch_member_for_root_symbol` absence in the engine module; the
+/// host-threaded surface bridges in `dispatch_helpers.rs`); a reintroduction at
+/// any other callsite would have escaped them. This widens the absence
+/// assertion to the whole crate.
+#[test]
+fn retired_utility_shape_cluster_absent_from_production_source() {
+    use walkdir::WalkDir;
+
+    fn is_test_file(rel: &str) -> bool {
+        rel.ends_with("_tests.rs") || rel.ends_with("/tests.rs") || rel.contains("/tests/")
+    }
+
+    let session_src = workspace_root().join("crates/verter_session/src");
+    let mut files_scanned = 0usize;
+    let mut violations: Vec<String> = Vec::new();
+    for entry in WalkDir::new(&session_src) {
+        let entry = entry.expect("walkdir entry");
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        let rel = path
+            .strip_prefix(workspace_root())
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        if is_test_file(&rel) {
+            continue;
+        }
+        let src = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
+        let file = syn::parse_file(&src).unwrap_or_else(|e| panic!("parse {rel}: {e}"));
+        files_scanned += 1;
+        for ident in retired_cluster_idents_in_file(&file) {
+            violations.push(format!(
+                "{rel}: retired cluster ident `{ident}` reintroduced into production source"
+            ));
+        }
+    }
+
+    // Anti-vacuity: the walk must actually cover the production corpus (384 such
+    // files at the time of writing). A broken walk (zero / a handful of files)
+    // would otherwise pass vacuously.
+    assert!(
+        files_scanned > 200,
+        "tombstone scan covered only {files_scanned} non-test production files — the walk \
+         is not reaching the `verter_session/src` corpus (anti-vacuity guard)"
+    );
+    assert!(
+        violations.is_empty(),
+        "retired utility-shape / route-fixpoint cluster ident(s) reintroduced into \
+         production source. Resolve root / tag surfaces through the node-domain \
+         Class-A rail (`project_expr_class_a_node_via_dispatch_threaded` + \
+         `materialize_registry_whole_surface_candidate`), never by re-adding the \
+         retired bridge / fixpoint / expr-surface cluster:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn retired_utility_shape_cluster_tombstone_discriminates() {
+    fn scan(src: &str) -> Vec<String> {
+        retired_cluster_idents_in_file(&syn::parse_file(src).expect("self-test fixture must parse"))
+    }
+
+    // RED: a reintroduced free-fn CALL is flagged.
+    assert!(
+        scan("fn caller() { let _ = project_expr_to_surface_shape(ctx, expr); }")
+            .contains(&"project_expr_to_surface_shape".to_string()),
+        "self-test: a reintroduced `project_expr_to_surface_shape` call MUST be flagged"
+    );
+    // RED: a reintroduced carrier TYPE reference is flagged.
+    assert!(
+        scan("fn f() -> Option<RouteFixpointCursor> { None }")
+            .contains(&"RouteFixpointCursor".to_string()),
+        "self-test: a reintroduced `RouteFixpointCursor` type reference MUST be flagged"
+    );
+    // RED: a reintroduced fn DEFINITION is flagged.
+    assert!(
+        scan("fn admit_mode_aware(w: &W) -> Option<N> { None }")
+            .contains(&"admit_mode_aware".to_string()),
+        "self-test: a reintroduced `admit_mode_aware` definition MUST be flagged"
+    );
+    // RED: a retired ident generated inside a macro invocation body is flagged
+    // (macro-token Ident scan), but a NAME inside a string literal is NOT.
+    assert!(
+        scan("fn f() { wrapper!(dispatch_projected_surface_to_type_expr(s)); }")
+            .contains(&"dispatch_projected_surface_to_type_expr".to_string()),
+        "self-test: a retired ident inside a macro body MUST be flagged"
+    );
+    assert!(
+        scan("fn f() { let _ = format!(\"removed project_expr_to_surface_shape helper\"); }")
+            .is_empty(),
+        "self-test: a retired NAME inside a string literal must NOT be flagged (Literal, not Ident)"
+    );
+
+    // GREEN — whole-identifier discrimination: the LIVE
+    // `dispatch_projected_surface_with_node` must NOT match the retired prefix
+    // `dispatch_projected_surface`.
+    assert!(
+        scan("impl E { fn c(&mut self) { let _ = self.dispatch_projected_surface_with_node(s, n); } }")
+            .is_empty(),
+        "self-test: the LIVE `dispatch_projected_surface_with_node` must NOT match the retired \
+         `dispatch_projected_surface` (whole-identifier matching)"
+    );
+    // GREEN — preserved-live node-domain rail idents are not in the retired set.
+    assert!(
+        scan(
+            "fn f() { \
+             let _ = project_expr_class_a_node_via_dispatch_threaded(); \
+             let _ = project_admitted_node_to_expanded_node(); \
+             let _ = project_route_surface_node_via_host_threaded(); \
+             let _ = project_admitted_route_node_to_expanded_object_shape(); }"
+        )
+        .is_empty(),
+        "self-test: preserved-live node-domain rail idents must NOT be flagged"
+    );
+    // GREEN — `#[cfg(test)]` exclusion: a retired ident inside test code is not
+    // flagged (characterization tests may reference the retired symbol).
+    assert!(
+        scan("#[cfg(test)]\nmod tests { fn t() { let _ = project_expr_to_surface_shape(); } }")
+            .is_empty(),
+        "self-test: a retired ident inside `#[cfg(test)]` must NOT be flagged"
+    );
+}
+
+// ===========================================================================
 // Phase 5l-supplement — `no_unbounded_recursion_in_resolver_core`
 // ===========================================================================
 //
