@@ -122,9 +122,9 @@ The `=====` delimiters make copy-paste boundaries unambiguous. Never concatenate
 Placeholders (substitute from elicited inputs):
 
 - `{{PLAN_PATH}}` — absolute plan file path.
-- `{{REPO_PATH}}` — repo root (e.g. `D:\path\to\verter` on Windows, `/path/to/verter` on POSIX).
-- `{{STAGING_BRANCH}}` — e.g. `staging/d-cutover`.
-- `{{TARGET_BRANCH}}` — e.g. `refactor/semantic-db-overhaul`.
+- `{{REPO_PATH}}` — repo root (e.g. `D:\path\to\project` on Windows, `/path/to/project` on POSIX).
+- `{{STAGING_BRANCH}}` — e.g. `staging/<campaign>`.
+- `{{TARGET_BRANCH}}` — e.g. the campaign's integration branch.
 - `{{GLOBAL_RULES}}` — the developer global rules file (`$HOME/.claude/CLAUDE.md` on POSIX, `%USERPROFILE%\.claude\CLAUDE.md` on Windows).
 - `{{PROJECT_RULES}}` — `<repo>/CLAUDE.md` if it exists; else omit the line that cites it.
 - `{{GATE_SECTION}}` — plan's landing-gate section ref (e.g. `§7.5`).

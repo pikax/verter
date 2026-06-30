@@ -3675,8 +3675,7 @@ NO persisted gate/review receipt. The eight parts of the protocol:
 
 ### 11.1 One branch per block
 
-Each block is implemented on its OWN branch off the target branch
-(`refactor/semantic-db-overhaul`). The branch is the unit of in-flight work and the only place a
+Each block is implemented on its OWN branch off the target branch. The branch is the unit of in-flight work and the only place a
 block's incomplete state ever lives — there is no tracked cursor recording "block X is in
 flight." A block's branch does exactly three coupled things in the SAME branch (so every commit
 on it, and the eventual squash-merge, is internally consistent):
@@ -3953,7 +3952,7 @@ skipped, and is never re-selected after its trailer is merged.
 ### 11.11 Git commit history — WIP series → squash-merge → one commit per block
 
 This subsection governs how many commits the target branch
-(`refactor/semantic-db-overhaul`) receives per landed block.
+receives per landed block.
 
 - **During block implementation the owning agent commits FREELY as a WIP series on
   the block's branch.** A HIGH WIP commit count is expected and encouraged (per-fix
@@ -3984,7 +3983,7 @@ This subsection governs how many commits the target branch
 
 Pinned by **`typeinfo_block_lands_as_single_squashed_commit`** — asserts each landed
 block's `Typeinfo-Block: <block_id>` trailer appears on EXACTLY ONE target-branch
-(`refactor/semantic-db-overhaul`) commit. The block ↔ commit relation is a BIJECTION:
+commit. The block ↔ commit relation is a BIJECTION:
 the guard REJECTS zero commits carrying a block's trailer, more than one commit
 carrying it, or a commit with a missing / malformed trailer. The TREE-HASH binding is
 DROPPED — the guard checks only the one-commit-per-block + `Typeinfo-Block:` trailer
@@ -4112,7 +4111,7 @@ manifest alone — no tracked cursor, no lease adoption, no staleness predicate,
    already merged is DONE and is never re-selected. Parallelism is independent branches + the merge
    queue (already serialized + atomic); two agents that pick the same block simply produce two
    branches and the merge queue serializes the merge — no CAS, no lease.
-4. **Cut a branch for the chosen block** off the target branch (`refactor/semantic-db-overhaul`).
+4. **Cut a branch for the chosen block** off the target branch.
    The branch is the unit of in-flight work; there is no "dispatch" / lease step.
 5. Execute exactly that block contract on the branch (committing a WIP series freely; §11.11).
 6. Dry-run the block's tests (the exact lifted-row proofs) to confirm they pass — either via

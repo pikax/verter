@@ -7,20 +7,20 @@ The block MANAGER lands; the CTO never lands and dispatches the independent conf
 ## Preconditions
 
 Do not start landing until all hold:
-- Full block diff has 3/3 LAND: 1 adversarial claude + 1 claims-aware codex + 1 unprimed codex, or only NIT residuals carried forward.
-- §1a `VERDICT:LAND`: diff-scope, every new/changed correctness-bearing test/guard proven discriminating (plant/revert RED→GREEN) plus unplanted control, cold full gate, rule/plan integrity.
+- Full block diff has the tier-required review LAND (S / escalated-A = 3/3: 1 adversarial claude + 1 claims-aware codex + 1 unprimed codex; the lighter tier lane otherwise — Block-Risk Tier Model), or only NIT residuals carried forward.
+- discrimination verification `VERDICT:LAND`: diff-scope, every new/changed correctness-bearing test/guard proven discriminating (plant/revert RED→GREEN) plus unplanted control, cold full gate, rule/plan integrity.
 - Anti-rogue layer 1 complete per `PROTOCOL.md`: full discovery over all changed paths, deleted hunks, deletions/renames/copies, and clean unprimed adversarial codex confirmation for each rule-bearing change.
-- No in-flight worker for this block — Agent status/stop result confirms none live on the default path, `ps` count 0 on the opt-in `claude -p` path; no uncommitted junk.
+- No in-flight worker for this block — an Agent status/stop result confirms none live; no uncommitted junk.
 
 ## 1. Pre-Land Sync
 
-Fetch and re-read current integration tip. Rebase branch onto current `refactor/semantic-db-overhaul`, then rerun the FULL canonical gate. A cheap check is not sufficient.
+Fetch and re-read current integration tip. Rebase branch onto the current integration branch (named in the brief), then rerun the FULL canonical gate. A cheap check is not sufficient.
 
-Re-review trigger: a clean zero-delta replay may proceed. Any conflict resolution or content/mirror delta re-enters full 3/3 + §1a + anti-rogue layer 1 before squash. "Mechanical" does not bypass review.
+Re-review trigger: a clean zero-delta replay may proceed. Any conflict resolution or content/mirror delta re-enters the block's TIER-REQUIRED review + discrimination verification + anti-rogue layer 1 before squash. "Mechanical" does not bypass review.
 
 ## 2. Design Mirror
 
-If the block authored/edited a binding design, ensure `docs/arch/<name>-design.md` is tracked, referenced by the master-plan locked-designs index, and byte-identical to the reviewed working design (`diff`/`cmp` empty). Stale or changed mirror content blocks land and may trigger re-review.
+If the block authored/edited a binding design, ensure the design (e.g. `docs/arch/<name>-design.md`) is tracked, referenced by the master plan's locked-designs index, and byte-identical to the reviewed working design (`diff`/`cmp` empty). Stale or changed mirror content blocks land and may trigger re-review.
 
 ## 3. Teeth'd Squash
 
@@ -47,9 +47,9 @@ Remove worktree and prune:
 - `git worktree remove <worktree>`
 - `git worktree prune`
 
-Do NOT remove transient scratch yet — the CTO confirm + anti-rogue layer 2 still need it. At land remove only the worktree/build dirs (above); PRESERVE briefs, reports/logs, review outputs, gate logs, `PROGRESS.md`, design `cmp`/`diff` evidence (and on the opt-in `claude -p` path, `jsonl` stream logs + markers), and the durable record (CTO ledger/MOM-NOTES, landed report, debt ledger, design docs). Transient scratch is removed only AFTER land + CONFIRMED, per `PROTOCOL.md` stage/phase cleanup.
+Do NOT remove transient scratch yet — the CTO confirm + anti-rogue layer 2 still need it. At land remove only the worktree/build dirs (above); PRESERVE briefs, reports/logs, review outputs, gate logs, `PROGRESS.md`, design `cmp`/`diff` evidence, and the durable record (CTO ledger/MOM-NOTES, landed report, debt ledger, design docs). Transient scratch is removed only AFTER land + CONFIRMED, per `PROTOCOL.md` stage/phase cleanup.
 
-Write `MANAGER-LANDED.md` with land SHA, summary, three review verdicts, §1a verdict, gate pass line, load-bearing proofs (legacy deletion grep, design `cmp`/`diff`). Touch done marker and append CTO ledger. Verify repo status clean.
+Write `MANAGER-LANDED.md` with land SHA, summary, the tier + tier-ruling, the tier-required review verdicts (the legs actually run), the discrimination verification verdict, gate pass line, load-bearing proofs (legacy deletion grep, design `cmp`/`diff`). Touch done marker and append CTO ledger. Verify repo status clean.
 
 ## CTO Handoff
 

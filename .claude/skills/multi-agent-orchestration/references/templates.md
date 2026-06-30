@@ -4,7 +4,7 @@ Copy-and-fill skeletons for the orchestrator. These are starting points — adap
 
 ## 1. Self-contained implementer brief
 
-Pass this brief as the Agent tool's `prompt` (the default mechanism) — or write it to a file the agent reads, or feed it to a `claude -p` stdin file on the opt-in CLI path. Either way the implementer sees only the brief, so give it everything. For any gate-bearing dispatch (independent reviewer, §1a/verification, confirm, anti-rogue — any mechanism, Agent or `claude -p`), persist the exact prompt/brief AND the verbatim final report to files with a recorded input id/hash plus the resolved model and effort before acting on the result — inline-only briefs are not allowed for those roles, because anti-rogue and never-prime checks need post-hoc inspection of the exact prompt and output.
+Pass this brief as the Agent tool's `prompt`. The agent sees only the brief, so give it everything. For any gate-bearing dispatch (independent reviewer, discrimination verification, confirm, anti-rogue), persist the exact prompt/brief AND the verbatim final report to files with a recorded input id/hash plus the resolved model and effort before acting on the result — inline-only briefs are not allowed for those roles, because anti-rogue and never-prime checks need post-hoc inspection of the exact prompt and output.
 
 ```
 # Implementer Brief — Block <N>: <title>
@@ -54,7 +54,7 @@ Pass this brief as the Agent tool's `prompt` (the default mechanism) — or writ
 
 ## 2. Reviewer sub-agent prompt
 
-This skeleton is ADVERSARIAL by default — it must dispatch a refute-first reviewer, not a confirmatory one. Its semantics match the CTO-tier CLAUDE-REVIEWER MANDATE. It is the claude leg of the base two-leg dual review (claude + second-opinion/codex); when MoM/CTO orchestration is in force its three-leg composition (1 adversarial claude + 1 claims-aware codex + 1 unprimed codex) SUPERSEDES the base loop — but the adversarial claude STANCE below is identical in both tiers. Standalone `/multi-agent-orchestration` may dispatch this self-contained skeleton as-is (no external mandate file required); under MoM/CTO, prepend `CLAUDE-REVIEWER-MANDATE.md` verbatim first, then append this gate-specific prompt.
+This skeleton is ADVERSARIAL by default — it must dispatch a refute-first reviewer, not a confirmatory one. Its semantics match the CTO-tier CLAUDE-REVIEWER MANDATE. It is the claude leg of the base two-leg dual review (claude + second-opinion/codex); when MoM/CTO orchestration is in force its TIER-REQUIRED review set supersedes the base loop (S/escalated-A = full 3/3; lighter lanes for A/B/C — see `/mom-cto-orchestration` → Block-Risk Tier Model) — but the adversarial claude STANCE below is identical in every tier. Standalone `/multi-agent-orchestration` may dispatch this self-contained skeleton as-is (no external mandate file required); under MoM/CTO, prepend `CLAUDE-REVIEWER-MANDATE.md` verbatim first, then append this gate-specific prompt.
 
 ```
 You are an ADVERSARIAL, independent, production-ready code reviewer. You did NOT
@@ -104,7 +104,8 @@ Worktree, gotchas, commit convention: <as in the implementer brief>.
 
 The findings (from EVERY review leg that ran — under the base tier the adversarial
 claude reviewer + the second-opinion/codex review; under MoM/CTO orchestration the
-adversarial claude leg + the claims-aware codex leg + the unprimed codex leg):
+tier-required legs that ran: S/escalated-A = adversarial claude + claims-aware codex
++ unprimed codex; the lighter tier lanes otherwise):
 <embed every finding verbatim, with the prescribed fix direction>.
 
 For each finding: fix it; if a finding is one instance of a class, fix the whole
@@ -154,14 +155,19 @@ Assemble with `cat head.md source.md tail.md > prompt.txt` so the embedded sourc
 ## 5. Second-opinion CLI invocations (codex)
 
 ```bash
-# Architectural consult — prompt from a file, output to a file:
-codex exec --skip-git-repo-check < prompt.txt > consult-out.txt 2>&1
+# FOREGROUND, single-blocking, read-only sandbox, highest reasoning; last message to a file.
+# (Under MoM/CTO, reference/PROTOCOL.md -> codex Invocation is the authoritative exact form.)
+codex exec --sandbox read-only --skip-git-repo-check \
+  -c 'model="gpt-5.5"' -c 'model_reasoning_effort="xhigh"' \
+  -o consult-last.txt < prompt.txt > consult-out.txt 2>&1
 
-# Code review of a block — no prompt arg; run from inside the worktree:
-cd <worktree> && codex review --base <base-branch> < /dev/null > review-out.txt 2>&1
+# Code review of a block — run from inside the worktree, reviewing the diff against the base:
+cd <worktree> && codex exec --sandbox read-only --skip-git-repo-check \
+  -c 'model="gpt-5.5"' -c 'model_reasoning_effort="xhigh"' \
+  -o review-last.txt < review-prompt.txt > review-out.txt 2>&1
 ```
 
-Output files are large. Grep them for findings (`grep -nE '\[P[0-3]\]' out.txt`) and read the tail for the verdict. Ignore trailing process-teardown noise. Never run these concurrently with a heavy test suite — memory contention.
+Run codex FOREGROUND as a single blocking call (no `&`), never background-then-yield. Read the `-o` last-message file for the verdict; `OUT.txt` is large, so grep its tail (`grep -nE '\[P[0-3]\]|VERDICT|__DONE__' out.txt | tail`). Never run codex concurrently with a heavy test suite — memory contention.
 
 ## 6. Environmental gotchas (carry into every brief)
 

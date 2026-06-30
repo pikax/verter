@@ -1,7 +1,7 @@
 # Semantic-DB-Overhaul — Unified Remaining-Work Plan
 
 This is the single authoritative plan for the **remaining** work across the
-two `refactor/semantic-db-overhaul` tracks: the **cache-runtime / scheduler**
+two semantic-db-overhaul tracks: the **cache-runtime / scheduler**
 track (`cache-runtime-overhaul-plan.md`) and the **semantic-type-graph** track
 (`semantic-type-graph-plan-recovered.md`). It merges and sequences the
 remaining items of both plans into one ordered backlog of 16 blocks (`U0`–`U15`)
@@ -972,7 +972,7 @@ doc map — they are DESIGN authorities; row/lift status still derives from §1.
 
 ### 1.4 Branch / tip binding rule (orientation, non-authoritative)
 
-**Branch:** `refactor/semantic-db-overhaul`. This plan does NOT pin a "current tip"
+**Branch:** the current semantic-db-overhaul integration branch (named operationally by the run). This plan does NOT pin a "current tip"
 SHA — the branch advances under a concurrent workstream, so any named SHA goes stale
 the moment it is written. Instead, the recent history is recorded as HISTORICAL
 WAYPOINTS for orientation only: `aba794d9` was the native-typeinfo full-TS-parity
@@ -1978,7 +1978,7 @@ graph remains a DAG.
 The three streams' historical artifacts are **HISTORICAL ONLY**: the `D:/` worktrees,
 the branches (`fix/goto-definition-overhaul`, `s5/b5`), the SHAs (`0b3a63894`,
 `380967beb`, `63d682f69`), and the `<scratch>/*` live-state artifacts. The **live
-authority** is this repository on `refactor/semantic-db-overhaul`.
+authority** is this repository's current semantic-db-overhaul integration branch.
 
 Goto `G.P1`/`G.P2` have since **landed on this branch** (typed `PositionMapper`
 coordinates + the `EmitOp` substrate — see §3.1.2). Stage5 `S5.B5` is **NOT landed

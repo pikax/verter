@@ -1,31 +1,29 @@
-# WAIT PROTOCOL
+# WAIT PROTOCOL — Foreground, Non-Polling
 
 > Governance: any change to this protocol requires prior neutral codex-architect approval — see PROTOCOL.md → GOVERNANCE.
 
-**Scope: the OPT-IN `claude -p` path only.** Default Agent/Task-tool dispatch is harness-managed — a blocking Agent call returns the sub-agent's final message; a `run_in_background` Agent call notifies the spawner on completion. No foreground-poll, no resume-loop, no marker watchdog. Everything below applies ONLY when you have explicitly opted into `claude -p` CLI subprocesses (separate-account / out-of-session work).
+Applies to EVERY non-orchestrator role (block manager, implementer, fix, reviewer, verifier, confirmer), every mechanism. It removes two failures: (a) BACKGROUND-THEN-YIELD — ending the turn to be notified later strands a sub-agent the harness never re-wakes; (b) POLLING — a multi-call sleep/check loop burns tokens processing ongoing output. Only the top-level durable orchestrator session — the one the harness reliably re-wakes (the CTO under MoM/CTO) — may dispatch true background-and-be-notified work.
 
-Headless `claude -p` agents are not interactive. When they stop tool calls and emit a final message, the process exits. They are not re-invoked by background notifications.
+## The only correct wait
 
-## Forbidden Waits
+A non-orchestrator role waits FOREGROUND with a SINGLE blocking invocation that returns ONLY on a terminal state — clean finish, error, or timeout. Inside that ONE foreground invocation, shell backgrounding (`&` + `wait`) is fine — that is HOW the call blocks on the job, NOT a background-then-yield (the turn never ends):
 
-Never background a long task and yield. Never use ScheduleWakeup/Monitor/"I'll resume when done" in headless `-p`. That exits and the resume-loop restarts cold.
+```bash
+# wait on one job; output only when it ends (portable — no GNU `timeout` needed):
+<cmd> > OUT.txt 2>&1 & PID=$!; wait "$PID"; echo "DONE rc=$?"
+# bound it with the harness/tool-call timeout (preferred), or a portable self-timeout:
+( <cmd> > OUT.txt 2>&1 ) & PID=$!; ( sleep <generous-seconds>; kill "$PID" 2>/dev/null ) & T=$!; wait "$PID"; rc=$?; kill "$T" 2>/dev/null; echo "rc=$rc"
+```
 
-## Only Correct Wait
+GNU `timeout` is NOT on every platform (e.g. macOS lacks it) — prefer the harness/tool-call timeout, or `gtimeout` / the self-timeout above. The invocation blocks IN-TURN until the work finishes / errors / times out; it does NOT stream or print ongoing output, and the turn never ends waiting. On return, read the small terminal artifact (`OUT.txt` / the codex `-o` file / a marker), then continue. Pick the timeout generously enough that normal completion returns before it, and treat a timeout as a real signal (a hang or an under-budget run), not a routine step. Never loop multiple tool calls polling a marker; never background a task and yield.
 
-Wait in a foreground blocking poll-loop, chunked to ≤5 minutes per tool call:
-1. Start long task detached, writing output and marker:
-   `nohup bash -c '<cmd> > OUT.txt 2>&1; echo DONE > MARKER' >/dev/null 2>&1 &`
-2. Poll foreground:
-   `for i in $(seq 1 10); do [ -f MARKER ] && { echo READY; break; }; sleep 30; done; [ -f MARKER ] && echo READY || echo STILL-RUNNING`
-3. If `STILL-RUNNING`, emit one short status line, then run the next ≤5-minute poll chunk.
-4. On `READY`, read output and continue.
+## Concurrent review legs
 
-A single 15-minute blocking call can hit idle timeout; chunking plus brief model output keeps the turn alive.
-
-## Gates / Concurrent Work
-
-If a gate is expected under 5 minutes, run foreground with `timeout 300`. Otherwise detach + chunk-poll. Dispatch concurrent work in background (gate, 1 adversarial claude reviewer, 1 claims-aware codex reviewer, 1 unprimed codex reviewer, sub-agents), each with a marker, then run ONE foreground watchdog over all markers. When any marker is ready, collect it and re-enter the watchdog for remaining markers. Never background the watchdog and yield.
+The one allowed non-orchestrator parallelism: run the review legs CONCURRENTLY, then block FOREGROUND for all in ONE wait. Mechanics differ by leg type, but both stay foreground:
+- codex CLI legs: start each as a background process writing its own `OUT`/`-o` file INSIDE one foreground bash invocation, then `wait` on all their PIDs in that same invocation (it returns only when all are done).
+- harness Agent legs: dispatch them as blocking calls and block in-turn for their reports. (The top-level orchestrator MAY instead dispatch Agent legs as notified-on-completion work — its prerogative as the durable session — but a child manager blocks foreground.)
+No poll loop, no yield. Do not run a heavy / canonical gate concurrently with codex (memory contention) — serialize those.
 
 ## Recovery
 
-Real socket deaths can still happen; the resume-loop plus `CHECKPOINT-PROTOCOL.md` recovers. Do not confuse rare API death with the yield-to-wait trap.
+A real socket / API death can still strand a turn; `CHECKPOINT-PROTOCOL.md` relaunch-first recovers from durable truth (`PROGRESS.md` + git), not memory. Do not confuse a rare death with the yield-to-wait or poll-loop traps this protocol removes.
