@@ -11913,6 +11913,161 @@ defineProps<PickedRegistryVisibility>()
 }
 
 #[test]
+fn resolve_component_meta_pick_keyspace_derivation_stays_public_only() {
+    // A `Pick` whose key-set is COMPUTED (not literal) from a member's value-type
+    // keyspace must stay public-only. `keyof C['config']` is `'beta' | 'gamma'`,
+    // so the prop type is `Pick<C, 'beta' | 'gamma' | 'alpha'>`. Even though the
+    // derived key-set NAMES the protected member `beta`, a `keyof` / `Pick`
+    // derivation over a class is public-only and must drop it; `gamma` is not a
+    // class member at all. Only the public key `alpha` may surface (it is also
+    // the positive control / non-vacuity check).
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"export class VisibilityClass {
+  public alpha = 1
+  protected beta = 2
+  public config: { beta: number; gamma: number } = { beta: 0, gamma: 0 }
+}
+export type PickedThroughMemberKeyspace = Pick<
+  VisibilityClass,
+  keyof VisibilityClass['config'] | 'alpha'
+>
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { PickedThroughMemberKeyspace } from './types'
+defineProps<PickedThroughMemberKeyspace>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let _resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
+        .expect("resolved component meta should exist");
+    let meta = project
+        .host()
+        .get_component_meta("/src/App.vue")
+        .expect("should return component meta");
+    let prop_names: Vec<&str> = meta.props.iter().map(|p| p.name.as_str()).collect();
+
+    // Positive control: the public key `alpha` surfaces (the surface resolved).
+    assert!(
+        prop_names.contains(&"alpha"),
+        "the public key `alpha` must surface, got {prop_names:?}",
+    );
+    // The protected member named in the derived key-set must NOT leak — a `keyof`
+    // / `Pick` derivation over a class is public-only.
+    assert!(
+        !prop_names.contains(&"beta"),
+        "the protected member `beta` must NOT leak onto the public surface even \
+         though its key is in `keyof C['config']`, got {prop_names:?}",
+    );
+    // `gamma` keys the member's value type, not the class itself — it must never
+    // surface as a class prop.
+    assert!(
+        !prop_names.contains(&"gamma"),
+        "`gamma` (a key of the member's value type, not a class member) must \
+         never surface, got {prop_names:?}",
+    );
+}
+
+#[test]
+fn resolve_component_meta_nested_utility_over_class_keeps_public_only() {
+    // A NESTED utility over a class with mixed visibility must not republish a
+    // non-public member. `Pick<C, 'publicA' | 'publicB' | 'protectedX'>` is
+    // public-only — the protected `protectedX` is excluded at the inner `Pick`
+    // even though it is in the requested key-set — and the outer
+    // `Omit<…, 'publicA'>` drops `publicA`, leaving exactly `{ publicB }`.
+    let project = make_project();
+    project
+        .upsert_base(
+            "/src/types.ts",
+            r#"export class NestedVisibilityClass {
+  public publicA = 'a'
+  public publicB = 2
+  protected protectedX = 'x'
+  private privateY = 3
+}
+export type NestedUtilityProps = Omit<
+  Pick<NestedVisibilityClass, 'publicA' | 'publicB' | 'protectedX'>,
+  'publicA'
+>
+"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/src/App.vue",
+            r#"<script setup lang="ts">
+import type { NestedUtilityProps } from './types'
+defineProps<NestedUtilityProps>()
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+    project.host().set_import_dependencies(
+        "/src/App.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "./types".to_string(),
+            resolved_canonical_id: Some("/src/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    let _resolved = project
+        .host()
+        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
+        .expect("resolved component meta should exist");
+    let meta = project
+        .host()
+        .get_component_meta("/src/App.vue")
+        .expect("should return component meta");
+    let prop_names: Vec<&str> = meta.props.iter().map(|p| p.name.as_str()).collect();
+
+    // Positive control: the inner `Pick` kept the public members and the outer
+    // `Omit` dropped `publicA`, so `publicB` survives (the nested utility
+    // resolved — non-vacuity).
+    assert!(
+        prop_names.contains(&"publicB"),
+        "the surviving public member `publicB` must surface, got {prop_names:?}",
+    );
+    // `publicA` was omitted by the outer `Omit`.
+    assert!(
+        !prop_names.contains(&"publicA"),
+        "the omitted public member `publicA` must NOT surface, got {prop_names:?}",
+    );
+    // The protected member must NOT surface — the inner `Pick<C, …>` over a class
+    // is public-only, so `protectedX` is dropped even though it is in the key-set.
+    assert!(
+        !prop_names.contains(&"protectedX"),
+        "the protected member `protectedX` must NOT leak through the nested \
+         `Omit<Pick<C, …>, …>`, got {prop_names:?}",
+    );
+    // The private member must NEVER surface through any class-utility derivation.
+    assert!(
+        !prop_names.contains(&"privateY"),
+        "the private member `privateY` must NEVER leak through a class-utility \
+         derivation, got {prop_names:?}",
+    );
+}
+
+#[test]
 fn resolve_component_meta_materializes_bound_registry_members_despite_opaque_sibling_args() {
     let project = make_project();
     project
