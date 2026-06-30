@@ -19823,6 +19823,114 @@ fn payload_ty_references(ty: &TypeExpr, event_name: &str) -> bool {
 }
 
 #[test]
+fn project_local_intrinsics_tag_members_partial_surface_survives_unresolvable_base() {
+    // A tag value that is an UNRESOLVABLE base arm intersected with a resolvable
+    // inline arm: `div: MissingBase & { projectOnly?: string }`. The Class-A
+    // whole-surface admission declines (the unresolvable `MissingBase` arm keeps
+    // the intersection un-materialised, so the all-or-nothing admit gate misses),
+    // but the resolvable inline arm's member MUST still publish: the node-domain
+    // partial-surface fallback recovers the one-level surface so a partially-
+    // resolvable tag never drops its resolvable members. Without the fallback,
+    // only the fallback `HTMLAttributes` members would survive.
+    let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
+        verter_workspace::MemoryOptions::default(),
+    ));
+    ws.inject_file(
+        "/workspace/node_modules/vue/package.json".to_string(),
+        Arc::from(
+            r#"{
+  "name": "vue",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": { "types": "./index.d.ts", "import": "./index.js" },
+    "./jsx": { "types": "./jsx.d.ts", "import": "./jsx.js" }
+  }
+}"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/vue/index.d.ts".to_string(),
+        Arc::from(
+            r#"export interface HTMLAttributes {
+  fallbackOnly?: string
+}"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/vue/jsx.d.ts".to_string(),
+        Arc::from(
+            r#"import type { NativeElements } from "./jsx-runtime"
+
+export namespace JSX {
+  export interface IntrinsicElements extends NativeElements {}
+}"#,
+        ),
+    );
+    ws.inject_file(
+        "/workspace/node_modules/vue/jsx-runtime.d.ts".to_string(),
+        // `MissingBase` is never declared or imported — an UNRESOLVABLE base arm.
+        // The inline `{ projectOnly?: string }` arm is resolvable.
+        Arc::from(
+            r#"export interface NativeElements {
+  div: MissingBase & { projectOnly?: string }
+}"#,
+        ),
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: crate::types::AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws,
+    );
+    host.configure_projects(vec![
+        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
+            "/workspace".to_string(),
+            "/workspace".to_string(),
+            Some("/workspace/tsconfig.json".to_string()),
+        ),
+    ]);
+    let project = MetaProject::new(host);
+    project
+        .upsert_base("/workspace/src/App.vue", r#"<template><div /></template>"#)
+        .unwrap();
+
+    let meta = get_meta(&project, "/workspace/src/App.vue");
+
+    let prop_names = || {
+        meta.accepted_props
+            .iter()
+            .map(|prop| prop.name.clone())
+            .collect::<Vec<_>>()
+    };
+
+    // The resolvable inline arm's member SURVIVES even though the base arm is
+    // unresolvable — the partial-surface fallback published it. (Pre-fix, the
+    // all-or-nothing path dropped the whole tag surface and only `fallbackOnly`
+    // survived.)
+    assert!(
+        meta.accepted_props
+            .iter()
+            .any(|prop| prop.name == "projectOnly"),
+        "the resolvable inline arm member `projectOnly` must survive a partially-\
+         resolvable tag value (`MissingBase & {{ projectOnly?: string }}`); the \
+         all-or-nothing path dropped it. accepted props: {:?}",
+        prop_names()
+    );
+    // The fallback `HTMLAttributes` surface still merges in (the recovered partial
+    // tag surface does not replace it).
+    assert!(
+        meta.accepted_props
+            .iter()
+            .any(|prop| prop.name == "fallbackOnly"),
+        "the fallback HTMLAttributes member `fallbackOnly` must still surface \
+         alongside the recovered tag-local member. accepted props: {:?}",
+        prop_names()
+    );
+}
+
+#[test]
 fn generic_root_propagation_off_stays_sound() {
     let project = make_project();
     project

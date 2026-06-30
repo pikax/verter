@@ -94,18 +94,21 @@ impl ComponentMetaQueryEngine<'_> {
             }
         }
         // FALLBACK — a value whose route admission declines (e.g. a partially
-        // resolvable `MissingBase & { projectOnly?: string }`, or a body with
-        // unresolved nested leaf refs) still carries a recoverable one-level
-        // surface. Lower the value to a base node and read its Shallow
-        // `SurfaceView` through the shared empty-path walker — the same
-        // node-domain sink the root-shape primary arm reads — which keeps the
-        // resolvable intersection arms and drops the unresolved ones. `None` only
-        // when the recovered surface is empty.
+        // resolvable `MissingBase & { projectOnly?: string }`) still carries a
+        // recoverable one-level surface from its RESOLVABLE arms. An intersection
+        // arm that lowered to an unresolved `Unknown` sentinel contributes no
+        // members (`unknown & T = T`) and otherwise poisons the whole-surface
+        // projection to a non-object terminal, so the resolvable remainder is
+        // taken first. Lower it to a base node and read its Shallow `SurfaceView`
+        // through the shared empty-path walker — the same node-domain sink the
+        // root-shape primary arm reads. `None` when nothing resolvable remains or
+        // the recovered surface is empty.
+        let resolvable = resolvable_intersection_remainder(tag_type)?;
         let dispatch = ProjectSemanticDispatch::new(ctx);
         let base = dispatch.lower_type_expr_in_scope_with_mode(
             scope_canonical_id,
-            tag_type,
-            ProjectionMode::Navigate,
+            &resolvable,
+            ProjectionMode::Shallow,
         )?;
         let view = dispatch.resolve_typeinfo_surface_view(
             base,
@@ -204,4 +207,31 @@ impl ComponentMetaQueryEngine<'_> {
         }
         prior
     }
+}
+
+/// The RESOLVABLE remainder of an intrinsic tag value for the partial-surface
+/// fallback of [`ComponentMetaQueryEngine::project_intrinsic_tag_member_shape`].
+///
+/// An intersection arm that lowered to an unresolved `Unknown` sentinel
+/// contributes no members (`unknown & T = T`) and poisons the whole-surface
+/// projection to a non-object terminal, so it is dropped. A non-intersection
+/// value (or an intersection carrying no `Unknown` arms) is returned unchanged.
+/// `None` when every arm is an unresolved sentinel — nothing resolvable remains
+/// to recover. Typed-IR structural only (variant match, no text inspection).
+fn resolvable_intersection_remainder(tag_type: &TypeExpr) -> Option<TypeExpr> {
+    let TypeExpr::Intersection(arms) = tag_type else {
+        return Some(tag_type.clone());
+    };
+    let resolvable: Vec<TypeExpr> = arms
+        .iter()
+        .filter(|arm| !matches!(arm, TypeExpr::Unknown { .. }))
+        .cloned()
+        .collect();
+    if resolvable.is_empty() {
+        return None;
+    }
+    // `TypeExpr::intersection` unwraps a single survivor and rebuilds the
+    // intersection for multiple — the non-empty case is guarded above so the
+    // empty→`unknown` arm of the constructor is never reached.
+    Some(TypeExpr::intersection(resolvable))
 }
