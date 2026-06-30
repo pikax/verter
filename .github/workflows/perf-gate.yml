@@ -1,0 +1,263 @@
+name: Perf Gate
+
+# Self-referential external-TS-engine perf-regression gate (design §2.7).
+#
+# Per-PR: correctness only — the perf-harness unit specs (the gate predicate +
+#   evaluation math, the discriminating gate-property specs, the corpus
+#   determinism + manifest-freshness rail). The full perf gate is NOT per-PR:
+#   shared CI hardware is too noisy for an absolute number, and the gate is a
+#   same-run candidate-vs-baseline comparison that belongs on a stable, dedicated
+#   nightly run.
+# Nightly-on-main (blocking): the full 15k self-referential regression gate on
+#   ONE canonical runner class (Linux GH-hosted). It builds the candidate AND the
+#   pinned-baseline build (BOTH native + binaries), runs both INTERLEAVED on the
+#   same job/corpus/tsgo/threads, and fails the job on a regression, a skipped
+#   workload, a degenerate metric, an engine mismatch, or an armed run that fell
+#   back to self-check. While baselineRef is PENDING (unarmed) the SCHEDULED run
+#   fails RED-until-armed — an unpinned baseline can never be a green blocking
+#   gate; a manual workflow_dispatch instead runs the same-commit self-check.
+#
+# The gate is 100% self-referential (Verter candidate vs pinned Verter baseline)
+# and vize-FREE — the offline vize comparison is a manager-run, VIZE_PATH-gated
+# script, never invoked here.
+#
+# Corpus scope: Vue `.vue` SFCs ONLY (Block-6). The corpus, the axis-A carrier
+# discovery, and the LSP workloads all target `.vue`; this gate makes NO claim of
+# current Svelte perf coverage. A Svelte (`.svelte`) perf corpus + carrier-extension
+# discovery is deferred to B8 (Svelte LSP/IDE) — see block6.json `deferred` and
+# design §2.7/§2.7.1.
+
+on:
+  schedule:
+    - cron: "0 5 * * *" # 5 AM UTC daily (the nightly blocking run)
+  workflow_dispatch:
+    inputs:
+      samples:
+        description: "Samples per side (>=7 for the blocking gate)"
+        required: false
+        default: "7"
+  pull_request:
+    paths:
+      - "packages/benchmark/src/perf/**"
+      - "packages/benchmark/baselines/**"
+      - "test-corpora/perf/**"
+      - ".github/workflows/perf-gate.yml"
+
+concurrency:
+  group: perf-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Per-PR: correctness only (NOT the perf gate) ──────────────────────────
+  perf-harness-correctness:
+    name: Perf harness correctness (PR)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # The gate predicate + evaluation math, the discriminating gate-property
+      # specs (skip/degenerate/tail/correctness/behavioral/arming), and the
+      # corpus determinism + manifest-freshness rails — pure unit specs, no
+      # binaries, no corpus materialization. The per-PR correctness contract.
+      - name: Perf harness unit specs
+        run: >
+          pnpm --filter @verter/benchmark exec vitest run
+          src/perf/stats.spec.ts src/perf/gate.spec.ts src/perf/corpus.spec.ts
+          src/perf/lsp-driver.spec.ts src/perf/lsp-binary-resolution.spec.ts
+          src/perf/workloads.spec.ts src/perf/run.spec.ts
+          src/perf/axis-a-child.spec.ts src/perf/audit-attribution.spec.ts
+          src/perf/vize-bench.spec.ts
+      # Verify the corpus generator reproduces its committed manifest hash (the
+      # integrity rail) — fast, in-memory, no materialization. OS-independent:
+      # the generator emits POSIX paths + LF, so this hash matches on every OS.
+      - name: Corpus manifest hash check
+        run: |
+          PRODUCED=$(node test-corpora/perf/synthetic-15k/generator/generate.mjs --hash-only)
+          COMMITTED=$(node -e "console.log(require('./test-corpora/perf/synthetic-15k/manifest.json').contentHash)")
+          echo "produced:  $PRODUCED"
+          echo "committed: $COMMITTED"
+          test "$PRODUCED" = "$COMMITTED" || {
+            echo "::error::corpus generator output does not match the committed manifest hash — refresh manifest.json"
+            exit 1
+          }
+
+  # ── Nightly-on-main: the full self-referential gate (BLOCKING) ────────────
+  perf-gate-nightly:
+    name: Self-referential perf gate (nightly, blocking)
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest # the ONE canonical blocking perf environment
+    steps:
+      # A workflow_dispatch may pass an arbitrary `samples`; the blocking gate
+      # computes p50/p95/p99 over the pooled per-side distribution and needs at
+      # least the blocking floor of 7 samples/side to support those tail
+      # percentiles. Validate the floor FIRST — before the expensive candidate +
+      # baseline builds — so a sub-floor run fails fast with a clear message
+      # (evaluateGate also enforces it, but a late failure wastes the full build).
+      - name: Validate samples floor
+        env:
+          SAMPLES: ${{ github.event.inputs.samples || '7' }}
+        run: |
+          if ! echo "$SAMPLES" | grep -qE '^[0-9]+$'; then
+            echo "::error::perf gate samples '$SAMPLES' is not a non-negative integer."
+            exit 1
+          fi
+          if [ "$SAMPLES" -lt 7 ]; then
+            echo "::error::perf gate samples=$SAMPLES is below the blocking floor of 7 — a full/armed run needs >=7 samples/side for stable p50/p95/p99. Re-run with samples>=7."
+            exit 1
+          fi
+          echo "samples=$SAMPLES (>= blocking floor 7)"
+
+      - name: Checkout candidate (HEAD)
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # need history to build the pinned baseline ref
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            target-baseline
+          key: ${{ runner.os }}-perf-gate-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-perf-gate-cargo-
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+          cache: pnpm
+      # The tsgo engine (typescript@7.0.1-rc, the TS 7 native compiler) is PINNED
+      # in the workspace-root devDeps; --frozen-lockfile brings exactly that
+      # version. The gate resolves the installed `typescript` version and FAILS a
+      # full run on a mismatch with the manifest's tsgoVersion — so there is NO
+      # runtime `pnpm add @latest` (which would mutate the lockfile after a
+      # frozen install and float the engine).
+      - run: pnpm install --frozen-lockfile
+
+      # --- Build the CANDIDATE (HEAD): native + binaries ---
+      - name: Build candidate (native + verter-tsc + verter_lsp)
+        run: |
+          pnpm run build:native
+          cargo build --release -p verter_tsc -p verter_lsp
+          mkdir -p artifacts/candidate-bin
+          cp target/release/verter-tsc artifacts/candidate-bin/
+          cp target/release/verter-lsp artifacts/candidate-bin/
+
+      # --- Resolve the pinned baseline ref ---
+      # While baselineRef is the PENDING placeholder the gate is NOT armed. The
+      # SCHEDULED (cron) nightly blocking run fails LOUD here (RED-until-armed — an
+      # unpinned baseline can never be a green blocking gate); a manual
+      # workflow_dispatch run instead executes the same-commit self-check
+      # (candidate === baseline, ~1.0 ratios, a loud NOT-ARMED warning, never a
+      # green armed gate). The baseline is armed POST-LAND via a separate
+      # `perf: refresh baseline` change (a squash SHA cannot self-reference).
+      - name: Resolve baseline ref
+        id: baseline
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          REF=$(node -e "console.log(require('./packages/benchmark/baselines/block6.json').baselineRef)")
+          # Armed mode REQUIRES a pinned, immutable baseline: a full 40-hex commit
+          # SHA. The PENDING placeholder is the only sanctioned unarmed sentinel;
+          # any other non-SHA value (a branch, a tag, "", a placeholder) is an
+          # unpinned/moving ref that must never arm the gate. A non-SHA ref fails
+          # the SCHEDULED blocking run (fail-until-armed) and runs the same-commit
+          # self-check on a manual workflow_dispatch (matching gate.ts arming).
+          if echo "$REF" | grep -qiE '^[0-9a-f]{40}$'; then
+            echo "Baseline ref is a pinned 40-hex SHA — armed comparison."
+            echo "self_check=false" >> "$GITHUB_OUTPUT"
+            echo "ref=$REF" >> "$GITHUB_OUTPUT"
+          else
+            if echo "$REF" | grep -qiE '^[[:space:]]*PENDING'; then
+              WHY="baselineRef is PENDING (unarmed placeholder)"
+            else
+              WHY="baselineRef '$REF' is not a full 40-hex commit SHA (an unpinned/moving ref)"
+            fi
+            if [ "$EVENT_NAME" = "schedule" ]; then
+              echo "::error::perf gate NOT ARMED — $WHY; the scheduled nightly blocking run fails until the baseline is pinned to a 40-hex SHA via a 'perf: refresh baseline' change (fail-until-armed)."
+              exit 1
+            fi
+            echo "$WHY — manual run: same-commit self-check (candidate === baseline)."
+            echo "self_check=true" >> "$GITHUB_OUTPUT"
+            echo "ref=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          fi
+
+      # --- Build the PINNED BASELINE (native + binaries) in a worktree ---
+      - name: Build baseline (pinned ref — native + verter-tsc + verter_lsp)
+        if: steps.baseline.outputs.self_check == 'false'
+        env:
+          BASELINE_REF: ${{ steps.baseline.outputs.ref }}
+        run: |
+          git worktree add ../verter-baseline "$BASELINE_REF"
+          cd ../verter-baseline
+          pnpm install --frozen-lockfile
+          # Axis A loads each side's OWN @verter/native, so the baseline worktree
+          # MUST build native too (not only the binaries).
+          pnpm run build:native
+          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target-baseline" cargo build --release -p verter_tsc -p verter_lsp
+          mkdir -p "$GITHUB_WORKSPACE/artifacts/baseline-bin"
+          cp "$GITHUB_WORKSPACE/target-baseline/release/verter-tsc" "$GITHUB_WORKSPACE/artifacts/baseline-bin/"
+          cp "$GITHUB_WORKSPACE/target-baseline/release/verter-lsp" "$GITHUB_WORKSPACE/artifacts/baseline-bin/"
+
+      # --- Run the gate ---
+      # Self-check mode (PENDING): omit the baseline side so both sides use the
+      # candidate build/native (~1.0 ratios; the gate emits the NOT-ARMED
+      # warning). Armed mode: pass each side's bin dir AND native package root —
+      # axis A needs the per-side native; an armed run that cannot pass a baseline
+      # side hard-fails inside the gate.
+      - name: Run self-referential perf gate
+        env:
+          SAMPLES: ${{ github.event.inputs.samples || '7' }}
+          SELF_CHECK: ${{ steps.baseline.outputs.self_check }}
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
+          ARGS="--samples $SAMPLES --out $GITHUB_WORKSPACE/artifacts/perf-gate-result.json"
+          if [ "$SELF_CHECK" != "true" ]; then
+            ARGS="$ARGS --candidate-bin $GITHUB_WORKSPACE/artifacts/candidate-bin"
+            ARGS="$ARGS --baseline-bin $GITHUB_WORKSPACE/artifacts/baseline-bin"
+            ARGS="$ARGS --candidate-native $GITHUB_WORKSPACE/packages/native"
+            ARGS="$ARGS --baseline-native $GITHUB_WORKSPACE/../verter-baseline/packages/native"
+            # The baseline worktree root — its tsgo engine is resolved + compared
+            # against the candidate's (a baseline-ref change could float it).
+            ARGS="$ARGS --baseline-root $GITHUB_WORKSPACE/../verter-baseline"
+          fi
+          # Run via the benchmark package (cwd) so `--import tsx` resolves (tsx is
+          # a benchmark devDep, not a root dependency).
+          pnpm --filter @verter/benchmark exec node --import tsx src/perf/gate.ts $ARGS
+
+      # The gate itself always writes perf-gate-result.json — even on a
+      # pre-report failure (corpus-hash mismatch / import / setup) it emits a
+      # pass:false error JSON before exiting nonzero. This fallback covers the
+      # remaining case: a build/setup step that fails BEFORE the gate runs, so
+      # the always() upload below is never empty.
+      - name: Ensure a perf-gate artifact exists
+        if: always()
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
+          F="$GITHUB_WORKSPACE/artifacts/perf-gate-result.json"
+          if [ ! -f "$F" ]; then
+            printf '{"timestamp":"%s","pass":false,"error":"perf gate produced no result (a build/setup step failed before the gate ran)"}\n' \
+              "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$F"
+          fi
+
+      # The CI artifact (raw ordered samples per side, ratios, CIs, memory,
+      # correctness/behavioral results, corpus hash, baseline ref, mode, engine
+      # version, threads) is uploaded EVEN on failure, and is guaranteed present.
+      - name: Upload perf-gate artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-gate-result
+          path: artifacts/perf-gate-result.json
+          if-no-files-found: error

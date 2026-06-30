@@ -1,0 +1,8 @@
+# The synthetic-15k corpus is GENERATE-ON-DEMAND, not committed: the
+# materialized tree is ~15,603 files / ~39 MB. What is committed is the
+# generator (generator/generate.mjs) plus the content-hashed identity
+# (manifest.json). A run regenerates the corpus and verifies the produced
+# bytes hash to manifest.json before any measurement, so a drift can never
+# silently read as a perf improvement.
+corpus/
+.out/

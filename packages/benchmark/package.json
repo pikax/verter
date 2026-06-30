@@ -24,7 +24,10 @@
     "bench:meta:ui:warm": "node --expose-gc --import tsx src/meta-ui-warm.ts",
     "bench:meta:ui:report": "node --import tsx src/meta-ui-report.ts",
     "bench:meta:ui:setup": "node ../../scripts/benchmark/setup-meta-ui.mjs",
-    "test": "vitest run src/audit-validator.spec.ts src/corpus-trace-runner.spec.ts src/workspace-invariants.spec.ts src/audit-harness-bootstrap.spec.ts src/lsp-bench.init.spec.ts src/lsp-bench.position.spec.ts"
+    "bench:perf": "node --import tsx src/perf/run.ts",
+    "bench:perf:gate": "node --import tsx src/perf/gate.ts",
+    "bench:perf:vize": "node --import tsx src/perf/vize-bench.ts",
+    "test": "vitest run src/audit-validator.spec.ts src/corpus-trace-runner.spec.ts src/workspace-invariants.spec.ts src/audit-harness-bootstrap.spec.ts src/lsp-bench.init.spec.ts src/lsp-bench.position.spec.ts src/perf/stats.spec.ts src/perf/gate.spec.ts src/perf/corpus.spec.ts src/perf/lsp-driver.spec.ts src/perf/lsp-binary-resolution.spec.ts src/perf/workloads.spec.ts src/perf/run.spec.ts src/perf/axis-a-child.spec.ts src/perf/audit-attribution.spec.ts"
   },
   "dependencies": {
     "@verter/component-meta": "workspace:*",
