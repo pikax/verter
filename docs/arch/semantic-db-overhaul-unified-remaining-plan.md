@@ -1308,10 +1308,15 @@ Deferred follow-ups (lead-architect ruled, tracked here):
   invariant suite (today it pins the bug). PRE-EXISTING on
   `refactor/semantic-db-overhaul` (predates stage9 — the gate + comment are verbatim
   on `refactor`; the completeness block's ONLY edit to that file is the
-  `pub`→`pub(crate)` visibility change on `run_component_meta_request`). The
-  structural `insert_if_complete` admission from
-  `COMPONENT_META_RESULT_DB_STRUCTURAL_ADMISSION` (below) would also close this.
-  Owner: named follow-up block `RESOLVED_META_SCALAR_NO_POISON`. codex-DEFER ruling
+  `pub`→`pub(crate)` visibility change on `run_component_meta_request`). Closing this requires complete-only admission on
+  the INTERMEDIATE resolved-meta cache (`resolver_runtime().component_meta`,
+  written at `host_manage/component_meta_methods.rs:3107,3174`) — a DISTINCT cache
+  from the final `ComponentMetaResultDb`. The final-DB `insert_if_complete` from
+  `COMPONENT_META_RESULT_DB_STRUCTURAL_ADMISSION` (below) does NOT by itself close
+  this (the codex-DEFER ruling: '[final-DB structural admission] does not by itself
+  fix P1#1 because P1#1 is in the intermediate resolved-meta cache'); the SAME
+  structural complete-only-admission pattern must be EXTENDED to the resolved-meta
+  cache. Owner: named follow-up block `RESOLVED_META_SCALAR_NO_POISON`. codex-DEFER ruling
   2026-06-30 (.feedback/completeness-block/p1-disposition-consult-OUT.txt;
   gpt-5.5/xhigh, neutral-verified + best-not-lowest-effort-explicit): DEFER —
   pre-existing, outside the final-cache block scope, but the pinned scalar invariant
@@ -1319,9 +1324,12 @@ Deferred follow-ups (lead-architect ruled, tracked here):
 - **`DYNAMIC_ROOT_TYPE_WALKER_BOUNDING`**: the dynamic-root TYPE-domain walker
   `collect_dynamic_root_candidates_from_type` (`resolver_core/fallthrough.rs:1037`,
   live via `host_manage/fallthrough.rs:843`) still uses raw uncharged `.flat_map`
-  recursion — the O(2^depth) pattern the completeness block's result-bound removed
-  ONLY in the node-domain sibling (`collect_dynamic_root_candidates_from_node` /
-  `insert_dynamic_root_candidate_charged`). It is live perf / stack-risk debt; it is
+  recursion — un-deduplicated, it RE-EXPANDS shared subtrees (a DAG walked as a tree
+  → up to O(2^depth) blow-up), with unbounded recursion DEPTH and uncharged
+  traversal. The completeness block's result-bound removed that pattern ONLY in the
+  node-domain sibling (`collect_dynamic_root_candidates_from_node` /
+  `insert_dynamic_root_candidate_charged`), which bounds it via charged
+  deduplication. It is live perf / stack-risk debt; it is
   NOT a final-cache no-poison blocker under the merged completeness gate. Best
   follow-up: delete the legacy syntactic `TypeExpr` leg if node-domain extraction
   covers the semantic cases, else replace it with an iterative, budget-charged,
@@ -1340,8 +1348,13 @@ Deferred follow-ups (lead-architect ruled, tracked here):
   `host_manage/component_meta_entry.rs:900,988`), and add an architecture guard
   banning direct production `.component_meta_results().insert(...)`. The completeness
   contract surfaced FOUR enumerated-gate gaps from caller-discipline fragility;
-  structural admission removes that whole class and would ALSO structurally close the
-  intermediate-cache gap of `RESOLVED_META_SCALAR_NO_POISON` (above). Adding a guard
+  structural admission removes that whole class for the FINAL
+  `ComponentMetaResultDb`. It does NOT by itself close `RESOLVED_META_SCALAR_NO_POISON`
+  (above), whose poison sits in the DISTINCT intermediate resolved-meta cache
+  (`resolver_runtime().component_meta`) — but the SAME structural
+  complete-only-admission pattern, EXTENDED to that cache, is the clean fix there
+  (the codex-DEFER ruling: final-DB structural admission 'does not by itself fix
+  P1#1'). Adding a guard
   is rule-bearing → GOVERNANCE codex approval required at implementation time. Owner:
   `COMPONENT_META_RESULT_DB_STRUCTURAL_ADMISSION`. codex-DEFER ruling 2026-06-30
   (.feedback/completeness-block/p1-disposition-consult-OUT.txt; gpt-5.5/xhigh,
