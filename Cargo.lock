@@ -4206,6 +4206,7 @@ dependencies = [
  "tokio",
  "verter_compiler",
  "verter_session",
+ "verter_span",
  "verter_tsgo_api",
  "verter_workspace",
  "walkdir",
