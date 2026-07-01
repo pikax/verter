@@ -26,7 +26,6 @@
 mod api_check;
 mod checker;
 mod error_map;
-mod offset_map;
 mod reporter;
 mod tsconfig;
 

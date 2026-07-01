@@ -206,3 +206,53 @@ fn diagnostic_for_unknown_non_root_file_is_not_misattributed_to_queried_root() {
          queried root — it must be dropped (root-attribution invariant)"
     );
 }
+
+// ── Offset-conversion regression coverage ────────────────────────────────────
+//
+// verter-tsc converts each `--api` diagnostic's UTF-16 code-unit `pos` to a
+// 1-based `(line, col)` (with a UTF-16 column) through the SHARED
+// `verter_tsgo_api::api_offset_to_line_col` boundary — there is no verter-tsc-local
+// offset walk. These pin the conversion semantics the inline-source-map remap
+// depends on (a wrong line/col would remap through the wrong source-map token).
+// They exercise the shared entry the crate now calls, keeping the CRLF / non-ASCII
+// edge coverage that guarded the retired local `offset_map` here at the consuming
+// layer.
+
+use verter_tsgo_api::api_offset_to_line_col;
+
+#[test]
+fn shared_offset_conversion_ascii_and_multiline() {
+    // "abc\ndef": offset 5 is 'e' on line 2, col 2; offset 4 is 'd' at line 2 col 1.
+    let s = "abc\ndef";
+    assert_eq!(api_offset_to_line_col(s, 5), (2, 2));
+    assert_eq!(api_offset_to_line_col(s, 4), (2, 1));
+    assert_eq!(api_offset_to_line_col(s, 0), (1, 1));
+}
+
+#[test]
+fn shared_offset_conversion_em_dash_is_utf16_not_byte() {
+    // The generated carriers carry em-dashes (U+2014: 3 UTF-8 bytes / 1 UTF-16
+    // unit) in comments; a byte reading would drift the line. "a—b\ncd": UTF-16
+    // units a(0) —(1) b(2) \n(3) c(4) d(5).
+    let s = "a\u{2014}b\ncd";
+    assert_eq!(api_offset_to_line_col(s, 4), (2, 1)); // 'c' — line 2, not line 1
+    assert_eq!(api_offset_to_line_col(s, 2), (1, 3)); // 'b'
+}
+
+#[test]
+fn shared_offset_conversion_crlf_is_single_terminator() {
+    // Windows carriers use `\r\n`, which TypeScript treats as ONE terminator:
+    // the char after `\r\n` is line 2 col 1, NOT line 3. "ab\r\ncd": units
+    // a(0) b(1) \r(2) \n(3) c(4) d(5).
+    let s = "ab\r\ncd";
+    assert_eq!(api_offset_to_line_col(s, 2), (1, 3)); // at `\r`, still line 1
+    assert_eq!(api_offset_to_line_col(s, 3), (1, 4)); // at `\n`, still line 1
+    assert_eq!(api_offset_to_line_col(s, 4), (2, 1)); // after `\r\n`, line 2
+}
+
+#[test]
+fn shared_offset_conversion_supplementary_pair_and_clamp() {
+    // A supplementary-plane char is 2 UTF-16 units; a past-end offset clamps.
+    assert_eq!(api_offset_to_line_col("\u{10437}x", 2), (1, 3)); // 'x' after the pair
+    assert_eq!(api_offset_to_line_col("abc", 999), (1, 4)); // past-end → final col
+}

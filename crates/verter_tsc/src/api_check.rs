@@ -35,8 +35,8 @@ use verter_workspace::native_fs::NativeFs;
 use verter_workspace::tsgo_virtual_config::build_virtual_overlay_snapshot;
 
 use crate::error_map::map_tsc_position;
-use crate::offset_map::offset_to_line_col;
 use crate::reporter::{Diagnostic, Severity};
+use verter_tsgo_api::api_offset_to_line_col;
 
 /// A hard failure of the in-memory `--api` typecheck path.
 ///
@@ -306,7 +306,7 @@ fn map_one(
         return None;
     }
 
-    let (gen_line, gen_col) = offset_to_line_col(&file.content, d.pos);
+    let (gen_line, gen_col) = api_offset_to_line_col(&file.content, d.pos);
 
     let (file_out, line_out, col_out) = match &file.remap {
         RemapKind::Passthrough => (slashed(file_name), gen_line, gen_col),
