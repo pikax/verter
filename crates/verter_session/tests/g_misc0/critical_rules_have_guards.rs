@@ -515,6 +515,13 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // paths only, so a generated name is caught once
             // committed, not at generation time).
             "tracked_paths_are_portable",
+            // Canonical-id case-canonicalization at the upsert
+            // chokepoint: a caller-supplied variant spelling of the
+            // same file (upper-case Windows drive letter `C:/...` vs
+            // canonical `c:/...`) must not mint a second host identity
+            // that splits alias routes and derived caches — the
+            // HOST_MISSING_MACRO_TYPE_DEP degradation class.
+            "upsert_always_canonicalizes_supplied_canonical_id",
         ],
     ),
     (

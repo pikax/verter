@@ -17,6 +17,7 @@
 //! | `runtime_render_does_not_leave_stale_semantic_axis_for_host_backed` | (e)-skip safety: a later HostBacked read sees current, not stale, deps. |
 //! | `runtime_render_upper_drive_input_resolves_macro_types_wired_under_lower_drive_routes` | Drive-letter case parity: an upper-drive compile input converges on the lower-drive canonical whose alias routes were wired via `set_import_dependencies`. |
 //! | `runtime_render_upper_drive_input_single_hop_relative_import_control` | Single-hop relative control: resolves without the route table across the same case split. |
+//! | `runtime_render_supplied_upper_drive_upsert_does_not_hijack_lower_alias` | Alias-map subsumption: a `Some(UPPER)` upsert must not mint a `c:/... -> C:/...` self-alias (the chokepoint canonicalization subsumes the hijack). |
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -1179,5 +1180,73 @@ fn runtime_render_upper_drive_input_single_hop_relative_import_control() {
         render.code.contains("relalpha"),
         "the relative-imported prop name must appear in render Main:\n{}",
         render.code
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 15 — the alias-map is NOT hijacked by a supplied upper-drive id
+// ---------------------------------------------------------------------------
+
+/// The upsert chokepoint's canonicalization SUBSUMES the alias-map hijack:
+/// an `upsert(UpsertRequest { canonical_id: Some(UPPER), input_id: UPPER })`
+/// must NOT register the file's own lower-drive canonical as an ALIAS that
+/// points BACK at the upper spelling.
+///
+/// Mechanism this locks: `finish_upsert_post_commit` seeds the file's
+/// self-alias set from `canonical_id` AND `canonicalize_id(&req.input_id)`,
+/// then `update_alias_map` maps every alias → the committed `canonical_id`.
+/// If the committed `canonical_id` were the caller's VERBATIM upper
+/// spelling (`C:/...`), the lower-drive `canonicalize_id(input_id)`
+/// (`c:/...`) would be minted as an alias pointing at the upper key — so a
+/// SUBSEQUENT `resolve_alias_or_canonical("c:/...")` (the spelling the
+/// route-wiring writer and the eval-dependency resolver both produce)
+/// would be REWRITTEN to `C:/...`, orphaning the lower-keyed
+/// `DerivedRawState.import_routes`. Because the chokepoint canonicalizes
+/// the supplied id, the committed canonical is already `c:/...`, the alias
+/// mint is `c:/... → c:/...` (identity), and the lookup is stable.
+///
+/// DISCRIMINATING: with a verbatim supplied-id passthrough at the
+/// chokepoint, `resolve_alias_or_canonical("c:/proj/Widget.vue")` returns
+/// `"C:/proj/Widget.vue"` (the hijack) and this assertion FAILS. It is a
+/// pure string/alias-map assertion — reproduces on every OS.
+#[test]
+fn runtime_render_supplied_upper_drive_upsert_does_not_hijack_lower_alias() {
+    let host = new_host();
+
+    let upper = "C:/proj/Widget.vue";
+    let lower = "c:/proj/Widget.vue";
+    let lang = host.language_classifier().classify(upper);
+
+    // Upsert exactly as a Rust caller that hands `compile_many`'s Stage B a
+    // raw upper-drive id would (Some(upper) + input_id upper) — the class
+    // the chokepoint fix protects independently of the `compile_many`
+    // boundary normalization.
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: Some(upper.to_string()),
+            input_id: upper.to_string(),
+            source: Arc::from(
+                "<script setup lang=\"ts\">\nconst n = 1\n</script>\n<template><div>{{ n }}</div></template>\n",
+            ),
+            file_language: lang,
+            aliases: Vec::new(),
+        })
+        .expect("upsert with supplied upper-drive canonical must succeed");
+
+    // The file committed under the canonical LOWER-drive identity.
+    assert_eq!(
+        host.resolve_alias_or_canonical(upper),
+        lower,
+        "the supplied upper-drive id must canonicalize to the lower-drive \
+         host identity"
+    );
+    // The lower-drive spelling must resolve to ITSELF — NOT be hijacked
+    // into an alias that points back at the upper spelling.
+    assert_eq!(
+        host.resolve_alias_or_canonical(lower),
+        lower,
+        "the lower-drive canonical must resolve to itself — a supplied \
+         upper-drive upsert must not mint a `c:/... -> C:/...` alias that \
+         orphans lower-keyed route/derived state"
     );
 }

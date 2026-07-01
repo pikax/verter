@@ -205,10 +205,7 @@ impl VerterHost {
         req: UpsertRequest,
         priority: Priority,
     ) -> Result<HostUpdateResult, HostError> {
-        let canonical_id = req
-            .canonical_id
-            .clone()
-            .unwrap_or_else(|| canonicalize_id(&req.input_id).into_owned());
+        let canonical_id = Self::resolve_upsert_canonical(&req);
         // Drain the single outcome of the 1-element batch back into the
         // single-file return shape. `upsert_many_with_priority` always
         // returns exactly one outcome per input request.
@@ -315,11 +312,7 @@ impl VerterHost {
         // arm. `assert_canonicals_unique` panics on a duplicate.
         let canonicals: Vec<String> = requests
             .iter()
-            .map(|req| {
-                req.canonical_id
-                    .clone()
-                    .unwrap_or_else(|| canonicalize_id(&req.input_id).into_owned())
-            })
+            .map(Self::resolve_upsert_canonical)
             .collect();
         Self::assert_canonicals_unique(&canonicals);
 
@@ -345,10 +338,11 @@ impl VerterHost {
             // caches revalidate lazily through their own
             // `fact_dep_signature` checks (R3); the upsert itself does not
             // eagerly drain them. The engine owns this per request so the
-            // single-file and batch entry points behave identically.
-            if let Some(ref id) = req.canonical_id {
-                self.register_facts_for_new_content(id);
-            }
+            // single-file and batch entry points behave identically. It
+            // runs on the RESOLVED canonical for EVERY request — never on
+            // a caller-supplied spelling, and never skipped for a request
+            // that derived its canonical from `input_id`.
+            self.register_facts_for_new_content(&canonical_id);
 
             // Test-only observable: lets `compile_many_propagates_*_priority`
             // tests confirm the priority that flowed to the scheduler.
@@ -386,6 +380,36 @@ impl VerterHost {
         // order, index-aligned with `prepared`.
         let batch = self.scheduler.submit_batch_atomic(scheduler_requests);
         UpsertBatchTxn { prepared, batch }
+    }
+
+    /// Resolve the canonical id for one upsert request — the SINGLE
+    /// derivation both upsert entry points use.
+    ///
+    /// The canonical id that enters host state (the scheduler node, the
+    /// self-alias mint, the `DerivedRawState` key, the parse-domain fact
+    /// registration) is ALWAYS `canonicalize_id`-normalized, for every
+    /// request, regardless of whether `canonical_id` was supplied or
+    /// derived from `input_id`. A supplied `canonical_id` is
+    /// contract-enforced through the SAME normalization as a derived one:
+    /// canonical ids are normalized file paths (virtual-node identity
+    /// rides on `raw_id`/`node_kind`, never the canonical path), so
+    /// re-canonicalizing a supplied id is contract enforcement, never a
+    /// semantic rewrite — `canonicalize_id` is idempotent on an
+    /// already-canonical id. Without this, a caller-provided variant
+    /// spelling (e.g. an upper-case Windows drive letter `C:/...` vs the
+    /// canonical `c:/...`) would mint a SECOND host identity for the same
+    /// file, splitting alias routes, dependency state, and derived caches
+    /// across the two spellings.
+    ///
+    /// Both arms MUST stay release-active `canonicalize_id` calls; the
+    /// static architecture guard
+    /// `upsert_always_canonicalizes_supplied_canonical_id` pins this fn's
+    /// shape.
+    fn resolve_upsert_canonical(req: &UpsertRequest) -> String {
+        match &req.canonical_id {
+            Some(id) => canonicalize_id(id).into_owned(),
+            None => canonicalize_id(&req.input_id).into_owned(),
+        }
     }
 
     /// Enforce the engine's canonical-uniqueness caller contract.

@@ -316,6 +316,31 @@ impl VerterHost {
             CompileManyTarget::HostBacked => compile_profile_for_bundler(),
             CompileManyTarget::RuntimeRender { profile } => render_base_profile(profile),
         };
+
+        // Boundary canonicalization: pin every input's `canonical_id` to the
+        // SAME host identity `upsert` stores under and every read path
+        // (`render_only_main` / `get_virtual_file`) resolves to, BEFORE the
+        // per-canonical keying below. Stage B's grouping, `group_errors`,
+        // `seen_compile_keys`, and the Stage-D output map are all keyed on
+        // `input.canonical_id`; the shared upsert engine returns its
+        // `UpsertOutcome` under the resolved canonical, and the Stage-C read
+        // resolves through `resolve_alias_or_canonical`. Normalizing here
+        // (alias map + `canonicalize_id`) is the single point that keeps all
+        // four key spaces coherent, so a caller-supplied variant spelling —
+        // e.g. a bundler's upper-case Windows drive id `C:/...` against the
+        // canonical `c:/...` — cannot desync the upsert-key, the read-key,
+        // and the error/output maps into two identities. This mirrors the
+        // upsert chokepoint (`resolve_upsert_canonical`) at the batch
+        // boundary; Rust callers can still hand `compile_many` a raw id, so
+        // the guard lives here regardless of any FFI/TS-side normalization.
+        let inputs: Vec<CompileBatchInput> = inputs
+            .into_iter()
+            .map(|mut input| {
+                input.canonical_id = self.resolve_alias_or_canonical(&input.canonical_id);
+                input
+            })
+            .collect();
+
         let priority = options.priority.unwrap_or(Priority::Background);
         // Batch default cache mode; a per-input `requested_mode` overrides
         // it. `None` on both resolves to the host default `Session`.
