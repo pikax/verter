@@ -4203,8 +4203,10 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tokio",
  "verter_compiler",
  "verter_session",
+ "verter_tsgo_api",
  "verter_workspace",
  "walkdir",
 ]

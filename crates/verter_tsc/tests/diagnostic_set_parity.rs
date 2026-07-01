@@ -336,146 +336,31 @@ fn create_junction_or_symlink(src: &Path, dest: &Path) {
     let _ = std::os::unix::fs::symlink(src, dest);
 }
 
-// ── tsgo availability preflight ─────────────────────────────────────────
+// ── gated rc `--api` engine preflight ────────────────────────────────────
 //
-// `verter-tsc` is a binary-only crate (no lib), so its `find_tsgo` cannot be
-// imported. This block REPLICATES `crates/verter_tsc/src/reporter.rs::find_tsgo`
-// (its 4-step search: node_modules native package, node_modules/.bin shim, PATH,
-// npx cache) so the preflight finds tsgo exactly where the real run does — in this
-// repo tsgo lives in the npx cache, NOT node_modules, so a node_modules-only check
-// would falsely report "absent" and skip vacuously. The preflight runs against the
-// SAME start dir the binary uses (the junctioned temp project dir).
+// The `--noEmit` typecheck now runs the gated in-memory tsgo `--api` backend,
+// which requires the rc `@typescript/typescript-*` native engine the wire gate
+// pins (`typescript@7.0.1-rc`, a workspace-root devDep installed by
+// `pnpm install --frozen-lockfile`). The temp project's junctioned
+// `packages/example/node_modules` does NOT carry that engine (it pins an older
+// `typescript`), and the retired native-preview `tsgo` (npx cache) fails the wire
+// gate — so this preflight resolves the rc engine once (an explicit
+// `VERTER_TSGO_BIN` wins; else the SHARED `verter_tsgo_api` discovery against the
+// workspace root) and threads it to the verter-tsc subprocess via
+// `VERTER_TSGO_BIN`. A genuinely-absent rc engine SKIPs — the pinned multiset is
+// engine-specific, so never assert against a missing or wrong engine.
 
-/// Replicates `reporter::find_tsgo`.
-fn find_tsgo(start_dir: &Path) -> Option<PathBuf> {
-    let native_pkg = native_tsgo_package_name();
-    let native_bin = native_tsgo_binary_name();
-
-    let mut dir = start_dir.to_path_buf();
-    loop {
-        let nm = dir.join("node_modules");
-        if let Some(pkg) = native_pkg {
-            let candidate = nm
-                .join("@typescript")
-                .join(pkg)
-                .join("lib")
-                .join(native_bin);
-            if candidate.exists() {
-                return Some(candidate);
-            }
-        }
-        let bin_dir = nm.join(".bin");
-        if cfg!(target_os = "windows") {
-            let candidate_cmd = bin_dir.join("tsgo.cmd");
-            if candidate_cmd.exists() {
-                return Some(candidate_cmd);
-            }
-        }
-        let candidate = bin_dir.join("tsgo");
-        if candidate.exists() {
-            return Some(candidate);
-        }
-        match dir.parent() {
-            Some(p) => dir = p.to_path_buf(),
-            None => break,
+/// Resolve the gated rc `--api` engine: an explicit `VERTER_TSGO_BIN` override
+/// first, then the shared `verter_tsgo_api` discovery against the workspace root
+/// (where `pnpm install --frozen-lockfile` installs `typescript@7.0.1-rc`).
+fn resolve_rc_engine() -> Option<PathBuf> {
+    if let Some(raw) = std::env::var_os("VERTER_TSGO_BIN") {
+        let path = PathBuf::from(raw);
+        if path.is_file() {
+            return Some(path);
         }
     }
-
-    #[cfg(target_os = "windows")]
-    {
-        if let Some(p) = which_simple("tsgo.cmd").or_else(|| which_simple("tsgo.exe")) {
-            return Some(p);
-        }
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        if let Some(p) = which_simple("tsgo") {
-            return Some(p);
-        }
-    }
-
-    find_tsgo_in_npx_cache()
-}
-
-fn find_tsgo_in_npx_cache() -> Option<PathBuf> {
-    let cache_dir = npm_cache_npx_dir()?;
-    let entries = std::fs::read_dir(&cache_dir).ok()?;
-    let native_pkg = native_tsgo_package_name();
-    let native_bin = native_tsgo_binary_name();
-
-    for entry in entries.flatten() {
-        let base = entry.path().join("node_modules");
-        if let Some(pkg) = native_pkg {
-            let candidate = base
-                .join("@typescript")
-                .join(pkg)
-                .join("lib")
-                .join(native_bin);
-            if candidate.exists() {
-                return Some(candidate);
-            }
-        }
-        if cfg!(target_os = "windows") {
-            let shim = base.join(".bin").join("tsgo.cmd");
-            if shim.exists() {
-                return Some(shim);
-            }
-        }
-        let shim = base.join(".bin").join("tsgo");
-        if shim.exists() {
-            return Some(shim);
-        }
-    }
-    None
-}
-
-fn npm_cache_npx_dir() -> Option<PathBuf> {
-    if cfg!(target_os = "windows") {
-        std::env::var("LOCALAPPDATA")
-            .ok()
-            .map(|d| PathBuf::from(d).join("npm-cache").join("_npx"))
-    } else {
-        std::env::var("HOME")
-            .ok()
-            .map(|d| PathBuf::from(d).join(".npm").join("_npx"))
-    }
-}
-
-fn native_tsgo_package_name() -> Option<&'static str> {
-    if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
-        Some("native-preview-win32-x64")
-    } else if cfg!(all(target_os = "windows", target_arch = "aarch64")) {
-        Some("native-preview-win32-arm64")
-    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
-        Some("native-preview-linux-x64")
-    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
-        Some("native-preview-linux-arm64")
-    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
-        Some("native-preview-darwin-x64")
-    } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-        Some("native-preview-darwin-arm64")
-    } else {
-        None
-    }
-}
-
-fn native_tsgo_binary_name() -> &'static str {
-    if cfg!(target_os = "windows") {
-        "tsgo.exe"
-    } else {
-        "tsgo"
-    }
-}
-
-fn which_simple(name: &str) -> Option<PathBuf> {
-    let path_var = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path_var) {
-        let candidate = dir.join(name);
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
-    None
+    verter_tsgo_api::transport::spawn::discover_tsgo(&workspace_root()).ok()
 }
 
 // ── The parity oracle ───────────────────────────────────────────────────
@@ -491,18 +376,18 @@ fn verter_tsc_diagnostic_set_parity() {
         }
     };
 
-    // PREFLIGHT 2 — tsgo binary, discovered exactly as the real run discovers it
-    // (`find_tsgo` against the junctioned temp project dir). The pinned multiset is
-    // tsgo-specific: when tsgo is genuinely absent the binary falls back to tsc,
-    // whose diagnostic set differs, so we SKIP rather than assert a tsc set.
-    let tsgo = match find_tsgo(&temp_path) {
+    // PREFLIGHT 2 — the gated rc `--api` engine (what the in-memory typecheck now
+    // uses). The pinned multiset is engine-specific: when the rc engine is genuinely
+    // absent we SKIP rather than assert against a missing/wrong engine. The resolved
+    // engine is threaded to the verter-tsc subprocess via `VERTER_TSGO_BIN` (the temp
+    // project's junctioned node_modules does not carry the rc engine).
+    let rc_engine = match resolve_rc_engine() {
         Some(p) => p,
         None => {
             eprintln!(
-                "SKIP: tsgo not found via find_tsgo({}) — the pinned set is tsgo-specific; \
-                 the tsc fallback's diagnostic set differs (run `pnpm install` / ensure tsgo \
-                 is on PATH or the npx cache)",
-                temp_path.display()
+                "SKIP: rc tsgo `--api` engine (typescript@7.0.1-rc) not found — the pinned set \
+                 is engine-specific; set VERTER_TSGO_BIN or run `pnpm install --frozen-lockfile` \
+                 in the workspace so the pinned engine is discoverable"
             );
             drop(temp_dir);
             return;
@@ -511,6 +396,7 @@ fn verter_tsc_diagnostic_set_parity() {
 
     let bin = env!("CARGO_BIN_EXE_verter-tsc");
     let output = Command::new(bin)
+        .env("VERTER_TSGO_BIN", &rc_engine)
         .arg("--noEmit")
         .arg("-p")
         .arg(temp_path.join("tsconfig.json"))
@@ -519,7 +405,7 @@ fn verter_tsc_diagnostic_set_parity() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    eprintln!("=== tsgo: {} ===", tsgo.display());
+    eprintln!("=== rc tsgo --api engine: {} ===", rc_engine.display());
     eprintln!("=== verter-tsc STDERR ===\n{stderr}");
     eprintln!("=== verter-tsc STDOUT ===\n{stdout}");
 
@@ -543,10 +429,10 @@ fn verter_tsc_diagnostic_set_parity() {
     // legitimate empty run.
     assert!(
         !diags.is_empty(),
-        "REGRESSION: tsgo IS present ({}) but verter-tsc parsed ZERO diagnostics over the \
-         intentional-error fixture (all diagnostics dropped / output format changed / early \
-         exit).\nSTDERR:\n{stderr}\nSTDOUT:\n{stdout}",
-        tsgo.display()
+        "REGRESSION: the rc tsgo `--api` engine IS present ({}) but verter-tsc parsed ZERO \
+         diagnostics over the intentional-error fixture (all diagnostics dropped / output format \
+         changed / early exit / engine failed to connect).\nSTDERR:\n{stderr}\nSTDOUT:\n{stdout}",
+        rc_engine.display()
     );
 
     let root_str = temp_path.to_string_lossy().replace('\\', "/");

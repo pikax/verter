@@ -6,27 +6,27 @@
 //!
 //! # Type checker resolution
 //!
-//! By default, verter-tsc looks for `tsgo` (the Go-based TypeScript compiler
-//! from `@typescript/native-preview`) first, falling back to `tsc` if not
-//! found. tsgo is ~10x faster than tsc and produces identical diagnostics.
+//! The `--noEmit` TYPECHECK path drives the GATED tsgo `--api` engine (the
+//! version-pinned rc `@typescript/typescript-<platform>` native binary — the TS 7
+//! native compiler) IN-MEMORY: the generated carriers are fed as an in-memory
+//! overlay, no temp files. This path is tsgo-only and version-gated; there is NO
+//! tsc fallback for type checking. Engine discovery precedence: the explicit
+//! `VERTER_TSGO_BIN` override, then the rc engine in the project's `node_modules`.
 //!
-//! Search order for tsgo:
-//! 1. `node_modules/@typescript/native-preview-<platform>/lib/tsgo` (native binary)
-//! 2. `node_modules/.bin/tsgo` (npm shim, walking up parent dirs)
-//! 3. `tsgo` on PATH
-//! 4. npx cache
-//!
-//! If tsgo is not found, falls back to `tsc` (same search strategy).
-//! Use `--use-tsc` to skip tsgo and force tsc.
+//! The `--declaration` EMIT path runs `tsgo --project` over temp files (the
+//! native-preview `tsgo`, with a tsc fallback if absent), because tsgo `--api`
+//! exposes no emit surface. Its search order: `node_modules/@typescript/`
+//! `native-preview-<platform>/lib/tsgo` → `node_modules/.bin/tsgo` → PATH → npx cache.
 //!
 //! # Usage
 //!
 //!   verter-tsc [--project tsconfig.json] [--noEmit]
 //!   verter-tsc --declaration --declarationDir dist/types
-//!   verter-tsc --use-tsc --noEmit   # force tsc instead of tsgo
 
+mod api_check;
 mod checker;
 mod error_map;
+mod offset_map;
 mod reporter;
 mod tsconfig;
 
@@ -42,9 +42,9 @@ use clap::Parser;
     about = "Vue SFC type checker — verter-native vue-tsc replacement",
     long_about = "Generates ComponentPublicInstance declarations from Vue SFC macros\n\
                   and invokes tsgo (or tsc) for type checking. Faster than vue-tsc for large projects.\n\n\
-                  By default, uses tsgo (~10x faster) if available, falling back to tsc.\n\
-                  Install tsgo: npm install -D @typescript/native-preview\n\
-                  Use --use-tsc to force the classic TypeScript compiler."
+                  The --noEmit typecheck path drives tsgo in-memory via --api (no temp files);\n\
+                  the --declaration emit path runs tsgo --project over temp files.\n\
+                  Install tsgo: npm install -D @typescript/native-preview"
 )]
 struct Cli {
     /// Path to tsconfig.json [default: tsconfig.json]
@@ -87,10 +87,6 @@ struct Cli {
     /// List emitted files after compilation
     #[arg(long = "listEmittedFiles")]
     list_emitted_files: bool,
-
-    /// Force using tsc instead of tsgo (tsgo is preferred by default for ~10x speed)
-    #[arg(long = "use-tsc")]
-    use_tsc: bool,
 
     // ── tsc-compat flags (accepted but ignored) ────────────────────
     /// Composite mode (accepted for tsc compat, ignored internally)
@@ -163,13 +159,7 @@ fn main() {
         config.vue_files.len()
     );
 
-    let binary = if cli.use_tsc {
-        checker::TypeCheckerBinary::ForceTsc
-    } else {
-        checker::TypeCheckerBinary::TsgoWithFallback
-    };
-
-    let result = checker::run(&config, &tsconfig_path, &emit_opts, binary);
+    let result = checker::run(&config, &tsconfig_path, &emit_opts);
 
     for diagnostic in &result.diagnostics {
         println!("{diagnostic}");
@@ -259,18 +249,14 @@ mod tests {
     }
 
     #[test]
-    fn cli_accepts_use_tsc_flag() {
-        let cli =
-            Cli::try_parse_from(["verter-tsc", "--noEmit", "--use-tsc"]).expect("should parse");
-        assert!(cli.use_tsc, "--use-tsc should set use_tsc to true");
-    }
-
-    #[test]
-    fn cli_defaults_use_tsc_to_false() {
-        let cli = Cli::try_parse_from(["verter-tsc", "--noEmit"]).expect("should parse");
+    fn cli_rejects_removed_use_tsc_flag() {
+        // `--use-tsc`/`ForceTsc` was removed: the typecheck path is in-memory
+        // tsgo `--api` (tsgo-only, no tsc fallback). clap must reject the flag.
+        let cli = Cli::try_parse_from(["verter-tsc", "--noEmit", "--use-tsc"]);
         assert!(
-            !cli.use_tsc,
-            "use_tsc should default to false (prefer tsgo)"
+            cli.is_err(),
+            "--use-tsc must be rejected after removal, got {:?}",
+            cli.ok().map(|_| "parsed")
         );
     }
 
@@ -312,24 +298,5 @@ mod tests {
             "build_projects should contain the positional path"
         );
         assert_eq!(cli.build_projects[0].to_str().unwrap(), "tsconfig.app.json");
-    }
-
-    #[test]
-    fn cli_use_tsc_with_all_flags() {
-        let cli = Cli::try_parse_from([
-            "verter-tsc",
-            "--noEmit",
-            "-p",
-            "tsconfig.json",
-            "--use-tsc",
-            "--composite",
-            "false",
-        ]);
-        assert!(
-            cli.is_ok(),
-            "should accept --use-tsc with other flags: {:?}",
-            cli.err()
-        );
-        assert!(cli.unwrap().use_tsc);
     }
 }

@@ -32,18 +32,10 @@ use tempfile::TempDir;
 use verter_compiler::compile::{CodegenOptions, CompileTarget, VerterCompileOptions};
 use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 
+use crate::api_check;
 use crate::error_map::map_tsc_position;
 use crate::reporter::{self, Diagnostic, TscDiagnostic};
 use crate::tsconfig::{strip_unc_prefix, TsConfig};
-
-/// Which type-checker binary to use.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TypeCheckerBinary {
-    /// Try tsgo first, fall back to tsc if not found (default).
-    TsgoWithFallback,
-    /// Force tsc (skip tsgo discovery).
-    ForceTsc,
-}
 
 /// Options controlling what the checker emits.
 pub struct EmitOptions {
@@ -66,21 +58,25 @@ struct CheckerInvocation {
     success: bool,
 }
 
-/// Generate public-API stub files for cross-component type resolution.
+/// Generate public-API stub carriers for cross-component type resolution.
 ///
 /// For each `.vue` file, generates a stub containing the component's public API
 /// (props, emits, slots, exposed bindings) so that cross-component imports resolve to
 /// real types instead of the generic `DefineComponent<{}, {}, any>` wildcard shim.
 ///
+/// IN-MEMORY: the stub is NOT written to disk — `base_dir` only roots the stub's
+/// deterministic virtual path (`<base>/Name_<hash>.vue.ts`), which the in-memory
+/// `--api` overlay serves and the synthetic tsconfig lists in `files`.
+///
 /// Returns:
-/// - `vue_ts_paths`: list of generated stub file paths (for tsconfig `files`)
-/// - `vue_ts_map`: canonical `.vue` path → temp-dir stub path (for import rewriting)
+/// - `stub_files`: `(virtual stub path, stub source)` for the overlay + `files`
+/// - `vue_ts_map`: canonical `.vue` path → virtual stub path (for import rewriting)
 fn generate_public_api_stubs(
     host: &VerterHost,
     vue_files: &[PathBuf],
-    temp_dir: &Path,
-) -> (Vec<PathBuf>, HashMap<String, PathBuf>) {
-    let mut vue_ts_paths = Vec::new();
+    base_dir: &Path,
+) -> (Vec<(PathBuf, String)>, HashMap<String, PathBuf>) {
+    let mut stub_files = Vec::new();
     let mut vue_ts_map = HashMap::new();
 
     // ONE batched public-API call for every .vue file: the batch captures a
@@ -122,24 +118,23 @@ fn generate_public_api_stubs(
         // the codegen's carrier-API specifier to this file via `vue_ts_map`, so
         // the `.vue.ts` extension here only needs `allowImportingTsExtensions`.
         let stub_name = format!("{component_name}_{hash:016x}.vue.ts");
-        let stub_path = temp_dir.join(&stub_name);
+        let stub_path = base_dir.join(&stub_name);
 
-        if fs::write(&stub_path, &code).is_err() {
-            continue;
-        }
-
-        vue_ts_paths.push(stub_path.clone());
-        vue_ts_map.insert(canonical_id, stub_path);
+        vue_ts_map.insert(canonical_id, stub_path.clone());
+        stub_files.push((stub_path, code));
     }
 
-    (vue_ts_paths, vue_ts_map)
+    (stub_files, vue_ts_map)
 }
 
 /// Validation stage: generate full TSX (script body + template) for every `.vue` file in parallel.
 ///
-/// Uses `compile()` with `CompileTarget::IDE` for full type checking.
-/// Returns `(vue_path, tsx_code, tsx_path)` tuples written to `temp_dir`.
-fn generate_all_tsx(vue_files: &[PathBuf], temp_dir: &Path) -> Vec<(PathBuf, String, PathBuf)> {
+/// Uses `compile()` with `CompileTarget::TSX` for full type checking.
+/// IN-MEMORY: nothing is written to disk — `base_dir` only roots each carrier's
+/// deterministic virtual path (`<base>/Name_<hash>.tsx`). Returns
+/// `(vue_path, tsx_code, virtual tsx_path)` tuples; the in-memory `--api` overlay
+/// serves the code and the synthetic tsconfig lists the path in `files`.
+fn generate_all_tsx(vue_files: &[PathBuf], base_dir: &Path) -> Vec<(PathBuf, String, PathBuf)> {
     vue_files
         .par_iter()
         .map(|vue_path| {
@@ -187,11 +182,7 @@ fn generate_all_tsx(vue_files: &[PathBuf], temp_dir: &Path) -> Vec<(PathBuf, Str
 
             let hash = simple_hash(vue_path.to_string_lossy().as_bytes());
             let tsx_name = format!("{component_name}_{hash:016x}.tsx");
-            let tsx_path = temp_dir.join(&tsx_name);
-
-            if fs::write(&tsx_path, &code).is_err() {
-                return None;
-            }
+            let tsx_path = base_dir.join(&tsx_name);
 
             Some((vue_path.clone(), code, tsx_path))
         })
@@ -273,12 +264,12 @@ fn build_host_config() -> HostConfig {
 }
 
 /// Run the full type-checking pipeline.
-pub fn run(
-    config: &TsConfig,
-    tsconfig_path: &Path,
-    opts: &EmitOptions,
-    binary: TypeCheckerBinary,
-) -> CheckResult {
+///
+/// The `--noEmit` TYPECHECK diagnostic set is produced IN-MEMORY through the tsgo
+/// `--api` backend ([`run_inmemory_typecheck`]) — no temp files, no subprocess.
+/// The `--declaration` EMIT stage stays on the temp-file `tsgo --project` path
+/// ([`run_declaration_stage`]) because tsgo `--api` exposes no emit surface.
+pub fn run(config: &TsConfig, tsconfig_path: &Path, opts: &EmitOptions) -> CheckResult {
     if config.vue_files.is_empty() {
         return CheckResult {
             diagnostics: Vec::new(),
@@ -286,27 +277,8 @@ pub fn run(
         };
     }
 
-    // CRITICAL: The temp dir MUST be inside the project root so that tsc can
-    // resolve node_modules (e.g. `import("vue")`) from the generated .tsx
-    // files. Using the system temp dir (different drive/path) breaks module
-    // resolution and produces incorrect results.
-    let temp_dir = match TempDir::new_in(&config.root_dir) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!(
-                "verter-tsc: failed to create temp directory in {}: {e}",
-                config.root_dir.display()
-            );
-            return CheckResult {
-                diagnostics: Vec::new(),
-                emitted_files: Vec::new(),
-            };
-        }
-    };
-
-    // ── Generate public API stubs ─────────────────────────
-    // Create a shared VerterHost, upsert all .vue files, and generate public-API
-    // stubs containing real component types for cross-component type resolution.
+    // ONE shared VerterHost (Batch preset): upsert every `.vue` once. Both stages
+    // build from it — the typecheck overlay carriers and the declaration `.tsc.tsx`.
     let host = VerterHost::new_standalone(build_host_config());
     for vue_path in &config.vue_files {
         let source = match fs::read_to_string(vue_path) {
@@ -323,243 +295,15 @@ pub fn run(
         });
     }
 
-    let (vue_ts_paths, vue_ts_map) =
-        generate_public_api_stubs(&host, &config.vue_files, temp_dir.path());
+    // ── Typecheck stage: in-memory tsgo `--api` (the `--noEmit` diagnostic set). ──
+    let mut diagnostics = run_inmemory_typecheck(&host, config, tsconfig_path);
 
-    // ── Validation stage (TSX) ───────────────────────────────────
-    // Generate full TSX output (script body + template) for type checking.
-    // This catches type errors that the minimal macro-only .tsc.tsx would miss.
-    let mut validation_generated = generate_all_tsx(&config.vue_files, temp_dir.path());
-
-    // ── Lower the GENERATED validation TSX's own carrier specifiers ──────
-    // TSC-validation carrier-specifier lowering (NOT user-import rewriting):
-    // Verter's IDE codegen emitted carrier-API specifiers via the reserved
-    // `.verter.ts` virtual suffix (`Foo.vue.verter.ts`). Lower known carrier-API
-    // paths to temp-dir stubs (for real cross-component type checking) and strip
-    // the suffix back to the carrier path for unknown paths (falling back to the
-    // wildcard shim). Only the generated TSX's OWN specifiers are touched.
-    for (_, code, tsx_path) in &mut validation_generated {
-        let rewritten = lower_tsc_validation_carrier_specifiers(code, &vue_ts_map);
-        if rewritten != *code {
-            *code = rewritten;
-            let _ = fs::write(tsx_path, &*code);
-        }
-    }
-
-    // ── Declaration-generation stage (TSC) ────────────────────────
-    // Only when --declaration is requested. Uses the minimal macro-only codegen.
-    // Reuses the shared VerterHost produced by the stub stage (files already upserted).
-    let declaration_generated = if opts.declaration {
-        // Use a subdirectory to keep validation and declaration files separate.
-        let decl_dir = temp_dir.path().join("_tsc");
-        let _ = fs::create_dir_all(&decl_dir);
-        Some(generate_all_tsc(&host, &config.vue_files, &decl_dir))
-    } else {
-        None
-    };
-
-    // Write a wildcard module declaration so tsc can resolve `import X from '*.vue'`.
-    // Without this, .ts files importing .vue components get TS2307 errors.
-    let shims_path = temp_dir.path().join("vue-shims.d.ts");
-    let _ = fs::write(
-        &shims_path,
-        "declare module '*.vue' {\n  \
-         import type { DefineComponent } from 'vue'\n  \
-         const component: DefineComponent<{}, {}, any>\n  \
-         export default component\n}\n",
-    );
-
-    // Augment Vue's HTMLAttributes with `children` so JSX children on intrinsic
-    // elements don't cause TS2322/TS2559 errors. This must be in a separate file
-    // because a top-level `import` would turn vue-shims.d.ts into a module,
-    // breaking the ambient `declare module '*.vue'` declaration.
-    let html_attrs_path = temp_dir.path().join("html-attrs-augment.d.ts");
-    let _ = fs::write(
-        &html_attrs_path,
-        "import '@vue/runtime-dom'\n\
-         declare module '@vue/runtime-dom' {\n  \
-           interface HTMLAttributes {\n    \
-             children?: any\n  \
-           }\n  \
-           interface SVGAttributes {\n    \
-             children?: any\n  \
-           }\n\
-         }\n\
-         export {}\n",
-    );
-
-    // Write a single shared @verter/types declaration file. Individual TSX files
-    // import from "@verter/types" but don't embed the ambient module block
-    // (embed_ambient_types=false), avoiding duplicate declarations across files.
-    let types_path = temp_dir.path().join("__verter_types.d.ts");
-    let _ = fs::write(&types_path, verter_compiler::VERTER_TYPES_AMBIENT_MODULE);
-
-    // Build validation file list (validation-stage TSX files + stubs).
-    let mut tsx_to_vue: HashMap<String, (PathBuf, String)> = HashMap::new();
-    let mut validation_paths: Vec<PathBuf> = vec![shims_path.clone(), html_attrs_path, types_path];
-
-    // Add public API stubs so tsconfig includes them for type resolution.
-    validation_paths.extend(vue_ts_paths);
-
-    for (vue_path, tsx_code, tsx_path) in &validation_generated {
-        let canon = strip_unc_prefix(&tsx_path.canonicalize().unwrap_or_else(|_| tsx_path.clone()));
-        tsx_to_vue.insert(
-            canon.to_string_lossy().replace('\\', "/"),
-            (vue_path.clone(), tsx_code.clone()),
-        );
-        validation_paths.push(tsx_path.clone());
-    }
-
-    // Build declaration file list (declaration-stage TSC files).
-    // Also track tsc generated files for declaration post-processing.
-    let generated_for_decl = if let Some(ref decl_gen) = declaration_generated {
-        let mut tsc_tsx_paths: Vec<PathBuf> = vec![shims_path];
-        for (vue_path, tsc_code, tsc_tsx_path) in decl_gen {
-            let canon = strip_unc_prefix(
-                &tsc_tsx_path
-                    .canonicalize()
-                    .unwrap_or_else(|_| tsc_tsx_path.clone()),
-            );
-            tsx_to_vue.insert(
-                canon.to_string_lossy().replace('\\', "/"),
-                (vue_path.clone(), tsc_code.clone()),
-            );
-            tsc_tsx_paths.push(tsc_tsx_path.clone());
-        }
-        // When emitting declarations, tsc needs to see the original .ts files too
-        for ts_path in &config.ts_files {
-            tsc_tsx_paths.push(ts_path.clone());
-        }
-        Some(tsc_tsx_paths)
-    } else {
-        None
-    };
-
-    // Find a type-checker binary.
-    let root = strip_unc_prefix(&config.root_dir);
-    let checker_bin = match binary {
-        TypeCheckerBinary::TsgoWithFallback => {
-            if let Some(tsgo) = reporter::find_tsgo(&root) {
-                eprintln!("verter-tsc: using tsgo at {}", tsgo.display());
-                strip_unc_prefix(&tsgo)
-            } else if let Some(tsc) = reporter::find_tsc(&root) {
-                eprintln!("verter-tsc: tsgo not found, falling back to tsc");
-                strip_unc_prefix(&tsc)
-            } else {
-                eprintln!(
-                    "verter-tsc: no type checker found. \
-                     Install tsgo: npm install -D @typescript/native-preview\n\
-                     Or install tsc: npm install -D typescript"
-                );
-                return CheckResult {
-                    diagnostics: Vec::new(),
-                    emitted_files: Vec::new(),
-                };
-            }
-        }
-        TypeCheckerBinary::ForceTsc => {
-            if let Some(tsc) = reporter::find_tsc(&root) {
-                eprintln!("verter-tsc: using tsc at {}", tsc.display());
-                strip_unc_prefix(&tsc)
-            } else {
-                eprintln!(
-                    "verter-tsc: TypeScript compiler (tsc) not found. \
-                     Install it with: npm install -D typescript"
-                );
-                return CheckResult {
-                    diagnostics: Vec::new(),
-                    emitted_files: Vec::new(),
-                };
-            }
-        }
-    };
-
-    // ── Validation stage ─────────────────────────────────────────
-    // Use full TSX files (script body + template) with --noEmit for type checking.
-    let validation_opts = EmitOptions {
-        no_emit: true,
-        declaration: false,
-        declaration_dir: None,
-    };
-    let validation_tsconfig = write_temp_tsconfig(
-        temp_dir.path(),
-        tsconfig_path,
-        &validation_paths,
-        &validation_opts,
-        &config.root_dir,
-    );
-
-    let mut diagnostics = match validation_tsconfig {
-        Ok(tsconfig_path) => match invoke_checker(&checker_bin, &tsconfig_path, &validation_opts) {
-            Ok(invocation) => {
-                let raw_diags = reporter::parse_tsc_output(&invocation.output);
-                remap_diagnostics(raw_diags, &tsx_to_vue)
-            }
-            Err(e) => {
-                eprintln!("verter-tsc: validation stage failed: {e}");
-                Vec::new()
-            }
-        },
-        Err(e) => {
-            eprintln!("verter-tsc: failed to write validation tsconfig: {e}");
-            Vec::new()
-        }
-    };
-
-    // ── Declaration-generation stage ──────────────────────────────
-    let emitted_files = if let Some(tsc_tsx_paths) = generated_for_decl {
-        let decl_opts = EmitOptions {
-            no_emit: false,
-            declaration: true,
-            declaration_dir: opts.declaration_dir.clone(),
-        };
-        let decl_tsconfig = write_temp_tsconfig(
-            temp_dir.path(),
-            tsconfig_path,
-            &tsc_tsx_paths,
-            &decl_opts,
-            &config.root_dir,
-        );
-
-        match decl_tsconfig {
-            Ok(tsconfig_path) => {
-                match invoke_checker(&checker_bin, &tsconfig_path, &decl_opts) {
-                    Ok(invocation) => {
-                        let raw_diags = reporter::parse_tsc_output(&invocation.output);
-                        diagnostics.extend(remap_diagnostics(raw_diags, &tsx_to_vue));
-
-                        if !invocation.success {
-                            eprintln!(
-                                "verter-tsc: declaration stage had errors; post-processing emitted declarations anyway"
-                            );
-                        }
-
-                        // Post-process: rename .tsc.tsx.d.ts → .vue.d.ts.
-                        // Always run, even when tsc exits with errors. tsc emits
-                        // .d.ts for non-erroring files (with noEmitOnError: false),
-                        // so skipping post-processing would leave 0 .vue.d.ts files
-                        // when only some components have type errors.
-                        if let (Some(decl_dir), Some(ref decl_gen)) =
-                            (&opts.declaration_dir, &declaration_generated)
-                        {
-                            postprocess_vue_declarations(decl_dir, decl_gen, &config.root_dir);
-                        }
-                        opts.declaration_dir
-                            .as_ref()
-                            .map(|d| collect_dts_files(d))
-                            .unwrap_or_default()
-                    }
-                    Err(e) => {
-                        eprintln!("verter-tsc: declaration stage failed: {e}");
-                        Vec::new()
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("verter-tsc: failed to write declaration tsconfig: {e}");
-                Vec::new()
-            }
-        }
+    // ── Declaration/emit stage: temp-file `tsgo --project` (tsgo `--api` has no
+    //    emit surface). Only when `--declaration` is requested. ──
+    let emitted_files = if opts.declaration {
+        let (decl_diagnostics, emitted) = run_declaration_stage(&host, config, tsconfig_path, opts);
+        diagnostics.extend(decl_diagnostics);
+        emitted
     } else {
         Vec::new()
     };
@@ -568,6 +312,313 @@ pub fn run(
         diagnostics,
         emitted_files,
     }
+}
+
+/// The wildcard `*.vue` ambient module so importing TS resolves
+/// `import X from '*.vue'` (without it, TS2307). Served as an in-memory overlay
+/// carrier for the typecheck stage and written to disk for the declaration stage.
+const VUE_SHIMS_DTS: &str = "declare module '*.vue' {\n  \
+     import type { DefineComponent } from 'vue'\n  \
+     const component: DefineComponent<{}, {}, any>\n  \
+     export default component\n}\n";
+
+/// Augments Vue's `HTMLAttributes`/`SVGAttributes` with `children` so JSX children
+/// on intrinsic elements don't trip TS2322/TS2559. Separate from [`VUE_SHIMS_DTS`]
+/// because a top-level `import` would turn that file into a module and break its
+/// ambient `declare module '*.vue'`.
+const HTML_ATTRS_AUGMENT_DTS: &str = "import '@vue/runtime-dom'\n\
+     declare module '@vue/runtime-dom' {\n  \
+       interface HTMLAttributes {\n    \
+         children?: any\n  \
+       }\n  \
+       interface SVGAttributes {\n    \
+         children?: any\n  \
+       }\n\
+     }\n\
+     export {}\n";
+
+/// Forward-slash an absolute carrier/config path for the in-memory overlay + the
+/// synthetic tsconfig `files`. The carriers are VIRTUAL (never on disk), so this
+/// never canonicalizes.
+fn slash(p: &Path) -> String {
+    p.to_string_lossy().replace('\\', "/")
+}
+
+/// The three ambient `.d.ts` shim carriers `(virtual path, content)`, rooted at
+/// virtual in-project paths under `base`.
+fn ambient_shim_carriers(base: &Path) -> Vec<(String, String)> {
+    vec![
+        (
+            slash(&base.join("vue-shims.d.ts")),
+            VUE_SHIMS_DTS.to_string(),
+        ),
+        (
+            slash(&base.join("html-attrs-augment.d.ts")),
+            HTML_ATTRS_AUGMENT_DTS.to_string(),
+        ),
+        (
+            slash(&base.join("__verter_types.d.ts")),
+            verter_compiler::VERTER_TYPES_AMBIENT_MODULE.to_string(),
+        ),
+    ]
+}
+
+/// Discover the gated tsgo `--api` engine (the rc `@typescript/typescript-*`
+/// native binary the wire gate pins). Mirrors the canonical discovery precedence
+/// the LSP/host uses: the explicit `VERTER_TSGO_BIN` override first, then the rc
+/// engine in the project's `node_modules` via the SHARED
+/// [`verter_tsgo_api::transport::spawn::discover_tsgo`]. The retired native-preview
+/// `tsgo` is intentionally NOT searched — it fails the wire gate, so resolving one
+/// would only fail-close after a spawn. (The npm/npx-cache rc tier of the canonical
+/// discovery lives in `verter_type_runtime`; verter-tsc cannot depend on it within
+/// this block's scope. TODO(follow-up): hoist that rc cache-search into
+/// `verter_tsgo_api` so every consumer — verter-tsc included — shares all tiers.)
+fn discover_api_engine(root: &Path) -> Option<PathBuf> {
+    if let Some(raw) = std::env::var_os("VERTER_TSGO_BIN") {
+        let path = PathBuf::from(raw);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    verter_tsgo_api::transport::spawn::discover_tsgo(root).ok()
+}
+
+/// The in-memory tsgo `--api` typecheck stage: generate the validation carriers
+/// (full TSX + public-API stubs + ambient shims) and the synthetic tsconfig as an
+/// in-memory overlay, then drive the gated [`api_check::typecheck`] over EVERY
+/// configured-project root file. No temp files, no subprocess, no tsc fallback.
+fn run_inmemory_typecheck(
+    host: &VerterHost,
+    config: &TsConfig,
+    tsconfig_path: &Path,
+) -> Vec<Diagnostic> {
+    let root = strip_unc_prefix(&config.root_dir);
+
+    // Discover the GATED `--api` engine (the rc `@typescript/typescript-*` native
+    // binary the wire gate pins). No tsc fallback for the typecheck path by design —
+    // a missing or wire-diverged engine fail-closes to an empty diagnostic set.
+    let engine = match discover_api_engine(&root) {
+        Some(p) => strip_unc_prefix(&p),
+        None => {
+            eprintln!(
+                "verter-tsc: no gated tsgo `--api` engine found for in-memory typecheck. \
+                 Install the pinned engine (`typescript@7.0.1-rc`) in the project's node_modules, \
+                 or point VERTER_TSGO_BIN at the `tsc` native binary. \
+                 (There is no tsc fallback for the typecheck path.)"
+            );
+            return Vec::new();
+        }
+    };
+
+    // Generate the validation carriers IN-MEMORY, rooted at deterministic
+    // in-project virtual paths (so node_modules resolution walks from the root).
+    let (stub_files, vue_ts_map) = generate_public_api_stubs(host, &config.vue_files, &root);
+    let mut tsx_files = generate_all_tsx(&config.vue_files, &root);
+    // Lower the generated TSX's OWN carrier specifiers to the public-API stubs (or
+    // strip back to the bare carrier for the `*.vue` wildcard shim).
+    for (_, code, _) in &mut tsx_files {
+        let rewritten = lower_tsc_validation_carrier_specifiers(code, &vue_ts_map);
+        if rewritten != *code {
+            *code = rewritten;
+        }
+    }
+
+    // Assemble the overlay carriers + the synthetic tsconfig `files` membership.
+    let mut overlay_files: Vec<api_check::OverlayFile> = Vec::new();
+    let mut config_files: Vec<String> = Vec::new();
+    for (path, content) in ambient_shim_carriers(&root) {
+        config_files.push(path.clone());
+        overlay_files.push(api_check::OverlayFile {
+            path,
+            content,
+            remap: api_check::RemapKind::Passthrough,
+        });
+    }
+    for (stub_path, code) in &stub_files {
+        let path = slash(stub_path);
+        config_files.push(path.clone());
+        overlay_files.push(api_check::OverlayFile {
+            path,
+            content: code.clone(),
+            remap: api_check::RemapKind::Passthrough,
+        });
+    }
+    for (vue_path, code, tsx_path) in &tsx_files {
+        let path = slash(tsx_path);
+        config_files.push(path.clone());
+        overlay_files.push(api_check::OverlayFile {
+            path,
+            content: code.clone(),
+            remap: api_check::RemapKind::SourceMapped {
+                vue_path: slash(vue_path),
+            },
+        });
+    }
+
+    // Synthetic tsconfig: byte-identical to the temp-file validation config (same
+    // `synthetic_tsconfig_value` builder), served in-memory at a virtual in-project
+    // path so node_modules + the real user tsconfig (via `extends`) resolve from disk.
+    let original_abs = match tsconfig_path.canonicalize() {
+        Ok(p) => slash(&strip_unc_prefix(&p)),
+        Err(e) => {
+            eprintln!(
+                "verter-tsc: cannot resolve tsconfig {}: {e}",
+                tsconfig_path.display()
+            );
+            return Vec::new();
+        }
+    };
+    let validation_opts = EmitOptions {
+        no_emit: true,
+        declaration: false,
+        declaration_dir: None,
+    };
+    let tsconfig_value = synthetic_tsconfig_value(
+        &original_abs,
+        &config_files,
+        &validation_opts,
+        &config.root_dir,
+    );
+    let tsconfig_bytes = match serde_json::to_string_pretty(&tsconfig_value) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("verter-tsc: failed to serialize synthetic tsconfig: {e}");
+            return Vec::new();
+        }
+    };
+    let virtual_tsconfig_path = slash(&root.join("verter-tsc-check.tsconfig.json"));
+
+    api_check::typecheck(api_check::TypecheckInputs {
+        engine: engine.as_path(),
+        cwd: root.as_path(),
+        tsconfig_path: virtual_tsconfig_path,
+        tsconfig_bytes,
+        files: overlay_files,
+    })
+}
+
+/// The temp-file `--declaration` emit stage (retained permanently — tsgo `--api`
+/// exposes no emit surface). Generates the minimal `.tsc.tsx` carriers + the
+/// vue-shims ambient on disk, runs `tsgo --project --declaration` (tsc fallback if
+/// tsgo is absent), remaps diagnostics, and post-processes `.tsc.tsx.d.ts` →
+/// `.vue.d.ts`. Returns `(declaration diagnostics, emitted .d.ts files)`.
+fn run_declaration_stage(
+    host: &VerterHost,
+    config: &TsConfig,
+    tsconfig_path: &Path,
+    opts: &EmitOptions,
+) -> (Vec<Diagnostic>, Vec<PathBuf>) {
+    // The temp dir MUST be inside the project root so tsc resolves node_modules
+    // (e.g. `import("vue")`) from the generated `.tsc.tsx` files.
+    let temp_dir = match TempDir::new_in(&config.root_dir) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!(
+                "verter-tsc: failed to create temp directory for declaration emit in {}: {e}",
+                config.root_dir.display()
+            );
+            return (Vec::new(), Vec::new());
+        }
+    };
+
+    // Minimal macro-only `.tsc.tsx` carriers (declaration codegen), on disk.
+    let decl_dir = temp_dir.path().join("_tsc");
+    let _ = fs::create_dir_all(&decl_dir);
+    let declaration_generated = generate_all_tsc(host, &config.vue_files, &decl_dir);
+
+    // vue-shims so the checker resolves `import X from '*.vue'`.
+    let shims_path = temp_dir.path().join("vue-shims.d.ts");
+    let _ = fs::write(&shims_path, VUE_SHIMS_DTS);
+
+    // Declaration file set + the `.tsc.tsx` → `.vue` source-map remap table.
+    let mut tsx_to_vue: HashMap<String, (PathBuf, String)> = HashMap::new();
+    let mut tsc_tsx_paths: Vec<PathBuf> = vec![shims_path];
+    for (vue_path, tsc_code, tsc_tsx_path) in &declaration_generated {
+        let canon = strip_unc_prefix(
+            &tsc_tsx_path
+                .canonicalize()
+                .unwrap_or_else(|_| tsc_tsx_path.clone()),
+        );
+        tsx_to_vue.insert(
+            canon.to_string_lossy().replace('\\', "/"),
+            (vue_path.clone(), tsc_code.clone()),
+        );
+        tsc_tsx_paths.push(tsc_tsx_path.clone());
+    }
+    // When emitting declarations, the checker needs the original `.ts` files too.
+    for ts_path in &config.ts_files {
+        tsc_tsx_paths.push(ts_path.clone());
+    }
+
+    // Discover the checker for the temp-file path: tsgo, else tsc.
+    let root = strip_unc_prefix(&config.root_dir);
+    let checker_bin = if let Some(tsgo) = reporter::find_tsgo(&root) {
+        eprintln!(
+            "verter-tsc: declaration emit using tsgo at {}",
+            tsgo.display()
+        );
+        strip_unc_prefix(&tsgo)
+    } else if let Some(tsc) = reporter::find_tsc(&root) {
+        eprintln!("verter-tsc: declaration emit: tsgo not found, falling back to tsc");
+        strip_unc_prefix(&tsc)
+    } else {
+        eprintln!(
+            "verter-tsc: no type checker found for declaration emit. \
+             Install tsgo: npm install -D @typescript/native-preview\n\
+             Or install tsc: npm install -D typescript"
+        );
+        return (Vec::new(), Vec::new());
+    };
+
+    let decl_opts = EmitOptions {
+        no_emit: false,
+        declaration: true,
+        declaration_dir: opts.declaration_dir.clone(),
+    };
+    let decl_tsconfig = match write_temp_tsconfig(
+        temp_dir.path(),
+        tsconfig_path,
+        &tsc_tsx_paths,
+        &decl_opts,
+        &config.root_dir,
+    ) {
+        Ok(tc) => tc,
+        Err(e) => {
+            eprintln!("verter-tsc: failed to write declaration tsconfig: {e}");
+            return (Vec::new(), Vec::new());
+        }
+    };
+
+    let invocation = match invoke_checker(&checker_bin, &decl_tsconfig, &decl_opts) {
+        Ok(inv) => inv,
+        Err(e) => {
+            eprintln!("verter-tsc: declaration stage failed: {e}");
+            return (Vec::new(), Vec::new());
+        }
+    };
+
+    let raw_diags = reporter::parse_tsc_output(&invocation.output);
+    let diagnostics = remap_diagnostics(raw_diags, &tsx_to_vue);
+
+    if !invocation.success {
+        eprintln!(
+            "verter-tsc: declaration stage had errors; post-processing emitted declarations anyway"
+        );
+    }
+
+    // Post-process: rename `.tsc.tsx.d.ts` → `.vue.d.ts`. Always run, even when the
+    // checker exits with errors: it emits `.d.ts` for non-erroring files
+    // (noEmitOnError: false), so skipping would leave 0 `.vue.d.ts` files.
+    if let Some(decl_dir_out) = &opts.declaration_dir {
+        postprocess_vue_declarations(decl_dir_out, &declaration_generated, &config.root_dir);
+    }
+    let emitted = opts
+        .declaration_dir
+        .as_ref()
+        .map(|d| collect_dts_files(d))
+        .unwrap_or_default();
+
+    (diagnostics, emitted)
 }
 
 /// Invoke the type-checker binary and return its combined stdout+stderr output
@@ -686,23 +737,57 @@ fn write_temp_tsconfig(
         })
         .collect();
 
+    let tsconfig_json = synthetic_tsconfig_value(
+        &original_abs.to_string_lossy().replace('\\', "/"),
+        &files,
+        opts,
+        root_dir,
+    );
+
+    let suffix = if opts.declaration { "decl" } else { "check" };
+    let temp_tsconfig = temp_dir.join(format!("verter-tsc-{suffix}.tsconfig.json"));
+    std::fs::write(
+        &temp_tsconfig,
+        serde_json::to_string_pretty(&tsconfig_json)
+            .map_err(|e| format!("serialization error: {e}"))?,
+    )
+    .map_err(|e| format!("write error: {e}"))?;
+
+    Ok(temp_tsconfig)
+}
+
+/// Build the synthetic tsconfig JSON value shared by BOTH backends: the in-memory
+/// `--api` typecheck (served as an overlay file) and the temp-file `--declaration`
+/// stage ([`write_temp_tsconfig`] serializes + writes it). Keeping ONE builder
+/// guarantees the in-memory typecheck sees byte-identical compiler options +
+/// membership to the path the PERF-0 Rail B parity oracle pinned.
+///
+/// `original_abs` is the forward-slashed absolute path of the user tsconfig the
+/// synthetic config `extends`; `files` are the forward-slashed absolute carrier
+/// paths (virtual for typecheck, on-disk `.tsc.tsx` for declaration).
+fn synthetic_tsconfig_value(
+    original_abs: &str,
+    files: &[String],
+    opts: &EmitOptions,
+    root_dir: &Path,
+) -> serde_json::Value {
     let mut compiler_options = serde_json::json!({
         "skipLibCheck": true,
         "noEmit": opts.no_emit,
         // Disable composite mode: the parent tsconfig may have `composite: true`
         // which requires all referenced files to be in the project file list.
-        // Our .tsc.tsx files import from project .ts files that aren't listed.
+        // Our generated carriers import from project .ts files that aren't listed.
         "composite": false,
         // Fix rootDir so tsc mirrors the source tree structure in declarationDir.
         // Without this, tsc computes rootDir from the common ancestor of all input
-        // files, which is unpredictable when mixing temp-dir .tsc.tsx and source .ts.
+        // files, which is unpredictable when mixing generated carriers and source .ts.
         "rootDir": root_dir.to_string_lossy().replace('\\', "/"),
         // Allow importing .vue.ts public API stubs (cross-component type resolution).
         // Requires noEmit or emitDeclarationOnly (both true in our generated configs).
         "allowImportingTsExtensions": true,
     });
-    // Validation stage uses TSX files that contain JSX syntax.
-    // Standard Vue TSX config: `jsx: "preserve"` + `jsxImportSource: "vue"`.
+    // Validation (typecheck) uses TSX files that contain JSX syntax.
+    // Standard Vue TSX config: `jsx: "react-jsx"` + `jsxImportSource: "vue"`.
     if !opts.declaration {
         compiler_options["jsx"] = serde_json::json!("react-jsx");
         compiler_options["jsxImportSource"] = serde_json::json!("vue");
@@ -725,26 +810,15 @@ fn write_temp_tsconfig(
         }
     }
 
-    let tsconfig_json = serde_json::json!({
-        "extends": original_abs.to_string_lossy().replace('\\', "/"),
+    serde_json::json!({
+        "extends": original_abs,
         "files": files,
         // Override parent's `include` to prevent scanning the source tree.
-        // All files are listed explicitly in `files` (generated .tsc.tsx + shims,
+        // All carriers are listed explicitly in `files` (generated carriers + shims,
         // plus original .ts files when emitting declarations).
         "include": [],
         "compilerOptions": compiler_options,
-    });
-
-    let suffix = if opts.declaration { "decl" } else { "check" };
-    let temp_tsconfig = temp_dir.join(format!("verter-tsc-{suffix}.tsconfig.json"));
-    std::fs::write(
-        &temp_tsconfig,
-        serde_json::to_string_pretty(&tsconfig_json)
-            .map_err(|e| format!("serialization error: {e}"))?,
-    )
-    .map_err(|e| format!("write error: {e}"))?;
-
-    Ok(temp_tsconfig)
+    })
 }
 
 /// Remap raw tsc diagnostics from `.tsc.tsx` positions to `.vue` positions.
@@ -822,18 +896,29 @@ fn remap_diagnostics(
 ///   not in Vue's JSX types.
 /// - `innerHTML` — Generated from `v-html="expr"` directive. Same issue.
 fn is_vue_jsx_type_gap_error(d: &TscDiagnostic) -> bool {
-    if !matches!(d.ts_code, 2322 | 2559) {
+    is_vue_jsx_type_gap(d.ts_code, &d.message)
+}
+
+/// The carrier-agnostic Vue-JSX type-gap predicate, shared by the temp-file
+/// declaration remap ([`is_vue_jsx_type_gap_error`]) and the in-memory `--api`
+/// typecheck remap ([`crate::api_check`]). Both paths must suppress the same
+/// `children` / `textContent` / `innerHTML` false positives on Vue intrinsic
+/// attribute types (tsgo preview does not honor the cross-file `HTMLAttributes`
+/// augmentation, so this filter — not the augmentation shim — is what removes
+/// them).
+pub(crate) fn is_vue_jsx_type_gap(ts_code: u32, message: &str) -> bool {
+    if !matches!(ts_code, 2322 | 2559) {
         return false;
     }
-    let has_gap_prop = d.message.contains("children")
-        || d.message.contains("textContent")
-        || d.message.contains("innerHTML");
+    let has_gap_prop = message.contains("children")
+        || message.contains("textContent")
+        || message.contains("innerHTML");
     // Match any Vue intrinsic element attribute type (HTMLAttributes, SVGAttributes,
     // InputHTMLAttributes, LabelHTMLAttributes, etc.) or ReservedProps.
     has_gap_prop
-        && (d.message.contains("HTMLAttributes")
-            || d.message.contains("SVGAttributes")
-            || d.message.contains("ReservedProps"))
+        && (message.contains("HTMLAttributes")
+            || message.contains("SVGAttributes")
+            || message.contains("ReservedProps"))
 }
 
 /// Filter out diagnostics from the generated temporary tsconfig file itself.
@@ -1857,6 +1942,12 @@ mod tests {
         assert_ne!(host.query_profile(), full.query_profile);
     }
 
+    /// Install a mock checker the DECLARATION stage discovers as `tsgo` (so
+    /// `find_tsgo` short-circuits to it before any real tsgo on PATH/npx). It is a
+    /// `--project`/`--declaration` subprocess mock only — it does NOT speak the
+    /// `--api` wire, so the in-memory typecheck stage's `TsgoClient::connect`
+    /// probe fails and that stage fail-closes to zero diagnostics, leaving the
+    /// declaration-stage diagnostics as the only ones these tests observe.
     fn write_mock_tsc(project_root: &Path, mode: &str) {
         let bin_dir = project_root.join("node_modules").join(".bin");
         fs::create_dir_all(&bin_dir).unwrap();
@@ -1915,7 +2006,7 @@ exit 0
             )
             .unwrap();
             fs::write(
-                bin_dir.join("tsc.cmd"),
+                bin_dir.join("tsgo.cmd"),
                 "@echo off\r\npowershell -NoProfile -ExecutionPolicy Bypass -File \"%~dp0mock-tsc.ps1\" %*\r\nexit /b %ERRORLEVEL%\r\n",
             )
             .unwrap();
@@ -1923,7 +2014,7 @@ exit 0
 
         #[cfg(not(target_os = "windows"))]
         {
-            let script = bin_dir.join("tsc");
+            let script = bin_dir.join("tsgo");
             fs::write(
                 &script,
                 r#"#!/bin/sh
@@ -2035,7 +2126,7 @@ exit 1
             )
             .unwrap();
             fs::write(
-                bin_dir.join("tsc.cmd"),
+                bin_dir.join("tsgo.cmd"),
                 "@echo off\r\npowershell -NoProfile -ExecutionPolicy Bypass -File \"%~dp0mock-tsc.ps1\" %*\r\nexit /b %ERRORLEVEL%\r\n",
             )
             .unwrap();
@@ -2043,7 +2134,7 @@ exit 1
 
         #[cfg(not(target_os = "windows"))]
         {
-            let script = bin_dir.join("tsc");
+            let script = bin_dir.join("tsgo");
             fs::write(
                 &script,
                 r#"#!/bin/sh
@@ -3657,7 +3748,6 @@ import type { Foo } from './types'"#;
                 declaration: true,
                 declaration_dir: Some(decl_dir.clone()),
             },
-            TypeCheckerBinary::ForceTsc,
         );
 
         assert_eq!(
@@ -3701,7 +3791,6 @@ import type { Foo } from './types'"#;
                 declaration: true,
                 declaration_dir: Some(decl_dir.clone()),
             },
-            TypeCheckerBinary::ForceTsc,
         );
 
         let target = decl_dir.join("src/Test.vue.d.ts");
@@ -3798,7 +3887,6 @@ const props = defineProps<{ msg: string }>()
                 declaration: true,
                 declaration_dir: Some(decl_dir.clone()),
             },
-            TypeCheckerBinary::ForceTsc,
         );
 
         // Positive: diagnostics should be reported
@@ -3819,7 +3907,7 @@ const props = defineProps<{ msg: string }>()
     // ── Cross-component type resolution tests ─────────────────────
 
     #[test]
-    fn generate_public_api_stubs_creates_files() {
+    fn generate_public_api_stubs_produces_in_memory_stub_carrier() {
         let temp = tempfile::TempDir::new().unwrap();
         let src_dir = temp.path().join("src");
         fs::create_dir_all(&src_dir).unwrap();
@@ -3851,26 +3939,46 @@ defineProps<{ msg: string }>()
         let out_dir = temp.path().join("out");
         fs::create_dir_all(&out_dir).unwrap();
 
-        let (vue_ts_paths, vue_ts_map) =
+        let (stub_files, vue_ts_map) =
             generate_public_api_stubs(&host, std::slice::from_ref(&child_vue), &out_dir);
 
-        // Positive: should create at least one .vue.ts stub
-        assert_eq!(vue_ts_paths.len(), 1, "should generate one stub file");
-        assert!(vue_ts_paths[0].exists(), "stub file should exist on disk");
-        let stub_content = fs::read_to_string(&vue_ts_paths[0]).unwrap();
+        // Positive: exactly one in-memory `.vue.ts` stub carrier.
+        assert_eq!(stub_files.len(), 1, "should generate one stub carrier");
+        let (stub_path, stub_content) = &stub_files[0];
+
+        // The stub is VIRTUAL (in-memory): rooted at `base_dir` with a
+        // `Name_<hash>.vue.ts` basename, and NOT written to disk.
+        assert!(
+            !stub_path.exists(),
+            "stub carrier must be in-memory, not written to disk: {}",
+            stub_path.display()
+        );
+        assert!(
+            stub_path.starts_with(&out_dir),
+            "stub path should be rooted at base_dir: {}",
+            stub_path.display()
+        );
+        assert!(
+            stub_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.ends_with(".vue.ts"))
+                .unwrap_or(false),
+            "stub basename should end with .vue.ts: {}",
+            stub_path.display()
+        );
         assert!(
             stub_content.contains("export default"),
             "stub should contain export default: {stub_content}"
         );
 
-        // Positive: map entry should exist
-        let key = canonical_id;
+        // Positive: map entry should exist (canonical .vue → virtual stub path).
         assert!(
-            vue_ts_map.contains_key(&key),
+            vue_ts_map.contains_key(&canonical_id),
             "vue_ts_map should have entry for the .vue file"
         );
 
-        // Negative: stub should not contain raw .vue.ts import paths
+        // Negative: stub should not contain raw .vue.ts import paths.
         assert!(
             !stub_content.contains(".vue.ts"),
             "stub should not contain .vue.ts import paths: {stub_content}"
@@ -4176,7 +4284,6 @@ const props = defineProps<{ msg: string }>()
                 declaration: true,
                 declaration_dir: effective_dir,
             },
-            TypeCheckerBinary::ForceTsc,
         );
 
         let target = decl_dir.join("src/Test.vue.d.ts");

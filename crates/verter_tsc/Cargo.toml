@@ -16,12 +16,17 @@ path = "src/main.rs"
 verter_compiler = { path = "../verter_compiler" }
 verter_session = { path = "../verter_session" }
 verter_workspace = { path = "../verter_workspace" }
+# In-memory tsgo `--api` typecheck backend (the `--noEmit` path).
+verter_tsgo_api = { path = "../verter_tsgo_api" }
 clap = { version = "4.6", features = ["derive"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rayon = "1"
+# Retained for the `--declaration` emit stage's temp-file `tsgo --project` path.
 tempfile = "3.27"
 base64 = "0.22.1"
 oxc_allocator = { workspace = true }
 oxc_sourcemap = "7.0.0"
 walkdir = "2.5"
+# One-shot runtime to drive the async `TsgoClient` from the sync CLI.
+tokio = { version = "1.52", features = ["rt", "rt-multi-thread", "io-util", "process", "net", "time", "sync"] }
