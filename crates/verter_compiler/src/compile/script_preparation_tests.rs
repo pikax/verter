@@ -75,8 +75,11 @@ const INVALID_PROPS_SFC: &str = "<script setup lang=\"ts\">\nimport type { Exter
 
 const INVALID_EMITS_SFC: &str = "<script setup lang=\"ts\">\nimport type { ExternalEmits } from './types'\ndefineEmits<ExternalEmits>()\n</script>\n<template><div>x</div></template>";
 
-/// An unresolvable imported `defineProps<T>` surfaces `XInvalidMacroType` for
-/// every target — the artifact-target bits never gate the diagnostic.
+/// An UNRESOLVABLE imported `defineProps<T>` surfaces
+/// `XUnresolvedImportedMacroType` for every target — the artifact-target
+/// bits never gate the diagnostic. (This is the resolution-failure code,
+/// distinct from the `XInvalidMacroType` a RESOLVED-but-wrong-shape type
+/// emits; the render-only bundler lane softens only the former.)
 #[test]
 fn invalid_define_props_surfaces_on_every_target() {
     for (name, target) in diagnostic_target_matrix() {
@@ -85,8 +88,8 @@ fn invalid_define_props_surfaces_on_every_target() {
             result
                 .errors
                 .iter()
-                .any(|error| error.code == "XInvalidMacroType"),
-            "XInvalidMacroType must surface for target {name}; got {:?}",
+                .any(|error| error.code == "XUnresolvedImportedMacroType"),
+            "XUnresolvedImportedMacroType must surface for target {name}; got {:?}",
             result.errors
         );
     }
@@ -111,11 +114,12 @@ fn invalid_define_emits_surfaces_on_every_target() {
     }
 }
 
-/// The `XInvalidMacroType` diagnostic span is content-local — relative to the
-/// setup block content, not the whole SFC. The prepared setup parse runs at the
-/// SFC content offset (so its spans are SFC-absolute for the codegen lanes), but
-/// the public diagnostic span is localized back to content coordinates, leaving
-/// it byte-identical to the historical span.
+/// The macro-type diagnostic span is content-local — relative to the setup
+/// block content, not the whole SFC. The prepared setup parse runs at the
+/// SFC content offset (so its spans are SFC-absolute for the codegen lanes),
+/// but the public diagnostic span is localized back to content coordinates,
+/// leaving it byte-identical to the historical span. (`INVALID_PROPS_SFC` is
+/// the UNRESOLVED case, so the code is `XUnresolvedImportedMacroType`.)
 #[test]
 fn invalid_macro_type_diagnostic_span_is_content_local() {
     let result = compile_with(INVALID_PROPS_SFC, CompileTarget::BUNDLER, None);
@@ -123,11 +127,11 @@ fn invalid_macro_type_diagnostic_span_is_content_local() {
     let diagnostic = result
         .errors
         .iter()
-        .find(|error| error.code == "XInvalidMacroType")
-        .expect("expected an XInvalidMacroType diagnostic");
+        .find(|error| error.code == "XUnresolvedImportedMacroType")
+        .expect("expected an XUnresolvedImportedMacroType diagnostic");
     let span = diagnostic
         .span
-        .expect("XInvalidMacroType diagnostic must carry a span");
+        .expect("XUnresolvedImportedMacroType diagnostic must carry a span");
 
     // The setup block does not start at offset 0, so content-local and
     // SFC-absolute coordinates are distinguishable.
@@ -169,20 +173,21 @@ fn invalid_macro_type_diagnostic_span_is_content_local() {
 }
 
 /// `withDefaults(defineProps<Imported>(), getDefaults())` with an unresolvable
-/// imported type and a defaults fallback must NOT surface `XInvalidMacroType` —
-/// the runtime props synthesize from the defaults expression. This suppression
-/// holds identically on every target.
+/// imported type and a defaults fallback must NOT surface EITHER macro-type
+/// diagnostic — the runtime props synthesize from the defaults expression.
+/// This suppression holds identically on every target. (Asserts both the
+/// resolution code `XUnresolvedImportedMacroType` AND the wrong-shape code
+/// `XInvalidMacroType` are suppressed.)
 #[test]
 fn with_defaults_unresolved_import_suppression_holds_on_every_target() {
     let source = "<script setup lang=\"ts\">\nimport type { Props } from './types'\nimport { getDefaults } from './defaults'\n\nconst props = withDefaults(defineProps<Props>(), getDefaults())\n</script>\n<template><div>{{ props.foo }}</div></template>";
     for (name, target) in diagnostic_target_matrix() {
         let result = compile_with(source, target, None);
         assert!(
-            !result
-                .errors
-                .iter()
-                .any(|error| error.code == "XInvalidMacroType"),
-            "withDefaults fallback must suppress XInvalidMacroType for target {name}; got {:?}",
+            !result.errors.iter().any(|error| error.code
+                == "XInvalidMacroType"
+                || error.code == "XUnresolvedImportedMacroType"),
+            "withDefaults fallback must suppress the macro-type diagnostic for target {name}; got {:?}",
             result.errors
         );
     }

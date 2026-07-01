@@ -431,11 +431,15 @@ fn test_define_props_unresolvable_type_reports_error() {
         ..Default::default()
     };
     let result = compile(input, &options, &verter_opts, &allocator);
+    // An UNRESOLVABLE imported type surfaces the resolution-failure code
+    // `XUnresolvedImportedMacroType` (distinct from the `XInvalidMacroType`
+    // a resolved-but-wrong-shape type emits — only the former is softened on
+    // the render-only bundler lane).
     assert!(
         result
             .errors
             .iter()
-            .any(|error| error.code == "XInvalidMacroType"),
+            .any(|error| error.code == "XUnresolvedImportedMacroType"),
         "unresolvable imported props type should surface a compiler error, got: {:?}",
         result.errors
     );
