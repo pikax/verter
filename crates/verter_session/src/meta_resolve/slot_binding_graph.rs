@@ -431,12 +431,12 @@ fn read_surface_members(
 /// Depth-fused at 256 to bound recursion on adversarial inputs.
 ///
 /// `pub(crate)` so the DTO slot-binding extractor
-/// (`typeinfo::framework_surface::vue_exec::binding_fields_from_param_ty` via
-/// `navigate_param_to_object_surface`) can apply the SAME open-vs-concrete gate
-/// before materialising a slot-param object surface — otherwise an open generic
-/// slot param (`SlotProps<M>` in a `generic="M"` component) would reduce to a
-/// committed branch and the DTO path would invent a phantom binding that the
-/// graph-native path correctly declined.
+/// (`typeinfo::framework_surface::vue_exec::binding_fields_from_param_node` via
+/// `VerterHost::project_shallow_surface_from_base`) can apply the SAME
+/// open-vs-concrete gate before materialising a slot-param object surface —
+/// otherwise an open generic slot param (`SlotProps<M>` in a `generic="M"`
+/// component) would reduce to a committed branch and the DTO path would invent a
+/// phantom binding that the graph-native path correctly declined.
 pub(crate) fn slot_param_root_is_symbolic_only(
     dispatch: &ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,

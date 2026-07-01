@@ -842,9 +842,10 @@ fn define_slots_normalizer_drops_union_bindings_when_an_arm_has_no_param() {
 //      surface, NOT only accept a literal `TypeExpr::Object` (the pre-fix bug
 //      dropped Pick bindings entirely).
 //
-//      Discriminating: pre-fix `binding_fields_from_param_ty` matches only
-//      `TypeExpr::Object`, so a `Pick<RowApi, 'name'|'value'>` first param
-//      yields ZERO bindings. Post-fix the bindings are `name` + `value`.
+//      Discriminating: `binding_fields_from_param_node` projects the
+//      `Pick<RowApi, 'name'|'value'>` first param through the SHARED shallow
+//      surface, so the picked `name` + `value` keys surface as bindings; a reader
+//      that only accepted a literal object surface would yield ZERO bindings here.
 // ---------------------------------------------------------------------------
 
 const VUE_SLOTS_PICK: &str = r#"<script setup lang="ts">
@@ -890,10 +891,193 @@ fn define_slots_normalizer_extracts_pick_bindings() {
         "the un-picked `hidden` key must not surface as a binding (negative)"
     );
     // Each binding carries a typed binding_expr (navigated through the shared
-    // resolver, not a text/shape sniff).
+    // resolver, not a text/shape sniff). A builtin `Pick<RowApi, K>` over a LOCAL
+    // closed interface materialises its picked members path-precisely to their
+    // CONCRETE value types (the symbolic `NamedRoot['member']` carrier is the
+    // shallow-source policy, exercised by the cross-file / package-backed Pick
+    // routes elsewhere). The `pick_source_root_node` builtin + nominal-root
+    // predicate leaves this builtin path exactly as before.
     assert!(
         row.bindings.iter().all(|b| b.binding_expr.is_some()),
         "each Pick binding carries its typed binding_expr"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (4c) defineSlots normalizer — a USERLAND `Pick` that shadows the builtin, and a
+//      BUILTIN `Pick` over a STRUCTURAL (non-nominal) source, both publish the
+//      CONCRETE member value, NOT the symbolic `Root['member']` access. Only a
+//      BUILTIN `Pick<NamedRoot, K>` with a NOMINAL source root is symbolic.
+// ---------------------------------------------------------------------------
+
+const VUE_SLOTS_USERLAND_PICK: &str = r#"<script setup lang="ts">
+type Pick<T, _K> = { wrapped: T };
+interface Cfg {
+  a: string;
+  b: number;
+}
+defineSlots<{
+  row(props: Pick<Cfg, 'a'>): void;
+}>();
+</script>
+"#;
+
+#[test]
+fn define_slots_userland_pick_shadow_publishes_concrete_not_symbolic() {
+    // A USERLAND `type Pick<T, _K> = { wrapped: T }` SHADOWS the builtin `Pick`.
+    // Its slot param `Pick<Cfg, 'a'>` is NOT a builtin Pick — the `wrapped` binding
+    // must be the CONCRETE userland-Pick body member type, NOT the symbolic
+    // `Cfg['wrapped']`.
+    //
+    // Discriminating: pre-fix `pick_source_root_node` matched ANY `Pick`
+    // InstantiationRef (no `__builtin__` check), so it returned the userland Pick's
+    // `args[0]` (`Cfg`, a nominal DeclRef) and published the BOGUS symbolic
+    // `Cfg['wrapped']` indexed access. Post-fix the `__builtin__` gate rejects the
+    // userland Pick, so `wrapped` mints its own concrete value.
+    const FILE: &str = "/w/SlotsUserlandPick.vue";
+    let host = make_host();
+    upsert(&host, FILE, VUE_SLOTS_USERLAND_PICK);
+
+    let request = props_request(&host, FILE, AnalyzedMacroKind::DefineSlots);
+    let surface = host
+        .resolve_vue_macro_surface(&request)
+        .expect("defineSlots with a userland-Pick first-param resolves a surface");
+    let slots =
+        slots_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+
+    let row = slots
+        .iter()
+        .find(|s| s.name == "row")
+        .expect("the row slot surfaces");
+    let wrapped = row
+        .bindings
+        .iter()
+        .find(|b| b.name == "wrapped")
+        .expect("the userland-Pick body member `wrapped` surfaces as a binding");
+    // The concrete userland-Pick body member is present.
+    assert!(
+        wrapped.binding_expr.is_some(),
+        "the `wrapped` binding carries its concrete typed value"
+    );
+    // THE FIX: NOT the symbolic `Cfg['wrapped']` indexed access.
+    assert!(
+        !matches!(
+            wrapped.binding_expr,
+            Some(verter_type_expr::TypeExpr::IndexedAccess { .. })
+        ),
+        "the userland-Pick `wrapped` binding must NOT be published as a symbolic \
+         `Cfg['wrapped']` indexed access, got {:?}",
+        wrapped.binding_expr
+    );
+}
+
+const VUE_SLOTS_STRUCTURAL_PICK: &str = r#"<script setup lang="ts">
+defineSlots<{
+  row(props: Pick<{ foo: string }, 'foo'>): void;
+}>();
+</script>
+"#;
+
+#[test]
+fn define_slots_structural_source_pick_publishes_concrete_not_symbolic() {
+    // A BUILTIN `Pick<{ foo: string }, 'foo'>` over a STRUCTURAL object source: the
+    // `foo` binding must be the CONCRETE member type (`string`), NOT a bogus
+    // symbolic `<object>['foo']` access.
+    //
+    // Discriminating: pre-fix `pick_source_root_node` returned `args[0]` for ANY
+    // source shape, so a structural object source was published as the nonsensical
+    // symbolic `{ foo: string }['foo']` IndexedAccess. Post-fix the nominal-root
+    // restriction rejects the structural source, so `foo` mints its concrete
+    // `string` value.
+    const FILE: &str = "/w/SlotsStructuralPick.vue";
+    let host = make_host();
+    upsert(&host, FILE, VUE_SLOTS_STRUCTURAL_PICK);
+
+    let request = props_request(&host, FILE, AnalyzedMacroKind::DefineSlots);
+    let surface = host
+        .resolve_vue_macro_surface(&request)
+        .expect("defineSlots with a structural-source Pick resolves a surface");
+    let slots =
+        slots_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+
+    let row = slots
+        .iter()
+        .find(|s| s.name == "row")
+        .expect("the row slot surfaces");
+    let foo = row
+        .bindings
+        .iter()
+        .find(|b| b.name == "foo")
+        .expect("the picked `foo` key surfaces as a binding");
+    // THE FIX: NOT a symbolic indexed access over the structural object source.
+    assert!(
+        !matches!(
+            foo.binding_expr,
+            Some(verter_type_expr::TypeExpr::IndexedAccess { .. })
+        ),
+        "the structural-source `foo` binding must NOT be a symbolic indexed access, got {:?}",
+        foo.binding_expr
+    );
+    // POSITIVE: the concrete picked member type `string`.
+    assert!(
+        matches!(
+            foo.binding_expr,
+            Some(verter_type_expr::TypeExpr::Primitive(
+                verter_type_expr::PrimitiveName::String
+            ))
+        ),
+        "the `foo` binding is the concrete `string` member type, got {:?}",
+        foo.binding_expr
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (4d) defineSlots normalizer — a NULLABLE slot (`SlotAlias | undefined`) is
+//      INTENTIONALLY DROPPED (behavior-preserving, codex-adjudicated). The strict
+//      `realized_callable_root(context)?` prefilter matches legacy Vue output;
+//      enabling nullable Vue slots is an out-of-scope future enhancement.
+// ---------------------------------------------------------------------------
+
+const VUE_SLOTS_NULLABLE: &str = r#"<script setup lang="ts">
+type SlotAlias = (props: { x: number }) => any;
+type Slots = { present: SlotAlias; nullable: SlotAlias | undefined };
+defineSlots<Slots>();
+</script>
+"#;
+
+#[test]
+fn define_slots_nullable_slot_is_intentionally_dropped() {
+    // INTENTIONAL-DROP parity lock (codex-adjudicated behavior-PRESERVING): a
+    // `nullable: SlotAlias | undefined` slot is DROPPED, not published — the strict
+    // `realized_callable_root(context)?` prefilter in `slots_from_typeinfo_surface`
+    // refuses the `Union(Fn, undefined)` (the `undefined` arm does not realize to a
+    // callable), matching legacy Vue output (legacy also dropped a nullable slot).
+    // This is INTENTIONAL and LOCKED here; enabling nullable Vue slots is an
+    // out-of-scope future enhancement, not a bug. The contrast slot
+    // `present: SlotAlias` (non-nullable) IS published, proving the drop is
+    // specifically the `| undefined` nullish arm, not a blanket failure.
+    const FILE: &str = "/w/SlotsNullable.vue";
+    let host = make_host();
+    upsert(&host, FILE, VUE_SLOTS_NULLABLE);
+
+    let request = props_request(&host, FILE, AnalyzedMacroKind::DefineSlots);
+    let surface = host
+        .resolve_vue_macro_surface(&request)
+        .expect("defineSlots resolves a surface");
+    let slots =
+        slots_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+
+    // CONTRAST: the non-nullable `present` slot IS published (the callable realizes).
+    assert!(
+        slots.iter().any(|s| s.name == "present"),
+        "the non-nullable `present: SlotAlias` slot is published"
+    );
+    // INTENTIONAL DROP: the nullable slot is NOT published.
+    assert!(
+        !slots.iter().any(|s| s.name == "nullable"),
+        "the nullable `nullable: SlotAlias | undefined` slot is INTENTIONALLY DROPPED \
+         (behavior-preserving), got {:?}",
+        slots.iter().map(|s| s.name.as_str()).collect::<Vec<_>>()
     );
 }
 
@@ -1248,7 +1432,7 @@ fn generic_inherited_member_type_expr_scope_is_deriving_file() {
 // can read the full set for native_props), so every PUBLISHED-member consumer
 // must re-apply a Public-only filter at the publication boundary. These tests
 // drive the typeinfo Vue adapter normalizers (`emits_from_typeinfo_surface`,
-// `slots_from_typeinfo_surface`, `binding_fields_from_param_ty`) over a class
+// `slots_from_typeinfo_surface`, `binding_fields_from_param_node`) over a class
 // type argument carrying `private` / `protected` members and assert the
 // non-public members do NOT leak into the published emit / slot / slot-binding
 // surface.

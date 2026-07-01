@@ -19,7 +19,7 @@
 //! normalizer) rather than duplicating its carrier walk, and OWNS the
 //! Union/Intersection callable-arm recursion so the Vue and Svelte normalizers
 //! never iterate `SemanticNodeData::Union` themselves.
-#![allow(dead_code)] // consumed by the Vue/Svelte normalizers in §5a SP2/SP3; removed as each method is wired
+#![allow(dead_code)] // view methods are consumed by the Vue/Svelte framework-surface normalizers; the module allow covers the view methods without a production caller yet
 
 use std::sync::Arc;
 
@@ -73,6 +73,82 @@ pub(crate) struct SlotCallableNodeParts {
     pub(crate) first_param: Option<SemanticNodeId>,
     pub(crate) return_type: Option<SemanticNodeId>,
     pub(crate) return_type_span: Option<Span>,
+}
+
+/// Classification of a single normalized `Snippet<Params>` argument node for the
+/// validated-snippet positional reader — produced by [`classify_snippet_params_arg`]
+/// under an EXHAUSTIVE `SemanticNodeData` match (no `_` wildcard, so a variant
+/// added later forces a conscious classification).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SnippetParamsArg {
+    /// A tuple `Params` — one positional binding per element.
+    Tuple,
+    /// A RESOLVED non-tuple `Params` (a concrete / decided type shape that is not
+    /// a tuple): a validated snippet with such a `Params` is a PRESENT,
+    /// binding-less slot (`Snippet<[a] | [b]>`, `Snippet<[a] & [b]>`,
+    /// `Snippet<Cond>`, an open-generic `Snippet<Params>`, an `Array`, a
+    /// scalar / object / function).
+    ResolvedNonTuple,
+    /// An UNRESOLVED residual carrier or a non-type artifact: the `Params` might
+    /// still be a tuple we could not reach, so fail closed (never present a
+    /// binding-less slot as binding-complete — no-poison).
+    Unresolved,
+}
+
+/// Classify a normalized single `Snippet<Params>` argument node into
+/// [`SnippetParamsArg`]. EXHAUSTIVE over every `SemanticNodeData` variant with NO
+/// `_` wildcard, so a variant added later forces a conscious Tuple /
+/// resolved-non-tuple / unresolved decision rather than silently changing
+/// behaviour. Missing node data is fail-closed (`Unresolved`).
+///
+/// The `Union` / `Intersection` / `Conditional` arms are the correctness-load-
+/// bearing rows: a RESOLVED `Snippet<[a] | [b]>` / `Snippet<[a] & [b]>` /
+/// `Snippet<Cond>` `Params` is a resolved non-tuple, so the slot stays PRESENT
+/// (binding-less) — a `_ => None` catch-all dropped it (subtractive vs legacy).
+fn classify_snippet_params_arg(data: Option<&SemanticNodeData>) -> SnippetParamsArg {
+    let Some(data) = data else {
+        // Missing node data — the `Params` did not resolve; fail closed.
+        return SnippetParamsArg::Unresolved;
+    };
+    match data {
+        // A tuple `Params` — one positional binding per element.
+        SemanticNodeData::Tuple { .. } => SnippetParamsArg::Tuple,
+        // RESOLVED NON-TUPLE — a concrete / decided type shape that is not a
+        // tuple. A validated snippet with such a `Params` is a PRESENT,
+        // binding-less slot (`Snippet<[a] | [b]>`, `Snippet<[a] & [b]>`,
+        // `Snippet<Cond>`, an open-generic `Snippet<Params>`, an `Array`, a
+        // scalar / object / function).
+        SemanticNodeData::Object(_)
+        | SemanticNodeData::Union(_)
+        | SemanticNodeData::Intersection(_)
+        | SemanticNodeData::Primitive(_)
+        | SemanticNodeData::Literal(_)
+        | SemanticNodeData::Array { .. }
+        | SemanticNodeData::TemplateLiteral { .. }
+        | SemanticNodeData::KeyOf { .. }
+        | SemanticNodeData::IndexedAccess { .. }
+        | SemanticNodeData::Mapped { .. }
+        | SemanticNodeData::TypeParam { .. }
+        | SemanticNodeData::Infer { .. }
+        | SemanticNodeData::Conditional { .. }
+        | SemanticNodeData::Function { .. }
+        | SemanticNodeData::MergedDecl { .. }
+        | SemanticNodeData::ConstructorType { .. } => SnippetParamsArg::ResolvedNonTuple,
+        // FAIL-CLOSED — an unresolved residual carrier or a non-type artifact the
+        // demand primitive could not resolve to a concrete `Params`. A `Params`
+        // we cannot resolve to a tuple must fail closed, never presenting a
+        // binding-less slot as binding-complete (no-poison).
+        SemanticNodeData::Alias(_)
+        | SemanticNodeData::DeclRef { .. }
+        | SemanticNodeData::InstantiationRef { .. }
+        | SemanticNodeData::BareRef(_)
+        | SemanticNodeData::ImportType(_)
+        | SemanticNodeData::TypeOf(_)
+        | SemanticNodeData::Opaque(_)
+        | SemanticNodeData::RawFallback { .. }
+        | SemanticNodeData::VueMacroElements(_)
+        | SemanticNodeData::SyntheticBinding { .. } => SnippetParamsArg::Unresolved,
+    }
 }
 
 /// A lightweight borrowed view over a callable ROOT node in the shared graph.
@@ -555,14 +631,20 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
     /// - `InstantiationRef` with `args.len() == 0` → `Some(vec![])` (a default
     ///   `Snippet` — a present, binding-less slot).
     /// - `InstantiationRef` with `args.len() == 1` → normalize the single
-    ///   `Params` arg through the shared structural-fact demand primitive:
+    ///   `Params` arg through the shared structural-fact demand primitive, then
+    ///   classify it EXHAUSTIVELY ([`SnippetParamsArg`], no `_` wildcard):
     ///     - a `Tuple` → one param per element (a `DeclRef`-to-tuple `Params`
     ///       RESOLVES here — the superset over the legacy literal-tuple-only
     ///       reader);
-    ///     - a COMPLETE non-tuple shape (`TypeParam` / `Array` / `Primitive` /
-    ///       `Object` / `Function`) → `Some(vec![])` (present, binding-less —
-    ///       e.g. an open-generic `Snippet<Params>`);
-    ///     - an UNRESOLVED residual carrier / `Opaque` miss → `None` (FAIL-CLOSED).
+    ///     - ANY OTHER resolved non-tuple shape (`Union` / `Intersection` /
+    ///       `Conditional` / `Object` / `Array` / `Primitive` / `Literal` /
+    ///       `TypeParam` / `Function` / …) → `Some(vec![])` (a validated snippet
+    ///       with a resolved non-tuple `Params` is a PRESENT, binding-less slot —
+    ///       e.g. `Snippet<[a] | [b]>`, an open-generic `Snippet<Params>`);
+    ///     - an UNRESOLVED residual carrier / non-type artifact (`Alias` /
+    ///       `DeclRef` / `InstantiationRef` / `Opaque` / …) → `None` (FAIL-CLOSED:
+    ///       the `Params` could still be a tuple we could not reach; never a
+    ///       present slot presented as binding-complete).
     /// - `InstantiationRef` with `args.len() > 1` → `Some(vec![])` (a validated
     ///   snippet is always a present slot; a non-single-`Params` shape carries no
     ///   enumerable bindings).
@@ -613,33 +695,44 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
                         // Normalize the single `Params` arg to its structural body
                         // (a `DeclRef`-to-tuple `Params` alias RESOLVES to its
                         // `Tuple` here — the superset over the legacy literal
-                        // reader).
+                        // reader), then classify it EXHAUSTIVELY (no `_` wildcard)
+                        // into Tuple / resolved-non-tuple / unresolved.
                         let arg_norm = self.normalized_fact_node(args[0], context);
-                        match self.data(arg_norm).as_deref() {
-                            Some(SemanticNodeData::Tuple { elements, .. }) => Some(
-                                elements
-                                    .iter()
-                                    .map(|element| PositionalParamNode {
-                                        label: element.label.clone(),
-                                        ty: element.value,
-                                    })
-                                    .collect(),
-                            ),
-                            // A COMPLETE non-tuple `Params` — a present,
-                            // binding-less slot (an open-generic `Snippet<Params>`,
-                            // an `Array`, or a concrete scalar / object / function).
-                            Some(
-                                SemanticNodeData::TypeParam { .. }
-                                | SemanticNodeData::Array { .. }
-                                | SemanticNodeData::Primitive(_)
-                                | SemanticNodeData::Object(_)
-                                | SemanticNodeData::Function { .. },
-                            ) => Some(Vec::new()),
-                            // An UNRESOLVED residual carrier / opaque miss — the
-                            // `Params` could still be a tuple we could not reach →
-                            // fail-closed (never a present slot presented as
+                        let arg_data = self.data(arg_norm);
+                        match classify_snippet_params_arg(arg_data.as_deref()) {
+                            // A tuple `Params` — one positional binding per element.
+                            SnippetParamsArg::Tuple => {
+                                let Some(SemanticNodeData::Tuple { elements, .. }) =
+                                    arg_data.as_deref()
+                                else {
+                                    // `classify_snippet_params_arg` returns `Tuple`
+                                    // ONLY for a `Tuple` node, so this is
+                                    // unreachable; fail closed defensively.
+                                    return None;
+                                };
+                                Some(
+                                    elements
+                                        .iter()
+                                        .map(|element| PositionalParamNode {
+                                            label: element.label.clone(),
+                                            ty: element.value,
+                                        })
+                                        .collect(),
+                                )
+                            }
+                            // A RESOLVED non-tuple `Params` — a PRESENT,
+                            // binding-less slot. This INCLUDES a resolved `Union` /
+                            // `Intersection` / `Conditional` `Params` (`Snippet<[a]
+                            // | [b]>` etc.): a valid `Params` shape carries no
+                            // enumerable positional bindings, but the slot IS
+                            // present — legacy kept it binding-less, so dropping it
+                            // here would be a subtractive delta.
+                            SnippetParamsArg::ResolvedNonTuple => Some(Vec::new()),
+                            // An UNRESOLVED residual carrier / non-type artifact —
+                            // the `Params` could still be a tuple we could not reach
+                            // → fail-closed (never a present slot presented as
                             // binding-complete).
-                            _ => None,
+                            SnippetParamsArg::Unresolved => None,
                         }
                     }
                     // Not a single-`Params`-tuple snippet — a present, binding-less

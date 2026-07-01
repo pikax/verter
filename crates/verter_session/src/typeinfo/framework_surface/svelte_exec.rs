@@ -697,13 +697,13 @@ pub(in crate::typeinfo::framework_surface::svelte_exec) fn materialize_snippet_s
 /// `this` param is skipped and each rest-tuple param is expanded into its
 /// element bindings. Returns `None` when the value is not callable.
 ///
-/// SUPERSEDED by the node-domain
+/// The production snippet-slot decider is the node-domain
 /// [`CallableNodeView::validated_snippet_positional_params`](crate::meta_resolve::callable_view::CallableNodeView):
-/// the production snippet-slot normalizer now decides in the node domain and
-/// this `TypeExpr`-domain reader has NO production caller. RETAINED as the SP4
-/// parity oracle (`svelte_exec_tests` `snippet_*` + the
+/// the snippet-slot normalizer decides in the node domain, so this
+/// `TypeExpr`-domain reader has NO production caller. Retained as a parity oracle
+/// (`svelte_exec_tests` `snippet_*` + the
 /// `realized_snippet_call_signature_is_this_plus_rest_tuple` parity assertion);
-/// deleted with the rest of the legacy `TypeExpr` snippet chain at §5a SP4.
+/// unused in non-test builds.
 #[cfg_attr(not(test), allow(dead_code))]
 fn snippet_callable_positional_bindings(
     value: &TypeExpr,
@@ -837,10 +837,10 @@ fn positional_binding(
 /// positional binding only if EVERY arm supplies it). Bindings present in only
 /// some arms are dropped (the shortest arm caps the count).
 ///
-/// SUPERSEDED by the node-domain
+/// The production combiner is the node-domain
 /// [`CallableNodeView::combine_positional_param_nodes_by_index`](crate::meta_resolve::callable_view::CallableNodeView),
-/// which the view now owns (the normalizer never iterates `Union` itself).
-/// RETAINED for the SP4 parity oracle; deleted at §5a SP4.
+/// which the view owns (the normalizer never iterates `Union` itself). Retained
+/// as a parity oracle; unused in non-test builds.
 #[cfg_attr(not(test), allow(dead_code))]
 fn combine_positional_bindings_by_index(
     per_arm: Vec<Vec<AnalyzedSlotFieldBinding>>,

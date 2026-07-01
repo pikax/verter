@@ -143,6 +143,39 @@ fn instantiation_ref(
     })
 }
 
+/// A free (synthetic-decl) [`SemanticNodeData::TypeParam`] — an OPEN generic
+/// parameter. Used to build an UNDECIDABLE conditional whose check cannot reduce.
+fn typeparam(graph: &SemanticGraphStore, name: &str) -> SemanticNodeId {
+    graph.intern_node(SemanticNodeData::TypeParam {
+        decl: DeclIdentity::synthetic(name),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from(name),
+    })
+}
+
+/// A non-distributive [`SemanticNodeData::Conditional`] shell
+/// (`check extends extends ? true_branch : false_branch`). With a FREE
+/// [`typeparam`] check the conditional is undecidable, so the structural-fact
+/// normalize keeps it as a deferred `Conditional` node rather than reducing it to
+/// a branch.
+fn conditional(
+    graph: &SemanticGraphStore,
+    check: SemanticNodeId,
+    extends: SemanticNodeId,
+    true_branch: SemanticNodeId,
+    false_branch: SemanticNodeId,
+) -> SemanticNodeId {
+    graph.intern_node(SemanticNodeData::Conditional {
+        check,
+        extends,
+        true_branch_ref: true_branch,
+        false_branch_ref: false_branch,
+        distributive: false,
+    })
+}
+
 fn navigate() -> ProjectionReductionContext {
     ProjectionReductionContext::published(ProjectionMode::Navigate)
 }
@@ -2619,5 +2652,109 @@ fn validated_snippet_params_declref_tuple_arg_resolves_the_superset_flip() {
         labels,
         vec![Some("item"), Some("index")],
         "the `DeclRef`-to-tuple `Params` resolves to its ordered bindings (superset over legacy)"
+    );
+}
+
+// ── resolved-non-tuple `Params` → PRESENT binding-less slot (subtractive-delta fix)
+//
+// These three DISCRIMINATE the exhaustive `SnippetParamsArg` classifier against
+// the pre-fix `args.len() == 1` arm, which whitelisted only
+// `TypeParam | Array | Primitive | Object | Function` as "present binding-less"
+// and DROPPED (`_ => None`) every other resolved shape. A RESOLVED `Union` /
+// `Intersection` / `Conditional` `Params` is a valid, present slot; dropping it
+// was subtractive versus legacy. FLIP: each test yields `Some(vec![])` post-fix
+// and `None` (dropped) against the pre-fix whitelist arm. The residual-carrier
+// fail-closed half stays covered by
+// `validated_snippet_params_unresolved_carrier_arg_fails_closed`.
+
+#[test]
+fn validated_snippet_params_union_of_tuples_is_present_bindingless() {
+    // `Snippet<[a] | [b]>`: the `Params` is a `Union` of two tuples — a RESOLVED
+    // non-tuple shape. A validated snippet with such a `Params` is a PRESENT,
+    // binding-less slot (`Some(vec![])`), NOT a dropped slot (`None`).
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let a = prim(&graph, PrimitiveKind::String);
+    let b = prim(&graph, PrimitiveKind::Number);
+    let ta = tuple(&graph, vec![tuple_element(Some("a"), a)]);
+    let tb = tuple(&graph, vec![tuple_element(Some("b"), b)]);
+    let params = union(&graph, vec![ta, tb]);
+    // PRECONDITION: the `Params` arg IS a `Union` (a resolved non-tuple), so the
+    // exhaustive classifier — not a lucky reduction — drives the outcome.
+    assert!(
+        matches!(
+            node_data_for(dispatch.ctx, params).as_deref(),
+            Some(SemanticNodeData::Union(_))
+        ),
+        "the `Params` arg is a `Union` of tuples before the reader runs"
+    );
+    let snippet = instantiation_ref(&graph, "Snippet", vec![params]);
+    assert_eq!(
+        CallableNodeView::new(&dispatch, snippet).validated_snippet_positional_params(navigate()),
+        Some(Vec::new()),
+        "a `Snippet<[a] | [b]>` is a PRESENT, binding-less slot (dropped by the pre-fix whitelist arm)"
+    );
+}
+
+#[test]
+fn validated_snippet_params_intersection_of_tuples_is_present_bindingless() {
+    // `Snippet<[a] & [b]>`: the `Params` is an `Intersection` of two tuples — a
+    // RESOLVED non-tuple shape → a PRESENT, binding-less slot (was dropped pre-fix).
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let a = prim(&graph, PrimitiveKind::String);
+    let b = prim(&graph, PrimitiveKind::Number);
+    let ta = tuple(&graph, vec![tuple_element(Some("a"), a)]);
+    let tb = tuple(&graph, vec![tuple_element(Some("b"), b)]);
+    let params = intersection(&graph, vec![ta, tb]);
+    assert!(
+        matches!(
+            node_data_for(dispatch.ctx, params).as_deref(),
+            Some(SemanticNodeData::Intersection(_))
+        ),
+        "the `Params` arg is an `Intersection` of tuples before the reader runs"
+    );
+    let snippet = instantiation_ref(&graph, "Snippet", vec![params]);
+    assert_eq!(
+        CallableNodeView::new(&dispatch, snippet).validated_snippet_positional_params(navigate()),
+        Some(Vec::new()),
+        "a `Snippet<[a] & [b]>` is a PRESENT, binding-less slot (dropped by the pre-fix whitelist arm)"
+    );
+}
+
+#[test]
+fn validated_snippet_params_conditional_is_present_bindingless() {
+    // `Snippet<Cond>` where `Cond` is an OPEN conditional
+    // (`T extends string ? number : boolean` over a FREE `TypeParam`): the free
+    // check is undecidable, so the structural-fact normalize keeps it a deferred
+    // `Conditional` node — a RESOLVED non-tuple shape → a PRESENT, binding-less
+    // slot (was dropped by the pre-fix whitelist arm).
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let t = typeparam(&graph, "T");
+    let string = prim(&graph, PrimitiveKind::String);
+    let number = prim(&graph, PrimitiveKind::Number);
+    let boolean = prim(&graph, PrimitiveKind::Boolean);
+    let cond = conditional(&graph, t, string, number, boolean);
+    // PRECONDITION: an (open) `Conditional` — its free-`TypeParam` check is
+    // undecidable, so normalize does NOT reduce it to a branch.
+    assert!(
+        matches!(
+            node_data_for(dispatch.ctx, cond).as_deref(),
+            Some(SemanticNodeData::Conditional { .. })
+        ),
+        "the `Params` arg is an (open) `Conditional` before the reader runs"
+    );
+    let snippet = instantiation_ref(&graph, "Snippet", vec![cond]);
+    assert_eq!(
+        CallableNodeView::new(&dispatch, snippet).validated_snippet_positional_params(navigate()),
+        Some(Vec::new()),
+        "a `Snippet<Cond>` (open conditional `Params`) is a PRESENT, binding-less slot (dropped pre-fix)"
     );
 }

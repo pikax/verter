@@ -772,13 +772,14 @@ pub(in crate::typeinfo::framework_surface::vue_exec) fn raise_member_value(
 /// `slot_binding_graph::compute_bindings_via_graph`, which realizes the same
 /// member value before reading `Function.params`.
 ///
-/// SUPERSEDED by the node-domain slot path: [`normalize::slots_from_typeinfo_surface`]
-/// now decides callable/slot facts through [`crate::meta_resolve::callable_view::CallableNodeView`]
-/// and mints the return `TypeExpr` at the registered `materialize_slot_return_node`
-/// sink, so this realize-then-raise verb has NO production caller. It STAYS a
-/// registered `HOT_TERMINAL_SINKS` entry (the sink allowlist is only additive in
-/// §5a); RETAINED (caller-free) and deleted at §5a SP4. Its terminal signature is
-/// pinned by the `slot_normalizer_legacy_oracle` compile-only reference.
+/// The node-domain slot path is the production decider:
+/// [`normalize::slots_from_typeinfo_surface`] decides callable/slot facts through
+/// [`crate::meta_resolve::callable_view::CallableNodeView`] and mints the return
+/// `TypeExpr` at the registered `materialize_slot_return_node` sink, so this
+/// realize-then-raise verb has NO production caller. It STAYS a registered
+/// `HOT_TERMINAL_SINKS` entry (the sink allowlist is additive-only); retained
+/// caller-free, its terminal signature pinned by the
+/// `slot_normalizer_legacy_oracle` compile-only reference.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(in crate::typeinfo::framework_surface::vue_exec) fn raise_realized_callable_member_value(
     ctx: &dyn crate::resolver_core::ResolverContext,

@@ -24155,7 +24155,7 @@ defineProps<Props>()
 /// End-to-end (`get_component_meta`) member-visibility leak guard for slot
 /// bindings whose first parameter is a CLASS carrying non-public members. This
 /// drives the FULL component-meta pipeline, so it covers BOTH the typeinfo
-/// adapter binding path (`binding_fields_from_param_ty`) AND the graph-native
+/// adapter binding path (`binding_fields_from_param_node`) AND the graph-native
 /// binding path (`slot_binding_graph::compute_bindings_via_graph` ->
 /// `publish_merged_bindings`); both must apply the Public-only publication
 /// filter so a navigated class param's `private` / `protected` member never

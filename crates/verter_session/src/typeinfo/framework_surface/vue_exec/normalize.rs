@@ -474,11 +474,11 @@ pub(in crate::typeinfo::framework_surface::vue_exec) fn property_style_emit_fiel
 ///   returns for a union).
 /// - Anything else → `None` (the member is not a slot).
 ///
-/// SUPERSEDED by the node-domain [`CallableNodeView::slot_param_and_return_by_arm`]:
-/// [`slots_from_typeinfo_surface`] now decides slot param/return in the node
-/// domain and this `TypeExpr`-domain helper has NO production caller. RETAINED as
-/// the SP4 parity oracle (`slot_normalizer_legacy_oracle` below); deleted at §5a
-/// SP4.
+/// The node-domain [`CallableNodeView::slot_param_and_return_by_arm`] is the
+/// production slot param/return decider ([`slots_from_typeinfo_surface`] decides
+/// entirely in the node domain), so this `TypeExpr`-domain helper has NO
+/// production caller. Retained as the `slot_normalizer_legacy_oracle` parity
+/// oracle below; unused in non-test builds.
 #[cfg_attr(not(test), allow(dead_code))]
 fn slot_callable_param_and_return(
     value: &TypeExpr,
@@ -515,8 +515,9 @@ fn slot_callable_param_and_return(
 /// params are ALWAYS intersected (the bindings a template can rely on must hold
 /// across every arm); only the return-type combiner differs.
 ///
-/// SUPERSEDED by the node-domain [`ArmCombineNode`]; retained with the legacy
-/// `TypeExpr` slot helpers for the SP4 parity oracle, deleted at §5a SP4.
+/// The node-domain [`ArmCombineNode`] is the production combiner; this enum is
+/// retained with the legacy `TypeExpr` slot helpers as their parity oracle,
+/// unused in non-test builds.
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy)]
 enum ArmCombine {
@@ -537,8 +538,9 @@ enum ArmCombine {
 /// there are NO guaranteed bindings — the first param is dropped to `None`. The
 /// return type still combines across arms.
 ///
-/// SUPERSEDED by [`CallableNodeView::slot_param_and_return_by_arm`]'s node-domain
-/// `combine_slot_arms`; retained for the SP4 parity oracle, deleted at §5a SP4.
+/// The production combiner is [`CallableNodeView::slot_param_and_return_by_arm`]'s
+/// node-domain `combine_slot_arms`; this helper is retained as its parity oracle,
+/// unused in non-test builds.
 #[cfg_attr(not(test), allow(dead_code))]
 fn slot_callable_param_and_return_from_arms(
     arms: &[TypeExpr],
@@ -604,7 +606,7 @@ fn slot_callable_param_and_return_from_arms(
 /// Keep FUNCTION-LIKE members only (the value raises to a `TypeExpr::Function`;
 /// non-function members are filtered); the slot's `bindings` come from resolving
 /// the function's first-parameter type to its object surface (a literal object,
-/// a `Pick<…>`, or a named alias — see [`binding_fields_from_param_ty`]); the
+/// a `Pick<…>`, or a named alias — see [`binding_fields_from_param_node`]); the
 /// `return_expr` / `return_type` come from the function's return type. Bindings +
 /// return are scoped to the slot member's VALUE-NODE file (see
 /// [`VueMacroSurface::member_expr_scope`]).
@@ -714,36 +716,30 @@ fn materialize_slot_return_node(
         .unwrap_or(TypeExpr::Unknown { raw: String::new() })
 }
 
-/// Reconstruct a slot's binding fields from its function's first-parameter type.
+/// Reconstruct a slot's binding fields from its function's first-parameter NODE.
 /// Each member of the parameter's OBJECT surface becomes one
 /// [`AnalyzedSlotFieldBinding`] carrying that member's value `TypeExpr` as
 /// `binding_expr`.
 ///
-/// The first parameter is the slot-props object. It can be written several ways:
-/// a literal object, a `Pick<T, 'k'>` over a named type, or a parenthesized
-/// form. To handle all of them WITHOUT a nominal shape-sniff, the binding object
-/// is obtained by RESOLVING the first-parameter type through the SHARED
-/// resolver:
-///
-/// - A literal [`TypeExpr::Object`] is read directly (no resolution needed).
-/// - Any other shape (`Pick<…>` / `Omit<…>` / a `Ref` to a named alias /
-///   `Parenthesized`) is lowered and projected to its one-level object surface
-///   ([`navigate_param_to_object_surface`]); each surface member becomes a
-///   binding.
-///
-/// A first parameter that does not resolve to an object surface yields no
-/// bindings.
+/// The first parameter is the slot-props object. It can be written several ways —
+/// a literal object, a `Pick<T, 'k'>` / `Omit<…>` over a named type, an aliased
+/// `Ref`, or a parenthesized form — plus the multi-arm intersected node a `Union`
+/// / `Intersection` slot produces. To cover all of them WITHOUT a nominal
+/// shape-sniff, the binding object is the first-param node's one-level SHALLOW
+/// object surface, projected through the shared carrier-preserving
+/// [`VerterHost::project_shallow_surface_from_base`]; each surface member becomes
+/// a binding.
 ///
 /// NODE-DOMAIN: the first param is a `SemanticNodeId` (the across-arms-intersected
 /// slot first-param node from [`CallableNodeView::slot_param_and_return_by_arm`]),
-/// NOT a materialised `TypeExpr`. It projects the first-param node's one-level
-/// SHALLOW object surface through the shared carrier-preserving
-/// [`VerterHost::project_shallow_surface_from_base`] — this uniformly covers a
+/// NOT a materialised `TypeExpr`. The shallow projection uniformly covers a
 /// literal object, a `Pick<…>`, an aliased param, AND the multi-arm intersected
-/// node (which [`CallableNodeView::first_param_object_surface`] does NOT cover) —
+/// node (which [`CallableNodeView::first_param_object_surface`] does NOT cover),
 /// applying the SAME open-generic gate (`slot_param_root_is_symbolic_only`) both
-/// binding paths use. Each per-member binding `TypeExpr` is minted ONCE at the
-/// registered terminal [`slot_binding_field`]; this navigator holds NO mint.
+/// binding paths use. A first-param node that does not project to an object
+/// surface yields no bindings. Each per-member binding `TypeExpr` is minted ONCE
+/// at the registered terminal [`slot_binding_field`]; this navigator holds NO
+/// mint.
 fn binding_fields_from_param_node(
     ctx: &dyn crate::resolver_core::ResolverContext,
     first_param: SemanticNodeId,
@@ -794,12 +790,28 @@ fn binding_fields_from_param_node(
 /// against — the node-domain analogue of [`pick_named_source_root`]. Peels the
 /// first-param node through the carrier-PRESERVING
 /// [`ProjectSemanticDispatch::peel_node_for_uninstantiated_carrier_fact_demand`]
-/// to reach the un-instantiated builtin `Pick<Root, K>` `InstantiationRef`, then
-/// returns its source-root arg (`args[0]`). A typed-IR STRUCTURAL match on the
-/// builtin `Pick` utility identity (`base.decl_name == "Pick"` with two args) —
-/// NOT a `"Pick<"` text sniff and NOT a materialise-then-decide. Any other shape
-/// (a literal object, a multi-arm `Intersection` first param, a non-Pick alias)
-/// returns `None` (each member then mints its own value at the sink).
+/// to reach an un-instantiated `Pick<Root, K>` `InstantiationRef`, then returns
+/// its source-root arg (`args[0]`) ONLY when BOTH hold:
+///
+/// - **Builtin-Pick identity** — the carrier is the BUILTIN `Pick`
+///   (`base.canonical_id == "__builtin__"` AND `base.decl_name == "Pick"`, two
+///   args): the SAME builtin-utility identity the resolver's route extractors read
+///   (`extract_route_root_identity_node` / `node_root_identity` in
+///   `meta_resolve::graph_predicates`). A USERLAND `type Pick<T, K>` that shadows
+///   the builtin is NOT a builtin `Pick` — its carrier base is the declaring file,
+///   not `__builtin__`, so it fails here and each member mints its own concrete
+///   (userland-Pick body) value instead of a symbolic access.
+/// - **Nominal source root** — `args[0]` is a NOMINAL named reference (`DeclRef` /
+///   `InstantiationRef`), the node-domain analogue of the legacy
+///   `pick_named_source_root`'s `TypeExpr::Ref` requirement. A STRUCTURAL source
+///   (`Pick<{ foo: string }, "foo">`) is NOT nominal, so publishing a symbolic
+///   `<object>['foo']` access would be bogus — return `None` and let each member
+///   mint its own concrete member value.
+///
+/// A typed-IR STRUCTURAL match (node-domain `canonical_id` / `decl_name` + the
+/// source-root shape) — NOT a `"Pick<"` text sniff and NOT a
+/// materialise-then-decide. Any other shape (a literal object, a multi-arm
+/// `Intersection` first param, a userland or non-Pick alias) returns `None`.
 fn pick_source_root_node(
     dispatch: &ProjectSemanticDispatch<'_>,
     first_param: SemanticNodeId,
@@ -810,9 +822,22 @@ fn pick_source_root_node(
     );
     match node_data_for(dispatch.ctx, peeled).as_deref() {
         Some(SemanticNodeData::InstantiationRef { base, args })
-            if base.decl_name.as_ref() == "Pick" && args.len() == 2 =>
+            if base.canonical_id.as_ref() == "__builtin__"
+                && base.decl_name.as_ref() == "Pick"
+                && args.len() == 2 =>
         {
-            Some(args[0])
+            // Nominal-root restriction (mirrors `extract_pick_omit_route` and the
+            // legacy `pick_named_source_root`'s `TypeExpr::Ref` requirement):
+            // publish the symbolic `NamedRoot['member']` access ONLY for a nominal
+            // named-reference source root; a structural source mints each member's
+            // own concrete value at the sink instead.
+            let root = args[0];
+            match node_data_for(dispatch.ctx, root).as_deref() {
+                Some(
+                    SemanticNodeData::DeclRef { .. } | SemanticNodeData::InstantiationRef { .. },
+                ) => Some(root),
+                _ => None,
+            }
         }
         _ => None,
     }
@@ -883,10 +908,10 @@ fn slot_binding_field(
 /// the typed IR — no type-text sniffing, no reparse. Any other shape returns
 /// `None`.
 ///
-/// The Vue Pick DTO policy is now read NODE-DOMAIN from the first-param node by
+/// The Vue Pick DTO policy is read NODE-DOMAIN from the first-param node by
 /// [`pick_source_root_node`] (the production path); this `TypeExpr`-domain reader
-/// is RETAINED as its parity oracle (`slot_normalizer_legacy_oracle` below) and
-/// deleted at §5a SP4.
+/// is retained as its `slot_normalizer_legacy_oracle` parity oracle below, unused
+/// in non-test builds.
 #[cfg_attr(not(test), allow(dead_code))]
 fn pick_named_source_root(param_ty: &TypeExpr) -> Option<&TypeExpr> {
     match param_ty {
@@ -931,13 +956,13 @@ fn macro_member_value_scope(
 
 #[cfg(test)]
 mod slot_normalizer_legacy_oracle {
-    //! SP4 parity oracles for the caller-free legacy `TypeExpr`-domain slot
-    //! helpers (`slot_callable_param_and_return` (+`_from_arms` / `ArmCombine`),
+    //! Parity oracles for the caller-free legacy `TypeExpr`-domain slot helpers
+    //! (`slot_callable_param_and_return` (+`_from_arms` / `ArmCombine`),
     //! `pick_named_source_root`) and a compile-only signature pin for the
     //! caller-free registered sink `raise_realized_callable_member_value`. The
     //! production path is node-domain (`slots_from_typeinfo_surface` via
-    //! `CallableNodeView`); these keep the legacy helpers referenced (and prove
-    //! they still behave) until they are deleted at §5a SP4.
+    //! `CallableNodeView`); these keep the legacy helpers referenced and prove
+    //! they still behave — the node path's behavioural baseline.
     use std::sync::Arc;
 
     use verter_type_expr::{FunctionExpr, FunctionParam, LiteralValue, PrimitiveName, TypeExpr};
@@ -1045,7 +1070,7 @@ mod slot_normalizer_legacy_oracle {
     #[test]
     fn raise_realized_callable_member_value_terminal_signature_pinned() {
         // Compile-only: pin the caller-free registered `HOT_TERMINAL_SINKS` sink's
-        // signature so it stays referenced (deleted at §5a SP4).
+        // signature so it stays referenced.
         let _: fn(
             &dyn crate::resolver_core::ResolverContext,
             &TypeInfoSurfaceMember,
