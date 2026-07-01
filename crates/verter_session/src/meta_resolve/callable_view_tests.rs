@@ -1875,14 +1875,16 @@ fn event_names_mutual_cycle_fails_whole_via_visited_set() {
     // sit FAR below `CALLABLE_VIEW_DEPTH_FUSE` (32), and a hypothetical
     // depth-fuse-ONLY impl (no visited set) would ALSO yield `onmut = None` (the
     // cycle eventually trips the fuse@32) and `onack = Some([...])` (terminates@~2)
-    // — so this pair passes under EITHER mechanism. The TRUE visited-set-vs-
-    // depth-fuse discriminator is `event_names_finite_deep_dag_union_enumerates_
-    // completely`: a deep-but-FINITE union (leaf near the fuse) with a SHARED
-    // subtree reached via two sibling branches enumerates the FULL name set, which
-    // succeeds ONLY because the active-path visited set is REMOVED on unwind (a
-    // GLOBAL never-removed visited set would wrongly fail it; a depth-fuse-only
-    // impl would not truncate the < fuse chain) — that test pins the active-path
-    // semantics this one cannot.
+    // — so this pair passes under EITHER mechanism. The ACTIVE-PATH (removed-on-
+    // unwind) visited-set discriminator is `event_names_finite_deep_dag_union_
+    // enumerates_completely`: a deep-but-FINITE union (leaf near the fuse) with a
+    // SHARED subtree reached via two sibling branches enumerates the FULL name
+    // set, which succeeds ONLY because the active-path visited set is REMOVED on
+    // unwind — a GLOBAL never-removed visited set would wrongly fail it, and THAT
+    // is the property that test pins. It does NOT isolate visited-set-vs-depth-
+    // fuse either: a depth-fuse-only impl (no visited set) would ALSO pass it (the
+    // sub-fuse chain is never truncated). It pins the active-path removed-on-
+    // unwind semantics this one cannot.
     assert_eq!(
         CallableNodeView::new(&dispatch, member("onack")).event_names(navigate()),
         Some(vec![
@@ -1890,7 +1892,7 @@ fn event_names_mutual_cycle_fails_whole_via_visited_set() {
             Arc::<str>::from("ack1"),
             Arc::<str>::from("ack2")
         ]),
-        "an ACYCLIC 2-hop carrier chain of the same shape enumerates completely — showing the mutual-cycle `None` is CYCLE-SPECIFIC (not a generic 2-hop-chain failure); the visited-set-vs-depth-fuse discriminator is `event_names_finite_deep_dag_union_enumerates_completely`"
+        "an ACYCLIC 2-hop carrier chain of the same shape enumerates completely — showing the mutual-cycle `None` is CYCLE-SPECIFIC (not a generic 2-hop-chain failure); the active-path (removed-on-unwind) visited-set discriminator is `event_names_finite_deep_dag_union_enumerates_completely`"
     );
 }
 
