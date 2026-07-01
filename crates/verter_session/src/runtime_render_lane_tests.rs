@@ -15,6 +15,8 @@
 //! | `runtime_render_syntax_error_is_fatal` | Template/script syntax error stays fatal. |
 //! | `runtime_render_bypasses_stage_c_wrapper` | Zero wrapper-op counter hits on a simple render; >0 on HostBacked. |
 //! | `runtime_render_does_not_leave_stale_semantic_axis_for_host_backed` | (e)-skip safety: a later HostBacked read sees current, not stale, deps. |
+//! | `runtime_render_upper_drive_input_resolves_macro_types_wired_under_lower_drive_routes` | Drive-letter case parity: an upper-drive compile input converges on the lower-drive canonical whose alias routes were wired via `set_import_dependencies`. |
+//! | `runtime_render_upper_drive_input_single_hop_relative_import_control` | Single-hop relative control: resolves without the route table across the same case split. |
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -1026,5 +1028,156 @@ fn runtime_render_leaves_prior_host_backed_axis_correct() {
         "after the import was removed, a later HostBacked request must NOT see \
          the stale cross-file dep in the semantic-transitive axis; found: {:?}",
         final_axis
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 14 — canonical owner-key parity across drive-letter case variants
+// ---------------------------------------------------------------------------
+
+/// A bundler hands the host TWO spellings of ONE Windows file: route wiring
+/// (`set_import_dependencies`) arrives under the canonical LOWER-drive key
+/// (`c:/...` — `resolve_alias_or_canonical` lowercases the drive letter),
+/// while the raw compile input keeps the bundler's UPPER-drive JS id
+/// (`C:/...`). The upsert chokepoint must canonicalize a supplied
+/// `canonical_id`, so both spellings converge on ONE host identity and the
+/// render-lane macro-type collector finds the wired alias route table.
+///
+/// DISCRIMINATING: an upsert engine that admits a supplied `canonical_id`
+/// VERBATIM mints a SECOND `C:/...` host identity whose
+/// `DerivedRawState.import_routes` are empty — the alias-imported macro
+/// types then degrade to Unknown with a `HOST_MISSING_MACRO_TYPE_DEP`
+/// warning and the resolved member names vanish from the render `Main`.
+/// Runs on EVERY OS: `canonicalize_id`'s drive-letter lowering is a pure
+/// string transform, so the `C:/` input vs `c:/` route-ownership split
+/// reproduces without a Windows filesystem.
+#[test]
+fn runtime_render_upper_drive_input_resolves_macro_types_wired_under_lower_drive_routes() {
+    let host = new_host();
+
+    // The alias-imported macro-type target, seeded under the canonical
+    // lower-drive key.
+    upsert_sibling(
+        &host,
+        "c:/proj/lib/types.ts",
+        "export interface AliasProps {\n  alphaprop: number\n  omegaprop: string\n}\nexport interface AliasEmits {\n  (e: 'aliaschange', value: number): void\n}\n",
+    );
+
+    // The owner imports its macro types via a PATH ALIAS — resolvable ONLY
+    // through the caller-wired route table (no relative fallback exists for
+    // a non-`.` specifier on a standalone host).
+    let owner_src = "<script setup lang=\"ts\">\nimport type { AliasProps, AliasEmits } from '@lib/types'\ndefineProps<AliasProps>()\ndefineEmits<AliasEmits>()\n</script>\n<template><div>{{ alphaprop }}{{ omegaprop }}</div></template>\n";
+
+    // The bundler's own upsert path seeds the owner under the LOWER-drive
+    // canonical...
+    upsert_sibling(&host, "c:/proj/Consumer.vue", owner_src);
+    // ...and wires the alias route under that same LOWER-drive owner key,
+    // exactly as the bundler's post-upsert dependency hydration does.
+    host.set_import_dependencies(
+        "c:/proj/Consumer.vue",
+        vec![crate::types::DependencyResolution {
+            specifier: "@lib/types".to_string(),
+            resolved_canonical_id: Some("c:/proj/lib/types.ts".to_string()),
+            possible_canonical_ids: Vec::new(),
+        }],
+    );
+
+    // Chokepoint-safety precondition: `canonicalize_id` is idempotent on an
+    // already-canonical lower-drive id, so re-canonicalizing a supplied
+    // `canonical_id` at the upsert chokepoint is contract enforcement,
+    // never a semantic rewrite.
+    assert_eq!(
+        crate::id::canonicalize_id("c:/proj/Consumer.vue").as_ref(),
+        "c:/proj/Consumer.vue",
+        "canonicalize_id must be a byte-equal no-op on an already-canonical id"
+    );
+
+    // Compile through the render lane with the RAW UPPER-drive JS id — the
+    // spelling the bundler's module graph carries.
+    let render = render_with_profile(
+        &host,
+        "C:/proj/Consumer.vue",
+        owner_src,
+        simple_render_profile(),
+        None,
+    );
+
+    assert!(
+        render.errors.is_empty(),
+        "render must succeed: {:?}",
+        render.errors
+    );
+    // NEGATIVE: the wired route must be FOUND — neither the collector
+    // missing-dep diagnostic nor the compiler unresolved-imported-macro
+    // diagnostic may surface.
+    assert!(
+        !render
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HOST_MISSING_MACRO_TYPE_DEP"
+                || d.code == "XUnresolvedImportedMacroType"),
+        "the alias route wired under the lower-drive owner key must be \
+         visible to the upper-drive compile input — ONE canonical identity, \
+         not two; diagnostics: {:?}",
+        render
+            .diagnostics
+            .iter()
+            .map(|d| format!("{:?}:{} {}", d.severity, d.code, d.message))
+            .collect::<Vec<_>>()
+    );
+    // POSITIVE: the resolved macro member names materialize in the render
+    // `Main` — the types did NOT degrade to Unknown.
+    assert!(
+        render.code.contains("alphaprop") && render.code.contains("omegaprop"),
+        "resolved alias-imported prop names must appear in render Main:\n{}",
+        render.code
+    );
+    assert!(
+        render.code.contains("aliaschange"),
+        "resolved alias-imported emit name must appear in render Main:\n{}",
+        render.code
+    );
+}
+
+/// Single-hop control for the drive-case split: a RELATIVE `./types` macro
+/// type import resolves WITHOUT the caller-wired route table (relative
+/// resolution canonicalizes the base path itself), so it stays green
+/// regardless of the upsert chokepoint's canonical-id handling. Locks the
+/// case-parity regression to the route-table owner key specifically — a
+/// failure here would indicate general breakage, not the owner-key split.
+#[test]
+fn runtime_render_upper_drive_input_single_hop_relative_import_control() {
+    let host = new_host();
+    upsert_sibling(
+        &host,
+        "c:/proj/types.ts",
+        "export interface RelProps { relalpha: number }\n",
+    );
+    let src = "<script setup lang=\"ts\">\nimport type { RelProps } from './types'\ndefineProps<RelProps>()\n</script>\n<template><div>{{ relalpha }}</div></template>\n";
+
+    let render = render_with_profile(&host, "C:/proj/Rel.vue", src, simple_render_profile(), None);
+    assert!(
+        render.errors.is_empty(),
+        "control render must succeed: {:?}",
+        render.errors
+    );
+    assert!(
+        !render
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HOST_MISSING_MACRO_TYPE_DEP"
+                || d.code == "XUnresolvedImportedMacroType"),
+        "the single-hop relative control must resolve without the route \
+         table; diagnostics: {:?}",
+        render
+            .diagnostics
+            .iter()
+            .map(|d| format!("{:?}:{} {}", d.severity, d.code, d.message))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        render.code.contains("relalpha"),
+        "the relative-imported prop name must appear in render Main:\n{}",
+        render.code
     );
 }
