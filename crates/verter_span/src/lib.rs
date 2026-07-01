@@ -21,6 +21,9 @@ pub use path::{
     longest_project_root, CanonicalPath,
 };
 
+pub mod tsgo_offset;
+pub use tsgo_offset::{utf16_offset_to_byte, utf16_offset_to_line_col};
+
 // ======================== Span (SFC-absolute) ========================
 
 /// SFC-absolute byte offset span. `[start, end)` half-open.

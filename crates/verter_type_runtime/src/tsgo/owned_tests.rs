@@ -69,12 +69,63 @@ fn map_api_diagnostic_maps_category_and_offsets() {
         end: 16,
         file_name: Some("c:/ws/src/A.ts".to_string()),
     };
-    let mapped = map_api_diagnostic(&d);
+    // ASCII content ⇒ UTF-16 offset == byte offset, so start/end are unchanged.
+    let content = "const abcdefghijklmnop = 1;\n";
+    let mapped = map_api_diagnostic(&d, Some(content));
     assert_eq!(mapped.code.as_deref(), Some("2322"));
     assert_eq!(mapped.start, 10);
     assert_eq!(mapped.end, 16);
     assert_eq!(severity_name(&mapped.severity), "error");
     assert!(mapped.message.contains("not assignable"));
+}
+
+/// DISCRIMINATING (PERF-3-offset regression): the `--api` diagnostic `pos`/`end`
+/// are UTF-16 code units, but `TypeDiagnostic.start`/`end` is a BYTE contract. With
+/// a multi-byte character (an em-dash `—`, U+2014 — 3 UTF-8 bytes / 1 UTF-16 unit)
+/// before the diagnostic, the byte offset is 2 GREATER than the UTF-16 offset.
+///
+/// RED before the fix: `map_api_diagnostic` copied `d.pos`/`d.end` straight through
+/// (byte == UTF-16 offset), so `start`/`end` were 2 too small → LSP position drift.
+/// GREEN after: the UTF-16 → byte conversion (shared `verter_tsgo_api`/`verter_span`
+/// helper) yields the true byte offsets. This asserts the CONVERTED byte values,
+/// which the passthrough could never produce.
+#[test]
+fn map_api_diagnostic_converts_utf16_offsets_to_bytes_on_non_ascii() {
+    // Carrier comment carries an em-dash, then a diagnostic on `x`.
+    // "// — note\nconst x: string = 1;\n"
+    // UTF-16 units: '/'(0) '/'(1) ' '(2) '—'(3) ' '(4) 'n'(5) 'o'(6) 't'(7) 'e'(8)
+    //   '\n'(9) 'c'(10) ...; the em-dash is 1 UTF-16 unit but 3 UTF-8 bytes.
+    let content = "// \u{2014} note\nconst x: string = 1;\n";
+    // The `1` literal: find it as a UTF-16 offset by walking chars.
+    let one_byte = content.find('1').unwrap() as u32; // byte offset of `1`
+                                                      // Compute the UTF-16 offset of `1` (what tsgo `--api` reports).
+    let one_utf16 = content[..one_byte as usize].encode_utf16().count() as u32;
+    assert!(
+        one_utf16 < one_byte,
+        "sanity: the em-dash makes the UTF-16 offset ({one_utf16}) strictly smaller \
+         than the byte offset ({one_byte})"
+    );
+
+    let d = verter_tsgo_api::proto::types::Diagnostic {
+        code: 2322,
+        category: 1,
+        text: "Type 'number' is not assignable to type 'string'.".to_string(),
+        pos: one_utf16,
+        end: one_utf16 + 1,
+        file_name: Some("c:/ws/src/A.vue.tsx".to_string()),
+    };
+    let mapped = map_api_diagnostic(&d, Some(content));
+    // The mapped BYTE start must equal the true byte offset of `1`, NOT the raw
+    // UTF-16 `pos` (which a passthrough would have produced).
+    assert_eq!(
+        mapped.start, one_byte,
+        "start must be the BYTE offset of `1` ({one_byte}), not the UTF-16 pos ({one_utf16})"
+    );
+    assert_eq!(mapped.end, one_byte + 1);
+    assert_ne!(
+        mapped.start, one_utf16,
+        "a straight UTF-16 passthrough (start == pos) is the bug this test forbids"
+    );
 }
 
 #[test]
@@ -88,20 +139,26 @@ fn map_api_diagnostic_severity_table() {
         file_name: None,
     };
     assert_eq!(
-        severity_name(&map_api_diagnostic(&base).severity),
+        severity_name(&map_api_diagnostic(&base, Some("w")).severity),
         "warning"
     );
 
-    let suggestion = map_api_diagnostic(&verter_tsgo_api::proto::types::Diagnostic {
-        category: 2,
-        ..base.clone()
-    });
+    let suggestion = map_api_diagnostic(
+        &verter_tsgo_api::proto::types::Diagnostic {
+            category: 2,
+            ..base.clone()
+        },
+        Some("w"),
+    );
     assert_eq!(severity_name(&suggestion.severity), "hint");
 
-    let message = map_api_diagnostic(&verter_tsgo_api::proto::types::Diagnostic {
-        category: 3,
-        ..base.clone()
-    });
+    let message = map_api_diagnostic(
+        &verter_tsgo_api::proto::types::Diagnostic {
+            category: 3,
+            ..base.clone()
+        },
+        Some("w"),
+    );
     assert_eq!(severity_name(&message.severity), "info");
 }
 

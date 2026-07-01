@@ -1543,6 +1543,16 @@ impl TsgoTypeProvider {
         Ok(TsgoApiSession { session_id, pipe })
     }
 
+    /// The cached content of an opened file (`didOpen`/`update` overlay), if
+    /// present. The `--api` diagnostic normalization (UTF-16 offset → byte /
+    /// (line,col)) needs the carrier's exact text; the `--lsp` surface already
+    /// caches every opened document's content for its own byte-offset ↔ position
+    /// conversion, so the dual-surface OWNED provider reads it back through here
+    /// rather than re-tracking a second copy.
+    pub async fn cached_content(&self, path: &str) -> Option<Arc<str>> {
+        self.contents.lock().await.get(path).cloned()
+    }
+
     /// Convert a file path to a `file://` URI.
     fn path_to_uri(path: &str) -> String {
         path_to_file_uri_string(path)

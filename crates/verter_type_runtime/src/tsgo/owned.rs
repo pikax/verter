@@ -159,11 +159,23 @@ impl TsgoOwnedProvider {
         let Some((snapshot, project, engine_carrier)) = self.api.resolve_for(&carrier).await else {
             return Ok(Vec::new());
         };
+        // The `--api` diagnostic `pos`/`end` are UTF-16 code units against the
+        // carrier's own text; `TypeDiagnostic.start`/`end` is a BYTE contract. Fetch
+        // the carrier content the `--lsp` surface already cached (this is a per-file
+        // getter, so every returned diagnostic is positioned in `engine_carrier`) and
+        // convert through the shared `verter_tsgo_api` offset boundary.
+        let content = self.lsp.cached_content(&engine_carrier).await;
+        let content_ref = content.as_deref();
         self.api
             .client
             .get_semantic_diagnostics(&snapshot, &project, &engine_carrier)
             .await
-            .map(|diags| diags.iter().map(map_api_diagnostic).collect())
+            .map(|diags| {
+                diags
+                    .iter()
+                    .map(|d| map_api_diagnostic(d, content_ref))
+                    .collect()
+            })
             .map_err(|e| {
                 crate::protocol::TypeProviderError::new(format!(
                     "--api getSemanticDiagnostics: {e}"
@@ -246,15 +258,26 @@ fn select_configured_project_carrier(
 /// Map a tsgo `--api` diagnostic to the runtime `TypeDiagnostic`; `category` maps
 /// to severity.
 ///
-/// TODO(PERF-3-offset): the `--api` `pos`/`end` are tsgo **UTF-16 code-unit**
-/// offsets (TypeScript position semantics), NOT bytes — copying them straight into
-/// the byte-contract `TypeDiagnostic.start`/`end` (below) drifts LSP positions on
-/// any non-ASCII content before the diagnostic. Fix per the "PERF-3-offset"
-/// deferral in `docs/arch/host-mode-perf-design.md`: normalize `--api` offset
-/// semantics ONCE at the shared `verter_tsgo_api` boundary, convert here, and
-/// de-duplicate verter-tsc's `offset_map`. Logic intentionally unchanged here —
-/// this is a cross-surface follow-up tracked in that deferral record.
-fn map_api_diagnostic(d: &verter_tsgo_api::proto::types::Diagnostic) -> TypeDiagnostic {
+/// The `--api` diagnostic `pos`/`end` are tsgo **UTF-16 code-unit** offsets
+/// (TypeScript position semantics), while `TypeDiagnostic.start`/`end` is a
+/// **byte** contract (`protocol.rs`). `content` is the carrier's own text; the
+/// offsets are converted UTF-16 → byte through the shared `verter_tsgo_api`
+/// offset boundary (the SINGLE offset-normalization implementation, backed by
+/// `verter_span`) so positions never drift on non-ASCII content before the
+/// diagnostic (e.g. an em-dash `—` in a carrier comment).
+///
+/// `content` is `None` only when the carrier is not in the `--lsp` content cache
+/// (it is opened before this runs, so this is defensive); ASCII UTF-16 offsets
+/// equal byte offsets, so the raw offset is used unchanged in that degenerate
+/// case rather than fabricating a wrong position.
+fn map_api_diagnostic(
+    d: &verter_tsgo_api::proto::types::Diagnostic,
+    content: Option<&str>,
+) -> TypeDiagnostic {
+    let (start, end) = match content {
+        Some(text) => verter_tsgo_api::diagnostic_byte_span(d, text),
+        None => (d.pos, d.end),
+    };
     TypeDiagnostic {
         message: d.text.clone(),
         // tsgo DiagnosticCategory: 0=Warning, 1=Error, 2=Suggestion, 3=Message.
@@ -264,8 +287,8 @@ fn map_api_diagnostic(d: &verter_tsgo_api::proto::types::Diagnostic) -> TypeDiag
             2 => TypeDiagnosticSeverity::Hint,
             _ => TypeDiagnosticSeverity::Info,
         },
-        start: d.pos,
-        end: d.end,
+        start,
+        end,
         code: Some(d.code.to_string()),
         tags: Vec::new(),
         related_information: Vec::new(),
