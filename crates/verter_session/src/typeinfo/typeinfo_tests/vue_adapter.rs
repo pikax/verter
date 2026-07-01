@@ -498,6 +498,85 @@ fn emit_call_signature_payload_type_is_stripped_payload_tuple() {
 }
 
 // ---------------------------------------------------------------------------
+// (3d) defineEmits call-signature CARRIER event-name union — the node-domain
+//      event-name behaviour: the event name is an ALIASED union (`type E =
+//      'save' | 'cancel'; (e: E, value: number): void`). A shallow-carrier
+//      decide on the materialized `first.ty` (a `Ref("E")` carrier) matches
+//      neither the `Literal` nor the `Union` arm and surfaces NO events; the
+//      node-domain `CallableNodeView::event_names` RESOLVES the `DeclRef(E)`
+//      carrier to its `'save' | 'cancel'` union and surfaces BOTH names — the
+//      decided-correct Vue semantics.
+//
+//      Discriminating (FAILS against a shallow-carrier decide, PASSES with the
+//      node-domain reader): a shallow `match &first.ty` falls to `_ => {}` for
+//      the `Ref("E")` carrier and produces an EMPTY emit set, so the
+//      `["cancel", "save"]` assertion FAILS against it; the node-domain reader
+//      surfaces both names. The payload (`[value: number]`) is unchanged — only
+//      the event-name enumeration improves.
+// ---------------------------------------------------------------------------
+
+const VUE_EMITS_CARRIER_UNION: &str = r#"<script setup lang="ts">
+type E = 'save' | 'cancel';
+defineEmits<{
+  (e: E, value: number): void;
+}>();
+</script>
+"#;
+
+#[test]
+fn define_emits_callsig_carrier_event_name_union_resolves_both_names() {
+    const FILE: &str = "/w/EmitsCarrierUnion.vue";
+    let host = make_host();
+    upsert(&host, FILE, VUE_EMITS_CARRIER_UNION);
+
+    let request = props_request(&host, FILE, AnalyzedMacroKind::DefineEmits);
+    let surface = host
+        .resolve_vue_macro_surface(&request)
+        .expect("defineEmits with an aliased event-name union resolves a surface");
+    let emits =
+        emits_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+
+    let mut names: Vec<&str> = emits.iter().map(|e| e.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        vec!["cancel", "save"],
+        "the aliased event-name union `type E = 'save' | 'cancel'` resolves through the \
+         node-domain event-name reader (the shallow-carrier decide surfaced NEITHER)"
+    );
+
+    // Each surfaced event carries the SAME stripped payload `[value: number]` —
+    // the event-name param is stripped, the tail is the payload (unchanged by
+    // the node-domain event-name resolution).
+    for name in ["save", "cancel"] {
+        let event = emits
+            .iter()
+            .find(|e| e.name == name)
+            .unwrap_or_else(|| panic!("event `{name}` surfaces"));
+        let verter_type_expr::TypeExpr::Tuple { elements, .. } = event
+            .payload_expr
+            .as_ref()
+            .unwrap_or_else(|| panic!("event `{name}` carries a payload tuple"))
+        else {
+            panic!("event `{name}` payload must be a Tuple");
+        };
+        assert_eq!(
+            elements.len(),
+            1,
+            "the leading event-name param is stripped, leaving the `[value: number]` payload"
+        );
+        assert!(
+            matches!(
+                elements[0].ty,
+                verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+            ),
+            "the surviving payload element is `number`, got {:?}",
+            elements[0].ty
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // (4) defineSlots normalizer — function-like members only, first-param object
 //     bindings, return preserved.
 //

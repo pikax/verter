@@ -803,6 +803,86 @@ fn signature_accessors_read_function_facts() {
 }
 
 #[test]
+fn raw_params_preserves_this_optional_and_rest_verbatim() {
+    // DISCRIMINATING vs `positional_params_expanded` (the WRONG shape for the
+    // emit/callback payload): `raw_params` keeps the leading `this`, PRESERVES
+    // each param's `optional` / `rest` flags, and does NOT element-expand a rest
+    // tuple. A wrong impl delegating to `positional_params_expanded` (skip
+    // `this`, expand the rest tuple, drop the flags into a `PositionalParamNode`)
+    // FAILS every assertion below.
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let void = prim(&graph, PrimitiveKind::Void);
+    let num = prim(&graph, PrimitiveKind::Number);
+    let str_ty = prim(&graph, PrimitiveKind::String);
+    let bool_ty = prim(&graph, PrimitiveKind::Boolean);
+    let rest_tuple = tuple(
+        &graph,
+        vec![
+            tuple_element(Some("a"), num),
+            tuple_element(Some("b"), str_ty),
+            tuple_element(Some("c"), bool_ty),
+        ],
+    );
+    // `(this: void, name?: number, ...args: [a: number, b: string, c: boolean])`.
+    let f = function(
+        &graph,
+        vec![
+            param(Some("this"), void, false, false),
+            param(Some("name"), num, true, false), // optional
+            param(Some("args"), rest_tuple, false, true), // rest
+        ],
+        void,
+    );
+
+    let view = CallableNodeView::new(&dispatch, f);
+    let sig = view
+        .signature(navigate())
+        .expect("the root realizes to a signature");
+    let raw = sig.raw_params();
+
+    // VERBATIM: all THREE params, `this` NOT skipped, the rest tuple NOT expanded.
+    assert_eq!(
+        raw.len(),
+        3,
+        "raw_params keeps `this` + optional + rest verbatim (no this-skip, no rest-expansion)"
+    );
+    assert_eq!(
+        raw[0].name.as_deref(),
+        Some("this"),
+        "the leading `this` param is PRESERVED (raw_params does not skip it)"
+    );
+    assert!(!raw[0].optional && !raw[0].rest);
+    assert_eq!(raw[1].name.as_deref(), Some("name"));
+    assert!(
+        raw[1].optional,
+        "the `optional` flag is preserved (a `PositionalParamNode` drops it)"
+    );
+    assert!(!raw[1].rest);
+    assert_eq!(raw[2].name.as_deref(), Some("args"));
+    assert!(raw[2].rest, "the `rest` flag is preserved");
+    assert_eq!(
+        raw[2].ty, rest_tuple,
+        "the rest param's `ty` is the UN-expanded tuple node (never element-expanded)"
+    );
+
+    // CONTRAST: `positional_params_expanded` on the SAME signature skips `this`
+    // and EXPANDS the rest tuple element-wise — a genuinely different shape (4
+    // entries, `this` gone, `a`/`b`/`c` inlined), proving `raw_params` is NOT
+    // that method.
+    let expanded = sig.positional_params_expanded(navigate());
+    let expanded_labels: Vec<Option<&str>> = expanded.iter().map(|p| p.label.as_deref()).collect();
+    assert_eq!(
+        expanded_labels,
+        vec![Some("name"), Some("a"), Some("b"), Some("c")],
+        "positional_params_expanded skips `this` and expands the rest tuple — the exact OPPOSITE \
+         shape `raw_params` must NOT produce"
+    );
+}
+
+#[test]
 fn signature_is_none_for_multi_arm_composite() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);

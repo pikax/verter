@@ -31,8 +31,8 @@ use crate::meta_resolve::slot_binding_graph::slot_param_root_is_symbolic_only;
 use crate::project_semantic_dispatch::{node_data_for, ProjectSemanticDispatch};
 use crate::resolver_core::ResolverContext;
 use crate::semantic_query::{
-    LiteralValue, PathSegment, PrimitiveKind, ProjectionMode, ProjectionReductionContext,
-    QueryError, SemanticNodeData, SemanticNodeId,
+    FunctionParam, LiteralValue, PathSegment, PrimitiveKind, ProjectionMode,
+    ProjectionReductionContext, QueryError, SemanticNodeData, SemanticNodeId,
 };
 use crate::typeinfo::surface::TypeInfoSurface;
 
@@ -728,6 +728,24 @@ impl SignatureNodeView<'_, '_> {
                 return_type_span, ..
             }) => *return_type_span,
             _ => None,
+        }
+    }
+
+    /// The realized signature's parameters VERBATIM (node-domain). Preserves each
+    /// param's name / `ty` node / `optional` / `rest` — unlike
+    /// [`Self::positional_params_expanded`], which skips a leading `this`,
+    /// element-expands a rest tuple, and drops the `optional` / `rest` flags into
+    /// a bare [`PositionalParamNode`]. The Vue emit payload takes these AFTER the
+    /// leading event-name param (`[1..]`); the Svelte callback payload takes ALL
+    /// of them. The consumer materializes each `param.ty` ONCE at a terminal sink;
+    /// the view never materializes.
+    ///
+    /// `function` is a `Function` node by construction; the non-`Function` arm is
+    /// unreachable and fails closed to an empty slice (never a fabricated param).
+    pub(crate) fn raw_params(&self) -> Arc<[FunctionParam]> {
+        match self.data(self.function).as_deref() {
+            Some(SemanticNodeData::Function { params, .. }) => Arc::clone(params),
+            _ => Arc::from(Vec::new().into_boxed_slice()),
         }
     }
 

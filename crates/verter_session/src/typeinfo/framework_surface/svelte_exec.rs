@@ -33,6 +33,7 @@ use verter_type_expr::{PrimitiveName, TypeExpr};
 use verter_protocol::typeinfo::graph::FrameworkSurfaceKind;
 
 use crate::framework::surface_store::{FullKey, StoredSurfaceDto};
+use crate::meta_resolve::callable_view::CallableNodeView;
 use crate::project_semantic_dispatch::output_materialization::OutputProjector;
 use crate::resolver_core::ResolverContext;
 use crate::typeinfo::framework_surface::resolved_surface_access::ResolvedSurfaceAccess;
@@ -1096,10 +1097,16 @@ fn callback_events_from_props_surface(
     owner: &str,
     surface: &TypeInfoSurface,
 ) -> Vec<AnalyzedEmitField> {
-    use verter_type_expr::TupleElement;
-
     let host = ctx.host_for_fact_tracer_install();
     let dispatch = ctx.dispatch();
+    // Publication sink (DTO event payload tuples): the callable-arm decide and the
+    // payload param selection are made ENTIRELY in the node domain through the
+    // shared `CallableNodeView`; materialization happens ONCE at the terminal
+    // `materialize_payload_tuple` sink. This normalizer calls NO mint verb.
+    let cap = TypeinfoSvelteSurfaceOutputCap::new(&dispatch);
+    let context = crate::semantic_query::ProjectionReductionContext::published(
+        crate::semantic_query::ProjectionMode::Navigate,
+    );
     let mut events: Vec<AnalyzedEmitField> = Vec::new();
     for member in surface.members.iter().filter(|m| m.visibility.is_public()) {
         // Structural `on${E}` callback convention: `on` prefix + a NON-EMPTY
@@ -1110,55 +1117,31 @@ fn callback_events_from_props_surface(
         if event_name.is_empty() {
             continue;
         }
-        // The value MUST realise to a FUNCTION-LIKE type (an arbitrary non-`on`
-        // function prop is excluded above; an `on*` prop whose value is NOT a
-        // function — `onclick: string` — is excluded here).
-        let realized = crate::meta_resolve::dispatch_helpers::realize_callable_member(
-            &dispatch,
-            member.value,
-            crate::semantic_query::ProjectionReductionContext::published(
-                crate::semantic_query::ProjectionMode::Navigate,
-            ),
-        )
-        .unwrap_or(member.value);
-        // `TypeExpr` implements `Drop`, so the function cannot be moved out of
-        // the raised value; bind it and borrow. The shared callable-arm
-        // extractor strips the nullish (`undefined` / `null`) arms an EXPLICIT
-        // nullish union VALUE (`onselect: ((r) => void) | undefined`) carries and
-        // pulls out the single callable arm. (A member-`?`-optional callback raises
-        // to a bare `Function` — the `?` rides the surface `optional` flag.) A
-        // non-callable prop (`label?: string`) and a union with no callable arm
-        // both yield `None` (NOT an event).
-        // Publication sink (DTO event surface): materialize into a sealed
-        // carrier and unwrap via the typeinfo output capability.
-        let cap = TypeinfoSvelteSurfaceOutputCap::new(&dispatch);
-        let raised = cap
-            .materialize_output_type_expr(realized)
-            .map(|carrier| carrier.into_type_expr(&cap));
-        let Some(func) = raised
-            .as_ref()
-            .and_then(crate::meta_resolve::dispatch_helpers::callable_arm_from_raised)
-        else {
+        // The value MUST realize to a single FUNCTION-LIKE type. The node-domain
+        // `single_callable_arm` (via `signature`) resolves the member's carrier(s)
+        // through the shared structural-fact demand primitive, strips an EXPLICIT
+        // nullish (`undefined` / `null`) arm an `onselect: ((r) => void) | undefined`
+        // value carries, and REFUSES two distinct callable arms — replacing the
+        // `realize → materialize → callable_arm_from_raised` decide. (A
+        // member-`?`-optional callback keeps its `?` on the surface `optional`
+        // flag, so the value is a bare `Function` here.) `None` — a non-callable
+        // prop (`onclick: string` / `label?: string`), or a union with no single
+        // callable arm — is NOT an event (matching the previous `continue`).
+        let view = CallableNodeView::new(&dispatch, member.value);
+        let Some(signature) = view.signature(context) else {
             continue;
         };
-        // Payload = the callback's PARAMETERS as a labelled tuple (all of them —
-        // a callback prop's parameters ARE the event payload; there is no leading
-        // event-name parameter to strip).
-        let payload_tuple = TypeExpr::Tuple {
-            elements: func
-                .parameters
-                .iter()
-                .map(|param| TupleElement {
-                    label: param.name.clone(),
-                    ty: param.ty.clone(),
-                    optional: param.optional,
-                    rest: param.rest,
-                })
-                .collect(),
-            readonly: false,
-        };
-        let payload_type =
-            crate::resolver_core::surface_projector::render_type_expr_display(&payload_tuple);
+        // Payload = the callback's PARAMETERS as a labelled tuple (ALL of them — a
+        // callback prop's parameters ARE the event payload; there is no leading
+        // event-name parameter to strip), materialized ONCE at the terminal sink
+        // and kept as `Option<TypeExpr>` so the DISPLAY renders through the by-name
+        // `as_ref().and_then(render_type_expr_display)` form — this normalizer
+        // NEVER decides on the materialized value.
+        let raw_params = signature.raw_params();
+        let payload_expr = Some(materialize_payload_tuple(&cap, &raw_params));
+        let payload_type = payload_expr
+            .as_ref()
+            .and_then(crate::resolver_core::surface_projector::render_type_expr_display);
         // Scope the payload to the `$props` member's VALUE-NODE file (the SAME
         // scope the shared resolver navigated the member in), so a payload `Ref`
         // (a callback parameter typed against a same-module `interface Row`)
@@ -1174,7 +1157,7 @@ fn callback_events_from_props_surface(
             name: event_name.to_string(),
             span: verter_span::Span::default(),
             payload_type,
-            payload_expr: Some(payload_tuple),
+            payload_expr,
             payload_expr_scope,
             description: None,
             tags: Vec::new(),
@@ -1184,6 +1167,48 @@ fn callback_events_from_props_surface(
     let mut seen = std::collections::HashSet::new();
     events.retain(|e| seen.insert(e.name.clone()));
     events
+}
+
+/// Materialize a Svelte callback-event payload tuple from NODE-DOMAIN params — a
+/// GENUINE decide-free terminal one-shot sink (the Svelte-cap twin of the Vue
+/// `vue_exec::normalize::materialize_payload_tuple`). Each `param.ty` node is
+/// minted ONCE through the sealed Svelte output capability into a labelled
+/// `TupleElement` that preserves the param's name / optional / rest; the result
+/// is the payload `TypeExpr::Tuple`. It makes NO decision on any materialized
+/// value (no branch / match / shape-extract), takes NO `&TypeExpr` param (node
+/// ids + the cap only), and lives inside the Svelte cap's
+/// `pub(in …::svelte_exec)` mint scope. A callback prop has NO leading event-name
+/// param, so ALL params enter the tuple (no `[1..]` skip).
+///
+/// A param whose node does not materialize is skipped (`filter_map`) — the same
+/// decide-free `?`-on-mint pattern the Vue sink uses. This does not arise in
+/// practice: the realized signature's param nodes ARE the callback's own declared
+/// parameter types, which all materialize.
+pub(in crate::typeinfo::framework_surface::svelte_exec) fn materialize_payload_tuple(
+    cap: &TypeinfoSvelteSurfaceOutputCap,
+    params: &[crate::semantic_query::FunctionParam],
+) -> TypeExpr {
+    use verter_type_expr::TupleElement;
+    let elements = params
+        .iter()
+        .filter_map(|param| {
+            let ty = cap
+                .materialize_output_type_expr(param.ty)?
+                .into_type_expr(cap);
+            Some(TupleElement {
+                // Node-domain `FunctionParam.name` (`Option<Arc<str>>`) → the
+                // display-facing tuple `label` (`Option<String>`).
+                label: param.name.as_ref().map(|n| n.to_string()),
+                ty,
+                optional: param.optional,
+                rest: param.rest,
+            })
+        })
+        .collect();
+    TypeExpr::Tuple {
+        elements,
+        readonly: false,
+    }
 }
 
 /// EXPOSE from the exported instance-script members. Each export is a named

@@ -1137,3 +1137,87 @@ fn explicit_union_with_two_distinct_callable_arms_refuses() {
             .collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn carrier_wrapped_nullish_callback_prop_classifies_as_event_with_precise_payload() {
+    // Node-domain callable-arm characterization: a callback prop whose value is
+    // an ALIAS whose BODY is a nullish union — `type Handler = ((row: Row) => void) |
+    // undefined; onselect: Handler`. The value node is a `DeclRef(Handler)`
+    // carrier wrapping `Union([Function, undefined])`. The node-domain
+    // `CallableNodeView::signature` (`single_callable_arm`) resolves the
+    // `DeclRef` through the shared structural-fact demand primitive FIRST, strips
+    // the `undefined` arm, and realizes the surviving `Function` — surfacing
+    // event `select` with a PRECISE `(row: Row)` payload.
+    //
+    // DISCRIMINATING (fails on a wrong projection): a reader that decided on the
+    // UN-resolved `DeclRef` carrier (never normalizing it), or that failed the
+    // whole-composite realize on the `undefined` arm without stripping it, would
+    // surface NO `select` event — the `select` assertion below FAILS against
+    // either. A non-callable `on*` union (`onmode: "a" | "b"`) stays NOT an event.
+    let canonical = "/CarrierNullishCb.svelte";
+    let source = "<script lang=\"ts\">\n\
+             interface Row { id: number }\n\
+             type Handler = ((row: Row) => void) | undefined;\n\
+             interface Props {\n\
+               onselect: Handler;\n\
+               onmode: \"a\" | \"b\";\n\
+             }\n\
+             let { onselect, onmode }: Props = $props();\n\
+             void onselect; void onmode;\n\
+             </script>\n\
+             <div />";
+    let (host, view) = host_with_svelte(canonical, source);
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
+
+    let outcome = resolve_svelte_surface(
+        &host,
+        &ctx,
+        canonical,
+        SvelteSurfaceSource::CallbackPropEvents,
+    );
+    let ResolvedOutcome::Resolved(dtos) = outcome else {
+        panic!("the callback-prop EMITS surface must resolve, got {outcome:?}");
+    };
+    let emits = dtos.emits.as_ref().expect("emits surface present");
+    let names: Vec<&str> = emits.fields.iter().map(|e| e.name.as_str()).collect();
+
+    // (a) the carrier-wrapped nullish callable alias IS event `select`.
+    let select = emits
+        .fields
+        .iter()
+        .find(|e| e.name == "select")
+        .unwrap_or_else(|| {
+            panic!(
+                "a carrier-wrapped nullish callback alias `onselect: Handler` (Handler = \
+                 `((row: Row) => void) | undefined`) must classify as event `select` (the \
+                 `DeclRef` carrier is resolved, the `| undefined` arm stripped), got {names:?}"
+            )
+        });
+    // (b) NEGATIVE: the non-callable `on*` union is NOT an event.
+    assert!(
+        !names.contains(&"mode"),
+        "an `on`-prefixed non-callable union (`onmode: \"a\" | \"b\"`) must NOT be an event, \
+         got {names:?}"
+    );
+
+    // The payload is PRECISE — `Row` resolves in scope (member `id`).
+    let scope = select
+        .payload_expr_scope
+        .as_ref()
+        .expect("carrier-nullish callback payload_expr_scope is Some (pairing)");
+    let TypeExpr::Tuple { elements, .. } = select.payload_expr.as_ref().expect("payload tuple")
+    else {
+        panic!("carrier-nullish callback payload is a tuple");
+    };
+    let row_ty = elements
+        .first()
+        .map(|el| el.ty.clone())
+        .expect("the `(row: Row)` callback has one parameter");
+    let resolved = navigate_param_to_object_surface(&ctx, scope.as_str(), &row_ty)
+        .expect("`Row` resolves through the carrier-nullish callback payload scope");
+    assert!(
+        resolved.members.iter().any(|m| m.name.as_ref() == "id"),
+        "the carrier-nullish callback's `Row` payload resolves precisely (member `id`)"
+    );
+}

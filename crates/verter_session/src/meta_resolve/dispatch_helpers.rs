@@ -339,6 +339,15 @@ fn realize_callable_member_inner(
 /// (ambiguous — the caller must not fabricate a single payload from divergent
 /// signatures). It NEVER broadens to a non-callable arm and NEVER introduces
 /// `any`.
+///
+/// RETAINED as the node-domain `CallableNodeView::single_callable_arm` PARITY
+/// ORACLE: the framework normalizers now decide callable arms in the node domain,
+/// so this `TypeExpr`-domain helper has NO production caller and survives only as
+/// the `callable_view_tests` oracle (`single_callable_arm ↔ callable_arm_from_raised`).
+/// It is deleted when the last legacy `TypeExpr`-domain helper is removed; until
+/// then it is unused in a non-test build, so the dead-code lint is silenced there
+/// (the test build DOES reference it).
+#[cfg_attr(not(test), allow(dead_code))]
 #[must_use]
 pub(crate) fn callable_arm_from_raised(
     raised: &verter_type_expr::TypeExpr,

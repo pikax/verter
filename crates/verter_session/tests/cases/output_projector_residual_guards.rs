@@ -12350,6 +12350,27 @@ const HOT_TERMINAL_SINKS: &[(&str, &str)] = &[
         "vue_exec/normalize.rs",
         "object_members_from_typeinfo_surface",
     ),
+    // The Vue emit payload-tuple terminal: mints each node-domain payload param
+    // (`FunctionParam.ty` node) ONCE through the sealed output cap into a
+    // labelled `TupleElement` and returns the payload `TypeExpr::Tuple`. ZERO
+    // decide (no branch / match on a materialized value); takes NO `TypeExpr`
+    // param (node ids + the cap only). The event-name decide + payload param
+    // selection are node-domain (`CallableNodeView`) in the non-terminal
+    // `emits_from_typeinfo_surface`.
+    ("vue_exec/normalize.rs", "materialize_payload_tuple"),
+    // The Vue property-style emit fallback terminal: iterates the surface's
+    // PUBLIC members (a node-domain visibility fact), mints each member value
+    // ONCE via the registered `raise_member_value` sink, and builds the
+    // `AnalyzedEmitField` DTOs — structurally identical to `props_from_typeinfo_surface`.
+    // No decision on any materialized value; no `TypeExpr` param.
+    ("vue_exec/normalize.rs", "property_style_emit_fields"),
+    // The Svelte callback-event payload-tuple terminal (the Svelte-cap twin of
+    // the Vue `materialize_payload_tuple`): mints each node-domain callback param
+    // ONCE through the sealed Svelte output cap into a labelled `TupleElement`.
+    // ZERO decide; no `TypeExpr` param. The callable-arm decide + param selection
+    // are node-domain (`CallableNodeView`) in the non-terminal
+    // `callback_events_from_props_surface`.
+    ("svelte_exec.rs", "materialize_payload_tuple"),
     // NOTE: `binding_fields_from_param_ty` is NOT here — it BRANCHES on its
     // `param_ty` (`if let TypeExpr::Object`), NAVIGATES it through the shared
     // resolver (`navigate_param_to_object_surface`), shape-matches `Pick`, and

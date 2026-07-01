@@ -21,8 +21,10 @@ use super::{
     member_jsdoc_from_spans, navigate_param_to_object_surface, raise_member_value,
     raise_realized_callable_member_value, signature_jsdoc_from_spans, slice_canonical_span,
 };
+use crate::meta_resolve::callable_view::CallableNodeView;
 use crate::project_semantic_dispatch::output_materialization::OutputProjector;
 use crate::resolver_core::surface_projector::render_type_expr_display;
+use crate::semantic_query::{FunctionParam, ProjectionMode, ProjectionReductionContext};
 use crate::typeinfo::framework_surface::resolved_surface_access::ResolvedSurfaceAccess;
 use crate::typeinfo::surface::{CanonicalSpan, TypeInfoSurfaceMember};
 use crate::VerterHost;
@@ -278,96 +280,152 @@ pub(crate) fn emits_from_typeinfo_surface(
     // use the host the `ctx` is installed against.
     let host = ctx.host_for_fact_tracer_install();
     let dispatch = ctx.dispatch();
-    // Publication sink (DTO emit fields): materialize into sealed carriers and
-    // unwrap via the typeinfo output capability.
+    // Publication sink (DTO emit payload tuples): the event-name decide and the
+    // payload param selection are made ENTIRELY in the node domain through the
+    // shared `CallableNodeView`; materialization happens ONCE at the terminal
+    // `materialize_payload_tuple` sink. This normalizer calls NO mint verb.
     let cap = super::TypeinfoVueSurfaceOutputCap::new(&dispatch);
+    // Node-domain demand identity. `Navigate` carrier-resolves an ALIASED
+    // event-name union (`type E = 'save' | 'cancel'`) so its literal names
+    // surface — a shallow-`TypeExpr` decide on the first param would keep the
+    // `DeclRef` carrier opaque and surface neither. The payload elements are
+    // minted shallow at the sink regardless of this mode.
+    let context = ProjectionReductionContext::published(ProjectionMode::Navigate);
 
     let mut emits: Vec<AnalyzedEmitField> = Vec::new();
 
-    // (1) Call-signature emits.
+    // (1) Call-signature emits — decided in the NODE domain.
     for sig in macro_surface.surface.call_signatures.iter() {
-        // `TypeExpr` implements `Drop`, so `func` cannot be moved out of the
-        // raised value; bind it and borrow the function.
-        let raised = cap
-            .materialize_output_type_expr(sig.node)
-            .map(|carrier| carrier.into_type_expr(&cap));
-        let Some(TypeExpr::Function(func)) = &raised else {
+        let view = CallableNodeView::new(&dispatch, sig.node);
+        // The event name(s): the realized callable's FIRST-param string literal /
+        // union, carrier-resolved (fail-closed-whole). `None` (no first param, or
+        // a first param carrying no string literal) contributes NO events (no
+        // event name ⇒ no emit field).
+        let Some(names) = view.event_names(context) else {
             continue;
         };
-        let Some(first) = func.parameters.first() else {
+        // Payload = the realized signature's params AFTER the leading event-name
+        // param (`[1..]`), materialized ONCE at the terminal sink. `event_names`
+        // above already realized the signature (its `first_param`), so `signature`
+        // here is `Some` by construction; the `else continue` is defensive.
+        let Some(signature) = view.signature(context) else {
             continue;
         };
-        // Payload = the call signature's REMAINING parameters (after the leading
-        // event-name parameter) as a TUPLE — the Vue emit payload shape. This
-        // matches the eager OXC rail's `AnalyzedEmitField.payload_expr` (a
-        // `TypeExpr::Tuple`). Each surviving parameter maps to a labelled tuple
-        // element preserving its name / optional / rest.
-        let payload_tuple = TypeExpr::Tuple {
-            elements: func
-                .parameters
-                .iter()
-                .skip(1)
-                .map(|param| verter_type_expr::TupleElement {
-                    label: param.name.clone(),
-                    ty: param.ty.clone(),
-                    optional: param.optional,
-                    rest: param.rest,
-                })
-                .collect(),
-            readonly: false,
-        };
+        let raw_params = signature.raw_params();
+        // Materialize the payload tuple ONCE at the terminal sink, kept as an
+        // `Option<TypeExpr>` so the DISPLAY renders through the by-name
+        // `as_ref().and_then(render_type_expr_display)` form — the SAME shape
+        // `props_from_typeinfo_surface` uses. This normalizer NEVER decides on the
+        // materialized value (no direct reader call on it).
+        let payload_expr = Some(materialize_payload_tuple(&cap, &raw_params[1..]));
         // Scope the payload to the call signature's DECLARATION-origin file so an
-        // inherited cross-file emit signature's payload `Ref`s resolve in the
-        // base file. Falls back to the SFC owner.
+        // inherited cross-file emit signature's payload `Ref`s resolve in the base
+        // file. Falls back to the SFC owner.
         let payload_scope = macro_surface.signature_expr_scope(sig);
         // `payload_type` (→ `rawType`) is DISPLAY-ONLY — no consumer parses it.
         // It mirrors the payload TUPLE rendered as `[label: T, ...]`.
-        let payload_type = render_type_expr_display(&payload_tuple);
+        let payload_type = payload_expr.as_ref().and_then(render_type_expr_display);
         // The event's JSDoc rides on the call signature itself, sliced from the
-        // signature's typeinfo JSDoc spans. A union of event-name literals on
-        // ONE signature shares that signature's JSDoc across each event.
+        // signature's typeinfo JSDoc spans. A union of event-name literals on ONE
+        // signature shares that signature's JSDoc across each event.
         let (description, tags) = signature_jsdoc_from_spans(host, sig);
-        let mut push_event = |name: String| {
+        for name in names {
             emits.push(AnalyzedEmitField {
-                name,
+                name: name.to_string(),
                 span: verter_span::Span::default(),
                 payload_type: payload_type.clone(),
-                payload_expr: Some(payload_tuple.clone()),
+                payload_expr: payload_expr.clone(),
                 payload_expr_scope: Some(payload_scope.clone()),
                 description: description.clone(),
                 tags: tags.clone(),
             });
-        };
-        match &first.ty {
-            TypeExpr::Literal(LiteralValue::String(name)) => push_event(name.clone()),
-            TypeExpr::Union(types) => {
-                for ty in types.iter() {
-                    if let TypeExpr::Literal(LiteralValue::String(name)) = ty {
-                        push_event(name.clone());
-                    }
-                }
-            }
-            _ => {}
         }
     }
 
     // (2) Property-style emits — fallback only when no call-signature emit fired.
+    // The member materialization lives in the terminal `property_style_emit_fields`
+    // sink so this normalizer mints nothing directly.
     if emits.is_empty() {
-        for member in macro_surface
-            .surface
-            .members
-            .iter()
-            // Public-only publication: a `private` / `protected` class member
-            // recorded on the shared surface must NOT leak as a published emit.
-            .filter(|member| member.visibility.is_public())
-        {
+        emits = property_style_emit_fields(ctx, resolved);
+    }
+
+    // (3) De-duplicate by event name, first-writer-wins.
+    let mut seen = std::collections::HashSet::new();
+    emits.retain(|emit| seen.insert(emit.name.clone()));
+    emits
+}
+
+/// Materialize a Vue emit payload tuple from NODE-DOMAIN params — a GENUINE
+/// decide-free terminal one-shot sink. Each `param.ty` node is minted ONCE
+/// through the sealed output capability into a labelled `TupleElement` that
+/// preserves the param's name / optional / rest; the result is the payload
+/// `TypeExpr::Tuple`. It makes NO decision on any materialized value (no branch /
+/// match / shape-extract), takes NO `&TypeExpr` param (node ids + the cap only),
+/// and lives inside the Vue cap's `pub(in …::vue_exec)` mint scope.
+///
+/// A param whose node does not materialize is skipped (`filter_map`) — the same
+/// decide-free `?`-on-mint pattern [`index_signatures_from_surface`] uses. This
+/// does not arise in practice: the realized signature's param nodes ARE the
+/// callable's own declared parameter types, which all materialize, so the
+/// fail-closed fallback is a shorter tuple, never a fabricated element.
+pub(in crate::typeinfo::framework_surface::vue_exec) fn materialize_payload_tuple(
+    cap: &super::TypeinfoVueSurfaceOutputCap,
+    params: &[FunctionParam],
+) -> TypeExpr {
+    let elements = params
+        .iter()
+        .filter_map(|param| {
+            let ty = cap
+                .materialize_output_type_expr(param.ty)?
+                .into_type_expr(cap);
+            Some(verter_type_expr::TupleElement {
+                // Node-domain `FunctionParam.name` (`Option<Arc<str>>`) → the
+                // display-facing tuple `label` (`Option<String>`).
+                label: param.name.as_ref().map(|n| n.to_string()),
+                ty,
+                optional: param.optional,
+                rest: param.rest,
+            })
+        })
+        .collect();
+    TypeExpr::Tuple {
+        elements,
+        readonly: false,
+    }
+}
+
+/// Build the property-style Vue emit fields — the FALLBACK used when a `.vue`
+/// `defineEmits<{ … }>()` object surface declares NO call signature. A GENUINE
+/// decide-free terminal one-shot sink: it iterates the surface's PUBLIC members
+/// (a node-domain visibility fact), mints each member value ONCE through the
+/// registered `raise_member_value` sink, and builds the `AnalyzedEmitField` DTO
+/// (name from the member, payload = the raised member value, scope + JSDoc from
+/// the surface). It makes NO decision on any materialized `TypeExpr` (the raised
+/// value is stored + display-rendered, never branched on) and takes NO
+/// `&TypeExpr` param — structurally identical to the [`props_from_typeinfo_surface`]
+/// member loop — so the non-terminal `emits_from_typeinfo_surface` delegates here
+/// instead of minting inline.
+pub(in crate::typeinfo::framework_surface::vue_exec) fn property_style_emit_fields(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    resolved: &impl ResolvedSurfaceAccess,
+) -> Vec<AnalyzedEmitField> {
+    let macro_surface = resolved.macro_surface();
+    let host = ctx.host_for_fact_tracer_install();
+    macro_surface
+        .surface
+        .members
+        .iter()
+        // Public-only publication: a `private` / `protected` class member
+        // recorded on the shared surface must NOT leak as a published emit.
+        .filter(|member| member.visibility.is_public())
+        .map(|member| {
             let payload_expr = raise_member_value(ctx, member);
             let payload_expr_scope = payload_expr
                 .as_ref()
                 .map(|_| macro_surface.member_expr_scope(host, member));
             let payload_type = payload_expr.as_ref().and_then(render_type_expr_display);
             let (description, tags) = member_jsdoc_from_spans(host, member);
-            emits.push(AnalyzedEmitField {
+            AnalyzedEmitField {
                 name: member.name.as_ref().to_string(),
                 span: verter_span::Span::default(),
                 payload_type,
@@ -375,14 +433,9 @@ pub(crate) fn emits_from_typeinfo_surface(
                 payload_expr_scope,
                 description,
                 tags,
-            });
-        }
-    }
-
-    // (3) De-duplicate by event name, first-writer-wins.
-    let mut seen = std::collections::HashSet::new();
-    emits.retain(|emit| seen.insert(emit.name.clone()));
-    emits
+            }
+        })
+        .collect()
 }
 
 /// Extract a slot callable's first-parameter type + return type from a slot
