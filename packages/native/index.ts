@@ -149,12 +149,24 @@ export type CompileManyTarget = "host-backed" | "runtime-render";
  * it never substitutes production/client defaults).
  */
 export interface CompileBatchRenderProfile {
+  /**
+   * Codegen filename override (component-name extraction, scope-id
+   * derivation, source-map source/file). Omit to fall back to the canonical
+   * id — same semantics as `HostCompileProfile.filename`.
+   */
+  filename?: string;
   isProduction: boolean;
   ssr: boolean;
   forceJs: boolean;
   forceVapor: boolean;
   sourceMap: boolean;
-  comments: boolean;
+  /**
+   * Preserve template comments. TRI-STATE: omit to keep the compiler
+   * default (`!isProduction` — dev preserves, prod strips), same semantics
+   * as an omitted `HostCompileProfile.comments`. Do NOT collapse an omitted
+   * value to `false`.
+   */
+  comments?: boolean;
   hmrStrategy: "none" | "vite" | "webpack";
   /** Runtime module import specifier (e.g. "vue"). */
   runtimeModuleName?: string;

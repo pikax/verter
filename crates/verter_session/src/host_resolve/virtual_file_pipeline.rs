@@ -845,13 +845,22 @@ impl VerterHost {
     ) -> Result<RenderOnlyMain, HostError> {
         let canonical = self.resolve_alias_or_canonical(canonical_id);
 
+        // The SAME profile hash `apply_block_overrides` / `get_virtual_file`
+        // key request-time block / style overrides under. The bundler's
+        // preprocessor path (Pug / CoffeeScript templates+scripts, custom
+        // blocks, non-Vite styles) stores overrides for this profile
+        // immediately before rendering, so the render lane must read the
+        // override-aware effective state — otherwise it compiles the RAW
+        // (un-preprocessed) block content.
+        let profile_hash = compile_profile_hash(profile);
+
         // ── ONE coherent source snapshot ──
         // Every content-determined input derives from this single read
         // (identical to the HostBacked cache-miss path), so the bytes and
-        // analysis cohere. The render lane consults NO cache node and runs
-        // NO classification, so it reads the snapshot directly with no
-        // profile-hash override (no request-time block / style overrides on
-        // the bundler render path).
+        // analysis cohere. The render lane consults NO cache output node and
+        // runs NO classification; the override-aware reads below consume the
+        // SAME stored override layers the HostBacked cache-miss path does —
+        // host state, not the Stage-C session wrapper.
         let source_snap =
             self.scheduler
                 .try_get_source(&canonical)
@@ -859,11 +868,10 @@ impl VerterHost {
                     canonical_id: canonical.clone(),
                 })?;
         let efs = self
-            .effective_file_state_from_snapshot(&source_snap, &canonical, None)
+            .effective_file_state_from_snapshot(&source_snap, &canonical, Some(profile_hash))
             .ok_or_else(|| HostError::MissingSource {
                 canonical_id: canonical.clone(),
             })?;
-        let effective_meta = self.effective_meta_from_base(efs.meta.clone(), &canonical, None);
 
         let compile_input = {
             use crate::host_executor::HostSourceData;
@@ -873,11 +881,29 @@ impl VerterHost {
                     canonical_id: canonical.clone(),
                 })?;
             let parse = &hd.parse;
+            // Override-aware meta over the RAW snapshot meta — the SAME base
+            // the HostBacked path feeds `effective_meta_from_base` (style-lang
+            // overrides project over the raw parse meta).
+            let effective_meta =
+                self.effective_meta_from_base(parse.meta.clone(), &canonical, Some(profile_hash));
+            // The stored request-time override layers for this profile —
+            // read exactly like the HostBacked cache-miss path.
+            let cc_ref = self.compile_cache().get(&canonical);
+            let style_override_layer = cc_ref.as_ref().and_then(|cc| {
+                cc.style_overrides
+                    .get(&profile_hash)
+                    .map(|o| o.layer.clone())
+            });
+            let content_override_layer = cc_ref.as_ref().and_then(|cc| {
+                cc.content_overrides
+                    .get(&profile_hash)
+                    .map(|o| o.layer.clone())
+            });
+            drop(cc_ref);
             // The byte-load-bearing `CompileInput` — the SAME field mapping
             // the HostBacked cache-miss path builds (source, macro deps,
-            // style v-bind vars from the same parse snapshot). Only the
-            // request-time override layers are omitted: the bundler render
-            // path carries none.
+            // style v-bind vars from the same parse snapshot; override
+            // layers from the same host state).
             let style_v_bind_vars = parse
                 .style_analyses
                 .iter()
@@ -894,12 +920,12 @@ impl VerterHost {
             CompileInput {
                 canonical_id: canonical.clone(),
                 source: efs.source,
-                meta: effective_meta.clone(),
+                meta: effective_meta,
                 parse_diagnostics: parse.parse_diagnostics.clone(),
                 src_blocks: parse.src_blocks.clone(),
                 external_requests: parse.external_requests.clone(),
-                style_override_layer: None,
-                content_override_layer: None,
+                style_override_layer,
+                content_override_layer,
                 macro_type_deps: efs.script_analysis.macro_type_deps.clone(),
                 script_imports: efs.script_analysis.imports.clone(),
                 script_macros: efs.script_analysis.macros.clone(),

@@ -158,13 +158,20 @@ pub struct CompileBatchEntry {
 /// `get_virtual_file` path (which builds its profile from the same JS
 /// `HostCompileProfile`). Omitting a field would silently drop it — e.g.
 /// without `source_map` a production build would lose its source maps.
-/// Fields NOT here are handled elsewhere: `filename` defaults to the
-/// canonical id, `component_id` is per-input, the compile target is fixed
-/// (runtime render — no TSX), and the TSX-only knobs
+/// Optional fields keep the same "absent = `CompileProfile` default"
+/// semantics as the FFI profile conversion, so the render profile also
+/// HASHES identically to the profile the caller stored request-time block /
+/// style overrides under (`apply_block_overrides`). Fields NOT here are
+/// handled elsewhere: `component_id` is per-input, the compile target is
+/// fixed (runtime render — no TSX), and the TSX-only knobs
 /// (`embed_ambient_types` / `conditional_root_narrowing` / `strict_slots`)
 /// do not affect the runtime `Main` and default identically on both lanes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompileBatchRenderProfile {
+    /// Codegen filename override (component-name extraction, scope-id
+    /// derivation, source-map `source`/`file`). `None` falls back to the
+    /// canonical id, exactly like an absent `CompileProfile::filename`.
+    pub filename: Option<String>,
     /// Production codegen — strips dev-only code (`__file`, HMR).
     pub is_production: bool,
     /// Server-side render function selection.
@@ -175,8 +182,12 @@ pub struct CompileBatchRenderProfile {
     pub force_vapor: bool,
     /// Emit a source map alongside the `Main` module.
     pub source_map: bool,
-    /// Preserve template comments in the render output.
-    pub comments: bool,
+    /// Preserve template comments in the render output. TRI-STATE: `None`
+    /// keeps the compiler default (`!is_production` — dev preserves,
+    /// prod strips), exactly like an absent `CompileProfile::comments`.
+    /// Collapsing an absent value to `false` would strip comments from
+    /// dev builds.
+    pub comments: Option<bool>,
     /// HMR injection strategy the host-side main-module assembly emits.
     pub hmr_strategy: crate::types::HmrStrategy,
     /// Runtime module import specifier (e.g. `"vue"`).
@@ -265,21 +276,35 @@ pub fn compile_profile_for_bundler() -> CompileProfile {
 /// later, so it is left `None` here. The compile target stays the default
 /// bundler target (no TSX); the TSX-only knobs keep their defaults (which
 /// match the HostBacked path, whose profile also defaults them).
+///
+/// Absent-field semantics mirror the FFI profile conversion
+/// (`ffi_profile_to_host`) field-for-field — `comments: None` stays `None`
+/// (the compiler default `!is_production`), an absent runtime module name
+/// keeps the `CompileProfile` default (`Some("vue")`). This is
+/// hash-load-bearing: the resulting profile must produce the SAME
+/// `compile_profile_hash` as the `CompileProfile` built from the same JS
+/// `HostCompileProfile`, because request-time block / style overrides
+/// (`apply_block_overrides`) are stored under that hash and the render
+/// lane consumes them through it.
 fn render_base_profile(rp: &CompileBatchRenderProfile) -> CompileProfile {
-    CompileProfile {
+    let mut profile = CompileProfile {
+        filename: rp.filename.clone(),
         is_production: rp.is_production,
         ssr: rp.ssr,
         force_js: rp.force_js,
         force_vapor: rp.force_vapor,
         source_map: rp.source_map,
-        comments: Some(rp.comments),
+        comments: rp.comments,
         hmr_strategy: rp.hmr_strategy,
-        runtime_module_name: rp.runtime_module_name.clone(),
         types_module_name: rp.types_module_name.clone(),
         delimiters: rp.delimiters.clone(),
         custom_elements: rp.custom_elements.clone(),
         ..CompileProfile::default()
+    };
+    if let Some(name) = &rp.runtime_module_name {
+        profile.runtime_module_name = Some(name.clone());
     }
+    profile
 }
 
 impl VerterHost {

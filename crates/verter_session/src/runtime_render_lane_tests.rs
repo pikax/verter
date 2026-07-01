@@ -18,6 +18,10 @@
 //! | `runtime_render_upper_drive_input_resolves_macro_types_wired_under_lower_drive_routes` | Drive-letter case parity: an upper-drive compile input converges on the lower-drive canonical whose alias routes were wired via `set_import_dependencies`. |
 //! | `runtime_render_upper_drive_input_single_hop_relative_import_control` | Single-hop relative control: resolves without the route table across the same case split. |
 //! | `runtime_render_supplied_upper_drive_upsert_does_not_hijack_lower_alias` | Alias-map subsumption: a `Some(UPPER)` upsert must not mint a `c:/... -> C:/...` self-alias (the chokepoint canonicalization subsumes the hijack). |
+//! | `runtime_render_consumes_stored_template_block_override` | A stored preprocessed template override (Pug flow) is consumed by the render lane — preprocessed content compiles, raw does not, byte-parity with `get_virtual_file`. |
+//! | `runtime_render_consumes_stored_style_override_lang_projection` | A stored style override projects the effective style lang (`lang.css`) into the `Main` style import, byte-parity with `get_virtual_file`. |
+//! | `runtime_render_omitted_comments_tristate_matches_compiler_default` | Absent `comments` stays tri-state `None` (dev preserves / prod strips), never collapsed to `false`; explicit `Some(true)` honored; parity in all three. |
+//! | `runtime_render_threads_profile_filename_into_output` | Profile `filename` distinct from the canonical id reaches codegen (scope-id derivation), parity with the same-filename oracle, divergence from the filename-less oracle. |
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -110,7 +114,10 @@ fn render_profile(
         force_js,
         force_vapor: false,
         source_map: false,
-        comments: false,
+        // Tri-state: absent means "compiler default" (`!is_production`),
+        // exactly like an absent `HostCompileProfile.comments`.
+        comments: None,
+        filename: None,
         hmr_strategy: hmr,
         runtime_module_name: Some("vue".to_string()),
         types_module_name: None,
@@ -183,22 +190,30 @@ fn get_virtual_file_profile(
     component_id: Option<String>,
 ) -> CompileProfile {
     // Mirror EXACTLY the projection `render_base_profile` applies, so the
-    // oracle and the render lane feed identical `RuntimeCompileOptions`.
-    CompileProfile {
+    // oracle and the render lane feed identical `RuntimeCompileOptions` AND
+    // hash to the SAME `compile_profile_hash` (the key request-time block /
+    // style overrides are stored under).
+    let mut profile = CompileProfile {
+        filename: rp.filename.clone(),
         is_production: rp.is_production,
         ssr: rp.ssr,
         force_js: rp.force_js,
         force_vapor: rp.force_vapor,
         source_map: rp.source_map,
-        comments: Some(rp.comments),
+        comments: rp.comments,
         hmr_strategy: rp.hmr_strategy,
-        runtime_module_name: rp.runtime_module_name.clone(),
         types_module_name: rp.types_module_name.clone(),
         delimiters: rp.delimiters.clone(),
         custom_elements: rp.custom_elements.clone(),
         component_id,
         ..CompileProfile::default()
+    };
+    // An absent runtime module name keeps the `CompileProfile` default
+    // (`Some("vue")`), matching the FFI profile conversion.
+    if let Some(name) = &rp.runtime_module_name {
+        profile.runtime_module_name = Some(name.clone());
     }
+    profile
 }
 
 // ---------------------------------------------------------------------------
@@ -1248,5 +1263,326 @@ fn runtime_render_supplied_upper_drive_upsert_does_not_hijack_lower_alias() {
         "the lower-drive canonical must resolve to itself — a supplied \
          upper-drive upsert must not mint a `c:/... -> C:/...` alias that \
          orphans lower-keyed route/derived state"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 16 — stored block overrides (preprocessed template) are consumed
+// ---------------------------------------------------------------------------
+
+/// The bundler's preprocessor path stores block overrides via
+/// `apply_block_overrides` — keyed by the compile-profile hash — IMMEDIATELY
+/// before rendering (unplugin's `applyPreprocessorRequests`: Pug /
+/// CoffeeScript templates+scripts, custom blocks, non-Vite styles). The
+/// RuntimeRender lane must consume the stored content-override layer through
+/// the SAME override-aware reads the `get_virtual_file` path uses — a lane
+/// that reads the snapshot with no profile-hash override compiles the RAW
+/// (un-preprocessed) block content. DISCRIMINATING: the preprocessed marker
+/// must appear (and the raw block content must NOT), and the render `Main`
+/// must byte-match the `get_virtual_file(Main)` oracle under the SAME
+/// profile + SAME stored override on the SAME host.
+#[test]
+fn runtime_render_consumes_stored_template_block_override() {
+    let host = new_host();
+    let canonical = "/proj/PugTemplate.vue";
+    // Raw SFC with a Pug template — un-preprocessed block content.
+    let raw = "<template lang=\"pug\">p rawpugtext</template>\n";
+    upsert_sibling(&host, canonical, raw);
+
+    let rp = simple_render_profile();
+    let gvf_profile = get_virtual_file_profile(rp.clone(), None);
+
+    // Store the preprocessed template exactly as the bundler does, keyed by
+    // the SAME compile profile the render request carries.
+    let _ = host
+        .apply_block_overrides(crate::types::BlockOverrideRequest {
+            canonical_id: canonical.to_string(),
+            compile_profile: gvf_profile.clone(),
+            overrides: vec![crate::types::BlockOverrideEntry {
+                block_type: crate::types::PreprocessorBlockType::Template,
+                index: 0,
+                code: Arc::from("<p>preprocessedpugmarker</p>"),
+                source_map: None,
+            }],
+        })
+        .expect("template block override must be stored");
+
+    // Render with the SAME raw source: the unchanged content means Stage B
+    // performs no re-upsert, exactly like the bundler's transform flow
+    // (upsert → preprocess/store overrides → render).
+    let render = render_with_profile(&host, canonical, raw, rp, None);
+    assert!(
+        render.errors.is_empty(),
+        "render with a stored template override must succeed: {:?}",
+        render.errors
+    );
+    assert!(
+        render.code.contains("preprocessedpugmarker"),
+        "the render Main must compile the PREPROCESSED template override, \
+         not the raw block:\n{}",
+        render.code
+    );
+    assert!(
+        !render.code.contains("rawpugtext"),
+        "the raw (un-preprocessed) template content must NOT reach the \
+         render Main:\n{}",
+        render.code
+    );
+
+    // Byte parity with the getVirtualFile oracle under the SAME profile +
+    // SAME stored override (same host state).
+    let resp = host
+        .get_virtual_file(crate::types::VirtualQuery {
+            raw_id: None,
+            canonical_id: Some(canonical.to_string()),
+            node_kind: Some(crate::types::VirtualNodeKind::Main),
+            compile_profile: gvf_profile,
+        })
+        .expect("get_virtual_file(Main) must succeed with the stored override");
+    assert_eq!(
+        render.code.as_ref(),
+        resp.code.as_ref(),
+        "RuntimeRender Main must byte-match getVirtualFile(Main) under the \
+         SAME profile + SAME stored template override.\n--- RENDER ---\n{}\n--- GETVIRTUALFILE ---\n{}",
+        render.code,
+        resp.code
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 17 — stored style overrides project the effective style lang
+// ---------------------------------------------------------------------------
+
+/// A stored STYLE override (non-Vite `<style lang="scss">` preprocessed to
+/// CSS) switches the block's effective lang to `css`
+/// (`StyleOverrideWithAnalysis::lang_overrides`), which the `Main` assembly
+/// reads through the override-aware effective meta: the style import in the
+/// `Main` module must reference `lang.css`, not the raw `lang.scss`.
+/// DISCRIMINATING: a render lane that reads the raw snapshot meta (no
+/// profile-hash override) emits the `lang.scss` import and diverges from the
+/// `get_virtual_file(Main)` oracle.
+#[test]
+fn runtime_render_consumes_stored_style_override_lang_projection() {
+    let host = new_host();
+    let canonical = "/proj/ScssStyle.vue";
+    let raw = "<template><div class=\"a\">x</div></template>\n<style lang=\"scss\">$c: red;\n.a { color: $c; }\n</style>\n";
+    upsert_sibling(&host, canonical, raw);
+
+    let rp = simple_render_profile();
+    let gvf_profile = get_virtual_file_profile(rp.clone(), None);
+
+    let _ = host
+        .apply_block_overrides(crate::types::BlockOverrideRequest {
+            canonical_id: canonical.to_string(),
+            compile_profile: gvf_profile.clone(),
+            overrides: vec![crate::types::BlockOverrideEntry {
+                block_type: crate::types::PreprocessorBlockType::Style,
+                index: 0,
+                code: Arc::from(".a { color: red; }"),
+                source_map: None,
+            }],
+        })
+        .expect("style block override must be stored");
+
+    let render = render_with_profile(&host, canonical, raw, rp, None);
+    assert!(
+        render.errors.is_empty(),
+        "render with a stored style override must succeed: {:?}",
+        render.errors
+    );
+    assert!(
+        render.code.contains("lang.css"),
+        "the stored style override must project the effective style lang \
+         (css) into the Main style import:\n{}",
+        render.code
+    );
+    assert!(
+        !render.code.contains("lang.scss"),
+        "the raw scss lang must NOT survive into the Main style import once \
+         the override is stored:\n{}",
+        render.code
+    );
+
+    let resp = host
+        .get_virtual_file(crate::types::VirtualQuery {
+            raw_id: None,
+            canonical_id: Some(canonical.to_string()),
+            node_kind: Some(crate::types::VirtualNodeKind::Main),
+            compile_profile: gvf_profile,
+        })
+        .expect("get_virtual_file(Main) must succeed with the stored override");
+    assert_eq!(
+        render.code.as_ref(),
+        resp.code.as_ref(),
+        "RuntimeRender Main must byte-match getVirtualFile(Main) under the \
+         SAME profile + SAME stored style override.\n--- RENDER ---\n{}\n--- GETVIRTUALFILE ---\n{}",
+        render.code,
+        resp.code
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 18 — omitted `comments` is a TRI-STATE, not a collapsed `false`
+// ---------------------------------------------------------------------------
+
+/// An ABSENT `comments` field must reach the compiler as `None` so its
+/// default (`!is_production`) applies: a DEV render preserves template
+/// comments, a PROD render strips them — each byte-matching the
+/// `get_virtual_file` oracle under the same absent-comments profile.
+/// DISCRIMINATING: a render profile that collapses an omitted `comments` to
+/// `false` strips the comment from the DEV output and diverges from the
+/// oracle (which keeps `comments: None`).
+#[test]
+fn runtime_render_omitted_comments_tristate_matches_compiler_default() {
+    let canonical = "/proj/Comments.vue";
+    let src = "<template><div>x</div><!-- keepmecomment --></template>\n";
+
+    // DEV, comments ABSENT: the compiler default (`!is_production` = true)
+    // must preserve the template comment.
+    let dev_rp = render_profile(false, false, false, crate::types::HmrStrategy::None);
+    assert_eq!(
+        dev_rp.comments, None,
+        "the test drives the ABSENT tri-state"
+    );
+    let dev = render_with_profile(&new_host(), canonical, src, dev_rp.clone(), None);
+    assert!(dev.errors.is_empty(), "dev render errors: {:?}", dev.errors);
+    assert!(
+        dev.code.contains("keepmecomment"),
+        "a DEV render with ABSENT comments must PRESERVE template comments \
+         (compiler default !is_production):\n{}",
+        dev.code
+    );
+    let (dev_hb, _, _) = host_backed_main_via_get_virtual_file(
+        &new_host(),
+        canonical,
+        src,
+        &get_virtual_file_profile(dev_rp, None),
+    );
+    assert_eq!(
+        dev.code.as_ref(),
+        dev_hb.as_ref(),
+        "dev RuntimeRender with ABSENT comments must byte-match \
+         getVirtualFile under the same absent-comments profile.\n--- RENDER ---\n{}\n--- GVF ---\n{}",
+        dev.code,
+        dev_hb
+    );
+
+    // PROD, comments ABSENT: the compiler default strips the comment.
+    let prod_rp = render_profile(true, false, false, crate::types::HmrStrategy::None);
+    let prod = render_with_profile(&new_host(), canonical, src, prod_rp.clone(), None);
+    assert!(
+        prod.errors.is_empty(),
+        "prod render errors: {:?}",
+        prod.errors
+    );
+    assert!(
+        !prod.code.contains("keepmecomment"),
+        "a PROD render with ABSENT comments must STRIP template comments:\n{}",
+        prod.code
+    );
+    let (prod_hb, _, _) = host_backed_main_via_get_virtual_file(
+        &new_host(),
+        canonical,
+        src,
+        &get_virtual_file_profile(prod_rp, None),
+    );
+    assert_eq!(
+        prod.code.as_ref(),
+        prod_hb.as_ref(),
+        "prod RuntimeRender with ABSENT comments must byte-match \
+         getVirtualFile under the same absent-comments profile"
+    );
+
+    // An EXPLICIT `comments: Some(true)` on a PROD profile must still
+    // preserve the comment (the tri-state is honored, not re-derived from
+    // is_production).
+    let mut prod_keep_rp = render_profile(true, false, false, crate::types::HmrStrategy::None);
+    prod_keep_rp.comments = Some(true);
+    let prod_keep = render_with_profile(&new_host(), canonical, src, prod_keep_rp.clone(), None);
+    assert!(
+        prod_keep.errors.is_empty(),
+        "prod+comments render errors: {:?}",
+        prod_keep.errors
+    );
+    assert!(
+        prod_keep.code.contains("keepmecomment"),
+        "an EXPLICIT comments=true must preserve the comment even in prod:\n{}",
+        prod_keep.code
+    );
+    let (prod_keep_hb, _, _) = host_backed_main_via_get_virtual_file(
+        &new_host(),
+        canonical,
+        src,
+        &get_virtual_file_profile(prod_keep_rp, None),
+    );
+    assert_eq!(
+        prod_keep.code.as_ref(),
+        prod_keep_hb.as_ref(),
+        "prod RuntimeRender with EXPLICIT comments=true must byte-match \
+         getVirtualFile under the same profile"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 19 — profile `filename` threads into the render output
+// ---------------------------------------------------------------------------
+
+/// A profile `filename` DISTINCT from the canonical id must reach codegen
+/// (component-name extraction → scope-id derivation when no explicit
+/// `component_id` is supplied) identically to the `get_virtual_file` path.
+/// DISCRIMINATING: a render profile that drops `filename` falls back to the
+/// canonical id, derives a different scope id for the scoped style, and
+/// diverges from the oracle under the same distinct-filename profile (while
+/// wrongly matching the filename-less oracle).
+#[test]
+fn runtime_render_threads_profile_filename_into_output() {
+    let canonical = "/proj/OnDisk.vue";
+    // A scoped style with NO explicit component_id: the scope id derives
+    // from the component name, which derives from the FILENAME.
+    let src = "<template><div class=\"a\">x</div></template>\n<style scoped>\n.a { color: red }\n</style>\n";
+
+    let mut rp = render_profile(true, false, false, crate::types::HmrStrategy::None);
+    rp.filename = Some("/somewhere/else/CustomName.vue".to_string());
+
+    let render = render_with_profile(&new_host(), canonical, src, rp.clone(), None);
+    assert!(
+        render.errors.is_empty(),
+        "render errors: {:?}",
+        render.errors
+    );
+
+    // Oracle under the SAME distinct filename: byte parity is the claim.
+    let (hb_named, _, _) = host_backed_main_via_get_virtual_file(
+        &new_host(),
+        canonical,
+        src,
+        &get_virtual_file_profile(rp.clone(), None),
+    );
+    assert_eq!(
+        render.code.as_ref(),
+        hb_named.as_ref(),
+        "RuntimeRender must thread the profile `filename` into codegen \
+         identically to getVirtualFile.\n--- RENDER ---\n{}\n--- GVF ---\n{}",
+        render.code,
+        hb_named
+    );
+
+    // NEGATIVE: the filename genuinely flows — the same render must DIFFER
+    // from the oracle WITHOUT the filename (whose scope id derives from the
+    // canonical-id fallback). A lane that dropped `filename` would match
+    // this one instead.
+    let mut rp_unnamed = rp.clone();
+    rp_unnamed.filename = None;
+    let (hb_unnamed, _, _) = host_backed_main_via_get_virtual_file(
+        &new_host(),
+        canonical,
+        src,
+        &get_virtual_file_profile(rp_unnamed, None),
+    );
+    assert_ne!(
+        render.code.as_ref(),
+        hb_unnamed.as_ref(),
+        "a render under a DISTINCT filename must not equal the \
+         filename-less oracle — `filename` must actually reach codegen"
     );
 }

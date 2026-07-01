@@ -2230,11 +2230,14 @@ impl NapiVerterHost {
                     };
                 host_compile::CompileManyTarget::RuntimeRender {
                     profile: host_compile::CompileBatchRenderProfile {
+                        filename: p.filename,
                         is_production: p.isProduction,
                         ssr: p.ssr,
                         force_js: p.forceJs,
                         force_vapor: p.forceVapor,
                         source_map: p.sourceMap,
+                        // Tri-state pass-through: an omitted `comments`
+                        // stays `None` (compiler default `!isProduction`).
                         comments: p.comments,
                         hmr_strategy: ffi_hmr_strategy_to_host(&p.hmrStrategy).map_err(ffi_err)?,
                         runtime_module_name: p.runtimeModuleName,
@@ -2973,12 +2976,20 @@ pub struct NapiCompileBatchInput {
 /// the render lane reproduces the `getVirtualFile` path byte-for-byte.
 #[napi(object)]
 pub struct NapiCompileBatchRenderProfile {
+    /// Codegen filename override (component-name extraction, scope-id
+    /// derivation, source-map `source`/`file`). Absent falls back to the
+    /// canonical id — same semantics as `HostCompileProfile.filename`.
+    pub filename: Option<String>,
     pub isProduction: bool,
     pub ssr: bool,
     pub forceJs: bool,
     pub forceVapor: bool,
     pub sourceMap: bool,
-    pub comments: bool,
+    /// Preserve template comments. TRI-STATE: absent keeps the compiler
+    /// default (`!isProduction` — dev preserves, prod strips), same
+    /// semantics as an absent `HostCompileProfile.comments`. Do NOT
+    /// collapse an omitted value to `false`.
+    pub comments: Option<bool>,
     /// HMR strategy: "none" | "vite" | "webpack".
     pub hmrStrategy: String,
     /// Runtime module import specifier (e.g. "vue").
