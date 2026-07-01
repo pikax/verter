@@ -266,14 +266,14 @@ fn non_root_real_file_diagnostic_is_surfaced_under_its_own_path_not_a_carrier() 
 
 #[test]
 fn non_root_content_miss_is_an_explicit_error_never_one_one_or_dropped() {
-    // D3 (fail-closed). A non-root diagnostic whose file content the cache CANNOT
+    // Fail-closed. A non-root diagnostic whose file content the cache CANNOT
     // resolve (not an overlay carrier, empty-FS fallback returns None) must surface
     // an EXPLICIT `MappingError::SourceUnavailable` — NOT a fabricated (1,1)
     // position, NOT a silent drop.
     //
-    // RED before D3: `map_one` fell back to `(1,1)` on a disk-read miss and returned
-    // `Some`, mis-homing the diagnostic to the file's first character. GREEN after:
-    // an explicit error propagates (→ a fatal TypecheckError at the boundary).
+    // RED before the fix: `map_one` fell back to `(1,1)` on a disk-read miss and
+    // returned `Some`, mis-homing the diagnostic to the file's first character.
+    // GREEN after: an explicit error propagates (→ a fatal TypecheckError).
     let carrier = OverlayFile {
         path: "/proj/Foo_ab12.tsx".to_string(),
         content: "const a = 1;\n".to_string(),
@@ -330,7 +330,7 @@ fn non_root_content_miss_is_an_explicit_error_never_one_one_or_dropped() {
 // takes the legitimate `.vue` remap (over-suppression = false negatives).
 
 /// Drive `map_one` under the given origin with a specific injected set + cache.
-/// Panics on a content miss (the D8 guard tests never miss — the companion content
+/// Panics on a content miss (the guard tests never miss — the companion content
 /// is in the overlay).
 fn map_with(
     d: &ApiDiagnostic,
@@ -343,8 +343,8 @@ fn map_with(
         .expect("content resolves for this fixture (no miss expected)")
 }
 
-/// REPRODUCER (the D8 leak). A `Config`-origin diagnostic whose `file_name` is a
-/// DRIVE-CASE-DIVERGENT form of an injected companion (registered `c:/proj/Foo.vue.tsx`,
+/// REPRODUCER (the exact-string-equality leak). A `Config`-origin diagnostic whose
+/// `file_name` is a DRIVE-CASE-DIVERGENT form of an injected companion (registered `c:/proj/Foo.vue.tsx`,
 /// reported `C:/proj/Foo.vue.tsx`, TS6059) must NOT be emitted and must NOT be
 /// re-homed onto the carrier's `.vue`. The companion is ALSO present in the overlay
 /// lookup as a `SourceMapped` carrier, so WITHOUT the guard `map_one` would remap the

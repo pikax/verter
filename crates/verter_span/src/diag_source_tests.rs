@@ -1,5 +1,5 @@
 //! Tests for the per-collection diagnostic-source cache: single resolution +
-//! single line-index build per file (the D9 scaling contract), overlay-first
+//! single line-index build per file (the scaling contract), overlay-first
 //! resolution order, and cached misses.
 
 use super::*;
@@ -20,7 +20,7 @@ fn counting_source(
     }
 }
 
-/// D9 (index build): N offset conversions in ONE file build the line index exactly
+/// Index build once: N offset conversions in ONE file build the line index exactly
 /// ONCE and reuse it — `line_index()` returns the SAME object every time. RED if
 /// the index were rebuilt per access (distinct addresses).
 #[test]
@@ -50,12 +50,12 @@ fn one_index_build_for_many_offsets_in_one_file() {
     assert_eq!(
         reads.get(),
         1,
-        "N accesses to one file resolve the content exactly once (D9): got {}",
+        "N accesses to one file resolve the content exactly once: got {}",
         reads.get()
     );
 }
 
-/// D9 (resolution count): the source is resolved exactly once across many
+/// Resolution count: the source is resolved exactly once across many
 /// `source_file` calls for the same file identity (including separator /
 /// drive-case variants). RED = one resolution per call.
 #[test]

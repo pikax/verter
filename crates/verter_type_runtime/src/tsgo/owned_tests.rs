@@ -129,7 +129,7 @@ fn map_api_diagnostic_converts_utf16_offsets_to_bytes_on_non_ascii() {
     );
 }
 
-/// DISCRIMINATING (D3 — content-unavailable is an EXPLICIT error, never a forged
+/// DISCRIMINATING (content-unavailable is an EXPLICIT error, never a forged
 /// span). When a carrier HAS diagnostics but its content is UNAVAILABLE (`None`),
 /// the UTF-16 offsets cannot be converted to bytes. The fail-closed contract:
 /// surface an EXPLICIT `TypeProviderError` — NEVER a fabricated `(0, 0)` span (the
