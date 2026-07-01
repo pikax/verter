@@ -283,8 +283,8 @@ pub(crate) fn emits_from_typeinfo_surface(
     // Publication sink (DTO emit payload tuples): the event-name decide and the
     // payload param selection are made ENTIRELY in the node domain through the
     // shared `CallableNodeView`; materialization happens ONCE at the terminal
-    // `materialize_payload_tuple` sink. This normalizer calls NO mint verb.
-    let cap = super::TypeinfoVueSurfaceOutputCap::new(&dispatch);
+    // `materialize_payload_tuple` sink (which constructs its own mint cap from
+    // `ctx`). This normalizer calls NO mint verb and holds NO cap.
     // Node-domain demand identity. `Navigate` carrier-resolves an ALIASED
     // event-name union (`type E = 'save' | 'cancel'`) so its literal names
     // surface — a shallow-`TypeExpr` decide on the first param would keep the
@@ -317,7 +317,7 @@ pub(crate) fn emits_from_typeinfo_surface(
         // `as_ref().and_then(render_type_expr_display)` form — the SAME shape
         // `props_from_typeinfo_surface` uses. This normalizer NEVER decides on the
         // materialized value (no direct reader call on it).
-        let payload_expr = Some(materialize_payload_tuple(&cap, &raw_params[1..]));
+        let payload_expr = Some(materialize_payload_tuple(ctx, &raw_params[1..]));
         // Scope the payload to the call signature's DECLARATION-origin file so an
         // inherited cross-file emit signature's payload `Ref`s resolve in the base
         // file. Falls back to the SFC owner.
@@ -360,32 +360,48 @@ pub(crate) fn emits_from_typeinfo_surface(
 /// through the sealed output capability into a labelled `TupleElement` that
 /// preserves the param's name / optional / rest; the result is the payload
 /// `TypeExpr::Tuple`. It makes NO decision on any materialized value (no branch /
-/// match / shape-extract), takes NO `&TypeExpr` param (node ids + the cap only),
-/// and lives inside the Vue cap's `pub(in …::vue_exec)` mint scope.
+/// match / shape-extract), takes NO `&TypeExpr` param (node ids + the active
+/// `ctx`), and lives inside the Vue cap's `pub(in …::vue_exec)` mint scope. The
+/// mint cap is constructed INTERNALLY from `ctx` (the `raise_member_value`
+/// pattern) — a cap is a mint AUTHORITY and must not cross the boundary from the
+/// non-terminal caller.
 ///
-/// A param whose node does not materialize is skipped (`filter_map`) — the same
-/// decide-free `?`-on-mint pattern [`index_signatures_from_surface`] uses. This
-/// does not arise in practice: the realized signature's param nodes ARE the
-/// callable's own declared parameter types, which all materialize, so the
-/// fail-closed fallback is a shorter tuple, never a fabricated element.
+/// Materialization is POSITION-PRESERVING: the params are `.map`ped (never
+/// `filter_map`ped), so a param whose node does not materialize keeps its tuple
+/// SLOT with the opaque `Unknown` raise-miss value instead of shifting the
+/// subsequent payload elements. This does not arise in practice — the realized
+/// signature's param nodes ARE the callable's own declared parameter types, which
+/// all materialize — so the fallback is position-safety robustness only, never a
+/// fabricated meaningful element.
 pub(in crate::typeinfo::framework_surface::vue_exec) fn materialize_payload_tuple(
-    cap: &super::TypeinfoVueSurfaceOutputCap,
+    ctx: &dyn crate::resolver_core::ResolverContext,
     params: &[FunctionParam],
 ) -> TypeExpr {
+    // Construct the mint cap INTERNALLY from the active `ctx` (the
+    // `raise_member_value` pattern): a cap is a genuine mint AUTHORITY that must
+    // not cross into a `TypeExpr`-producing sink from the non-terminal caller.
+    let dispatch = ctx.dispatch();
+    let cap = super::TypeinfoVueSurfaceOutputCap::new(&dispatch);
     let elements = params
         .iter()
-        .filter_map(|param| {
+        .map(|param| {
+            // Position-preserving: mint the param's `ty` node ONCE; a node that
+            // does not materialize keeps its tuple SLOT with the opaque `Unknown`
+            // raise-miss value (the `output_sink::raise_node_to_sealed_carrier`
+            // convention) so subsequent payload params never shift. A declared
+            // param's `ty` always mints, so the fallback is robustness only.
             let ty = cap
-                .materialize_output_type_expr(param.ty)?
-                .into_type_expr(cap);
-            Some(verter_type_expr::TupleElement {
+                .materialize_output_type_expr(param.ty)
+                .map(|raised| raised.into_type_expr(&cap))
+                .unwrap_or_else(|| TypeExpr::Unknown { raw: String::new() });
+            verter_type_expr::TupleElement {
                 // Node-domain `FunctionParam.name` (`Option<Arc<str>>`) → the
                 // display-facing tuple `label` (`Option<String>`).
                 label: param.name.as_ref().map(|n| n.to_string()),
                 ty,
                 optional: param.optional,
                 rest: param.rest,
-            })
+            }
         })
         .collect();
     TypeExpr::Tuple {

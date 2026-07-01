@@ -1088,10 +1088,13 @@ fn resolve_callback_prop_events(
 ///   member-OPTIONAL prop `onselect?: (r: Row) => void` (the `?` is carried by
 ///   the surface member `optional` flag, so the VALUE raises to a bare
 ///   `Function`, not a union);
-/// - a callable arm of an EXPLICIT nullish union/intersection VALUE —
+/// - a callable arm of an EXPLICIT nullish UNION VALUE —
 ///   `onselect: ((r: Row) => void) | undefined` raises to
-///   `Union([Function, Undefined])`, and `callable_arm_from_raised` strips the
-///   nullish arm and pulls out the single callable.
+///   `Union([Function, Undefined])`, and the node-domain
+///   `CallableNodeView::signature` (via `single_callable_arm`) strips the nullish
+///   arm and pulls out the single callable. A nullish INTERSECTION
+///   (`Fn & undefined` = `never`) is deliberately REFUSED, matching the shared
+///   `realize_callable_member`.
 fn callback_events_from_props_surface(
     ctx: &dyn ResolverContext,
     owner: &str,
@@ -1102,8 +1105,8 @@ fn callback_events_from_props_surface(
     // Publication sink (DTO event payload tuples): the callable-arm decide and the
     // payload param selection are made ENTIRELY in the node domain through the
     // shared `CallableNodeView`; materialization happens ONCE at the terminal
-    // `materialize_payload_tuple` sink. This normalizer calls NO mint verb.
-    let cap = TypeinfoSvelteSurfaceOutputCap::new(&dispatch);
+    // `materialize_payload_tuple` sink (which constructs its own mint cap from
+    // `ctx`). This normalizer calls NO mint verb and holds NO cap.
     let context = crate::semantic_query::ProjectionReductionContext::published(
         crate::semantic_query::ProjectionMode::Navigate,
     );
@@ -1138,7 +1141,7 @@ fn callback_events_from_props_surface(
         // `as_ref().and_then(render_type_expr_display)` form — this normalizer
         // NEVER decides on the materialized value.
         let raw_params = signature.raw_params();
-        let payload_expr = Some(materialize_payload_tuple(&cap, &raw_params));
+        let payload_expr = Some(materialize_payload_tuple(ctx, &raw_params));
         let payload_type = payload_expr
             .as_ref()
             .and_then(crate::resolver_core::surface_projector::render_type_expr_display);
@@ -1176,33 +1179,48 @@ fn callback_events_from_props_surface(
 /// `TupleElement` that preserves the param's name / optional / rest; the result
 /// is the payload `TypeExpr::Tuple`. It makes NO decision on any materialized
 /// value (no branch / match / shape-extract), takes NO `&TypeExpr` param (node
-/// ids + the cap only), and lives inside the Svelte cap's
-/// `pub(in …::svelte_exec)` mint scope. A callback prop has NO leading event-name
-/// param, so ALL params enter the tuple (no `[1..]` skip).
+/// ids + the active `ctx`), and lives inside the Svelte cap's
+/// `pub(in …::svelte_exec)` mint scope. The mint cap is constructed INTERNALLY
+/// from `ctx` (the `raise_member_value` pattern) — a cap is a mint AUTHORITY and
+/// must not cross the boundary from the non-terminal caller. A callback prop has
+/// NO leading event-name param, so ALL params enter the tuple (no `[1..]` skip).
 ///
-/// A param whose node does not materialize is skipped (`filter_map`) — the same
-/// decide-free `?`-on-mint pattern the Vue sink uses. This does not arise in
-/// practice: the realized signature's param nodes ARE the callback's own declared
-/// parameter types, which all materialize.
+/// Materialization is POSITION-PRESERVING: the params are `.map`ped (never
+/// `filter_map`ped), so a param whose node does not materialize keeps its tuple
+/// SLOT with the opaque `Unknown` raise-miss value instead of shifting the
+/// subsequent payload elements. This does not arise in practice — the realized
+/// signature's param nodes ARE the callback's own declared parameter types, which
+/// all materialize — so the fallback is position-safety robustness only.
 pub(in crate::typeinfo::framework_surface::svelte_exec) fn materialize_payload_tuple(
-    cap: &TypeinfoSvelteSurfaceOutputCap,
+    ctx: &dyn ResolverContext,
     params: &[crate::semantic_query::FunctionParam],
 ) -> TypeExpr {
     use verter_type_expr::TupleElement;
+    // Construct the mint cap INTERNALLY from the active `ctx` (the
+    // `raise_member_value` pattern): a cap is a genuine mint AUTHORITY that must
+    // not cross into a `TypeExpr`-producing sink from the non-terminal caller.
+    let dispatch = ctx.dispatch();
+    let cap = TypeinfoSvelteSurfaceOutputCap::new(&dispatch);
     let elements = params
         .iter()
-        .filter_map(|param| {
+        .map(|param| {
+            // Position-preserving: mint the param's `ty` node ONCE; a node that
+            // does not materialize keeps its tuple SLOT with the opaque `Unknown`
+            // raise-miss value (the `output_sink::raise_node_to_sealed_carrier`
+            // convention) so subsequent payload params never shift. A declared
+            // param's `ty` always mints, so the fallback is robustness only.
             let ty = cap
-                .materialize_output_type_expr(param.ty)?
-                .into_type_expr(cap);
-            Some(TupleElement {
+                .materialize_output_type_expr(param.ty)
+                .map(|raised| raised.into_type_expr(&cap))
+                .unwrap_or_else(|| TypeExpr::Unknown { raw: String::new() });
+            TupleElement {
                 // Node-domain `FunctionParam.name` (`Option<Arc<str>>`) → the
                 // display-facing tuple `label` (`Option<String>`).
                 label: param.name.as_ref().map(|n| n.to_string()),
                 ty,
                 optional: param.optional,
                 rest: param.rest,
-            })
+            }
         })
         .collect();
     TypeExpr::Tuple {
