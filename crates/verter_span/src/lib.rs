@@ -27,6 +27,11 @@ pub use tsgo_offset::{utf16_offset_to_byte, utf16_offset_to_line_col};
 pub mod utf16_line_index;
 pub use utf16_line_index::{LineCol, OffsetError, Utf16LineIndex};
 
+pub mod diag_source;
+pub use diag_source::{
+    DiagnosticContentSource, DiagnosticSourceCache, OverlayThenFallback, SourceFile,
+};
+
 // ======================== Span (SFC-absolute) ========================
 
 /// SFC-absolute byte offset span. `[start, end)` half-open.

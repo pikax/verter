@@ -36,9 +36,12 @@ use verter_workspace::tsgo_virtual_config::{
     build_virtual_overlay_snapshot, strip_injected_root_diagnostics, InjectedPathSet,
 };
 
+use verter_span::diag_source::{
+    DiagnosticContentSource, DiagnosticSourceCache, OverlayThenFallback,
+};
+
 use crate::error_map::map_tsc_position;
 use crate::reporter::{Diagnostic, Severity};
-use verter_tsgo_api::api_offset_to_line_col;
 
 /// A hard failure of the in-memory `--api` typecheck path.
 ///
@@ -69,6 +72,59 @@ impl std::fmt::Display for TypecheckError {
 }
 
 impl std::error::Error for TypecheckError {}
+
+/// A diagnostic whose position could NOT be resolved because its source content is
+/// unavailable — an infrastructure MISS, never a fabricated position.
+///
+/// The old path silently fell back to `(1, 1)` on a content miss, mis-homing the
+/// diagnostic to the file's first character. Surfacing this as an explicit error
+/// (propagated to a fatal [`TypecheckError`]) is the fail-closed contract: a
+/// diagnostic is NEVER emitted at a guessed position and NEVER silently dropped.
+#[derive(Debug, Clone)]
+pub enum MappingError {
+    /// The content for `file_name` could not be resolved (not an overlay carrier
+    /// and not readable through the real-FS fallback), so the UTF-16 `pos` cannot
+    /// be converted to a `(line, col)`.
+    SourceUnavailable {
+        /// The engine-reported file path whose content is missing.
+        file_name: String,
+        /// The TS diagnostic code that would have been surfaced.
+        diagnostic_code: u32,
+        /// The collection origin of the un-positionable diagnostic.
+        origin: DiagOrigin,
+    },
+}
+
+impl std::fmt::Display for MappingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MappingError::SourceUnavailable {
+                file_name,
+                diagnostic_code,
+                origin,
+            } => write!(
+                f,
+                "cannot position {origin:?} diagnostic TS{diagnostic_code}: source content for \
+                 '{file_name}' is unavailable (not an overlay carrier and not readable from disk)"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for MappingError {}
+
+/// A [`DiagnosticContentSource`] backed by the sanctioned native-FS boundary — the
+/// real-filesystem fallback for a non-overlay file's content. Keeps `std::fs` out
+/// of this crate (routes through [`NativeFs`], the VFS-boundary invariant).
+struct NativeFsSource {
+    fs: NativeFs,
+}
+
+impl DiagnosticContentSource for NativeFsSource {
+    fn resolve(&self, raw_path: &str) -> Option<Arc<str>> {
+        self.fs.read_file(raw_path)
+    }
+}
 
 /// Which whole-program getter produced a diagnostic — the diagnostic's COLLECTION
 /// ORIGIN. The wire [`ApiDiagnostic`] does not carry this (only `code`, `category`,
@@ -172,11 +228,6 @@ pub fn typecheck(inputs: TypecheckInputs<'_>) -> Result<Vec<Diagnostic>, Typeche
     let mut injected_paths: Vec<String> = files.iter().map(|f| f.path.clone()).collect();
     injected_paths.push(tsconfig_path.clone());
 
-    // Read real, non-overlay project files (imported `.ts`, etc.) from disk so a
-    // whole-program diagnostic on a NON-root file can be positioned by its own
-    // content — the same NativeFs boundary the RealDirSource uses.
-    let disk = NativeFs::new();
-
     let real: Arc<dyn RealDirSource> = Arc::new(FsRealDirSource::new());
     let snapshot =
         build_virtual_overlay_snapshot(&tsconfig_path, &tsconfig_bytes, &companions, real);
@@ -205,11 +256,28 @@ pub fn typecheck(inputs: TypecheckInputs<'_>) -> Result<Vec<Diagnostic>, Typeche
             }
         };
         // Always close the client, then surface the collected result (Ok or Err).
-        let result =
-            collect_diagnostics(&client, &tsconfig_path, &lookup, &injected_paths, &disk).await;
+        let result = collect_diagnostics(&client, &tsconfig_path, &lookup, &injected_paths).await;
         let _ = client.close().await;
         result
     })
+}
+
+/// Build the per-collection diagnostic-source cache: OVERLAY (the in-hand generated
+/// carriers) FIRST, then the real filesystem via the `NativeFs` boundary. Every
+/// diagnostic's UTF-16 offset is positioned through this cache, so each file's
+/// content is resolved ONCE and its line index built ONCE per pass (never per
+/// diagnostic).
+fn build_source_cache(
+    lookup: &HashMap<String, &OverlayFile>,
+) -> DiagnosticSourceCache<OverlayThenFallback<NativeFsSource>> {
+    let overlay = lookup.values().map(|f| (f.path.clone(), f.content.clone()));
+    let source = OverlayThenFallback::new(
+        overlay,
+        NativeFsSource {
+            fs: NativeFs::new(),
+        },
+    );
+    DiagnosticSourceCache::new(source)
 }
 
 /// Drive the engine: initialize, open the configured project, then collect the
@@ -227,7 +295,6 @@ async fn collect_diagnostics(
     tsconfig_path: &str,
     lookup: &HashMap<String, &OverlayFile>,
     injected_paths: &[String],
-    disk: &NativeFs,
 ) -> Result<Vec<Diagnostic>, TypecheckError> {
     if let Err(e) = client.initialize().await {
         return Err(TypecheckError::new(format!(
@@ -304,48 +371,66 @@ async fn collect_diagnostics(
     let injected_set = InjectedPathSet::from_paths(injected_paths);
     let config = strip_injected_root_diagnostics(config, &injected_set);
 
+    // The per-collection source cache: OVERLAY carriers first, then the real FS.
+    // Every offset is positioned through it, so each file resolves + indexes ONCE.
+    let cache = build_source_cache(lookup);
+
     let mut out = Vec::new();
     push_mapped(
         &mut out,
         &semantic,
         DiagOrigin::Semantic,
         lookup,
-        disk,
+        &cache,
         &injected_set,
-    );
+    )?;
     push_mapped(
         &mut out,
         &syntactic,
         DiagOrigin::Syntactic,
         lookup,
-        disk,
+        &cache,
         &injected_set,
-    );
+    )?;
     push_mapped(
         &mut out,
         &config,
         DiagOrigin::Config,
         lookup,
-        disk,
+        &cache,
         &injected_set,
-    );
+    )?;
     Ok(out)
 }
 
+/// Map a diagnostic stream, pushing every surfaced diagnostic. A content/source
+/// MISS on any diagnostic is FATAL: it propagates as a [`TypecheckError`] (non-zero
+/// exit + stderr note) rather than a fabricated position or a silent drop.
 fn push_mapped(
     out: &mut Vec<Diagnostic>,
     diags: &[ApiDiagnostic],
     origin: DiagOrigin,
     lookup: &HashMap<String, &OverlayFile>,
-    disk: &NativeFs,
+    cache: &DiagnosticSourceCache<OverlayThenFallback<NativeFsSource>>,
     injected: &InjectedPathSet,
-) {
+) -> Result<(), TypecheckError> {
     for d in diags {
         let od = OriginDiagnostic { d, origin };
-        if let Some(mapped) = map_one(&od, lookup, disk, injected) {
-            out.push(mapped);
+        match map_one(&od, lookup, cache, injected) {
+            Ok(Some(mapped)) => out.push(mapped),
+            // `Ok(None)` = not an error/warning, a suppressed Vue-JSX gap, or a
+            // suppressed injected-companion config diagnostic (not a failure).
+            Ok(None) => {}
+            // A genuine content/source miss: surface it, never guess a position.
+            Err(e) => {
+                return Err(TypecheckError::new(format!(
+                    "verter-tsc: {e}; the typecheck cannot position this diagnostic (fail-closed: \
+                     no fabricated position, no silent drop)"
+                )));
+            }
         }
     }
+    Ok(())
 }
 
 /// Map a single `--api` diagnostic to a displayable [`Diagnostic`], or `None`
@@ -383,9 +468,9 @@ fn push_mapped(
 fn map_one(
     od: &OriginDiagnostic<'_>,
     lookup: &HashMap<String, &OverlayFile>,
-    disk: &NativeFs,
+    cache: &DiagnosticSourceCache<OverlayThenFallback<NativeFsSource>>,
     injected: &InjectedPathSet,
-) -> Option<Diagnostic> {
+) -> Result<Option<Diagnostic>, MappingError> {
     let d = od.d;
 
     // FAIL-CLOSED map-boundary guard (keyed by normalized path AND origin): a
@@ -396,7 +481,7 @@ fn map_one(
     if od.origin == DiagOrigin::Config {
         if let Some(file_name) = d.file_name.as_deref() {
             if injected.contains(file_name) {
-                return None;
+                return Ok(None);
             }
         }
     }
@@ -406,24 +491,26 @@ fn map_one(
     let severity = match d.category {
         1 => Severity::Error,
         0 => Severity::Warning,
-        _ => return None,
+        _ => return Ok(None),
     };
 
     // Suppress the known Vue-JSX type gaps (children / textContent / innerHTML on
     // Vue intrinsic-element attribute types) the temp-file path also suppresses
     // (tsgo preview does not honor the cross-file HTMLAttributes augmentation).
     if crate::checker::is_vue_jsx_type_gap(d.code, &d.text) {
-        return None;
+        return Ok(None);
     }
 
     let (file_out, line_out, col_out) = match d.file_name.as_deref() {
         // Case 3: a global / compiler-options diagnostic (no file). Surface it at
-        // a synthetic position rather than dropping it.
+        // a synthetic position rather than dropping it (this is NOT a content miss —
+        // there is no file to resolve).
         None => ("<compiler options>".to_string(), 1, 1),
         Some(file_name) => match lookup.get(&norm_key(file_name)) {
-            // Case 1: a known overlay carrier.
+            // Case 1: a known overlay carrier. Its content is in the overlay, so the
+            // cache resolves it (a miss here is an internal inconsistency, surfaced).
             Some(file) => {
-                let (gen_line, gen_col) = api_offset_to_line_col(&file.content, d.pos);
+                let (gen_line, gen_col) = line_col_via_cache(cache, &file.path, od)?;
                 match &file.remap {
                     RemapKind::Passthrough => (slashed(file_name), gen_line, gen_col),
                     RemapKind::SourceMapped { vue_path } => {
@@ -433,32 +520,56 @@ fn map_one(
                                 pos.line + 1,
                                 pos.col + 1,
                             ),
-                            // No source-map mapping for this position: report at the .vue (1,1).
+                            // No source-map TOKEN for this position (the carrier
+                            // content DID resolve): report at the .vue (1,1). This is
+                            // a source-map gap, not a content miss.
                             None => (slashed(vue_path), 1, 1),
                         }
                     }
                 }
             }
-            // Case 2: a real non-root file (imported `.ts`, etc.). Position it by
-            // its OWN disk content; fall back to (1,1) if unreadable (never drop).
+            // Case 2: a real non-root file (imported `.ts`, etc.). Position it by its
+            // OWN content, resolved through the shared cache (overlay-then-disk). A
+            // genuine content miss is an EXPLICIT error — never a fabricated (1,1),
+            // never a silent drop.
             None => {
-                let (line, col) = match disk.read_file(file_name) {
-                    Some(content) => api_offset_to_line_col(&content, d.pos),
-                    None => (1, 1),
-                };
+                let (line, col) = line_col_via_cache(cache, file_name, od)?;
                 (slashed(file_name), line, col)
             }
         },
     };
 
-    Some(Diagnostic {
+    Ok(Some(Diagnostic {
         file: file_out,
         line: line_out,
         col: col_out,
         severity,
         ts_code: d.code,
         message: d.text.clone(),
-    })
+    }))
+}
+
+/// Convert the diagnostic's UTF-16 `pos` to a 1-based `(line, col)` through the
+/// per-collection source cache's build-once line index for `content_path`. A
+/// content/source MISS is an explicit [`MappingError::SourceUnavailable`] — the
+/// fail-closed contract (no fabricated position).
+fn line_col_via_cache(
+    cache: &DiagnosticSourceCache<OverlayThenFallback<NativeFsSource>>,
+    content_path: &str,
+    od: &OriginDiagnostic<'_>,
+) -> Result<(u32, u32), MappingError> {
+    let Some(sf) = cache.source_file(content_path) else {
+        return Err(MappingError::SourceUnavailable {
+            file_name: content_path.to_string(),
+            diagnostic_code: od.d.code,
+            origin: od.origin,
+        });
+    };
+    let lc = sf
+        .line_index()
+        .line_col_for_utf16(od.d.pos)
+        .expect("Utf16LineIndex built by new() always has line starts");
+    Ok((lc.line, lc.col))
 }
 
 /// Resolve a source-map `sources[]` entry to a display path, mirroring the

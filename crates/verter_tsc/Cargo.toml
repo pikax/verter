@@ -18,6 +18,8 @@ verter_session = { path = "../verter_session" }
 verter_workspace = { path = "../verter_workspace" }
 # In-memory tsgo `--api` typecheck backend (the `--noEmit` path).
 verter_tsgo_api = { path = "../verter_tsgo_api" }
+# Shared per-collection diagnostic-source cache + UTF-16 line index.
+verter_span = { path = "../verter_span" }
 clap = { version = "4.6", features = ["derive"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
