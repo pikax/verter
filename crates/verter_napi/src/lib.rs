@@ -803,6 +803,23 @@ fn host_diagnostics_to_napi(
     }
 }
 
+/// Convert a single host [`host::HostDiagnostic`] into its NAPI wire
+/// shape. Used to surface the RuntimeRender soft-macro warnings on
+/// [`NapiCompileBatchEntry::diagnostics`].
+fn napi_diagnostic_from_host(d: &host::HostDiagnostic) -> NapiDiagnostic {
+    NapiDiagnostic {
+        severity: match d.severity {
+            host::HostSeverity::Error => "error".to_string(),
+            host::HostSeverity::Warning => "warning".to_string(),
+            host::HostSeverity::Info => "info".to_string(),
+        },
+        code: d.code.clone(),
+        message: d.message.clone(),
+        spanStart: d.span.map(|s| s.start),
+        spanEnd: d.span.map(|s| s.end),
+    }
+}
+
 fn host_block_kind_to_str(kind: &host::ExternalBlockKind) -> &'static str {
     match kind {
         host::ExternalBlockKind::Script => "script",
@@ -2171,6 +2188,7 @@ impl NapiVerterHost {
                     priority,
                     default_mode,
                 },
+                host_compile::CompileManyTarget::HostBacked,
             )
         }))?;
         Ok(entries
@@ -2180,6 +2198,11 @@ impl NapiVerterHost {
                 code: e.code.to_string(),
                 sourceMap: e.source_map.map(|s| s.to_string()),
                 errors: e.errors,
+                diagnostics: e
+                    .diagnostics
+                    .iter()
+                    .map(napi_diagnostic_from_host)
+                    .collect(),
                 durationMs: e.duration_ms,
                 cacheHit: e.cache_hit,
                 requestedMode: e.requested_mode.to_string(),
@@ -2889,6 +2912,12 @@ pub struct NapiCompileBatchEntry {
     pub sourceMap: Option<String>,
     /// All compilation errors for this file. Empty on success.
     pub errors: Vec<String>,
+    /// Non-fatal WARNING-severity diagnostics surfaced on a SUCCESSFUL
+    /// compile, separate from the fatal `errors`. Populated by the
+    /// RuntimeRender lane's soft-macro contract (an unresolved imported
+    /// macro type renders successfully and reports a warning here). Always
+    /// empty on the HostBacked lane and on any fatal outcome.
+    pub diagnostics: Vec<NapiDiagnostic>,
     pub durationMs: f64,
     /// `true` iff this input was served from a warm cache entry under its
     /// classified mode — the fact-validated session slot (`Session`) or

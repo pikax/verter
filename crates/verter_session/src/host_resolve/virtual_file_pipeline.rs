@@ -26,6 +26,16 @@ use verter_compiler::framework_common::{
     CompileUnsupported, RuntimeCompileOptions, RuntimeDiagnosticSeverity,
 };
 
+/// The render-only `Main` output of the
+/// [`crate::host_compile::CompileManyTarget::RuntimeRender`] lane: the
+/// assembled `_sfc_main` module bytes, its optional source map, and the
+/// soft (warning-severity) diagnostics of a SUCCESSFUL render.
+pub(crate) struct RenderOnlyMain {
+    pub(crate) code: Arc<str>,
+    pub(crate) source_map: Option<Arc<str>>,
+    pub(crate) diagnostics: Vec<HostDiagnostic>,
+}
+
 /// Host-scoped RAII guard that arms and clears the per-host compile-tier
 /// fact-injection knob [`VerterHost::compile_force_overflow_observations`].
 ///
@@ -818,6 +828,37 @@ impl VerterHost {
         }
     }
 
+    /// Render-only `Main` output for the
+    /// [`crate::host_compile::CompileManyTarget::RuntimeRender`] lane:
+    /// byte-identical `Main` bytes to the `HostBacked` wrapper, produced
+    /// through the SAME shared substrate and host-side `Main` assembly,
+    /// without the per-file session-wrapper overhead. `diagnostics` carries
+    /// only the soft (warning-severity) diagnostics of a SUCCESSFUL render.
+    pub(crate) fn render_only_main(
+        &self,
+        canonical_id: &str,
+        profile: &CompileProfile,
+    ) -> Result<RenderOnlyMain, HostError> {
+        // S1 stub: route through the HostBacked artifact path so the API
+        // compiles and behaves like `HostBacked`. Replaced by the real
+        // render-only lane in the next slice.
+        let served = self.ensure_compile_artifacts(
+            canonical_id.to_string(),
+            profile,
+            CompileDemand::VirtualNode(VirtualNodeKind::Main),
+        )?;
+        let found = served.outputs.get(&VirtualNodeKind::Main).ok_or_else(|| {
+            HostError::MissingVirtualNode {
+                canonical_id: canonical_id.to_string(),
+            }
+        })?;
+        Ok(RenderOnlyMain {
+            code: found.code.clone(),
+            source_map: found.source_map.clone(),
+            diagnostics: Vec::new(),
+        })
+    }
+
     /// Retrieve a compiled virtual file (script, template, style, or main bundle).
     ///
     /// On cache hit, returns immediately. On cache miss, compiles the file using
@@ -1118,6 +1159,13 @@ impl VerterHost {
                 // the rare explicit Content opt-in.
                 let owner_has_module_augmentation = requested_mode == CompileCacheMode::Content
                     && self.owner_has_module_augmentation_dependency(&canonical_id);
+                // Test-only observable: the cache-mode classification the
+                // RuntimeRender lane skips entirely (fixed render target, no
+                // IDE-carrier cache decision). See
+                // `VerterHost::wrapper_cache_mode_classification_count`.
+                #[cfg(test)]
+                self.wrapper_cache_mode_classification_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let classification = crate::compile_cache_mode::classify_compile_mode(
                     requested_mode,
                     &crate::compile_cache_mode::EligibilityInputs {
@@ -2203,6 +2251,12 @@ impl VerterHost {
     > {
         let mut diagnostics = snapshot.parse_diagnostics.clone();
 
+        // Test-only observable: the per-file source re-clone the
+        // RuntimeRender lane avoids for a simple (no external `src=`) file.
+        // See `VerterHost::wrapper_source_clone_count`.
+        #[cfg(test)]
+        self.wrapper_source_clone_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut merged_source = snapshot.source.to_string();
         if !snapshot.src_blocks.is_empty() {
             let ext_sources = {
@@ -2266,9 +2320,21 @@ impl VerterHost {
                 // Cold external-type collection context (compile-prep): seed
                 // from the cold-seed's inner view; nested probes fail closed
                 // on a stale seed.
+                // Test-only observables: the resolver store-view read and the
+                // resolver-context construction the RuntimeRender lane
+                // performs ONLY for a cross-file-macro file (non-empty
+                // `macro_type_deps`), never for a simple file. See
+                // `VerterHost::wrapper_store_view_read_count` /
+                // `wrapper_resolver_ctx_construction_count`.
+                #[cfg(test)]
+                self.wrapper_store_view_read_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let store_view = self.resolver_store_view_read().into_cold_seed_view();
                 let overlay =
                     std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+                #[cfg(test)]
+                self.wrapper_resolver_ctx_construction_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let host_ctx = crate::resolver_core::HostResolverContext::from_cold_seed(
                     self,
                     &store_view,

@@ -539,6 +539,33 @@ pub struct VerterHost {
     /// in production builds.**
     #[cfg(test)]
     pub(crate) compile_one_host_cpu_pool_token: std::sync::atomic::AtomicUsize,
+    /// Test-only observables: per-host counters incremented at each of the
+    /// five Stage-C session-wrapper (`compile_entry`) per-file operations
+    /// that the [`crate::host_compile::CompileManyTarget::RuntimeRender`]
+    /// lane bypasses. Read by `runtime_render_bypasses_stage_c_wrapper` to
+    /// prove the render lane touches NONE of them for a simple file while a
+    /// `HostBacked` compile of the same file touches them (so the counters
+    /// are known to fire). **Compiled out in production builds.**
+    ///
+    /// `wrapper_source_clone` — the `snapshot.source.to_string()` re-clone.
+    #[cfg(test)]
+    pub(crate) wrapper_source_clone_count: std::sync::atomic::AtomicUsize,
+    /// `wrapper_cache_mode_classification` — the `classify_compile_mode`
+    /// call in the `ensure_compile_artifacts` cache path.
+    #[cfg(test)]
+    pub(crate) wrapper_cache_mode_classification_count: std::sync::atomic::AtomicUsize,
+    /// `wrapper_sync_transitive` — the
+    /// `sync_transitive_macro_type_dependencies` shared-state mutation.
+    #[cfg(test)]
+    pub(crate) wrapper_sync_transitive_count: std::sync::atomic::AtomicUsize,
+    /// `wrapper_store_view_read` — the resolver store-view / overlay read
+    /// in the cross-file-macro collector branch.
+    #[cfg(test)]
+    pub(crate) wrapper_store_view_read_count: std::sync::atomic::AtomicUsize,
+    /// `wrapper_resolver_ctx_construction` — the `HostResolverContext`
+    /// construction in the cross-file-macro collector branch.
+    #[cfg(test)]
+    pub(crate) wrapper_resolver_ctx_construction_count: std::sync::atomic::AtomicUsize,
     /// Test-only seam fired inside an `IndexedReady` materialise flight
     /// (base materialise, edge refresh, and the overlay materialiser)
     /// AFTER the flight's generation stamps are captured and BEFORE the

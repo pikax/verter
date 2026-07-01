@@ -1061,6 +1061,14 @@ impl VerterHost {
         canonical_id: &str,
         transitive_deps: &std::collections::BTreeSet<String>,
     ) {
+        // Test-only observable: this shared dependency/semantic-axis
+        // mutation is the one the RuntimeRender lane must NEVER perform (it
+        // is a pure read-only render). Read by
+        // `runtime_render_bypasses_stage_c_wrapper`. See
+        // `VerterHost::wrapper_sync_transitive_count`.
+        #[cfg(test)]
+        self.wrapper_sync_transitive_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut new_deps = self.parse_dependency_set_for_file(canonical_id);
         // import_routes lives on DerivedRawState; dependencies on
         // DependencyState (D48 split).

@@ -340,6 +340,16 @@ impl VerterHost {
             #[cfg(test)]
             compile_one_host_cpu_pool_token: std::sync::atomic::AtomicUsize::new(usize::MAX),
             #[cfg(test)]
+            wrapper_source_clone_count: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            wrapper_cache_mode_classification_count: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            wrapper_sync_transitive_count: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            wrapper_store_view_read_count: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            wrapper_resolver_ctx_construction_count: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
             materialize_seam_hook: parking_lot::Mutex::new(None),
             #[cfg(test)]
             flight_retry_seam_hook: parking_lot::Mutex::new(None),
@@ -1033,6 +1043,7 @@ mod resource_policy_lazy_tests {
                 requested_mode: None,
             }],
             CompileBatchOptions::default(),
+            crate::host_compile::CompileManyTarget::HostBacked,
         );
         assert_eq!(entries.len(), 1, "the batch must produce exactly one entry");
         assert!(

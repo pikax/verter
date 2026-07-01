@@ -73,8 +73,8 @@ use verter_scheduler::stage::Priority;
 
 use crate::hash::hash_16;
 use crate::types::{
-    CompileCacheMode, CompileProfile, DowngradeReason, HostError, HostSeverity, UpsertRequest,
-    VirtualNodeKind, VirtualQuery,
+    CompileCacheMode, CompileProfile, DowngradeReason, HostDiagnostic, HostError, HostSeverity,
+    UpsertRequest, VirtualNodeKind, VirtualQuery,
 };
 use crate::VerterHost;
 
@@ -109,6 +109,14 @@ pub struct CompileBatchEntry {
     pub code: Arc<str>,
     pub source_map: Option<Arc<str>>,
     pub errors: Vec<String>,
+    /// Non-fatal WARNING-severity diagnostics surfaced on a SUCCESSFUL
+    /// compile, kept separate from the fatal `errors`. Populated by the
+    /// [`CompileManyTarget::RuntimeRender`] lane's soft-macro contract: an
+    /// unresolved imported macro type renders successfully (the compiler
+    /// degrades the type to `Unknown`) and reports the diagnostic here
+    /// instead of aborting. Always empty on the `HostBacked` lane and on
+    /// any fatal outcome.
+    pub diagnostics: Vec<HostDiagnostic>,
     pub duration_ms: f64,
     pub cache_hit: bool,
     /// The compile cache mode the caller requested for this input.
@@ -139,6 +147,37 @@ pub struct CompileBatchOptions {
     pub default_mode: Option<CompileCacheMode>,
 }
 
+/// The compile lane a [`VerterHost::compile_many`] batch runs under.
+///
+/// The lane is ALWAYS explicit — it is never inferred from the node kind,
+/// the file, or the caller. One shared runtime substrate
+/// (`compile_bundle` + `assemble_vue_main_module`), two lanes:
+///
+/// - [`CompileManyTarget::HostBacked`] runs the full Stage-C session
+///   wrapper (`compile_entry`): cache-mode classification, the
+///   fact-observation tracer, warm-hit consult, and session/content
+///   publish. This is the path IDE / analysis / TSC / type-resolution
+///   consumers rely on. Its output is byte-for-byte unchanged.
+/// - [`CompileManyTarget::RuntimeRender`] runs a render-only lane that
+///   produces the SAME `Main` bytes through the SAME shared substrate but
+///   drops the per-file wrapper overhead (source re-clone, cache-mode
+///   classification, the unconditional dependency/semantic-axis sync, and
+///   the store-view/overlay/resolver-context construction on simple
+///   files). Cross-file-macro files still resolve `external_types`
+///   through the ONE shared resolver so their render output stays
+///   byte-identical. An unresolved imported macro type degrades to a
+///   warning instead of a fatal error on this lane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompileManyTarget {
+    /// The full session-wrapper path (`compile_entry`). Byte-for-byte
+    /// unchanged; used by every IDE / analysis / TSC / type-resolution
+    /// consumer.
+    HostBacked,
+    /// The render-only bundler lane. Same substrate + same host-side
+    /// `Main` assembly, without the per-file session-wrapper overhead.
+    RuntimeRender,
+}
+
 /// Bundler-default compile profile: production codegen, no SSR, no
 /// HMR. `compile_many` always uses this profile internally — no
 /// JS-side profile parameter, no IDE preset helper.
@@ -165,6 +204,7 @@ impl VerterHost {
         &self,
         inputs: Vec<CompileBatchInput>,
         options: CompileBatchOptions,
+        target: CompileManyTarget,
     ) -> Vec<CompileBatchEntry> {
         // ── short-circuit empty input ──
         // No pool is constructed. Tested by
@@ -308,7 +348,8 @@ impl VerterHost {
         let compiled: HashMap<(String, CompileCacheMode), CompileBatchEntry> = coordinator
             .run_batch(&canonical_to_compile, &compile_policy, |input| {
                 let pre_err = group_errors.get(&input.canonical_id).cloned();
-                let entry = self.compile_one_in_batch(input, &profile, default_mode, pre_err);
+                let entry =
+                    self.compile_one_in_batch(input, &profile, default_mode, target, pre_err);
                 let effective_mode = input.requested_mode.unwrap_or(default_mode);
                 ((input.canonical_id.clone(), effective_mode), entry)
             })
@@ -337,6 +378,7 @@ impl VerterHost {
                         code: Arc::from(""),
                         source_map: None,
                         errors: vec![err.clone()],
+                        diagnostics: Vec::new(),
                         duration_ms: 0.0,
                         cache_hit: false,
                         requested_mode: requested,
@@ -379,6 +421,7 @@ impl VerterHost {
         input: &CompileBatchInput,
         profile: &CompileProfile,
         default_mode: CompileCacheMode,
+        target: CompileManyTarget,
         precomputed_error: Option<String>,
     ) -> CompileBatchEntry {
         // Test-only: increment the call counter at the VERY TOP of the
@@ -440,6 +483,7 @@ impl VerterHost {
                 code: Arc::from(""),
                 source_map: None,
                 errors: vec![err],
+                diagnostics: Vec::new(),
                 duration_ms: start.elapsed().as_secs_f64() * 1000.0,
                 cache_hit: false,
                 requested_mode,
@@ -463,6 +507,15 @@ impl VerterHost {
         if input.canonical_id == PANIC_INJECT_SENTINEL {
             panic!("synthetic panic for compile_many_isolates_panics test");
         }
+
+        // Route by the explicit lane. `RuntimeRender` runs the render-only
+        // lane (same shared substrate + host-side `Main` assembly, without
+        // the per-file session-wrapper overhead); `HostBacked` runs the
+        // full session wrapper via `get_virtual_file`.
+        if target == CompileManyTarget::RuntimeRender {
+            return self.compile_one_runtime_render(input, &per_input_profile, requested_mode, start);
+        }
+
         let result = self.get_virtual_file(VirtualQuery {
             raw_id: None,
             canonical_id: Some(input.canonical_id.clone()),
@@ -490,6 +543,12 @@ impl VerterHost {
                     code: response.code,
                     source_map: response.source_map,
                     errors,
+                    // HostBacked never softens a diagnostic to a warning
+                    // here — its warnings ride in the response diagnostics
+                    // and are not re-surfaced as a distinct success-warning
+                    // list. Only the RuntimeRender soft-macro lane populates
+                    // `diagnostics`.
+                    diagnostics: Vec::new(),
                     duration_ms,
                     cache_hit: response.cache_hit,
                     requested_mode: response.requested_mode,
@@ -527,6 +586,7 @@ impl VerterHost {
                     code: Arc::from(""),
                     source_map: None,
                     errors,
+                    diagnostics: Vec::new(),
                     duration_ms,
                     cache_hit: false,
                     requested_mode: failure.requested_mode,
@@ -539,7 +599,76 @@ impl VerterHost {
                 code: Arc::from(""),
                 source_map: None,
                 errors: vec![format!("{id_prefix}host error: {host_err}")],
+                diagnostics: Vec::new(),
                 duration_ms,
+                cache_hit: false,
+                requested_mode,
+                actual_mode: requested_mode,
+                downgrade_reason: None,
+            },
+        }
+    }
+
+    /// The [`CompileManyTarget::RuntimeRender`] per-file worker: a
+    /// render-only compile onto the shared runtime substrate that produces
+    /// byte-identical `Main` output to the `HostBacked` wrapper without the
+    /// per-file session-wrapper overhead.
+    fn compile_one_runtime_render(
+        &self,
+        input: &CompileBatchInput,
+        per_input_profile: &CompileProfile,
+        requested_mode: CompileCacheMode,
+        start: Instant,
+    ) -> CompileBatchEntry {
+        let id_prefix = format!("[{}] ", input.canonical_id);
+        match self.render_only_main(&input.canonical_id, per_input_profile) {
+            Ok(render) => CompileBatchEntry {
+                canonical_id: input.canonical_id.clone(),
+                code: render.code,
+                source_map: render.source_map,
+                errors: Vec::new(),
+                diagnostics: render.diagnostics,
+                duration_ms: start.elapsed().as_secs_f64() * 1000.0,
+                // The render lane consults no host cache node, so a render
+                // is never a "warm hit" and always reports `false`. The
+                // mode axis is carried for wire-shape parity with the
+                // HostBacked entry; the render lane runs under no cache mode.
+                cache_hit: false,
+                requested_mode,
+                actual_mode: requested_mode,
+                downgrade_reason: None,
+            },
+            Err(HostError::CompileError(failure)) => {
+                let mut errors: Vec<String> = failure
+                    .diagnostics
+                    .diagnostics
+                    .iter()
+                    .filter(|d| d.severity == HostSeverity::Error)
+                    .map(|d| format!("{id_prefix}{}", d.message))
+                    .collect();
+                if errors.is_empty() {
+                    errors.push(format!("{id_prefix}compile error (no diagnostic messages)"));
+                }
+                CompileBatchEntry {
+                    canonical_id: input.canonical_id.clone(),
+                    code: Arc::from(""),
+                    source_map: None,
+                    errors,
+                    diagnostics: Vec::new(),
+                    duration_ms: start.elapsed().as_secs_f64() * 1000.0,
+                    cache_hit: false,
+                    requested_mode,
+                    actual_mode: requested_mode,
+                    downgrade_reason: None,
+                }
+            }
+            Err(host_err) => CompileBatchEntry {
+                canonical_id: input.canonical_id.clone(),
+                code: Arc::from(""),
+                source_map: None,
+                errors: vec![format!("{id_prefix}host error: {host_err}")],
+                diagnostics: Vec::new(),
+                duration_ms: start.elapsed().as_secs_f64() * 1000.0,
                 cache_hit: false,
                 requested_mode,
                 actual_mode: requested_mode,
@@ -569,6 +698,7 @@ fn compile_panic_entry(
             "[{}] compiler panic: {}",
             input.canonical_id, message
         )],
+        diagnostics: Vec::new(),
         duration_ms: 0.0,
         cache_hit: false,
         requested_mode: effective_mode,
