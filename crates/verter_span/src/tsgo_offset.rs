@@ -53,9 +53,11 @@ pub fn utf16_offset_to_byte(content: &str, offset: u32) -> u32 {
 /// position, with `col` also measured in UTF-16 code units (TypeScript position
 /// semantics).
 ///
-/// - `line` is 1 + the number of `\n` code units before the offset (a `\r\n` is a
-///   single terminator whose line starts after the `\n`; the `\r` and `\n`
-///   themselves report on the preceding line).
+/// - `line` is 1 + the number of line terminators before the offset. The
+///   terminator set matches TypeScript's `getLineStarts`: `\n`; a LONE `\r` (a
+///   CR not immediately followed by LF); U+2028 (LINE SEPARATOR); U+2029
+///   (PARAGRAPH SEPARATOR). A `\r\n` is a single terminator whose line starts
+///   after the `\n`; the `\r` and `\n` themselves report on the preceding line.
 /// - `col` is 1 + the number of UTF-16 code units between the start of that line
 ///   and the offset.
 ///
@@ -69,14 +71,27 @@ pub fn utf16_offset_to_line_col(content: &str, offset: u32) -> (u32, u32) {
     let mut line = 1u32;
     let mut line_start = 0usize; // UTF-16 index of the current line's first unit
 
-    for ch in content.chars() {
+    // Line terminators follow TypeScript's `getLineStarts`: a `\n`; a LONE `\r`
+    // (a CR not immediately followed by LF); U+2028 (LINE SEPARATOR); U+2029
+    // (PARAGRAPH SEPARATOR). A `\r\n` pair is ONE terminator — only its `\n`
+    // advances the line, so a position AT the `\r` or `\n` of a `\r\n` still
+    // reports on the preceding line, and the new line starts after the `\n`.
+    let mut chars = content.chars().peekable();
+    while let Some(ch) = chars.next() {
         if u16_idx >= target {
             break;
         }
         u16_idx += ch.len_utf16();
-        if ch == '\n' {
+        let is_terminator = match ch {
+            '\n' | '\u{2028}' | '\u{2029}' => true,
+            // A lone CR terminates a line; the `\r` of a `\r\n` does not (its `\n`
+            // is the single terminator), so peek and skip the paired case.
+            '\r' => chars.peek() != Some(&'\n'),
+            _ => false,
+        };
+        if is_terminator {
             line += 1;
-            line_start = u16_idx; // first unit after the '\n'
+            line_start = u16_idx; // first unit after the terminator
         }
     }
 
@@ -202,6 +217,47 @@ mod tests {
     #[test]
     fn line_col_out_of_range_offset_is_clamped_to_end() {
         assert_eq!(utf16_offset_to_line_col("abc", 999), (1, 4));
+    }
+
+    #[test]
+    fn line_col_lone_cr_is_a_line_terminator() {
+        // A LONE `\r` (CR not followed by LF) is a line terminator in TypeScript's
+        // `getLineStarts`. "ab\rcd": units a(0) b(1) \r(2) c(3) d(4); the line breaks
+        // AFTER the `\r`, so 'c' (unit 3) is line 2 col 1.
+        let s = "ab\rcd";
+        assert_eq!(utf16_offset_to_line_col(s, 2), (1, 3)); // at the `\r`, still line 1
+        assert_eq!(utf16_offset_to_line_col(s, 3), (2, 1)); // 'c' — line 2 after the lone `\r`
+        assert_eq!(utf16_offset_to_line_col(s, 4), (2, 2)); // 'd'
+    }
+
+    #[test]
+    fn line_col_line_separator_u2028_is_a_terminator() {
+        // U+2028 LINE SEPARATOR is a TypeScript line terminator. "a\u{2028}b":
+        // units a(0) LS(1) b(2) — 'b' is line 2 col 1.
+        let s = "a\u{2028}b";
+        assert_eq!(utf16_offset_to_line_col(s, 2), (2, 1));
+    }
+
+    #[test]
+    fn line_col_paragraph_separator_u2029_is_a_terminator() {
+        // U+2029 PARAGRAPH SEPARATOR is a TypeScript line terminator. "a\u{2029}b":
+        // units a(0) PS(1) b(2) — 'b' is line 2 col 1.
+        let s = "a\u{2029}b";
+        assert_eq!(utf16_offset_to_line_col(s, 2), (2, 1));
+    }
+
+    #[test]
+    fn line_col_mixed_lone_cr_and_crlf_each_count_once() {
+        // "a\rb\r\nc": units a(0) \r(1) b(2) \r(3) \n(4) c(5). The FIRST `\r` is a
+        // LONE CR (one terminator); the `\r\n` pair is ONE terminator. So there are
+        // exactly two line breaks, and 'c' lands on line 3 — NOT line 4 (which a
+        // double-count of `\r` + `\n` would produce).
+        let s = "a\rb\r\nc";
+        assert_eq!(utf16_offset_to_line_col(s, 1), (1, 2)); // at the lone `\r`, line 1
+        assert_eq!(utf16_offset_to_line_col(s, 2), (2, 1)); // 'b' — line 2 after lone `\r`
+        assert_eq!(utf16_offset_to_line_col(s, 3), (2, 2)); // at the `\r` of `\r\n`, line 2
+        assert_eq!(utf16_offset_to_line_col(s, 4), (2, 3)); // at the `\n` of `\r\n`, line 2
+        assert_eq!(utf16_offset_to_line_col(s, 5), (3, 1)); // 'c' — line 3 (\r\n = ONE break)
     }
 
     #[test]
