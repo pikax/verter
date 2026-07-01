@@ -159,9 +159,11 @@ it must be built. (3) Single-root-per-session workspace model (monorepo multi-ro
 - `crates/verter_tsc/` — the CLI: `load_tsconfig` (`tsconfig.rs`) → `VerterHost::upsert`
   per `.vue` → `generate_public_api_stubs` (cross-component `.vue.ts` stubs) →
   `generate_all_tsx` (`CompileTarget::IDE` + `TSX`, **inline base64 source maps**) →
-  tsgo/tsc subprocess → `reporter.rs::parse_tsc_output` → `error_map.rs::map_tsc_position`
-  (remap TSX line/col → `.vue`). Defaults to tsgo, falls back to tsc; `--use-tsc` forces
-  tsc. Distributed via `packages/verter-tsc/`.
+  `error_map.rs::map_tsc_position` (remap TSX line/col → `.vue`). The `--noEmit`
+  typecheck runs in-memory via tsgo `--api` (tsgo-only, NO tsc fallback, no
+  `--use-tsc`); the `--declaration` emit stage runs the `tsgo --project` subprocess
+  (`reporter.rs::parse_tsc_output`), falling back to tsc only if tsgo is absent.
+  Distributed via `packages/verter-tsc/`.
 - `scripts/integration-test/diagnostics.mjs` — the **dual-tool comparison harness**:
   runs BOTH `vue-tsc` and `verter-tsc`, `parseTypeScriptDiagnostics` (per tool),
   `normalizeTypeCheckArtifacts` (schema `verter.typecheck-diagnostics.v1`),

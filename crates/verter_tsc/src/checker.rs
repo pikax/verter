@@ -269,12 +269,21 @@ fn build_host_config() -> HostConfig {
 /// `--api` backend ([`run_inmemory_typecheck`]) — no temp files, no subprocess.
 /// The `--declaration` EMIT stage stays on the temp-file `tsgo --project` path
 /// ([`run_declaration_stage`]) because tsgo `--api` exposes no emit surface.
-pub fn run(config: &TsConfig, tsconfig_path: &Path, opts: &EmitOptions) -> CheckResult {
+///
+/// Returns [`Err`] when the in-memory `--api` typecheck stage cannot run (engine
+/// absent, or a connect/init/updateSnapshot/protocol/project-not-found failure) —
+/// the caller surfaces it as a non-zero process exit. This fail-closed contract
+/// is why a broken/missing engine can never masquerade as a clean typecheck.
+pub fn run(
+    config: &TsConfig,
+    tsconfig_path: &Path,
+    opts: &EmitOptions,
+) -> Result<CheckResult, api_check::TypecheckError> {
     if config.vue_files.is_empty() {
-        return CheckResult {
+        return Ok(CheckResult {
             diagnostics: Vec::new(),
             emitted_files: Vec::new(),
-        };
+        });
     }
 
     // ONE shared VerterHost (Batch preset): upsert every `.vue` once. Both stages
@@ -296,7 +305,9 @@ pub fn run(config: &TsConfig, tsconfig_path: &Path, opts: &EmitOptions) -> Check
     }
 
     // ── Typecheck stage: in-memory tsgo `--api` (the `--noEmit` diagnostic set). ──
-    let mut diagnostics = run_inmemory_typecheck(&host, config, tsconfig_path);
+    // A hard failure here (engine absent / connect / protocol) aborts the whole run
+    // with `Err` — we never proceed to emit against a compromised typecheck.
+    let mut diagnostics = run_inmemory_typecheck(&host, config, tsconfig_path)?;
 
     // ── Declaration/emit stage: temp-file `tsgo --project` (tsgo `--api` has no
     //    emit surface). Only when `--declaration` is requested. ──
@@ -308,10 +319,10 @@ pub fn run(config: &TsConfig, tsconfig_path: &Path, opts: &EmitOptions) -> Check
         Vec::new()
     };
 
-    CheckResult {
+    Ok(CheckResult {
         diagnostics,
         emitted_files,
-    }
+    })
 }
 
 /// The wildcard `*.vue` ambient module so importing TS resolves
@@ -391,22 +402,22 @@ fn run_inmemory_typecheck(
     host: &VerterHost,
     config: &TsConfig,
     tsconfig_path: &Path,
-) -> Vec<Diagnostic> {
+) -> Result<Vec<Diagnostic>, api_check::TypecheckError> {
     let root = strip_unc_prefix(&config.root_dir);
 
     // Discover the GATED `--api` engine (the rc `@typescript/typescript-*` native
     // binary the wire gate pins). No tsc fallback for the typecheck path by design —
-    // a missing or wire-diverged engine fail-closes to an empty diagnostic set.
+    // a missing or wire-diverged engine is a HARD failure (surfaced as a non-zero
+    // exit), NOT a silent empty diagnostic set that would masquerade as a clean run.
     let engine = match discover_api_engine(&root) {
         Some(p) => strip_unc_prefix(&p),
         None => {
-            eprintln!(
+            return Err(api_check::TypecheckError::new(
                 "verter-tsc: no gated tsgo `--api` engine found for in-memory typecheck. \
                  Install the pinned engine (`typescript@7.0.1-rc`) in the project's node_modules, \
                  or point VERTER_TSGO_BIN at the `tsc` native binary. \
-                 (There is no tsc fallback for the typecheck path.)"
-            );
-            return Vec::new();
+                 (There is no tsc fallback for the typecheck path.)",
+            ));
         }
     };
 
@@ -461,11 +472,10 @@ fn run_inmemory_typecheck(
     let original_abs = match tsconfig_path.canonicalize() {
         Ok(p) => slash(&strip_unc_prefix(&p)),
         Err(e) => {
-            eprintln!(
+            return Err(api_check::TypecheckError::new(format!(
                 "verter-tsc: cannot resolve tsconfig {}: {e}",
                 tsconfig_path.display()
-            );
-            return Vec::new();
+            )));
         }
     };
     let validation_opts = EmitOptions {
@@ -482,8 +492,9 @@ fn run_inmemory_typecheck(
     let tsconfig_bytes = match serde_json::to_string_pretty(&tsconfig_value) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("verter-tsc: failed to serialize synthetic tsconfig: {e}");
-            return Vec::new();
+            return Err(api_check::TypecheckError::new(format!(
+                "verter-tsc: failed to serialize synthetic tsconfig: {e}"
+            )));
         }
     };
     let virtual_tsconfig_path = slash(&root.join("verter-tsc-check.tsconfig.json"));
@@ -689,7 +700,7 @@ fn invoke_checker(
                     let _ = stdout_handle.join();
                     let _ = stderr_handle.join();
                     return Err(format!(
-                        "type checker timed out after {}s — try --use-tsc if tsgo hangs",
+                        "type checker timed out after {}s",
                         timeout.as_secs()
                     ));
                 }
@@ -2185,6 +2196,36 @@ exit 1
             perms.set_mode(0o755);
             fs::set_permissions(&script, perms).unwrap();
         }
+    }
+
+    /// Drive ONLY the declaration/emit stage (the temp-file `tsgo --project`
+    /// path), bypassing the in-memory `--api` typecheck stage. [`run`] now
+    /// hard-fails (returns `Err`) when the `--api` engine is absent — tsgo-only,
+    /// no tsc fallback — so declaration-stage tests, which install a
+    /// `--project`-only mock and never provide an `--api` engine, exercise
+    /// [`run_declaration_stage`] directly here. Mirrors [`run`]'s host
+    /// construction + per-`.vue` upsert.
+    fn run_declaration_only(
+        config: &TsConfig,
+        tsconfig_path: &Path,
+        opts: &EmitOptions,
+    ) -> (Vec<Diagnostic>, Vec<PathBuf>) {
+        let host = VerterHost::new_standalone(build_host_config());
+        for vue_path in &config.vue_files {
+            let source = match fs::read_to_string(vue_path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let canonical_id = vue_path.to_string_lossy().replace('\\', "/");
+            let _ = host.upsert(UpsertRequest {
+                canonical_id: Some(canonical_id.clone()),
+                input_id: canonical_id,
+                source: std::sync::Arc::<str>::from(source),
+                file_language: FileLanguage::vue(),
+                aliases: Vec::new(),
+            });
+        }
+        run_declaration_stage(&host, config, tsconfig_path, opts)
     }
 
     fn create_run_fixture(
@@ -3740,7 +3781,10 @@ import type { Foo } from './types'"#;
     #[test]
     fn run_declaration_phase_failure_returns_remapped_diagnostics_and_skips_emitted_files() {
         let (_temp, config, tsconfig_path, decl_dir) = create_run_fixture("phase-b-fail");
-        let result = run(
+        // The `--api` typecheck stage is bypassed here (no `--api` engine in the
+        // fixture); this exercises the declaration stage directly. See
+        // `run_declaration_only`.
+        let (diagnostics, emitted_files) = run_declaration_only(
             &config,
             &tsconfig_path,
             &EmitOptions {
@@ -3751,11 +3795,11 @@ import type { Foo } from './types'"#;
         );
 
         assert_eq!(
-            result.diagnostics.len(),
+            diagnostics.len(),
             1,
             "declaration-phase failures should surface diagnostics"
         );
-        let diagnostic = &result.diagnostics[0];
+        let diagnostic = &diagnostics[0];
         assert_eq!(diagnostic.ts_code, 2304, "should preserve TypeScript code");
         assert!(
             diagnostic.message.contains("MissingType"),
@@ -3771,7 +3815,7 @@ import type { Foo } from './types'"#;
             diagnostic.file
         );
         assert!(
-            result.emitted_files.is_empty(),
+            emitted_files.is_empty(),
             "declaration-phase failure must not report emitted files"
         );
         assert!(
@@ -3783,7 +3827,9 @@ import type { Foo } from './types'"#;
     #[test]
     fn run_declaration_phase_success_postprocesses_vue_declarations() {
         let (_temp, config, tsconfig_path, decl_dir) = create_run_fixture("phase-b-success");
-        let result = run(
+        // `--api` typecheck stage bypassed (no engine in the fixture); exercise the
+        // declaration stage directly. See `run_declaration_only`.
+        let (diagnostics, emitted_files) = run_declaration_only(
             &config,
             &tsconfig_path,
             &EmitOptions {
@@ -3795,7 +3841,7 @@ import type { Foo } from './types'"#;
 
         let target = decl_dir.join("src/Test.vue.d.ts");
         assert!(
-            result.diagnostics.is_empty(),
+            diagnostics.is_empty(),
             "successful declaration run should not add diagnostics"
         );
         assert!(
@@ -3803,7 +3849,7 @@ import type { Foo } from './types'"#;
             "should postprocess .tsc.tsx output into .vue.d.ts"
         );
         assert!(
-            result.emitted_files.iter().any(|path| path == &target),
+            emitted_files.iter().any(|path| path == &target),
             "emitted files should include the final .vue.d.ts output"
         );
     }
@@ -3879,7 +3925,9 @@ const props = defineProps<{ msg: string }>()
         write_mock_tsc_error_with_emit(&root, &decl_dir);
 
         let config = load_tsconfig(&tsconfig_path).expect("test tsconfig should load");
-        let result = run(
+        // `--api` typecheck stage bypassed (no engine in the fixture); exercise the
+        // declaration stage directly. See `run_declaration_only`.
+        let (diagnostics, _emitted_files) = run_declaration_only(
             &config,
             &tsconfig_path,
             &EmitOptions {
@@ -3891,7 +3939,7 @@ const props = defineProps<{ msg: string }>()
 
         // Positive: diagnostics should be reported
         assert!(
-            !result.diagnostics.is_empty(),
+            !diagnostics.is_empty(),
             "should report diagnostics from the error"
         );
 
@@ -4276,7 +4324,9 @@ const props = defineProps<{ msg: string }>()
             .clone()
             .or_else(|| config.out_dir.clone());
 
-        let result = run(
+        // `--api` typecheck stage bypassed (no engine in the fixture); exercise the
+        // declaration stage directly. See `run_declaration_only`.
+        let (diagnostics, emitted_files) = run_declaration_only(
             &config,
             &tsconfig_path,
             &EmitOptions {
@@ -4288,16 +4338,15 @@ const props = defineProps<{ msg: string }>()
 
         let target = decl_dir.join("src/Test.vue.d.ts");
         assert!(
-            result.diagnostics.is_empty(),
-            "tsconfig-sourced declarationDir should produce no diagnostics: {:?}",
-            result.diagnostics
+            diagnostics.is_empty(),
+            "tsconfig-sourced declarationDir should produce no diagnostics: {diagnostics:?}"
         );
         assert!(
             target.exists(),
             "should postprocess .vue.d.ts using tsconfig-sourced declarationDir"
         );
         assert!(
-            !result.emitted_files.is_empty(),
+            !emitted_files.is_empty(),
             "emitted_files should not be empty when using tsconfig-sourced output dir"
         );
     }

@@ -149,9 +149,9 @@ fn sourcemapped_carrier_without_map_falls_back_to_vue_at_one_one() {
 }
 
 #[test]
-fn unknown_carrier_path_falls_back_to_queried_root() {
-    // The engine echoes a path differing only in separator/case from the overlay
-    // key; the normalized lookup still resolves it.
+fn omitted_file_name_is_read_as_the_queried_root() {
+    // A per-file getter may omit the (redundant) `file_name`; map_one reads the
+    // diagnostic AS the queried root in that case.
     let stub = OverlayFile {
         path: "/proj/Foo.vue.ts".to_string(),
         content: "const x = 1;\n".to_string(),
@@ -160,9 +160,49 @@ fn unknown_carrier_path_falls_back_to_queried_root() {
     let files = vec![stub];
     let lookup = lookup_of(&files);
 
-    // file_name omitted ⇒ fall back to the queried root.
+    // file_name omitted ⇒ read as the queried root.
     let mut d = api_diag(2304, 1, "Cannot find name.", 6, "/proj/Foo.vue.ts");
     d.file_name = None;
-    let mapped = map_one(&d, "/proj/Foo.vue.ts", &lookup).expect("falls back to queried root");
+    let mapped = map_one(&d, "/proj/Foo.vue.ts", &lookup).expect("omitted file_name reads as root");
     assert_eq!(mapped.file, "/proj/Foo.vue.ts");
+}
+
+#[test]
+fn diagnostic_for_unknown_non_root_file_is_not_misattributed_to_queried_root() {
+    // ROOT-ATTRIBUTION INVARIANT (discriminating). The queried root is a
+    // SourceMapped `.vue` carrier; the engine reports a diagnostic whose
+    // `file_name` is a DIFFERENT file we did NOT generate a carrier for (an
+    // imported `.ts`, a `node_modules` file, a global/options diagnostic). map_one
+    // must DROP it — never re-home it onto the queried root (which would both
+    // misattribute the file AND remap the unrelated file's UTF-16 offset through
+    // the WRONG carrier's source map).
+    //
+    // RED before the fix: the old `.or_else(lookup.get(queried_root))` fallback
+    // re-homed the unknown-file diagnostic onto the root carrier ⇒ `map_one`
+    // returned `Some(diagnostic @ /proj/src/Foo.vue)` and this `.is_none()`
+    // assertion FAILED. GREEN after: the fallback is removed, so the unknown file
+    // resolves to no carrier ⇒ `None`.
+    let tsx = OverlayFile {
+        path: "/proj/Foo_ab12.tsx".to_string(),
+        content: "const a: string = 1;\n".to_string(),
+        remap: RemapKind::SourceMapped {
+            vue_path: "/proj/src/Foo.vue".to_string(),
+        },
+    };
+    let files = vec![tsx];
+    let lookup = lookup_of(&files);
+
+    // A present `file_name` that is NOT one of our overlay carriers.
+    let d = api_diag(
+        2322,
+        1,
+        "Type 'number' is not assignable to type 'string'.",
+        6,
+        "/proj/src/imported-types.ts",
+    );
+    assert!(
+        map_one(&d, "/proj/Foo_ab12.tsx", &lookup).is_none(),
+        "a diagnostic for a non-overlay imported/global file must NOT be misattributed to the \
+         queried root — it must be dropped (root-attribution invariant)"
+    );
 }

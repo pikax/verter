@@ -243,9 +243,17 @@ fn select_configured_project_carrier(
     Some((project.id.clone(), engine_carrier))
 }
 
-/// Map a tsgo `--api` diagnostic to the runtime `TypeDiagnostic`. The `--api`
-/// diagnostic carries byte offsets (`pos`/`end`) that map directly to the
-/// generated-file `start`/`end`; `category` maps to severity.
+/// Map a tsgo `--api` diagnostic to the runtime `TypeDiagnostic`; `category` maps
+/// to severity.
+///
+/// TODO(PERF-3-offset): the `--api` `pos`/`end` are tsgo **UTF-16 code-unit**
+/// offsets (TypeScript position semantics), NOT bytes — copying them straight into
+/// the byte-contract `TypeDiagnostic.start`/`end` (below) drifts LSP positions on
+/// any non-ASCII content before the diagnostic. Fix per the "PERF-3-offset"
+/// deferral in `docs/arch/host-mode-perf-design.md`: normalize `--api` offset
+/// semantics ONCE at the shared `verter_tsgo_api` boundary, convert here, and
+/// de-duplicate verter-tsc's `offset_map`. Logic intentionally unchanged here —
+/// this is a cross-surface follow-up tracked in that deferral record.
 fn map_api_diagnostic(d: &verter_tsgo_api::proto::types::Diagnostic) -> TypeDiagnostic {
     TypeDiagnostic {
         message: d.text.clone(),

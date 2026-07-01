@@ -5,8 +5,12 @@
 //! `.d.ts` shims) and the synthetic tsconfig are fed to the engine as an
 //! in-memory [`OverlaySnapshot`] — NO temp files, NO subprocess spawn, NO poll
 //! loop. The engine is the gated [`TsgoClient`] (`--api`-only); a diverged /
-//! unknown engine fails the wire gate at `connect` and the typecheck fail-closes
-//! (empty diagnostics + a stderr note) — there is NO tsc fallback for this path.
+//! unknown engine fails the wire gate at `connect`. There is NO tsc fallback for
+//! this path, and "fail-closed" means the failure is SURFACED as a hard
+//! [`TypecheckError`] (→ non-zero process exit + a stderr note), NEVER swallowed
+//! into an empty diagnostic set: a broken/absent engine returning empty
+//! diagnostics + exit 0 would falsely advertise a clean typecheck (a broken
+//! engine masquerading as "no type errors").
 //!
 //! Membership + virtual-config materialization REUSE the shared
 //! [`verter_workspace::tsgo_virtual_config`] owner
@@ -33,6 +37,36 @@ use verter_workspace::tsgo_virtual_config::build_virtual_overlay_snapshot;
 use crate::error_map::map_tsc_position;
 use crate::offset_map::offset_to_line_col;
 use crate::reporter::{Diagnostic, Severity};
+
+/// A hard failure of the in-memory `--api` typecheck path.
+///
+/// The `--noEmit` typecheck backend is tsgo-`--api`-only with NO tsc fallback, so
+/// an absent / wire-diverged engine or a connect/init/updateSnapshot/protocol/
+/// project-not-found failure means the typecheck genuinely could not run. This
+/// error is SURFACED (the caller exits non-zero + prints the message to stderr)
+/// rather than swallowed into an empty diagnostic set — an empty set + exit 0
+/// would falsely report a clean typecheck.
+#[derive(Debug)]
+pub struct TypecheckError {
+    /// A user-facing explanation, printed to stderr at the process boundary.
+    pub message: String,
+}
+
+impl TypecheckError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for TypecheckError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for TypecheckError {}
 
 /// How a carrier file's diagnostics map back to user-visible positions.
 pub enum RemapKind {
@@ -74,9 +108,12 @@ pub struct TypecheckInputs<'a> {
 }
 
 /// Run the in-memory `--api` typecheck and return the remapped diagnostics.
-/// On any engine/connect/protocol failure this returns an empty vector and logs
-/// to stderr (fail-closed — never a silent tsc fallback).
-pub fn typecheck(inputs: TypecheckInputs<'_>) -> Vec<Diagnostic> {
+///
+/// Fail-closed = SURFACE the failure: on any engine/connect/init/updateSnapshot/
+/// protocol/project-not-found failure this returns [`Err`] (the caller exits
+/// non-zero + prints the message). It NEVER returns an empty `Ok` for a failed
+/// run — that would falsely advertise a clean typecheck. There is no tsc fallback.
+pub fn typecheck(inputs: TypecheckInputs<'_>) -> Result<Vec<Diagnostic>, TypecheckError> {
     let TypecheckInputs {
         engine,
         cwd,
@@ -106,8 +143,9 @@ pub fn typecheck(inputs: TypecheckInputs<'_>) -> Vec<Diagnostic> {
     {
         Ok(rt) => rt,
         Err(e) => {
-            eprintln!("verter-tsc: failed to start async runtime for tsgo --api: {e}");
-            return Vec::new();
+            return Err(TypecheckError::new(format!(
+                "verter-tsc: failed to start async runtime for tsgo --api: {e}"
+            )));
         }
     };
 
@@ -116,16 +154,16 @@ pub fn typecheck(inputs: TypecheckInputs<'_>) -> Vec<Diagnostic> {
         let client = match TsgoClient::connect(engine, cwd, snapshot, 16) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!(
-                    "verter-tsc: tsgo --api unavailable ({e}); no diagnostics produced \
+                return Err(TypecheckError::new(format!(
+                    "verter-tsc: tsgo --api unavailable ({e}); the --noEmit typecheck cannot run \
                      (there is no tsc fallback for the typecheck path)"
-                );
-                return Vec::new();
+                )));
             }
         };
-        let diags = collect_diagnostics(&client, &tsconfig_path, &lookup).await;
+        // Always close the client, then surface the collected result (Ok or Err).
+        let result = collect_diagnostics(&client, &tsconfig_path, &lookup).await;
         let _ = client.close().await;
-        diags
+        result
     })
 }
 
@@ -136,10 +174,11 @@ async fn collect_diagnostics(
     client: &TsgoClient,
     tsconfig_path: &str,
     lookup: &HashMap<String, &OverlayFile>,
-) -> Vec<Diagnostic> {
+) -> Result<Vec<Diagnostic>, TypecheckError> {
     if let Err(e) = client.initialize().await {
-        eprintln!("verter-tsc: tsgo --api initialize failed: {e}");
-        return Vec::new();
+        return Err(TypecheckError::new(format!(
+            "verter-tsc: tsgo --api initialize failed: {e}"
+        )));
     }
 
     let params = UpdateSnapshotParams {
@@ -149,8 +188,9 @@ async fn collect_diagnostics(
     let snap = match client.update_snapshot(&params).await {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("verter-tsc: tsgo --api updateSnapshot failed: {e}");
-            return Vec::new();
+            return Err(TypecheckError::new(format!(
+                "verter-tsc: tsgo --api updateSnapshot failed: {e}"
+            )));
         }
     };
 
@@ -163,34 +203,43 @@ async fn collect_diagnostics(
     {
         Some(p) => p,
         None => {
-            eprintln!(
+            return Err(TypecheckError::new(format!(
                 "verter-tsc: tsgo --api did not open the configured project ({tsconfig_path})"
-            );
-            return Vec::new();
+            )));
         }
     };
 
     let mut out = Vec::new();
     // Enumerate ALL configured-project root files — TSX carriers AND the
     // `.vue.ts` public-API stubs AND the ambient `.d.ts` shims — not just the
-    // `.vue`-derived TSX, or stub-carrier diagnostics drop.
+    // `.vue`-derived TSX, or stub-carrier diagnostics drop. A per-root getter
+    // protocol failure is a HARD error (not an eprintln-and-continue): silently
+    // dropping a root's diagnostics is exactly the quiet-failure this path bans.
     for root in &project.root_files {
         match client
             .get_semantic_diagnostics(&snap.snapshot, &project.id, root)
             .await
         {
             Ok(diags) => push_mapped(&mut out, &diags, root, lookup),
-            Err(e) => eprintln!("verter-tsc: tsgo --api getSemanticDiagnostics({root}): {e}"),
+            Err(e) => {
+                return Err(TypecheckError::new(format!(
+                    "verter-tsc: tsgo --api getSemanticDiagnostics({root}): {e}"
+                )));
+            }
         }
         match client
             .get_syntactic_diagnostics(&snap.snapshot, &project.id, root)
             .await
         {
             Ok(diags) => push_mapped(&mut out, &diags, root, lookup),
-            Err(e) => eprintln!("verter-tsc: tsgo --api getSyntacticDiagnostics({root}): {e}"),
+            Err(e) => {
+                return Err(TypecheckError::new(format!(
+                    "verter-tsc: tsgo --api getSyntacticDiagnostics({root}): {e}"
+                )));
+            }
         }
     }
-    out
+    Ok(out)
 }
 
 fn push_mapped(
@@ -207,8 +256,29 @@ fn push_mapped(
 }
 
 /// Map a single `--api` diagnostic to a displayable [`Diagnostic`], or `None`
-/// when it is not an error/warning, is a known Vue-JSX type gap, or its carrier
-/// content is unknown.
+/// when it is not an error/warning, is a known Vue-JSX type gap, or its file is
+/// not one of our known overlay carriers.
+///
+/// ROOT-ATTRIBUTION INVARIANT: a mapped diagnostic is ONLY surfaced when its file
+/// resolves to a KNOWN overlay carrier — either the queried root itself (the
+/// common per-file-getter case: `file_name == queried_root`, or the engine
+/// omitted `file_name`, which we read AS the queried root) or another carrier we
+/// actually generated (looked up by its own `file_name`). A diagnostic whose
+/// `file_name` is PRESENT but resolves to no known carrier (an imported source we
+/// did not generate a carrier for, a `node_modules` file, a global/options
+/// diagnostic) is DROPPED — it is NEVER re-attributed to the queried root. The
+/// old temp-file `tsgo --project` path likewise surfaced such a diagnostic under
+/// its OWN file path (a passthrough), never under a carrier's; re-homing it onto
+/// the queried root here would ALSO remap an unrelated file's UTF-16 offset
+/// through the WRONG carrier's source map (double corruption). We cannot correctly
+/// re-position a file whose content is not in the overlay, so we drop rather than
+/// misattribute.
+///
+/// NOTE (reported divergence, not fixed here): the `--api` path only QUERIES
+/// `project.root_files`, so a real diagnostic in a non-root imported file is never
+/// collected at all — whereas the old whole-program `tsgo --project` surfaced it.
+/// The parity corpus does not exercise this (its one imported `.ts`, `types.ts`,
+/// is clean); see the "PERF-3-offset"-adjacent note in `docs/arch/host-mode-perf-design.md`.
 fn map_one(
     d: &ApiDiagnostic,
     queried_root: &str,
@@ -222,12 +292,12 @@ fn map_one(
         _ => return None,
     };
 
-    // A per-file getter reports `file_name == queried_root`; fall back to the
-    // queried root if the engine omits it.
+    // A per-file getter reports `file_name == queried_root`; when the engine omits
+    // it, read it AS the queried root. But a PRESENT-yet-unknown `file_name` (an
+    // imported/global file with no overlay carrier) must NOT be re-homed onto the
+    // queried root — drop it (the root-attribution invariant), never fall back.
     let file_name = d.file_name.as_deref().unwrap_or(queried_root);
-    let file = lookup
-        .get(&norm_key(file_name))
-        .or_else(|| lookup.get(&norm_key(queried_root)))?;
+    let file = lookup.get(&norm_key(file_name))?;
 
     // Suppress the known Vue-JSX type gaps (children / textContent / innerHTML on
     // Vue intrinsic-element attribute types) the temp-file path also suppresses

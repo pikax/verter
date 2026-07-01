@@ -159,7 +159,19 @@ fn main() {
         config.vue_files.len()
     );
 
-    let result = checker::run(&config, &tsconfig_path, &emit_opts);
+    // The in-memory `--api` typecheck is tsgo-only with NO tsc fallback. A hard
+    // failure (engine absent, connect/init/updateSnapshot/protocol/project-not-found)
+    // is SURFACED as a non-zero exit + a stderr note — it must NEVER be swallowed
+    // into an empty diagnostic set that exits 0 (a broken engine masquerading as a
+    // clean typecheck). Exit 2 distinguishes this infrastructure failure from a
+    // type-error run (exit 1) and a config-load failure (also exit 2).
+    let result = match checker::run(&config, &tsconfig_path, &emit_opts) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("{e}");
+            process::exit(2);
+        }
+    };
 
     for diagnostic in &result.diagnostics {
         println!("{diagnostic}");

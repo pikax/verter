@@ -126,10 +126,93 @@ mod tests {
     }
 
     #[test]
-    fn mid_surrogate_offset_does_not_panic() {
-        // An offset landing inside a surrogate pair resolves to a stable column.
-        let s = "𐐷";
-        let (line, _col) = offset_to_line_col(s, 1);
-        assert_eq!(line, 1);
+    fn mid_surrogate_offset_resolves_to_stable_in_pair_column() {
+        // An offset landing INSIDE a surrogate pair resolves to a stable, concrete
+        // in-pair column (never panics). "𐐷" is one pair (units 0,1); offset 1 is
+        // mid-pair and clamps to the pair's start column → (1, 2).
+        assert_eq!(offset_to_line_col("𐐷", 1), (1, 2));
+    }
+
+    #[test]
+    fn surrogate_pair_shifts_columns_by_two_units_concretely() {
+        // "x𐐷y\nz": UTF-16 units x(0) hi(1) lo(2) y(3) \n(4) z(5). The pair occupies
+        // TWO units, so everything after it shifts by two columns.
+        let s = "x𐐷y\nz";
+        assert_eq!(offset_to_line_col(s, 0), (1, 1)); // 'x'
+        assert_eq!(offset_to_line_col(s, 1), (1, 2)); // start of the pair
+        assert_eq!(offset_to_line_col(s, 3), (1, 4)); // 'y' — after the 2-unit pair
+        assert_eq!(offset_to_line_col(s, 5), (2, 1)); // 'z' on line 2
+    }
+
+    // ── CRLF (`\r\n`) edge cases — the common Windows line ending in carriers ──
+    // TypeScript treats `\r\n` as ONE line terminator whose line starts AFTER the
+    // `\n`; the `\r` and `\n` themselves report on the PRECEDING line. These pin
+    // the exact `(line,col)` at each of the three CRLF positions. Discriminating:
+    // a wrong impl that treated `\r` as its own line break (or `\r\n` as two)
+    // would report the char after `\r\n` on line 3, not line 2.
+
+    #[test]
+    fn crlf_offset_at_carriage_return_stays_on_preceding_line() {
+        // "ab\r\ncd": units a(0) b(1) \r(2) \n(3) c(4) d(5).
+        let s = "ab\r\ncd";
+        // Offset AT the `\r` → still line 1, column just past "ab" (col 3).
+        assert_eq!(offset_to_line_col(s, 2), (1, 3));
+    }
+
+    #[test]
+    fn crlf_offset_at_line_feed_stays_on_preceding_line() {
+        let s = "ab\r\ncd";
+        // Offset AT the `\n` of the `\r\n` → line 1, col 4 (the `\r` counts as a
+        // normal 1-unit column on line 1; the line does not advance until after
+        // the `\n`).
+        assert_eq!(offset_to_line_col(s, 3), (1, 4));
+    }
+
+    #[test]
+    fn crlf_offset_immediately_after_crlf_is_next_line_col_one() {
+        let s = "ab\r\ncd";
+        // Offset IMMEDIATELY AFTER `\r\n` → line 2, col 1 (NOT line 3 — `\r\n` is a
+        // single terminator).
+        assert_eq!(offset_to_line_col(s, 4), (2, 1));
+        assert_eq!(offset_to_line_col(s, 5), (2, 2)); // 'd'
+    }
+
+    #[test]
+    fn crlf_with_multibyte_before_is_utf16_not_byte() {
+        // Combined CRLF + non-ASCII: "á\r\nb", á = U+00E1 (1 UTF-16 unit, 2 UTF-8
+        // bytes). Units á(0) \r(1) \n(2) b(3). A byte reading of offset 3 would land
+        // on the `\n` (byte 3) and misreport; the UTF-16 reading is 'b' on line 2.
+        let s = "á\r\nb";
+        assert_eq!(offset_to_line_col(s, 0), (1, 1)); // 'á'
+        assert_eq!(offset_to_line_col(s, 3), (2, 1)); // 'b' — after `\r\n`
+    }
+
+    #[test]
+    fn crlf_out_of_range_offset_clamps_to_end() {
+        // Past-the-end offset clamps to the final column on the last line.
+        assert_eq!(offset_to_line_col("ab\r\ncd", 999), (2, 3));
+        assert_eq!(offset_to_line_col("ab\ncd", 999), (2, 3));
+    }
+
+    #[test]
+    fn leading_bom_counts_as_one_column_unit() {
+        // A leading BOM (U+FEFF) is one UTF-16 unit; the conversion counts it as a
+        // normal column (it does NOT strip it), so content after it shifts by one.
+        // Generated carriers carry no BOM — this pins the contract for offsets the
+        // engine reports against BOM-inclusive content.
+        let s = "\u{FEFF}ab";
+        assert_eq!(offset_to_line_col(s, 0), (1, 1)); // the BOM itself
+        assert_eq!(offset_to_line_col(s, 1), (1, 2)); // 'a' — after the 1-unit BOM
+        assert_eq!(offset_to_line_col(s, 2), (1, 3)); // 'b'
+    }
+
+    #[test]
+    fn tab_counts_as_one_column_not_expanded() {
+        // A tab is one UTF-16 unit and contributes exactly one column (TypeScript
+        // does NOT expand tabs to a tab stop in its column count).
+        let s = "a\tb\nc";
+        assert_eq!(offset_to_line_col(s, 1), (1, 2)); // the tab
+        assert_eq!(offset_to_line_col(s, 2), (1, 3)); // 'b' — tab counted as 1 col
+        assert_eq!(offset_to_line_col(s, 4), (2, 1)); // 'c' on line 2
     }
 }
