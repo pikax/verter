@@ -153,6 +153,14 @@ export interface CompileBatchEntry {
   sourceMap?: string;
   /** All compilation errors for this file. Empty on success. */
   errors: string[];
+  /**
+   * Non-fatal WARNING-severity diagnostics surfaced on a SUCCESSFUL
+   * compile, separate from the fatal `errors`. Populated by the
+   * RuntimeRender lane's soft-macro contract (an unresolved imported
+   * macro type renders successfully and reports a warning here). Always
+   * empty on the HostBacked lane and on any fatal outcome.
+   */
+  diagnostics: HostDiagnostic[];
   durationMs: number;
   /**
    * True iff this input was served from a warm cache slot (the
@@ -209,7 +217,7 @@ export type {
   HostIdeProjectConfig,
 } from "./host-types";
 
-import type { HostCompileProfile } from "./host-types";
+import type { HostCompileProfile, HostDiagnostic } from "./host-types";
 
 // ---------------------------------------------------------------------------
 // Native-specific overrides: accept Buffer in addition to string
