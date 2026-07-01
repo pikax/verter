@@ -266,17 +266,23 @@ fn select_configured_project_carrier(
 /// `verter_span`) so positions never drift on non-ASCII content before the
 /// diagnostic (e.g. an em-dash `—` in a carrier comment).
 ///
-/// `content` is `None` only when the carrier is not in the `--lsp` content cache
-/// (it is opened before this runs, so this is defensive); ASCII UTF-16 offsets
-/// equal byte offsets, so the raw offset is used unchanged in that degenerate
-/// case rather than fabricating a wrong position.
+/// `content` is `None` only when the carrier is not in the `--lsp` content cache.
+/// The carrier is opened before diagnostics run, so this is defensive. Because the
+/// raw `pos`/`end` are UTF-16 code units, emitting them AS bytes would be a
+/// known-wrong byte span on any non-ASCII content — the exact drift the byte
+/// conversion above exists to prevent. So the content-unavailable path degrades to
+/// a well-defined zero-length span `(0, 0)` at the start of the file (a defensible
+/// "no precise range") rather than fabricating a wrong range from the UTF-16
+/// offsets.
 fn map_api_diagnostic(
     d: &verter_tsgo_api::proto::types::Diagnostic,
     content: Option<&str>,
 ) -> TypeDiagnostic {
     let (start, end) = match content {
         Some(text) => verter_tsgo_api::diagnostic_byte_span(d, text),
-        None => (d.pos, d.end),
+        // Degraded, content-unavailable path: a zero-length span at the file start,
+        // never the raw UTF-16 offsets reinterpreted as bytes.
+        None => (0, 0),
     };
     TypeDiagnostic {
         message: d.text.clone(),

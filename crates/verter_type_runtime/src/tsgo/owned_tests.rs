@@ -129,6 +129,47 @@ fn map_api_diagnostic_converts_utf16_offsets_to_bytes_on_non_ascii() {
     );
 }
 
+/// DISCRIMINATING (content-unavailable degraded span): the `--api` diagnostic
+/// `pos`/`end` are UTF-16 code units, but `TypeDiagnostic.start`/`end` is a BYTE
+/// contract. When the carrier content is UNAVAILABLE (`None`), the raw UTF-16
+/// offsets cannot be converted to bytes and would be a KNOWN-WRONG byte span on
+/// any non-ASCII content. The degraded contract is a well-defined zero-length span
+/// `(0, 0)` at the start of the file — NEVER the raw `pos`/`end` fabricated as
+/// bytes.
+///
+/// RED before the fix: the `None` arm returned `(d.pos, d.end)` = `(28, 30)`.
+/// GREEN after: it returns `(0, 0)`. The non-zero `pos`/`end` here make the two
+/// outcomes distinct, so this fails against the old passthrough and passes only
+/// with the degraded span.
+#[test]
+fn map_api_diagnostic_content_unavailable_yields_zero_length_degraded_span() {
+    let d = verter_tsgo_api::proto::types::Diagnostic {
+        code: 2322,
+        category: 1,
+        text: "Type 'string' is not assignable to type 'number'.".to_string(),
+        pos: 28,
+        end: 30,
+        file_name: Some("c:/ws/src/A.ts".to_string()),
+    };
+    let mapped = map_api_diagnostic(&d, None);
+    assert_eq!(
+        mapped.start, 0,
+        "content-unavailable start must be the degraded 0, NOT the raw UTF-16 pos (28)"
+    );
+    assert_eq!(
+        mapped.end, 0,
+        "content-unavailable end must be the degraded 0, NOT the raw UTF-16 end (30)"
+    );
+    assert_ne!(
+        (mapped.start, mapped.end),
+        (d.pos, d.end),
+        "emitting the raw UTF-16 (pos,end) as a byte span is the wrong-span bug this test forbids"
+    );
+    // The rest of the mapping is unaffected by the missing content.
+    assert_eq!(mapped.code.as_deref(), Some("2322"));
+    assert_eq!(severity_name(&mapped.severity), "error");
+}
+
 #[test]
 fn map_api_diagnostic_severity_table() {
     let base = verter_tsgo_api::proto::types::Diagnostic {
