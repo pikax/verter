@@ -79,10 +79,11 @@ fn map_api_diagnostic_maps_category_and_offsets() {
     assert!(mapped.message.contains("not assignable"));
 }
 
-/// DISCRIMINATING (PERF-3-offset regression): the `--api` diagnostic `pos`/`end`
-/// are UTF-16 code units, but `TypeDiagnostic.start`/`end` is a BYTE contract. With
-/// a multi-byte character (an em-dash `—`, U+2014 — 3 UTF-8 bytes / 1 UTF-16 unit)
-/// before the diagnostic, the byte offset is 2 GREATER than the UTF-16 offset.
+/// DISCRIMINATING (UTF-16-offset → byte regression): the `--api` diagnostic
+/// `pos`/`end` are UTF-16 code units, but `TypeDiagnostic.start`/`end` is a BYTE
+/// contract. With a multi-byte character (an em-dash `—`, U+2014 — 3 UTF-8 bytes /
+/// 1 UTF-16 unit) before the diagnostic, the byte offset is 2 GREATER than the
+/// UTF-16 offset.
 ///
 /// RED before the fix: `map_api_diagnostic` copied `d.pos`/`d.end` straight through
 /// (byte == UTF-16 offset), so `start`/`end` were 2 too small → LSP position drift.
