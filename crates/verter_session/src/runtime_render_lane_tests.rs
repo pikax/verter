@@ -638,7 +638,11 @@ fn runtime_render_honors_render_profile_dev_vs_prod() {
     let dev = render_with_profile(&new_host(), canonical, src, dev_rp, None);
     let prod = render_with_profile(&new_host(), canonical, src, prod_rp, None);
     assert!(dev.errors.is_empty(), "dev render errors: {:?}", dev.errors);
-    assert!(prod.errors.is_empty(), "prod render errors: {:?}", prod.errors);
+    assert!(
+        prod.errors.is_empty(),
+        "prod render errors: {:?}",
+        prod.errors
+    );
 
     // The profile FLOWS: dev and prod outputs differ (dev carries HMR /
     // dev-only code that prod strips). If render_profile were ignored, both
@@ -747,7 +751,9 @@ fn runtime_render_threads_per_input_component_id_into_scope() {
 /// WARNING (for the missing one only) — the resolved one is NOT dragged
 /// into fatality, and the missing one is NOT fatal. DISCRIMINATING: a lane
 /// that softened nothing would be fatal; one that softened everything would
-/// hide a genuinely fatal case. (Locks codex's two-layer gate.)
+/// hide a genuinely fatal case. Locks the two-surface soft gate (the
+/// collector missing-diagnostic AND the compiler `XInvalidMacroType`
+/// downgraded only for the unresolved-import case).
 #[test]
 fn runtime_render_mixed_resolved_and_missing_imported_macro_is_soft() {
     let host = new_host();

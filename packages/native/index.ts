@@ -130,6 +130,29 @@ export interface CompileBatchInput {
    * `defaultMode` (which itself defaults to "session").
    */
   requestedMode?: CompileCacheMode;
+  /**
+   * Explicit per-component scoped-style / HMR id. Threaded into this
+   * input's compile profile ONLY on the `"runtime-render"` lane
+   * (scoped-style / HMR identity is per-component, not per-build). Omit to
+   * let codegen auto-generate the id.
+   */
+  componentId?: string;
+}
+
+/** The compile lane for {@link VerterHost.compileMany}. */
+export type CompileManyTarget = "host-backed" | "runtime-render";
+
+/**
+ * The batch-level render profile for the `"runtime-render"` lane. Every
+ * field is output-affecting and uniform across a single bundler build. It
+ * is REQUIRED for the render lane (the host fails closed when it is absent —
+ * it never substitutes production/client defaults).
+ */
+export interface CompileBatchRenderProfile {
+  isProduction: boolean;
+  ssr: boolean;
+  forceJs: boolean;
+  hmrStrategy: "none" | "vite" | "webpack";
 }
 
 export interface CompileBatchOptions {
@@ -145,12 +168,29 @@ export interface CompileBatchOptions {
    * unset. Defaults to "session" (the host default).
    */
   defaultMode?: CompileCacheMode;
+  /**
+   * The compile lane. `"host-backed"` (default) runs the full session
+   * wrapper; `"runtime-render"` runs the render-only bundler lane, which
+   * REQUIRES `compileProfile`.
+   */
+  target?: CompileManyTarget;
+  /**
+   * The batch-level render profile for the `"runtime-render"` lane.
+   * REQUIRED for that lane; ignored by `"host-backed"`.
+   */
+  compileProfile?: CompileBatchRenderProfile;
 }
 
 export interface CompileBatchEntry {
   canonicalId: string;
   code: string;
   sourceMap?: string;
+  /**
+   * The compiled Main module language ("ts" / "js" / "jsx"), or undefined
+   * on an error/panic outcome. Bundler consumers (vite sub-request
+   * routing) read it.
+   */
+  lang?: string;
   /** All compilation errors for this file. Empty on success. */
   errors: string[];
   /**

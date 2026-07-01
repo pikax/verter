@@ -26,6 +26,82 @@ import { replaceImportMetaSsr, stripComponents } from "./core/ssr-transforms";
 
 export type { VerterPluginOptions, HmrStrategy, Options } from "./core/types";
 
+/** The compiled Main module the bundler ships for a `.vue` file. */
+interface RenderedMain {
+  code: string;
+  sourceMap?: string;
+  lang?: string;
+}
+
+/**
+ * Render a `.vue` file's runtime Main module through the render-only
+ * bundler lane (`host.compileMany([input], { target: "runtime-render" })`) —
+ * the single shared compile substrate. The batch render profile + per-input
+ * `componentId` are taken from the SAME `HostCompileProfile` the bundler
+ * would have passed to `getVirtualFile({ compileProfile })`, so the Main
+ * output is byte-identical to the previous path.
+ *
+ * A fatal compile surfaces as a thrown error (mirroring `getVirtualFile`'s
+ * throw). Non-fatal (warning-severity) diagnostics from the lane's
+ * soft-macro contract are forwarded to the bundler via `warn` (preserving
+ * code/message/source id); they never become build errors.
+ */
+function renderMainRuntime(
+  host: VerterHost,
+  canonicalId: string,
+  source: string,
+  profile: HostCompileProfile,
+  warn?: (w: { message: string; id?: string }) => void,
+): RenderedMain {
+  const [entry] = host.compileMany(
+    [
+      {
+        canonicalId,
+        source,
+        componentId: profile.componentId,
+      },
+    ],
+    {
+      target: "runtime-render",
+      compileProfile: {
+        // `HostCompileProfile` fields are optional; the render profile
+        // requires explicit booleans. Default to the same values the
+        // `CompileProfile` default / FFI conversion applies for an absent
+        // field (`false`), so a caller that omitted a field renders exactly
+        // as `getVirtualFile` would have.
+        isProduction: profile.isProduction ?? false,
+        ssr: profile.ssr ?? false,
+        forceJs: profile.forceJs ?? false,
+        // `HostCompileProfile.hmrStrategy` is already "none" | "vite" |
+        // "webpack"; map it faithfully (default "none").
+        hmrStrategy: profile.hmrStrategy ?? "none",
+      },
+    },
+  );
+
+  // Fatal errors abort exactly like `getVirtualFile` did (fail-closed).
+  if (entry.errors.length > 0) {
+    throw new Error(`[verter] ${canonicalId}: ${entry.errors.join("; ")}`);
+  }
+
+  // Forward soft (warning-severity) diagnostics as bundler warnings.
+  if (warn) {
+    for (const d of entry.diagnostics) {
+      warn({ message: `[verter] ${d.code}: ${d.message}`, id: canonicalId });
+    }
+  } else {
+    for (const d of entry.diagnostics) {
+      console.warn(`[verter] ${d.code}: ${d.message} (${canonicalId})`);
+    }
+  }
+
+  return {
+    code: entry.code,
+    sourceMap: entry.sourceMap ?? undefined,
+    lang: entry.lang ?? undefined,
+  };
+}
+
 /** Normalize Windows backslashes to forward slashes for the workspace API. */
 function normalizePath(p: string): string {
   return p.replace(/\\/g, "/");
@@ -480,10 +556,15 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
           opts.customBlocks,
         );
 
-        const main = host.getVirtualFile({
-          rawId: filename,
-          compileProfile: profile,
-        });
+        const main = renderMainRuntime(
+          host,
+          filename,
+          source,
+          profile,
+          typeof (this as { warn?: unknown })?.warn === "function"
+            ? (this as unknown as { warn: (w: { message: string }) => void }).warn.bind(this)
+            : undefined,
+        );
 
         if (viteConfig) {
           scriptCache.set(filename, {
@@ -658,11 +739,22 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
       );
       const t2 = timing ? performance.now() : 0;
 
-      // Get the main module from the host (assembled in Rust)
-      const main = host.getVirtualFile({
-        rawId: filename,
-        compileProfile: profile,
-      });
+      // Render the main module through the render-only bundler lane
+      // (`compileMany(RuntimeRender)`) — the single shared substrate, no
+      // parallel render API. The batch render profile + per-input
+      // componentId reproduce EXACTLY the `getVirtualFile({ compileProfile })`
+      // values this transform used before, so the Main output is
+      // byte-identical. Soft (warning-severity) diagnostics are forwarded as
+      // bundler warnings below.
+      const main = renderMainRuntime(
+        host,
+        filename,
+        code,
+        profile,
+        typeof (this as { warn?: unknown })?.warn === "function"
+          ? (this as unknown as { warn: (w: { message: string }) => void }).warn.bind(this)
+          : undefined,
+      );
       const t3 = timing ? performance.now() : 0;
 
       if (timing) {

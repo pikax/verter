@@ -2250,6 +2250,7 @@ impl NapiVerterHost {
                 canonicalId: e.canonical_id,
                 code: e.code.to_string(),
                 sourceMap: e.source_map.map(|s| s.to_string()),
+                lang: e.lang,
                 errors: e.errors,
                 diagnostics: e
                     .diagnostics
@@ -2990,6 +2991,10 @@ pub struct NapiCompileBatchEntry {
     pub canonicalId: String,
     pub code: String,
     pub sourceMap: Option<String>,
+    /// The compiled `Main` module language ("ts" / "js" / "jsx"), or
+    /// `None` on an error/panic outcome. Bundler consumers (vite
+    /// sub-request routing) read it.
+    pub lang: Option<String>,
     /// All compilation errors for this file. Empty on success.
     pub errors: Vec<String>,
     /// Non-fatal WARNING-severity diagnostics surfaced on a SUCCESSFUL

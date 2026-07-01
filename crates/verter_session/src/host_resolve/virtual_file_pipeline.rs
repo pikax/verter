@@ -33,6 +33,10 @@ use verter_compiler::framework_common::{
 pub(crate) struct RenderOnlyMain {
     pub(crate) code: Arc<str>,
     pub(crate) source_map: Option<Arc<str>>,
+    /// The `Main` module language (`"ts"` / `"js"` / `"jsx"`), derived
+    /// identically to the HostBacked `get_virtual_file` `Main` node so the
+    /// bundler consumer (vite sub-request routing) sees the same value.
+    pub(crate) lang: Option<String>,
     pub(crate) diagnostics: Vec<HostDiagnostic>,
 }
 
@@ -3105,10 +3109,26 @@ impl VerterHost {
         } else {
             Some(Arc::from(compiled.main.source_map.clone()))
         };
+        // The `Main` language, derived IDENTICALLY to the HostBacked
+        // `Main`-node path so the bundler consumer routes sub-requests the
+        // same way.
+        let main_lang = compiled.main.lang.clone().unwrap_or_else(|| {
+            if profile.force_js {
+                "js".to_string()
+            } else {
+                snapshot
+                    .meta
+                    .script_lang
+                    .as_deref()
+                    .unwrap_or("js")
+                    .to_string()
+            }
+        });
 
         Ok(RenderOnlyMain {
             code: Arc::from(main_code),
             source_map: main_source_map,
+            lang: Some(main_lang),
             diagnostics: soft_warnings,
         })
     }

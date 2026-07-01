@@ -117,6 +117,10 @@ pub struct CompileBatchEntry {
     pub canonical_id: String,
     pub code: Arc<str>,
     pub source_map: Option<Arc<str>>,
+    /// The compiled `Main` module language (`"ts"` / `"js"` / `"jsx"`),
+    /// derived identically across both lanes. `None` on an error/panic
+    /// outcome. Bundler consumers (vite sub-request routing) read it.
+    pub lang: Option<String>,
     pub errors: Vec<String>,
     /// Non-fatal WARNING-severity diagnostics surfaced on a SUCCESSFUL
     /// compile, kept separate from the fatal `errors`. Populated by the
@@ -446,6 +450,7 @@ impl VerterHost {
                         canonical_id: input.canonical_id.clone(),
                         code: Arc::from(""),
                         source_map: None,
+                        lang: None,
                         errors: vec![err.clone()],
                         diagnostics: Vec::new(),
                         duration_ms: 0.0,
@@ -559,6 +564,7 @@ impl VerterHost {
                 canonical_id: input.canonical_id.clone(),
                 code: Arc::from(""),
                 source_map: None,
+                lang: None,
                 errors: vec![err],
                 diagnostics: Vec::new(),
                 duration_ms: start.elapsed().as_secs_f64() * 1000.0,
@@ -624,6 +630,7 @@ impl VerterHost {
                     canonical_id: input.canonical_id.clone(),
                     code: response.code,
                     source_map: response.source_map,
+                    lang: response.lang,
                     errors,
                     // HostBacked never softens a diagnostic to a warning
                     // here — its warnings ride in the response diagnostics
@@ -667,6 +674,7 @@ impl VerterHost {
                     canonical_id: input.canonical_id.clone(),
                     code: Arc::from(""),
                     source_map: None,
+                    lang: None,
                     errors,
                     diagnostics: Vec::new(),
                     duration_ms,
@@ -680,6 +688,7 @@ impl VerterHost {
                 canonical_id: input.canonical_id.clone(),
                 code: Arc::from(""),
                 source_map: None,
+                lang: None,
                 errors: vec![format!("{id_prefix}host error: {host_err}")],
                 diagnostics: Vec::new(),
                 duration_ms,
@@ -708,6 +717,7 @@ impl VerterHost {
                 canonical_id: input.canonical_id.clone(),
                 code: render.code,
                 source_map: render.source_map,
+                lang: render.lang,
                 errors: Vec::new(),
                 diagnostics: render.diagnostics,
                 duration_ms: start.elapsed().as_secs_f64() * 1000.0,
@@ -735,6 +745,7 @@ impl VerterHost {
                     canonical_id: input.canonical_id.clone(),
                     code: Arc::from(""),
                     source_map: None,
+                    lang: None,
                     errors,
                     diagnostics: Vec::new(),
                     duration_ms: start.elapsed().as_secs_f64() * 1000.0,
@@ -748,6 +759,7 @@ impl VerterHost {
                 canonical_id: input.canonical_id.clone(),
                 code: Arc::from(""),
                 source_map: None,
+                lang: None,
                 errors: vec![format!("{id_prefix}host error: {host_err}")],
                 diagnostics: Vec::new(),
                 duration_ms: start.elapsed().as_secs_f64() * 1000.0,
@@ -776,6 +788,7 @@ fn compile_panic_entry(
         canonical_id: input.canonical_id.clone(),
         code: Arc::from(""),
         source_map: None,
+        lang: None,
         errors: vec![format!(
             "[{}] compiler panic: {}",
             input.canonical_id, message
