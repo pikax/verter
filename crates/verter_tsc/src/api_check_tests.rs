@@ -23,6 +23,14 @@ fn lookup_of(files: &[OverlayFile]) -> HashMap<String, &OverlayFile> {
     files.iter().map(|f| (norm_key(&f.path), f)).collect()
 }
 
+/// A `NativeFs` for tests that need one to satisfy `map_one`'s disk-read arg. The
+/// unit tests here exercise overlay-carrier + global cases (no real-disk read),
+/// so an empty-project FS is sufficient; the real-disk non-root read path is
+/// covered end-to-end by the Rail B parity oracle.
+fn empty_disk() -> NativeFs {
+    NativeFs::new()
+}
+
 #[test]
 fn passthrough_stub_keeps_file_and_converts_offset() {
     let stub = OverlayFile {
@@ -43,7 +51,7 @@ fn passthrough_stub_keeps_file_and_converts_offset() {
         "/proj/Foo_00ab.vue.ts",
     );
 
-    let mapped = map_one(&d, "/proj/Foo_00ab.vue.ts", &lookup).expect("stub diag maps");
+    let mapped = map_one(&d, &lookup, &empty_disk()).expect("stub diag maps");
     assert_eq!(mapped.file, "/proj/Foo_00ab.vue.ts");
     assert_eq!(mapped.line, 1);
     assert_eq!(mapped.col, pos + 1);
@@ -70,9 +78,9 @@ fn suggestion_and_message_categories_are_dropped() {
         6,
         "/proj/Foo.vue.ts",
     );
-    assert!(map_one(&sug, "/proj/Foo.vue.ts", &lookup).is_none());
+    assert!(map_one(&sug, &lookup, &empty_disk()).is_none());
     let msg = api_diag(4114, 3, "some message", 6, "/proj/Foo.vue.ts");
-    assert!(map_one(&msg, "/proj/Foo.vue.ts", &lookup).is_none());
+    assert!(map_one(&msg, &lookup, &empty_disk()).is_none());
 }
 
 #[test]
@@ -92,7 +100,7 @@ fn warning_category_maps_to_warning_severity() {
         6,
         "/proj/Foo.vue.ts",
     );
-    let mapped = map_one(&warn, "/proj/Foo.vue.ts", &lookup).expect("warning maps");
+    let mapped = map_one(&warn, &lookup, &empty_disk()).expect("warning maps");
     assert!(matches!(mapped.severity, Severity::Warning));
 }
 
@@ -115,7 +123,7 @@ fn vue_jsx_type_gap_children_is_suppressed() {
         "/proj/Foo.tsx",
     );
     assert!(
-        map_one(&gap, "/proj/Foo.tsx", &lookup).is_none(),
+        map_one(&gap, &lookup, &empty_disk()).is_none(),
         "the children/HTMLAttributes gap must be suppressed"
     );
 }
@@ -141,7 +149,7 @@ fn sourcemapped_carrier_without_map_falls_back_to_vue_at_one_one() {
         10,
         "/proj/Foo_dead.tsx",
     );
-    let mapped = map_one(&d, "/proj/Foo_dead.tsx", &lookup).expect("maps with fallback");
+    let mapped = map_one(&d, &lookup, &empty_disk()).expect("maps with fallback");
     assert_eq!(mapped.file, "/proj/src/Foo.vue");
     assert_eq!(mapped.line, 1);
     assert_eq!(mapped.col, 1);
@@ -149,39 +157,36 @@ fn sourcemapped_carrier_without_map_falls_back_to_vue_at_one_one() {
 }
 
 #[test]
-fn omitted_file_name_is_read_as_the_queried_root() {
-    // A per-file getter may omit the (redundant) `file_name`; map_one reads the
-    // diagnostic AS the queried root in that case.
-    let stub = OverlayFile {
-        path: "/proj/Foo.vue.ts".to_string(),
-        content: "const x = 1;\n".to_string(),
-        remap: RemapKind::Passthrough,
-    };
-    let files = vec![stub];
+fn global_diagnostic_without_file_name_is_surfaced_not_dropped() {
+    // A global / compiler-options diagnostic carries no `file_name`. In
+    // whole-program mode it must be RETAINED (surfaced at a synthetic position),
+    // never dropped — a bad-`target` (TS6046) would otherwise vanish.
+    let files: Vec<OverlayFile> = vec![];
     let lookup = lookup_of(&files);
 
-    // file_name omitted ⇒ read as the queried root.
-    let mut d = api_diag(2304, 1, "Cannot find name.", 6, "/proj/Foo.vue.ts");
+    let mut d = api_diag(6046, 1, "Argument for '--target' option must be ...", 0, "");
     d.file_name = None;
-    let mapped = map_one(&d, "/proj/Foo.vue.ts", &lookup).expect("omitted file_name reads as root");
-    assert_eq!(mapped.file, "/proj/Foo.vue.ts");
+    let mapped =
+        map_one(&d, &lookup, &empty_disk()).expect("a global (no-file) diagnostic is surfaced");
+    assert_eq!(mapped.ts_code, 6046);
+    assert_eq!(mapped.file, "<compiler options>");
+    assert_eq!(mapped.line, 1);
+    assert_eq!(mapped.col, 1);
 }
 
 #[test]
-fn diagnostic_for_unknown_non_root_file_is_not_misattributed_to_queried_root() {
-    // ROOT-ATTRIBUTION INVARIANT (discriminating). The queried root is a
-    // SourceMapped `.vue` carrier; the engine reports a diagnostic whose
-    // `file_name` is a DIFFERENT file we did NOT generate a carrier for (an
-    // imported `.ts`, a `node_modules` file, a global/options diagnostic). map_one
-    // must DROP it — never re-home it onto the queried root (which would both
-    // misattribute the file AND remap the unrelated file's UTF-16 offset through
-    // the WRONG carrier's source map).
+fn non_root_real_file_diagnostic_is_surfaced_under_its_own_path_not_a_carrier() {
+    // WHOLE-PROGRAM ATTRIBUTION (discriminating). A SourceMapped `.vue` carrier is
+    // in the overlay; the engine reports a diagnostic whose `file_name` is a
+    // DIFFERENT, real, non-root imported `.ts` we did NOT generate a carrier for.
+    // In whole-program mode it MUST be surfaced under its OWN path (a passthrough),
+    // NEVER re-homed onto the carrier (which would remap the unrelated file's
+    // UTF-16 offset through the WRONG carrier's source map).
     //
-    // RED before the fix: the old `.or_else(lookup.get(queried_root))` fallback
-    // re-homed the unknown-file diagnostic onto the root carrier ⇒ `map_one`
-    // returned `Some(diagnostic @ /proj/src/Foo.vue)` and this `.is_none()`
-    // assertion FAILED. GREEN after: the fallback is removed, so the unknown file
-    // resolves to no carrier ⇒ `None`.
+    // RED before the whole-program change: `map_one` DROPPED a present-but-unknown
+    // `file_name` (the old root-attribution invariant), so this returned `None`
+    // and the non-root error vanished — exactly the rootscope gap. GREEN after:
+    // the diagnostic is surfaced at its own path.
     let tsx = OverlayFile {
         path: "/proj/Foo_ab12.tsx".to_string(),
         content: "const a: string = 1;\n".to_string(),
@@ -192,7 +197,8 @@ fn diagnostic_for_unknown_non_root_file_is_not_misattributed_to_queried_root() {
     let files = vec![tsx];
     let lookup = lookup_of(&files);
 
-    // A present `file_name` that is NOT one of our overlay carriers.
+    // A present `file_name` that is NOT one of our overlay carriers (a real
+    // non-root imported `.ts`, not on disk in this unit test ⇒ (1,1) fallback).
     let d = api_diag(
         2322,
         1,
@@ -200,11 +206,17 @@ fn diagnostic_for_unknown_non_root_file_is_not_misattributed_to_queried_root() {
         6,
         "/proj/src/imported-types.ts",
     );
-    assert!(
-        map_one(&d, "/proj/Foo_ab12.tsx", &lookup).is_none(),
-        "a diagnostic for a non-overlay imported/global file must NOT be misattributed to the \
-         queried root — it must be dropped (root-attribution invariant)"
+    let mapped = map_one(&d, &lookup, &empty_disk())
+        .expect("a real non-root file diagnostic is surfaced (whole-program), not dropped");
+    assert_eq!(
+        mapped.file, "/proj/src/imported-types.ts",
+        "the non-root diagnostic is homed on its OWN path, never re-attributed to the carrier"
     );
+    assert_ne!(
+        mapped.file, "/proj/src/Foo.vue",
+        "it must NOT be re-homed onto the carrier's .vue source"
+    );
+    assert_eq!(mapped.ts_code, 2322);
 }
 
 // ── Offset-conversion regression coverage ────────────────────────────────────
@@ -255,4 +267,97 @@ fn shared_offset_conversion_supplementary_pair_and_clamp() {
     // A supplementary-plane char is 2 UTF-16 units; a past-end offset clamps.
     assert_eq!(api_offset_to_line_col("\u{10437}x", 2), (1, 3)); // 'x' after the pair
     assert_eq!(api_offset_to_line_col("abc", 999), (1, 4)); // past-end → final col
+}
+
+// ── Whole-program config-diagnostic filtering (FAIL-CLOSED invariant) ─────────
+//
+// The whole-program path applies `strip_injected_root_diagnostics` to the
+// config-parse stream with the injected-companion set (the generated carriers +
+// the synthetic tsconfig). The FAIL-CLOSED invariant: ONLY a diagnostic whose
+// `file_name` is a KNOWN injected companion may be dropped; a real user-config
+// error, a real non-root file diagnostic, and a `fileName:None` global/options
+// diagnostic are ALL retained (never silently dropped). This pins that verter-tsc
+// passes the right injected set and never over-filters.
+
+#[test]
+fn config_filtering_drops_only_injected_companions_and_retains_real_and_global() {
+    let injected_tsx = "/proj/Foo_ab12.vue.tsx".to_string();
+    let injected_stub = "/proj/Foo_ab12.vue.ts".to_string();
+    let synthetic_tsconfig = "/proj/verter-tsc-check.tsconfig.json".to_string();
+    let injected_paths = vec![
+        injected_tsx.clone(),
+        injected_stub.clone(),
+        synthetic_tsconfig.clone(),
+    ];
+
+    // A config diagnostic pointing at an injected companion (a virtualization
+    // artifact) — MUST be dropped.
+    let on_injected_tsx = api_diag(6059, 1, "File is not under 'rootDir'", 0, &injected_tsx);
+    // A config diagnostic pointing at the synthetic tsconfig itself — dropped.
+    let on_synthetic_config = api_diag(
+        18003,
+        1,
+        "No inputs were found in config file",
+        0,
+        &synthetic_tsconfig,
+    );
+    // A REAL user-config error (points at the user's own tsconfig) — RETAINED.
+    let real_user_config = api_diag(
+        5024,
+        1,
+        "Compiler option requires a value",
+        0,
+        "/proj/tsconfig.json",
+    );
+    // A REAL non-root source diagnostic — RETAINED.
+    let real_source = api_diag(2322, 1, "not assignable", 0, "/proj/src/types.ts");
+    // A GLOBAL options diagnostic (no fileName) — RETAINED.
+    let mut global_opt = api_diag(6046, 1, "Argument for '--target' option", 0, "");
+    global_opt.file_name = None;
+
+    let filtered = strip_injected_root_diagnostics(
+        vec![
+            on_injected_tsx.clone(),
+            on_synthetic_config.clone(),
+            real_user_config.clone(),
+            real_source.clone(),
+            global_opt.clone(),
+        ],
+        &injected_paths,
+    );
+
+    // The two injected-companion config diagnostics are GONE.
+    assert!(
+        !filtered
+            .iter()
+            .any(|d| d.file_name.as_deref() == Some(injected_tsx.as_str())),
+        "a config diagnostic on an injected carrier must be dropped: {filtered:?}"
+    );
+    assert!(
+        !filtered
+            .iter()
+            .any(|d| d.file_name.as_deref() == Some(synthetic_tsconfig.as_str())),
+        "a config diagnostic on the synthetic tsconfig must be dropped: {filtered:?}"
+    );
+    // The real user-config error, real source diagnostic, and global diagnostic
+    // are ALL retained (fail-closed: never silently drop a real/global diagnostic).
+    assert!(
+        filtered.contains(&real_user_config),
+        "a real user-config error MUST survive: {filtered:?}"
+    );
+    assert!(
+        filtered.contains(&real_source),
+        "a real non-root source diagnostic MUST survive: {filtered:?}"
+    );
+    assert!(
+        filtered
+            .iter()
+            .any(|d| d.file_name.is_none() && d.code == 6046),
+        "a global (fileName:None) options diagnostic MUST survive: {filtered:?}"
+    );
+    assert_eq!(
+        filtered.len(),
+        3,
+        "exactly the two injected-companion diagnostics are removed, nothing else"
+    );
 }

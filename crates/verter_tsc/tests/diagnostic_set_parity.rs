@@ -64,11 +64,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 // ── Pinned expected diagnostic MULTISET (sorted) ────────────────────────
-// Captured from the current `verter-tsc` Full-mode run over
+// Captured from the current `verter-tsc` run over
 // `crates/verter_tsc/tests/fixtures/diagnostics/`. Tuple =
 // `(fixture_relative_path, line, col, ts_code, count, stable_message_substring)`.
-// `count` pins multiplicity (raw total = 70; two keys repeat:
+// `count` pins multiplicity (raw total = 71; two keys repeat:
 // `src/DirectiveErrors.vue(1,1) TS7006` x3, `src/GenericComp.vue(1,1) TS6196` x2).
+// The 71st is the whole-program non-root diagnostic in `src/nonRootBad.ts` (the
+// old per-root loop dropped it; the whole-program call surfaces it).
 // Regenerate ONLY when the pinned pipeline output legitimately changes (a later
 // perf block must prove this multiset is identical, or consciously re-pin it).
 #[rustfmt::skip]
@@ -145,6 +147,13 @@ const EXPECTED: &[(&str, u32, u32, u32, usize, &str)] = &[
     // (vue-version-volatile), so pin only the fixture-stable assignable-FROM type.
     ("src/WithDefaultsErrors.vue", 11, 1, 2322, 1, "'string' is not assignable to type"),
     ("src/WithDefaultsErrors.vue", 12, 1, 2322, 1, "'number' is not assignable to type"),
+    // WHOLE-PROGRAM (non-root) diagnostic: `NonRootImport.vue` imports a clean
+    // symbol from `src/nonRootBad.ts`, which ALSO carries a real TS2322. This file
+    // is NOT a synthetic-tsconfig root (it enters the program only transitively),
+    // so the old per-root loop NEVER queried it and the error was dropped; the
+    // whole-program semantic call surfaces it, homed on its OWN path at (8,14).
+    // This tuple is a real ADDITION (the corpus grows to 71), not a relaxation.
+    ("src/nonRootBad.ts", 8, 14, 2322, 1, "'string' is not assignable to type 'number'"),
 ];
 
 /// Verter-tsc's expected exit code when the project has diagnostics. The binary
@@ -162,6 +171,10 @@ const CLEAN_SFCS: &[&str] = &[
     "src/GenericList.vue",
     "src/StatusBadge.vue",
     "src/types.ts",
+    // NonRootImport.vue is itself clean — its only role is to pull the erroring
+    // non-root `nonRootBad.ts` into the program. Asserting it clean guards against
+    // the whole-program error being mis-homed onto the importing SFC.
+    "src/NonRootImport.vue",
 ];
 
 // ── Diagnostic parsing (mirrors diagnostics.rs:34 `parse_diag_line`) ─────

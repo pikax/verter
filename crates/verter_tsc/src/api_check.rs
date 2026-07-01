@@ -32,7 +32,9 @@ use verter_tsgo_api::proto::types::{Diagnostic as ApiDiagnostic, UpdateSnapshotP
 use verter_tsgo_api::snapshot::{AccessibleEntries, RealDirSource};
 use verter_tsgo_api::TsgoClient;
 use verter_workspace::native_fs::NativeFs;
-use verter_workspace::tsgo_virtual_config::build_virtual_overlay_snapshot;
+use verter_workspace::tsgo_virtual_config::{
+    build_virtual_overlay_snapshot, strip_injected_root_diagnostics,
+};
 
 use crate::error_map::map_tsc_position;
 use crate::reporter::{Diagnostic, Severity};
@@ -133,6 +135,19 @@ pub fn typecheck(inputs: TypecheckInputs<'_>) -> Result<Vec<Diagnostic>, Typeche
         .map(|f| (f.path.clone(), f.content.clone()))
         .collect();
 
+    // The injected-companion paths (the generated carriers + the synthetic
+    // tsconfig itself) — the set a config-parse diagnostic may reference purely as
+    // a virtualization artifact. Config diagnostics pointing at these are stripped
+    // (invisible to the user); real user-config errors and global (fileName:None)
+    // diagnostics survive.
+    let mut injected_paths: Vec<String> = files.iter().map(|f| f.path.clone()).collect();
+    injected_paths.push(tsconfig_path.clone());
+
+    // Read real, non-overlay project files (imported `.ts`, etc.) from disk so a
+    // whole-program diagnostic on a NON-root file can be positioned by its own
+    // content — the same NativeFs boundary the RealDirSource uses.
+    let disk = NativeFs::new();
+
     let real: Arc<dyn RealDirSource> = Arc::new(FsRealDirSource::new());
     let snapshot =
         build_virtual_overlay_snapshot(&tsconfig_path, &tsconfig_bytes, &companions, real);
@@ -161,19 +176,29 @@ pub fn typecheck(inputs: TypecheckInputs<'_>) -> Result<Vec<Diagnostic>, Typeche
             }
         };
         // Always close the client, then surface the collected result (Ok or Err).
-        let result = collect_diagnostics(&client, &tsconfig_path, &lookup).await;
+        let result =
+            collect_diagnostics(&client, &tsconfig_path, &lookup, &injected_paths, &disk).await;
         let _ = client.close().await;
         result
     })
 }
 
-/// Drive the engine: initialize, open the configured project, then enumerate and
-/// query EVERY `root_file` (TSX + stubs + ambient `.d.ts`) for semantic +
-/// syntactic diagnostics.
+/// Drive the engine: initialize, open the configured project, then collect the
+/// WHOLE-PROGRAM diagnostics — one file-omitted semantic call + one file-omitted
+/// syntactic call (which cover every program file, INCLUDING non-root imported
+/// `.ts` the old per-root loop never queried) PLUS the config-file-parsing
+/// diagnostics (options/global, not covered by the per-file getters). This is
+/// whole-program parity with the old `tsgo --project --noEmit` path.
+///
+/// Fail-closed: any protocol failure on any call is a HARD error (never an
+/// eprintln-and-continue) — silently dropping diagnostics is exactly the
+/// quiet-failure this path bans.
 async fn collect_diagnostics(
     client: &TsgoClient,
     tsconfig_path: &str,
     lookup: &HashMap<String, &OverlayFile>,
+    injected_paths: &[String],
+    disk: &NativeFs,
 ) -> Result<Vec<Diagnostic>, TypecheckError> {
     if let Err(e) = client.initialize().await {
         return Err(TypecheckError::new(format!(
@@ -195,7 +220,7 @@ async fn collect_diagnostics(
     };
 
     // Select the CONFIGURED project for our virtual tsconfig (never an inferred
-    // single-file fallback) — its `root_files` is the membership oracle.
+    // single-file fallback).
     let project = match snap
         .projects
         .iter()
@@ -209,80 +234,91 @@ async fn collect_diagnostics(
         }
     };
 
+    // ONE whole-program semantic call + ONE whole-program syntactic call: the
+    // `file` argument is omitted, so the engine returns diagnostics for EVERY file
+    // in the program (root carriers AND non-root imported sources).
+    let semantic = client
+        .get_semantic_diagnostics_for_program(&snap.snapshot, &project.id)
+        .await
+        .map_err(|e| {
+            TypecheckError::new(format!(
+                "verter-tsc: tsgo --api getSemanticDiagnostics (whole program): {e}"
+            ))
+        })?;
+    let syntactic = client
+        .get_syntactic_diagnostics_for_program(&snap.snapshot, &project.id)
+        .await
+        .map_err(|e| {
+            TypecheckError::new(format!(
+                "verter-tsc: tsgo --api getSyntacticDiagnostics (whole program): {e}"
+            ))
+        })?;
+
+    // Config-file parse / compiler-options diagnostics (options/global — NOT
+    // covered by the two per-file getters). Strip only the diagnostics that point
+    // at an injected companion (a virtualization artifact); real user-config
+    // errors and global (fileName:None) diagnostics survive (fail-closed: only
+    // KNOWN injected companions are discarded).
+    let config = client
+        .get_config_file_parsing_diagnostics(&snap.snapshot, &project.id)
+        .await
+        .map_err(|e| {
+            TypecheckError::new(format!(
+                "verter-tsc: tsgo --api getConfigFileParsingDiagnostics: {e}"
+            ))
+        })?;
+    let config = strip_injected_root_diagnostics(config, injected_paths);
+
     let mut out = Vec::new();
-    // Enumerate ALL configured-project root files — TSX carriers AND the
-    // `.vue.ts` public-API stubs AND the ambient `.d.ts` shims — not just the
-    // `.vue`-derived TSX, or stub-carrier diagnostics drop. A per-root getter
-    // protocol failure is a HARD error (not an eprintln-and-continue): silently
-    // dropping a root's diagnostics is exactly the quiet-failure this path bans.
-    for root in &project.root_files {
-        match client
-            .get_semantic_diagnostics(&snap.snapshot, &project.id, root)
-            .await
-        {
-            Ok(diags) => push_mapped(&mut out, &diags, root, lookup),
-            Err(e) => {
-                return Err(TypecheckError::new(format!(
-                    "verter-tsc: tsgo --api getSemanticDiagnostics({root}): {e}"
-                )));
-            }
-        }
-        match client
-            .get_syntactic_diagnostics(&snap.snapshot, &project.id, root)
-            .await
-        {
-            Ok(diags) => push_mapped(&mut out, &diags, root, lookup),
-            Err(e) => {
-                return Err(TypecheckError::new(format!(
-                    "verter-tsc: tsgo --api getSyntacticDiagnostics({root}): {e}"
-                )));
-            }
-        }
-    }
+    push_mapped(&mut out, &semantic, lookup, disk);
+    push_mapped(&mut out, &syntactic, lookup, disk);
+    push_mapped(&mut out, &config, lookup, disk);
     Ok(out)
 }
 
 fn push_mapped(
     out: &mut Vec<Diagnostic>,
     diags: &[ApiDiagnostic],
-    queried_root: &str,
     lookup: &HashMap<String, &OverlayFile>,
+    disk: &NativeFs,
 ) {
     for d in diags {
-        if let Some(mapped) = map_one(d, queried_root, lookup) {
+        if let Some(mapped) = map_one(d, lookup, disk) {
             out.push(mapped);
         }
     }
 }
 
 /// Map a single `--api` diagnostic to a displayable [`Diagnostic`], or `None`
-/// when it is not an error/warning, is a known Vue-JSX type gap, or its file is
-/// not one of our known overlay carriers.
+/// when it is not an error/warning or is a known Vue-JSX type gap.
 ///
-/// ROOT-ATTRIBUTION INVARIANT: a mapped diagnostic is ONLY surfaced when its file
-/// resolves to a KNOWN overlay carrier — either the queried root itself (the
-/// common per-file-getter case: `file_name == queried_root`, or the engine
-/// omitted `file_name`, which we read AS the queried root) or another carrier we
-/// actually generated (looked up by its own `file_name`). A diagnostic whose
-/// `file_name` is PRESENT but resolves to no known carrier (an imported source we
-/// did not generate a carrier for, a `node_modules` file, a global/options
-/// diagnostic) is DROPPED — it is NEVER re-attributed to the queried root. The
-/// old temp-file `tsgo --project` path likewise surfaced such a diagnostic under
-/// its OWN file path (a passthrough), never under a carrier's; re-homing it onto
-/// the queried root here would ALSO remap an unrelated file's UTF-16 offset
-/// through the WRONG carrier's source map (double corruption). We cannot correctly
-/// re-position a file whose content is not in the overlay, so we drop rather than
-/// misattribute.
+/// WHOLE-PROGRAM ATTRIBUTION (fail-closed, never mis-mapped): every diagnostic is
+/// homed by its OWN `file_name`, exactly as the old whole-program `tsgo --project`
+/// path did. Three cases:
 ///
-/// NOTE (reported divergence, not fixed here): the `--api` path only QUERIES
-/// `project.root_files`, so a real diagnostic in a non-root imported file is never
-/// collected at all — whereas the old whole-program `tsgo --project` surfaced it.
-/// The parity corpus does not exercise this (its one imported `.ts`, `types.ts`,
-/// is clean); see the "PERF-3-offset"-adjacent note in `docs/arch/host-mode-perf-design.md`.
+///   1. `file_name` resolves to a KNOWN overlay carrier (a generated TSX / `.vue.ts`
+///      stub / ambient shim): map through that carrier — a `SourceMapped` carrier
+///      remaps its UTF-16 → (line,col) through the inline source map back to the
+///      `.vue` source; a `Passthrough` carrier keeps its own converted position.
+///   2. `file_name` is PRESENT but is NOT a carrier (a real non-root imported
+///      `.ts` the whole-program call surfaces): surface it as a PASSTHROUGH at its
+///      OWN path + converted position, reading the file's content from disk to
+///      position the UTF-16 offset. A non-root diagnostic is NEVER dropped and
+///      NEVER re-homed onto a carrier (that would remap through the wrong source
+///      map). When the disk content is unavailable, fall back to (1,1) on the
+///      file rather than dropping the error.
+///   3. `file_name` is ABSENT (a global / compiler-options diagnostic, e.g. a bad
+///      `target`): surface it at the project's own position `(1,1)` under a
+///      synthetic `<compiler options>` label — a global diagnostic is RETAINED,
+///      not dropped.
+///
+/// Injected-companion CONFIG noise is filtered UPSTREAM by
+/// `strip_injected_root_diagnostics` before this runs; here every remaining
+/// diagnostic is surfaced.
 fn map_one(
     d: &ApiDiagnostic,
-    queried_root: &str,
     lookup: &HashMap<String, &OverlayFile>,
+    disk: &NativeFs,
 ) -> Option<Diagnostic> {
     // Only error (1) + warning (0) reach tsc-style output. Suggestion (2) /
     // message (3) categories are never printed by `tsgo --project --noEmit`.
@@ -292,13 +328,6 @@ fn map_one(
         _ => return None,
     };
 
-    // A per-file getter reports `file_name == queried_root`; when the engine omits
-    // it, read it AS the queried root. But a PRESENT-yet-unknown `file_name` (an
-    // imported/global file with no overlay carrier) must NOT be re-homed onto the
-    // queried root — drop it (the root-attribution invariant), never fall back.
-    let file_name = d.file_name.as_deref().unwrap_or(queried_root);
-    let file = lookup.get(&norm_key(file_name))?;
-
     // Suppress the known Vue-JSX type gaps (children / textContent / innerHTML on
     // Vue intrinsic-element attribute types) the temp-file path also suppresses
     // (tsgo preview does not honor the cross-file HTMLAttributes augmentation).
@@ -306,21 +335,39 @@ fn map_one(
         return None;
     }
 
-    let (gen_line, gen_col) = api_offset_to_line_col(&file.content, d.pos);
-
-    let (file_out, line_out, col_out) = match &file.remap {
-        RemapKind::Passthrough => (slashed(file_name), gen_line, gen_col),
-        RemapKind::SourceMapped { vue_path } => {
-            match map_tsc_position(&file.content, gen_line, gen_col) {
-                Some((src_name, pos)) => (
-                    resolve_src_display(&src_name, vue_path),
-                    pos.line + 1,
-                    pos.col + 1,
-                ),
-                // No source-map mapping for this position: report at the .vue (1,1).
-                None => (slashed(vue_path), 1, 1),
+    let (file_out, line_out, col_out) = match d.file_name.as_deref() {
+        // Case 3: a global / compiler-options diagnostic (no file). Surface it at
+        // a synthetic position rather than dropping it.
+        None => ("<compiler options>".to_string(), 1, 1),
+        Some(file_name) => match lookup.get(&norm_key(file_name)) {
+            // Case 1: a known overlay carrier.
+            Some(file) => {
+                let (gen_line, gen_col) = api_offset_to_line_col(&file.content, d.pos);
+                match &file.remap {
+                    RemapKind::Passthrough => (slashed(file_name), gen_line, gen_col),
+                    RemapKind::SourceMapped { vue_path } => {
+                        match map_tsc_position(&file.content, gen_line, gen_col) {
+                            Some((src_name, pos)) => (
+                                resolve_src_display(&src_name, vue_path),
+                                pos.line + 1,
+                                pos.col + 1,
+                            ),
+                            // No source-map mapping for this position: report at the .vue (1,1).
+                            None => (slashed(vue_path), 1, 1),
+                        }
+                    }
+                }
             }
-        }
+            // Case 2: a real non-root file (imported `.ts`, etc.). Position it by
+            // its OWN disk content; fall back to (1,1) if unreadable (never drop).
+            None => {
+                let (line, col) = match disk.read_file(file_name) {
+                    Some(content) => api_offset_to_line_col(&content, d.pos),
+                    None => (1, 1),
+                };
+                (slashed(file_name), line, col)
+            }
+        },
     };
 
     Some(Diagnostic {
