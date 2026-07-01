@@ -2433,6 +2433,89 @@ async fn test_provider_operations_fail_after_process_death() {
     assert!(diags.unwrap().is_empty(), "no cached diagnostics expected");
 }
 
+/// DISCRIMINATING (contents-cache false-miss across path forms): `load_file`
+/// writes the `contents` cache under one path form; `cached_content` (read
+/// cross-surface by the OWNED `--api` diagnostics route with the engine's own
+/// `root_files` form) reads it. Before the fix, the insert used the raw
+/// `path.to_string()` and `cached_content` did an exact `.get(path)`, so a lookup
+/// that differed only in separators / drive-letter case (`C:\…` vs `c:/…`) — the
+/// exact Windows engine-vs-didOpen divergence — was a FALSE miss returning `None`.
+///
+/// RED before the fix: exact-string insert (`C:\Ws\Src\A.ts`) vs exact-string
+/// lookup (`c:/Ws/Src/A.ts`) miss → `None`. GREEN after: both route through the
+/// shared `canonicalize_path` contents key (which slash-normalizes and lowercases
+/// the drive letter on EVERY host), so the two forms agree and the content is
+/// found. `load_file` is a pure cache write (no transport), so a dead short-lived
+/// process suffices — the map, not the engine, is under test.
+#[tokio::test]
+async fn cached_content_resolves_equivalent_path_forms_after_load_file() {
+    let (mut child, stdin, stdout) = spawn_short_lived_process().await;
+    let _ = child.wait().await;
+
+    let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    let (stdin_tx, stdin_rx) = mpsc::channel::<StdinMessage>(16);
+    tokio::spawn(stdin_writer_loop_single(stdin, stdin_rx));
+    let transport = Arc::new(test_transport_with_pending(
+        stdin_tx.clone(),
+        Arc::clone(&pending),
+    ));
+    let diagnostics_cache: Arc<Mutex<HashMap<String, Vec<TypeDiagnostic>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    let contents_cache: Arc<Mutex<HashMap<String, Arc<str>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    tokio::spawn(read_loop(
+        stdout,
+        Arc::clone(&pending),
+        Arc::clone(&diagnostics_cache),
+        Arc::clone(&contents_cache),
+        stdin_tx,
+        None,
+    ));
+    let provider = TsgoTypeProvider {
+        transport,
+        child,
+        versions: Arc::new(Mutex::new(HashMap::new())),
+        contents: Arc::clone(&contents_cache),
+        diagnostics_cache,
+    };
+
+    // Insert under a mixed-case, backslash-separated Windows-style path.
+    let insert_form = r"C:\Ws\Src\A.ts";
+    let body = "export const x: number = 1;\n";
+    provider
+        .load_file(insert_form, body)
+        .await
+        .expect("load_file caches content");
+
+    // Query with an equivalent form differing in separators + drive-letter case
+    // (same segment case, which is all `canonicalize_path` folds). This is the
+    // engine-reported `root_files` shape the OWNED `--api` route passes.
+    let equivalent_form = "c:/Ws/Src/A.ts";
+    assert_ne!(
+        insert_form, equivalent_form,
+        "the two path forms must be textually distinct for the miss to be exercised"
+    );
+    let hit = provider.cached_content(equivalent_form).await;
+    assert!(
+        hit.is_some(),
+        "cached_content must resolve an equivalent path form (a raw-string exact \
+         .get miss is the bug this test forbids)"
+    );
+    assert_eq!(
+        hit.as_deref(),
+        Some(body),
+        "the resolved content must be exactly what load_file cached"
+    );
+
+    // Slash-normalization equivalence alone (same case, only separators differ) —
+    // the minimal cross-platform guarantee.
+    assert!(
+        provider.cached_content("C:/Ws/Src/A.ts").await.is_some(),
+        "a forward-slash form of the same path must also resolve"
+    );
+}
+
 #[test]
 fn test_collect_npm_cache_roots_uses_env_then_npm_then_default() {
     let roots = collect_npm_cache_roots(

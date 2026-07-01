@@ -1057,6 +1057,21 @@ fn normalize_file_uri(uri: &str) -> String {
     normalize_file_uri_for_cache(uri)
 }
 
+/// The single key convention for the `contents` cache.
+///
+/// The cache is keyed by canonical filesystem path so every producer/consumer of
+/// a carrier's content agrees on identity: the file-lifecycle inserts, the
+/// position-mapping reads, `cached_content` (read cross-surface by the OWNED
+/// `--api` diagnostics route with the engine's own `root_files` form), and the
+/// edit-target snapshot scanners in [`crate::contents_snapshot`] (which key by
+/// this same `canonicalize_path`). A raw-string insert paired with a differently
+/// slashed / drive-cased lookup (e.g. the engine echoes `c:/…` while a didOpen
+/// used `C:\…`) is a FALSE miss that would strand a carrier's content; routing
+/// every access through this helper makes the insert and lookup forms agree.
+fn contents_key(path: &str) -> String {
+    verter_span::path::canonicalize_path(path)
+}
+
 /// Parse an LSP CompletionItem JSON value into a `Completion`.
 fn parse_completion_item(item: &serde_json::Value, content: Option<&str>) -> Option<Completion> {
     let label = item.get("label")?.as_str()?.to_string();
@@ -1550,7 +1565,7 @@ impl TsgoTypeProvider {
     /// conversion, so the dual-surface OWNED provider reads it back through here
     /// rather than re-tracking a second copy.
     pub async fn cached_content(&self, path: &str) -> Option<Arc<str>> {
-        self.contents.lock().await.get(path).cloned()
+        self.contents.lock().await.get(&contents_key(path)).cloned()
     }
 
     /// Convert a file path to a `file://` URI.
@@ -1593,7 +1608,7 @@ impl TsgoTypeProvider {
                     contents_cache
                         .lock()
                         .await
-                        .insert(path_owned.clone(), Arc::from(content.as_str()));
+                        .insert(contents_key(&path_owned), Arc::from(content.as_str()));
                     versions.lock().await.insert(path_owned, 1);
                     transport
                         .notify_with_priority(
@@ -1641,7 +1656,7 @@ impl TsgoTypeProvider {
             contents_cache
                 .lock()
                 .await
-                .insert(path_owned.clone(), Arc::from(content.as_str()));
+                .insert(contents_key(&path_owned), Arc::from(content.as_str()));
 
             let mut vers = versions.lock().await;
             if let Some(v) = vers.get_mut(&path_owned) {
@@ -1691,7 +1706,10 @@ impl TsgoTypeProvider {
         let versions = Arc::clone(&self.versions);
         let contents_cache = Arc::clone(&self.contents);
         Box::pin(async move {
-            contents_cache.lock().await.remove(&path_owned);
+            contents_cache
+                .lock()
+                .await
+                .remove(&contents_key(&path_owned));
             versions.lock().await.remove(&path_owned);
             transport
                 .notify_with_priority(
@@ -1941,7 +1959,7 @@ impl TypeProvider for TsgoTypeProvider {
                     contents_cache
                         .lock()
                         .await
-                        .insert(path_owned.clone(), Arc::from(content.as_str()));
+                        .insert(contents_key(&path_owned), Arc::from(content.as_str()));
                     // Mark as opened with version 1
                     versions.lock().await.insert(path_owned, 1);
                     transport
@@ -1987,7 +2005,7 @@ impl TypeProvider for TsgoTypeProvider {
                     contents_cache
                         .lock()
                         .await
-                        .insert(path_owned, content_owned.into());
+                        .insert(contents_key(&path_owned), content_owned.into());
                     crate::type_runtime_trace_event!(
                         "tsgo_load_file_result",
                         "cached_only=true".to_string()
@@ -2020,7 +2038,7 @@ impl TypeProvider for TsgoTypeProvider {
             contents_cache
                 .lock()
                 .await
-                .insert(path_owned.clone(), Arc::from(content.as_str()));
+                .insert(contents_key(&path_owned), Arc::from(content.as_str()));
 
             let mut vers = versions.lock().await;
             if let Some(v) = vers.get_mut(&path_owned) {
@@ -2087,7 +2105,10 @@ impl TypeProvider for TsgoTypeProvider {
                 "tsgo_close_file",
                 format!("path={} uri={}", path_owned, uri),
                 async {
-                    contents_cache.lock().await.remove(&path_owned);
+                    contents_cache
+                        .lock()
+                        .await
+                        .remove(&contents_key(&path_owned));
                     versions.lock().await.remove(&path_owned);
                     transport
                         .notify(
@@ -2128,7 +2149,7 @@ impl TypeProvider for TsgoTypeProvider {
         Box::pin(async move {
             let (line, character, content_snapshot) = {
                 let cache = contents_cache.lock().await;
-                match cache.get(&path_owned) {
+                match cache.get(&contents_key(&path_owned)) {
                     Some(c) => {
                         let (l, ch) = offset_to_position(c, offset);
                         (l, ch, Some(c.clone()))
@@ -2354,7 +2375,7 @@ impl TypeProvider for TsgoTypeProvider {
         Box::pin(async move {
             let (line, character, cache_hit) = {
                 let cache = contents_cache.lock().await;
-                match cache.get(&path_owned) {
+                match cache.get(&contents_key(&path_owned)) {
                     Some(c) => {
                         let (line, character) = offset_to_position(c, offset);
                         (line, character, true)
@@ -2482,7 +2503,7 @@ impl TypeProvider for TsgoTypeProvider {
                 Ok(val) => {
                     let content = {
                         let cache = contents_cache.lock().await;
-                        cache.get(&path_owned).cloned()
+                        cache.get(&contents_key(&path_owned)).cloned()
                     };
 
                     let diags = val
@@ -2540,7 +2561,7 @@ impl TypeProvider for TsgoTypeProvider {
         Box::pin(async move {
             let (line, character) = {
                 let cache = contents_cache.lock().await;
-                match cache.get(&path_owned) {
+                match cache.get(&contents_key(&path_owned)) {
                     Some(c) => {
                         let (l, ch) = offset_to_position(c, offset);
                         (l, ch)
@@ -2575,9 +2596,13 @@ impl TypeProvider for TsgoTypeProvider {
                         .and_then(|value| value.as_str())
                         .map(uri_to_file_path)?;
                     let target_content = if target_path == path_owned {
-                        cache.get(&path_owned).map(|text| text.as_ref())
+                        cache
+                            .get(&contents_key(&path_owned))
+                            .map(|text| text.as_ref())
                     } else {
-                        cache.get(&target_path).map(|text| text.as_ref())
+                        cache
+                            .get(&contents_key(&target_path))
+                            .map(|text| text.as_ref())
                     };
                     parse_lsp_location(loc, target_content)
                 })
@@ -2598,7 +2623,7 @@ impl TypeProvider for TsgoTypeProvider {
         Box::pin(async move {
             let (line, character) = {
                 let cache = contents_cache.lock().await;
-                match cache.get(&path_owned) {
+                match cache.get(&contents_key(&path_owned)) {
                     Some(c) => {
                         let (l, ch) = offset_to_position(c, offset);
                         (l, ch)
@@ -2633,9 +2658,13 @@ impl TypeProvider for TsgoTypeProvider {
                         .and_then(|value| value.as_str())
                         .map(uri_to_file_path)?;
                     let target_content = if target_path == path_owned {
-                        cache.get(&path_owned).map(|text| text.as_ref())
+                        cache
+                            .get(&contents_key(&path_owned))
+                            .map(|text| text.as_ref())
                     } else {
-                        cache.get(&target_path).map(|text| text.as_ref())
+                        cache
+                            .get(&contents_key(&target_path))
+                            .map(|text| text.as_ref())
                     };
                     parse_lsp_location(loc, target_content)
                 })
@@ -2652,7 +2681,7 @@ impl TypeProvider for TsgoTypeProvider {
         Box::pin(async move {
             let (line, character) = {
                 let cache = contents_cache.lock().await;
-                match cache.get(&path_owned) {
+                match cache.get(&contents_key(&path_owned)) {
                     Some(c) => offset_to_position(c, offset),
                     None => (0, offset),
                 }
@@ -2693,7 +2722,7 @@ impl TypeProvider for TsgoTypeProvider {
         Box::pin(async move {
             let (line, character) = {
                 let cache = contents_cache.lock().await;
-                match cache.get(&path_owned) {
+                match cache.get(&contents_key(&path_owned)) {
                     Some(c) => offset_to_position(c, offset),
                     None => (0, offset),
                 }
@@ -2746,7 +2775,7 @@ impl TypeProvider for TsgoTypeProvider {
         Box::pin(async move {
             let (line, character) = {
                 let cache = contents_cache.lock().await;
-                match cache.get(&path_owned) {
+                match cache.get(&contents_key(&path_owned)) {
                     Some(c) => offset_to_position(c, offset),
                     None => (0, offset),
                 }
@@ -2790,7 +2819,7 @@ impl TypeProvider for TsgoTypeProvider {
             }
             let (start_line, start_char, end_line, end_char, context_diagnostics) = {
                 let cache = contents_cache.lock().await;
-                let content = cache.get(&path_owned);
+                let content = cache.get(&contents_key(&path_owned));
                 let to_pos = |off: u32| match content {
                     Some(c) => offset_to_position(c, off),
                     None => (0, off),
@@ -2877,7 +2906,7 @@ impl TypeProvider for TsgoTypeProvider {
         Box::pin(async move {
             let content_snapshot = {
                 let cache = contents_cache.lock().await;
-                cache.get(&path_owned).cloned()
+                cache.get(&contents_key(&path_owned)).cloned()
             };
             let result = transport
                 .request(
@@ -2910,7 +2939,7 @@ impl TypeProvider for TsgoTypeProvider {
         Box::pin(async move {
             let (line, character, content_snapshot) = {
                 let cache = contents_cache.lock().await;
-                match cache.get(&path_owned) {
+                match cache.get(&contents_key(&path_owned)) {
                     Some(c) => {
                         let (l, ch) = offset_to_position(c, offset);
                         (l, ch, Some(c.clone()))
@@ -2949,7 +2978,7 @@ impl TypeProvider for TsgoTypeProvider {
         Box::pin(async move {
             let (start_line, start_char, end_line, end_char, content_snapshot) = {
                 let cache = contents_cache.lock().await;
-                match cache.get(&path_owned) {
+                match cache.get(&contents_key(&path_owned)) {
                     Some(c) => {
                         let (sl, sc) = offset_to_position(c, start_offset);
                         let (el, ec) = offset_to_position(c, end_offset);
@@ -3022,7 +3051,7 @@ impl TypeProvider for TsgoTypeProvider {
 
             let content_snapshot = {
                 let cache = contents_cache.lock().await;
-                cache.get(&path_owned).cloned()
+                cache.get(&contents_key(&path_owned)).cloned()
             };
 
             let additional_text_edits: Vec<ResolvedTextEdit> = edits
@@ -3155,7 +3184,11 @@ impl TypeProvider for TsgoTypeProvider {
                         .and_then(|v| v.as_array())
                         .cloned()
                         .unwrap_or_default();
-                    let content = contents_cache.lock().await.get(&path_owned).cloned();
+                    let content = contents_cache
+                        .lock()
+                        .await
+                        .get(&contents_key(&path_owned))
+                        .cloned();
                     Ok(items
                         .iter()
                         .filter_map(|d| {
