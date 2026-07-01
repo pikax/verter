@@ -159,8 +159,9 @@ fn fs_paths_equal_under(a: &str, b: &str, case_insensitive: bool) -> bool {
 /// two paths differing in NON-drive case denote the same file — the extra fold
 /// closes that gap.
 ///
-/// This is a FILESYSTEM concern routed through the shared path primitive, NOT a
-/// type-text heuristic.
+/// This is the workspace path-EQUIVALENCE policy ([`fs_paths_equal`]) reified as a
+/// key, NOT an OS file-id (no inode / device probe): a FILESYSTEM concern routed
+/// through the shared path primitive, NOT a type-text heuristic.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct InjectedPathKey(String);
 

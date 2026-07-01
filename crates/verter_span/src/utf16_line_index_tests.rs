@@ -106,17 +106,19 @@ fn parity_boundary_and_past_end_explicit() {
         "past-end byte clamps to len"
     );
 
-    // Mid-surrogate resolves to the pair start on BOTH queries.
+    // Mid-surrogate resolves DIFFERENTLY per query (parity with the scalars):
+    // the column is the STABLE in-pair column (offset-based, NOT snapped to the pair
+    // start — pair-start would be col 1), the byte snaps to the pair's start byte.
     let astral = Utf16LineIndex::new("\u{10437}");
     assert_eq!(
         astral.line_col_for_utf16(1).unwrap(),
         LineCol { line: 1, col: 2 },
-        "mid-surrogate column clamps to the pair start"
+        "mid-surrogate column is the in-pair column (offset - line_start + 1), not the pair start"
     );
     assert_eq!(
         astral.byte_for_utf16(1).unwrap(),
         0,
-        "mid-surrogate byte clamps to the pair start byte"
+        "mid-surrogate byte snaps to the pair's start byte"
     );
 }
 

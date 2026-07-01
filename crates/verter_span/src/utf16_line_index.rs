@@ -14,10 +14,15 @@
 //!
 //! **Offset semantics are byte-identical to [`crate::tsgo_offset`]** — the same
 //! TypeScript `getLineStarts` terminator set (`\n`; a LONE `\r`; U+2028; U+2029;
-//! `\r\n` is ONE terminator), UTF-16 columns, past-end CLAMPS to the end, and a
-//! mid-surrogate offset resolves to the surrogate pair's start. Those clamps are
-//! `Ok(clamped)` (never an error) so parity with the never-erroring scalars holds;
-//! [`OffsetError`] is reserved for a genuinely impossible internal state.
+//! `\r\n` is ONE terminator), UTF-16 columns, and past-end CLAMPS to the end. A
+//! mid-surrogate offset (one landing INSIDE a supplementary-plane pair) resolves
+//! DIFFERENTLY per query, in parity with the corresponding scalar: `byte_for_utf16`
+//! snaps to the surrogate pair's START byte (a byte offset must land on a char
+//! boundary), while `line_col_for_utf16` reports the STABLE in-pair column
+//! (`offset - line_start + 1`, the raw offset-based column the scalar reports — NOT
+//! the pair-start column). Those clamps/resolutions are `Ok(..)` (never an error) so
+//! parity with the never-erroring scalars holds; [`OffsetError`] is reserved for a
+//! genuinely impossible internal state.
 //!
 //! [`utf16_offset_to_byte`]: crate::tsgo_offset::utf16_offset_to_byte
 //! [`utf16_offset_to_line_col`]: crate::tsgo_offset::utf16_offset_to_line_col
@@ -133,7 +138,9 @@ impl Utf16LineIndex {
     /// Convert a UTF-16 code-unit `offset` to a 1-based `(line, col)` (UTF-16
     /// column). Byte-identical to
     /// [`crate::tsgo_offset::utf16_offset_to_line_col`]: past-end clamps to the
-    /// final column; a mid-surrogate offset resolves to the pair's start column.
+    /// final column; a mid-surrogate offset reports the STABLE in-pair column
+    /// (`offset - line_start + 1`, the raw offset-based column — NOT snapped to the
+    /// pair start), matching the scalar.
     pub fn line_col_for_utf16(&self, offset: u32) -> Result<LineCol, OffsetError> {
         let line_idx = self.line_index_for_u16(offset)?;
         let line_start = self.line_starts[line_idx];

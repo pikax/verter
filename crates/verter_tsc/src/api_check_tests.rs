@@ -19,8 +19,11 @@ fn api_diag(code: u32, category: u32, text: &str, pos: u32, file: &str) -> ApiDi
     }
 }
 
-fn lookup_of(files: &[OverlayFile]) -> HashMap<String, &OverlayFile> {
-    files.iter().map(|f| (norm_key(&f.path), f)).collect()
+fn lookup_of(files: &[OverlayFile]) -> HashMap<InjectedPathKey, &OverlayFile> {
+    files
+        .iter()
+        .map(|f| (InjectedPathKey::new(&f.path), f))
+        .collect()
 }
 
 /// The per-collection source cache the unit tests exercise: the carriers' own
@@ -44,7 +47,7 @@ fn cache_of(files: &[OverlayFile]) -> DiagnosticSourceCache<OverlayThenFallback<
 /// miss (the happy-path helper — the explicit-miss path is tested separately).
 fn map_semantic(
     d: &ApiDiagnostic,
-    lookup: &HashMap<String, &OverlayFile>,
+    lookup: &HashMap<InjectedPathKey, &OverlayFile>,
     cache: &DiagnosticSourceCache<OverlayThenFallback<NativeFsSource>>,
 ) -> Option<Diagnostic> {
     map_one(
@@ -335,7 +338,7 @@ fn non_root_content_miss_is_an_explicit_error_never_one_one_or_dropped() {
 fn map_with(
     d: &ApiDiagnostic,
     origin: DiagOrigin,
-    lookup: &HashMap<String, &OverlayFile>,
+    lookup: &HashMap<InjectedPathKey, &OverlayFile>,
     cache: &DiagnosticSourceCache<OverlayThenFallback<NativeFsSource>>,
     injected: &InjectedPathSet,
 ) -> Option<Diagnostic> {
@@ -386,6 +389,64 @@ fn config_origin_case_divergent_injected_companion_is_not_emitted_or_rehomed() {
         "a case-divergent Config-origin injected companion must be suppressed at the map \
          boundary, never emitted or re-homed onto .vue: {mapped:?}"
     );
+}
+
+/// DISCRIMINATING (carrier-classification identity). `map_one` classifies an
+/// engine-reported `file_name` as a KNOWN overlay carrier through the SAME shared
+/// filesystem-identity key that drives the config strip + the map-boundary guard +
+/// the source cache — NOT a divergent slash+`cfg!(windows)`-only fold. A carrier
+/// registered at `c:/proj/Foo.vue.tsx` and a `Semantic` diagnostic the engine
+/// reports at the EXTENDED-LENGTH + UPPERCASE-DRIVE form `//?/C:/proj/Foo.vue.tsx`
+/// denote the SAME file, so the diagnostic MUST remap through the carrier's source
+/// map to `.vue` — never fall through to a passthrough on the raw carrier path.
+///
+/// This discriminates on EVERY host: the extended-length prefix (`//?/`) and drive
+/// case both survive the OLD `norm_key` (which only slash-normalizes and folds ASCII
+/// under `cfg!(windows)`) so the OLD key MISSES the carrier on Windows AND Linux;
+/// and the SAME unified canonicalize-then-case-fold key also closes the macOS
+/// non-drive-case gap (`…/Sub/…` vs `…/sub/…` on a default-case-insensitive APFS),
+/// where the OLD key never folded at all. RED on the pre-fix `norm_key` lookup
+/// (homes as a passthrough on `//?/C:/proj/Foo.vue.tsx`); GREEN once the lookup is
+/// keyed by `InjectedPathKey`.
+#[test]
+fn carrier_classification_uses_shared_identity_key_not_divergent_norm() {
+    // A SourceMapped carrier registered with the canonical lowercase-drive form.
+    let carrier = OverlayFile {
+        path: "c:/proj/Foo.vue.tsx".to_string(),
+        content: "const a: string = 1;\n".to_string(),
+        remap: RemapKind::SourceMapped {
+            vue_path: "c:/proj/src/Foo.vue".to_string(),
+        },
+    };
+    let files = vec![carrier];
+    let lookup = lookup_of(&files);
+
+    // The engine reports a SEMANTIC diagnostic under an extended-length + uppercase
+    // drive form of the SAME carrier — a real Windows path shape that the divergent
+    // `norm_key` (no `//?/` strip) fails to fold onto the registered carrier.
+    let d = api_diag(
+        2322,
+        1,
+        "Type 'number' is not assignable to type 'string'.",
+        10,
+        "//?/C:/proj/Foo.vue.tsx",
+    );
+
+    let mapped = map_semantic(&d, &lookup, &cache_of(&files))
+        .expect("a semantic diagnostic on the carrier is surfaced");
+    // It must be recognized as the carrier and REMAP to `.vue` (no inline source map
+    // on `content`, so the source-map gap resolves to the `.vue` (1,1)) — never a
+    // passthrough left on the raw `//?/C:/…` carrier path.
+    assert_eq!(
+        mapped.file, "c:/proj/src/Foo.vue",
+        "a case/prefix-divergent carrier report must fold onto the registered carrier and remap \
+         to its .vue source (shared filesystem-identity key), not fall through to a passthrough"
+    );
+    assert_ne!(
+        mapped.file, "//?/C:/proj/Foo.vue.tsx",
+        "it must NOT be homed as a passthrough on the raw engine-reported carrier path"
+    );
+    assert_eq!(mapped.ts_code, 2322);
 }
 
 /// INVARIANT (guards against over-suppression). A `Semantic` diagnostic on the SAME
@@ -503,7 +564,7 @@ fn config_filtering_drops_only_injected_companions_and_retains_real_and_global()
     let injected_tsx = "/proj/Foo_ab12.vue.tsx".to_string();
     let injected_stub = "/proj/Foo_ab12.vue.ts".to_string();
     let synthetic_tsconfig = "/proj/verter-tsc-check.tsconfig.json".to_string();
-    let injected_paths = vec![
+    let injected_paths = [
         injected_tsx.clone(),
         injected_stub.clone(),
         synthetic_tsconfig.clone(),

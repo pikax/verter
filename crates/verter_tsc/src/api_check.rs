@@ -39,6 +39,7 @@ use verter_workspace::tsgo_virtual_config::{
 use verter_span::diag_source::{
     DiagnosticContentSource, DiagnosticSourceCache, OverlayThenFallback,
 };
+use verter_span::path::{fs_paths_equal, InjectedPathKey};
 
 use crate::error_map::map_tsc_position;
 use crate::reporter::{Diagnostic, Severity};
@@ -209,10 +210,15 @@ pub fn typecheck(inputs: TypecheckInputs<'_>) -> Result<Vec<Diagnostic>, Typeche
         files,
     } = inputs;
 
-    // Path → carrier lookup (normalized keys so the engine's reported path form
-    // hits the right carrier regardless of separator / drive-letter case).
-    let lookup: HashMap<String, &OverlayFile> =
-        files.iter().map(|f| (norm_key(&f.path), f)).collect();
+    // Path → carrier lookup, keyed by the shared filesystem-identity key
+    // ([`InjectedPathKey`]) so the engine's reported path form hits the right
+    // carrier regardless of separator / drive-letter case / extended-length prefix /
+    // (on a case-insensitive FS) non-drive case — the SAME identity notion the
+    // config strip, the map-boundary guard, and the source cache use.
+    let lookup: HashMap<InjectedPathKey, &OverlayFile> = files
+        .iter()
+        .map(|f| (InjectedPathKey::new(&f.path), f))
+        .collect();
 
     // Carriers served through the overlay alongside the synthetic config.
     let companions: Vec<(String, String)> = files
@@ -268,7 +274,7 @@ pub fn typecheck(inputs: TypecheckInputs<'_>) -> Result<Vec<Diagnostic>, Typeche
 /// content is resolved ONCE and its line index built ONCE per pass (never per
 /// diagnostic).
 fn build_source_cache(
-    lookup: &HashMap<String, &OverlayFile>,
+    lookup: &HashMap<InjectedPathKey, &OverlayFile>,
 ) -> DiagnosticSourceCache<OverlayThenFallback<NativeFsSource>> {
     let overlay = lookup.values().map(|f| (f.path.clone(), f.content.clone()));
     let source = OverlayThenFallback::new(
@@ -293,7 +299,7 @@ fn build_source_cache(
 async fn collect_diagnostics(
     client: &TsgoClient,
     tsconfig_path: &str,
-    lookup: &HashMap<String, &OverlayFile>,
+    lookup: &HashMap<InjectedPathKey, &OverlayFile>,
     injected_paths: &[String],
 ) -> Result<Vec<Diagnostic>, TypecheckError> {
     if let Err(e) = client.initialize().await {
@@ -320,7 +326,7 @@ async fn collect_diagnostics(
     let project = match snap
         .projects
         .iter()
-        .find(|p| paths_equal(&p.config_file_name, tsconfig_path))
+        .find(|p| fs_paths_equal(&p.config_file_name, tsconfig_path))
     {
         Some(p) => p,
         None => {
@@ -410,7 +416,7 @@ fn push_mapped(
     out: &mut Vec<Diagnostic>,
     diags: &[ApiDiagnostic],
     origin: DiagOrigin,
-    lookup: &HashMap<String, &OverlayFile>,
+    lookup: &HashMap<InjectedPathKey, &OverlayFile>,
     cache: &DiagnosticSourceCache<OverlayThenFallback<NativeFsSource>>,
     injected: &InjectedPathSet,
 ) -> Result<(), TypecheckError> {
@@ -441,20 +447,28 @@ fn push_mapped(
 /// path did. Three cases:
 ///
 ///   1. `file_name` resolves to a KNOWN overlay carrier (a generated TSX / `.vue.ts`
-///      stub / ambient shim): map through that carrier — a `SourceMapped` carrier
-///      remaps its UTF-16 → (line,col) through the inline source map back to the
-///      `.vue` source; a `Passthrough` carrier keeps its own converted position.
+///      stub / ambient shim). Carrier classification folds the engine-reported path
+///      onto the registered carrier through the shared filesystem-identity key
+///      ([`InjectedPathKey`]) — the SAME notion the config strip, the map-boundary
+///      guard, and the source cache use — so a separator / drive-letter-case /
+///      extended-length-prefix / (case-insensitive-FS) non-drive-case variant of the
+///      carrier path still hits it. Map through that carrier: a `SourceMapped`
+///      carrier remaps its UTF-16 → (line,col) through the inline source map back to
+///      the `.vue` source; a `Passthrough` carrier keeps its own converted position.
 ///   2. `file_name` is PRESENT but is NOT a carrier (a real non-root imported
 ///      `.ts` the whole-program call surfaces): surface it as a PASSTHROUGH at its
-///      OWN path + converted position, reading the file's content from disk to
-///      position the UTF-16 offset. A non-root diagnostic is NEVER dropped and
-///      NEVER re-homed onto a carrier (that would remap through the wrong source
-///      map). When the disk content is unavailable, fall back to (1,1) on the
-///      file rather than dropping the error.
+///      OWN path + converted position, reading the file's content through the shared
+///      source cache (overlay-then-disk) to position the UTF-16 offset. A non-root
+///      diagnostic is NEVER dropped and NEVER re-homed onto a carrier (that would
+///      remap through the wrong source map). When the content genuinely cannot be
+///      resolved, this returns an EXPLICIT [`MappingError`] (→ a fatal
+///      `TypecheckError`) — never a fabricated position, never a silent drop.
 ///   3. `file_name` is ABSENT (a global / compiler-options diagnostic, e.g. a bad
 ///      `target`): surface it at the project's own position `(1,1)` under a
 ///      synthetic `<compiler options>` label — a global diagnostic is RETAINED,
-///      not dropped.
+///      not dropped. This is NOT a content miss (there is no file to resolve); it is
+///      distinct from the case-1 source-map GAP, which reports a RESOLVED carrier's
+///      un-tokenized position at the `.vue` `(1,1)`.
 ///
 /// Injected-companion CONFIG noise is filtered UPSTREAM by
 /// `strip_injected_root_diagnostics`. A fail-closed BELT-AND-SUSPENDERS guard here
@@ -467,13 +481,14 @@ fn push_mapped(
 /// remap path and is never suppressed (over-dropping = false negatives).
 fn map_one(
     od: &OriginDiagnostic<'_>,
-    lookup: &HashMap<String, &OverlayFile>,
+    lookup: &HashMap<InjectedPathKey, &OverlayFile>,
     cache: &DiagnosticSourceCache<OverlayThenFallback<NativeFsSource>>,
     injected: &InjectedPathSet,
 ) -> Result<Option<Diagnostic>, MappingError> {
     let d = od.d;
 
-    // FAIL-CLOSED map-boundary guard (keyed by normalized path AND origin): a
+    // FAIL-CLOSED map-boundary invariant (keyed by the shared filesystem-identity
+    // key AND origin), independent of the upstream config strip: a
     // Config/injected-root-origin diagnostic pointing at an injected companion is a
     // virtualization artifact and must never be emitted or re-homed onto `.vue`.
     // Non-Config origins are NOT touched here — they take the legitimate carrier
@@ -506,7 +521,7 @@ fn map_one(
         // a synthetic position rather than dropping it (this is NOT a content miss —
         // there is no file to resolve).
         None => ("<compiler options>".to_string(), 1, 1),
-        Some(file_name) => match lookup.get(&norm_key(file_name)) {
+        Some(file_name) => match lookup.get(&InjectedPathKey::new(file_name)) {
             // Case 1: a known overlay carrier. Its content is in the overlay, so the
             // cache resolves it (a miss here is an internal inconsistency, surfaced).
             Some(file) => {
@@ -593,23 +608,6 @@ fn resolve_src_display(src_name: &str, vue_path: &str) -> String {
 /// Forward-slash a path for display / comparison.
 fn slashed(p: &str) -> String {
     p.replace('\\', "/")
-}
-
-/// Lookup-map key: forward-slashed, case-folded on Windows (NTFS is
-/// case-insensitive, and the engine may echo a different drive-letter case).
-fn norm_key(p: &str) -> String {
-    let s = slashed(p);
-    if cfg!(windows) {
-        s.to_ascii_lowercase()
-    } else {
-        s
-    }
-}
-
-/// Path equality used to select the configured project: forward-slashed, and
-/// case-insensitive on Windows.
-fn paths_equal(a: &str, b: &str) -> bool {
-    norm_key(a) == norm_key(b)
 }
 
 /// A [`RealDirSource`] backed by the sanctioned native-FS boundary

@@ -306,11 +306,20 @@ fn map_api_diagnostic(
     d: &verter_tsgo_api::proto::types::Diagnostic,
     index: &Utf16LineIndex,
 ) -> TypeDiagnostic {
-    // The index build never yields an empty line-start table, so these conversions
-    // are infallible; a genuinely impossible index state clamps at the file start
-    // rather than fabricating a wrong non-zero span.
-    let start = index.byte_for_utf16(d.pos).unwrap_or(0) as u32;
-    let end = index.byte_for_utf16(d.end).unwrap_or(0) as u32;
+    // The conversion is infallible BY INVARIANT: `Utf16LineIndex::new` always records
+    // line 1 at offset 0, so `byte_for_utf16` can never yield `OffsetError::EmptyIndex`.
+    // A violation is a corrupt-index bug, not a recoverable content miss (the
+    // recoverable miss — a carrier with no content — is caught fail-closed by the
+    // caller `position_carrier_diagnostics`), so it fails LOUD rather than forging a
+    // silent `(0, 0)` position.
+    let start = index
+        .byte_for_utf16(d.pos)
+        .expect("Utf16LineIndex::new always records line 1 at offset 0, so byte_for_utf16 never yields EmptyIndex")
+        as u32;
+    let end = index
+        .byte_for_utf16(d.end)
+        .expect("Utf16LineIndex::new always records line 1 at offset 0, so byte_for_utf16 never yields EmptyIndex")
+        as u32;
     TypeDiagnostic {
         message: d.text.clone(),
         // tsgo DiagnosticCategory: 0=Warning, 1=Error, 2=Suggestion, 3=Message.
