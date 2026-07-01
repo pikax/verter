@@ -4641,6 +4641,29 @@ const SINK_LOCAL_RAW_AUTHORITY_ALLOWLIST: &[(&str, &str)] = &[
         "crate::typeinfo::framework_surface::svelte_exec",
         "callback_events_from_props_surface",
     ),
+    // The §5a-SP3 node-domain Vue slot-normalizer raisers — the SAME category as
+    // `raise_member_value` / `raise_realized_callable_member_value` above and the
+    // `component_meta_query_engine::surface` node raisers: each is fed a
+    // RESOLUTION-DERIVED node/member (the slot first-param / return node from
+    // `CallableNodeView::slot_param_and_return_by_arm`, or a projected-surface
+    // member), NOT a caller-forged subject, and mints the sealed output cap
+    // INTERNALLY. All are `pub(in vue_exec)` / module-private, reachable ONLY
+    // through the token-gated `slots_from_typeinfo_surface` normalizer. The
+    // node-domain conversion (offenders a/b) replaced their `&TypeExpr` inputs
+    // (never flagged) with resolution-derived `SemanticNodeId` / member inputs,
+    // so they now cross this boundary exactly as the sibling raisers do.
+    (
+        "crate::typeinfo::framework_surface::vue_exec::normalize",
+        "binding_fields_from_param_node",
+    ),
+    (
+        "crate::typeinfo::framework_surface::vue_exec::normalize",
+        "materialize_slot_return_node",
+    ),
+    (
+        "crate::typeinfo::framework_surface::vue_exec::normalize",
+        "slot_binding_field",
+    ),
     // The SANCTIONED token-MINTING projector callers. Each keeps a
     // `ProjectionCursor` demand and resolves + ADMITS internally (through
     // `resolve_macro_payload`/`resolve_payload_surface`/`read_surface_members` +
@@ -12371,6 +12394,31 @@ const HOT_TERMINAL_SINKS: &[(&str, &str)] = &[
     // are node-domain (`CallableNodeView`) in the non-terminal
     // `callback_events_from_props_surface`.
     ("svelte_exec.rs", "materialize_payload_tuple"),
+    // The Svelte snippet-slot binding terminal (the snippet-slot twin of the
+    // Svelte `materialize_payload_tuple`): mints each NODE-DOMAIN
+    // `PositionalParamNode.ty` ONCE through the sealed Svelte output cap into an
+    // `AnalyzedSlotFieldBinding`. ZERO decide (the display renders through the
+    // by-name `.and_then` form); takes NO `TypeExpr` param (node ids + the value-
+    // node scope). The validated-snippet decide + `Params` read + union combine
+    // are node-domain (`CallableNodeView::validated_snippet_positional_params`)
+    // in the non-terminal `svelte_snippet_slots_from_typeinfo_surface`.
+    ("svelte_exec.rs", "materialize_snippet_slot_bindings"),
+    // The Vue slot-return terminal (the single-node twin of the Vue
+    // `materialize_payload_tuple`): mints the slot's return `SemanticNodeId` ONCE
+    // through the sealed output cap into the display return `TypeExpr`. ZERO
+    // decide; takes NO `TypeExpr` param. The slot param/return decide is
+    // node-domain (`CallableNodeView::slot_param_and_return_by_arm`) in the
+    // non-terminal `slots_from_typeinfo_surface`.
+    ("vue_exec/normalize.rs", "materialize_slot_return_node"),
+    // The Vue per-slot-binding terminal: builds ONE `AnalyzedSlotFieldBinding` —
+    // a `Pick` member as the SYMBOLIC `NamedRoot['member']` access (the source
+    // root minted ONCE, the `IndexedAccess` a pure syntactic display build), any
+    // other member via the registered `raise_member_value` mint. The only branch
+    // is the NODE-DOMAIN `Option<SemanticNodeId>` Pick source-root (decided in
+    // the non-terminal `binding_fields_from_param_node`), never a `TypeExpr`
+    // decide; the display renders through the by-name `.and_then` form; takes NO
+    // `TypeExpr` param.
+    ("vue_exec/normalize.rs", "slot_binding_field"),
     // NOTE: `binding_fields_from_param_ty` is NOT here — it BRANCHES on its
     // `param_ty` (`if let TypeExpr::Object`), NAVIGATES it through the shared
     // resolver (`navigate_param_to_object_surface`), shape-matches `Pick`, and

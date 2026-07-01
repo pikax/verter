@@ -1221,3 +1221,150 @@ fn carrier_wrapped_nullish_callback_prop_classifies_as_event_with_precise_payloa
         "the carrier-nullish callback's `Row` payload resolves precisely (member `id`)"
     );
 }
+
+#[test]
+fn svelte_snippet_slots_normalizer_publishes_node_domain_bindings() {
+    // END-TO-END (the CONVERTED node-domain normalizer): a
+    // `Snippet<[item: Item, index: number]>` member publishes ordered slot
+    // bindings `item` + `index` through `svelte_snippet_slots_from_typeinfo_surface`
+    // — the node-domain path (no materialize-then-decide). Uses a WORKSPACE-LOCAL
+    // `Snippet` interface + a direct `retain_members` (bypassing package-backed
+    // validation) so the CONVERTED normalizer is exercised directly.
+    let component = "/workspace/SnippetSlots.svelte";
+    let source = "<script lang=\"ts\">\n\
+             import type { Snippet } from './snippet';\n\
+             interface Item { id: number }\n\
+             interface Props { row: Snippet<[item: Item, index: number]> }\n\
+             let { row }: Props = $props();\n\
+             void row;\n\
+             </script>\n\
+             <div />";
+    let (host, view) = workspace_host_with_svelte(
+        component,
+        source,
+        &[(
+            "/workspace/snippet.ts",
+            "export interface Snippet<Params extends unknown[] = []> {\n\
+                 (this: void, ...args: Params): { __brand: 'snippet' };\n\
+                 }\n",
+        )],
+    );
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
+
+    let facts = host
+        .resolve_svelte_script_facts_with_ctx(&ctx, component)
+        .expect("svelte facts");
+    let props_type = facts.props_type.as_ref().expect("props type");
+    let surface =
+        navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
+    let filtered = retain_members(&surface, &["row".to_string()]);
+    let resolved = macro_surface_shell(filtered, AnalyzedMacroKind::DefineSlots, component);
+
+    let slots = svelte_snippet_slots_from_typeinfo_surface(&ctx, &resolved);
+    let row = slots
+        .iter()
+        .find(|s| s.name == "row")
+        .expect("the `row` snippet slot publishes");
+    let names: Vec<&str> = row.bindings.iter().map(|b| b.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["item", "index"],
+        "the snippet slot bindings come from the `Params` tuple, in order"
+    );
+    assert!(
+        row.bindings.iter().all(|b| b.binding_expr.is_some()),
+        "each binding carries a materialized `binding_expr` (minted at the terminal sink)"
+    );
+    assert!(
+        row.bindings.iter().all(|b| b.binding_expr_scope.is_some()),
+        "each binding_expr is paired with a scope (pairing invariant)"
+    );
+}
+
+#[test]
+fn snippet_declref_tuple_param_flip_node_resolves_legacy_drops() {
+    // THE FLIP, EMPIRICAL — a `Snippet<Args>` whose `Args` is a DeclRef-to-tuple
+    // (`type Args = [item: Item, index: number]`):
+    // - the NODE reader (`validated_snippet_positional_params`) RESOLVES the
+    //   `DeclRef` to its `Tuple` → the two bindings `item` + `index`;
+    // - the LEGACY `TypeExpr` reader (`snippet_callable_positional_bindings` on the
+    //   materialized member value) DROPS them (empty) — `single_tuple_type_argument`
+    //   requires a LITERAL `Tuple` type-argument, which `Ref{Snippet, [Ref{Args}]}`
+    //   is not.
+    // This directly exhibits the behavior delta the node-domain conversion adds
+    // (bindings dropped pre-fix, present post-fix).
+    let component = "/workspace/FlipSnippetSurface.svelte";
+    let source = "<script lang=\"ts\">\n\
+             import type { Snippet } from './snippet';\n\
+             import type { Args } from './types';\n\
+             interface Props { row: Snippet<Args> }\n\
+             let { row }: Props = $props();\n\
+             void row;\n\
+             </script>\n\
+             <div />";
+    let (host, view) = workspace_host_with_svelte(
+        component,
+        source,
+        &[
+            (
+                "/workspace/snippet.ts",
+                "export interface Snippet<Params extends unknown[] = []> {\n\
+                     (this: void, ...args: Params): { __brand: 'snippet' };\n\
+                     }\n",
+            ),
+            (
+                "/workspace/types.ts",
+                "export interface Item { id: number }\n\
+                 export type Args = [item: Item, index: number];\n",
+            ),
+        ],
+    );
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
+
+    let facts = host
+        .resolve_svelte_script_facts_with_ctx(&ctx, component)
+        .expect("svelte facts");
+    let props_type = facts.props_type.as_ref().expect("props type");
+    let surface =
+        navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
+    let row = surface
+        .members
+        .iter()
+        .find(|m| m.name.as_ref() == "row")
+        .expect("the `row` member is present");
+    let dispatch = ctx.dispatch();
+    let context = crate::semantic_query::ProjectionReductionContext::published(
+        crate::semantic_query::ProjectionMode::Navigate,
+    );
+
+    // NODE reader: resolves the DeclRef-to-tuple `Params`.
+    let params = CallableNodeView::new(&dispatch, row.value)
+        .validated_snippet_positional_params(context)
+        .expect("the node reader resolves the DeclRef-to-tuple `Params`");
+    let node_labels: Vec<Option<&str>> = params.iter().map(|p| p.label.as_deref()).collect();
+    assert_eq!(
+        node_labels,
+        vec![Some("item"), Some("index")],
+        "the NODE reader resolves the two ordered bindings (the flip: superset over legacy)"
+    );
+
+    // LEGACY reader: DROPS them (the materialized `Snippet<Args>` is a
+    // `Ref{Snippet, [Ref{Args}]}` — a non-literal type argument).
+    let realized = crate::meta_resolve::dispatch_helpers::realize_callable_member(
+        &dispatch, row.value, context,
+    )
+    .unwrap_or(row.value);
+    let value = dispatch
+        .materialize_output_type_expr_for_test(realized)
+        .expect("the member value materializes");
+    let scope = verter_type_expr::TypeExprScope::new(component);
+    let legacy = snippet_callable_positional_bindings(&value, &scope);
+    assert!(
+        legacy.is_none_or(|bindings| bindings.is_empty()),
+        "the LEGACY `TypeExpr` reader DROPS the DeclRef-tuple `Params` bindings (the gap the node \
+         reader closes), got {:?}",
+        snippet_callable_positional_bindings(&value, &scope)
+    );
+}

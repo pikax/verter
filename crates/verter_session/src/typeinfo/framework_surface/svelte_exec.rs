@@ -33,7 +33,7 @@ use verter_type_expr::{PrimitiveName, TypeExpr};
 use verter_protocol::typeinfo::graph::FrameworkSurfaceKind;
 
 use crate::framework::surface_store::{FullKey, StoredSurfaceDto};
-use crate::meta_resolve::callable_view::CallableNodeView;
+use crate::meta_resolve::callable_view::{CallableNodeView, PositionalParamNode};
 use crate::project_semantic_dispatch::output_materialization::OutputProjector;
 use crate::resolver_core::ResolverContext;
 use crate::typeinfo::framework_surface::resolved_surface_access::ResolvedSurfaceAccess;
@@ -593,36 +593,35 @@ fn svelte_snippet_slots_from_typeinfo_surface(
 ) -> Vec<AnalyzedSlotField> {
     let macro_surface = resolved.macro_surface();
     let host = ctx.host_for_fact_tracer_install();
+    let dispatch = ctx.dispatch();
+    // Node-domain demand identity. `Navigate` so a carrier-wrapped snippet
+    // (`Snippet<Args>` with `Args` a `DeclRef`-to-tuple) resolves its `Params`.
+    // The binding types are minted shallow at the terminal sink regardless.
+    let context = crate::semantic_query::ProjectionReductionContext::published(
+        crate::semantic_query::ProjectionMode::Navigate,
+    );
     macro_surface
         .surface
         .members
         .iter()
         .filter(|member| member.visibility.is_public())
         .filter_map(|member| {
-            // Realize the member value to a callable through the SHARED
-            // substrate (Alias / Conditional / InstantiationRef / DeclRef
-            // carrier normalization), then raise to a TypeExpr.
-            let dispatch = ctx.dispatch();
-            let realized = crate::meta_resolve::dispatch_helpers::realize_callable_member(
-                &dispatch,
-                member.value,
-                crate::semantic_query::ProjectionReductionContext::published(
-                    crate::semantic_query::ProjectionMode::Navigate,
-                ),
-            )
-            .unwrap_or(member.value);
-            // Publication sink (DTO surface): materialize into a sealed
-            // carrier and unwrap via the typeinfo output capability.
-            let cap = TypeinfoSvelteSurfaceOutputCap::new(&dispatch);
-            let value = cap
-                .materialize_output_type_expr(realized)?
-                .into_type_expr(&cap);
+            // The validated-snippet positional binding NODES, decided ENTIRELY in
+            // the node domain through the shared `CallableNodeView` (which
+            // carrier-preserving-peels the `Snippet<Params>` carrier and reads its
+            // uninstantiated `Params` — the primary shape the legacy
+            // materialize-then-decide chain reached only for a LITERAL tuple).
+            // A fail-closed `None` (an unresolved `Params` carrier) drops the slot.
+            let params = CallableNodeView::new(&dispatch, member.value)
+                .validated_snippet_positional_params(context)?;
             let scope = crate::typeinfo::framework_surface::scope::member_value_expr_scope(
                 host,
                 member,
                 macro_surface.owner_canonical.as_ref(),
             );
-            let bindings = snippet_callable_positional_bindings(&value, &scope)?;
+            // Materialize each binding node ONCE at the terminal DTO sink; this
+            // normalizer makes NO decision on any materialized value.
+            let bindings = materialize_snippet_slot_bindings(ctx, &params, &scope);
             Some(AnalyzedSlotField {
                 name: member.name.as_ref().to_string(),
                 is_required: !member.optional,
@@ -638,11 +637,74 @@ fn svelte_snippet_slots_from_typeinfo_surface(
         .collect()
 }
 
+/// Materialize the validated Svelte snippet-slot bindings from NODE-DOMAIN
+/// positional params — a GENUINE decide-free terminal one-shot sink (the
+/// snippet-slot twin of [`materialize_payload_tuple`]). Each
+/// [`PositionalParamNode::ty`] is minted ONCE through the sealed Svelte output
+/// capability; the binding NAME is the element/param label (fallback
+/// `arg{index}`), the display `type_annotation` is rendered from the minted
+/// value via the by-name `.and_then(render_type_expr_display)` form, and both
+/// are paired with the slot member's value-node `scope` (the
+/// `binding_expr.is_some() <=> binding_expr_scope.is_some()` pairing invariant).
+///
+/// It makes NO decision on any materialized value (no branch / match /
+/// shape-extract) and takes NO `&TypeExpr` param (node ids + the active `ctx` +
+/// the value-node scope). The mint cap is constructed INTERNALLY from `ctx` (the
+/// `raise_member_value` pattern) — a cap is a mint AUTHORITY and must not cross
+/// the boundary from the non-terminal caller.
+pub(in crate::typeinfo::framework_surface::svelte_exec) fn materialize_snippet_slot_bindings(
+    ctx: &dyn ResolverContext,
+    params: &[PositionalParamNode],
+    scope: &verter_type_expr::TypeExprScope,
+) -> Vec<AnalyzedSlotFieldBinding> {
+    let dispatch = ctx.dispatch();
+    let cap = TypeinfoSvelteSurfaceOutputCap::new(&dispatch);
+    params
+        .iter()
+        .enumerate()
+        .map(|(index, param)| {
+            // Mint the binding's type node ONCE. Display renders through the
+            // by-name `.and_then` form (never a direct read-of-mint decide).
+            let raised = cap
+                .materialize_output_type_expr(param.ty)
+                .map(|raised| raised.into_type_expr(&cap));
+            let type_annotation = raised
+                .as_ref()
+                .and_then(crate::resolver_core::surface_projector::render_type_expr_display);
+            let name = param
+                .label
+                .as_ref()
+                .map(|label| label.to_string())
+                .unwrap_or_else(|| format!("arg{index}"));
+            // A node that does not materialize keeps its binding SLOT with the
+            // opaque `Unknown` raise-miss value (position-preserving); a validated
+            // snippet's `Params` element node always mints, so this is robustness.
+            let binding_expr = Some(raised.unwrap_or(TypeExpr::Unknown { raw: String::new() }));
+            AnalyzedSlotFieldBinding {
+                name,
+                type_annotation,
+                binding_expr,
+                binding_expr_scope: Some(scope.clone()),
+                span: verter_span::Span::default(),
+            }
+        })
+        .collect()
+}
+
 /// Extract the ordered positional slot bindings from a realized snippet
 /// callable `value`, handling a single `Function`, or a `Union` / `Intersection`
 /// of callable arms (combined by positional index — intersecting types). Each
 /// `this` param is skipped and each rest-tuple param is expanded into its
 /// element bindings. Returns `None` when the value is not callable.
+///
+/// SUPERSEDED by the node-domain
+/// [`CallableNodeView::validated_snippet_positional_params`](crate::meta_resolve::callable_view::CallableNodeView):
+/// the production snippet-slot normalizer now decides in the node domain and
+/// this `TypeExpr`-domain reader has NO production caller. RETAINED as the SP4
+/// parity oracle (`svelte_exec_tests` `snippet_*` + the
+/// `realized_snippet_call_signature_is_this_plus_rest_tuple` parity assertion);
+/// deleted with the rest of the legacy `TypeExpr` snippet chain at §5a SP4.
+#[cfg_attr(not(test), allow(dead_code))]
 fn snippet_callable_positional_bindings(
     value: &TypeExpr,
     scope: &verter_type_expr::TypeExprScope,
@@ -685,6 +747,7 @@ fn snippet_callable_positional_bindings(
 /// type-argument list, or `None` when the carrier has no single tuple argument
 /// (an open `Params` generic / a non-tuple arg ⇒ no enumerable positional
 /// bindings).
+#[cfg_attr(not(test), allow(dead_code))]
 fn single_tuple_type_argument(
     type_arguments: &[TypeExpr],
 ) -> Option<&[verter_type_expr::TupleElement]> {
@@ -696,6 +759,7 @@ fn single_tuple_type_argument(
 
 /// Expand a `Params` tuple into ordered positional bindings (label →
 /// `arg{index}` fallback, element type preserved).
+#[cfg_attr(not(test), allow(dead_code))]
 fn positional_bindings_from_tuple(
     elements: &[verter_type_expr::TupleElement],
     scope: &verter_type_expr::TypeExprScope,
@@ -712,6 +776,7 @@ fn positional_bindings_from_tuple(
 /// The ordered positional bindings of ONE realized snippet `Function`: skip the
 /// leading `this` param, expand a rest-tuple param into element bindings, and
 /// emit each remaining positional param directly.
+#[cfg_attr(not(test), allow(dead_code))]
 fn snippet_function_positional_bindings(
     value: &TypeExpr,
     scope: &verter_type_expr::TypeExprScope,
@@ -749,6 +814,7 @@ fn snippet_function_positional_bindings(
 
 /// One positional slot binding: name from the label (fallback `arg{index}`),
 /// the typed element/param type, scoped to the slot member's value-node file.
+#[cfg_attr(not(test), allow(dead_code))]
 fn positional_binding(
     label: Option<String>,
     index: usize,
@@ -770,6 +836,12 @@ fn positional_binding(
 /// INTERSECTION of every arm's `i`-th binding type (a template can rely on a
 /// positional binding only if EVERY arm supplies it). Bindings present in only
 /// some arms are dropped (the shortest arm caps the count).
+///
+/// SUPERSEDED by the node-domain
+/// [`CallableNodeView::combine_positional_param_nodes_by_index`](crate::meta_resolve::callable_view::CallableNodeView),
+/// which the view now owns (the normalizer never iterates `Union` itself).
+/// RETAINED for the SP4 parity oracle; deleted at §5a SP4.
+#[cfg_attr(not(test), allow(dead_code))]
 fn combine_positional_bindings_by_index(
     per_arm: Vec<Vec<AnalyzedSlotFieldBinding>>,
     scope: &verter_type_expr::TypeExprScope,

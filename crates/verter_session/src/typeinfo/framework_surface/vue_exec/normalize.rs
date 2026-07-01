@@ -18,13 +18,16 @@ use verter_semantic::analysis::AnalyzedMacroKind;
 use verter_type_expr::{LiteralValue, TypeExpr, TypeExprScope};
 
 use super::{
-    member_jsdoc_from_spans, navigate_param_to_object_surface, raise_member_value,
-    raise_realized_callable_member_value, signature_jsdoc_from_spans, slice_canonical_span,
+    member_jsdoc_from_spans, raise_member_value, signature_jsdoc_from_spans, slice_canonical_span,
 };
-use crate::meta_resolve::callable_view::CallableNodeView;
+use crate::meta_resolve::callable_view::{ArmCombineNode, CallableNodeView};
 use crate::project_semantic_dispatch::output_materialization::OutputProjector;
+use crate::project_semantic_dispatch::{node_data_for, ProjectSemanticDispatch};
 use crate::resolver_core::surface_projector::render_type_expr_display;
-use crate::semantic_query::{FunctionParam, ProjectionMode, ProjectionReductionContext};
+use crate::semantic_query::{
+    FunctionParam, PathSegment, ProjectionMode, ProjectionReductionContext, SemanticNodeData,
+    SemanticNodeId,
+};
 use crate::typeinfo::framework_surface::resolved_surface_access::ResolvedSurfaceAccess;
 use crate::typeinfo::surface::{CanonicalSpan, TypeInfoSurfaceMember};
 use crate::VerterHost;
@@ -470,6 +473,13 @@ pub(in crate::typeinfo::framework_surface::vue_exec) fn property_style_emit_fiel
 ///   combined return type (intersection of returns for an intersection, union of
 ///   returns for a union).
 /// - Anything else → `None` (the member is not a slot).
+///
+/// SUPERSEDED by the node-domain [`CallableNodeView::slot_param_and_return_by_arm`]:
+/// [`slots_from_typeinfo_surface`] now decides slot param/return in the node
+/// domain and this `TypeExpr`-domain helper has NO production caller. RETAINED as
+/// the SP4 parity oracle (`slot_normalizer_legacy_oracle` below); deleted at §5a
+/// SP4.
+#[cfg_attr(not(test), allow(dead_code))]
 fn slot_callable_param_and_return(
     value: &TypeExpr,
 ) -> Option<(
@@ -504,6 +514,10 @@ fn slot_callable_param_and_return(
 /// How to combine the RETURN types of a multi-arm slot callable. The first
 /// params are ALWAYS intersected (the bindings a template can rely on must hold
 /// across every arm); only the return-type combiner differs.
+///
+/// SUPERSEDED by the node-domain [`ArmCombineNode`]; retained with the legacy
+/// `TypeExpr` slot helpers for the SP4 parity oracle, deleted at §5a SP4.
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy)]
 enum ArmCombine {
     Intersection,
@@ -522,6 +536,10 @@ enum ArmCombine {
 /// the multi-arm callable can be invoked with no slot props in that branch, so
 /// there are NO guaranteed bindings — the first param is dropped to `None`. The
 /// return type still combines across arms.
+///
+/// SUPERSEDED by [`CallableNodeView::slot_param_and_return_by_arm`]'s node-domain
+/// `combine_slot_arms`; retained for the SP4 parity oracle, deleted at §5a SP4.
+#[cfg_attr(not(test), allow(dead_code))]
 fn slot_callable_param_and_return_from_arms(
     arms: &[TypeExpr],
     combine: ArmCombine,
@@ -600,6 +618,10 @@ pub(crate) fn slots_from_typeinfo_surface(
     // Host-level reads (JSDoc / return-type source slicing, node scope) use the
     // host the `ctx` is installed against.
     let host = ctx.host_for_fact_tracer_install();
+    let dispatch = ctx.dispatch();
+    // Node-domain demand identity: `Navigate` carrier-resolves an aliased /
+    // generic slot callable before the function-like filter.
+    let context = ProjectionReductionContext::published(ProjectionMode::Navigate);
     macro_surface
         .surface
         .members
@@ -608,28 +630,49 @@ pub(crate) fn slots_from_typeinfo_surface(
         // NOT leak as a published slot.
         .filter(|member| member.visibility.is_public())
         .filter_map(|member| {
-            // A slot member's value may be a non-`Function` carrier shell under
-            // the transit-shallow macro surface — most notably a generic slot
-            // alias that lowers to an `InstantiationRef` / alias carrier rather
-            // than a reduced `Function`. Realize the value through the SHARED
-            // callable-realization substrate so a decidable callable surfaces as
-            // a `Function` BEFORE the function-like filter — otherwise the
-            // generic slot is silently dropped.
-            let value = raise_realized_callable_member_value(ctx, member)?;
-            // A slot member is function-like: a single `Function`, or an
-            // `Intersection` of functions, or a `Union` of functions.
-            let (first_param, return_expr, return_span) = slot_callable_param_and_return(&value)?;
+            // The slot callable decisions are made ENTIRELY in the node domain
+            // through the shared `CallableNodeView`; the display return `TypeExpr`
+            // is minted ONCE at the terminal sink. A slot member may be a
+            // non-`Function` carrier shell under the transit-shallow surface (a
+            // generic slot alias lowering to an `InstantiationRef` / alias
+            // carrier) — the view realizes it BEFORE the function-like filter.
+            let view = CallableNodeView::new(&dispatch, member.value);
+            // Function-like FILTER + ArmCombine determination (node-domain): a
+            // member that does not realize to a callable is not a slot (dropped).
+            // The realized root's top-level kind selects the return combiner — a
+            // `Union` of function arms unions returns; a single `Function` or an
+            // `Intersection` of function arms intersects them. (The first params
+            // are ALWAYS intersected — a template binding must hold across arms.)
+            let realized_root = view.realized_callable_root(context)?;
+            let combine = match node_data_for(dispatch.ctx, realized_root).as_deref() {
+                Some(SemanticNodeData::Union(_)) => ArmCombineNode::Union,
+                _ => ArmCombineNode::Intersection,
+            };
+            // The across-arms first-param + return NODES (fails closed to drop the
+            // slot when any arm is non-callable — the same soundness the legacy
+            // `slot_callable_param_and_return` enforced).
+            let parts = view.slot_param_and_return_by_arm(combine, context)?;
             let scope = macro_surface.member_expr_scope(host, member);
-            let bindings = first_param
-                .as_ref()
-                .map(|param_ty| binding_fields_from_param_ty(ctx, param_ty, &scope))
+            // Bindings from the (across-arms-intersected) first-param NODE.
+            let bindings = parts
+                .first_param
+                .map(|first_param| binding_fields_from_param_node(ctx, first_param, &scope))
                 .unwrap_or_default();
+            // `return_expr`: materialize the return NODE ONCE at the terminal sink
+            // (kept as `Option<TypeExpr>`; the normalizer only stores + renders it,
+            // never decides on its variant).
+            let return_expr = parts
+                .return_type
+                .map(|return_node| materialize_slot_return_node(ctx, return_node));
             let return_expr_scope = return_expr.as_ref().map(|_| scope.clone());
             // Display `return_type`: prefer the EXACT source text sliced from the
-            // return-type annotation span — this preserves a name the typed
-            // return cannot surface (an unresolved imported `VNode`). Fall back
-            // to rendering the typed return when there is no span. Display-only.
-            let return_type = return_span
+            // return-type annotation span (single-arm) — this preserves a name the
+            // typed return cannot surface (an unresolved imported `VNode`). Fall
+            // back to rendering the materialized return (composed multi-arm — no
+            // single span). Display-only; the by-name `.and_then` render form makes
+            // no decision on the materialized value.
+            let return_type = parts
+                .return_type_span
                 .map(|span| CanonicalSpan::new(scope.as_str().into(), span))
                 .and_then(|cspan| slice_canonical_span(host, &cspan))
                 .map(|text| text.trim().to_string())
@@ -651,6 +694,26 @@ pub(crate) fn slots_from_typeinfo_surface(
         .collect()
 }
 
+/// Materialize a Vue slot RETURN node into its display `TypeExpr` — a GENUINE
+/// decide-free terminal one-shot sink (the single-node twin of
+/// [`materialize_payload_tuple`]). The return `SemanticNodeId` is minted ONCE
+/// through the sealed output cap; it makes NO decision on the materialized value
+/// and takes NO `&TypeExpr` param (a node id + the active `ctx`). The mint cap is
+/// constructed INTERNALLY from `ctx` (the `raise_member_value` pattern).
+pub(in crate::typeinfo::framework_surface::vue_exec) fn materialize_slot_return_node(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    return_node: SemanticNodeId,
+) -> TypeExpr {
+    let dispatch = ctx.dispatch();
+    let cap = super::TypeinfoVueSurfaceOutputCap::new(&dispatch);
+    // A node that does not materialize keeps the opaque `Unknown` raise-miss value
+    // (the shared raise-miss convention); a realized slot's return node always
+    // mints, so the fallback is robustness only.
+    cap.materialize_output_type_expr(return_node)
+        .map(|raised| raised.into_type_expr(&cap))
+        .unwrap_or(TypeExpr::Unknown { raw: String::new() })
+}
+
 /// Reconstruct a slot's binding fields from its function's first-parameter type.
 /// Each member of the parameter's OBJECT surface becomes one
 /// [`AnalyzedSlotFieldBinding`] carrying that member's value `TypeExpr` as
@@ -670,81 +733,147 @@ pub(crate) fn slots_from_typeinfo_surface(
 ///
 /// A first parameter that does not resolve to an object surface yields no
 /// bindings.
-pub(crate) fn binding_fields_from_param_ty(
+///
+/// NODE-DOMAIN: the first param is a `SemanticNodeId` (the across-arms-intersected
+/// slot first-param node from [`CallableNodeView::slot_param_and_return_by_arm`]),
+/// NOT a materialised `TypeExpr`. It projects the first-param node's one-level
+/// SHALLOW object surface through the shared carrier-preserving
+/// [`VerterHost::project_shallow_surface_from_base`] — this uniformly covers a
+/// literal object, a `Pick<…>`, an aliased param, AND the multi-arm intersected
+/// node (which [`CallableNodeView::first_param_object_surface`] does NOT cover) —
+/// applying the SAME open-generic gate (`slot_param_root_is_symbolic_only`) both
+/// binding paths use. Each per-member binding `TypeExpr` is minted ONCE at the
+/// registered terminal [`slot_binding_field`]; this navigator holds NO mint.
+pub(crate) fn binding_fields_from_param_node(
     ctx: &dyn crate::resolver_core::ResolverContext,
-    param_ty: &TypeExpr,
+    first_param: SemanticNodeId,
     scope: &TypeExprScope,
 ) -> Vec<AnalyzedSlotFieldBinding> {
-    // View-sensitive navigation / raising flows through `ctx`; host-level node
-    // scope reads use the host the `ctx` is installed against.
+    let dispatch = ctx.dispatch();
     let host = ctx.host_for_fact_tracer_install();
-    // Literal object: read its properties directly (structural typed-IR match).
-    if let TypeExpr::Object(obj) = param_ty {
-        return obj
-            .properties
-            .iter()
-            .filter_map(|member| match member {
-                // Public-only publication.
-                verter_type_expr::ObjectMember::Property(prop) if prop.visibility.is_public() => {
-                    Some(AnalyzedSlotFieldBinding {
-                        name: prop.name.clone(),
-                        type_annotation: render_type_expr_display(&prop.ty),
-                        binding_expr: Some(prop.ty.clone()),
-                        binding_expr_scope: Some(scope.clone()),
-                        span: verter_span::Span::default(),
-                    })
-                }
-                _ => None,
-            })
-            .collect();
+    // Open-generic gate: a symbolic-only param root (an open Conditional / mapped
+    // / indexed / free `TypeParam`) must NOT be materialised into a committed
+    // object surface — the SAME gate `navigate_param_to_object_surface` /
+    // `first_param_object_surface` apply, keeping every binding path in agreement.
+    if crate::meta_resolve::slot_binding_graph::slot_param_root_is_symbolic_only(
+        &dispatch,
+        first_param,
+        0,
+    ) {
+        return Vec::new();
     }
-
-    // Non-object first param (`Pick<…>` / alias `Ref` / `Parenthesized`):
-    // navigate it through the shared resolver to its object surface.
-    let Some(surface) = navigate_param_to_object_surface(ctx, scope.as_str(), param_ty) else {
+    // Project the first-param node's one-level SHALLOW object surface (STAYS
+    // Shallow / carrier-preserving — the root is NOT carrier-resolved, preserving
+    // the `AppProps['avatar']` symbolic-access policy).
+    let Some(surface) = host.project_shallow_surface_from_base(
+        ctx,
+        &dispatch,
+        first_param,
+        Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+        ProjectionReductionContext::published(ProjectionMode::Shallow),
+    ) else {
         return Vec::new();
     };
     // Shallow-by-default Pick member publication: when the slot param is a
     // `Pick<NamedRoot, K>` the picked members stay SYMBOLIC at the published
-    // binding surface — each binding's value is the typed indexed access
-    // `NamedRoot['member']` (built from the typed param, not reparsed). Other
-    // shapes keep the navigated value.
-    let pick_symbolic_root = pick_named_source_root(param_ty);
+    // binding surface — the terminal sink builds each binding's value as the typed
+    // indexed access `NamedRoot['member']`. The Pick source-root is read
+    // NODE-DOMAIN from the first-param node (a thin structural `InstantiationRef`
+    // read under the Vue Pick DTO policy — never a `"Pick<"` text sniff).
+    let pick_root = pick_source_root_node(&dispatch, first_param);
     surface
         .members
         .iter()
         // Public-only publication.
         .filter(|member| member.visibility.is_public())
-        .map(|member| {
-            if let Some(root) = pick_symbolic_root {
-                let symbolic = TypeExpr::IndexedAccess {
-                    object: Arc::new(root.clone()),
-                    index: Arc::new(TypeExpr::Literal(LiteralValue::String(
-                        member.name.as_ref().to_string(),
-                    ))),
-                };
-                return AnalyzedSlotFieldBinding {
-                    name: member.name.as_ref().to_string(),
-                    type_annotation: render_type_expr_display(&symbolic),
-                    binding_expr: Some(symbolic),
-                    binding_expr_scope: Some(scope.clone()),
-                    span: verter_span::Span::default(),
-                };
-            }
+        .map(|member| slot_binding_field(ctx, member, pick_root, scope))
+        .collect()
+}
+
+/// The Pick source-root NODE the Vue Pick DTO policy publishes each picked member
+/// against — the node-domain analogue of [`pick_named_source_root`]. Peels the
+/// first-param node through the carrier-PRESERVING
+/// [`ProjectSemanticDispatch::peel_node_for_uninstantiated_carrier_fact_demand`]
+/// to reach the un-instantiated builtin `Pick<Root, K>` `InstantiationRef`, then
+/// returns its source-root arg (`args[0]`). A typed-IR STRUCTURAL match on the
+/// builtin `Pick` utility identity (`base.decl_name == "Pick"` with two args) —
+/// NOT a `"Pick<"` text sniff and NOT a materialise-then-decide. Any other shape
+/// (a literal object, a multi-arm `Intersection` first param, a non-Pick alias)
+/// returns `None` (each member then mints its own value at the sink).
+fn pick_source_root_node(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    first_param: SemanticNodeId,
+) -> Option<SemanticNodeId> {
+    let peeled = dispatch.peel_node_for_uninstantiated_carrier_fact_demand(
+        first_param,
+        ProjectionReductionContext::published(ProjectionMode::Navigate),
+    );
+    match node_data_for(dispatch.ctx, peeled).as_deref() {
+        Some(SemanticNodeData::InstantiationRef { base, args })
+            if base.decl_name.as_ref() == "Pick" && args.len() == 2 =>
+        {
+            Some(args[0])
+        }
+        _ => None,
+    }
+}
+
+/// Build ONE published slot binding for a surface member — a GENUINE decide-free
+/// terminal one-shot sink. It takes NO `&TypeExpr` param (a surface member, the
+/// node-domain `Option<SemanticNodeId>` Pick source-root, and the scope) and
+/// makes NO decision on any materialised value:
+///
+/// - a `Pick` member (`pick_root == Some`) publishes the SYMBOLIC
+///   `NamedRoot['member']` indexed access — the source root is minted ONCE
+///   (internally) and the `IndexedAccess` is a pure syntactic display build (NOT
+///   a reverse-materialisation), the shallow-by-default Pick policy;
+/// - any other member mints its own value ONCE through the registered
+///   [`raise_member_value`] sink.
+///
+/// The `pick_root` branch is a NODE-DOMAIN `Option` match, never a `TypeExpr`
+/// decide; the display renders through the by-name `.and_then` form. The mint cap
+/// is constructed INTERNALLY from `ctx` (the `raise_member_value` pattern).
+pub(in crate::typeinfo::framework_surface::vue_exec) fn slot_binding_field(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    member: &TypeInfoSurfaceMember,
+    pick_root: Option<SemanticNodeId>,
+    scope: &TypeExprScope,
+) -> AnalyzedSlotFieldBinding {
+    let host = ctx.host_for_fact_tracer_install();
+    let (binding_expr, binding_expr_scope) = match pick_root {
+        Some(root_node) => {
+            // Mint the Pick source-root ONCE, then build the symbolic
+            // `NamedRoot['member']` display access (a pure syntactic build).
+            let dispatch = ctx.dispatch();
+            let cap = super::TypeinfoVueSurfaceOutputCap::new(&dispatch);
+            let named_root = cap
+                .materialize_output_type_expr(root_node)
+                .map(|raised| raised.into_type_expr(&cap))
+                .unwrap_or(TypeExpr::Unknown { raw: String::new() });
+            let symbolic = TypeExpr::IndexedAccess {
+                object: Arc::new(named_root),
+                index: Arc::new(TypeExpr::Literal(LiteralValue::String(
+                    member.name.as_ref().to_string(),
+                ))),
+            };
+            (Some(symbolic), Some(scope.clone()))
+        }
+        None => {
             let binding_expr = raise_member_value(ctx, member);
             let binding_expr_scope = binding_expr
                 .as_ref()
                 .map(|_| macro_member_value_scope(host, member, scope));
-            let type_annotation = binding_expr.as_ref().and_then(render_type_expr_display);
-            AnalyzedSlotFieldBinding {
-                name: member.name.as_ref().to_string(),
-                type_annotation,
-                binding_expr,
-                binding_expr_scope,
-                span: verter_span::Span::default(),
-            }
-        })
-        .collect()
+            (binding_expr, binding_expr_scope)
+        }
+    };
+    let type_annotation = binding_expr.as_ref().and_then(render_type_expr_display);
+    AnalyzedSlotFieldBinding {
+        name: member.name.as_ref().to_string(),
+        type_annotation,
+        binding_expr,
+        binding_expr_scope,
+        span: verter_span::Span::default(),
+    }
 }
 
 /// When `param_ty` is structurally `Pick<NamedRoot, K>` (modulo `Parenthesized`
@@ -753,6 +882,12 @@ pub(crate) fn binding_fields_from_param_ty(
 /// symbolic `NamedRoot['member']` indexed access. This is a STRUCTURAL match on
 /// the typed IR — no type-text sniffing, no reparse. Any other shape returns
 /// `None`.
+///
+/// The Vue Pick DTO policy is now read NODE-DOMAIN from the first-param node by
+/// [`pick_source_root_node`] (the production path); this `TypeExpr`-domain reader
+/// is RETAINED as its parity oracle (`slot_normalizer_legacy_oracle` below) and
+/// deleted at §5a SP4.
+#[cfg_attr(not(test), allow(dead_code))]
 fn pick_named_source_root(param_ty: &TypeExpr) -> Option<&TypeExpr> {
     match param_ty {
         TypeExpr::Parenthesized(inner) => pick_named_source_root(inner),
@@ -792,4 +927,128 @@ fn macro_member_value_scope(
                 .map(|canonical| TypeExprScope::new(canonical.as_ref()))
         })
         .unwrap_or_else(|| fallback.clone())
+}
+
+#[cfg(test)]
+mod slot_normalizer_legacy_oracle {
+    //! SP4 parity oracles for the caller-free legacy `TypeExpr`-domain slot
+    //! helpers (`slot_callable_param_and_return` (+`_from_arms` / `ArmCombine`),
+    //! `pick_named_source_root`) and a compile-only signature pin for the
+    //! caller-free registered sink `raise_realized_callable_member_value`. The
+    //! production path is node-domain (`slots_from_typeinfo_surface` via
+    //! `CallableNodeView`); these keep the legacy helpers referenced (and prove
+    //! they still behave) until they are deleted at §5a SP4.
+    use std::sync::Arc;
+
+    use verter_type_expr::{FunctionExpr, FunctionParam, LiteralValue, PrimitiveName, TypeExpr};
+
+    use super::{pick_named_source_root, slot_callable_param_and_return};
+    use crate::typeinfo::surface::TypeInfoSurfaceMember;
+
+    fn named_ref(name: &str) -> TypeExpr {
+        TypeExpr::Ref {
+            name: Arc::from(name),
+            type_arguments: Arc::from(Vec::new().into_boxed_slice()),
+        }
+    }
+
+    fn func(params: Vec<FunctionParam>, ret: TypeExpr) -> TypeExpr {
+        TypeExpr::Function(Arc::new(FunctionExpr::synthetic(
+            params,
+            Some(Arc::new(ret)),
+            Vec::new(),
+        )))
+    }
+
+    #[test]
+    fn slot_callable_param_and_return_extracts_single_function() {
+        let props = named_ref("Props");
+        let f = func(
+            vec![FunctionParam::synthetic(
+                Some("props".to_string()),
+                props.clone(),
+                false,
+                false,
+            )],
+            TypeExpr::Primitive(PrimitiveName::String),
+        );
+        let (first, ret, _span) =
+            slot_callable_param_and_return(&f).expect("a single Function is slot-callable");
+        assert_eq!(first, Some(props), "first param extracted");
+        assert_eq!(
+            ret,
+            Some(TypeExpr::Primitive(PrimitiveName::String)),
+            "return extracted"
+        );
+    }
+
+    #[test]
+    fn slot_callable_param_and_return_union_intersects_params_unions_returns() {
+        // Exercises `slot_callable_param_and_return_from_arms` + `ArmCombine`: a
+        // union of two function slots intersects first params, unions returns.
+        let fa = func(
+            vec![FunctionParam::synthetic(
+                Some("p".to_string()),
+                named_ref("PA"),
+                false,
+                false,
+            )],
+            TypeExpr::Primitive(PrimitiveName::String),
+        );
+        let fb = func(
+            vec![FunctionParam::synthetic(
+                Some("p".to_string()),
+                named_ref("PB"),
+                false,
+                false,
+            )],
+            TypeExpr::Primitive(PrimitiveName::Number),
+        );
+        let un = TypeExpr::Union(Arc::from(vec![fa, fb].into_boxed_slice()));
+        let (first, ret, _span) =
+            slot_callable_param_and_return(&un).expect("a union of functions is slot-callable");
+        assert!(
+            matches!(first, Some(TypeExpr::Intersection(ref arms)) if arms.len() == 2),
+            "first param is the intersection of both arms' params, got {first:?}"
+        );
+        assert!(
+            matches!(ret, Some(TypeExpr::Union(ref arms)) if arms.len() == 2),
+            "return is the union of both arms' returns, got {ret:?}"
+        );
+    }
+
+    #[test]
+    fn pick_named_source_root_recognizes_pick_ref() {
+        let row_api = named_ref("RowApi");
+        let pick = TypeExpr::Ref {
+            name: Arc::from("Pick"),
+            type_arguments: Arc::from(
+                vec![
+                    row_api.clone(),
+                    TypeExpr::Literal(LiteralValue::String("name".to_string())),
+                ]
+                .into_boxed_slice(),
+            ),
+        };
+        assert_eq!(
+            pick_named_source_root(&pick),
+            Some(&row_api),
+            "`Pick<RowApi, K>` source root is `RowApi`"
+        );
+        assert_eq!(
+            pick_named_source_root(&row_api),
+            None,
+            "a non-`Pick` Ref has no Pick source root"
+        );
+    }
+
+    #[test]
+    fn raise_realized_callable_member_value_terminal_signature_pinned() {
+        // Compile-only: pin the caller-free registered `HOT_TERMINAL_SINKS` sink's
+        // signature so it stays referenced (deleted at §5a SP4).
+        let _: fn(
+            &dyn crate::resolver_core::ResolverContext,
+            &TypeInfoSurfaceMember,
+        ) -> Option<TypeExpr> = super::super::raise_realized_callable_member_value;
+    }
 }

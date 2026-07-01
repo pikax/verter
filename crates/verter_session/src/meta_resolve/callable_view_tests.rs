@@ -16,7 +16,7 @@ use crate::project_semantic_dispatch::{node_data_for, ProjectSemanticDispatch};
 use crate::resolver_core::{CanonicalCompletionOverlay, HostResolverContext, ResolverContext};
 use crate::resolver_store::CurrentHostStoreView;
 use crate::semantic_query::{
-    DeclIdentity, FunctionParam, LiteralValue, PrimitiveKind, ProjectionMode,
+    DeclIdentity, FunctionParam, HashValue, LiteralValue, PrimitiveKind, ProjectionMode,
     ProjectionReductionContext, QueryError, SemanticNodeData, SemanticNodeId, SurfaceMember,
     SurfaceView, TupleElement,
 };
@@ -122,6 +122,25 @@ fn object_surface(
         has_index_signature: false,
     };
     graph.intern_node(SemanticNodeData::Object(view))
+}
+
+/// A synthetic `Base<args...>` [`SemanticNodeData::InstantiationRef`] carrier
+/// (the shape a `Snippet<Params>` member value lowers to). The `__builtin__`
+/// base makes the carrier UN-instantiable, so the carrier-preserving peel reads
+/// its `args` directly — exactly the validated-snippet read path.
+fn instantiation_ref(
+    graph: &SemanticGraphStore,
+    base_name: &str,
+    args: Vec<SemanticNodeId>,
+) -> SemanticNodeId {
+    graph.intern_node(SemanticNodeData::InstantiationRef {
+        base: DeclIdentity {
+            canonical_id: Arc::from("__builtin__"),
+            whole_hash: HashValue::default(),
+            decl_name: Arc::from(base_name),
+        },
+        args: Arc::from(args.into_boxed_slice()),
+    })
 }
 
 fn navigate() -> ProjectionReductionContext {
@@ -2223,5 +2242,382 @@ fn event_names_constructor_type_arm_is_skipped_not_failed() {
         CallableNodeView::new(&dispatch, f).event_names(navigate()),
         Some(vec![Arc::<str>::from("a")]),
         "a `ConstructorType` (`new () => X`) arm is SKIPPED (complete-no-name), exactly like `Function` — `'a' | (new () => X)` yields `[\"a\"]`, never fail-closed `None`"
+    );
+}
+
+// ───────── peel_node_for_uninstantiated_carrier_fact_demand ─────────
+//
+// The carrier-PRESERVING peel: unwrap `Alias` / resolve `DeclRef` but STOP at an
+// `InstantiationRef` (never instantiate it) so a validated-snippet reader can
+// read its `Params` args. Discriminated against the ordinary
+// `normalize_node_for_structural_fact_demand`, which DOES instantiate.
+
+#[test]
+fn peel_stops_at_instantiation_ref_while_normalize_instantiates() {
+    // A `Snippet<[item: Item, index: number]>` member value lowers to an
+    // `InstantiationRef(Snippet, [tuple])`. The PEEL keeps that carrier (so its
+    // `Params` args stay readable); the ordinary demand primitive INSTANTIATES it
+    // to the Snippet interface Object — the exact gap the peel closes. This is the
+    // DISCRIMINATOR: peel != normalize on a snippet carrier.
+    let component = "/workspace/PeelSnippet.svelte";
+    let source = "<script lang=\"ts\">\n\
+         import type { Snippet } from './snippet';\n\
+         interface Item { id: number }\n\
+         interface Props { row: Snippet<[item: Item, index: number]> }\n\
+         let { row }: Props = $props();\n\
+         void row;\n\
+         </script>\n\
+         <div />";
+    let (host, view) = workspace_host_with_svelte(
+        component,
+        source,
+        &[(
+            "/workspace/snippet.ts",
+            "export interface Snippet<Params extends unknown[] = []> {\n\
+                 (this: void, ...args: Params): { __brand: 'snippet' };\n\
+                 }\n",
+        )],
+    );
+    let overlay = Arc::new(CanonicalCompletionOverlay::new());
+    let ctx = HostResolverContext::from_current(&host, &view, overlay);
+    let facts = host
+        .resolve_svelte_script_facts_with_ctx(&ctx, component)
+        .expect("svelte facts");
+    let props_type = facts.props_type.as_ref().expect("props type");
+    let surface =
+        navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
+    let dispatch = ctx.dispatch();
+    let row = surface
+        .members
+        .iter()
+        .find(|m| m.name.as_ref() == "row")
+        .expect("the `row` member is present")
+        .value;
+
+    let peeled = dispatch.peel_node_for_uninstantiated_carrier_fact_demand(row, navigate());
+    assert!(
+        matches!(
+            node_data_for(dispatch.ctx, peeled).as_deref(),
+            Some(SemanticNodeData::InstantiationRef { .. })
+        ),
+        "the peel STOPS at the `Snippet<Params>` `InstantiationRef` (does not instantiate it), got {:?}",
+        node_data_for(dispatch.ctx, peeled).as_deref()
+    );
+    let normalized = dispatch.normalize_node_for_structural_fact_demand(row, navigate());
+    assert!(
+        !matches!(
+            node_data_for(dispatch.ctx, normalized).as_deref(),
+            Some(SemanticNodeData::InstantiationRef { .. })
+        ),
+        "the ordinary demand primitive INSTANTIATES the `Snippet<Params>` carrier (consuming its \
+         args), got {:?}",
+        node_data_for(dispatch.ctx, normalized).as_deref()
+    );
+    assert_ne!(
+        peeled, normalized,
+        "peel (carrier-preserving) and normalize (instantiating) DIVERGE on a snippet carrier"
+    );
+}
+
+#[test]
+fn peel_unwraps_alias_to_instantiation_ref() {
+    // The peel unwraps an `Alias` shell to REACH the un-instantiated
+    // `InstantiationRef` (and stops there).
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let item = prim(&graph, PrimitiveKind::Number);
+    let tup = tuple(&graph, vec![tuple_element(Some("item"), item)]);
+    let instref = instantiation_ref(&graph, "Snippet", vec![tup]);
+    let aliased = alias(&graph, instref);
+
+    let peeled = dispatch.peel_node_for_uninstantiated_carrier_fact_demand(aliased, navigate());
+    assert_eq!(
+        peeled, instref,
+        "the peel unwraps the `Alias` to reach the un-instantiated `InstantiationRef`"
+    );
+}
+
+#[test]
+fn peel_bounded_fail_closed_on_declref_cycle() {
+    // A mutual `DeclRef` cycle terminates fail-closed at a carrier (never a hang,
+    // never a fabricated concrete type) — the peel shares the bounded loop.
+    let (host, view) = primitive_carrier_host();
+    let overlay = Arc::new(CanonicalCompletionOverlay::new());
+    let ctx = HostResolverContext::from_current(&host, &view, overlay);
+    let facts = host
+        .resolve_svelte_script_facts_with_ctx(&ctx, "/workspace/Carriers.svelte")
+        .expect("svelte facts");
+    let props_type = facts.props_type.as_ref().expect("props type");
+    let surface = navigate_param_to_object_surface(&ctx, "/workspace/Carriers.svelte", props_type)
+        .expect("props surface");
+    let dispatch = ctx.dispatch();
+    let mutual = surface
+        .members
+        .iter()
+        .find(|m| m.name.as_ref() == "mutual")
+        .expect("the `mutual` member is present")
+        .value;
+
+    let peeled = dispatch.peel_node_for_uninstantiated_carrier_fact_demand(mutual, navigate());
+    assert!(
+        matches!(
+            node_data_for(dispatch.ctx, peeled).as_deref(),
+            Some(SemanticNodeData::DeclRef { .. })
+        ),
+        "a mutual-recursion `DeclRef` cycle carrier-stops fail-closed (bounded), got {:?}",
+        node_data_for(dispatch.ctx, peeled).as_deref()
+    );
+}
+
+// ─────────── validated_snippet_positional_params ───────────
+
+#[test]
+fn validated_snippet_params_expands_instantiation_ref_tuple() {
+    // The PRIMARY snippet shape: an `InstantiationRef(Snippet, [Params])` whose
+    // `Params` is a tuple expands element-wise, in order — the carrier read the
+    // legacy `positional_params` (needs a realized `Function`) DROPPED.
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let item = prim(&graph, PrimitiveKind::String);
+    let index = prim(&graph, PrimitiveKind::Number);
+    assert_ne!(item, index, "distinct element type nodes");
+    let tup = tuple(
+        &graph,
+        vec![
+            tuple_element(Some("item"), item),
+            tuple_element(Some("index"), index),
+        ],
+    );
+    let snippet = instantiation_ref(&graph, "Snippet", vec![tup]);
+
+    let params = CallableNodeView::new(&dispatch, snippet)
+        .validated_snippet_positional_params(navigate())
+        .expect("a `Snippet<[item, index]>` carrier yields positional params");
+    let labels: Vec<Option<&str>> = params.iter().map(|p| p.label.as_deref()).collect();
+    assert_eq!(
+        labels,
+        vec![Some("item"), Some("index")],
+        "the `Params` tuple expands to ALL positional params in order"
+    );
+    assert_eq!(params[0].ty, item, "binding 0 ty is the tuple element node");
+    assert_eq!(
+        params[1].ty, index,
+        "binding 1 ty is the tuple element node"
+    );
+}
+
+#[test]
+fn validated_snippet_params_empty_args_is_present_bindingless() {
+    // A default `Snippet` (`InstantiationRef(Snippet, [])`) is a PRESENT,
+    // binding-less slot — `Some(vec![])`, never a dropped slot (`None`).
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let snippet = instantiation_ref(&graph, "Snippet", vec![]);
+    assert_eq!(
+        CallableNodeView::new(&dispatch, snippet).validated_snippet_positional_params(navigate()),
+        Some(Vec::new()),
+        "a default `Snippet` is a present, binding-less slot"
+    );
+}
+
+#[test]
+fn validated_snippet_params_complete_nontuple_arg_is_present_bindingless() {
+    // A `Snippet<Params>` whose `Params` normalizes to a COMPLETE non-tuple shape
+    // (here a primitive, the analogue of an open-generic `Params`) is a PRESENT,
+    // binding-less slot — NOT a dropped slot.
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let open = prim(&graph, PrimitiveKind::String);
+    let snippet = instantiation_ref(&graph, "Snippet", vec![open]);
+    assert_eq!(
+        CallableNodeView::new(&dispatch, snippet).validated_snippet_positional_params(navigate()),
+        Some(Vec::new()),
+        "a complete non-tuple `Params` yields a present, binding-less slot"
+    );
+}
+
+#[test]
+fn validated_snippet_params_function_fallback_skips_this_expands_rest() {
+    // The Function fallback: a snippet whose realized call signature is
+    // `(this: void, ...args: [item, index])` — the leading `this` is skipped and
+    // the rest-tuple expands element-wise.
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let void = prim(&graph, PrimitiveKind::Void);
+    let item = prim(&graph, PrimitiveKind::String);
+    let index = prim(&graph, PrimitiveKind::Number);
+    let tup = tuple(
+        &graph,
+        vec![
+            tuple_element(Some("item"), item),
+            tuple_element(Some("index"), index),
+        ],
+    );
+    let f = function(
+        &graph,
+        vec![
+            param(Some("this"), void, false, false),
+            param(Some("args"), tup, false, true),
+        ],
+        void,
+    );
+    let params = CallableNodeView::new(&dispatch, f)
+        .validated_snippet_positional_params(navigate())
+        .expect("a realized snippet callable yields positional params");
+    let labels: Vec<Option<&str>> = params.iter().map(|p| p.label.as_deref()).collect();
+    assert_eq!(
+        labels,
+        vec![Some("item"), Some("index")],
+        "`this` skipped, rest-tuple expanded"
+    );
+}
+
+#[test]
+fn validated_snippet_params_union_combines_by_index() {
+    // A `Union` of two snippet carriers combines positional params by index: the
+    // view OWNS the arm recursion; position 0 is `a: A & B` (the shortest arm caps
+    // the count, the first arm supplies the label).
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let a = prim(&graph, PrimitiveKind::String);
+    let b = prim(&graph, PrimitiveKind::Number);
+    let snip_a = instantiation_ref(
+        &graph,
+        "Snippet",
+        vec![tuple(&graph, vec![tuple_element(Some("a"), a)])],
+    );
+    let snip_b = instantiation_ref(
+        &graph,
+        "Snippet",
+        vec![tuple(&graph, vec![tuple_element(Some("a"), b)])],
+    );
+    let un = union(&graph, vec![snip_a, snip_b]);
+
+    let params = CallableNodeView::new(&dispatch, un)
+        .validated_snippet_positional_params(navigate())
+        .expect("a union of snippet carriers yields combined positional params");
+    assert_eq!(
+        params.len(),
+        1,
+        "one position across both arms (shortest caps)"
+    );
+    assert_eq!(params[0].label.as_deref(), Some("a"));
+    match node_data_for(dispatch.ctx, params[0].ty).as_deref() {
+        Some(SemanticNodeData::Intersection(arms)) => {
+            assert_eq!(
+                arms.as_ref(),
+                &[a, b][..],
+                "the combined position type is the intersection of both arms, in arm order"
+            );
+        }
+        other => panic!("the combined binding type is an `Intersection` node, got {other:?}"),
+    }
+}
+
+#[test]
+fn validated_snippet_params_bare_tuple_root_is_not_a_snippet() {
+    // A directly-written `Tuple` ROOT is NOT a snippet — fail-closed (`None`),
+    // NOT expanded as if it were a `Snippet<[...]>`.
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let item = prim(&graph, PrimitiveKind::String);
+    let tup = tuple(&graph, vec![tuple_element(Some("item"), item)]);
+    assert_eq!(
+        CallableNodeView::new(&dispatch, tup).validated_snippet_positional_params(navigate()),
+        None,
+        "a bare `Tuple` root is NOT a snippet"
+    );
+}
+
+#[test]
+fn validated_snippet_params_unresolved_carrier_arg_fails_closed() {
+    // A `Snippet<Params>` whose `Params` is an UNRESOLVED carrier (a `DeclRef` to
+    // a non-existent declaration) fails closed (`None`) — the `Params` could still
+    // be a tuple we could not reach, so it is never a present-slot-as-complete.
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let fake = graph.intern_node(SemanticNodeData::DeclRef {
+        identity: DeclIdentity::synthetic("Nonexistent"),
+    });
+    let snippet = instantiation_ref(&graph, "Snippet", vec![fake]);
+    assert_eq!(
+        CallableNodeView::new(&dispatch, snippet).validated_snippet_positional_params(navigate()),
+        None,
+        "an unresolved `Params` carrier fails closed"
+    );
+}
+
+#[test]
+fn validated_snippet_params_declref_tuple_arg_resolves_the_superset_flip() {
+    // THE FLIP: a `Snippet<Args>` whose `Params` arg is a `DeclRef`-to-tuple
+    // (`type Args = [item: Item, index: number]`) RESOLVES to `[item, index]`.
+    // The legacy TypeExpr reader (`single_tuple_type_argument`) required a LITERAL
+    // `Tuple` type-argument and DROPPED this (a binding-less slot); the node
+    // reader normalizes the `DeclRef` to its `Tuple` — the strict superset. (The
+    // legacy-drops half is proven empirically in `svelte_exec_tests`.)
+    let component = "/workspace/FlipSnippet.svelte";
+    let source = "<script lang=\"ts\">\n\
+         import type { Args } from './types';\n\
+         interface Props { x: Args }\n\
+         let props: Props = $props();\n\
+         void props;\n\
+         </script>\n\
+         <div />";
+    let (host, view) = workspace_host_with_svelte(
+        component,
+        source,
+        &[(
+            "/workspace/types.ts",
+            "export interface Item { id: number }\n\
+             export type Args = [item: Item, index: number];\n",
+        )],
+    );
+    let overlay = Arc::new(CanonicalCompletionOverlay::new());
+    let ctx = HostResolverContext::from_current(&host, &view, overlay);
+    let facts = host
+        .resolve_svelte_script_facts_with_ctx(&ctx, component)
+        .expect("svelte facts");
+    let props_type = facts.props_type.as_ref().expect("props type");
+    let surface =
+        navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
+    let dispatch = ctx.dispatch();
+    let x = surface
+        .members
+        .iter()
+        .find(|m| m.name.as_ref() == "x")
+        .expect("the `x` member is present")
+        .value;
+    // PRECONDITION: the `Args` arg is a `DeclRef` carrier (NOT a literal tuple).
+    assert!(
+        matches!(
+            node_data_for(dispatch.ctx, x).as_deref(),
+            Some(SemanticNodeData::DeclRef { .. })
+        ),
+        "the `Args` type argument is a `DeclRef` carrier before resolution"
+    );
+    // Build the synthetic `Snippet<Args>` carrier over the REAL `DeclRef(Args)`.
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+    let snippet = instantiation_ref(&graph, "Snippet", vec![x]);
+
+    let params = CallableNodeView::new(&dispatch, snippet)
+        .validated_snippet_positional_params(navigate())
+        .expect("the node reader RESOLVES the DeclRef-to-tuple `Params` (the flip)");
+    let labels: Vec<Option<&str>> = params.iter().map(|p| p.label.as_deref()).collect();
+    assert_eq!(
+        labels,
+        vec![Some("item"), Some("index")],
+        "the `DeclRef`-to-tuple `Params` resolves to its ordered bindings (superset over legacy)"
     );
 }

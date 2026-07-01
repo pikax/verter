@@ -533,6 +533,175 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
         Some(self.signature(context)?.positional_params_expanded(context))
     }
 
+    /// The validated Svelte-snippet positional params — the node-domain reader
+    /// the Svelte snippet-slot normalizer consumes. The caller has ALREADY
+    /// proven the member is a validated Svelte `Snippet` member; this is NOT a
+    /// generic "any callable carrier positional args" API (reading an
+    /// `InstantiationRef.args` tuple as positional params is a positional
+    /// generic-contract assumption legitimate ONLY under the validated snippet
+    /// boundary).
+    ///
+    /// It resolves the snippet's positional binding NODES WITHOUT the
+    /// "instantiate-then-fail" gap: the primary `Snippet<Params>` shape lowers
+    /// to an `InstantiationRef(Snippet, [Params])` whose `Instantiate` yields the
+    /// Snippet interface `Object` (a call signature on the surface, NOT a
+    /// `Function` node), so [`Self::positional_params`] (which needs a
+    /// `Function`) DROPS it. This reader therefore PEELS the root through the
+    /// carrier-PRESERVING
+    /// [`ProjectSemanticDispatch::peel_node_for_uninstantiated_carrier_fact_demand`]
+    /// (unwrap `Alias` / resolve `DeclRef`, STOP at `InstantiationRef`) and reads
+    /// the un-instantiated `Params` `args` directly. Order + contract:
+    ///
+    /// - `InstantiationRef` with `args.len() == 0` → `Some(vec![])` (a default
+    ///   `Snippet` — a present, binding-less slot).
+    /// - `InstantiationRef` with `args.len() == 1` → normalize the single
+    ///   `Params` arg through the shared structural-fact demand primitive:
+    ///     - a `Tuple` → one param per element (a `DeclRef`-to-tuple `Params`
+    ///       RESOLVES here — the superset over the legacy literal-tuple-only
+    ///       reader);
+    ///     - a COMPLETE non-tuple shape (`TypeParam` / `Array` / `Primitive` /
+    ///       `Object` / `Function`) → `Some(vec![])` (present, binding-less —
+    ///       e.g. an open-generic `Snippet<Params>`);
+    ///     - an UNRESOLVED residual carrier / `Opaque` miss → `None` (FAIL-CLOSED).
+    /// - `InstantiationRef` with `args.len() > 1` → `Some(vec![])` (a validated
+    ///   snippet is always a present slot; a non-single-`Params` shape carries no
+    ///   enumerable bindings).
+    /// - a realized `Function` (a snippet whose call signature reduced, or a
+    ///   `(this, ...args: Params)` callback) → [`Self::positional_params`]
+    ///   (this-skip + rest-tuple expansion).
+    /// - a `Union` / `Intersection` of snippet carriers / functions → the view
+    ///   OWNS the arm recursion (the normalizer never iterates `Union`): recurse
+    ///   per arm (fail-closed on ANY non-snippet arm) and combine by index.
+    /// - anything else (incl. a directly-written `Tuple` ROOT) is NOT a snippet →
+    ///   `None`.
+    pub(crate) fn validated_snippet_positional_params(
+        &self,
+        context: ProjectionReductionContext,
+    ) -> Option<Vec<PositionalParamNode>> {
+        self.snippet_positional_params_at(self.root, context, 0)
+    }
+
+    /// Recursive worker for [`Self::validated_snippet_positional_params`],
+    /// operating on an arbitrary node (the root, or a `Union` / `Intersection`
+    /// arm). Bounded by [`CALLABLE_VIEW_DEPTH_FUSE`]; fail-closed on exhaustion.
+    fn snippet_positional_params_at(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+        depth: u32,
+    ) -> Option<Vec<PositionalParamNode>> {
+        if depth > CALLABLE_VIEW_DEPTH_FUSE {
+            return None;
+        }
+        // Carrier-PRESERVING peel: unwrap `Alias` / resolve `DeclRef`, but STOP
+        // at an `InstantiationRef` so its `Params` `args` stay readable (the
+        // ordinary instantiate-first demand primitive would consume them — the
+        // snippet gap).
+        let peeled = self
+            .dispatch
+            .peel_node_for_uninstantiated_carrier_fact_demand(node, context);
+        let data = self.data(peeled)?;
+        match data.as_ref() {
+            // A `Snippet<Params>` carrier — read the un-instantiated `Params`.
+            SemanticNodeData::InstantiationRef { args, .. } => {
+                let args = Arc::clone(args);
+                drop(data);
+                match args.len() {
+                    // A default `Snippet` — a present, binding-less slot.
+                    0 => Some(Vec::new()),
+                    1 => {
+                        // Normalize the single `Params` arg to its structural body
+                        // (a `DeclRef`-to-tuple `Params` alias RESOLVES to its
+                        // `Tuple` here — the superset over the legacy literal
+                        // reader).
+                        let arg_norm = self.normalized_fact_node(args[0], context);
+                        match self.data(arg_norm).as_deref() {
+                            Some(SemanticNodeData::Tuple { elements, .. }) => Some(
+                                elements
+                                    .iter()
+                                    .map(|element| PositionalParamNode {
+                                        label: element.label.clone(),
+                                        ty: element.value,
+                                    })
+                                    .collect(),
+                            ),
+                            // A COMPLETE non-tuple `Params` — a present,
+                            // binding-less slot (an open-generic `Snippet<Params>`,
+                            // an `Array`, or a concrete scalar / object / function).
+                            Some(
+                                SemanticNodeData::TypeParam { .. }
+                                | SemanticNodeData::Array { .. }
+                                | SemanticNodeData::Primitive(_)
+                                | SemanticNodeData::Object(_)
+                                | SemanticNodeData::Function { .. },
+                            ) => Some(Vec::new()),
+                            // An UNRESOLVED residual carrier / opaque miss — the
+                            // `Params` could still be a tuple we could not reach →
+                            // fail-closed (never a present slot presented as
+                            // binding-complete).
+                            _ => None,
+                        }
+                    }
+                    // Not a single-`Params`-tuple snippet — a present, binding-less
+                    // slot (a validated snippet is always a present slot).
+                    _ => Some(Vec::new()),
+                }
+            }
+            // A snippet whose call signature realized to a `Function`
+            // (`(this, ...args: Params)`): reuse the shared positional reader
+            // (leading `this` skipped, rest-tuple expanded) on the realized node.
+            SemanticNodeData::Function { .. } => {
+                drop(data);
+                CallableNodeView::new(self.dispatch, peeled).positional_params(context)
+            }
+            // A `Union` / `Intersection` of snippet carriers / functions — the
+            // view OWNS the arm recursion (the normalizer never iterates `Union`):
+            // recurse per arm (fail-closed on ANY non-snippet arm) and combine by
+            // index.
+            SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
+                let arms = Arc::clone(arms);
+                drop(data);
+                let mut per_arm: Vec<Vec<PositionalParamNode>> = Vec::with_capacity(arms.len());
+                for arm in arms.iter() {
+                    per_arm.push(self.snippet_positional_params_at(*arm, context, depth + 1)?);
+                }
+                Some(self.combine_positional_param_nodes_by_index(per_arm))
+            }
+            // Anything else (incl. a directly-written `Tuple` ROOT, a primitive,
+            // an unresolved carrier) is NOT a snippet — fail-closed.
+            _ => None,
+        }
+    }
+
+    /// Combine per-arm positional param NODES by index: position `i` is the
+    /// INTERSECTION of every arm's `i`-th param type (a binding a template can
+    /// rely on must hold across every arm), the SHORTEST arm caps the count, and
+    /// the FIRST arm supplies the position's label. The node-domain analogue of
+    /// the Svelte DTO `combine_positional_bindings_by_index` — the intersection
+    /// is interned as a node here, materialised ONCE at the terminal sink.
+    fn combine_positional_param_nodes_by_index(
+        &self,
+        per_arm: Vec<Vec<PositionalParamNode>>,
+    ) -> Vec<PositionalParamNode> {
+        let Some(min_len) = per_arm.iter().map(|arm| arm.len()).min() else {
+            return Vec::new();
+        };
+        (0..min_len)
+            .map(|i| {
+                // The first arm's label names the position.
+                let label = per_arm[0][i].label.clone();
+                let tys: Vec<SemanticNodeId> = per_arm.iter().map(|arm| arm[i].ty).collect();
+                let ty = match tys.len() {
+                    1 => tys[0],
+                    _ => self.intern(SemanticNodeData::Intersection(Arc::from(
+                        tys.into_boxed_slice(),
+                    ))),
+                };
+                PositionalParamNode { label, ty }
+            })
+            .collect()
+    }
+
     /// The Vue multi-arm slot first-param + return facts. The root is realized
     /// to a callable (a `Function`, or a `Union` / `Intersection` of realized
     /// `Function` arms); the first-param binding exists ONLY when EVERY callable

@@ -289,6 +289,60 @@ impl<'a> ProjectSemanticDispatch<'a> {
         node: SemanticNodeId,
         context: ProjectionReductionContext,
     ) -> SemanticNodeId {
+        // Full structural-fact demand: resolve BOTH residual carriers
+        // (`DeclRef` via `ResolveDecl`, `InstantiationRef` via `Instantiate`).
+        self.resolve_structural_fact_demand(node, context, true)
+    }
+
+    /// Carrier-PRESERVING sibling of
+    /// [`Self::normalize_node_for_structural_fact_demand`] for readers that must
+    /// reach an UNINSTANTIATED `InstantiationRef` carrier (e.g. the validated
+    /// Svelte-snippet positional reader
+    /// [`CallableNodeView::validated_snippet_positional_params`](crate::meta_resolve::callable_view::CallableNodeView),
+    /// and the Vue slot-binding `Pick` source-root read).
+    ///
+    /// It is [`Self::normalize_node_for_structural_fact_demand`] MINUS the
+    /// `InstantiationRef`-instantiate arm: it evaluates deferred shells and
+    /// resolves a residual `DeclRef` through the shared `ResolveDecl` query (the
+    /// SAME `ScopeId { canonical_id, local_scope: None }` shape), re-evaluating
+    /// each hop, BUT it STOPS at an `InstantiationRef` root and NEVER calls
+    /// `Instantiate` on it — it returns the un-instantiated `InstantiationRef`
+    /// node so the caller can read its `args` (a positional generic-contract
+    /// read legitimate ONLY under a validated boundary such as the Svelte
+    /// `Snippet<Params>` contract or the Vue `Pick<Root, K>` DTO policy). The
+    /// `Instantiate`-first demand primitive would CONSUME the `args` tuple
+    /// (`Snippet<[T]>` → the Snippet interface `Object`, losing the carrier
+    /// args), so a carrier-reading reader must peel through THIS primitive first.
+    ///
+    /// Bounded (`visited` + [`STRUCTURAL_FACT_DEMAND_FUSE`]) and fail-closed
+    /// (a cycle / no-progress / depth exhaustion / `Recursive`/`Error` query
+    /// returns the current node unchanged — which may still be a carrier). It is
+    /// NOT a second resolver: the `DeclRef` step delegates to the shared
+    /// `ResolveDecl` query and records the same dep-signature / suppress facts as
+    /// the demand primitive it derives from.
+    pub(crate) fn peel_node_for_uninstantiated_carrier_fact_demand(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        // Carrier-preserving peel: resolve `DeclRef` shells but STOP at an
+        // `InstantiationRef` (do NOT instantiate — leave the args readable).
+        self.resolve_structural_fact_demand(node, context, false)
+    }
+
+    /// Shared residual-carrier resolution loop backing both
+    /// [`Self::normalize_node_for_structural_fact_demand`]
+    /// (`instantiate_instantiation_refs = true`) and
+    /// [`Self::peel_node_for_uninstantiated_carrier_fact_demand`]
+    /// (`= false`). ONE loop, one resolver — the two entry points differ ONLY by
+    /// whether the `InstantiationRef` arm instantiates (there is no divergent
+    /// second implementation).
+    fn resolve_structural_fact_demand(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+        instantiate_instantiation_refs: bool,
+    ) -> SemanticNodeId {
         // Step 1: evaluate deferred shells (Alias / KeyOf / IndexedAccess /
         // Mapped / Conditional / TemplateLiteral / DeclPlaceholder / bare-import).
         let mut n = self.evaluate_deferred_semantic_node_with_context(node, context);
@@ -348,7 +402,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // evaluate carrier-shaped under the caller's context, the slot is
                 // the base decl's type slot, and the instantiate context derives
                 // from the caller's context.
-                SemanticNodeData::InstantiationRef { base, args } => {
+                //
+                // GATED: the carrier-preserving peel
+                // (`instantiate_instantiation_refs == false`) STOPS here instead —
+                // an `InstantiationRef` falls through to the `_ => break` arm below,
+                // returning the un-instantiated carrier so the caller can read its
+                // `args`.
+                SemanticNodeData::InstantiationRef { base, args }
+                    if instantiate_instantiation_refs =>
+                {
                     let slot = self
                         .type_slot_for(Arc::clone(&base.canonical_id), Arc::clone(&base.decl_name));
                     let owner_canonical = Arc::clone(&base.canonical_id);
@@ -376,7 +438,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         QueryResult::Recursive(_) | QueryResult::Error(_) => break,
                     }
                 }
-                // Not a residual resolvable carrier — `n` is the structural body.
+                // Not a residual resolvable carrier — `n` is the structural body
+                // (OR an un-instantiated `InstantiationRef` the peel deliberately
+                // stops at).
                 _ => break,
             };
             // Re-evaluate the materialised body (it may itself be a deferred
