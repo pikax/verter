@@ -97,6 +97,15 @@ pub struct CompileBatchInput {
     /// inherits the batch default ([`CompileBatchOptions::default_mode`]),
     /// which in turn defaults to [`CompileCacheMode::Session`].
     pub requested_mode: Option<CompileCacheMode>,
+    /// Explicit component id for scoped-style / HMR identity, threaded
+    /// into this input's [`CompileProfile::component_id`] on the
+    /// [`CompileManyTarget::RuntimeRender`] lane. This is PER-INPUT (not
+    /// batch-level): scoped-style / HMR identity is a property of the
+    /// component, not the build, and a real batch mixes components with
+    /// distinct ids. `None` lets codegen auto-generate the id. Consumed
+    /// ONLY by the RuntimeRender lane; the HostBacked lane's profile is
+    /// unchanged.
+    pub component_id: Option<String>,
 }
 
 /// Result for a single original input position. `cache_hit` is `true`
@@ -130,6 +139,30 @@ pub struct CompileBatchEntry {
     pub downgrade_reason: Option<DowngradeReason>,
 }
 
+/// The batch-level compiler-visible render profile for the
+/// [`CompileManyTarget::RuntimeRender`] lane.
+///
+/// These fields are output-affecting and uniform across a single bundler
+/// build (a build is entirely dev OR prod, client OR SSR), so they live on
+/// the batch options rather than per-input. Per-component identity
+/// (`component_id`) is separate — it rides on [`CompileBatchInput`]. When
+/// `CompileBatchOptions::render_profile` is `None`, the RuntimeRender lane
+/// falls back to the [`compile_profile_for_bundler`] preset.
+///
+/// Every field here MUST be reproduced from the caller's build profile so
+/// the render output stays byte-identical to the HostBacked
+/// `get_virtual_file` path: `is_production` toggles dev-only code
+/// (`__file`, HMR), `ssr` selects the SSR render function, `force_js`
+/// controls TS stripping, and `hmr_strategy` selects the HMR injection the
+/// host-side main-module assembly emits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CompileBatchRenderProfile {
+    pub is_production: bool,
+    pub ssr: bool,
+    pub force_js: bool,
+    pub hmr_strategy: crate::types::HmrStrategy,
+}
+
 /// Caller-configurable batch options.
 ///
 /// `priority = None` defaults to [`Priority::Background`] (yields to
@@ -145,6 +178,11 @@ pub struct CompileBatchOptions {
     /// [`CompileBatchInput::requested_mode`] is `None`. `None` resolves
     /// to [`CompileCacheMode::Session`] (the host default).
     pub default_mode: Option<CompileCacheMode>,
+    /// The batch-level render profile for the
+    /// [`CompileManyTarget::RuntimeRender`] lane. `None` falls back to the
+    /// [`compile_profile_for_bundler`] preset. Ignored by the
+    /// [`CompileManyTarget::HostBacked`] lane.
+    pub render_profile: Option<CompileBatchRenderProfile>,
 }
 
 /// The compile lane a [`VerterHost::compile_many`] batch runs under.
@@ -178,14 +216,36 @@ pub enum CompileManyTarget {
     RuntimeRender,
 }
 
-/// Bundler-default compile profile: production codegen, no SSR, no
-/// HMR. `compile_many` always uses this profile internally — no
-/// JS-side profile parameter, no IDE preset helper.
+/// Bundler-default compile profile preset: production codegen, no SSR, no
+/// HMR. This is the EXPLICIT fallback the `RuntimeRender` lane uses when
+/// [`CompileBatchOptions::render_profile`] is `None` — it is NOT hidden
+/// policy for every `compile_many` call. When a caller supplies a
+/// [`CompileBatchRenderProfile`], the lane builds its profile from that
+/// instead (see [`render_base_profile`]).
 pub fn compile_profile_for_bundler() -> CompileProfile {
     CompileProfile {
         is_production: true,
         ssr: false,
         ..CompileProfile::default()
+    }
+}
+
+/// Build the batch-level base `CompileProfile` for the `RuntimeRender`
+/// lane. With a supplied [`CompileBatchRenderProfile`], every
+/// output-affecting field is taken from it (reproducing the caller's build
+/// profile byte-for-byte); with `None`, the [`compile_profile_for_bundler`]
+/// preset is used. `component_id` is per-input and set later, so it is left
+/// `None` here.
+fn render_base_profile(render_profile: Option<CompileBatchRenderProfile>) -> CompileProfile {
+    match render_profile {
+        Some(rp) => CompileProfile {
+            is_production: rp.is_production,
+            ssr: rp.ssr,
+            force_js: rp.force_js,
+            hmr_strategy: rp.hmr_strategy,
+            ..CompileProfile::default()
+        },
+        None => compile_profile_for_bundler(),
     }
 }
 
@@ -213,7 +273,16 @@ impl VerterHost {
             return Vec::new();
         }
 
-        let profile = compile_profile_for_bundler();
+        // The batch-level base profile. `HostBacked` keeps the byte-frozen
+        // bundler preset (its output is byte-unchanged); `RuntimeRender`
+        // builds from the caller-supplied `render_profile` (reproducing the
+        // build's dev/prod/ssr/force_js/hmr), falling back to the preset
+        // when `None`. Per-input `component_id` is layered on later, on the
+        // RuntimeRender lane only.
+        let profile = match target {
+            CompileManyTarget::HostBacked => compile_profile_for_bundler(),
+            CompileManyTarget::RuntimeRender => render_base_profile(options.render_profile),
+        };
         let priority = options.priority.unwrap_or(Priority::Background);
         // Batch default cache mode; a per-input `requested_mode` overrides
         // it. `None` on both resolves to the host default `Session`.
@@ -474,6 +543,14 @@ impl VerterHost {
         let requested_mode = input.requested_mode.unwrap_or(default_mode);
         let per_input_profile = CompileProfile {
             requested_mode,
+            // Per-input scoped-style / HMR identity. Only the RuntimeRender
+            // lane threads it (it is a per-component, not per-build, axis);
+            // the HostBacked lane keeps the preset's `component_id` (`None`)
+            // so its profile — and output — is byte-unchanged.
+            component_id: match target {
+                CompileManyTarget::RuntimeRender => input.component_id.clone(),
+                CompileManyTarget::HostBacked => profile.component_id.clone(),
+            },
             ..profile.clone()
         };
 

@@ -265,11 +265,13 @@ fn compile_many_honors_per_input_requested_mode() {
             canonical_id: "/M.vue".to_string(),
             source: source.clone(),
             requested_mode: Some(CompileCacheMode::Session),
+            component_id: None,
         },
         CompileBatchInput {
             canonical_id: "/M.vue".to_string(),
             source: source.clone(),
             requested_mode: Some(CompileCacheMode::Stateless),
+            component_id: None,
         },
     ];
 
@@ -339,6 +341,7 @@ fn compile_many_content_warm_hit_reports_cache_hit() {
             canonical_id: "/W.vue".to_string(),
             source: source.clone(),
             requested_mode: Some(CompileCacheMode::Content),
+            component_id: None,
         }]
     };
 
@@ -409,6 +412,7 @@ fn compile_many_error_after_downgrade_reports_true_mode() {
         canonical_id: "/E.vue".to_string(),
         source,
         requested_mode: Some(CompileCacheMode::Content),
+        component_id: None,
     }];
 
     let results = host.compile_many(

@@ -36,6 +36,7 @@ fn input(canonical_id: &str, source: &str) -> CompileBatchInput {
         canonical_id: canonical_id.to_string(),
         source: Arc::from(source),
         requested_mode: None,
+        component_id: None,
     }
 }
 
@@ -87,6 +88,96 @@ fn host_backed_one(
     );
     assert_eq!(entries.len(), 1, "one input must produce one entry");
     entries.pop().unwrap()
+}
+
+/// Build the batch render profile mirroring an unplugin build.
+fn render_profile(
+    is_production: bool,
+    ssr: bool,
+    force_js: bool,
+    hmr: crate::types::HmrStrategy,
+) -> crate::host_compile::CompileBatchRenderProfile {
+    crate::host_compile::CompileBatchRenderProfile {
+        is_production,
+        ssr,
+        force_js,
+        hmr_strategy: hmr,
+    }
+}
+
+/// Compile one `.vue` through the RuntimeRender lane under an EXPLICIT
+/// batch render profile + per-input `component_id`.
+fn render_with_profile(
+    host: &VerterHost,
+    canonical_id: &str,
+    source: &str,
+    profile: crate::host_compile::CompileBatchRenderProfile,
+    component_id: Option<String>,
+) -> crate::host_compile::CompileBatchEntry {
+    let input = CompileBatchInput {
+        canonical_id: canonical_id.to_string(),
+        source: Arc::from(source),
+        requested_mode: None,
+        component_id,
+    };
+    let mut entries = host.compile_many(
+        vec![input],
+        CompileBatchOptions {
+            render_profile: Some(profile),
+            ..CompileBatchOptions::default()
+        },
+        CompileManyTarget::RuntimeRender,
+    );
+    assert_eq!(entries.len(), 1, "one input must produce one entry");
+    entries.pop().unwrap()
+}
+
+/// The CURRENT unplugin Main-render path oracle: upsert the file and call
+/// `get_virtual_file(Main)` with the EXACT `CompileProfile` unplugin would
+/// pass to `getVirtualFile({ compileProfile })`. This is the byte-parity
+/// target the RuntimeRender lane must match — NOT `compile_many(HostBacked)`
+/// (whose profile is the frozen bundler preset). Returns `(code, source_map)`.
+fn host_backed_main_via_get_virtual_file(
+    host: &VerterHost,
+    canonical_id: &str,
+    source: &str,
+    profile: &CompileProfile,
+) -> (Arc<str>, Option<Arc<str>>) {
+    let lang = host.language_classifier().classify(canonical_id);
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: Some(canonical_id.to_string()),
+            input_id: canonical_id.to_string(),
+            source: Arc::from(source),
+            file_language: lang,
+            aliases: Vec::new(),
+        })
+        .expect("upsert must succeed");
+    let resp = host
+        .get_virtual_file(crate::types::VirtualQuery {
+            raw_id: None,
+            canonical_id: Some(canonical_id.to_string()),
+            node_kind: Some(crate::types::VirtualNodeKind::Main),
+            compile_profile: profile.clone(),
+        })
+        .expect("get_virtual_file(Main) must succeed");
+    (resp.code, resp.source_map)
+}
+
+/// The `CompileProfile` an unplugin build would pass to `getVirtualFile`,
+/// matching a batch render profile + per-input component id.
+fn get_virtual_file_profile(
+    rp: crate::host_compile::CompileBatchRenderProfile,
+    component_id: Option<String>,
+) -> CompileProfile {
+    CompileProfile {
+        is_production: rp.is_production,
+        ssr: rp.ssr,
+        force_js: rp.force_js,
+        hmr_strategy: rp.hmr_strategy,
+        component_id,
+        ..CompileProfile::default()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -198,55 +289,57 @@ fn runtime_render_matches_host_backed_wrapper_output() {
         },
     ];
 
+    // Drive BOTH prod (is_production:true) and dev (false) — dev is now
+    // genuinely exercised (the profile flows through render_profile). The
+    // RuntimeRender lane is compared against the CURRENT unplugin path
+    // (`get_virtual_file(Main)` under the SAME CompileProfile) in each mode.
     for prod in [true, false] {
+        let rp = render_profile(prod, false, false, crate::types::HmrStrategy::None);
+        let gvf_profile = get_virtual_file_profile(rp, None);
         for case in &cases {
-            // Fresh host per (case, mode) so neither lane warms the other.
+            // Fresh host per (case, mode) so neither path warms the other.
             let host_r = new_host();
             let host_h = new_host();
             if let Some((sib_id, sib_src)) = case.sibling {
                 upsert_sibling(&host_r, sib_id, sib_src);
                 upsert_sibling(&host_h, sib_id, sib_src);
             }
-            // Both lanes run under `compile_profile_for_bundler()` internally;
-            // `prod` here parametrises the shared bundler profile is_production
-            // by driving both lanes through the SAME compile_many surface, so
-            // whatever profile compile_many uses is identical across lanes.
-            // (compile_many owns a fixed bundler profile; the loop still
-            // exercises the two lanes on identical inputs.)
-            let _ = prod;
-            let render = render_one(&host_r, case.canonical, case.source);
-            let host_backed = host_backed_one(&host_h, case.canonical, case.source);
+            let render = render_with_profile(&host_r, case.canonical, case.source, rp, None);
+            let (hb_code, hb_map) = host_backed_main_via_get_virtual_file(
+                &host_h,
+                case.canonical,
+                case.source,
+                &gvf_profile,
+            );
 
             assert!(
                 render.errors.is_empty(),
-                "[{}] render lane must succeed: {:?}",
+                "[{} prod={}] render lane must succeed: {:?}",
                 case.name,
+                prod,
                 render.errors
             );
             assert!(
-                host_backed.errors.is_empty(),
-                "[{}] host-backed lane must succeed: {:?}",
-                case.name,
-                host_backed.errors
-            );
-            assert!(
                 !render.code.is_empty(),
-                "[{}] render Main must be non-empty",
-                case.name
+                "[{} prod={}] render Main must be non-empty",
+                case.name,
+                prod
             );
             assert_eq!(
                 render.code.as_ref(),
-                host_backed.code.as_ref(),
-                "[{}] RuntimeRender Main bytes must equal HostBacked Main bytes.\n--- RENDER ---\n{}\n--- HOSTBACKED ---\n{}",
+                hb_code.as_ref(),
+                "[{} prod={}] RuntimeRender Main bytes must equal the getVirtualFile Main bytes.\n--- RENDER ---\n{}\n--- GETVIRTUALFILE ---\n{}",
                 case.name,
+                prod,
                 render.code,
-                host_backed.code
+                hb_code
             );
             assert_eq!(
                 render.source_map.as_ref().map(|s| s.as_ref()),
-                host_backed.source_map.as_ref().map(|s| s.as_ref()),
-                "[{}] RuntimeRender source map must equal HostBacked source map",
-                case.name
+                hb_map.as_ref().map(|s| s.as_ref()),
+                "[{} prod={}] RuntimeRender source map must equal the getVirtualFile source map",
+                case.name,
+                prod
             );
             // The cross-file-macro case must NOT be a false positive: the
             // resolved props must actually appear in the rendered output
@@ -254,8 +347,9 @@ fn runtime_render_matches_host_backed_wrapper_output() {
             if case.name == "cross-file-macro" {
                 assert!(
                     render.code.contains("id") && render.code.contains("label"),
-                    "[{}] resolved cross-file props must appear in render Main:\n{}",
+                    "[{} prod={}] resolved cross-file props must appear in render Main:\n{}",
                     case.name,
+                    prod,
                     render.code
                 );
             }
@@ -518,5 +612,184 @@ fn runtime_render_does_not_leave_stale_semantic_axis_for_host_backed() {
     assert!(
         !after_host_backed.contains("/proj/types.ts"),
         "the removed cross-file dep must NOT linger in the semantic-transitive axis"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 9 (S4) — render_profile actually flows (dev vs prod differ; each
+// byte-matches the corresponding getVirtualFile profile)
+// ---------------------------------------------------------------------------
+
+/// The RuntimeRender lane honors `render_profile.is_production` +
+/// `hmr_strategy`: a dev profile (is_production=false, HMR=Vite) produces
+/// DIFFERENT output than a prod profile (is_production=true, HMR=None), and
+/// each byte-matches the `get_virtual_file` Main under the SAME
+/// `CompileProfile`. DISCRIMINATING: a lane that ignored `render_profile`
+/// (kept the hardcoded bundler preset) would produce identical prod output
+/// for both and MISMATCH the dev oracle.
+#[test]
+fn runtime_render_honors_render_profile_dev_vs_prod() {
+    let canonical = "/proj/Profile.vue";
+    let src = "<script setup lang=\"ts\">\nconst n = 1\n</script>\n<template><div>{{ n }}</div></template>\n";
+
+    let dev_rp = render_profile(false, false, false, crate::types::HmrStrategy::Vite);
+    let prod_rp = render_profile(true, false, false, crate::types::HmrStrategy::None);
+
+    let dev = render_with_profile(&new_host(), canonical, src, dev_rp, None);
+    let prod = render_with_profile(&new_host(), canonical, src, prod_rp, None);
+    assert!(dev.errors.is_empty(), "dev render errors: {:?}", dev.errors);
+    assert!(prod.errors.is_empty(), "prod render errors: {:?}", prod.errors);
+
+    // The profile FLOWS: dev and prod outputs differ (dev carries HMR /
+    // dev-only code that prod strips). If render_profile were ignored, both
+    // would be the same prod bytes.
+    assert_ne!(
+        dev.code.as_ref(),
+        prod.code.as_ref(),
+        "dev and prod RuntimeRender output must differ — render_profile must flow.\n--- DEV ---\n{}\n--- PROD ---\n{}",
+        dev.code,
+        prod.code
+    );
+
+    // Each mode byte-matches the current getVirtualFile path under the SAME
+    // profile — the real parity claim, now in BOTH modes.
+    let (dev_hb, _) = host_backed_main_via_get_virtual_file(
+        &new_host(),
+        canonical,
+        src,
+        &get_virtual_file_profile(dev_rp, None),
+    );
+    let (prod_hb, _) = host_backed_main_via_get_virtual_file(
+        &new_host(),
+        canonical,
+        src,
+        &get_virtual_file_profile(prod_rp, None),
+    );
+    assert_eq!(
+        dev.code.as_ref(),
+        dev_hb.as_ref(),
+        "dev RuntimeRender must byte-match getVirtualFile(dev profile).\n--- RENDER ---\n{}\n--- GVF ---\n{}",
+        dev.code,
+        dev_hb
+    );
+    assert_eq!(
+        prod.code.as_ref(),
+        prod_hb.as_ref(),
+        "prod RuntimeRender must byte-match getVirtualFile(prod profile)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 10 (S4) — per-input component_id flows into the scoped-style id
+// ---------------------------------------------------------------------------
+
+/// A per-input `component_id` flows into the scoped-style `data-v-<id>` in
+/// the render `Main`. Two different component ids produce two different
+/// scope ids; the explicit id appears verbatim. DISCRIMINATING: a lane that
+/// dropped per-input `component_id` (or read it batch-level) would emit an
+/// auto-generated id, not the caller's.
+#[test]
+fn runtime_render_threads_per_input_component_id_into_scope() {
+    let canonical = "/proj/Scoped.vue";
+    let src = "<template><div>x</div></template>\n<style scoped>\n.a { color: red }\n</style>\n";
+    let rp = render_profile(true, false, false, crate::types::HmrStrategy::None);
+
+    let a = render_with_profile(&new_host(), canonical, src, rp, Some("aaa111".to_string()));
+    let b = render_with_profile(&new_host(), canonical, src, rp, Some("bbb222".to_string()));
+    assert!(a.errors.is_empty(), "render a errors: {:?}", a.errors);
+    assert!(b.errors.is_empty(), "render b errors: {:?}", b.errors);
+
+    // The explicit component id becomes the scope id (`data-v-<id>` /
+    // `__scopeId "data-v-<id>"`). The exact id string must appear.
+    assert!(
+        a.code.contains("aaa111"),
+        "explicit component_id 'aaa111' must appear in the render Main scope id:\n{}",
+        a.code
+    );
+    assert!(
+        !a.code.contains("bbb222"),
+        "render a must not carry the other id"
+    );
+    assert!(
+        b.code.contains("bbb222"),
+        "explicit component_id 'bbb222' must appear in the render Main scope id:\n{}",
+        b.code
+    );
+    // Different ids => different output (per-component identity flows).
+    assert_ne!(
+        a.code.as_ref(),
+        b.code.as_ref(),
+        "distinct per-input component_ids must produce distinct scoped output"
+    );
+
+    // Byte-match the current getVirtualFile path under the same explicit id.
+    let (hb_a, _) = host_backed_main_via_get_virtual_file(
+        &new_host(),
+        canonical,
+        src,
+        &get_virtual_file_profile(rp, Some("aaa111".to_string())),
+    );
+    assert_eq!(
+        a.code.as_ref(),
+        hb_a.as_ref(),
+        "RuntimeRender with explicit component_id must byte-match getVirtualFile.\n--- RENDER ---\n{}\n--- GVF ---\n{}",
+        a.code,
+        hb_a
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 11 (S4) — soft-macro boundary: one missing + one resolved import
+// ---------------------------------------------------------------------------
+
+/// Locks the soft-macro boundary: an SFC with TWO imported macro types
+/// where ONE resolves and ONE is missing renders successfully with a
+/// WARNING (for the missing one only) — the resolved one is NOT dragged
+/// into fatality, and the missing one is NOT fatal. DISCRIMINATING: a lane
+/// that softened nothing would be fatal; one that softened everything would
+/// hide a genuinely fatal case. (Locks codex's two-layer gate.)
+#[test]
+fn runtime_render_mixed_resolved_and_missing_imported_macro_is_soft() {
+    let host = new_host();
+    // A resolvable sibling providing `GoodProps`; `MissingProps` has no
+    // resolvable source.
+    upsert_sibling(
+        &host,
+        "/proj/good.ts",
+        "export interface GoodProps { a: number }\n",
+    );
+    // `defineProps` takes the resolved type; `defineEmits` takes a missing
+    // imported type — the emits import is unresolved.
+    let src = "<script setup lang=\"ts\">\nimport type { GoodProps } from './good'\nimport type { MissingEmits } from './nope'\ndefineProps<GoodProps>()\ndefineEmits<MissingEmits>()\n</script>\n<template><div>{{ a }}</div></template>\n";
+    let render = render_one(&host, "/proj/Mixed.vue", src);
+
+    assert!(
+        render.errors.is_empty(),
+        "a mix of one resolved + one missing imported macro must NOT be fatal: {:?}",
+        render.errors
+    );
+    assert!(
+        !render.code.is_empty(),
+        "the mixed case must still render (missing type degrades to Unknown)"
+    );
+    assert!(
+        !render.diagnostics.is_empty()
+            && render
+                .diagnostics
+                .iter()
+                .all(|d| d.severity == crate::types::HostSeverity::Warning),
+        "the missing imported type must surface as a WARNING (not error): {:?}",
+        render
+            .diagnostics
+            .iter()
+            .map(|d| format!("{:?}:{}", d.severity, d.code))
+            .collect::<Vec<_>>()
+    );
+    // The resolved `GoodProps` must still materialize (its prop `a` is used
+    // in the template and appears) — the resolved side was not broken.
+    assert!(
+        render.code.contains('a'),
+        "the resolved prop must still materialize in the render Main:\n{}",
+        render.code
     );
 }

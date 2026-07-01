@@ -36,6 +36,7 @@ fn ok_input(canonical_id: &str, source: &str) -> CompileBatchInput {
         canonical_id: canonical_id.to_string(),
         source: Arc::from(source),
         requested_mode: None,
+        component_id: None,
     }
 }
 
@@ -223,6 +224,7 @@ fn compile_many_upsert_batch_captures_calling_thread_request_context() {
             CompileBatchOptions {
                 priority: Some(Priority::Interactive),
                 default_mode: None,
+                render_profile: None,
             },
             CompileManyTarget::HostBacked,
         );

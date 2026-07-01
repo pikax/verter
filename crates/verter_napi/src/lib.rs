@@ -803,6 +803,24 @@ fn host_diagnostics_to_napi(
     }
 }
 
+/// Map a JS HMR-strategy string to the host [`host::HmrStrategy`]. Mirrors
+/// the `verter_ffi` profile conversion (`"vite"` / `"webpack"` / `"none"`,
+/// case-insensitive). Faithful mapping — an unknown value is an error, not
+/// a silent drop to `None`.
+fn ffi_hmr_strategy_to_host(s: &str) -> std::result::Result<host::HmrStrategy, String> {
+    if s.eq_ignore_ascii_case("vite") {
+        Ok(host::HmrStrategy::Vite)
+    } else if s.eq_ignore_ascii_case("webpack") {
+        Ok(host::HmrStrategy::Webpack)
+    } else if s.eq_ignore_ascii_case("none") {
+        Ok(host::HmrStrategy::None)
+    } else {
+        Err(format!(
+            "invalid hmrStrategy '{s}', expected 'vite', 'webpack', or 'none'"
+        ))
+    }
+}
+
 /// Convert a single host [`host::HostDiagnostic`] into its NAPI wire
 /// shape. Used to surface the RuntimeRender soft-macro warnings on
 /// [`NapiCompileBatchEntry::diagnostics`].
@@ -2173,6 +2191,7 @@ impl NapiVerterHost {
                     canonical_id: f.canonicalId,
                     source: std::sync::Arc::from(buffer_to_string(f.source)?),
                     requested_mode,
+                    component_id: f.componentId,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -2181,14 +2200,48 @@ impl NapiVerterHost {
             .map(|m| ffi_compile_cache_mode_to_host(&m))
             .transpose()
             .map_err(ffi_err)?;
+        // The compile lane. Default `host-backed`.
+        let target = match opts.target.as_deref() {
+            None | Some("host-backed") => host_compile::CompileManyTarget::HostBacked,
+            Some("runtime-render") => host_compile::CompileManyTarget::RuntimeRender,
+            Some(other) => {
+                return Err(ffi_err(format!(
+                    "invalid target '{other}', expected 'host-backed' or 'runtime-render'"
+                )));
+            }
+        };
+        // The render profile. FAIL-CLOSED: the RuntimeRender lane REQUIRES an
+        // explicit profile — the host must never substitute
+        // production/client defaults for a bundler render. HostBacked
+        // ignores it (its profile is the frozen bundler preset).
+        let render_profile = match target {
+            host_compile::CompileManyTarget::RuntimeRender => {
+                let p = opts.compileProfile.ok_or_else(|| {
+                    ffi_err(
+                        "compileProfile is required for target 'runtime-render' \
+                         (is_production/ssr/force_js/hmr_strategy must be explicit; \
+                         the host does not substitute defaults)"
+                            .to_string(),
+                    )
+                })?;
+                Some(host_compile::CompileBatchRenderProfile {
+                    is_production: p.isProduction,
+                    ssr: p.ssr,
+                    force_js: p.forceJs,
+                    hmr_strategy: ffi_hmr_strategy_to_host(&p.hmrStrategy).map_err(ffi_err)?,
+                })
+            }
+            host_compile::CompileManyTarget::HostBacked => None,
+        };
         let entries = catch_panic(std::panic::AssertUnwindSafe(|| {
             self.inner.compile_many(
                 inputs,
                 host_compile::CompileBatchOptions {
                     priority,
                     default_mode,
+                    render_profile,
                 },
-                host_compile::CompileManyTarget::HostBacked,
+                target,
             )
         }))?;
         Ok(entries
@@ -2889,6 +2942,23 @@ pub struct NapiCompileBatchInput {
     /// Requested compile cache mode ("stateless" / "content" /
     /// "session"). `None` inherits the batch `defaultMode`.
     pub requestedMode: Option<String>,
+    /// Explicit per-component scoped-style / HMR id. Threaded into this
+    /// input's compile profile ONLY on the RuntimeRender lane (scoped-style
+    /// / HMR identity is per-component, not per-build). `None` lets codegen
+    /// auto-generate the id.
+    pub componentId: Option<String>,
+}
+
+/// The batch-level render profile for the RuntimeRender lane (JS mirror of
+/// [`host_compile::CompileBatchRenderProfile`]). Every field is
+/// output-affecting and uniform across a single bundler build.
+#[napi(object)]
+pub struct NapiCompileBatchRenderProfile {
+    pub isProduction: bool,
+    pub ssr: bool,
+    pub forceJs: bool,
+    /// HMR strategy: "none" | "vite" | "webpack".
+    pub hmrStrategy: String,
 }
 
 /// Caller-configurable options for [`NapiVerterHost::compile_many`].
@@ -2902,6 +2972,16 @@ pub struct NapiCompileBatchOptions {
     /// Default compile cache mode for inputs whose `requestedMode` is
     /// unset. `None` resolves to "session" (the host default).
     pub defaultMode: Option<String>,
+    /// The compile lane: `"host-backed"` (default) runs the full session
+    /// wrapper; `"runtime-render"` runs the render-only bundler lane. The
+    /// render lane REQUIRES `compileProfile` (fail-closed).
+    pub target: Option<String>,
+    /// The batch-level render profile for the `"runtime-render"` lane. It
+    /// is REQUIRED for that lane (the NAPI conversion fails closed when it
+    /// is absent) — every output-affecting field must be explicit; the
+    /// host must not substitute production/client defaults. Ignored by the
+    /// `"host-backed"` lane.
+    pub compileProfile: Option<NapiCompileBatchRenderProfile>,
 }
 
 /// Result for a single original input position.

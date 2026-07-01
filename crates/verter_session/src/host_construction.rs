@@ -1041,6 +1041,7 @@ mod resource_policy_lazy_tests {
                 canonical_id: "/proj/Lazy.vue".to_string(),
                 source: Arc::from("<template><div>x</div></template>"),
                 requested_mode: None,
+                component_id: None,
             }],
             CompileBatchOptions::default(),
             crate::host_compile::CompileManyTarget::HostBacked,
