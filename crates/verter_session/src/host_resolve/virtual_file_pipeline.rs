@@ -839,23 +839,83 @@ impl VerterHost {
         canonical_id: &str,
         profile: &CompileProfile,
     ) -> Result<RenderOnlyMain, HostError> {
-        // S1 stub: route through the HostBacked artifact path so the API
-        // compiles and behaves like `HostBacked`. Replaced by the real
-        // render-only lane in the next slice.
-        let served = self.ensure_compile_artifacts(
-            canonical_id.to_string(),
-            profile,
-            CompileDemand::VirtualNode(VirtualNodeKind::Main),
-        )?;
-        let found = served.outputs.get(&VirtualNodeKind::Main).ok_or_else(|| {
-            HostError::MissingVirtualNode {
-                canonical_id: canonical_id.to_string(),
+        let canonical = self.resolve_alias_or_canonical(canonical_id);
+
+        // ── ONE coherent source snapshot ──
+        // Every content-determined input derives from this single read
+        // (identical to the HostBacked cache-miss path), so the bytes and
+        // analysis cohere. The render lane consults NO cache node and runs
+        // NO classification, so it reads the snapshot directly with no
+        // profile-hash override (no request-time block / style overrides on
+        // the bundler render path).
+        let source_snap =
+            self.scheduler
+                .try_get_source(&canonical)
+                .ok_or_else(|| HostError::MissingSource {
+                    canonical_id: canonical.clone(),
+                })?;
+        let efs = self
+            .effective_file_state_from_snapshot(&source_snap, &canonical, None)
+            .ok_or_else(|| HostError::MissingSource {
+                canonical_id: canonical.clone(),
+            })?;
+        let effective_meta = self.effective_meta_from_base(efs.meta.clone(), &canonical, None);
+
+        let compile_input = {
+            use crate::host_executor::HostSourceData;
+            let hd =
+                source_snap
+                    .downcast_data::<HostSourceData>()
+                    .ok_or_else(|| HostError::MissingSource {
+                        canonical_id: canonical.clone(),
+                    })?;
+            let parse = &hd.parse;
+            // The byte-load-bearing `CompileInput` — the SAME field mapping
+            // the HostBacked cache-miss path builds (source, macro deps,
+            // style v-bind vars from the same parse snapshot). Only the
+            // request-time override layers are omitted: the bundler render
+            // path carries none.
+            let style_v_bind_vars = parse
+                .style_analyses
+                .iter()
+                .flat_map(|sa| {
+                    sa.v_binds.iter().map(|vb| {
+                        vb.expression
+                            .split('.')
+                            .next()
+                            .unwrap_or(&vb.expression)
+                            .to_string()
+                    })
+                })
+                .collect();
+            CompileInput {
+                canonical_id: canonical.clone(),
+                source: efs.source,
+                meta: effective_meta.clone(),
+                parse_diagnostics: parse.parse_diagnostics.clone(),
+                src_blocks: parse.src_blocks.clone(),
+                external_requests: parse.external_requests.clone(),
+                style_override_layer: None,
+                content_override_layer: None,
+                macro_type_deps: efs.script_analysis.macro_type_deps.clone(),
+                script_imports: efs.script_analysis.imports.clone(),
+                script_macros: efs.script_analysis.macros.clone(),
+                script_bindings: efs.script_analysis.bindings.clone(),
+                framework_parse: efs.framework_parse,
+                style_v_bind_vars,
             }
-        })?;
+        };
+
+        // The render-only compile: the SAME shared substrate + host-side
+        // `Main` assembly as `compile_entry`, without the per-file wrapper
+        // overhead, and with the imported-macro-resolution fatality softened
+        // to a warning.
+        let (main_code, main_source_map, diagnostics) =
+            self.compile_entry_runtime_render(&compile_input, profile)?;
         Ok(RenderOnlyMain {
-            code: found.code.clone(),
-            source_map: found.source_map.clone(),
-            diagnostics: Vec::new(),
+            code: main_code,
+            source_map: main_source_map,
+            diagnostics,
         })
     }
 
@@ -2694,5 +2754,360 @@ impl VerterHost {
         });
 
         Ok((outputs, compile_diags, cached_tsx, template_analysis))
+    }
+
+    /// Render-only sibling of [`Self::compile_entry`]: produces the SAME
+    /// `Main` bytes through the SAME shared substrate (`compile_bundle`) and
+    /// the SAME host-side [`assemble_vue_main_module`], WITHOUT the per-file
+    /// session-wrapper overhead. Returns the assembled `Main` code, its
+    /// optional source map, and the soft (warning-severity) diagnostics of a
+    /// SUCCESSFUL render.
+    ///
+    /// Differences from `compile_entry` (the DECIDED drop list):
+    /// - (a) the source is borrowed (`&*snapshot.source`) for the common
+    ///   no-external-`src=` case instead of re-cloned; the external-`src=`
+    ///   merge (which inherently allocates) is unchanged.
+    /// - (e) it NEVER calls `sync_transitive_macro_type_dependencies` — the
+    ///   render lane is pure and READ-ONLY w.r.t. the shared
+    ///   dependency/semantic-transitive axis. The axis is authoritatively
+    ///   reset by the Stage-B upsert and re-populated by whichever
+    ///   HostBacked/type-resolution request needs it.
+    /// - (f) the external-macro-type collector runs CONDITIONALLY — exactly
+    ///   the existing `macro_type_deps.is_empty()` gate — through the ONE
+    ///   shared resolver, so cross-file-macro `external_types` (a codegen
+    ///   input) is produced and the render output stays byte-identical.
+    ///   Simple / local-macro files skip it (where the overhead lives).
+    /// - the imported-macro-resolution fatality (site 2) is SOFTENED to a
+    ///   warning; every other fatal site stays hard.
+    fn compile_entry_runtime_render(
+        &self,
+        snapshot: &CompileInput,
+        profile: &CompileProfile,
+    ) -> Result<(Arc<str>, Option<Arc<str>>, Vec<HostDiagnostic>), HostError> {
+        let mut diagnostics = snapshot.parse_diagnostics.clone();
+
+        // (a) DROP the source re-clone for the common case. Only the
+        // external-`src=` merge (rare, and inherently allocating) builds an
+        // owned String; otherwise the substrate borrows the snapshot bytes.
+        let merged_source: std::borrow::Cow<'_, str> = if snapshot.src_blocks.is_empty() {
+            std::borrow::Cow::Borrowed(&*snapshot.source)
+        } else {
+            let ext_sources = {
+                let mut map = FxHashMap::default();
+                for req in &snapshot.external_requests {
+                    if let Some(dep_source) = self.resolve_dep_source(
+                        &snapshot.canonical_id,
+                        &req.resolved_canonical_id,
+                        &req.specifier,
+                    ) {
+                        map.insert(req.resolved_canonical_id.clone(), dep_source);
+                    }
+                }
+                map
+            };
+
+            for (idx, req) in snapshot.external_requests.iter().enumerate() {
+                if !ext_sources.contains_key(&req.resolved_canonical_id) {
+                    let span = snapshot.src_blocks.get(idx).map(|block| {
+                        verter_span::Span::new(block.tag_open_start, block.tag_open_end)
+                    });
+                    diagnostics =
+                        diagnostics.merge(DiagnosticsSnapshot::from_vec(vec![HostDiagnostic {
+                            severity: HostSeverity::Error,
+                            code: "HOST_MISSING_EXTERNAL_SOURCE".to_string(),
+                            message: format!(
+                                "missing external source '{}' for '{}'",
+                                req.specifier, snapshot.canonical_id
+                            ),
+                            span,
+                        }]));
+                }
+            }
+
+            // Site 1 (missing external `src=`) stays FATAL on the render lane.
+            if diagnostics.has_errors {
+                return Err(HostError::CompileError(CompileFailure {
+                    diagnostics,
+                    requested_mode: profile.requested_mode,
+                    actual_mode: profile.requested_mode,
+                    downgrade_reason: None,
+                }));
+            }
+
+            std::borrow::Cow::Owned(merge_external_sources(
+                &snapshot.source,
+                &snapshot.src_blocks,
+                &ext_sources,
+            ))
+        };
+
+        // The compiler's own parse scratch. A local `Allocator` per render
+        // call passed straight into `compile_bundle` is NOT carrier-lifecycle
+        // state; it is transient parse scratch, dropped at the end of this
+        // call.
+        let alloc = Allocator::new();
+
+        let profile_hash = compile_profile_hash(profile);
+
+        // (f) NARROWED: the external-macro-type collector runs CONDITIONALLY,
+        // exactly the existing `macro_type_deps.is_empty()` gate. A simple /
+        // local-macro file (empty deps) substitutes the empty result and
+        // skips the store-view / overlay / resolver-context construction
+        // entirely (where the overhead lives). A cross-file-macro file runs
+        // the collector through the ONE shared resolver so `external_types`
+        // (a byte-affecting codegen input) is produced. The collector is
+        // READ-ONLY: unlike `compile_entry`, this lane NEVER calls
+        // `sync_transitive_macro_type_dependencies` (drop (e)), so the
+        // transitive set it returns is intentionally discarded.
+        let (external_types, missing_macro_type_diags) = if snapshot.macro_type_deps.is_empty() {
+            (None, Vec::new())
+        } else {
+            let store_view = self.resolver_store_view_read().into_cold_seed_view();
+            let overlay =
+                std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+            let host_ctx =
+                crate::resolver_core::HostResolverContext::from_cold_seed(self, &store_view, overlay);
+            let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
+            let (external_types, missing_macro_type_diags, _transitive) = self
+                .collect_external_types_from_loaded_files(
+                    ctx,
+                    &snapshot.canonical_id,
+                    &snapshot.macro_type_deps,
+                    &snapshot.script_imports,
+                    Some(profile_hash),
+                );
+            (external_types, missing_macro_type_diags)
+        };
+
+        // Soft-macro contract (site 2): on the RuntimeRender lane an
+        // unresolved imported macro type does NOT abort. The compiler already
+        // degrades the type to `Unknown` (renders as `null`); surface the
+        // collector's diagnostics as WARNING severity on the successful
+        // output instead of returning `Err`. `had_unresolved_import` gates
+        // the compiler-layer downgrade below: the SAME unresolved-import
+        // failure ALSO surfaces from `compile_bundle` as an error-severity
+        // `XInvalidMacroType` (which HostBacked never reaches because it
+        // aborts at site 2 first). A resolvable-but-wrong-shape type is NOT
+        // reported here, so its compiler diagnostic stays fatal.
+        let had_unresolved_import = !missing_macro_type_diags.is_empty();
+        let mut soft_warnings: Vec<HostDiagnostic> = missing_macro_type_diags
+            .into_iter()
+            .map(|d| HostDiagnostic {
+                severity: HostSeverity::Warning,
+                code: d.code,
+                message: d.message,
+                span: d.span,
+            })
+            .collect();
+
+        let scope = self.config.effective_scope();
+
+        let vue_extras: std::sync::Arc<dyn std::any::Any + Send + Sync> = std::sync::Arc::new(
+            verter_compiler::framework_common::vue_bridge::VueRuntimeCompileExtras {
+                external_types,
+                prop_constness_overrides: None,
+                style_v_bind_vars: snapshot.style_v_bind_vars.clone(),
+            },
+        );
+
+        // The compiler-visible runtime options — byte-identical to
+        // `compile_entry`'s. `want_ide` is `profile.target.needs_tsx()`
+        // (false on the bundler render profile: no TSX). `want_template_data`
+        // matches `compile_entry` exactly (same scope + target derivation) so
+        // template extraction — and therefore the assembled `Main` — cannot
+        // drift.
+        let runtime_opts = RuntimeCompileOptions {
+            filename: profile
+                .filename
+                .clone()
+                .or_else(|| Some(snapshot.canonical_id.clone())),
+            is_production: profile.is_production,
+            source_map: profile.source_map,
+            ssr: profile.ssr,
+            runtime_module_name: profile.runtime_module_name.clone(),
+            component_id: profile.component_id.clone(),
+            force_js: profile.force_js,
+            force_vapor: profile.force_vapor,
+            comments: profile.comments,
+            delimiters: profile.delimiters.clone(),
+            custom_elements: profile.custom_elements.clone(),
+            want_ide: profile.target.needs_tsx(),
+            want_template_data: scope.needs_template_analysis()
+                || profile.target.needs_template_data(),
+            types_module_name: profile.types_module_name.clone(),
+            embed_ambient_types: profile.embed_ambient_types,
+            conditional_root_narrowing: profile.conditional_root_narrowing,
+            strict_slots: profile.strict_slots,
+            framework_extras: Some(vue_extras),
+        };
+
+        // Route through the carrier registry (the single dispatch authority)
+        // — identical to `compile_entry`. Sites 3 (no artifact) and 4 (no
+        // compiler) stay FATAL.
+        let Some(artifact) = snapshot.framework_parse.as_ref() else {
+            return Err(HostError::CompileError(CompileFailure {
+                diagnostics: diagnostics.merge(DiagnosticsSnapshot::from_vec(vec![
+                    HostDiagnostic {
+                        severity: HostSeverity::Error,
+                        code: "HOST_NO_CARRIER_ARTIFACT".to_string(),
+                        message: format!(
+                            "no framework parse artifact for '{}' — cannot route the runtime compile",
+                            snapshot.canonical_id
+                        ),
+                        span: None,
+                    },
+                ])),
+                requested_mode: profile.requested_mode,
+                actual_mode: profile.requested_mode,
+                downgrade_reason: None,
+            }));
+        };
+        let Some(compiler) = crate::parse::carrier_compiler_registry()
+            .compiler_for_carrier_language(&artifact.adapter_id, &artifact.language_id)
+        else {
+            return Err(HostError::CompileError(CompileFailure {
+                diagnostics: diagnostics.merge(DiagnosticsSnapshot::from_vec(vec![
+                    HostDiagnostic {
+                        severity: HostSeverity::Error,
+                        code: "HOST_NO_CARRIER_COMPILER".to_string(),
+                        message: format!(
+                            "no carrier compiler for adapter '{}' / language '{}'",
+                            artifact.adapter_id.as_str(),
+                            artifact.language_id.as_str()
+                        ),
+                        span: None,
+                    },
+                ])),
+                requested_mode: profile.requested_mode,
+                actual_mode: profile.requested_mode,
+                downgrade_reason: None,
+            }));
+        };
+
+        // The host OWNS the cached-parse validity decision — identical to
+        // `compile_entry` so the substrate sees the same parse for the same
+        // bytes/options.
+        let can_use_cache =
+            snapshot.src_blocks.is_empty() && !profile.has_parse_affecting_template_options();
+        let fresh_artifact = if can_use_cache {
+            None
+        } else {
+            Some(crate::parse::parse_carrier_counted(
+                &self.provenance,
+                compiler.as_ref(),
+                &merged_source,
+                &verter_compiler::framework_common::ParseOptions {
+                    delimiters: profile.delimiters.clone(),
+                    custom_elements: profile.custom_elements.clone(),
+                },
+            ))
+        };
+        let compile_artifact = fresh_artifact.as_deref().unwrap_or(artifact);
+
+        let compiled = match compiler.compile_bundle(
+            &merged_source,
+            compile_artifact,
+            &runtime_opts,
+            &alloc,
+        ) {
+            Ok(bundle) => bundle,
+            // Site 5 (`CompileUnsupported`) stays FATAL.
+            Err(unsupported) => {
+                let code = match unsupported {
+                    CompileUnsupported::TargetMissingIde(_) => "HOST_COMPILE_TARGET_MISSING_IDE",
+                    CompileUnsupported::NoIdeProjection { .. } => "HOST_COMPILE_UNSUPPORTED",
+                };
+                return Err(HostError::CompileError(CompileFailure {
+                    diagnostics: diagnostics.merge(DiagnosticsSnapshot::from_vec(vec![
+                        HostDiagnostic {
+                            severity: HostSeverity::Error,
+                            code: code.to_string(),
+                            message: format!(
+                                "carrier '{}' cannot produce a runtime bundle for '{}'",
+                                artifact.adapter_id.as_str(),
+                                snapshot.canonical_id
+                            ),
+                            span: None,
+                        },
+                    ])),
+                    requested_mode: profile.requested_mode,
+                    actual_mode: profile.requested_mode,
+                    downgrade_reason: None,
+                }));
+            }
+        };
+
+        // Lift the bundle's framework-neutral diagnostics into the host
+        // snapshot. Soft-macro contract, compiler layer: when the collector
+        // reported an unresolved imported macro type
+        // (`had_unresolved_import`), the SAME failure re-surfaces here as an
+        // error-severity `XInvalidMacroType` (the compiler continues and
+        // degrades the type to `Unknown`, but still emits the diagnostic).
+        // HostBacked never reaches this — it aborted at site 2. On the render
+        // lane, downgrade exactly those `XInvalidMacroType` errors to
+        // WARNINGs (moving them onto the soft output) so a successful render
+        // is produced; every OTHER compiler diagnostic — including an
+        // `XInvalidMacroType` shape error for a type that DID resolve (which
+        // never sets `had_unresolved_import`) — stays fatal at site 6.
+        let mut compile_diags = diagnostics.clone();
+        let mut fatal_compiled_diags: Vec<HostDiagnostic> = Vec::new();
+        for d in &compiled.diagnostics {
+            let severity = match d.severity {
+                RuntimeDiagnosticSeverity::Error => HostSeverity::Error,
+                RuntimeDiagnosticSeverity::Warning => HostSeverity::Warning,
+                RuntimeDiagnosticSeverity::Info => HostSeverity::Info,
+            };
+            let is_soft_unresolved_import =
+                had_unresolved_import && d.code == "XInvalidMacroType";
+            if is_soft_unresolved_import {
+                soft_warnings.push(HostDiagnostic {
+                    severity: HostSeverity::Warning,
+                    code: d.code.clone(),
+                    message: d.message.clone(),
+                    span: d.span,
+                });
+            } else {
+                fatal_compiled_diags.push(HostDiagnostic {
+                    severity,
+                    code: d.code.clone(),
+                    message: d.message.clone(),
+                    span: d.span,
+                });
+            }
+        }
+        if !fatal_compiled_diags.is_empty() {
+            compile_diags = compile_diags.merge(DiagnosticsSnapshot::from_vec(fatal_compiled_diags));
+        }
+
+        // Site 6 (`compile_diags.has_errors`: syntax, CodeTransform failures,
+        // any non-softened compiler error) stays FATAL.
+        if compile_diags.has_errors {
+            return Err(HostError::CompileError(CompileFailure {
+                diagnostics: compile_diags,
+                requested_mode: profile.requested_mode,
+                actual_mode: profile.requested_mode,
+                downgrade_reason: None,
+            }));
+        }
+
+        // Assemble the `Main` runtime module host-side — the SAME
+        // byte-load-bearing [`assemble_vue_main_module`] `compile_entry`
+        // uses. A carrier that produced no runtime surface has no `Main`.
+        if !compiled.has_runtime_surface() {
+            return Err(HostError::MissingVirtualNode {
+                canonical_id: snapshot.canonical_id.clone(),
+            });
+        }
+        let main_code = match &compiled.main.body_code {
+            Some(body) => body.clone(),
+            None => assemble_vue_main_module(&snapshot.canonical_id, &compiled, &snapshot.meta, profile),
+        };
+        let main_source_map = if compiled.main.source_map.is_empty() {
+            None
+        } else {
+            Some(Arc::from(compiled.main.source_map.clone()))
+        };
+
+        Ok((Arc::from(main_code), main_source_map, soft_warnings))
     }
 }
