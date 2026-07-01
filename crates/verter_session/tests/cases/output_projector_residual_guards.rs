@@ -4641,29 +4641,6 @@ const SINK_LOCAL_RAW_AUTHORITY_ALLOWLIST: &[(&str, &str)] = &[
         "crate::typeinfo::framework_surface::svelte_exec",
         "callback_events_from_props_surface",
     ),
-    // The §5a-SP3 node-domain Vue slot-normalizer raisers — the SAME category as
-    // `raise_member_value` / `raise_realized_callable_member_value` above and the
-    // `component_meta_query_engine::surface` node raisers: each is fed a
-    // RESOLUTION-DERIVED node/member (the slot first-param / return node from
-    // `CallableNodeView::slot_param_and_return_by_arm`, or a projected-surface
-    // member), NOT a caller-forged subject, and mints the sealed output cap
-    // INTERNALLY. All are `pub(in vue_exec)` / module-private, reachable ONLY
-    // through the token-gated `slots_from_typeinfo_surface` normalizer. The
-    // node-domain conversion (offenders a/b) replaced their `&TypeExpr` inputs
-    // (never flagged) with resolution-derived `SemanticNodeId` / member inputs,
-    // so they now cross this boundary exactly as the sibling raisers do.
-    (
-        "crate::typeinfo::framework_surface::vue_exec::normalize",
-        "binding_fields_from_param_node",
-    ),
-    (
-        "crate::typeinfo::framework_surface::vue_exec::normalize",
-        "materialize_slot_return_node",
-    ),
-    (
-        "crate::typeinfo::framework_surface::vue_exec::normalize",
-        "slot_binding_field",
-    ),
     // The SANCTIONED token-MINTING projector callers. Each keeps a
     // `ProjectionCursor` demand and resolves + ADMITS internally (through
     // `resolve_macro_payload`/`resolve_payload_surface`/`read_surface_members` +

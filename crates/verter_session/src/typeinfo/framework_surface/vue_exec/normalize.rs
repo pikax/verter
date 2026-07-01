@@ -700,7 +700,7 @@ pub(crate) fn slots_from_typeinfo_surface(
 /// through the sealed output cap; it makes NO decision on the materialized value
 /// and takes NO `&TypeExpr` param (a node id + the active `ctx`). The mint cap is
 /// constructed INTERNALLY from `ctx` (the `raise_member_value` pattern).
-pub(in crate::typeinfo::framework_surface::vue_exec) fn materialize_slot_return_node(
+fn materialize_slot_return_node(
     ctx: &dyn crate::resolver_core::ResolverContext,
     return_node: SemanticNodeId,
 ) -> TypeExpr {
@@ -744,7 +744,7 @@ pub(in crate::typeinfo::framework_surface::vue_exec) fn materialize_slot_return_
 /// applying the SAME open-generic gate (`slot_param_root_is_symbolic_only`) both
 /// binding paths use. Each per-member binding `TypeExpr` is minted ONCE at the
 /// registered terminal [`slot_binding_field`]; this navigator holds NO mint.
-pub(crate) fn binding_fields_from_param_node(
+fn binding_fields_from_param_node(
     ctx: &dyn crate::resolver_core::ResolverContext,
     first_param: SemanticNodeId,
     scope: &TypeExprScope,
@@ -833,7 +833,7 @@ fn pick_source_root_node(
 /// The `pick_root` branch is a NODE-DOMAIN `Option` match, never a `TypeExpr`
 /// decide; the display renders through the by-name `.and_then` form. The mint cap
 /// is constructed INTERNALLY from `ctx` (the `raise_member_value` pattern).
-pub(in crate::typeinfo::framework_surface::vue_exec) fn slot_binding_field(
+fn slot_binding_field(
     ctx: &dyn crate::resolver_core::ResolverContext,
     member: &TypeInfoSurfaceMember,
     pick_root: Option<SemanticNodeId>,
