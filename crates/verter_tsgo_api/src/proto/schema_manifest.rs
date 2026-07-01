@@ -112,6 +112,7 @@ const fn fnv1a_str_list(mut h: u64, items: &[&str]) -> u64 {
 /// [`crate::proto::types::method`] for per-op line citations).
 pub const PINNED_OPS: &[&str] = &[
     "echo",
+    "getConfigFileParsingDiagnostics",
     "getDefaultProjectForFile",
     "getSemanticDiagnostics",
     "getSourceFile",
@@ -139,10 +140,10 @@ pub const PINNED_CALLBACKS: &[&str] = &[
 /// updates `engine_version` (and the op/callback inventory if the surface
 /// changed). Pinned to `typescript@7.0.1-rc` — the engine installed in this
 /// worktree, whose opaque-numeric handle class is the bare-integer wire the
-/// codec ([`crate::proto::types::OpaqueHandle`]) targets. The wire fingerprint
-/// is unchanged from the prior pin (the framing/op/callback inventory did not
-/// move; only the handle ENCODING — string → integer — changed, and that is not
-/// a fingerprint input).
+/// codec ([`crate::proto::types::OpaqueHandle`]) targets. The op inventory
+/// carries `getConfigFileParsingDiagnostics` (the project config-parse /
+/// compiler-options diagnostic surface the codec now hand-writes); the
+/// fingerprint reflects that op set.
 pub const PINNED: SchemaManifest = SchemaManifest {
     engine_version: "7.0.1-rc",
     framing: FramingConstants {

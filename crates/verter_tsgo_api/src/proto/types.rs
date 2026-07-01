@@ -52,6 +52,12 @@ pub mod method {
     pub const GET_SYNTACTIC_DIAGNOSTICS: &str = "getSyntacticDiagnostics";
     /// `"getSuggestionDiagnostics"` (sync/api.js:253).
     pub const GET_SUGGESTION_DIAGNOSTICS: &str = "getSuggestionDiagnostics";
+    /// `"getConfigFileParsingDiagnostics"` — the project's config-file parse /
+    /// compiler-options diagnostics (e.g. an invalid `target`, a bad option
+    /// value). These are program-wide diagnostics NOT covered by the per-file
+    /// semantic/syntactic getters; the standard TS `Program` exposes them as
+    /// `program.getConfigFileParsingDiagnostics()` (no `file` argument).
+    pub const GET_CONFIG_FILE_PARSING_DIAGNOSTICS: &str = "getConfigFileParsingDiagnostics";
     /// `"getTypeAtPosition"` (sync/api.js:387).
     pub const GET_TYPE_AT_POSITION: &str = "getTypeAtPosition";
     /// `"getSymbolAtPosition"` (sync/api.js:312).

@@ -286,6 +286,255 @@ async fn typed_client_connects_through_gate_and_serves_typed_ops() {
     client.close().await.expect("close");
 }
 
+/// DISCRIMINATING (whole-program vs per-file): a real, ON-DISK, NON-ROOT
+/// imported `.ts` file carries a type error. The project's tsconfig lists ONLY
+/// the carrier in `files` (no `include` glob), so the imported module enters the
+/// program TRANSITIVELY, never as a root. The per-file `getSemanticDiagnostics`
+/// on the carrier does NOT surface the imported file's error; the file-OMITTED
+/// whole-program getter DOES. A clean control (imported file fixed) surfaces
+/// none from either call.
+///
+/// This is the rootscope proof at the API-client layer: it FAILS to surface the
+/// non-root error via the per-file call and SUCCEEDS via the program call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn program_getter_surfaces_non_root_imported_error_that_per_file_misses() {
+    use verter_tsgo_api::TsgoClient;
+
+    let Some(exe) = common::engine_or_skip() else {
+        return;
+    };
+
+    let tmp = tempdir();
+    let src = tmp.join("src");
+    std::fs::create_dir_all(&src).expect("create src");
+
+    // A real, ON-DISK, non-root imported module with a deliberate type error:
+    // assigning a string to a `number`-typed export → TS2322. It is NOT written
+    // to the overlay (it lives on disk) and is NOT a tsconfig root.
+    std::fs::write(
+        src.join("imported.ts"),
+        "export const bad: number = \"not a number\";\nexport const ok: number = 1;\n",
+    )
+    .expect("write imported.ts");
+
+    // The carrier (a tsconfig ROOT) imports the non-root module but is itself
+    // clean — so a per-file check of the carrier finds nothing.
+    let carrier = src.join("Carrier.tsx");
+    let carrier_norm = common::norm(&carrier);
+    let carrier_src = "import { ok } from \"./imported\";\nexport const x: number = ok;\n";
+
+    // tsconfig lists ONLY the carrier in `files` (no `include`), so `imported.ts`
+    // is a NON-ROOT transitive program member.
+    let tsconfig = tmp.join("tsconfig.json");
+    std::fs::write(
+        &tsconfig,
+        format!(
+            r#"{{
+  "compilerOptions": {{
+    "strict": true,
+    "target": "ES2020",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "noEmit": true,
+    "skipLibCheck": true
+  }},
+  "files": ["{}"]
+}}
+"#,
+            common::norm(&carrier)
+        ),
+    )
+    .expect("write tsconfig");
+
+    let snapshot = OverlaySnapshot::builder()
+        .file(&carrier_norm, carrier_src)
+        .directory(common::norm(&src))
+        .real_dir_source(Arc::new(StdFsDirSource))
+        .build();
+
+    let client = TsgoClient::connect(&exe, &tmp, snapshot, 16).expect("connect");
+    client.initialize().await.expect("initialize");
+    let params = UpdateSnapshotParams {
+        open_project: Some(common::norm(&tsconfig)),
+        file_changes: None,
+    };
+    let snap = client
+        .update_snapshot(&params)
+        .await
+        .expect("updateSnapshot");
+    let project = snap
+        .projects
+        .iter()
+        .find(|p| {
+            common::norm(std::path::Path::new(&p.config_file_name)) == common::norm(&tsconfig)
+        })
+        .expect("project opened");
+
+    // (a) Per-file getter on the CARRIER: the imported file's error is NOT here.
+    let per_file = client
+        .get_semantic_diagnostics(&snap.snapshot, &project.id, &carrier_norm)
+        .await
+        .expect("per-file diagnostics");
+    assert!(
+        !per_file.iter().any(|d| d.code == 2322),
+        "the per-file carrier check must NOT surface the non-root imported error \
+         (that is exactly the rootscope gap): {per_file:?}"
+    );
+
+    // (b) Whole-program getter (file omitted): the non-root imported error IS here.
+    let program = client
+        .get_semantic_diagnostics_for_program(&snap.snapshot, &project.id)
+        .await
+        .expect("program diagnostics");
+    let imported_error = program.iter().find(|d| d.code == 2322);
+    assert!(
+        imported_error.is_some(),
+        "the whole-program getter MUST surface the non-root imported TS2322: {program:?}"
+    );
+    // The surfaced diagnostic is attributed to the imported file, not the carrier.
+    let d = imported_error.unwrap();
+    assert!(
+        d.file_name
+            .as_deref()
+            .map(|f| f.replace('\\', "/").ends_with("src/imported.ts"))
+            .unwrap_or(false),
+        "the non-root diagnostic is homed on imported.ts: {:?}",
+        d.file_name
+    );
+
+    // (c) CLEAN control: fix the imported file on disk, fresh snapshot, re-check.
+    // The whole-program getter now surfaces NO TS2322.
+    std::fs::write(
+        src.join("imported.ts"),
+        "export const bad: number = 0;\nexport const ok: number = 1;\n",
+    )
+    .expect("rewrite imported.ts clean");
+    let clean_client = TsgoClient::connect(
+        &exe,
+        &tmp,
+        OverlaySnapshot::builder()
+            .file(&carrier_norm, carrier_src)
+            .directory(common::norm(&src))
+            .real_dir_source(Arc::new(StdFsDirSource))
+            .build(),
+        16,
+    )
+    .expect("connect clean");
+    clean_client.initialize().await.expect("initialize clean");
+    let snap_clean = clean_client
+        .update_snapshot(&params)
+        .await
+        .expect("updateSnapshot clean");
+    let project_clean = snap_clean
+        .projects
+        .iter()
+        .find(|p| {
+            common::norm(std::path::Path::new(&p.config_file_name)) == common::norm(&tsconfig)
+        })
+        .expect("clean project opened");
+    let clean_program = clean_client
+        .get_semantic_diagnostics_for_program(&snap_clean.snapshot, &project_clean.id)
+        .await
+        .expect("clean program diagnostics");
+    assert!(
+        !clean_program.iter().any(|d| d.code == 2322),
+        "a clean imported file yields no TS2322 from the whole-program getter: {clean_program:?}"
+    );
+
+    client.close().await.expect("close");
+    clean_client.close().await.expect("close clean");
+}
+
+/// DISCRIMINATING (config/options): `getConfigFileParsingDiagnostics` surfaces a
+/// compiler-options error (an invalid `target` → TS6046) that neither per-file
+/// nor whole-program semantic/syntactic getters report; a clean config returns
+/// none. This is the config-diagnostic proof at the API-client layer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn config_file_parsing_getter_surfaces_bad_target_and_none_on_clean() {
+    use verter_tsgo_api::TsgoClient;
+
+    let Some(exe) = common::engine_or_skip() else {
+        return;
+    };
+
+    // Helper: open a project whose tsconfig has the given `target` value and
+    // return its config-file-parsing diagnostics.
+    async fn config_diags_for_target(exe: &std::path::Path, target: &str) -> Vec<Diagnostic> {
+        let tmp = tempdir();
+        let src = tmp.join("src");
+        std::fs::create_dir_all(&src).expect("create src");
+        let carrier = src.join("Carrier.tsx");
+        let carrier_norm = common::norm(&carrier);
+        std::fs::write(&carrier, "export const x: number = 1;\n").expect("write carrier on disk");
+
+        let tsconfig = tmp.join("tsconfig.json");
+        std::fs::write(
+            &tsconfig,
+            format!(
+                r#"{{
+  "compilerOptions": {{
+    "strict": true,
+    "target": "{target}",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "noEmit": true,
+    "skipLibCheck": true
+  }},
+  "files": ["{}"]
+}}
+"#,
+                common::norm(&carrier)
+            ),
+        )
+        .expect("write tsconfig");
+
+        let snapshot = OverlaySnapshot::builder()
+            .file(&carrier_norm, "export const x: number = 1;\n")
+            .directory(common::norm(&src))
+            .real_dir_source(Arc::new(StdFsDirSource))
+            .build();
+
+        let client = TsgoClient::connect(exe, &tmp, snapshot, 16).expect("connect");
+        client.initialize().await.expect("initialize");
+        let params = UpdateSnapshotParams {
+            open_project: Some(common::norm(&tsconfig)),
+            file_changes: None,
+        };
+        let snap = client
+            .update_snapshot(&params)
+            .await
+            .expect("updateSnapshot");
+        let project = snap
+            .projects
+            .iter()
+            .find(|p| {
+                common::norm(std::path::Path::new(&p.config_file_name)) == common::norm(&tsconfig)
+            })
+            .expect("project opened");
+        let diags = client
+            .get_config_file_parsing_diagnostics(&snap.snapshot, &project.id)
+            .await
+            .expect("config diagnostics");
+        client.close().await.expect("close");
+        diags
+    }
+
+    // (a) A bad `target` value → TS6046 (Argument for '--target' option must be ...).
+    let bad = config_diags_for_target(&exe, "NotARealTarget").await;
+    assert!(
+        bad.iter().any(|d| d.code == 6046),
+        "an invalid `target` must surface TS6046 via getConfigFileParsingDiagnostics: {bad:?}"
+    );
+
+    // (b) A valid `target` → NO TS6046 (the control that proves it is the bad
+    // value, not the call, producing the diagnostic).
+    let clean = config_diags_for_target(&exe, "ES2020").await;
+    assert!(
+        !clean.iter().any(|d| d.code == 6046),
+        "a valid `target` yields no TS6046: {clean:?}"
+    );
+}
+
 /// Create a unique temp directory (no external crate; uses pid + nanos).
 fn tempdir() -> std::path::PathBuf {
     use std::time::{SystemTime, UNIX_EPOCH};

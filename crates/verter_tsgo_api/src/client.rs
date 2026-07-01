@@ -60,6 +60,14 @@ impl TsgoClient {
         Ok(Self { handle, clearance })
     }
 
+    /// Construct a client over an already-built handle + clearance. Test-only:
+    /// it bypasses the spawn + wire gate so a mock-engine `FrameStream` can drive
+    /// the typed methods and their exact request-param wire shape is assertable.
+    #[cfg(test)]
+    pub(crate) fn from_parts(handle: ClientHandle, clearance: GateClearance) -> Self {
+        Self { handle, clearance }
+    }
+
     /// The capabilities the wire gate confirmed for the connected engine.
     pub fn clearance(&self) -> &GateClearance {
         &self.clearance
@@ -115,6 +123,59 @@ impl TsgoClient {
         self.typed(
             method::GET_SYNTACTIC_DIAGNOSTICS,
             &serde_json::json!({ "snapshot": snapshot, "project": project, "file": file }),
+        )
+        .await
+    }
+
+    /// `getSemanticDiagnostics` for the WHOLE PROGRAM — the `file` argument is
+    /// OMITTED, which the engine reads as "return diagnostics for every file in
+    /// the program" (the standard TS `Program.getSemanticDiagnostics()` with no
+    /// argument). This surfaces type errors in NON-root imported files the
+    /// per-file getter never reaches. Each returned diagnostic carries its own
+    /// `file_name`; offsets are UTF-16 code units per the `--api` offset contract
+    /// ([`crate::offset`]).
+    pub async fn get_semantic_diagnostics_for_program(
+        &self,
+        snapshot: &OpaqueHandle,
+        project: &str,
+    ) -> TsgoApiResult<Vec<Diagnostic>> {
+        self.typed(
+            method::GET_SEMANTIC_DIAGNOSTICS,
+            &serde_json::json!({ "snapshot": snapshot, "project": project }),
+        )
+        .await
+    }
+
+    /// `getSyntacticDiagnostics` for the WHOLE PROGRAM — the `file` argument is
+    /// OMITTED (whole-program parse diagnostics). See
+    /// [`Self::get_semantic_diagnostics_for_program`] for the file-omitted
+    /// contract.
+    pub async fn get_syntactic_diagnostics_for_program(
+        &self,
+        snapshot: &OpaqueHandle,
+        project: &str,
+    ) -> TsgoApiResult<Vec<Diagnostic>> {
+        self.typed(
+            method::GET_SYNTACTIC_DIAGNOSTICS,
+            &serde_json::json!({ "snapshot": snapshot, "project": project }),
+        )
+        .await
+    }
+
+    /// `getConfigFileParsingDiagnostics` — the project's config-file parse /
+    /// compiler-options diagnostics (e.g. an invalid `target` → TS6046). These
+    /// are program-wide and NOT covered by the per-file semantic/syntactic
+    /// getters. A global option diagnostic carries no `file_name`; a config-file
+    /// diagnostic carries the tsconfig path. Offsets are UTF-16 code units per
+    /// the `--api` offset contract ([`crate::offset`]).
+    pub async fn get_config_file_parsing_diagnostics(
+        &self,
+        snapshot: &OpaqueHandle,
+        project: &str,
+    ) -> TsgoApiResult<Vec<Diagnostic>> {
+        self.typed(
+            method::GET_CONFIG_FILE_PARSING_DIAGNOSTICS,
+            &serde_json::json!({ "snapshot": snapshot, "project": project }),
         )
         .await
     }
@@ -262,6 +323,141 @@ mod tests {
         assert_eq!(parse_version("7.0.1-rc").as_deref(), Some("7.0.1-rc"));
         assert_eq!(parse_version("   ").as_deref(), None);
         assert_eq!(parse_version("Version").as_deref(), None);
+    }
+
+    // ── DISCRIMINATING: the whole-program getters OMIT the `file` field on the
+    //    wire (file-omitted == "diagnostics for all files"), while the per-file
+    //    getters INCLUDE it. A regression that reused the per-file param (with a
+    //    `file` key) would fail here. Drives the ACTUAL client methods over a
+    //    mock-engine FrameStream and inspects the captured request payload. ──────
+    use crate::actor::{spawn_actor, FrameStream};
+    use crate::gate::{GateClearance, WireCapability};
+    use crate::proto::frame::{decode_frame, encode_frame, MessageType};
+    use crate::proto::schema_manifest::PINNED;
+    use crate::proto::types::OpaqueHandle;
+    use crate::snapshot::OverlaySnapshot;
+    use tokio::sync::mpsc;
+
+    fn test_client() -> (TsgoClient, mpsc::Sender<Vec<u8>>, mpsc::Receiver<Vec<u8>>) {
+        let (inbound_tx, inbound_rx) = mpsc::channel::<Vec<u8>>(64);
+        let (outbound_tx, outbound_rx) = mpsc::channel::<Vec<u8>>(64);
+        let stream = FrameStream::new(inbound_rx, outbound_tx);
+        let handle = spawn_actor(stream, OverlaySnapshot::builder().build(), 8);
+        let clearance = GateClearance {
+            manifest: PINNED,
+            capabilities: vec![WireCapability::SyncTupleApi],
+        };
+        (
+            TsgoClient::from_parts(handle, clearance),
+            inbound_tx,
+            outbound_rx,
+        )
+    }
+
+    /// Capture the JSON request payload the next client call sends, replying with
+    /// an empty diagnostics array so the call resolves.
+    async fn capture_request_payload(
+        mut to_engine: mpsc::Receiver<Vec<u8>>,
+        from_engine: mpsc::Sender<Vec<u8>>,
+    ) -> tokio::task::JoinHandle<serde_json::Value> {
+        tokio::spawn(async move {
+            let raw = to_engine
+                .recv()
+                .await
+                .expect("client sends a request frame");
+            let (req, _) = decode_frame(&raw, 0).expect("decode request frame");
+            let payload: serde_json::Value =
+                serde_json::from_slice(req.payload).expect("request payload is JSON");
+            let resp = encode_frame(MessageType::Response, req.name, b"[]");
+            from_engine.send(resp).await.expect("engine reply");
+            payload
+        })
+    }
+
+    #[tokio::test]
+    async fn program_semantic_getter_omits_file_and_per_file_getter_includes_it() {
+        let snap = OpaqueHandle(1);
+
+        // (1) Whole-program semantic getter: the `file` key MUST be absent.
+        {
+            let (client, from_engine, to_engine) = test_client();
+            let engine = capture_request_payload(to_engine, from_engine).await;
+            client
+                .get_semantic_diagnostics_for_program(&snap, "p.x")
+                .await
+                .expect("program getter resolves");
+            let payload = engine.await.unwrap();
+            assert_eq!(payload["project"], serde_json::json!("p.x"));
+            assert!(
+                payload.get("file").is_none(),
+                "whole-program getSemanticDiagnostics MUST omit `file` (got {payload})"
+            );
+        }
+
+        // (2) Per-file semantic getter: the `file` key MUST be present. This is the
+        // discriminating control — the two share a method name but differ on `file`.
+        {
+            let (client, from_engine, to_engine) = test_client();
+            let engine = capture_request_payload(to_engine, from_engine).await;
+            client
+                .get_semantic_diagnostics(&snap, "p.x", "/proj/A.tsx")
+                .await
+                .expect("per-file getter resolves");
+            let payload = engine.await.unwrap();
+            assert_eq!(
+                payload["file"],
+                serde_json::json!("/proj/A.tsx"),
+                "per-file getSemanticDiagnostics MUST carry `file` (got {payload})"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn program_syntactic_getter_omits_file() {
+        let snap = OpaqueHandle(2);
+        let (client, from_engine, to_engine) = test_client();
+        let engine = capture_request_payload(to_engine, from_engine).await;
+        client
+            .get_syntactic_diagnostics_for_program(&snap, "p.y")
+            .await
+            .expect("program syntactic getter resolves");
+        let payload = engine.await.unwrap();
+        assert_eq!(payload["project"], serde_json::json!("p.y"));
+        assert!(
+            payload.get("file").is_none(),
+            "whole-program getSyntacticDiagnostics MUST omit `file` (got {payload})"
+        );
+    }
+
+    #[tokio::test]
+    async fn config_file_parsing_getter_sends_config_method_without_file() {
+        let snap = OpaqueHandle(3);
+        let (client, from_engine, to_engine) = test_client();
+        // Capture BOTH the method name and payload for the config getter.
+        let engine = tokio::spawn(async move {
+            let mut to_engine = to_engine;
+            let raw = to_engine.recv().await.unwrap();
+            let (req, _) = decode_frame(&raw, 0).unwrap();
+            let name = String::from_utf8_lossy(req.name).into_owned();
+            let payload: serde_json::Value = serde_json::from_slice(req.payload).unwrap();
+            let resp = encode_frame(MessageType::Response, req.name, b"[]");
+            from_engine.send(resp).await.unwrap();
+            (name, payload)
+        });
+        client
+            .get_config_file_parsing_diagnostics(&snap, "p.z")
+            .await
+            .expect("config getter resolves");
+        let (name, payload) = engine.await.unwrap();
+        assert_eq!(
+            name, "getConfigFileParsingDiagnostics",
+            "the config getter uses the dedicated wire method"
+        );
+        assert_eq!(payload["project"], serde_json::json!("p.z"));
+        assert!(
+            payload.get("file").is_none(),
+            "getConfigFileParsingDiagnostics is program-wide and carries no `file`"
+        );
     }
 
     #[test]
