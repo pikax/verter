@@ -39,6 +39,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex as SyncMutex;
 use verter_span::path::fs_paths_equal;
+use verter_span::Utf16LineIndex;
 use verter_tsgo_api::api_attach::ApiAttachClient;
 use verter_tsgo_api::client::probe_engine_version;
 use verter_tsgo_api::gate::{self, ObservedEngine};
@@ -159,29 +160,60 @@ impl TsgoOwnedProvider {
         let Some((snapshot, project, engine_carrier)) = self.api.resolve_for(&carrier).await else {
             return Ok(Vec::new());
         };
-        // The `--api` diagnostic `pos`/`end` are UTF-16 code units against the
-        // carrier's own text; `TypeDiagnostic.start`/`end` is a BYTE contract. Fetch
-        // the carrier content the `--lsp` surface already cached (this is a per-file
-        // getter, so every returned diagnostic is positioned in `engine_carrier`) and
-        // convert through the shared `verter_tsgo_api` offset boundary.
-        let content = self.lsp.cached_content(&engine_carrier).await;
-        let content_ref = content.as_deref();
-        self.api
+        let diags = self
+            .api
             .client
             .get_semantic_diagnostics(&snapshot, &project, &engine_carrier)
             .await
-            .map(|diags| {
-                diags
-                    .iter()
-                    .map(|d| map_api_diagnostic(d, content_ref))
-                    .collect()
-            })
             .map_err(|e| {
                 crate::protocol::TypeProviderError::new(format!(
                     "--api getSemanticDiagnostics: {e}"
                 ))
-            })
+            })?;
+
+        // The `--api` diagnostic `pos`/`end` are UTF-16 code units against the
+        // carrier's own text; `TypeDiagnostic.start`/`end` is a BYTE contract. Fetch
+        // the carrier content the `--lsp` surface already cached (this is a per-file
+        // getter, so every returned diagnostic is positioned in `engine_carrier`) and
+        // position through the shared `verter_span` UTF-16 line index — built ONCE
+        // for the carrier and reused for every diagnostic (not a per-diagnostic
+        // walk). A missing content with diagnostics present is a FAIL-CLOSED explicit
+        // error (never a forged `(0, 0)` span) — see `position_carrier_diagnostics`.
+        let content = self.lsp.cached_content(&engine_carrier).await;
+        position_carrier_diagnostics(&diags, content, &engine_carrier)
     }
+}
+
+/// Position a carrier's `--api` diagnostics into byte-contract [`TypeDiagnostic`]s,
+/// or surface an EXPLICIT error if positioning is impossible.
+///
+/// - No diagnostics ⇒ `Ok(vec![])` (nothing to position; content is irrelevant).
+/// - Diagnostics present + `content` available ⇒ build ONE shared
+///   [`Utf16LineIndex`] and map every diagnostic through it.
+/// - Diagnostics present + `content` UNAVAILABLE ⇒ `Err` — the UTF-16 offsets
+///   cannot be converted to bytes, so we NEVER fabricate a `(0, 0)` span (the old
+///   degrade silently mis-positioned every diagnostic to the file start).
+///
+/// Pure (no I/O) so the fail-closed miss decision is hermetically testable.
+fn position_carrier_diagnostics(
+    diags: &[verter_tsgo_api::proto::types::Diagnostic],
+    content: Option<Arc<str>>,
+    engine_carrier: &str,
+) -> Result<Vec<TypeDiagnostic>, crate::protocol::TypeProviderError> {
+    if diags.is_empty() {
+        return Ok(Vec::new());
+    }
+    let Some(content) = content else {
+        return Err(crate::protocol::TypeProviderError::new(format!(
+            "--api getSemanticDiagnostics: carrier content for '{engine_carrier}' is unavailable, \
+             so the UTF-16 diagnostic offsets cannot be positioned (fail-closed: no forged span)"
+        )));
+    };
+    let index = Utf16LineIndex::new(content);
+    Ok(diags
+        .iter()
+        .map(|d| map_api_diagnostic(d, &index))
+        .collect())
 }
 
 /// Forward-slash-normalize a path for engine comparison.
@@ -260,30 +292,25 @@ fn select_configured_project_carrier(
 ///
 /// The `--api` diagnostic `pos`/`end` are tsgo **UTF-16 code-unit** offsets
 /// (TypeScript position semantics), while `TypeDiagnostic.start`/`end` is a
-/// **byte** contract (`protocol.rs`). `content` is the carrier's own text; the
-/// offsets are converted UTF-16 → byte through the shared `verter_tsgo_api`
-/// offset boundary (the SINGLE offset-normalization implementation, backed by
-/// `verter_span`) so positions never drift on non-ASCII content before the
-/// diagnostic (e.g. an em-dash `—` in a carrier comment).
+/// **byte** contract (`protocol.rs`). `index` is the carrier content's shared
+/// [`Utf16LineIndex`] (built ONCE per carrier by the caller), so the offsets are
+/// converted UTF-16 → byte through the SINGLE offset-normalization implementation
+/// in `verter_span` — positions never drift on non-ASCII content before the
+/// diagnostic (e.g. an em-dash `—` in a carrier comment), and the conversion is not
+/// a per-diagnostic re-walk from the file start.
 ///
-/// `content` is `None` only when the carrier is not in the `--lsp` content cache.
-/// The carrier is opened before diagnostics run, so this is defensive. Because the
-/// raw `pos`/`end` are UTF-16 code units, emitting them AS bytes would be a
-/// known-wrong byte span on any non-ASCII content — the exact drift the byte
-/// conversion above exists to prevent. So the content-unavailable path degrades to
-/// a well-defined zero-length span `(0, 0)` at the start of the file (a defensible
-/// "no precise range") rather than fabricating a wrong range from the UTF-16
-/// offsets.
+/// The content-unavailable case is handled by the CALLER (an explicit provider
+/// error) before this runs, so there is no forged `(0, 0)` degrade here — a
+/// diagnostic is only ever mapped when its carrier content is genuinely present.
 fn map_api_diagnostic(
     d: &verter_tsgo_api::proto::types::Diagnostic,
-    content: Option<&str>,
+    index: &Utf16LineIndex,
 ) -> TypeDiagnostic {
-    let (start, end) = match content {
-        Some(text) => verter_tsgo_api::diagnostic_byte_span(d, text),
-        // Degraded, content-unavailable path: a zero-length span at the file start,
-        // never the raw UTF-16 offsets reinterpreted as bytes.
-        None => (0, 0),
-    };
+    // The index build never yields an empty line-start table, so these conversions
+    // are infallible; a genuinely impossible index state clamps at the file start
+    // rather than fabricating a wrong non-zero span.
+    let start = index.byte_for_utf16(d.pos).unwrap_or(0) as u32;
+    let end = index.byte_for_utf16(d.end).unwrap_or(0) as u32;
     TypeDiagnostic {
         message: d.text.clone(),
         // tsgo DiagnosticCategory: 0=Warning, 1=Error, 2=Suggestion, 3=Message.

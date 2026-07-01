@@ -71,7 +71,7 @@ fn map_api_diagnostic_maps_category_and_offsets() {
     };
     // ASCII content ⇒ UTF-16 offset == byte offset, so start/end are unchanged.
     let content = "const abcdefghijklmnop = 1;\n";
-    let mapped = map_api_diagnostic(&d, Some(content));
+    let mapped = map_api_diagnostic(&d, &Utf16LineIndex::new(content));
     assert_eq!(mapped.code.as_deref(), Some("2322"));
     assert_eq!(mapped.start, 10);
     assert_eq!(mapped.end, 16);
@@ -115,7 +115,7 @@ fn map_api_diagnostic_converts_utf16_offsets_to_bytes_on_non_ascii() {
         end: one_utf16 + 1,
         file_name: Some("c:/ws/src/A.vue.tsx".to_string()),
     };
-    let mapped = map_api_diagnostic(&d, Some(content));
+    let mapped = map_api_diagnostic(&d, &Utf16LineIndex::new(content));
     // The mapped BYTE start must equal the true byte offset of `1`, NOT the raw
     // UTF-16 `pos` (which a passthrough would have produced).
     assert_eq!(
@@ -129,20 +129,17 @@ fn map_api_diagnostic_converts_utf16_offsets_to_bytes_on_non_ascii() {
     );
 }
 
-/// DISCRIMINATING (content-unavailable degraded span): the `--api` diagnostic
-/// `pos`/`end` are UTF-16 code units, but `TypeDiagnostic.start`/`end` is a BYTE
-/// contract. When the carrier content is UNAVAILABLE (`None`), the raw UTF-16
-/// offsets cannot be converted to bytes and would be a KNOWN-WRONG byte span on
-/// any non-ASCII content. The degraded contract is a well-defined zero-length span
-/// `(0, 0)` at the start of the file — NEVER the raw `pos`/`end` fabricated as
-/// bytes.
+/// DISCRIMINATING (D3 — content-unavailable is an EXPLICIT error, never a forged
+/// span). When a carrier HAS diagnostics but its content is UNAVAILABLE (`None`),
+/// the UTF-16 offsets cannot be converted to bytes. The fail-closed contract:
+/// surface an EXPLICIT `TypeProviderError` — NEVER a fabricated `(0, 0)` span (the
+/// old degrade), NEVER a raw-UTF-16-as-bytes span, NEVER a silent drop.
 ///
-/// RED before the fix: the `None` arm returned `(d.pos, d.end)` = `(28, 30)`.
-/// GREEN after: it returns `(0, 0)`. The non-zero `pos`/`end` here make the two
-/// outcomes distinct, so this fails against the old passthrough and passes only
-/// with the degraded span.
+/// RED before the fix: the content-unavailable path returned a `(0, 0)` degraded
+/// span (a `TypeDiagnostic`), silently mis-positioning every diagnostic to the file
+/// start. GREEN after: it returns `Err`.
 #[test]
-fn map_api_diagnostic_content_unavailable_yields_zero_length_degraded_span() {
+fn content_unavailable_with_diagnostics_is_an_explicit_error_not_a_forged_span() {
     let d = verter_tsgo_api::proto::types::Diagnostic {
         code: 2322,
         category: 1,
@@ -151,23 +148,51 @@ fn map_api_diagnostic_content_unavailable_yields_zero_length_degraded_span() {
         end: 30,
         file_name: Some("c:/ws/src/A.ts".to_string()),
     };
-    let mapped = map_api_diagnostic(&d, None);
-    assert_eq!(
-        mapped.start, 0,
-        "content-unavailable start must be the degraded 0, NOT the raw UTF-16 pos (28)"
+    let result = position_carrier_diagnostics(std::slice::from_ref(&d), None, "c:/ws/src/A.ts");
+    assert!(
+        result.is_err(),
+        "content-unavailable with diagnostics present must be an EXPLICIT error, not a \
+         forged (0,0) span or a silent drop: {result:?}"
     );
-    assert_eq!(
-        mapped.end, 0,
-        "content-unavailable end must be the degraded 0, NOT the raw UTF-16 end (30)"
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("unavailable"),
+        "the error must explain the carrier content is unavailable: {msg}"
     );
-    assert_ne!(
-        (mapped.start, mapped.end),
-        (d.pos, d.end),
-        "emitting the raw UTF-16 (pos,end) as a byte span is the wrong-span bug this test forbids"
+}
+
+/// No diagnostics ⇒ `Ok(vec![])` even when content is unavailable (nothing to
+/// position, so the missing content is irrelevant — NOT an error).
+#[test]
+fn no_diagnostics_is_ok_even_when_content_unavailable() {
+    let result = position_carrier_diagnostics(&[], None, "c:/ws/src/A.ts");
+    assert!(
+        result.expect("no diagnostics is never an error").is_empty(),
+        "an empty diagnostic set positions to an empty vec regardless of content"
     );
-    // The rest of the mapping is unaffected by the missing content.
-    assert_eq!(mapped.code.as_deref(), Some("2322"));
-    assert_eq!(severity_name(&mapped.severity), "error");
+}
+
+/// Content present ⇒ diagnostics position through the shared index at their true
+/// byte offsets (the happy path of `position_carrier_diagnostics`).
+#[test]
+fn content_present_positions_diagnostics_through_shared_index() {
+    let d = verter_tsgo_api::proto::types::Diagnostic {
+        code: 2322,
+        category: 1,
+        text: "Type 'string' is not assignable to type 'number'.".to_string(),
+        pos: 6,
+        end: 7,
+        file_name: Some("c:/ws/src/A.ts".to_string()),
+    };
+    let content: Arc<str> = Arc::from("const x = 1;\n");
+    let mapped =
+        position_carrier_diagnostics(std::slice::from_ref(&d), Some(content), "c:/ws/src/A.ts")
+            .expect("content present ⇒ Ok");
+    assert_eq!(mapped.len(), 1);
+    // ASCII ⇒ byte offset == UTF-16 offset.
+    assert_eq!(mapped[0].start, 6);
+    assert_eq!(mapped[0].end, 7);
+    assert_eq!(mapped[0].code.as_deref(), Some("2322"));
 }
 
 #[test]
@@ -180,8 +205,9 @@ fn map_api_diagnostic_severity_table() {
         end: 1,
         file_name: None,
     };
+    let index = Utf16LineIndex::new("w");
     assert_eq!(
-        severity_name(&map_api_diagnostic(&base, Some("w")).severity),
+        severity_name(&map_api_diagnostic(&base, &index).severity),
         "warning"
     );
 
@@ -190,7 +216,7 @@ fn map_api_diagnostic_severity_table() {
             category: 2,
             ..base.clone()
         },
-        Some("w"),
+        &index,
     );
     assert_eq!(severity_name(&suggestion.severity), "hint");
 
@@ -199,7 +225,7 @@ fn map_api_diagnostic_severity_table() {
             category: 3,
             ..base.clone()
         },
-        Some("w"),
+        &index,
     );
     assert_eq!(severity_name(&message.severity), "info");
 }
