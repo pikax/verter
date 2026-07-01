@@ -513,7 +513,12 @@ impl VerterHost {
         // the per-file session-wrapper overhead); `HostBacked` runs the
         // full session wrapper via `get_virtual_file`.
         if target == CompileManyTarget::RuntimeRender {
-            return self.compile_one_runtime_render(input, &per_input_profile, requested_mode, start);
+            return self.compile_one_runtime_render(
+                input,
+                &per_input_profile,
+                requested_mode,
+                start,
+            );
         }
 
         let result = self.get_virtual_file(VirtualQuery {

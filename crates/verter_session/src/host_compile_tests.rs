@@ -79,7 +79,11 @@ fn compile_many_returns_in_input_order() {
     let inputs: Vec<CompileBatchInput> = (0..5)
         .map(|i| ok_input(&format!("/A{i}.vue"), &good_template(&format!("v{i}"))))
         .collect();
-    let entries = host.compile_many(inputs.clone(), CompileBatchOptions::default(), CompileManyTarget::HostBacked);
+    let entries = host.compile_many(
+        inputs.clone(),
+        CompileBatchOptions::default(),
+        CompileManyTarget::HostBacked,
+    );
     assert_eq!(entries.len(), 5);
     for (i, entry) in entries.iter().enumerate() {
         assert_eq!(
@@ -109,14 +113,22 @@ fn compile_many_warm_cache_reuses_compile_results() {
         ok_input("/W2.vue", &good_template("w2")),
     ];
 
-    let r1 = host.compile_many(inputs.clone(), CompileBatchOptions::default(), CompileManyTarget::HostBacked);
+    let r1 = host.compile_many(
+        inputs.clone(),
+        CompileBatchOptions::default(),
+        CompileManyTarget::HostBacked,
+    );
     assert!(
         r1.iter().all(|e| !e.cache_hit),
         "first batch must be all-cold: {:?}",
         r1.iter().map(|e| e.cache_hit).collect::<Vec<_>>()
     );
 
-    let r2 = host.compile_many(inputs, CompileBatchOptions::default(), CompileManyTarget::HostBacked);
+    let r2 = host.compile_many(
+        inputs,
+        CompileBatchOptions::default(),
+        CompileManyTarget::HostBacked,
+    );
     assert!(
         r2.iter().all(|e| e.cache_hit),
         "second batch must be all-warm: {:?}",
@@ -146,7 +158,11 @@ fn compile_many_isolates_per_file_errors() {
         ok_input("/C.vue", &good_template("ok again")),
     ];
 
-    let entries = host.compile_many(inputs, CompileBatchOptions::default(), CompileManyTarget::HostBacked);
+    let entries = host.compile_many(
+        inputs,
+        CompileBatchOptions::default(),
+        CompileManyTarget::HostBacked,
+    );
     assert_eq!(entries.len(), 3);
     assert!(
         entries[0].errors.is_empty(),
@@ -173,7 +189,11 @@ fn compile_many_records_all_errors_not_just_first() {
     // parse-level diagnostics.
     let multi = "<template><div><span><p>{{ unclosed </template>";
     let inputs = vec![ok_input("/MULTI.vue", multi)];
-    let entries = host.compile_many(inputs, CompileBatchOptions::default(), CompileManyTarget::HostBacked);
+    let entries = host.compile_many(
+        inputs,
+        CompileBatchOptions::default(),
+        CompileManyTarget::HostBacked,
+    );
     assert_eq!(entries.len(), 1);
     assert!(
         !entries[0].errors.is_empty(),
@@ -203,7 +223,11 @@ fn compile_many_isolates_panics() {
         ok_input(PANIC_INJECT_SENTINEL, &good_template("ignored")),
         ok_input("/after.vue", &good_template("after")),
     ];
-    let entries = host.compile_many(inputs, CompileBatchOptions::default(), CompileManyTarget::HostBacked);
+    let entries = host.compile_many(
+        inputs,
+        CompileBatchOptions::default(),
+        CompileManyTarget::HostBacked,
+    );
     assert_eq!(entries.len(), 3);
 
     assert!(
@@ -249,7 +273,11 @@ fn compile_many_dedup_conflicting_source_rejects_entire_group() {
         // Independent input that should compile cleanly.
         ok_input("/B.vue", &good_template("b")),
     ];
-    let entries = host.compile_many(inputs, CompileBatchOptions::default(), CompileManyTarget::HostBacked);
+    let entries = host.compile_many(
+        inputs,
+        CompileBatchOptions::default(),
+        CompileManyTarget::HostBacked,
+    );
     assert_eq!(entries.len(), 3);
 
     for (i, entry) in entries.iter().enumerate().take(2) {
@@ -310,7 +338,11 @@ fn compile_many_compiles_each_canonical_once() {
     let inputs: Vec<CompileBatchInput> = (0..5).map(|_| ok_input("/A.vue", &body)).collect();
 
     let baseline = host.compile_one_call_count.load(Ordering::Relaxed);
-    let entries = host.compile_many(inputs, CompileBatchOptions::default(), CompileManyTarget::HostBacked);
+    let entries = host.compile_many(
+        inputs,
+        CompileBatchOptions::default(),
+        CompileManyTarget::HostBacked,
+    );
     let after = host.compile_one_call_count.load(Ordering::Relaxed);
 
     assert_eq!(
@@ -426,7 +458,11 @@ fn compile_many_compile_error_preserves_all_diagnostics() {
   <span>{{ also-unclosed
 </template>"#;
     let inputs = vec![ok_input("/multi-error.vue", multi)];
-    let entries = host.compile_many(inputs, CompileBatchOptions::default(), CompileManyTarget::HostBacked);
+    let entries = host.compile_many(
+        inputs,
+        CompileBatchOptions::default(),
+        CompileManyTarget::HostBacked,
+    );
     assert_eq!(entries.len(), 1);
     let entry = &entries[0];
     assert!(
@@ -499,11 +535,19 @@ fn compile_many_throughput_smoke() {
         .collect();
 
     let cold_start = std::time::Instant::now();
-    let r1 = host.compile_many(inputs.clone(), CompileBatchOptions::default(), CompileManyTarget::HostBacked);
+    let r1 = host.compile_many(
+        inputs.clone(),
+        CompileBatchOptions::default(),
+        CompileManyTarget::HostBacked,
+    );
     let cold_ms = cold_start.elapsed().as_secs_f64() * 1000.0;
 
     let warm_start = std::time::Instant::now();
-    let r2 = host.compile_many(inputs, CompileBatchOptions::default(), CompileManyTarget::HostBacked);
+    let r2 = host.compile_many(
+        inputs,
+        CompileBatchOptions::default(),
+        CompileManyTarget::HostBacked,
+    );
     let warm_ms = warm_start.elapsed().as_secs_f64() * 1000.0;
 
     assert_eq!(r1.len(), N);
@@ -607,7 +651,11 @@ fn compile_many_workers_carry_host_cpu_pool_id() {
     let expected_pool_id = host.host_cpu_pool().pool_id();
 
     let inputs = vec![ok_input("/host-pool-id.vue", &good_template("v"))];
-    let entries = host.compile_many(inputs, CompileBatchOptions::default(), CompileManyTarget::HostBacked);
+    let entries = host.compile_many(
+        inputs,
+        CompileBatchOptions::default(),
+        CompileManyTarget::HostBacked,
+    );
     assert_eq!(entries.len(), 1);
     assert!(
         entries[0].errors.is_empty(),
@@ -689,7 +737,11 @@ fn two_back_to_back_compile_many_share_host_pool() {
     host.compile_one_host_cpu_pool_token
         .store(usize::MAX, std::sync::atomic::Ordering::Relaxed);
     let inputs_a = vec![ok_input("/share-a.vue", &good_template("a"))];
-    let entries_a = host.compile_many(inputs_a, CompileBatchOptions::default(), CompileManyTarget::HostBacked);
+    let entries_a = host.compile_many(
+        inputs_a,
+        CompileBatchOptions::default(),
+        CompileManyTarget::HostBacked,
+    );
     assert_eq!(entries_a.len(), 1);
     let token_after_first = host
         .compile_one_host_cpu_pool_token
@@ -698,7 +750,11 @@ fn two_back_to_back_compile_many_share_host_pool() {
     host.compile_one_host_cpu_pool_token
         .store(usize::MAX, std::sync::atomic::Ordering::Relaxed);
     let inputs_b = vec![ok_input("/share-b.vue", &good_template("b"))];
-    let entries_b = host.compile_many(inputs_b, CompileBatchOptions::default(), CompileManyTarget::HostBacked);
+    let entries_b = host.compile_many(
+        inputs_b,
+        CompileBatchOptions::default(),
+        CompileManyTarget::HostBacked,
+    );
     assert_eq!(entries_b.len(), 1);
     let token_after_second = host
         .compile_one_host_cpu_pool_token
@@ -792,7 +848,11 @@ fn host_cpu_threads_some_zero_constructs_default_pool() {
     // actually has at least one worker, not that we got an empty
     // ThreadPoolBuilder past validation somehow).
     let inputs = vec![ok_input("/host-cpu-threads-0.vue", &good_template("ok"))];
-    let entries = host.compile_many(inputs, CompileBatchOptions::default(), CompileManyTarget::HostBacked);
+    let entries = host.compile_many(
+        inputs,
+        CompileBatchOptions::default(),
+        CompileManyTarget::HostBacked,
+    );
     assert_eq!(entries.len(), 1);
     assert!(
         entries[0].errors.is_empty(),
@@ -826,7 +886,11 @@ fn host_cpu_threads_some_explicit_constructs_pool() {
          on any non-2-core machine."
     );
     let inputs = vec![ok_input("/host-cpu-threads-2.vue", &good_template("ok"))];
-    let entries = host.compile_many(inputs, CompileBatchOptions::default(), CompileManyTarget::HostBacked);
+    let entries = host.compile_many(
+        inputs,
+        CompileBatchOptions::default(),
+        CompileManyTarget::HostBacked,
+    );
     assert_eq!(entries.len(), 1);
     assert!(
         entries[0].errors.is_empty(),

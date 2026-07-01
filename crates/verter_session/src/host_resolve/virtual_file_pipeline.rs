@@ -863,12 +863,11 @@ impl VerterHost {
 
         let compile_input = {
             use crate::host_executor::HostSourceData;
-            let hd =
-                source_snap
-                    .downcast_data::<HostSourceData>()
-                    .ok_or_else(|| HostError::MissingSource {
-                        canonical_id: canonical.clone(),
-                    })?;
+            let hd = source_snap
+                .downcast_data::<HostSourceData>()
+                .ok_or_else(|| HostError::MissingSource {
+                    canonical_id: canonical.clone(),
+                })?;
             let parse = &hd.parse;
             // The byte-load-bearing `CompileInput` — the SAME field mapping
             // the HostBacked cache-miss path builds (source, macro deps,
@@ -910,13 +909,7 @@ impl VerterHost {
         // `Main` assembly as `compile_entry`, without the per-file wrapper
         // overhead, and with the imported-macro-resolution fatality softened
         // to a warning.
-        let (main_code, main_source_map, diagnostics) =
-            self.compile_entry_runtime_render(&compile_input, profile)?;
-        Ok(RenderOnlyMain {
-            code: main_code,
-            source_map: main_source_map,
-            diagnostics,
-        })
+        self.compile_entry_runtime_render(&compile_input, profile)
     }
 
     /// Retrieve a compiled virtual file (script, template, style, or main bundle).
@@ -2783,7 +2776,7 @@ impl VerterHost {
         &self,
         snapshot: &CompileInput,
         profile: &CompileProfile,
-    ) -> Result<(Arc<str>, Option<Arc<str>>, Vec<HostDiagnostic>), HostError> {
+    ) -> Result<RenderOnlyMain, HostError> {
         let mut diagnostics = snapshot.parse_diagnostics.clone();
 
         // (a) DROP the source re-clone for the common case. Only the
@@ -2865,8 +2858,11 @@ impl VerterHost {
             let store_view = self.resolver_store_view_read().into_cold_seed_view();
             let overlay =
                 std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-            let host_ctx =
-                crate::resolver_core::HostResolverContext::from_cold_seed(self, &store_view, overlay);
+            let host_ctx = crate::resolver_core::HostResolverContext::from_cold_seed(
+                self,
+                &store_view,
+                overlay,
+            );
             let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
             let (external_types, missing_macro_type_diags, _transitive) = self
                 .collect_external_types_from_loaded_files(
@@ -2951,9 +2947,9 @@ impl VerterHost {
                         severity: HostSeverity::Error,
                         code: "HOST_NO_CARRIER_ARTIFACT".to_string(),
                         message: format!(
-                            "no framework parse artifact for '{}' — cannot route the runtime compile",
-                            snapshot.canonical_id
-                        ),
+                        "no framework parse artifact for '{}' — cannot route the runtime compile",
+                        snapshot.canonical_id
+                    ),
                         span: None,
                     },
                 ])),
@@ -3057,8 +3053,7 @@ impl VerterHost {
                 RuntimeDiagnosticSeverity::Warning => HostSeverity::Warning,
                 RuntimeDiagnosticSeverity::Info => HostSeverity::Info,
             };
-            let is_soft_unresolved_import =
-                had_unresolved_import && d.code == "XInvalidMacroType";
+            let is_soft_unresolved_import = had_unresolved_import && d.code == "XInvalidMacroType";
             if is_soft_unresolved_import {
                 soft_warnings.push(HostDiagnostic {
                     severity: HostSeverity::Warning,
@@ -3076,7 +3071,8 @@ impl VerterHost {
             }
         }
         if !fatal_compiled_diags.is_empty() {
-            compile_diags = compile_diags.merge(DiagnosticsSnapshot::from_vec(fatal_compiled_diags));
+            compile_diags =
+                compile_diags.merge(DiagnosticsSnapshot::from_vec(fatal_compiled_diags));
         }
 
         // Site 6 (`compile_diags.has_errors`: syntax, CodeTransform failures,
@@ -3100,7 +3096,9 @@ impl VerterHost {
         }
         let main_code = match &compiled.main.body_code {
             Some(body) => body.clone(),
-            None => assemble_vue_main_module(&snapshot.canonical_id, &compiled, &snapshot.meta, profile),
+            None => {
+                assemble_vue_main_module(&snapshot.canonical_id, &compiled, &snapshot.meta, profile)
+            }
         };
         let main_source_map = if compiled.main.source_map.is_empty() {
             None
@@ -3108,6 +3106,10 @@ impl VerterHost {
             Some(Arc::from(compiled.main.source_map.clone()))
         };
 
-        Ok((Arc::from(main_code), main_source_map, soft_warnings))
+        Ok(RenderOnlyMain {
+            code: Arc::from(main_code),
+            source_map: main_source_map,
+            diagnostics: soft_warnings,
+        })
     }
 }

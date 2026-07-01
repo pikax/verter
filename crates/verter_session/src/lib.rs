@@ -223,8 +223,6 @@ mod host_compile_atomic_upsert_tests;
 pub mod host_compile_audit;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod host_compile_tests;
-#[cfg(all(test, not(target_arch = "wasm32")))]
-mod runtime_render_lane_tests;
 mod host_construction;
 pub(crate) mod host_executor;
 #[cfg(test)]
@@ -250,6 +248,8 @@ pub mod invalidation_domain;
 pub mod loop5_instrumentation;
 pub(crate) mod mapper_binder_registry;
 pub mod meta;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod runtime_render_lane_tests;
 
 pub mod meta_resolve;
 #[cfg(test)]

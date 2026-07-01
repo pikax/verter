@@ -45,18 +45,26 @@ fn input(canonical_id: &str, source: &str) -> CompileBatchInput {
 /// on the host first.
 fn upsert_sibling(host: &VerterHost, canonical_id: &str, source: &str) {
     let lang = host.language_classifier().classify(canonical_id);
-    host.upsert(UpsertRequest {
-        canonical_id: Some(canonical_id.to_string()),
-        input_id: canonical_id.to_string(),
-        source: Arc::from(source),
-        file_language: lang,
-        aliases: Vec::new(),
-    })
-    .expect("sibling upsert must succeed");
+    // `upsert` returns a `#[must_use]` `HostUpdateResult`; the render lane
+    // reads the file back from the host, so the result is intentionally
+    // discarded after asserting success.
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: Some(canonical_id.to_string()),
+            input_id: canonical_id.to_string(),
+            source: Arc::from(source),
+            file_language: lang,
+            aliases: Vec::new(),
+        })
+        .expect("sibling upsert must succeed");
 }
 
 /// Compile one `.vue` through the RuntimeRender lane and return its entry.
-fn render_one(host: &VerterHost, canonical_id: &str, source: &str) -> crate::host_compile::CompileBatchEntry {
+fn render_one(
+    host: &VerterHost,
+    canonical_id: &str,
+    source: &str,
+) -> crate::host_compile::CompileBatchEntry {
     let mut entries = host.compile_many(
         vec![input(canonical_id, source)],
         CompileBatchOptions::default(),
@@ -96,7 +104,11 @@ fn rail_a_ide_carrier_is_distinct_from_render_output() {
     let host = new_host();
     let src = "<script setup lang=\"ts\">\nconst n = 1\n</script>\n<template><div>{{ n }}</div></template>\n";
     let render = render_one(&host, "/proj/Ide.vue", src);
-    assert!(render.errors.is_empty(), "render errors: {:?}", render.errors);
+    assert!(
+        render.errors.is_empty(),
+        "render errors: {:?}",
+        render.errors
+    );
 
     let profile = CompileProfile {
         source_map: true,
@@ -319,7 +331,8 @@ fn runtime_render_local_type_error_is_fatal() {
     // A `<script src="...">` pointing at a file that was never upserted:
     // the wrapper cannot merge the external source and returns the fatal
     // `HOST_MISSING_EXTERNAL_SOURCE` (site 1).
-    let src = "<script src=\"./nope.ts\" setup lang=\"ts\"></script>\n<template><div /></template>\n";
+    let src =
+        "<script src=\"./nope.ts\" setup lang=\"ts\"></script>\n<template><div /></template>\n";
     let host = new_host();
     let render = render_one(&host, "/proj/LocalErr.vue", src);
     assert!(
@@ -371,7 +384,11 @@ fn runtime_render_bypasses_stage_c_wrapper() {
     // RuntimeRender: zero wrapper-op hits.
     let host_r = new_host();
     let render = render_one(&host_r, "/proj/Bypass.vue", src);
-    assert!(render.errors.is_empty(), "render errors: {:?}", render.errors);
+    assert!(
+        render.errors.is_empty(),
+        "render errors: {:?}",
+        render.errors
+    );
 
     assert_eq!(
         host_r.wrapper_source_clone_count.load(Ordering::Relaxed),
@@ -453,7 +470,11 @@ fn runtime_render_does_not_leave_stale_semantic_axis_for_host_backed() {
     );
     let with_dep = "<script setup lang=\"ts\">\nimport type { P } from './types'\ndefineProps<P>()\n</script>\n<template><div /></template>\n";
     let render1 = render_one(&host, owner, with_dep);
-    assert!(render1.errors.is_empty(), "render1 errors: {:?}", render1.errors);
+    assert!(
+        render1.errors.is_empty(),
+        "render1 errors: {:?}",
+        render1.errors
+    );
 
     // Baseline: whatever the RuntimeRender lane recorded, the workspace
     // semantic-transitive axis for the owner must NOT have been populated by
@@ -470,7 +491,11 @@ fn runtime_render_does_not_leave_stale_semantic_axis_for_host_backed() {
     // Now the owner's deps go EMPTY (drop the import entirely). Re-render.
     let no_dep = "<script setup lang=\"ts\">\nconst x = 1\n</script>\n<template><div>{{ x }}</div></template>\n";
     let render2 = render_one(&host, owner, no_dep);
-    assert!(render2.errors.is_empty(), "render2 errors: {:?}", render2.errors);
+    assert!(
+        render2.errors.is_empty(),
+        "render2 errors: {:?}",
+        render2.errors
+    );
 
     // A later HostBacked request on the SAME host for the owner: the
     // semantic-transitive axis it sees must reflect the CURRENT (empty)
