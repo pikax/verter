@@ -31,6 +31,26 @@ fn empty_disk() -> NativeFs {
     NativeFs::new()
 }
 
+/// Map a per-carrier / whole-program diagnostic under the `Semantic` origin (the
+/// natural origin for the semantic/syntactic streams these unit tests model) with
+/// an EMPTY injected set (no injected-companion suppression) — the common case for
+/// the overlay-carrier + global tests.
+fn map_semantic(
+    d: &ApiDiagnostic,
+    lookup: &HashMap<String, &OverlayFile>,
+    disk: &NativeFs,
+) -> Option<Diagnostic> {
+    map_one(
+        &OriginDiagnostic {
+            d,
+            origin: DiagOrigin::Semantic,
+        },
+        lookup,
+        disk,
+        &InjectedPathSet::default(),
+    )
+}
+
 #[test]
 fn passthrough_stub_keeps_file_and_converts_offset() {
     let stub = OverlayFile {
@@ -51,7 +71,7 @@ fn passthrough_stub_keeps_file_and_converts_offset() {
         "/proj/Foo_00ab.vue.ts",
     );
 
-    let mapped = map_one(&d, &lookup, &empty_disk()).expect("stub diag maps");
+    let mapped = map_semantic(&d, &lookup, &empty_disk()).expect("stub diag maps");
     assert_eq!(mapped.file, "/proj/Foo_00ab.vue.ts");
     assert_eq!(mapped.line, 1);
     assert_eq!(mapped.col, pos + 1);
@@ -78,9 +98,9 @@ fn suggestion_and_message_categories_are_dropped() {
         6,
         "/proj/Foo.vue.ts",
     );
-    assert!(map_one(&sug, &lookup, &empty_disk()).is_none());
+    assert!(map_semantic(&sug, &lookup, &empty_disk()).is_none());
     let msg = api_diag(4114, 3, "some message", 6, "/proj/Foo.vue.ts");
-    assert!(map_one(&msg, &lookup, &empty_disk()).is_none());
+    assert!(map_semantic(&msg, &lookup, &empty_disk()).is_none());
 }
 
 #[test]
@@ -100,7 +120,7 @@ fn warning_category_maps_to_warning_severity() {
         6,
         "/proj/Foo.vue.ts",
     );
-    let mapped = map_one(&warn, &lookup, &empty_disk()).expect("warning maps");
+    let mapped = map_semantic(&warn, &lookup, &empty_disk()).expect("warning maps");
     assert!(matches!(mapped.severity, Severity::Warning));
 }
 
@@ -123,7 +143,7 @@ fn vue_jsx_type_gap_children_is_suppressed() {
         "/proj/Foo.tsx",
     );
     assert!(
-        map_one(&gap, &lookup, &empty_disk()).is_none(),
+        map_semantic(&gap, &lookup, &empty_disk()).is_none(),
         "the children/HTMLAttributes gap must be suppressed"
     );
 }
@@ -149,7 +169,7 @@ fn sourcemapped_carrier_without_map_falls_back_to_vue_at_one_one() {
         10,
         "/proj/Foo_dead.tsx",
     );
-    let mapped = map_one(&d, &lookup, &empty_disk()).expect("maps with fallback");
+    let mapped = map_semantic(&d, &lookup, &empty_disk()).expect("maps with fallback");
     assert_eq!(mapped.file, "/proj/src/Foo.vue");
     assert_eq!(mapped.line, 1);
     assert_eq!(mapped.col, 1);
@@ -166,8 +186,8 @@ fn global_diagnostic_without_file_name_is_surfaced_not_dropped() {
 
     let mut d = api_diag(6046, 1, "Argument for '--target' option must be ...", 0, "");
     d.file_name = None;
-    let mapped =
-        map_one(&d, &lookup, &empty_disk()).expect("a global (no-file) diagnostic is surfaced");
+    let mapped = map_semantic(&d, &lookup, &empty_disk())
+        .expect("a global (no-file) diagnostic is surfaced");
     assert_eq!(mapped.ts_code, 6046);
     assert_eq!(mapped.file, "<compiler options>");
     assert_eq!(mapped.line, 1);
@@ -206,7 +226,7 @@ fn non_root_real_file_diagnostic_is_surfaced_under_its_own_path_not_a_carrier() 
         6,
         "/proj/src/imported-types.ts",
     );
-    let mapped = map_one(&d, &lookup, &empty_disk())
+    let mapped = map_semantic(&d, &lookup, &empty_disk())
         .expect("a real non-root file diagnostic is surfaced (whole-program), not dropped");
     assert_eq!(
         mapped.file, "/proj/src/imported-types.ts",
@@ -215,6 +235,115 @@ fn non_root_real_file_diagnostic_is_surfaced_under_its_own_path_not_a_carrier() 
     assert_ne!(
         mapped.file, "/proj/src/Foo.vue",
         "it must NOT be re-homed onto the carrier's .vue source"
+    );
+    assert_eq!(mapped.ts_code, 2322);
+}
+
+// ── Injected-root map-boundary guard (fail-closed, origin + path keyed) ──────
+//
+// The upstream `strip_injected_root_diagnostics` filters the config stream, but the
+// reopen proved the strip alone leaks when the engine echoes an injected companion
+// under a DIFFERENT drive-letter case / separator (the old exact `p == name` path).
+// The belt-and-suspenders guard in `map_one` re-checks the SAME injected set at the
+// map boundary, keyed by the shared filesystem-identity key AND the diagnostic's
+// COLLECTION ORIGIN — so a Config-origin companion diagnostic is suppressed even
+// case-divergent, while a Semantic/Syntactic diagnostic on the same carrier still
+// takes the legitimate `.vue` remap (over-suppression = false negatives).
+
+/// Drive `map_one` under the given origin with a specific injected set.
+fn map_with(
+    d: &ApiDiagnostic,
+    origin: DiagOrigin,
+    lookup: &HashMap<String, &OverlayFile>,
+    injected: &InjectedPathSet,
+) -> Option<Diagnostic> {
+    map_one(
+        &OriginDiagnostic { d, origin },
+        lookup,
+        &empty_disk(),
+        injected,
+    )
+}
+
+/// REPRODUCER (the D8 leak). A `Config`-origin diagnostic whose `file_name` is a
+/// DRIVE-CASE-DIVERGENT form of an injected companion (registered `c:/proj/Foo.vue.tsx`,
+/// reported `C:/proj/Foo.vue.tsx`, TS6059) must NOT be emitted and must NOT be
+/// re-homed onto the carrier's `.vue`. The companion is ALSO present in the overlay
+/// lookup as a `SourceMapped` carrier, so WITHOUT the guard `map_one` would remap the
+/// TS6059 onto `.vue` (the spurious diagnostic). RED on the pre-guard path (leaks as
+/// a `.vue` TS6059); GREEN with the fail-closed origin+path guard.
+#[test]
+fn config_origin_case_divergent_injected_companion_is_not_emitted_or_rehomed() {
+    // The companion is a real overlay carrier (SourceMapped → `.vue`).
+    let carrier = OverlayFile {
+        path: "c:/proj/Foo.vue.tsx".to_string(),
+        content: "const a: string = 1;\n".to_string(),
+        remap: RemapKind::SourceMapped {
+            vue_path: "c:/proj/src/Foo.vue".to_string(),
+        },
+    };
+    let files = vec![carrier];
+    let lookup = lookup_of(&files);
+    // Injected set registered with the LOWERCASE-drive canonical form.
+    let injected = InjectedPathSet::from_paths(["c:/proj/Foo.vue.tsx".to_string()]);
+
+    // A Config-parse diagnostic the engine reports with an UPPERCASE drive letter.
+    let d = api_diag(
+        6059,
+        1,
+        "File 'c:/proj/Foo.vue.tsx' is not under 'rootDir'.",
+        6,
+        "C:/proj/Foo.vue.tsx",
+    );
+
+    let mapped = map_with(&d, DiagOrigin::Config, &lookup, &injected);
+    assert!(
+        mapped.is_none(),
+        "a case-divergent Config-origin injected companion must be suppressed at the map \
+         boundary, never emitted or re-homed onto .vue: {mapped:?}"
+    );
+}
+
+/// INVARIANT (guards against over-suppression). A `Semantic` diagnostic on the SAME
+/// generated carrier — even though the carrier IS in the injected set — STILL maps
+/// back through the source map to `.vue`. The guard fires only for `Config` origin;
+/// suppressing a semantic error here would be a false negative.
+#[test]
+fn semantic_origin_on_injected_carrier_still_maps_to_vue() {
+    let carrier = OverlayFile {
+        path: "c:/proj/Foo.vue.tsx".to_string(),
+        content: "const a: string = 1;\n".to_string(),
+        remap: RemapKind::SourceMapped {
+            vue_path: "c:/proj/src/Foo.vue".to_string(),
+        },
+    };
+    let files = vec![carrier];
+    let lookup = lookup_of(&files);
+    // The carrier IS an injected companion (same set as the reproducer).
+    let injected = InjectedPathSet::from_paths(["c:/proj/Foo.vue.tsx".to_string()]);
+
+    // A real SEMANTIC type error on that carrier (reported with the same drive-case
+    // divergence to prove the guard's origin gate — not its path gate — is what
+    // spares it).
+    let d = api_diag(
+        2322,
+        1,
+        "Type 'number' is not assignable to type 'string'.",
+        10,
+        "C:/proj/Foo.vue.tsx",
+    );
+
+    let mapped = map_with(&d, DiagOrigin::Semantic, &lookup, &injected)
+        .expect("a semantic diagnostic on the carrier is surfaced, never suppressed by the guard");
+    // No inline source map on `content`, so it falls back to the `.vue` (1,1) — the
+    // point is it REMAPS to `.vue`, never suppressed and never left on the `.tsx`.
+    assert_eq!(
+        mapped.file, "c:/proj/src/Foo.vue",
+        "a Semantic-origin diagnostic on an injected carrier must still remap to its .vue source"
+    );
+    assert_ne!(
+        mapped.file, "c:/proj/Foo.vue.tsx",
+        "it must not be left on the raw .tsx carrier"
     );
     assert_eq!(mapped.ts_code, 2322);
 }
@@ -323,7 +452,7 @@ fn config_filtering_drops_only_injected_companions_and_retains_real_and_global()
             real_source.clone(),
             global_opt.clone(),
         ],
-        &injected_paths,
+        &InjectedPathSet::from_paths(injected_paths.iter().cloned()),
     );
 
     // The two injected-companion config diagnostics are GONE.

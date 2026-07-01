@@ -26,12 +26,57 @@
 //! bytes this module computes. The discovery DECISION and the virtual-config
 //! IDENTITY live alongside this module in `verter_workspace`.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
+use verter_span::path::InjectedPathKey;
 use verter_tsgo_api::proto::types::Diagnostic;
 use verter_tsgo_api::snapshot::{OverlaySnapshot, RealDirSource};
 
 use crate::config::strip_json_comments;
+
+/// The set of injected companion paths (the generated carriers + the synthetic
+/// tsconfig) whose config/options diagnostics must be invisible, keyed by the
+/// shared filesystem-identity key ([`InjectedPathKey`]) so membership folds the
+/// SAME way the rest of the workspace compares two paths for file identity.
+///
+/// Building the set once and testing membership through it is what makes the
+/// strip decision (here) and the diagnostic-homing decision (`verter_tsc`'s
+/// `map_one`) share ONE path-identity notion — a companion the engine echoes in
+/// a different separator / drive-letter / (on a case-insensitive FS) non-drive
+/// case still folds to the same key and is correctly recognized, closing the
+/// exact-string-equality leak.
+#[derive(Debug, Clone, Default)]
+pub struct InjectedPathSet {
+    keys: HashSet<InjectedPathKey>,
+}
+
+impl InjectedPathSet {
+    /// Build the set from the raw injected companion paths.
+    pub fn from_paths<I, S>(paths: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        Self {
+            keys: paths
+                .into_iter()
+                .map(|p| InjectedPathKey::new(p.as_ref()))
+                .collect(),
+        }
+    }
+
+    /// Whether `path` denotes one of the injected companions under the host's
+    /// filesystem case policy.
+    pub fn contains(&self, path: &str) -> bool {
+        self.keys.contains(&InjectedPathKey::new(path))
+    }
+
+    /// Whether the set is empty (no injected companions).
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+}
 
 /// Produce the virtual (augmented) tsconfig bytes for a project that must be
 /// virtualized: the user config with `companion_paths` injected into `files`,
@@ -103,14 +148,16 @@ pub fn build_virtual_overlay_snapshot(
 
 /// Strip config/options diagnostics that point at an injected companion root.
 ///
-/// A diagnostic is dropped only when its `fileName` is one of `injected_paths`
-/// (an injected companion). Every diagnostic with no `fileName` (a global
-/// options diagnostic) and every diagnostic pointing at a real user file is
-/// retained, so a virtualized config yields the SAME user-visible config/options
-/// diagnostic set the real config would.
+/// A diagnostic is dropped only when its `fileName` folds to one of the injected
+/// companions in `injected` (membership under the shared filesystem-identity key,
+/// so a separator / drive-case / case-insensitive-FS variant of a companion is
+/// still recognized — NOT exact string equality). Every diagnostic with no
+/// `fileName` (a global options diagnostic) and every diagnostic pointing at a
+/// real user file is retained, so a virtualized config yields the SAME
+/// user-visible config/options diagnostic set the real config would.
 pub fn strip_injected_root_diagnostics(
     diagnostics: Vec<Diagnostic>,
-    injected_paths: &[String],
+    injected: &InjectedPathSet,
 ) -> Vec<Diagnostic> {
     diagnostics
         .into_iter()
@@ -118,7 +165,7 @@ pub fn strip_injected_root_diagnostics(
             // A diagnostic pointing at an injected companion is invisible; every
             // other diagnostic (a real config/source file, or a global option
             // diagnostic with no fileName) is retained verbatim.
-            Some(name) => !injected_paths.iter().any(|p| p == name),
+            Some(name) => !injected.contains(name),
             None => true,
         })
         .collect()

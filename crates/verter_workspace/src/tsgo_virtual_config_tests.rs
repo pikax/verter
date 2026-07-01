@@ -9,6 +9,7 @@ use verter_tsgo_api::snapshot::{AccessibleEntries, ReadFileResult, RealDirSource
 
 use super::{
     augment_tsconfig_bytes, build_virtual_overlay_snapshot, strip_injected_root_diagnostics,
+    InjectedPathSet,
 };
 
 const TSCONFIG: &str = "d:/ws/tsconfig.json";
@@ -194,7 +195,7 @@ fn injected_root_diagnostic_is_stripped_but_real_config_error_survives() {
             global_options_diag.clone(),
             real_source_diag.clone(),
         ],
-        &[COMPANION.to_string()],
+        &InjectedPathSet::from_paths([COMPANION.to_string()]),
     );
 
     // DISCRIMINATING: the injected-root diagnostic is gone …
@@ -230,6 +231,51 @@ fn injected_root_diagnostic_is_stripped_but_real_config_error_survives() {
 #[test]
 fn strip_with_no_injected_paths_is_identity() {
     let diags = vec![diag(5024, Some(TSCONFIG)), diag(2345, Some("d:/ws/a.ts"))];
-    let filtered = strip_injected_root_diagnostics(diags.clone(), &[]);
+    let filtered = strip_injected_root_diagnostics(diags.clone(), &InjectedPathSet::default());
     assert_eq!(filtered, diags, "no injected paths ⇒ no diagnostic removed");
+}
+
+/// DISCRIMINATING (the exact-equality leak): a config diagnostic whose `fileName`
+/// is a DRIVE-CASE-DIVERGENT form of the injected companion (`C:/…` vs the
+/// registered `c:/…`, or a backslash form) must STILL be stripped — the engine
+/// may echo a companion under a different drive-letter case / separator. The old
+/// exact `p == name` path let it slip through (RED); the shared
+/// filesystem-identity key folds it and strips it (GREEN).
+#[test]
+fn strip_folds_case_and_slash_divergent_companion() {
+    // Registered as forward-slash lowercase-drive; the engine reports it with an
+    // UPPERCASE drive and backslashes — the same file.
+    let injected = InjectedPathSet::from_paths([COMPANION.to_string()]); // d:/ws/src/Foo.vue.tsx
+    let divergent_drive = diag(6059, Some("D:/ws/src/Foo.vue.tsx"));
+    let divergent_slash = diag(6059, Some(r"d:\ws\src\Foo.vue.tsx"));
+    let real_config_error = diag(5024, Some(TSCONFIG));
+
+    let filtered = strip_injected_root_diagnostics(
+        vec![
+            divergent_drive.clone(),
+            divergent_slash.clone(),
+            real_config_error.clone(),
+        ],
+        &injected,
+    );
+
+    // Both divergent-form companion diagnostics are stripped …
+    assert!(
+        !filtered.iter().any(|d| {
+            d.file_name
+                .as_deref()
+                .is_some_and(|f| f.eq_ignore_ascii_case("d:/ws/src/foo.vue.tsx") || f.contains("Foo.vue.tsx"))
+        }),
+        "a drive-case / slash-divergent injected companion must be stripped, not leaked: {filtered:?}"
+    );
+    // … while the real config error survives.
+    assert!(
+        filtered.contains(&real_config_error),
+        "the real config error MUST survive: {filtered:?}"
+    );
+    assert_eq!(
+        filtered.len(),
+        1,
+        "exactly the two divergent-form companion diagnostics are removed"
+    );
 }

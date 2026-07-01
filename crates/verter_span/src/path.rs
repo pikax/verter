@@ -143,6 +143,51 @@ fn fs_paths_equal_under(a: &str, b: &str, case_insensitive: bool) -> bool {
     }
 }
 
+/// A filesystem-identity key for one path under THIS host's case policy
+/// ([`fs_is_case_insensitive`]) — the SAME identity notion [`fs_paths_equal`]
+/// compares with, but reified as a `Hash`/`Eq` key so a set of paths can be
+/// membership-tested in one lookup instead of an O(n) scan.
+///
+/// Construction ([`InjectedPathKey::new`]) canonicalizes the raw path
+/// ([`canonicalize_path`] — slash-normalized, drive-lowercased, extended-prefix
+/// stripped, trailing-slash stripped) and THEN, iff the host filesystem folds
+/// case, ASCII-lowercases the whole result. The fold matches
+/// [`fs_paths_equal`]'s case-insensitive branch exactly, so two paths that
+/// [`fs_paths_equal`] would call the same file produce the same key (and two it
+/// would call distinct produce distinct keys). [`canonicalize_path`] alone folds
+/// only the drive letter, which is insufficient on a case-insensitive FS where
+/// two paths differing in NON-drive case denote the same file — the extra fold
+/// closes that gap.
+///
+/// This is a FILESYSTEM concern routed through the shared path primitive, NOT a
+/// type-text heuristic.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct InjectedPathKey(String);
+
+impl InjectedPathKey {
+    /// Build the filesystem-identity key for `raw` under this host's case policy.
+    pub fn new(raw: &str) -> Self {
+        Self(injected_key_under(raw, fs_is_case_insensitive()))
+    }
+
+    /// The inner normalized key string (for diagnostics / debugging).
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// The pure key-derivation core, parameterized by the case-sensitivity bit so it
+/// runs and discriminates on EVERY host (mirrors [`fs_paths_equal_under`]):
+/// canonicalize, then ASCII-lowercase the whole path iff `case_insensitive`.
+fn injected_key_under(raw: &str, case_insensitive: bool) -> String {
+    let canon = canonicalize_path(raw);
+    if case_insensitive {
+        canon.to_ascii_lowercase()
+    } else {
+        canon
+    }
+}
+
 /// A normalized filesystem path.
 ///
 /// Invariants:

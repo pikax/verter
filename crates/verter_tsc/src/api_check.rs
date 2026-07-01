@@ -33,7 +33,7 @@ use verter_tsgo_api::snapshot::{AccessibleEntries, RealDirSource};
 use verter_tsgo_api::TsgoClient;
 use verter_workspace::native_fs::NativeFs;
 use verter_workspace::tsgo_virtual_config::{
-    build_virtual_overlay_snapshot, strip_injected_root_diagnostics,
+    build_virtual_overlay_snapshot, strip_injected_root_diagnostics, InjectedPathSet,
 };
 
 use crate::error_map::map_tsc_position;
@@ -69,6 +69,35 @@ impl std::fmt::Display for TypecheckError {
 }
 
 impl std::error::Error for TypecheckError {}
+
+/// Which whole-program getter produced a diagnostic — the diagnostic's COLLECTION
+/// ORIGIN. The wire [`ApiDiagnostic`] does not carry this (only `code`, `category`,
+/// `text`, `pos`, `end`, `file_name`), so it is tagged at the collection boundary
+/// where the three getters are called and threaded to mapping.
+///
+/// The origin gates the fail-closed injected-root map-boundary guard: ONLY a
+/// `Config`-origin diagnostic pointing at an injected companion is suppressed;
+/// `Semantic`/`Syntactic` diagnostics on a generated carrier are the LEGITIMATE
+/// `.vue` remap path and are never suppressed by that guard (over-dropping them
+/// would be a false negative).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagOrigin {
+    /// `getSemanticDiagnosticsForProgram` — whole-program semantic errors.
+    Semantic,
+    /// `getSyntacticDiagnosticsForProgram` — whole-program syntactic errors.
+    Syntactic,
+    /// `getConfigFileParsingDiagnostics` — config-file-parse / compiler-options
+    /// diagnostics. The ONLY origin whose injected-companion diagnostics are a
+    /// virtualization artifact to be suppressed.
+    Config,
+}
+
+/// A wire diagnostic paired with its collection origin. Borrows the wire
+/// diagnostic (mapping does not mutate the shared proto struct).
+pub struct OriginDiagnostic<'a> {
+    pub d: &'a ApiDiagnostic,
+    pub origin: DiagOrigin,
+}
 
 /// How a carrier file's diagnostics map back to user-visible positions.
 pub enum RemapKind {
@@ -267,23 +296,53 @@ async fn collect_diagnostics(
                 "verter-tsc: tsgo --api getConfigFileParsingDiagnostics: {e}"
             ))
         })?;
-    let config = strip_injected_root_diagnostics(config, injected_paths);
+
+    // ONE injected-companion set, shared by the upstream config strip AND the
+    // fail-closed map-boundary guard, so the strip decision and the diagnostic-
+    // homing decision share a single filesystem-identity notion (never a second
+    // ad-hoc path key that could diverge on separator / drive-letter case).
+    let injected_set = InjectedPathSet::from_paths(injected_paths);
+    let config = strip_injected_root_diagnostics(config, &injected_set);
 
     let mut out = Vec::new();
-    push_mapped(&mut out, &semantic, lookup, disk);
-    push_mapped(&mut out, &syntactic, lookup, disk);
-    push_mapped(&mut out, &config, lookup, disk);
+    push_mapped(
+        &mut out,
+        &semantic,
+        DiagOrigin::Semantic,
+        lookup,
+        disk,
+        &injected_set,
+    );
+    push_mapped(
+        &mut out,
+        &syntactic,
+        DiagOrigin::Syntactic,
+        lookup,
+        disk,
+        &injected_set,
+    );
+    push_mapped(
+        &mut out,
+        &config,
+        DiagOrigin::Config,
+        lookup,
+        disk,
+        &injected_set,
+    );
     Ok(out)
 }
 
 fn push_mapped(
     out: &mut Vec<Diagnostic>,
     diags: &[ApiDiagnostic],
+    origin: DiagOrigin,
     lookup: &HashMap<String, &OverlayFile>,
     disk: &NativeFs,
+    injected: &InjectedPathSet,
 ) {
     for d in diags {
-        if let Some(mapped) = map_one(d, lookup, disk) {
+        let od = OriginDiagnostic { d, origin };
+        if let Some(mapped) = map_one(&od, lookup, disk, injected) {
             out.push(mapped);
         }
     }
@@ -313,13 +372,35 @@ fn push_mapped(
 ///      not dropped.
 ///
 /// Injected-companion CONFIG noise is filtered UPSTREAM by
-/// `strip_injected_root_diagnostics` before this runs; here every remaining
-/// diagnostic is surfaced.
+/// `strip_injected_root_diagnostics`. A fail-closed BELT-AND-SUSPENDERS guard here
+/// re-checks the SAME injected set at the map boundary (before any carrier remap):
+/// a `Config`-origin diagnostic pointing at an injected companion is suppressed. The
+/// reopen proved the upstream strip alone leaks when the engine echoes a companion
+/// under a different drive-letter case / separator; the shared filesystem-identity
+/// key closes that. The guard fires ONLY for `Config` origin — a
+/// `Semantic`/`Syntactic` diagnostic on a generated carrier is the LEGITIMATE `.vue`
+/// remap path and is never suppressed (over-dropping = false negatives).
 fn map_one(
-    d: &ApiDiagnostic,
+    od: &OriginDiagnostic<'_>,
     lookup: &HashMap<String, &OverlayFile>,
     disk: &NativeFs,
+    injected: &InjectedPathSet,
 ) -> Option<Diagnostic> {
+    let d = od.d;
+
+    // FAIL-CLOSED map-boundary guard (keyed by normalized path AND origin): a
+    // Config/injected-root-origin diagnostic pointing at an injected companion is a
+    // virtualization artifact and must never be emitted or re-homed onto `.vue`.
+    // Non-Config origins are NOT touched here — they take the legitimate carrier
+    // remap below.
+    if od.origin == DiagOrigin::Config {
+        if let Some(file_name) = d.file_name.as_deref() {
+            if injected.contains(file_name) {
+                return None;
+            }
+        }
+    }
+
     // Only error (1) + warning (0) reach tsc-style output. Suggestion (2) /
     // message (3) categories are never printed by `tsgo --project --noEmit`.
     let severity = match d.category {
