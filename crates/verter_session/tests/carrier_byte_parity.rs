@@ -369,9 +369,9 @@ fn generics_public_api_stub_matches_golden() {
 /// Diagnostic-set parity (Rail B, `crates/verter_tsc/tests/diagnostic_set_parity.rs`)
 /// follows transitively: Batch keeps the carrier-affecting analysis facts
 /// (`AnalysisScope::BUILD` includes STYLE_VBIND/STYLE_SCOPED), so identical carrier
-/// + stub bytes under identical scope feed tsgo identical input ⇒ the same
-/// diagnostic set. (verter-tsc still runs the default host until it adopts the Batch
-/// preset, so a direct Batch diagnostic run is not wireable here.)
+/// and stub bytes under identical scope feed tsgo identical input ⇒ the same
+/// diagnostic set. verter-tsc still runs the default host until it adopts the Batch
+/// preset, so a direct Batch diagnostic run is not wireable here.
 ///
 /// DISCRIMINATING: this parity test guards script-fact scope and
 /// query-profile-induced cross-file differences — the `cross_file_child` fixture

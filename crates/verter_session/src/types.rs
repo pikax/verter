@@ -781,7 +781,10 @@ impl PoolSize {
 pub struct PoolPolicy {
     /// When the pool spawns its OS threads.
     pub spawn: PoolSpawn,
-    /// How many workers the pool resolves to at spawn time.
+    /// How many workers the pool resolves to. The size resolves EAGERLY at host
+    /// construction in BOTH spawn modes (see [`PoolSize`]); only the OS-thread
+    /// spawn is deferred under [`PoolSpawn::LazyOnFirstUse`], never the size
+    /// resolution.
     pub size: PoolSize,
 }
 

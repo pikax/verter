@@ -15,7 +15,7 @@
 
 use verter_semantic::analysis::AnalysisScope;
 use verter_semantic::profile::QueryProfile;
-use verter_session::{HostConfig, VerterHost};
+use verter_session::{HostConfig, PoolSpawn, VerterHost};
 
 // ── query_profile flows from config (was hardcoded `Build`) ──
 
@@ -181,5 +181,56 @@ fn batch_scope_is_not_the_build_profile_bits_which_omit_style() {
         "batch_typecheck() scope must NOT equal the Build PROFILE's recommended bits \
          (those omit the style facts that feed carrier bytes — the profile-bits \
          style-omission pitfall)"
+    );
+}
+
+// ── Resource-policy pool SPAWN axis (batch defers, default is eager) ──
+
+/// The Batch preset defers the DECL-LOWERING pool's OS-thread spawn
+/// (`PoolSpawn::LazyOnFirstUse`) so a one-shot batch host never pays a cold
+/// thread-spawn it cannot amortise, while the default / interactive presets keep it
+/// EAGER (Full-mode construction stays timing-identical). This pins the spawn axis
+/// specifically — the analysis-scope / query-profile tests above do NOT cover it, so
+/// a regression that flipped the batch decl-lowering pool back to Eager (or the
+/// default to Lazy) would otherwise go unnoticed.
+///
+/// Discriminating: reverting the batch preset to `PoolSpawn::Eager` flips the first
+/// assertion RED; making the default Lazy flips the second/third RED.
+#[test]
+fn batch_defers_decl_lowering_spawn_while_default_and_interactive_are_eager() {
+    assert_eq!(
+        HostConfig::batch_typecheck()
+            .resource_policy
+            .decl_lowering
+            .spawn,
+        PoolSpawn::LazyOnFirstUse,
+        "batch_typecheck() must defer the decl-lowering pool's OS-thread spawn \
+         (LazyOnFirstUse) — a one-shot batch never amortises the cold spawn"
+    );
+
+    assert_eq!(
+        HostConfig::default().resource_policy.decl_lowering.spawn,
+        PoolSpawn::Eager,
+        "default() must keep the decl-lowering pool EAGER (timing-identical to before \
+         the resource policy existed)"
+    );
+    assert_eq!(
+        HostConfig::lsp_interactive()
+            .resource_policy
+            .decl_lowering
+            .spawn,
+        PoolSpawn::Eager,
+        "lsp_interactive() must keep the decl-lowering pool EAGER"
+    );
+
+    // Distinctness control — Batch and the interactive presets really do differ on
+    // this axis, so the per-preset assertions are not vacuous.
+    assert_ne!(
+        HostConfig::batch_typecheck()
+            .resource_policy
+            .decl_lowering
+            .spawn,
+        HostConfig::default().resource_policy.decl_lowering.spawn,
+        "the Batch and default decl-lowering spawn axes must differ"
     );
 }
