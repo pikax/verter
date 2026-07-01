@@ -3634,6 +3634,12 @@ mod topology_oracle {
         SvelteHelper::BindElementSize,
         SvelteHelper::BindContentEditable,
         SvelteHelper::BindProperty,
+        // The 5f-b special-host bind helpers (`<svelte:window|document>`).
+        SvelteHelper::BindWindowSize,
+        SvelteHelper::BindWindowScroll,
+        SvelteHelper::BindOnline,
+        SvelteHelper::BindFocused,
+        SvelteHelper::BindActiveElement,
         SvelteHelper::AttributeEffect,
     ];
 

@@ -62,8 +62,8 @@ fn emits_main(source: &str) -> bool {
 /// content-gated, not element-gated); `span` is the plain inline structural host the
 /// component slot / `{#snippet}` body fixtures need.
 const SUPPORTED_ELEMENTS: &[&str] = &[
-    "a", "audio", "button", "details", "div", "h1", "input", "option", "p", "select", "span",
-    "textarea", "video",
+    "a", "audio", "base", "button", "details", "div", "h1", "input", "link", "meta", "option", "p",
+    "select", "span", "textarea", "video",
 ];
 
 /// The full HTML tag universe (the TS DOM lib `HTMLElementTagNameMap`,
@@ -292,7 +292,7 @@ fn skeleton_clones_tag(source: &str, tag: &str) -> bool {
 }
 
 #[test]
-fn element_matrix_supports_exactly_the_thirteen_core_tags() {
+fn element_matrix_supports_exactly_the_core_tags() {
     // The POSITIVE half: EXACTLY the allowlist tags emit a `Main` that CLONES the tag as
     // an intrinsic element; the count and membership are both pinned (a shrink OR a widen
     // fails here). The Svelte-special-parse tags (`script` / `style` / …) are excluded
@@ -315,18 +315,19 @@ fn element_matrix_supports_exactly_the_thirteen_core_tags() {
     expected.sort_unstable();
     assert_eq!(
         supported, expected,
-        "the element allowlist must support EXACTLY {{a, audio, button, details, div, h1, \
-         input, option, p, select, span, textarea, video}} — a tag cloned into a Main outside \
-         that set is a leak; a tag in the set failing to emit is an over-reach. (`span` is the \
-         plain inline structural host the component-slot / `{{#snippet}}`-body fixtures need; \
-         `ul` / `li` have no live conformance need.)"
+        "the element allowlist must support EXACTLY {{a, audio, base, button, details, div, h1, \
+         input, link, meta, option, p, select, span, textarea, video}} — a tag cloned into a Main \
+         outside that set is a leak; a tag in the set failing to emit is an over-reach. (`span` is \
+         the plain inline structural host the component-slot / `{{#snippet}}`-body fixtures need; \
+         `meta` / `link` / `base` are the `<svelte:head>` metadata void elements; `ul` / `li` have \
+         no live conformance need.)"
     );
     // Belt-and-suspenders on the cardinality (the convergence count gate).
     assert_eq!(
         supported.len(),
-        13,
-        "exactly thirteen elements are in the client-core allowlist (the §1.2 / bind-host \
-         tags + span)"
+        16,
+        "exactly sixteen elements are in the client-core allowlist (the §1.2 / bind-host \
+         tags + span + the head metadata void elements meta/link/base)"
     );
 }
 
@@ -471,27 +472,47 @@ fn element_matrix_raw_slot_fails_closed() {
 
 #[test]
 fn element_matrix_svelte_special_elements_fail_closed() {
-    // The host / renderable `<svelte:*>` specials fail closed (5f-b), as does a STANDALONE
-    // `<svelte:fragment>` (the transparent-wrapper surface — the 5f-a fragment surface is
-    // the `slot=`-bearing NAMED slot, absorbed into its parent component). The
-    // component-INVOCATION specials `<svelte:component>` / `<svelte:self>` are NOW SUPPORTED
-    // (5f-a) and emit a `$.component(...)` / recursive call — they are NOT in this
-    // fail-closed corpus. `<svelte:options>` is a compile-option carrier (gated elsewhere).
-    for tag in [
-        "svelte:element",
-        "svelte:fragment",
-        "svelte:window",
-        "svelte:document",
-        "svelte:body",
-        "svelte:head",
-        "svelte:boundary",
-    ] {
+    // The STILL-REFUSED `<svelte:*>` specials fail closed. A STANDALONE `<svelte:fragment>` is
+    // the transparent-wrapper surface (the 5f-a fragment surface is the `slot=`-bearing NAMED
+    // slot, absorbed into its parent component); an empty `<svelte:element>` fails closed because
+    // it carries NO `this` selector (a `<svelte:element this={…}>` NOW EMITS the `$.element(...)`
+    // renderable, 5f-b). The window/document/body host events+binds, `<svelte:element this={…}>`,
+    // `<svelte:boundary>`, and `<svelte:head>` surfaces are NOW SUPPORTED (5f-b) and emit — they
+    // are NOT in this fail-closed corpus; the component-INVOCATION specials `<svelte:component>` /
+    // `<svelte:self>` are 5f-a. `<svelte:options>` is a compile-option carrier (gated elsewhere).
+    for tag in ["svelte:element", "svelte:fragment"] {
         let src = format!(
             "<script>let c = $state(0);</script>\n<{tag}></{tag}>\n<button onclick={{() => c++}}>{{c}}</button>\n"
         );
         assert!(
             !emits_main(&src),
             "the Svelte special <{tag}> must fail closed (no Main)"
+        );
+    }
+    // NEGATIVE: the NOW-SUPPORTED special surfaces DO emit a Main (a positive boundary against
+    // the fail-closed corpus above — window events, a `<svelte:element this={…}>`, a plain
+    // `<svelte:boundary>`, and a (here empty) `<svelte:head>` are all supported 5f-b surfaces).
+    for (label, src) in [
+        (
+            "svelte:window events",
+            "<script>let c = $state(0);</script>\n<svelte:window onresize={() => c++} />\n",
+        ),
+        (
+            "svelte:element with this",
+            "<script>let tag = $state('div');</script>\n<svelte:element this={tag}>x</svelte:element>\n",
+        ),
+        (
+            "svelte:boundary",
+            "<script>let { x } = $props();</script>\n<svelte:boundary><p>{x}</p></svelte:boundary>\n",
+        ),
+        (
+            "svelte:head",
+            "<script>let c = $state(0);</script>\n<svelte:head></svelte:head>\n<button onclick={() => c++}>{c}</button>\n",
+        ),
+    ] {
+        assert!(
+            emits_main(src),
+            "the NOW-SUPPORTED special surface <{label}> must emit a Main"
         );
     }
 }

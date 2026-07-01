@@ -85,6 +85,16 @@ pub enum SvelteHelper {
     BindProperty,
     /// `$.bind_this` — `bind:this` element/component reference.
     BindThis,
+    /// `$.bind_window_size` — `<svelte:window>` dimension reads (`innerWidth`/…).
+    BindWindowSize,
+    /// `$.bind_window_scroll` — `<svelte:window>` scroll positions (`scrollX`/`scrollY`).
+    BindWindowScroll,
+    /// `$.bind_online` — `<svelte:window bind:online>`.
+    BindOnline,
+    /// `$.bind_focused` — `bind:focused` (element or `<svelte:window>` host).
+    BindFocused,
+    /// `$.bind_active_element` — `<svelte:document bind:activeElement>`.
+    BindActiveElement,
     /// `$.remove_textarea_child` — strip a `<textarea>`'s child content before a
     /// `bind:value` (the official per-host default-clearing).
     RemoveTextareaChild,
@@ -169,6 +179,11 @@ impl SvelteHelper {
             Self::BindContentEditable => "bind_content_editable",
             Self::BindProperty => "bind_property",
             Self::BindThis => "bind_this",
+            Self::BindWindowSize => "bind_window_size",
+            Self::BindWindowScroll => "bind_window_scroll",
+            Self::BindOnline => "bind_online",
+            Self::BindFocused => "bind_focused",
+            Self::BindActiveElement => "bind_active_element",
             Self::RemoveTextareaChild => "remove_textarea_child",
             Self::Html => "html",
             Self::AttributeEffect => "attribute_effect",

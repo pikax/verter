@@ -50,6 +50,14 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 //   tags        the applicable lowercase tag set, or "*" for any element, or a
 //               "contenteditable" pseudo-constraint (any element with the
 //               attribute — the projector does not enforce it, documentary).
+//   host_scope  OPTIONAL special-host scope, ORTHOGONAL to `tags`. Absent (the
+//               default) ⇒ BindHostScope::Element (regular elements per `tags`, plus
+//               `<svelte:body>` / `<svelte:element>` for the universal `*` /
+//               `contenteditable` binds — svelte's `invalid_elements: [svelte:window,
+//               svelte:document]` rows). "window" / "document" ⇒ the bind is valid ONLY
+//               on `<svelte:window>` / `<svelte:document>` (svelte's `valid_elements`).
+//               "universal" ⇒ valid on EVERY host incl. the four special hosts (svelte's
+//               no-valid/no-invalid rows: `focused`, `this`).
 //   special     "this" | "group" | null — routes to a dedicated checker (IDE).
 //   policy      OPTIONAL accepted-target-shape policy. Absent (the default) ⇒
 //               BindTargetPolicy::LvalueOrFunctionPair (a function-pair {get, set}
@@ -96,6 +104,11 @@ const REGISTRY = [
     direction: "r",
     value_type: "{HOST}",
     tags: "*",
+    // `this: { omit_in_ssr }` has no valid/invalid_elements ⇒ valid on EVERY host
+    // (regular elements + all four special hosts). The host-specific `$.set(…, true)`
+    // proxy flag is HOST-driven at projection (false on a regular element, true on a
+    // special host), so the row's `should_proxy` stays the element baseline `false`.
+    host_scope: "universal",
     special: "this",
     official_helper: "this",
     support: "supported",
@@ -151,20 +164,27 @@ const REGISTRY = [
   // `$.bind_focused(input, ($$value) => $.set(x, $$value))`. `focused: {}` in the
   // official `binding_properties` registry carries no `valid_elements`, so it
   // applies to ANY element (`*`); the svelte attribute type is `readonly` (a
-  // read-direction binding). The native client runtime does not emit it yet
-  // (`support: "unsupported"` ⇒ fail closed) — an EXPLICIT shared-contract row
-  // (absent-row fail-closed and helper-identity erasure are both unacceptable for an
-  // official bind), with the real `$.bind_focused` identity preserved. The IDE row
-  // stays real; the implementation that supports it flips support + adds goldens
-  // (debt-ledger D-25).
+  // read-direction binding). The native client runtime EMITS it (`support:
+  // "supported"`): a regular element emits `$.bind_focused(el, ($$value) => $.set(x,
+  // $$value))` and the `<svelte:window>` host emits `$.bind_focused($.window,
+  // ($$value) => $.set(x, $$value, true))` (the proxy flag is HOST-driven — see the
+  // `should_proxy` note below). The IDE row + the runtime row share this contract.
   {
     name: "focused",
     direction: "r",
     value_type: "boolean",
+    // `focused: {}` has no valid/invalid_elements ⇒ valid on ANY host (regular
+    // elements + all four special hosts incl. `<svelte:window>`). The native client
+    // runtime emits the dedicated `$.bind_focused(host, set)` (universal.js); the host
+    // expression is the element var on a regular element and `$.window` on the window
+    // host, and the `$.set(…, true)` proxy flag is HOST-driven at projection (false on a
+    // regular element, true on the window host), so the row's `should_proxy` stays the
+    // element baseline `false`.
     tags: "*",
+    host_scope: "universal",
     special: null,
     official_helper: "focused",
-    support: "unsupported",
+    support: "supported",
     arity: "set_only",
     event: "",
     prelude: "none",
@@ -597,6 +617,202 @@ const REGISTRY = [
     prelude: "none",
     should_proxy: false,
   },
+
+  // ── Special-host bindings (`<svelte:window>` / `<svelte:document>`) ──
+  // These bind names carry `valid_elements: ['svelte:window' | 'svelte:document']`
+  // in svelte's `binding_properties`, so they resolve ONLY on their special host
+  // (`host_scope: "window" | "document"`) and the wrong-host pairs fail closed at the
+  // router. Their host expression is the global (`$.window` / `$.document`), NOT a DOM
+  // var, and EVERY one carries the `should_proxy: true` host setter
+  // (`$.set(local, $$value, true)`) — the window/document host setters that 5f-b wires.
+
+  // <svelte:window> dimension reads — `$.bind_window_size('<name>', set)` (name FIRST,
+  // NO host expr, setter-only). innerWidth/innerHeight/outerWidth/outerHeight.
+  {
+    name: "innerWidth",
+    direction: "r",
+    value_type: "number",
+    tags: "*",
+    host_scope: "window",
+    special: null,
+    official_helper: "window_size",
+    support: "supported",
+    arity: "set_only",
+    event: "",
+    prelude: "none",
+    should_proxy: true,
+  },
+  {
+    name: "innerHeight",
+    direction: "r",
+    value_type: "number",
+    tags: "*",
+    host_scope: "window",
+    special: null,
+    official_helper: "window_size",
+    support: "supported",
+    arity: "set_only",
+    event: "",
+    prelude: "none",
+    should_proxy: true,
+  },
+  {
+    name: "outerWidth",
+    direction: "r",
+    value_type: "number",
+    tags: "*",
+    host_scope: "window",
+    special: null,
+    official_helper: "window_size",
+    support: "supported",
+    arity: "set_only",
+    event: "",
+    prelude: "none",
+    should_proxy: true,
+  },
+  {
+    name: "outerHeight",
+    direction: "r",
+    value_type: "number",
+    tags: "*",
+    host_scope: "window",
+    special: null,
+    official_helper: "window_size",
+    support: "supported",
+    arity: "set_only",
+    event: "",
+    prelude: "none",
+    should_proxy: true,
+  },
+
+  // <svelte:window> scroll positions — `$.bind_window_scroll('x'|'y', get, set)`. The
+  // runtime axis name is REMAPPED ('x' for scrollX, 'y' for scrollY) and the helper is
+  // READ-WRITE (get+set), unlike the set-only window-size binds. `bidirectional: true`.
+  {
+    name: "scrollX",
+    direction: "rw",
+    value_type: "number",
+    tags: "*",
+    host_scope: "window",
+    special: null,
+    official_helper: "window_scroll",
+    support: "supported",
+    arity: "get_set",
+    event: "",
+    prelude: "none",
+    should_proxy: true,
+  },
+  {
+    name: "scrollY",
+    direction: "rw",
+    value_type: "number",
+    tags: "*",
+    host_scope: "window",
+    special: null,
+    official_helper: "window_scroll",
+    support: "supported",
+    arity: "get_set",
+    event: "",
+    prelude: "none",
+    should_proxy: true,
+  },
+
+  // <svelte:window bind:online> — `$.bind_online(set)` (setter-only, NO name, NO host).
+  {
+    name: "online",
+    direction: "r",
+    value_type: "boolean",
+    tags: "*",
+    host_scope: "window",
+    special: null,
+    official_helper: "online",
+    support: "supported",
+    arity: "set_only",
+    event: "",
+    prelude: "none",
+    should_proxy: true,
+  },
+
+  // <svelte:window bind:devicePixelRatio> — the generic property form on the `resize`
+  // event: `$.bind_property('devicePixelRatio', 'resize', $.window, set)` (read-only ⇒ no
+  // getter).
+  {
+    name: "devicePixelRatio",
+    direction: "r",
+    value_type: "number",
+    tags: "*",
+    host_scope: "window",
+    special: null,
+    official_helper: "property",
+    support: "supported",
+    arity: "property",
+    event: "resize",
+    prelude: "none",
+    should_proxy: true,
+  },
+
+  // <svelte:document bind:activeElement> — the DEDICATED `$.bind_active_element(set)`
+  // (setter-only, NO name, NO host expr — NOT the generic `$.bind_property`).
+  {
+    name: "activeElement",
+    direction: "r",
+    value_type: "Element | null",
+    tags: "*",
+    host_scope: "document",
+    special: null,
+    official_helper: "active_element",
+    support: "supported",
+    arity: "set_only",
+    event: "",
+    prelude: "none",
+    should_proxy: true,
+  },
+
+  // <svelte:document> property reads — `$.bind_property('<name>', '<event>', $.document,
+  // set)` (read-only ⇒ no getter). Per-name event: fullscreenElement→fullscreenchange,
+  // pointerLockElement→pointerlockchange, visibilityState→visibilitychange.
+  {
+    name: "fullscreenElement",
+    direction: "r",
+    value_type: "Element | null",
+    tags: "*",
+    host_scope: "document",
+    special: null,
+    official_helper: "property",
+    support: "supported",
+    arity: "property",
+    event: "fullscreenchange",
+    prelude: "none",
+    should_proxy: true,
+  },
+  {
+    name: "pointerLockElement",
+    direction: "r",
+    value_type: "Element | null",
+    tags: "*",
+    host_scope: "document",
+    special: null,
+    official_helper: "property",
+    support: "supported",
+    arity: "property",
+    event: "pointerlockchange",
+    prelude: "none",
+    should_proxy: true,
+  },
+  {
+    name: "visibilityState",
+    direction: "r",
+    value_type: "DocumentVisibilityState",
+    tags: "*",
+    host_scope: "document",
+    special: null,
+    official_helper: "property",
+    support: "supported",
+    arity: "property",
+    event: "visibilitychange",
+    prelude: "none",
+    should_proxy: true,
+  },
 ];
 
 function rsStr(s) {
@@ -624,6 +840,22 @@ function specialVariant(special) {
       return "BindSpecial::None";
     default:
       throw new Error(`unknown special: ${special}`);
+  }
+}
+
+function hostScopeVariant(scope) {
+  switch (scope) {
+    case undefined:
+    case "element":
+      return "BindHostScope::Element";
+    case "window":
+      return "BindHostScope::Window";
+    case "document":
+      return "BindHostScope::Document";
+    case "universal":
+      return "BindHostScope::Universal";
+    default:
+      throw new Error(`unknown host_scope: ${scope}`);
   }
 }
 
@@ -672,6 +904,12 @@ function officialHelperVariant(helper) {
     ended: "Ended",
     ready_state: "ReadyState",
     resize_observer: "ResizeObserver",
+    // Special-host helpers (5f-b): the dedicated `<svelte:window>` / `<svelte:document>`
+    // bind helpers the native client runtime emits.
+    window_size: "WindowSize",
+    window_scroll: "WindowScroll",
+    online: "Online",
+    active_element: "ActiveElement",
   };
   const v = map[helper];
   if (!v) throw new Error(`unknown official_helper: ${helper}`);
@@ -728,9 +966,9 @@ function generate(root) {
   // freshness gate).
   lines.push("use super::bind_contract::{");
   lines.push(
-    "    BindContract, BindDirection, BindPrelude, BindSpecial, BindTargetPolicy, HelperArity,",
+    "    BindContract, BindDirection, BindHostScope, BindPrelude, BindSpecial, BindTargetPolicy,",
   );
-  lines.push("    OfficialRuntimeHelper, RuntimeSupport,");
+  lines.push("    HelperArity, OfficialRuntimeHelper, RuntimeSupport,");
   lines.push("};");
   lines.push("");
   lines.push("/// The complete CLOSED bind-contract table — the SHARED SOURCE OF TRUTH for");
@@ -743,6 +981,7 @@ function generate(root) {
     lines.push(`        direction: ${directionVariant(row.direction)},`);
     lines.push(`        value_type: ${rsStr(row.value_type)},`);
     lines.push(`        tags: ${rsStr(row.tags)},`);
+    lines.push(`        host_scope: ${hostScopeVariant(row.host_scope)},`);
     lines.push(`        special: ${specialVariant(row.special)},`);
     pushPolicyField(lines, row.policy);
     lines.push(`        official_helper: ${officialHelperVariant(row.official_helper)},`);

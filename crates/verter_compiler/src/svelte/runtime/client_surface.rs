@@ -36,9 +36,12 @@ use super::client_surface_refuse::{
     namespace_label, refuse_invalid_self_placement, refuse_tag, refuse_unsupported_special_content,
     special_label,
 };
+use super::client_surface_script::{classify_props_usage, classify_script_items};
+use super::client_surface_special::{
+    classify_special_host, classify_svelte_boundary, classify_svelte_element, classify_svelte_head,
+};
 use super::events::{validate_event_modifiers, EventModifierError};
-use super::expr::{BindingRuntimeKind, ExprRefKind};
-use super::expr_emit::{self, PropsShape, StateDeclShape};
+use super::expr::BindingRuntimeKind;
 use super::html::{synthesize_region, TemplateFactory};
 use super::instance_items::{self, SupportedInstanceScriptItem};
 use super::ir::{
@@ -285,17 +288,17 @@ impl ClientSyntaxSurface {
 
 /// The per-node accepted shape facts accumulated during the template-node walk.
 #[derive(Default)]
-struct SurfaceFacts {
+pub(super) struct SurfaceFacts {
     /// The accepted element fact per element node (the strict-allowlist `try_from`
     /// result — the SOLE source of the DOM var stem at emit time).
     element_facts: Vec<(NodeId, SupportedHtmlElement)>,
     /// The accepted event-handler shape per (target node, event type, handler expr) —
     /// keyed precisely so an element with multiple events keeps each event's fact
     /// distinct.
-    event_shapes: Vec<(NodeId, String, ExprId, ClientEventHandlerShape)>,
+    pub(super) event_shapes: Vec<(NodeId, String, ExprId, ClientEventHandlerShape)>,
     /// The accepted bind shape per (target node, bind NAME) — keyed by name so an
     /// element with multiple binds keeps each bind's routing distinct.
-    bind_shapes: Vec<(NodeId, String, ClientBindShape)>,
+    pub(super) bind_shapes: Vec<(NodeId, String, ClientBindShape)>,
     /// The `bind:group` value literal per group-input node.
     group_values: Vec<(NodeId, String)>,
     /// The `bind:group` input nodes carrying a DYNAMIC/mixed `value={…}`.
@@ -313,309 +316,6 @@ struct SurfaceFacts {
 /// The default-deny classifier handle (a zero-size type the entry method hangs
 /// off — `ClientSyntaxSurface::classify`).
 pub(super) struct ClientSyntaxSurface;
-
-/// Classify the `$props()` USAGE: a prop is supported READ-ONLY. Any write to a
-/// prop local — an instance-script reassignment (`a += 1`), a template-expression
-/// write-ref (`onclick={() => a++}`), or a `bind:` target resolving to a prop —
-/// fails closed BEFORE `lower_props_declarator` (a written prop is official's
-/// flag-7 setter-call form; a bound prop is official's 2-arg `$.bind_value(input,
-/// label)` form — both deferral-ledger follow-ups). Returns the read-only
-/// [`ClientPropsUsage`] fact when every prop is read-only.
-///
-/// Prop locals are resolved SCOPE-AWARELY through the binding table: a write to a
-/// SHADOWING local of the same name (an arrow param) is not a prop write.
-fn classify_props_usage(
-    ir: &SvelteRuntimeIr,
-) -> Result<ClientPropsUsage, UnsupportedSvelteRuntimeSurface> {
-    let prop_locals = client_shapes::collect_prop_locals(ir.analysis.scripts.instance_source);
-    if prop_locals.is_empty() {
-        return Ok(ClientPropsUsage { prop_locals });
-    }
-
-    // (a) Instance-script prop REFERENCES — the supported prop read position is a
-    // bare template interpolation `{a}` ONLY. ANY instance-script reference to a prop
-    // local outside its own `$props()` declaration (a read `cb()` / `console.log(a)`,
-    // a write `a += 1`, a mutating call) is the deferral-ledger non-interpolation
-    // prop-usage surface (5g). Observed structurally by scanning every NON-declaration
-    // instance statement for a reference resolving to a prop binding.
-    if let Some(instance) = ir.analysis.scripts.instance_source {
-        if instance_script_references_a_prop(instance, ir) {
-            return Err(UnsupportedSvelteRuntimeSurface::AdvancedRune {
-                rune: "$props() non-interpolation usage",
-                span: Span::new(0, 0),
-            });
-        }
-    }
-
-    // (b) Template-expression write-refs — a handler / interpolation that writes a
-    // prop local (`onclick={() => a++}`). Resolved scope-awarely through the binding
-    // table so a shadowing local is not a prop write.
-    for expr in ir.analysis.expressions.all() {
-        for r in &expr.references {
-            if !matches!(r.kind, ExprRefKind::Reassign | ExprRefKind::DeepMutate) {
-                continue;
-            }
-            if resolves_to_prop(ir, expr.scope, &r.name) {
-                return Err(UnsupportedSvelteRuntimeSurface::AdvancedRune {
-                    rune: "$props() written prop",
-                    span: Span::new(0, 0),
-                });
-            }
-        }
-    }
-
-    // (c) `bind:` targets — a `bind:value={prop}` resolves to a prop local (the
-    // bound prop is official's 2-arg `$.bind_value` form — fail closed at 5c). The
-    // attribute walk also catches this (via `classify_bind_shape`); this top-level
-    // sweep keeps the prop-bind refusal owned by the prop-usage gate so a bound prop
-    // is refused even when its element is otherwise unsupported-adjacent.
-    for node in &ir.nodes {
-        let IrNode::Element(el) = node else {
-            continue;
-        };
-        for attr in &el.attrs {
-            let AttrIr::Bind {
-                target,
-                expr: Some(expr_id),
-            } = attr
-            else {
-                continue;
-            };
-            if target != "value" {
-                continue;
-            }
-            let analyzed = ir.analysis.expressions.get(*expr_id);
-            // A bare-identifier bind target that resolves to a prop is a bound prop.
-            if resolves_to_prop(ir, analyzed.scope, analyzed.source.trim()) {
-                return Err(UnsupportedSvelteRuntimeSurface::Binding {
-                    target: target.clone(),
-                    span: el.span,
-                });
-            }
-        }
-    }
-
-    Ok(ClientPropsUsage { prop_locals })
-}
-
-/// Whether `name` resolves (scope-awarely, nearest binding up the chain) to a
-/// `$props()` prop binding in `scope`.
-fn resolves_to_prop(ir: &SvelteRuntimeIr, scope: super::expr::ScopeId, name: &str) -> bool {
-    matches!(
-        ir.analysis
-            .bindings
-            .resolve_kind(&ir.analysis.scopes, scope, name),
-        Some(BindingRuntimeKind::Prop) | Some(BindingRuntimeKind::BindableProp)
-    )
-}
-
-/// Whether the instance script REFERENCES (reads or writes) a `$props()` prop local
-/// anywhere outside its own `$props()` declaration. The supported prop read position
-/// is a bare template interpolation `{a}` ONLY, so any instance-script prop reference
-/// (a read `cb()` / `console.log(a)`, a write `a += 1`) fails the prop gate.
-///
-/// Reparses the instance program ONCE and walks it with a scope-aware visitor that
-/// SKIPS the `$props()` declarator subtrees (they BIND the prop, they do not read
-/// it) and reports any identifier reference resolving to a prop binding. A reference
-/// to a shadowing local of the same name is not a prop reference (the walk reuses the
-/// shared `ShadowStack` lexical model).
-fn instance_script_references_a_prop(instance_source: &str, ir: &SvelteRuntimeIr) -> bool {
-    let alloc = Allocator::default();
-    let Some(program) = super::expr::reparse_module(&alloc, instance_source) else {
-        return false;
-    };
-    // The prop-local names declared at the instance root.
-    let prop_locals: rustc_hash::FxHashSet<String> =
-        client_shapes::collect_prop_locals(Some(instance_source))
-            .into_iter()
-            .collect();
-    if prop_locals.is_empty() {
-        return false;
-    }
-    let mut scan = PropRefScan {
-        prop_locals: &prop_locals,
-        scopes: super::expr::ShadowStack::default(),
-        found: false,
-    };
-    use oxc_ast_visit::Visit;
-    scan.visit_program(&program);
-    let _ = ir;
-    scan.found
-}
-
-/// A scope-aware scan for an instance-script reference to a `$props()` prop local
-/// outside its declaration. Tracks the shared `ShadowStack` lexical model (so a
-/// nested local shadowing a prop name is not a prop reference) and skips a
-/// `$props()` declarator's init/pattern (the destructure binds, it does not read).
-struct PropRefScan<'a> {
-    prop_locals: &'a rustc_hash::FxHashSet<String>,
-    scopes: super::expr::ShadowStack,
-    found: bool,
-}
-
-impl<'a> oxc_ast_visit::Visit<'a> for PropRefScan<'_> {
-    fn visit_program(&mut self, it: &oxc_ast::ast::Program<'a>) {
-        let mut frame = rustc_hash::FxHashSet::default();
-        super::expr::collect_direct_decls(&it.body, &mut frame);
-        super::expr::collect_var_hoists(&it.body, &mut frame);
-        // The prop locals are declared at THIS scope; remove them from the frame so a
-        // prop reference is not treated as shadowed by its own declaration.
-        for name in self.prop_locals {
-            frame.remove(name);
-        }
-        self.scopes.push(frame);
-        oxc_ast_visit::walk::walk_program(self, it);
-        self.scopes.pop();
-    }
-
-    fn visit_variable_declarator(&mut self, it: &oxc_ast::ast::VariableDeclarator<'a>) {
-        // Skip a `$props()` declarator entirely (the destructure pattern + the
-        // `$props()` callee are not a prop READ). Any OTHER declarator is walked.
-        if let Some(oxc_ast::ast::Expression::CallExpression(call)) = &it.init {
-            if super::expr::is_props_callee(&call.callee) {
-                return;
-            }
-        }
-        oxc_ast_visit::walk::walk_variable_declarator(self, it);
-    }
-
-    fn visit_function(
-        &mut self,
-        it: &oxc_ast::ast::Function<'a>,
-        flags: oxc_syntax::scope::ScopeFlags,
-    ) {
-        self.scopes.push(super::expr::function_scope_names(it));
-        oxc_ast_visit::walk::walk_function(self, it, flags);
-        self.scopes.pop();
-    }
-
-    fn visit_arrow_function_expression(&mut self, it: &oxc_ast::ast::ArrowFunctionExpression<'a>) {
-        self.scopes.push(super::expr::arrow_scope_names(it));
-        oxc_ast_visit::walk::walk_arrow_function_expression(self, it);
-        self.scopes.pop();
-    }
-
-    fn visit_block_statement(&mut self, it: &oxc_ast::ast::BlockStatement<'a>) {
-        self.scopes.push(super::expr::block_scope_names(it));
-        oxc_ast_visit::walk::walk_block_statement(self, it);
-        self.scopes.pop();
-    }
-
-    fn visit_identifier_reference(&mut self, it: &oxc_ast::ast::IdentifierReference<'a>) {
-        let name = it.name.as_str();
-        if self.prop_locals.contains(name) && !self.scopes.is_shadowed(name) {
-            self.found = true;
-        }
-        oxc_ast_visit::walk::walk_identifier_reference(self, it);
-    }
-}
-
-/// Classify the instance + module script items, returning the admitted module-scope
-/// user imports (the `.svelte`-component-default subset). A `<script module>`,
-/// every NON-`.svelte`-default instance import (named / namespace / side-effect /
-/// mixed / default-non-`.svelte`), a non-basic / default-bearing `$props()` form, a
-/// destructured / non-primitive `$state`, or an advanced rune call/member fails closed
-/// (no wildcard accept).
-fn classify_script_items(
-    ir: &SvelteRuntimeIr,
-) -> Result<Vec<UserImport>, UnsupportedSvelteRuntimeSurface> {
-    // A `<script module>` is the broad static-import-prelude / module-item deferral —
-    // fail closed BEFORE the rune-shape gates. (The component `.svelte` default import
-    // is admitted below; every OTHER static import form — named / namespace /
-    // side-effect / non-`.svelte` default — plus arbitrary `<script module>` items stay
-    // closed until the broad script-import prelude is supported.)
-    if let Some(module) = ir.analysis.scripts.module_source {
-        let _ = module;
-        return Err(UnsupportedSvelteRuntimeSurface::ScriptImport {
-            construct: "module script",
-            span: Span::new(0, 0),
-        });
-    }
-    // Instance-script imports: ADMIT a default `.svelte` component import (hoisted to
-    // module scope as the component callee), REFUSE every other form (not yet supported).
-    let user_imports = if let Some(instance) = ir.analysis.scripts.instance_source {
-        super::client_surface_imports::classify_instance_imports(instance)?
-    } else {
-        Vec::new()
-    };
-    // A non-basic `$props()` form (rest / whole-object / computed / numeric /
-    // nested / default / `$bindable`) is an advanced rune form that fails closed.
-    if let Some(instance) = ir.analysis.scripts.instance_source {
-        // A NON-`let` rune declarator (`var`/`const` `$state` / `$derived` /
-        // `$props`) is a distinct official surface (`var` reads use `$.safe_get`; a
-        // read-only `const $state` constant-folds to an empty reactive topology) —
-        // fail closed BEFORE the shape / static-interpolation checks, so a
-        // `const c = $state(0)` read fails at the decl-kind gate, not as a
-        // const-fold (the const-fold sub-contract).
-        client_shapes::classify_rune_declaration_kind(instance)?;
-        match expr_emit::props_shape(instance) {
-            PropsShape::None | PropsShape::BasicDestructure => {}
-            PropsShape::Advanced { rune } => {
-                return Err(UnsupportedSvelteRuntimeSurface::AdvancedRune {
-                    rune,
-                    span: Span::new(0, 0),
-                });
-            }
-        }
-        // A DESTRUCTURED or NON-PRIMITIVE `$state` declarator (ANY declarator across
-        // ALL statements, multi-declarator scanned) is the advanced state form (5g)
-        // — fail closed before lowering so the primitive-identifier lowering never
-        // sees a destructure or a deep-reactive proxy init.
-        match expr_emit::state_decl_shape(instance) {
-            StateDeclShape::None | StateDeclShape::Identifier => {}
-            StateDeclShape::Advanced { rune } => {
-                return Err(UnsupportedSvelteRuntimeSurface::AdvancedRune {
-                    rune,
-                    span: Span::new(0, 0),
-                });
-            }
-        }
-    }
-
-    // A scope-aware, POSITION-SENSITIVE scan over the instance script. It has
-    // supported rune positions (a top-level `$state` / `$props()` declarator init);
-    // `$derived` / `$effect` have NONE (they are refused entirely). The scan also
-    // refuses an advanced FORM (`$state.snapshot` / `$effect.pre` / `$inspect` /
-    // `$host` / `$props.id`) the binding classifier does not see as a top-level
-    // declarator. A SHADOWED rune name is never refused. (A `<script module>` was
-    // already refused above as a script-hoisting deferral.)
-    let mut alloc = Allocator::default();
-    if let Some(instance) = ir.analysis.scripts.instance_source {
-        if let Some(reason) = scan_unsupported_rune_forms(&alloc, instance, true) {
-            return Err(reason);
-        }
-        alloc.reset();
-    }
-    // The SAME scan over every analyzed TEMPLATE expression (an interpolation /
-    // handler / bind expression) — an unsupported rune inside an expression
-    // (`{$state.snapshot(x)}`) must fail closed too. A template expression hosts no
-    // supported rune position (`is_instance = false`).
-    for expr in ir.analysis.expressions.all() {
-        let wrapped = format!("({});", expr.source);
-        if let Some(reason) = scan_unsupported_rune_forms(&alloc, &wrapped, false) {
-            return Err(reason);
-        }
-        alloc.reset();
-    }
-    // A compiler-MAGIC identifier (`$$slots` / `$$props` / `$$restProps`) is an
-    // auto-injected legacy object; a raw reference in the runes client output binds
-    // an undefined identifier (a `ReferenceError`). Scan the instance script AND every
-    // template expression (a shadowing local of the same name is not a magic ref); the
-    // precise `MagicIdentifier` diagnostic wins over the generic instance-script-item
-    // refusal the allowlist would otherwise produce.
-    if let Some(instance) = ir.analysis.scripts.instance_source {
-        if let Some(reason) = instance_items::scan_magic_identifiers(instance) {
-            return Err(reason);
-        }
-    }
-    for expr in ir.analysis.expressions.all() {
-        let wrapped = format!("({});", expr.source);
-        if let Some(reason) = instance_items::scan_magic_identifiers(&wrapped) {
-            return Err(reason);
-        }
-    }
-    Ok(user_imports)
-}
 
 /// Refuse a ROOT REGION whose emission shape is NOT a supported root shape. The
 /// supported shapes are the `from_html` clone-root, a standalone `<Component>` /
@@ -656,6 +356,19 @@ fn classify_script_items(
 // instead of materializing.
 fn refuse_unsupported_root_region(ir: &SvelteRuntimeIr) -> Option<UnsupportedSvelteRuntimeSurface> {
     let scope = ir.root_scope();
+    // A NO-BODY special (`<svelte:window|document|body>` / `<svelte:head>`) at root is
+    // TRANSPARENT to root classification: it renders at the function-init level and clones NO
+    // template, so the root's clone-frame shape is decided by the REMAINING (cleaned) content.
+    // Only bypass the empty/text-root refusal when the cleaned root is EMPTY (a host-special-ONLY
+    // root ⇒ the no-DOM init-only path); a MIXED root falls through so its sibling classifies
+    // normally (an element sibling ⇒ `FromHtml` accept; a bare reactive/empty text sibling ⇒ the
+    // `RootTextRegion` deferral, EXACTLY as a text root without a host special) — never silently
+    // accepted-and-mis-emitted through the no-DOM path.
+    if root_region_has_no_body_special_host(ir)
+        && clean_nodes(ir, &scope.roots, CleanContext::region_root()).is_empty()
+    {
+        return None;
+    }
     match synthesize_region(ir, scope) {
         // The supported clone-frame shapes — `root()` is a valid factory call (or
         // the standalone root, already refused upstream).
@@ -687,6 +400,23 @@ fn refuse_unsupported_root_region(ir: &SvelteRuntimeIr) -> Option<UnsupportedSve
     }
 }
 
+/// Whether the ROOT region directly hosts a NO-BODY special (`<svelte:window|document|body>` —
+/// a global event/bind host — or `<svelte:head>` — the `$.head(...)` region), each of which
+/// emits at the function-init level and clones no root template. A root that is otherwise empty
+/// after dropping such a special takes the emitter's no-DOM region path rather than being
+/// refused as an empty/text root. Structural over the typed root nodes, never a source scan.
+fn root_region_has_no_body_special_host(ir: &SvelteRuntimeIr) -> bool {
+    ir.root_scope().roots.iter().any(|&n| {
+        matches!(
+            ir.node(n),
+            IrNode::Special(s) if matches!(
+                s.kind,
+                SpecialKind::Window | SpecialKind::Document | SpecialKind::Body | SpecialKind::Head
+            )
+        )
+    })
+}
+
 /// The diagnostic span for a refused root region: the first interpolation's span
 /// when the region cleans to a reactive text run (the precise reactive surface),
 /// else the first root node's span, else an empty span (an empty template).
@@ -710,24 +440,6 @@ fn root_region_span(ir: &SvelteRuntimeIr, scope: &super::ir::TemplateScope) -> S
             _ => Span::new(0, 0),
         })
         .unwrap_or_else(|| Span::new(0, 0))
-}
-
-/// Scope-aware, POSITION-SENSITIVE scan of a script for an UNSUPPORTED rune form or
-/// position. Returns the FIRST unsupported occurrence, or `None`. `is_instance`
-/// marks the instance-script program — the only program with supported rune
-/// positions; a module-script / template-expression program passes `false`, so its
-/// supported-position set is empty and every rune reference refuses. A shadowed
-/// rune name is not a rune reference.
-fn scan_unsupported_rune_forms(
-    alloc: &Allocator,
-    source: &str,
-    is_instance: bool,
-) -> Option<UnsupportedSvelteRuntimeSurface> {
-    let program = super::expr::reparse_module(alloc, source)?;
-    let mut scan = super::rune_scan::UnsupportedRuneScan::for_program(&program, is_instance);
-    use oxc_ast_visit::Visit;
-    scan.visit_program(&program);
-    scan.into_surface()
 }
 
 /// Classify one template node + its descendants, ACCUMULATING the per-node accepted
@@ -958,6 +670,37 @@ fn classify_node(
         IrNode::Special(s) if matches!(s.kind, SpecialKind::Component | SpecialKind::SelfRef) => {
             Ok(())
         }
+        // The GLOBAL-host specials (`<svelte:window|document|body>`) are ACCEPTED with
+        // per-host attribute validation: events classify against the regular event surface
+        // (recorded host-keyed), binds resolve through the HOST-SCOPED bind contract (a
+        // wrong-host / unknown bind name fails closed). No DOM is rendered.
+        IrNode::Special(s)
+            if matches!(
+                s.kind,
+                SpecialKind::Window | SpecialKind::Document | SpecialKind::Body
+            ) =>
+        {
+            classify_special_host(ir, node_id, s, declared_root_names, facts)
+        }
+        // A `<svelte:element this={…}>` dynamic element is ACCEPTED with per-attribute
+        // validation: its binds resolve through the HOST-SCOPED bind contract (the
+        // `svelte:element` generic-element host — `bind:value` / `bind:devicePixelRatio`
+        // fail closed, the §1.8 negatives), its events validate against the inline-handler
+        // surface, and its attributes fold into the runtime `$.attribute_effect`. Its
+        // children are its OWN body region (classified independently by the scope loop).
+        IrNode::Special(s) if s.kind == SpecialKind::Element => {
+            classify_svelte_element(ir, node_id, s, declared_root_names, facts)
+        }
+        // A `<svelte:boundary>` is ACCEPTED: its `onerror` handler validates against the
+        // inline-handler surface (an ASYNC handler fails closed via `ExperimentalAsync`), its
+        // body + `failed`/`pending` snippets are classified independently by the scope loop.
+        // An async-runtime construct inside the boundary (`await` / `$effect.pending` / async
+        // `$derived` / async handler) fails closed via the shared `ExperimentalAsync` paths.
+        IrNode::Special(s) if s.kind == SpecialKind::Boundary => classify_svelte_boundary(ir, s),
+        // A `<svelte:head>` is ACCEPTED: it emits `$.head(...)`, its `<title>` drives
+        // `$.document.title`, and its non-title children are its OWN body region (scope-loop
+        // classified). Official rejects head attributes (`svelte_head_illegal_attribute`) — parity.
+        IrNode::Special(s) if s.kind == SpecialKind::Head => classify_svelte_head(s),
         IrNode::Special(s) => Err(UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
             construct: special_label(s.kind),
             span: s.span,
@@ -1105,7 +848,7 @@ fn refuse_spread_incompatible_attr(
 /// These are official COMPILE ERRORS; Verter keeps them fail-closed/refused (routed
 /// through the event channel) so an invalid event surface never emits. (A modern
 /// attribute carries no modifiers, so it validates trivially.)
-fn refuse_invalid_event_modifiers(
+pub(super) fn refuse_invalid_event_modifiers(
     modifiers: &[String],
     event_type: &str,
     el_span: Span,
@@ -1189,10 +932,12 @@ fn classify_attr(
             // Class / Style surface — the plan reads the static base when coalescing.
             // (Without this, a static `style="x"` would fail the static-attr allowlist
             // even though the `style:` directive makes the whole element a 5a surface.)
-            if (name == "class" && element_has_class_directive(ir, node_id))
-                || (name == "style" && element_has_style_directive(ir, node_id))
+            // The NAME matches case-insensitively — official normalizes HTML attribute
+            // names (`get_attribute_name` → `normalize_attribute`) before routing.
+            if (name.eq_ignore_ascii_case("class") && element_has_class_directive(ir, node_id))
+                || (name.eq_ignore_ascii_case("style") && element_has_style_directive(ir, node_id))
             {
-                let shape = if name == "class" {
+                let shape = if name.eq_ignore_ascii_case("class") {
                     ClientDynamicAttrShape::Class
                 } else {
                     ClientDynamicAttrShape::Style
@@ -1389,6 +1134,7 @@ fn classify_attr(
             capture: _,
             modifiers,
             passive: _,
+            origin: _,
         } => {
             // A regular intrinsic DOM element hosts the full event surface: a delegated
             // modern attribute (`$.delegated`), a non-delegated / capture-phase / legacy

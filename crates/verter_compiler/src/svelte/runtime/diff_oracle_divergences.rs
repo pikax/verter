@@ -31,63 +31,24 @@
 // Included by `diff_oracle_tests.rs` via `include!`.
 
 #[rustfmt::skip]
-const KNOWN_DIVERGENCES_DATA: [DivergenceRow; 120] = [
+const KNOWN_DIVERGENCES_DATA: [DivergenceRow; 97] = [
     // (`generated/001_root_component.svelte` — a standalone root `<Component>` — converged
     // with the component vertical: its `HelperSet` + `DecodedText` rows were removed.)
-    DivergenceRow {
-        fixture: "generated/002_root_svelte_element.svelte",
-        axis: DiffAxis::HelperSet,
-        root_cause: "Y12-emission -> 5f (dynamic-element-emission layer): the <svelte:element this={...}> $.element wrapper topology (the comment-anchor, child mount, and $.attribute_effect spread vs Verter's <!> from_html clone) — the 5f dynamic-element-emission layer owns it (the this dynamic-tag IR fact is modeled)",
-        summary: "official owned-helper-set [\"append\", \"comment\"] != Verter [\"append\", \"from_html\"]",
-    },
-    DivergenceRow {
-        fixture: "generated/002_root_svelte_element.svelte",
-        axis: DiffAxis::StaticHtml,
-        root_cause: "Y12-emission -> 5f (dynamic-element-emission layer): the <svelte:element this={...}> $.element wrapper topology (the comment-anchor, child mount, and $.attribute_effect spread vs Verter's <!> from_html clone) — the 5f dynamic-element-emission layer owns it (the this dynamic-tag IR fact is modeled)",
-        summary: "official static-html [] != Verter [\"<!>\"]",
-    },
-    DivergenceRow {
-        fixture: "generated/002_root_svelte_element.svelte",
-        axis: DiffAxis::Factory,
-        root_cause: "Y12-emission -> 5f (dynamic-element-emission layer): the <svelte:element this={...}> $.element wrapper topology (the comment-anchor, child mount, and $.attribute_effect spread vs Verter's <!> from_html clone) — the 5f dynamic-element-emission layer owns it (the this dynamic-tag IR fact is modeled)",
-        summary: "official factory-kinds [] != Verter [\"from_html\"]",
-    },
-    DivergenceRow {
-        fixture: "generated/002_root_svelte_element.svelte",
-        axis: DiffAxis::DecodedText,
-        root_cause: "Y12-emission -> 5f (dynamic-element-emission layer): the <svelte:element this={...}> $.element wrapper topology (the comment-anchor, child mount, and $.attribute_effect spread vs Verter's <!> from_html clone) — the 5f dynamic-element-emission layer owns it (the this dynamic-tag IR fact is modeled)",
-        summary: "official decoded-text [\"hello\"] != Verter []",
-    },
+    // The `<svelte:element>` CLIENT emission converged in 5f-b (the comment-anchor +
+    // `$.element` wrapper + `$.attribute_effect` fold): its helper_set / static_html / factory
+    // / decoded_text divergence rows were removed as stale. The SSR-side dynamic-surface plan
+    // for the dynamic element (the `<!>` node-path + the attribute/spread dynamic-slot
+    // representation) is NOT yet converged — it is owned by the unimplemented SSR backend.
     DivergenceRow {
         fixture: "generated/002_root_svelte_element.svelte",
         axis: DiffAxis::NodePaths,
-        root_cause: "Y12-emission -> 5f (dynamic-element-emission layer): the <svelte:element this={...}> $.element wrapper topology (the comment-anchor, child mount, and $.attribute_effect spread vs Verter's <!> from_html clone) — the 5f dynamic-element-emission layer owns it (the this dynamic-tag IR fact is modeled)",
+        root_cause: "Y12-ssr -> SSR dynamic-element surface: the <svelte:element this={...}> SSR node-path plan (the client `$.element` emission converged in 5f-b; the SSR dynamic-element comment-anchor node-path is the unimplemented SSR backend's concern)",
         summary: "official node-paths [[CandNodePath { base: \"fragment\", steps: [\"first_child\"] }]] != Verter []",
     },
-    DivergenceRow {
-        fixture: "generated/003_root_svelte_window.svelte",
-        axis: DiffAxis::HelperSet,
-        root_cause: "Y18-region -> 5f (special-element-region layer): a <svelte:window>/body/document/head region comment-anchor SHAPE (Verter plans an append + comment anchor where official folds the global region) — the 5f special-element-region layer owns the region shape (the delegation is fixed)",
-        summary: "official owned-helper-set [] != Verter [\"append\", \"comment\"]",
-    },
-    DivergenceRow {
-        fixture: "generated/004_root_svelte_body.svelte",
-        axis: DiffAxis::HelperSet,
-        root_cause: "Y18-region -> 5f (special-element-region layer): a <svelte:window>/body/document/head region comment-anchor SHAPE (Verter plans an append + comment anchor where official folds the global region) — the 5f special-element-region layer owns the region shape (the delegation is fixed)",
-        summary: "official owned-helper-set [] != Verter [\"append\", \"comment\"]",
-    },
-    DivergenceRow {
-        fixture: "generated/005_root_svelte_document.svelte",
-        axis: DiffAxis::HelperSet,
-        root_cause: "Y18-region -> 5f (special-element-region layer): a <svelte:window>/body/document/head region comment-anchor SHAPE (Verter plans an append + comment anchor where official folds the global region) — the 5f special-element-region layer owns the region shape (the delegation is fixed)",
-        summary: "official owned-helper-set [] != Verter [\"append\", \"comment\"]",
-    },
-    DivergenceRow {
-        fixture: "generated/006_root_svelte_head.svelte",
-        axis: DiffAxis::HelperSet,
-        root_cause: "Y18-region -> 5f (special-element-region layer): a <svelte:window>/body/document/head region comment-anchor SHAPE (Verter plans an append + comment anchor where official folds the global region) — the 5f special-element-region layer owns the region shape (the delegation is fixed)",
-        summary: "official owned-helper-set [\"head\"] != Verter [\"append\", \"comment\", \"head\"]",
-    },
+    // 003/004/005 (`<svelte:window|body|document>` roots) + 006 (`<svelte:head>` root) CONVERGED
+    // in 5f-b: the no-DOM host root is now an init-only region (a global host emits no
+    // `$.comment` / `$.append`; a head-only root emits `$.head(...)` with no root comment/append),
+    // matching official's folded region. (Their KNOWN_DIVERGENCES rows were removed as stale.)
     DivergenceRow {
         fixture: "generated/007_root_svg.svelte",
         axis: DiffAxis::HelperSet,
@@ -172,150 +133,73 @@ const KNOWN_DIVERGENCES_DATA: [DivergenceRow; 120] = [
         root_cause: "Y14 -> 5a (class/style-merge layer): a class:/style: directive is merged with the element's class/style attribute into ONE setter (and the style:|important array-wrapped value shape) — the 5a class/style-merge layer owns it",
         summary: "official directive-exprs [] != Verter [CandDirectiveExpr { kind: \"style\", shape: \"expr\" }]",
     },
+    // 060 (`<svelte:element onclick={ev}>`): the CLIENT emission converged in 5f-b (the
+    // onclick folds into `$.attribute_effect`); its helper_set / static_html / factory /
+    // decoded_text rows were removed as stale. The SSR dynamic-surface plan still represents
+    // the dynamic element's attribute as an attribute slot (vs official's spread) + lacks the
+    // comment-anchor node-path — the unimplemented SSR backend's concern.
     DivergenceRow {
         fixture: "generated/060_event_delegated_click_on_svelte_element.svelte",
         axis: DiffAxis::AttrParts,
-        root_cause: "Y12-emission -> 5f (dynamic-element-emission layer): the <svelte:element this={...}> $.element wrapper topology (the comment-anchor, child mount, and $.attribute_effect spread vs Verter's <!> from_html clone) — the 5f dynamic-element-emission layer owns it (the this dynamic-tag IR fact is modeled)",
+        root_cause: "Y12-ssr -> SSR dynamic-element surface: the dynamic element's SSR attr-part plan (client `$.attribute_effect` fold converged in 5f-b; the SSR dynamic-attribute representation is the unimplemented SSR backend's concern)",
         summary: "official attr-parts [] != Verter [CandAttrPart { helper: \"set_attribute\", attr: \"onclick\", chunks: [\"expr\"] }]",
     },
     DivergenceRow {
         fixture: "generated/060_event_delegated_click_on_svelte_element.svelte",
-        axis: DiffAxis::HelperSet,
-        root_cause: "Y12-emission -> 5f (dynamic-element-emission layer): the <svelte:element this={...}> $.element wrapper topology (the comment-anchor, child mount, and $.attribute_effect spread vs Verter's <!> from_html clone) — the 5f dynamic-element-emission layer owns it (the this dynamic-tag IR fact is modeled)",
-        summary: "official owned-helper-set [\"append\", \"attribute_effect\", \"comment\"] != Verter [\"append\", \"from_html\"]",
-    },
-    DivergenceRow {
-        fixture: "generated/060_event_delegated_click_on_svelte_element.svelte",
-        axis: DiffAxis::StaticHtml,
-        root_cause: "Y12-emission -> 5f (dynamic-element-emission layer): the <svelte:element this={...}> $.element wrapper topology (the comment-anchor, child mount, and $.attribute_effect spread vs Verter's <!> from_html clone) — the 5f dynamic-element-emission layer owns it (the this dynamic-tag IR fact is modeled)",
-        summary: "official static-html [] != Verter [\"<!>\"]",
-    },
-    DivergenceRow {
-        fixture: "generated/060_event_delegated_click_on_svelte_element.svelte",
-        axis: DiffAxis::Factory,
-        root_cause: "Y12-emission -> 5f (dynamic-element-emission layer): the <svelte:element this={...}> $.element wrapper topology (the comment-anchor, child mount, and $.attribute_effect spread vs Verter's <!> from_html clone) — the 5f dynamic-element-emission layer owns it (the this dynamic-tag IR fact is modeled)",
-        summary: "official factory-kinds [] != Verter [\"from_html\"]",
-    },
-    DivergenceRow {
-        fixture: "generated/060_event_delegated_click_on_svelte_element.svelte",
-        axis: DiffAxis::DecodedText,
-        root_cause: "Y12-emission -> 5f (dynamic-element-emission layer): the <svelte:element this={...}> $.element wrapper topology (the comment-anchor, child mount, and $.attribute_effect spread vs Verter's <!> from_html clone) — the 5f dynamic-element-emission layer owns it (the this dynamic-tag IR fact is modeled)",
-        summary: "official decoded-text [\"x\"] != Verter []",
-    },
-    DivergenceRow {
-        fixture: "generated/060_event_delegated_click_on_svelte_element.svelte",
         axis: DiffAxis::NodePaths,
-        root_cause: "Y12-emission -> 5f (dynamic-element-emission layer): the <svelte:element this={...}> $.element wrapper topology (the comment-anchor, child mount, and $.attribute_effect spread vs Verter's <!> from_html clone) — the 5f dynamic-element-emission layer owns it (the this dynamic-tag IR fact is modeled)",
+        root_cause: "Y12-ssr -> SSR dynamic-element surface: the dynamic element's SSR node-path plan (the unimplemented SSR backend's concern)",
         summary: "official node-paths [[CandNodePath { base: \"fragment\", steps: [\"first_child\"] }]] != Verter []",
     },
     DivergenceRow {
         fixture: "generated/060_event_delegated_click_on_svelte_element.svelte",
         axis: DiffAxis::DynamicSlots,
-        root_cause: "Y12-emission -> 5f (dynamic-element-emission layer): the <svelte:element this={...}> $.element wrapper topology (the comment-anchor, child mount, and $.attribute_effect spread vs Verter's <!> from_html clone) — the 5f dynamic-element-emission layer owns it (the this dynamic-tag IR fact is modeled)",
+        root_cause: "Y12-ssr -> SSR dynamic-element surface: the dynamic element's SSR dynamic-slot plan (attribute vs official spread; the unimplemented SSR backend's concern)",
         summary: "official dynamic-slots {\"spread\": 1} != Verter {\"attribute\": 1}",
     },
+    // 061 (`<svelte:element onfocus={ev}>`): client emission converged in 5f-b; the SSR
+    // dynamic-surface rows remain (the unimplemented SSR backend's concern).
     DivergenceRow {
         fixture: "generated/061_event_nondelegated_focus_on_svelte_element.svelte",
         axis: DiffAxis::AttrParts,
-        root_cause: "Y12-emission -> 5f (dynamic-element-emission layer): the <svelte:element this={...}> $.element wrapper topology (the comment-anchor, child mount, and $.attribute_effect spread vs Verter's <!> from_html clone) — the 5f dynamic-element-emission layer owns it (the this dynamic-tag IR fact is modeled)",
+        root_cause: "Y12-ssr -> SSR dynamic-element surface: the dynamic element's SSR attr-part plan (client `$.attribute_effect` fold converged in 5f-b; the SSR dynamic-attribute representation is the unimplemented SSR backend's concern)",
         summary: "official attr-parts [] != Verter [CandAttrPart { helper: \"set_attribute\", attr: \"onfocus\", chunks: [\"expr\"] }]",
     },
     DivergenceRow {
         fixture: "generated/061_event_nondelegated_focus_on_svelte_element.svelte",
-        axis: DiffAxis::HelperSet,
-        root_cause: "Y12-emission -> 5f (dynamic-element-emission layer): the <svelte:element this={...}> $.element wrapper topology (the comment-anchor, child mount, and $.attribute_effect spread vs Verter's <!> from_html clone) — the 5f dynamic-element-emission layer owns it (the this dynamic-tag IR fact is modeled)",
-        summary: "official owned-helper-set [\"append\", \"attribute_effect\", \"comment\"] != Verter [\"append\", \"from_html\"]",
-    },
-    DivergenceRow {
-        fixture: "generated/061_event_nondelegated_focus_on_svelte_element.svelte",
-        axis: DiffAxis::StaticHtml,
-        root_cause: "Y12-emission -> 5f (dynamic-element-emission layer): the <svelte:element this={...}> $.element wrapper topology (the comment-anchor, child mount, and $.attribute_effect spread vs Verter's <!> from_html clone) — the 5f dynamic-element-emission layer owns it (the this dynamic-tag IR fact is modeled)",
-        summary: "official static-html [] != Verter [\"<!>\"]",
-    },
-    DivergenceRow {
-        fixture: "generated/061_event_nondelegated_focus_on_svelte_element.svelte",
-        axis: DiffAxis::Factory,
-        root_cause: "Y12-emission -> 5f (dynamic-element-emission layer): the <svelte:element this={...}> $.element wrapper topology (the comment-anchor, child mount, and $.attribute_effect spread vs Verter's <!> from_html clone) — the 5f dynamic-element-emission layer owns it (the this dynamic-tag IR fact is modeled)",
-        summary: "official factory-kinds [] != Verter [\"from_html\"]",
-    },
-    DivergenceRow {
-        fixture: "generated/061_event_nondelegated_focus_on_svelte_element.svelte",
-        axis: DiffAxis::DecodedText,
-        root_cause: "Y12-emission -> 5f (dynamic-element-emission layer): the <svelte:element this={...}> $.element wrapper topology (the comment-anchor, child mount, and $.attribute_effect spread vs Verter's <!> from_html clone) — the 5f dynamic-element-emission layer owns it (the this dynamic-tag IR fact is modeled)",
-        summary: "official decoded-text [\"x\"] != Verter []",
-    },
-    DivergenceRow {
-        fixture: "generated/061_event_nondelegated_focus_on_svelte_element.svelte",
         axis: DiffAxis::NodePaths,
-        root_cause: "Y12-emission -> 5f (dynamic-element-emission layer): the <svelte:element this={...}> $.element wrapper topology (the comment-anchor, child mount, and $.attribute_effect spread vs Verter's <!> from_html clone) — the 5f dynamic-element-emission layer owns it (the this dynamic-tag IR fact is modeled)",
+        root_cause: "Y12-ssr -> SSR dynamic-element surface: the dynamic element's SSR node-path plan (the unimplemented SSR backend's concern)",
         summary: "official node-paths [[CandNodePath { base: \"fragment\", steps: [\"first_child\"] }]] != Verter []",
     },
     DivergenceRow {
         fixture: "generated/061_event_nondelegated_focus_on_svelte_element.svelte",
         axis: DiffAxis::DynamicSlots,
-        root_cause: "Y12-emission -> 5f (dynamic-element-emission layer): the <svelte:element this={...}> $.element wrapper topology (the comment-anchor, child mount, and $.attribute_effect spread vs Verter's <!> from_html clone) — the 5f dynamic-element-emission layer owns it (the this dynamic-tag IR fact is modeled)",
+        root_cause: "Y12-ssr -> SSR dynamic-element surface: the dynamic element's SSR dynamic-slot plan (attribute vs official spread; the unimplemented SSR backend's concern)",
         summary: "official dynamic-slots {\"spread\": 1} != Verter {\"attribute\": 1}",
     },
+    // 062 (`<svelte:element onclickcapture={ev}>`): client emission converged in 5f-b; the
+    // SSR dynamic-surface rows remain (the unimplemented SSR backend's concern).
     DivergenceRow {
         fixture: "generated/062_event_capture_click_on_svelte_element.svelte",
         axis: DiffAxis::AttrParts,
-        root_cause: "Y12-emission -> 5f (dynamic-element-emission layer): the <svelte:element this={...}> $.element wrapper topology (the comment-anchor, child mount, and $.attribute_effect spread vs Verter's <!> from_html clone) — the 5f dynamic-element-emission layer owns it (the this dynamic-tag IR fact is modeled)",
+        root_cause: "Y12-ssr -> SSR dynamic-element surface: the dynamic element's SSR attr-part plan (client `$.attribute_effect` fold converged in 5f-b; the SSR dynamic-attribute representation is the unimplemented SSR backend's concern)",
         summary: "official attr-parts [] != Verter [CandAttrPart { helper: \"set_attribute\", attr: \"onclickcapture\", chunks: [\"expr\"] }]",
     },
     DivergenceRow {
         fixture: "generated/062_event_capture_click_on_svelte_element.svelte",
-        axis: DiffAxis::HelperSet,
-        root_cause: "Y12-emission -> 5f (dynamic-element-emission layer): the <svelte:element this={...}> $.element wrapper topology (the comment-anchor, child mount, and $.attribute_effect spread vs Verter's <!> from_html clone) — the 5f dynamic-element-emission layer owns it (the this dynamic-tag IR fact is modeled)",
-        summary: "official owned-helper-set [\"append\", \"attribute_effect\", \"comment\"] != Verter [\"append\", \"from_html\"]",
-    },
-    DivergenceRow {
-        fixture: "generated/062_event_capture_click_on_svelte_element.svelte",
-        axis: DiffAxis::StaticHtml,
-        root_cause: "Y12-emission -> 5f (dynamic-element-emission layer): the <svelte:element this={...}> $.element wrapper topology (the comment-anchor, child mount, and $.attribute_effect spread vs Verter's <!> from_html clone) — the 5f dynamic-element-emission layer owns it (the this dynamic-tag IR fact is modeled)",
-        summary: "official static-html [] != Verter [\"<!>\"]",
-    },
-    DivergenceRow {
-        fixture: "generated/062_event_capture_click_on_svelte_element.svelte",
-        axis: DiffAxis::Factory,
-        root_cause: "Y12-emission -> 5f (dynamic-element-emission layer): the <svelte:element this={...}> $.element wrapper topology (the comment-anchor, child mount, and $.attribute_effect spread vs Verter's <!> from_html clone) — the 5f dynamic-element-emission layer owns it (the this dynamic-tag IR fact is modeled)",
-        summary: "official factory-kinds [] != Verter [\"from_html\"]",
-    },
-    DivergenceRow {
-        fixture: "generated/062_event_capture_click_on_svelte_element.svelte",
-        axis: DiffAxis::DecodedText,
-        root_cause: "Y12-emission -> 5f (dynamic-element-emission layer): the <svelte:element this={...}> $.element wrapper topology (the comment-anchor, child mount, and $.attribute_effect spread vs Verter's <!> from_html clone) — the 5f dynamic-element-emission layer owns it (the this dynamic-tag IR fact is modeled)",
-        summary: "official decoded-text [\"x\"] != Verter []",
-    },
-    DivergenceRow {
-        fixture: "generated/062_event_capture_click_on_svelte_element.svelte",
         axis: DiffAxis::NodePaths,
-        root_cause: "Y12-emission -> 5f (dynamic-element-emission layer): the <svelte:element this={...}> $.element wrapper topology (the comment-anchor, child mount, and $.attribute_effect spread vs Verter's <!> from_html clone) — the 5f dynamic-element-emission layer owns it (the this dynamic-tag IR fact is modeled)",
+        root_cause: "Y12-ssr -> SSR dynamic-element surface: the dynamic element's SSR node-path plan (the unimplemented SSR backend's concern)",
         summary: "official node-paths [[CandNodePath { base: \"fragment\", steps: [\"first_child\"] }]] != Verter []",
     },
     DivergenceRow {
         fixture: "generated/062_event_capture_click_on_svelte_element.svelte",
         axis: DiffAxis::DynamicSlots,
-        root_cause: "Y12-emission -> 5f (dynamic-element-emission layer): the <svelte:element this={...}> $.element wrapper topology (the comment-anchor, child mount, and $.attribute_effect spread vs Verter's <!> from_html clone) — the 5f dynamic-element-emission layer owns it (the this dynamic-tag IR fact is modeled)",
+        root_cause: "Y12-ssr -> SSR dynamic-element surface: the dynamic element's SSR dynamic-slot plan (attribute vs official spread; the unimplemented SSR backend's concern)",
         summary: "official dynamic-slots {\"spread\": 1} != Verter {\"attribute\": 1}",
     },
-    DivergenceRow {
-        fixture: "generated/063_event_window_resize.svelte",
-        axis: DiffAxis::HelperSet,
-        root_cause: "Y18-region -> 5f (special-element-region layer): a <svelte:window>/body/document/head region comment-anchor SHAPE (Verter plans an append + comment anchor where official folds the global region) — the 5f special-element-region layer owns the region shape (the delegation is fixed)",
-        summary: "official owned-helper-set [\"event\"] != Verter [\"append\", \"comment\", \"event\"]",
-    },
-    DivergenceRow {
-        fixture: "generated/064_event_body_click.svelte",
-        axis: DiffAxis::HelperSet,
-        root_cause: "Y18-region -> 5f (special-element-region layer): a <svelte:window>/body/document/head region comment-anchor SHAPE (Verter plans an append + comment anchor where official folds the global region) — the 5f special-element-region layer owns the region shape (the delegation is fixed)",
-        summary: "official owned-helper-set [\"event\"] != Verter [\"append\", \"comment\", \"event\"]",
-    },
-    DivergenceRow {
-        fixture: "generated/065_event_document_click.svelte",
-        axis: DiffAxis::HelperSet,
-        root_cause: "Y18-region -> 5f (special-element-region layer): a <svelte:window>/body/document/head region comment-anchor SHAPE (Verter plans an append + comment anchor where official folds the global region) — the 5f special-element-region layer owns the region shape (the delegation is fixed)",
-        summary: "official owned-helper-set [\"event\"] != Verter [\"append\", \"comment\", \"event\"]",
-    },
+    // 063/064/065 (`<svelte:window|body|document on*>` event roots) CONVERGED in 5f-b: the
+    // global-host event root is now a no-DOM init-only region emitting only `$.event` (no
+    // `$.comment` / `$.append`), matching official. (Their KNOWN_DIVERGENCES rows were removed
+    // as stale.)
     DivergenceRow {
         fixture: "generated/068_pair_root_element__attr_mixed.svelte",
         axis: DiffAxis::DynamicSlots,

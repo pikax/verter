@@ -31,6 +31,7 @@ mod bind_target;
 mod bind_target_names;
 pub mod client;
 mod client_allowlist;
+mod client_attr_emit;
 mod client_bind;
 mod client_block_emit;
 mod client_block_plan;
@@ -41,6 +42,7 @@ mod client_effect;
 mod client_event;
 mod client_module_frame;
 mod client_plan;
+mod client_plan_attr_value;
 mod client_plan_bind;
 mod client_plan_rewrite;
 mod client_plan_spread_html;
@@ -51,6 +53,11 @@ mod client_surface;
 mod client_surface_element_query;
 mod client_surface_imports;
 mod client_surface_refuse;
+mod client_surface_script;
+mod client_surface_special;
+mod client_svelte_boundary;
+mod client_svelte_element;
+mod client_svelte_head;
 mod client_walk;
 mod css_reject;
 mod entity_decode;
@@ -93,11 +100,11 @@ use oxc_allocator::Allocator;
 
 use crate::svelte::parser::{
     forced_runes_option, ParsedSvelte, SvelteBlock, SvelteBlockKind, SvelteClauseKind,
-    SvelteElement, SvelteElementKind, SvelteNode, SvelteSpecialKind, SvelteTag, SvelteTagKind,
+    SvelteElement, SvelteElementKind, SvelteNode, SvelteTag, SvelteTagKind,
 };
 use verter_span::Span;
 
-use attr_lowering::{lower_attributes, AttrHost};
+use attr_lowering::lower_attributes;
 use expr::{
     collect_expr_references, parse_debug_identifier_spans, parse_declarators, parse_pattern_names,
     parse_render_call, reparse_module, AnalyzedExpr, BindingInfo, BindingRuntimeKind, BindingTable,
@@ -105,7 +112,7 @@ use expr::{
 };
 use html::StaticTemplatePlan;
 use ir::{
-    AttrIr, BlockIr, ComponentIr, ComponentIrNode, ComponentSlots, DebugArg, DeclKind, ElementIr,
+    BlockIr, ComponentIr, ComponentIrNode, ComponentSlots, DebugArg, DeclKind, ElementIr,
     EscapeMode, ExprId, IfBranch, IrNode, NodeId, PatternBindings, PatternId, RenderCallee,
     RuntimeAnalysis, RuntimeOp, SpecialElementIr, SpecialKind, SvelteMode, SvelteRuntimeIr, TagIr,
     TemplateDeclarator, TemplateRune, TemplateScope, TemplateScopeId,
@@ -568,6 +575,7 @@ pub fn lower_parsed_svelte_to_ir<'a>(
 
     let component = ComponentIr {
         name: derive_component_name(opts),
+        filename: opts.filename.clone(),
         mode,
     };
     let analysis = RuntimeAnalysis {
@@ -631,24 +639,26 @@ fn lower_element(ctx: &mut LoweringCtx, el: &SvelteElement, scope: ScopeId) -> O
     // component forwards the handler as a prop, a `<svelte:element>` runs it through
     // `$.attribute_effect`, and a window/body/document binds a direct global
     // listener. Compute it from the parser element kind BEFORE lowering attributes.
-    let host = attr_host_for(&el.kind);
+    let host = lower_component::attr_host_for(&el.kind);
     let attrs = lower_attributes(ctx, &el.attributes, scope, host);
     // The special kind is resolved up front: a component-FAMILY node (a `<Foo>`
     // component, `<svelte:component>`, `<svelte:self>`, or `<svelte:fragment>`)
     // decomposes its children into SLOT regions (the official `Component.js`
     // grouping); every other element / special lowers its children FLAT in `scope`.
     let special_kind = match &el.kind {
-        SvelteElementKind::Special(special) => match lower_special_kind(*special) {
-            Some(kind) => Some(kind),
-            None => {
-                ctx.errors.push(
-                    "svelte-runtime-unknown-special-element",
-                    format!("unrecognised `<svelte:{}>` special element", el.name),
-                    el.open_span,
-                );
-                return None;
+        SvelteElementKind::Special(special) => {
+            match lower_component::lower_special_kind(*special) {
+                Some(kind) => Some(kind),
+                None => {
+                    ctx.errors.push(
+                        "svelte-runtime-unknown-special-element",
+                        format!("unrecognised `<svelte:{}>` special element", el.name),
+                        el.open_span,
+                    );
+                    return None;
+                }
             }
-        },
+        }
         _ => None,
     };
     let is_component_family = matches!(el.kind, SvelteElementKind::Component)
@@ -657,8 +667,34 @@ fn lower_element(ctx: &mut LoweringCtx, el: &SvelteElement, scope: ScopeId) -> O
             Some(SpecialKind::Component | SpecialKind::SelfRef | SpecialKind::Fragment)
         );
 
-    let (children, slots) = if is_component_family {
-        lower_component::lower_component_slots(ctx, el, scope)
+    // A RENDERABLE special whose body is a CALLBACK region (`<svelte:element>` /
+    // `<svelte:boundary>`): its children render INSIDE the special's callback, so they form
+    // their OWN body template scope (see `lower_renderable_special_region`), NOT part of the
+    // enclosing region.
+    let is_renderable_region_special = matches!(
+        special_kind,
+        Some(SpecialKind::Element | SpecialKind::Boundary)
+    );
+    // A `<svelte:head>` is a renderable-region special whose `<title>` child is SPECIAL: it
+    // renders no DOM node (it drives `$.document.title`), so it is separated from the
+    // body-region DOM children (`<meta>` / `<link>` / …) at lowering (the official
+    // `SvelteHead` fragment + `TitleElement` split).
+    let is_head = matches!(special_kind, Some(SpecialKind::Head));
+    let (children, slots, body_region, head_title) = if is_component_family {
+        let (children, slots) = lower_component::lower_component_slots(ctx, el, scope);
+        (children, slots, None, None)
+    } else if is_head {
+        let (children, body_region, head_title) =
+            lower_component::lower_head_region(ctx, el, scope);
+        (children, ComponentSlots::default(), body_region, head_title)
+    } else if is_renderable_region_special {
+        let (children, slots, body_region) = lower_component::lower_renderable_special_region(
+            ctx,
+            el,
+            scope,
+            matches!(special_kind, Some(SpecialKind::Boundary)),
+        );
+        (children, slots, body_region, None)
     } else {
         let mut children = Vec::new();
         for child in &el.children {
@@ -666,7 +702,7 @@ fn lower_element(ctx: &mut LoweringCtx, el: &SvelteElement, scope: ScopeId) -> O
                 children.push(id);
             }
         }
-        (children, ComponentSlots::default())
+        (children, ComponentSlots::default(), None, None)
     };
 
     let node = match &el.kind {
@@ -695,103 +731,27 @@ fn lower_element(ctx: &mut LoweringCtx, el: &SvelteElement, scope: ScopeId) -> O
             // so split it out into the distinct `this_expr` fact and DROP it from the
             // generic attribute list (it must not surface as a `set_attribute` /
             // attribute slot). Only Element / Component specials consume `this`.
-            let (this_expr, attrs) =
+            let (this_expr, static_tag, attrs) =
                 if matches!(kind, SpecialKind::Element | SpecialKind::Component) {
-                    extract_this_expr(attrs)
+                    lower_component::extract_this_expr(attrs)
                 } else {
-                    (None, attrs)
+                    (None, None, attrs)
                 };
             ctx.push_node(IrNode::Special(SpecialElementIr {
                 kind,
                 span: el.open_span,
                 attrs,
                 this_expr,
+                static_tag,
                 children,
                 scope,
                 slots,
+                body_region,
+                head_title,
             }))
         }
     };
     Some(node)
-}
-
-/// Split the dynamic-tag / component `this` selector out of a special element's
-/// attribute list: REMOVE the attribute named `this` from `attrs` and return its
-/// reactive expression (`<svelte:element this={tag}>` → `Some(tag)`). A STATIC
-/// `this="div"` (a literal tag) is still removed from `attrs` (it is not a DOM
-/// attribute) but carries no [`ExprId`], so `this_expr` is `None`. Any non-`this`
-/// attribute / directive stays in `attrs`.
-fn extract_this_expr(attrs: Vec<AttrIr>) -> (Option<ExprId>, Vec<AttrIr>) {
-    let mut this_expr = None;
-    let mut kept = Vec::with_capacity(attrs.len());
-    for attr in attrs {
-        let is_this = match &attr {
-            AttrIr::Static { name, .. }
-            | AttrIr::Dynamic { name, .. }
-            | AttrIr::Mixed { name, .. } => name == "this",
-            _ => false,
-        };
-        if is_this {
-            // Capture the reactive expression of a dynamic `this={…}`; a static
-            // `this="div"` / mixed `this` carries no single ExprId (the tag literal /
-            // concatenation is the emitting backend's concern at 5f).
-            if let AttrIr::Dynamic { expr, .. } = &attr {
-                this_expr = Some(*expr);
-            }
-            // Drop the `this` attribute from the generic list either way.
-            continue;
-        }
-        kept.push(attr);
-    }
-    (this_expr, kept)
-}
-
-/// Map a parser element kind to the attribute host kind that decides how an `on*`
-/// event lowers (the official `metadata.delegated` parent-kind rule). A regular
-/// intrinsic element delegates; a component (incl. `<svelte:component>` /
-/// `<svelte:self>`) forwards events as props; a `<svelte:element this={…}>` runs
-/// them through `$.attribute_effect`; a window/body/document binds a direct global
-/// listener; any other `<svelte:*>` falls through to the element-event path. An
-/// unrecognised special (`Unknown`) records a diagnostic later, so the host here is
-/// irrelevant (the node is dropped) — classify it as `OtherSpecial`.
-fn attr_host_for(kind: &SvelteElementKind) -> AttrHost {
-    match kind {
-        SvelteElementKind::Intrinsic | SvelteElementKind::NestedStyle => AttrHost::Element,
-        SvelteElementKind::Component => AttrHost::Component,
-        SvelteElementKind::Special(special) => match special {
-            SvelteSpecialKind::Element => AttrHost::DynamicElement,
-            SvelteSpecialKind::Window | SvelteSpecialKind::Document | SvelteSpecialKind::Body => {
-                AttrHost::GlobalSpecial
-            }
-            // `<svelte:component this={C}>` / `<svelte:self>` are component hosts —
-            // an `on*` forwards as a prop, exactly like a `<Foo onclick>`.
-            SvelteSpecialKind::Component | SvelteSpecialKind::SelfRef => AttrHost::Component,
-            SvelteSpecialKind::Head
-            | SvelteSpecialKind::Options
-            | SvelteSpecialKind::Boundary
-            | SvelteSpecialKind::Fragment
-            | SvelteSpecialKind::Unknown => AttrHost::OtherSpecial,
-        },
-    }
-}
-
-/// Map a parser special-element kind to the IR special kind. An unrecognised
-/// `<svelte:*>` (the parser's `Unknown`) yields `None` so the caller records a
-/// diagnostic rather than coercing the element to a fragment.
-fn lower_special_kind(kind: SvelteSpecialKind) -> Option<SpecialKind> {
-    Some(match kind {
-        SvelteSpecialKind::Head => SpecialKind::Head,
-        SvelteSpecialKind::Window => SpecialKind::Window,
-        SvelteSpecialKind::Document => SpecialKind::Document,
-        SvelteSpecialKind::Body => SpecialKind::Body,
-        SvelteSpecialKind::Element => SpecialKind::Element,
-        SvelteSpecialKind::Boundary => SpecialKind::Boundary,
-        SvelteSpecialKind::Options => SpecialKind::Options,
-        SvelteSpecialKind::Component => SpecialKind::Component,
-        SvelteSpecialKind::SelfRef => SpecialKind::SelfRef,
-        SvelteSpecialKind::Fragment => SpecialKind::Fragment,
-        SvelteSpecialKind::Unknown => return None,
-    })
 }
 
 /// Lower a block construct into the IR, creating its body template scopes.

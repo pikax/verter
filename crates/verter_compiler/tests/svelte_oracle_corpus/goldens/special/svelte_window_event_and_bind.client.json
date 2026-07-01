@@ -1,0 +1,68 @@
+{
+  "slug": "special/svelte_window_event_and_bind.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "svelte_window_event_and_bind",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "state",
+    "state",
+    "event",
+    "window",
+    "update",
+    "event",
+    "window",
+    "update",
+    "bind_window_size",
+    "set",
+    "bind_window_scroll",
+    "get",
+    "set"
+  ],
+  "helperSet": [
+    "bind_window_scroll",
+    "bind_window_size",
+    "event",
+    "get",
+    "set",
+    "state",
+    "update",
+    "window"
+  ],
+  "helperCounts": {
+    "state": 2,
+    "event": 2,
+    "window": 2,
+    "update": 2,
+    "bind_window_size": 1,
+    "set": 2,
+    "bind_window_scroll": 1,
+    "get": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; export default function svelte_window_event_and_bind($$anchor) {let width = $.state(0); let scroll = $.state(0); $.event('resize', $.window, () => $.update(scroll)); $.event('keydown', $.window, () => $.update(width)); $.bind_window_size('innerWidth', ($$value) => $.set(width, $$value, true)); $.bind_window_scroll('x', () => $.get(scroll), ($$value) => $.set(scroll, $$value, true));}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

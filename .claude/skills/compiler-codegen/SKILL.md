@@ -182,6 +182,10 @@ Byte-equality tests remain valid only where bytes are the actual contract, such 
 
 Tracked guard gap: the positive structural-discriminator guard currently covers Svelte client only. Add backend-owned positive structural conformance oracles for Vue VDOM/Vapor and SSR/client outputs before those backends are considered fully guard-covered by this rule; the re-printer guard is cross-backend negative coverage.
 
+### Deliberate documented deviations (Svelte client)
+
+Default is parity with official's observable-correct behavior. A deviation is a DELIBERATE final-state choice to differ from official's correct behavior, recorded with a deviation record, durable code comment, and landed note; silent divergence is never a deviation. The native Svelte client backend currently has no deliberate deviations. This does not mean zero divergences: known structural/helper-topology divergences, behavior-equivalent topology differences, and unconverged SSR/unimplemented surfaces remain tracked in `crates/verter_compiler/src/svelte/runtime/diff_oracle_divergences.rs` or their owning tests and must be converged or kept fail-closed before promotion. `<svelte:head>` attributes fail closed matching official's `svelte_head_illegal_attribute`; that is reject-parity, not a deviation.
+
 Guards: `svelte_structural_conformance_discriminates_cosmetic_from_behavioral_diffs`, `no_compiled_output_cosmetic_reprinter_path`.
 
 ## Strict Slot Children Type Checking (Experimental)

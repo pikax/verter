@@ -100,6 +100,18 @@ pub(super) enum ClientNode {
         /// The source span.
         span: Span,
     },
+    /// A GLOBAL-host special (`<svelte:window|document|body>`) — a NON-RENDERING init-only
+    /// host. It clones no template, emits no `$.from_html` / `$.comment` / `$.append`; its
+    /// event + bind ops ride the region's [`ClientRuntimeOp`]s (events against `$.window` /
+    /// `$.document` / `$.document.body`, binds via the host-expr routing). Carried so the
+    /// node arena mirrors the IR node-id space; the DOM walk skips it (it is excluded from
+    /// the static skeleton by `is_non_body_special`).
+    SpecialHost {
+        /// The host kind (`Window` / `Document` / `Body`).
+        kind: super::ir::SpecialKind,
+        /// The source span.
+        span: Span,
+    },
     /// A `{#snippet}` DECLARATION marker — non-rendering (dropped from the DOM walk); the
     /// snippet const is emitted separately (module / instance / a component's wrapping
     /// block) by `emit_snippet_decl` reading the IR node. Carried so the node arena mirrors
@@ -135,6 +147,204 @@ pub(super) enum ClientNode {
     /// A `{@render}` tag — a static snippet call (`pair(node, () => 1)`) or a dynamic
     /// `$.snippet(node, () => fn, …)`, its callee + argument thunks rewritten.
     Render(ClientRender),
+    /// A `<svelte:element this={…}>` dynamic element — the comment-anchored `$.element(node,
+    /// get_tag, is_svg, callback)` renderable. Its attributes fold into the callback's
+    /// `$.attribute_effect` and its binds run against the `$$element` callback param; its
+    /// children are the callback's body region.
+    SvelteElement(ClientSvelteElement),
+    /// A `<svelte:boundary>` error boundary — the comment-anchored `$.boundary(node, { onerror,
+    /// failed, pending }, ($$anchor) => { <body> })` renderable. The `failed` / `pending`
+    /// `{#snippet}`s hoist to `const`s in a wrapping block above the call (passed by name in
+    /// the props); the body is the callback's region.
+    Boundary(ClientBoundary),
+    /// A `<svelte:head>` — the `$.head('<hash>', ($$anchor) => { <body> })` head-region call.
+    /// The `<title>` child (when present) is the `$.document.title = <rhs>` effect emitted in
+    /// the callback's after_update slot (between the body-region ops and its `$.append`); the
+    /// non-title children (`<meta>` / `<link>` / …) are the body region. The head is EXCLUDED
+    /// from the enclosing body skeleton (`is_non_body_special`) and emits its `$.head(...)` at
+    /// its source position (interleaved during the walk, like a `{@debug}`).
+    Head(ClientHead),
+}
+
+/// A projected `<svelte:head>` — the `$.head('<hash>', ($$anchor) => { <body> })` call. The
+/// `hash` is the official `hash(filename)` (djb2-XOR, structural); `title` is the optional
+/// `$.document.title` effect (the callback's after_update); `body_region` is the non-title
+/// head content (`<meta>` / `<link>` / …) rendered inside the callback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ClientHead {
+    /// The `$.head('<hash>', …)` scope hash — the official `hash(filename)` over the compile
+    /// filename.
+    pub(super) hash: String,
+    /// The `<title>` effect — `None` for a head with no `<title>`. Emitted in the callback's
+    /// after_update slot (between the body-region ops and its `$.append`).
+    pub(super) title: Option<ClientTitleEffect>,
+    /// The non-title head content region — the `$.from_html` + `$.append` DOM rendered inside
+    /// the `($$anchor) => { … }` callback (empty for a title-only head).
+    pub(super) body_region: TemplateScopeId,
+}
+
+/// A `<svelte:head>`'s `<title>` → `$.document.title = <rhs>` effect. `deferred` picks the
+/// wrapper: `has_state` false ⇒ `$.effect(() => { … })` (a static / constant-foldable title),
+/// `has_state` true ⇒ `$.deferred_template_effect(…)` (a stateful / call-bearing title). `rhs`
+/// is the fully-built assignment right-hand side (a literal, a `value ?? ''`, or a template
+/// literal), driven from the typed IR (the official `TitleElement` + `build_template_chunk`).
+/// `deps` are the memoized `has_call` chunk bodies (the official `Memoizer.sync_values()`): a
+/// NON-empty `deps` emits the deps-array form `$.deferred_template_effect(($0, …) => { … },
+/// [() => dep0, …])` (the `rhs` reads the `$0 … $N-1` placeholders); an empty `deps` emits the
+/// plain no-param form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ClientTitleEffect {
+    /// Whether the title references state OR memoizes a call (⇒ `$.deferred_template_effect`,
+    /// not `$.effect`).
+    pub(super) deferred: bool,
+    /// The `$.document.title = <rhs>` right-hand side (already rewritten + coalesced; reads the
+    /// `$N` placeholders for memoized chunks).
+    pub(super) rhs: String,
+    /// The memoized `has_call` chunk bodies in `$0 … $N-1` order — the second `[() => …]`
+    /// argument of the `$.deferred_template_effect` deps-array form. Empty for a title with no
+    /// call chunks.
+    pub(super) deps: Vec<String>,
+}
+
+/// A projected `<svelte:boundary>` — the comment-anchored `$.boundary(node, props, ($$anchor)
+/// => { <body> })` renderable. The `onerror` / `failed` / `pending` ATTRIBUTE props ride the
+/// props object (getter or plain init per state-bearing-ness); the `failed` / `pending` snippet
+/// defs hoist to `const`s in a wrapping `{ … }` block above the call (when present), referenced
+/// by name (object shorthand) in the props object AFTER the attribute props.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ClientBoundary {
+    /// The `onerror` / `failed` / `pending` ATTRIBUTE props, in SOURCE order — official's single
+    /// attribute loop (`SvelteBoundary.js`). Each is emitted as a getter accessor (`get name() {
+    /// return <expr>; }`) when its value is state-bearing, else a plain init (`name: <expr>`).
+    /// Empty for a boundary with no attributes.
+    pub(super) attr_props: Vec<BoundaryAttrProp>,
+    /// The `failed` / `pending` `{#snippet}` def node ids, in source order — each hoisted to a
+    /// `const <name> = …;` in the wrapping block AND passed by NAME (object shorthand) in the
+    /// props AFTER the attribute props. Empty for a boundary with no snippet props (no wrapping
+    /// block).
+    pub(super) snippets: Vec<super::ir::NodeId>,
+    /// The boundary body region — the `($$anchor) => { <body> }` callback's content.
+    pub(super) body_region: TemplateScopeId,
+}
+
+/// One `<svelte:boundary>` ATTRIBUTE prop — an `onerror` / `failed` / `pending` attribute whose
+/// value is an EXPRESSION. Official's `SvelteBoundary.js` attribute loop emits each as
+/// `chunk.metadata.expression.has_state ? b.get(name, [b.return(expr)]) : b.init(name, expr)`:
+/// a state-bearing value (a prop / signal / snippet reference) becomes the getter accessor `get
+/// name() { return <expr>; }`, a constant value (e.g. an inline `onerror` arrow whose only reads
+/// are inside its body) becomes the plain `name: <expr>` init.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct BoundaryAttrProp {
+    /// The prop KEY — the source attribute name (`onerror` / `failed` / `pending`).
+    pub(super) name: String,
+    /// The rewritten value expression — the getter body (`return <expr>;`) or the init value.
+    pub(super) expr: String,
+    /// Whether the value is STATE-BEARING (⇒ getter accessor) vs a constant (⇒ plain init) —
+    /// official's `metadata.expression.has_state` (the sync-only, snippet-name-aware predicate).
+    pub(super) has_state: bool,
+}
+
+/// A projected `<svelte:element this={…}>` — the comment-anchored `$.element(node, () =>
+/// <tag>, <is_svg>, ($$element, $$anchor) => { … })` renderable. The callback body is the
+/// element's attribute fold (`$.attribute_effect`) + its `$$element`-hosted binds, then the
+/// child-content body region.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ClientSvelteElement {
+    /// The get-tag thunk BODY (the `() => <tag>` body): a DYNAMIC tag's rewritten `this={…}`
+    /// expression (`tag` / `$$props.tag`), or a STATIC tag's single-quoted literal (`'div'`).
+    pub(super) get_tag: String,
+    /// Whether the host is an SVG / MathML namespace element (the `$.element` 3rd arg). Always
+    /// `false` for the reachable HTML surface (SVG/MathML host elements are not in the client
+    /// element allowlist), so an SVG-hosted dynamic element is unreachable until those land.
+    pub(super) is_svg: bool,
+    /// The LONE-class `$.set_class($$element, 0, …)` fast-path pieces — the official
+    /// `SvelteElement` `attributes.length === 1 && class && is_text_attribute` route
+    /// (counting the analyze-phase directive-synthesized empty `class`), WITH every
+    /// co-located `class:` directive merged into the directive-object argument (the
+    /// official `build_set_class`). `Some` only when the SetClass route of
+    /// [`svelte_element_attr_route`] fires (the class + `class:` directives then do NOT
+    /// appear in `fold`); every other class shape (class + another plain attr, dynamic
+    /// class, a co-located `style:` directive) stays in `fold` as plain
+    /// `$.attribute_effect` entries. Produced by the SHARED class projection
+    /// ([`SetClassPieces`]) — the same substrate the regular-element coalesced class op
+    /// uses.
+    ///
+    /// [`svelte_element_attr_route`]: super::client_svelte_element::svelte_element_attr_route
+    pub(super) set_class: Option<SetClassPieces>,
+    /// The element's attribute-fold items, in SOURCE ORDER — the entries of the single
+    /// `$.attribute_effect($$element, () => ({ … }))` the callback emits. Empty when the
+    /// element has no foldable attributes (no `$.attribute_effect` is emitted).
+    pub(super) fold: Vec<ElementFoldItem>,
+    /// The element's `bind:` directives, run against the `$$element` callback param (each
+    /// carries its accepted shape + the rewritten getter/setter, the proxied host setter).
+    pub(super) binds: Vec<ClientElementBind>,
+    /// The element's LEGACY `on:` listeners, in source order — each a fully-rendered
+    /// `$.event('<type>', $$element, <wrapped-handler>[, <capture>][, <passive>])` statement
+    /// (the official `SvelteElement` `OnDirective` → `after_update` direct-event path). A MODERN
+    /// `on*` attribute (`onclick={…}`) is NOT here — it folds into `$.attribute_effect` via
+    /// `fold`. Empty for an element with no legacy `on:` directives.
+    pub(super) events: Vec<String>,
+    /// The child-content body region — the callback's `($$element, $$anchor) => { … }` body.
+    pub(super) body_region: TemplateScopeId,
+}
+
+/// One source-ordered entry of a `<svelte:element>`'s `$.attribute_effect` fold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ElementFoldItem {
+    /// A pre-built fold entry (`class: cls`, `...spread`, `[$.CLASS]: { … }`) — emitted
+    /// verbatim into the object literal.
+    Entry(String),
+    /// An EVENT handler — hoisted to a stable `var <name> = <handler>;` local in the callback
+    /// (the official attribute-effect handler-stability hoist), then referenced by name in the
+    /// fold (`onclick: <name>`). The hoist name is minted at emit time (collision-safe).
+    Event {
+        /// The fold object KEY (`onclick`).
+        prop: String,
+        /// The rewritten handler body (`() => $.update(n)`) — the `var <name> = …;` RHS.
+        handler: String,
+    },
+}
+
+/// The SEMANTIC pieces of one coalesced `$.set_class` write, HOST-INDEPENDENT — the
+/// structured base value, the `css_hash` / directive-object / reactivity facts. Produced
+/// by the shared class projection (`project_set_class_pieces`) for BOTH the
+/// regular-element coalesced class op ([`ClientRuntimeOp::SetClass`], which adds the
+/// target node) and the `<svelte:element>` lone-class fast path (which assembles against
+/// the `$$element` callback param with `is_html = 0`) — one merge substrate, no per-host
+/// class engine. Field semantics match [`ClientRuntimeOp::SetClass`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SetClassPieces {
+    /// The `value` arg (the base class value) in STRUCTURED form (see the field docs on
+    /// the `ClientRuntimeOp::SetClass` op).
+    pub(super) value: AttrValue,
+    /// The `css_hash` arg (`null` when directives are present, since scoped CSS is
+    /// refused upstream), or `None` when there are no directives (omitted).
+    pub(super) css_hash: Option<String>,
+    /// The directives object `{ foo: cond, … }`, or `None` for a base-only class.
+    pub(super) directives: Option<String>,
+    /// Whether ANY directive value `has_call` (so the whole directives object arg is
+    /// memoized into a `$N` deps-array slot when the op is reactive).
+    pub(super) directives_has_call: bool,
+    /// Whether the call is REACTIVE — `has_state || base.has_call() ||
+    /// directives_has_call` (a stateful OR `has_call` base/directive forces the effect +
+    /// memoization, the official rule).
+    pub(super) reactive: bool,
+    /// The accumulator STEM (`classes`) when the reactive-directive path needs the
+    /// `let <name>;` accumulator; `None` otherwise.
+    pub(super) accumulator_stem: Option<&'static str>,
+}
+
+/// A `<svelte:element>` `bind:` directive run against the `$$element` callback param — the
+/// accepted shape plus the rewritten getter/setter (the proxied host setter `$.set(local,
+/// $$value, true)`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ClientElementBind {
+    /// The accepted bind shape (`This` / a `DomBind` dimension/property routing).
+    pub(super) shape: ClientBindShape,
+    /// The rewritten getter body.
+    pub(super) getter: String,
+    /// The rewritten setter body (carries the `$.set(local, $$value, true)` proxy flag).
+    pub(super) setter: String,
 }
 
 /// A projected component invocation — the closed structural mirror of a `<Foo …/>` /
@@ -625,6 +835,11 @@ pub(super) enum EventEmitTarget {
     Document,
     /// The document `body` (`$.document.body`) — a `<svelte:body>` listener.
     Body,
+    /// The `<svelte:element>` callback's element param (`$$element`) — a LEGACY `on:`
+    /// directive on a dynamic element emits a DIRECT `$.event('type', $$element, …)` in the
+    /// element callback body (the official `SvelteElement` `OnDirective` → `after_update`
+    /// path), NOT an `$.attribute_effect` fold entry (that is the MODERN `on*` attribute form).
+    SvelteElement,
 }
 
 /// A legacy `on:` event modifier WRAPPER — each wraps the handler in its official

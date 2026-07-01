@@ -113,11 +113,18 @@ pub(super) fn node_or_descendant_dynamic(ir: &SvelteRuntimeIr, node_id: NodeId) 
         // `<svelte:fragment>`) is a dynamic node — its `<!>` anchor var hosts the
         // `Child(node, …)` call.
         IrNode::Component(_) => true,
+        // A component-family special hosts a `Child(node, …)` call at its `<!>` anchor; a
+        // RENDERABLE special (`<svelte:element>` / `<svelte:boundary>`) hosts a
+        // `$.element(node, …)` / `$.boundary(node, …)` call at its `<!>` anchor — both are
+        // dynamic nodes the walk must reach. (The GLOBAL hosts + `<svelte:head>` are
+        // `is_non_body_special` — excluded from the body skeleton, never a walked position.)
         IrNode::Special(s) => matches!(
             s.kind,
             super::ir::SpecialKind::Component
                 | super::ir::SpecialKind::SelfRef
                 | super::ir::SpecialKind::Fragment
+                | super::ir::SpecialKind::Element
+                | super::ir::SpecialKind::Boundary
         ),
         IrNode::Element(el) => {
             el.attrs.iter().any(super::html::attr_is_dynamic_surface)

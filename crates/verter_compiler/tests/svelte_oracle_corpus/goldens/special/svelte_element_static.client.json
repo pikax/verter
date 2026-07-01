@@ -1,0 +1,64 @@
+{
+  "slug": "special/svelte_element_static.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "svelte_element_static",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "state",
+    "comment",
+    "first_child",
+    "element",
+    "bind_element_size",
+    "set",
+    "text",
+    "append",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "bind_element_size",
+    "comment",
+    "element",
+    "first_child",
+    "set",
+    "state",
+    "text"
+  ],
+  "helperCounts": {
+    "state": 1,
+    "comment": 1,
+    "first_child": 1,
+    "element": 1,
+    "bind_element_size": 1,
+    "set": 1,
+    "text": 1,
+    "append": 2
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; export default function svelte_element_static($$anchor) {let n = $.state(0); var fragment = $.comment(); var node = $.first_child(fragment); $.element(node, () => 'div', false, ($$element, $$anchor) => {$.bind_element_size($$element, 'clientWidth', ($$value) => $.set(n, $$value, true)); var text = $.text('hi'); $.append($$anchor, text);}); $.append($$anchor, fragment);}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

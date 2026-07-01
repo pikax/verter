@@ -56,6 +56,15 @@ pub(super) enum SupportedHtmlElement {
     Audio,
     /// `<details>` — the `bind:open` host (`$.bind_property('open','toggle',…)`).
     Details,
+    /// `<meta>` — a `<svelte:head>` metadata VOID element (baked into the head's
+    /// `$.from_html` skeleton; no reactive / property-write attribute).
+    Meta,
+    /// `<link>` — a `<svelte:head>` resource-link VOID element (baked into the head's
+    /// `$.from_html` skeleton).
+    Link,
+    /// `<base>` — a `<svelte:head>` document-base VOID element (baked into the head's
+    /// `$.from_html` skeleton).
+    Base,
 }
 
 impl SupportedHtmlElement {
@@ -80,6 +89,9 @@ impl SupportedHtmlElement {
             "option" => Some(Self::Option),
             "audio" => Some(Self::Audio),
             "details" => Some(Self::Details),
+            "meta" => Some(Self::Meta),
+            "link" => Some(Self::Link),
+            "base" => Some(Self::Base),
             _ => None,
         }
     }
@@ -105,6 +117,9 @@ impl SupportedHtmlElement {
             Self::Option => "option",
             Self::Audio => "audio",
             Self::Details => "details",
+            Self::Meta => "meta",
+            Self::Link => "link",
+            Self::Base => "base",
         }
     }
 }
@@ -155,6 +170,12 @@ pub(super) enum SupportedStaticAttr {
     /// property write — it bakes into the static skeleton like the official
     /// `<div contenteditable>` form.
     ContentEditable,
+    /// A `<svelte:head>` metadata attribute on `<meta>` / `<link>` / `<base>` (`name`,
+    /// `content`, `rel`, `href`, `charset`, `property`, `media`, …). These VOID
+    /// head-metadata elements carry no attribute the official client output treats
+    /// specially (no reactive mirror / property write / default clearing), so every
+    /// static attribute simply bakes into the head's `$.from_html` skeleton.
+    MetadataAttr,
 }
 
 impl SupportedStaticAttr {
@@ -203,6 +224,14 @@ impl SupportedStaticAttr {
         }
         if let Some(rest) = name.strip_prefix("aria-") {
             return (!rest.is_empty()).then_some(Self::Aria);
+        }
+        // A `<svelte:head>` metadata VOID element (`<meta>` / `<link>` / `<base>`) carries
+        // no client-special attribute — every static attribute bakes into the head skeleton.
+        if matches!(
+            element,
+            SupportedHtmlElement::Meta | SupportedHtmlElement::Link | SupportedHtmlElement::Base
+        ) {
+            return Some(Self::MetadataAttr);
         }
         // The per-element valued / boolean attrs.
         match (element, name) {
@@ -401,15 +430,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn try_from_accepts_exactly_the_thirteen_core_tags() {
+    fn try_from_accepts_exactly_the_core_tags() {
         // The SOLE element-acceptance authority accepts EXACTLY the core set (the §1.2
         // six, the `video` media host for the `muted` property write, the bindings-breadth
-        // DOM-bind hosts (`textarea`/`select`/`option`/`audio`/`details`), plus the plain
+        // DOM-bind hosts (`textarea`/`select`/`option`/`audio`/`details`), the plain
         // inline `span` host the component slot / `{#snippet}` body fixtures need (no
-        // special content model).
+        // special content model), plus the `<svelte:head>` metadata VOID elements
+        // (`meta`/`link`/`base`) the head body region serializes.
         let expected = [
             "a", "button", "div", "h1", "input", "p", "span", "video", "textarea", "select",
-            "option", "audio", "details",
+            "option", "audio", "details", "meta", "link", "base",
         ];
         let accepted: Vec<&str> = expected
             .into_iter()
@@ -443,8 +473,13 @@ mod tests {
     #[test]
     fn var_stem_is_a_valid_non_reserved_identifier_for_every_element() {
         // Every supported element's var stem must be a valid, NON-reserved JS
-        // identifier (so the emitter never synthesizes `var var = …`).
-        for el in [
+        // identifier (so the emitter never synthesizes `var var = …`). The list below
+        // must cover EVERY `SupportedHtmlElement` variant — including the head metadata
+        // elements `Meta` / `Link` / `Base`; the `assert_element_is_covered` match below
+        // is a COMPILE-TIME exhaustiveness guard: a NEW variant that is not added here
+        // fails to compile (a non-exhaustive match), so the coverage can never silently
+        // regress.
+        const ALL: [SupportedHtmlElement; 16] = [
             SupportedHtmlElement::A,
             SupportedHtmlElement::Button,
             SupportedHtmlElement::Div,
@@ -458,7 +493,34 @@ mod tests {
             SupportedHtmlElement::Option,
             SupportedHtmlElement::Audio,
             SupportedHtmlElement::Details,
-        ] {
+            SupportedHtmlElement::Meta,
+            SupportedHtmlElement::Link,
+            SupportedHtmlElement::Base,
+        ];
+        // Compile-time exhaustiveness: forces `ALL` to enumerate every variant (a new
+        // variant breaks this match → the developer must add it to `ALL` too).
+        fn assert_element_is_covered(el: SupportedHtmlElement) {
+            match el {
+                SupportedHtmlElement::A
+                | SupportedHtmlElement::Button
+                | SupportedHtmlElement::Div
+                | SupportedHtmlElement::H1
+                | SupportedHtmlElement::Input
+                | SupportedHtmlElement::P
+                | SupportedHtmlElement::Span
+                | SupportedHtmlElement::Video
+                | SupportedHtmlElement::Textarea
+                | SupportedHtmlElement::Select
+                | SupportedHtmlElement::Option
+                | SupportedHtmlElement::Audio
+                | SupportedHtmlElement::Details
+                | SupportedHtmlElement::Meta
+                | SupportedHtmlElement::Link
+                | SupportedHtmlElement::Base => {}
+            }
+        }
+        for el in ALL {
+            assert_element_is_covered(el);
             let stem = el.var_stem();
             assert!(!stem.is_empty());
             assert!(

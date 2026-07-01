@@ -15,7 +15,7 @@ use super::client_plan::{ClientModulePlan, ClientRuntimeOp};
 use super::client_plan_types::{AttrValue, AttrValuePart};
 use super::client_shapes::{BindGetSetForm, ClientBindShape, GroupBindKey};
 use super::client_walk::bind_host_prelude;
-use super::ir::{IrNode, NodeId};
+use super::ir::{IrNode, NodeId, SpecialKind};
 use crate::svelte::bind_contract::{BindPrelude, RuntimeBindRouting};
 
 impl<'a> ClientEmitter<'a> {
@@ -276,7 +276,7 @@ impl<'a> ClientEmitter<'a> {
         getter: &str,
         setter: &str,
     ) {
-        let var = self.dom_var(target);
+        let var = self.bind_host_expr(target);
         match shape {
             ClientBindShape::This { getset } => {
                 // The set/get tokens: an identifier target synthesizes the thunks
@@ -424,6 +424,39 @@ impl<'a> ClientEmitter<'a> {
                     .unwrap_or(get_thunk);
                 format!("\t$.bind_group({group}, [], {var}, {get_tok}, {set_thunk});\n")
             }
+            RuntimeHelper::WindowSize => {
+                // `$.bind_window_size('<name>', set)` — the dimension NAME is the first
+                // string-literal arg, NO host expr, setter-only.
+                format!("\t$.bind_window_size('{bind_name}', {set_thunk});\n")
+            }
+            RuntimeHelper::WindowScroll => {
+                // `$.bind_window_scroll('x'|'y', get, set)` — the runtime axis name is
+                // REMAPPED from the bind name (`scrollX` → `'x'`, `scrollY` → `'y'`) and the
+                // helper is READ-WRITE (get+set). The bind name is a typed contract-row name
+                // (one of exactly `scrollX` / `scrollY`), not source text.
+                let axis = match bind_name {
+                    "scrollX" => "x",
+                    "scrollY" => "y",
+                    other => unreachable!(
+                        "a WindowScroll routing carries only scrollX/scrollY, got `{other}`"
+                    ),
+                };
+                format!("\t$.bind_window_scroll('{axis}', {get_thunk}, {set_thunk});\n")
+            }
+            RuntimeHelper::Online => {
+                // `$.bind_online(set)` — setter-only, NO name, NO host expr.
+                format!("\t$.bind_online({set_thunk});\n")
+            }
+            RuntimeHelper::Focused => {
+                // `$.bind_focused(host, set)` — host expr + setter-only. The host is the
+                // element var on a regular element and `$.window` on the window host.
+                format!("\t$.bind_focused({var}, {set_thunk});\n")
+            }
+            RuntimeHelper::ActiveElement => {
+                // `$.bind_active_element(set)` — the dedicated setter-only helper, NO name,
+                // NO host expr (NOT the generic `$.bind_property`).
+                format!("\t$.bind_active_element({set_thunk});\n")
+            }
             RuntimeHelper::This => {
                 // `this` never reaches the DOM router: the bind classifier maps the
                 // `this` name exclusively to the `This` shape (emitted by the
@@ -432,6 +465,24 @@ impl<'a> ClientEmitter<'a> {
                 unreachable!("a `this` bind routes through the This shape, never format_dom_bind")
             }
         }
+    }
+
+    /// The HOST EXPRESSION a `bind:` call targets — a regular element's walked DOM var, or
+    /// the global host for a special-element bind (`<svelte:window>` ⇒ `$.window`,
+    /// `<svelte:document>` ⇒ `$.document`, `<svelte:body>` ⇒ `$.document.body`,
+    /// `<svelte:element>` ⇒ the `$$element` callback param). Structural over the typed IR
+    /// node, never a name scan.
+    fn bind_host_expr(&self, target: NodeId) -> String {
+        if let IrNode::Special(s) = self.ir().node(target) {
+            match s.kind {
+                SpecialKind::Window => return "$.window".to_string(),
+                SpecialKind::Document => return "$.document".to_string(),
+                SpecialKind::Body => return "$.document.body".to_string(),
+                SpecialKind::Element => return "$$element".to_string(),
+                _ => {}
+            }
+        }
+        self.dom_var(target)
     }
 }
 

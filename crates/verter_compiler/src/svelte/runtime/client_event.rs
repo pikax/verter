@@ -75,6 +75,9 @@ fn event_target_host(
         EventEmitTarget::Window => "$.window".to_string(),
         EventEmitTarget::Document => "$.document".to_string(),
         EventEmitTarget::Body => "$.document.body".to_string(),
+        // A `<svelte:element>` legacy `on:` listener targets the element callback's
+        // `$$element` param (the host is the dynamic element itself).
+        EventEmitTarget::SvelteElement => "$$element".to_string(),
     }
 }
 

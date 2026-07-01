@@ -62,6 +62,10 @@ pub struct ComponentIr {
     /// The component-function name — derived from the filename stem (JS-identifier
     /// sanitized) or an explicit name override.
     pub name: String,
+    /// The compile FILENAME (the `filename` compile option, verbatim), used as the
+    /// input to the `$.head('<hash>', …)` scope hash a `<svelte:head>` emits (the
+    /// official `hash(filename)`). `None` when the host supplied no filename.
+    pub filename: Option<String>,
     /// The reactivity mode.
     pub mode: SvelteMode,
 }
@@ -261,15 +265,56 @@ pub struct SpecialElementIr {
     /// never an attribute named `this`). `None` for every other special kind (and for
     /// a `<svelte:element>` with no `this`, which is a parse error upstream).
     pub this_expr: Option<ExprId>,
+    /// The STATIC `this="div"` tag literal of a `<svelte:element this="div">` (the decoded
+    /// literal, NOT JS-quoted) — the runtime tag a `() => 'div'` get-tag thunk emits. `None`
+    /// for a DYNAMIC `this={…}` (carried by [`Self::this_expr`]) and every non-element
+    /// special. Mutually exclusive with `this_expr`.
+    pub static_tag: Option<String>,
     /// The special element's children in source order.
     pub children: Vec<NodeId>,
     /// The lexical scope the special element's children bind in.
     pub scope: ScopeId,
     /// The slot decomposition — used by the component-family specials
     /// (`<svelte:component>` / `<svelte:self>` / `<svelte:fragment>`); empty (the
-    /// `Default`) for the host / renderable specials (the `<svelte:window|body|document|
-    /// head|element|boundary>` hosts, not yet supported).
+    /// `Default`) for the host / renderable specials.
     pub slots: ComponentSlots,
+    /// The RENDERABLE special's CHILD-CONTENT region — its own template scope (the children
+    /// render INSIDE the special's callback, NOT in the enclosing region). `Some` for the
+    /// renderable specials whose body is a callback region (`<svelte:element>` /
+    /// `<svelte:boundary>` / `<svelte:head>`); `None` for the host / component-family
+    /// specials (whose children, if any, are not a callback region).
+    pub body_region: Option<TemplateScopeId>,
+    /// The `<svelte:head>`'s `<title>` child, decomposed into its template chunks (the
+    /// official `TitleElement` reads `node.fragment.nodes`). `Some` for a `<svelte:head>`
+    /// that carries a `<title>`; `None` otherwise. The title is NOT a body-region DOM node
+    /// (it renders no element — it drives `$.document.title`); its non-title siblings
+    /// (`<meta>` / `<link>` / …) are the `body_region`.
+    pub head_title: Option<HeadTitleIr>,
+}
+
+/// A `<svelte:head>`'s `<title>` element decomposed into its template chunks — the input
+/// the projector folds into the `$.document.title = <rhs>` write (the official
+/// `TitleElement` + `build_template_chunk`). Carries NO DOM node: the title renders no
+/// element, so it is not a body-region root and produces no reactive-text op.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeadTitleIr {
+    /// The title fragment's chunks in source order (literal text runs + interpolation
+    /// expressions), mirroring `node.fragment.nodes`.
+    pub chunks: Vec<TitleChunkIr>,
+    /// The span of the FIRST parsed title child that is NEITHER text NOR an interpolation
+    /// (a nested element, comment, or block) — the official `title_invalid_content` error
+    /// (`<title>` can only contain text and `{tags}`). `None` for a title whose children are
+    /// exclusively text + interpolations; a `Some` fails the surface closed at classification.
+    pub invalid_content: Option<Span>,
+}
+
+/// One chunk of a `<title>`'s content — a literal text run or an interpolation expression.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TitleChunkIr {
+    /// A literal (entity-decoded) text run.
+    Text(String),
+    /// An `{expr}` interpolation (an id into the expression arena).
+    Expr(ExprId),
 }
 
 /// The closed family of `<svelte:*>` special-element kinds the runtime IR
@@ -303,6 +348,19 @@ pub enum SpecialKind {
 pub struct StaticAttrValue {
     /// The literal attribute value.
     pub value: String,
+}
+
+/// Which authored syntax an [`AttrIr::Event`] came from. The MODERN Svelte-5 `on*`
+/// attribute (`onclick={…}`) and the LEGACY `on:` directive (`on:click={…}`) collapse to
+/// the SAME `AttrIr::Event` once normalized, so the distinct origin is recorded at lowering
+/// (where the syntax is still separate) for the few consumers whose validity differs by form
+/// — e.g. `<svelte:boundary>`, which accepts only the modern `onerror` attribute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventOrigin {
+    /// The MODERN Svelte-5 `on*` attribute form (`onclick={…}` / `onerror={…}`).
+    ModernAttribute,
+    /// The LEGACY `on:` directive form (`on:click={…}` / `on:error|preventDefault={…}`).
+    LegacyDirective,
 }
 
 /// An attribute or directive on an element / component / special element.
@@ -396,6 +454,18 @@ pub enum AttrIr {
         /// (`touchstart` / `touchmove` ⇒ `Some(true)`), the LEGACY directive form
         /// derives it from the `|passive` / `|nonpassive` modifiers ONLY.
         passive: Option<bool>,
+        /// Which authored syntax produced this event — the MODERN Svelte-5 `on*`
+        /// attribute (`onclick={…}`) or the LEGACY `on:` directive (`on:click={…}`).
+        /// Recorded at LOWERING because the two forms COLLAPSE to an identical
+        /// `AttrIr::Event` once normalized (a bare `on:click` carries no modifiers,
+        /// byte-identical to `onclick`), so this is the sole faithful discriminator
+        /// downstream. Consumed where the two forms have DIFFERENT validity — a
+        /// `<svelte:boundary>` accepts ONLY the modern `onerror` attribute and rejects
+        /// every legacy `on:` directive (official `svelte_boundary_invalid_attribute`).
+        /// For a regular element / global host both forms are valid and emit the same
+        /// (`delegated` / `modifiers` already carry the emission-relevant differences),
+        /// so those consumers ignore it.
+        origin: EventOrigin,
     },
     /// A `use:action` directive (`use:fn` / `use:fn={arg}`).
     Use {

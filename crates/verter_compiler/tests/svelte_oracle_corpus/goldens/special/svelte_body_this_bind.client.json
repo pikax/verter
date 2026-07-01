@@ -1,0 +1,54 @@
+{
+  "slug": "special/svelte_body_this_bind.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "svelte_body_this_bind",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "state",
+    "bind_this",
+    "document",
+    "set",
+    "get"
+  ],
+  "helperSet": [
+    "bind_this",
+    "document",
+    "get",
+    "set",
+    "state"
+  ],
+  "helperCounts": {
+    "state": 1,
+    "bind_this": 1,
+    "document": 1,
+    "set": 1,
+    "get": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; export default function svelte_body_this_bind($$anchor) {let b = $.state(0); $.bind_this($.document.body, ($$value) => $.set(b, $$value, true), () => $.get(b));}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

@@ -1,0 +1,64 @@
+{
+  "slug": "special/svelte_element_attrs.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "svelte_element_attrs",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "state",
+    "comment",
+    "first_child",
+    "element",
+    "update",
+    "attribute_effect",
+    "text",
+    "append",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "attribute_effect",
+    "comment",
+    "element",
+    "first_child",
+    "state",
+    "text",
+    "update"
+  ],
+  "helperCounts": {
+    "state": 1,
+    "comment": 1,
+    "first_child": 1,
+    "element": 1,
+    "update": 1,
+    "attribute_effect": 1,
+    "text": 1,
+    "append": 2
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; export default function svelte_element_attrs($$anchor) {let tag = 'div'; let cls = 'a'; let n = $.state(0); var fragment = $.comment(); var node = $.first_child(fragment); $.element(node, () => tag, false, ($$element, $$anchor) => {var event_handler = () => $.update(n); $.attribute_effect($$element, () => ({class: cls, onclick: event_handler})); var text = $.text('hi'); $.append($$anchor, text);}); $.append($$anchor, fragment);}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

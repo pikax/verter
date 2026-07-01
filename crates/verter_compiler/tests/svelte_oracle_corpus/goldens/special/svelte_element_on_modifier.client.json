@@ -1,0 +1,69 @@
+{
+  "slug": "special/svelte_element_on_modifier.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "svelte_element_on_modifier",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "state",
+    "comment",
+    "first_child",
+    "element",
+    "event",
+    "preventDefault",
+    "update",
+    "event",
+    "update",
+    "text",
+    "append",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "comment",
+    "element",
+    "event",
+    "first_child",
+    "preventDefault",
+    "state",
+    "text",
+    "update"
+  ],
+  "helperCounts": {
+    "state": 1,
+    "comment": 1,
+    "first_child": 1,
+    "element": 1,
+    "event": 2,
+    "preventDefault": 1,
+    "update": 2,
+    "text": 1,
+    "append": 2
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; export default function svelte_element_on_modifier($$anchor) {let tag = 'div'; let count = $.state(0); var fragment = $.comment(); var node = $.first_child(fragment); $.element(node, () => tag, false, ($$element, $$anchor) => {$.event('click', $$element, $.preventDefault(() => $.update(count))); $.event('keydown', $$element, () => $.update(count), true); var text = $.text('hi'); $.append($$anchor, text);}); $.append($$anchor, fragment);}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

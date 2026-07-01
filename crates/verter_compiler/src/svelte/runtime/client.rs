@@ -28,10 +28,7 @@
 use super::client_effect::{emit_text_effect, EffectBody, Memoizer};
 use super::client_event::{emit_delegate_epilogue, render_event_registration};
 use super::client_module_frame::{emit_imports, escape_template_literal};
-use super::client_plan::{
-    AttrValue, ClientBlock, ClientDynAttrEmit, ClientModulePlan, ClientNode, ClientRuntimeOp,
-    EventEmit,
-};
+use super::client_plan::{ClientBlock, ClientModulePlan, ClientNode, ClientRuntimeOp, EventEmit};
 use super::client_shapes::{BindGetSetForm, ClientBindShape, GroupBindKey};
 use super::client_walk::{
     any_item_needs_name, first_descent, item_needs_name, sibling_descent, WalkBase,
@@ -530,7 +527,7 @@ impl<'a> ClientEmitter<'a> {
         // The region-root `{@debug}` effects, grouped by the clean-item gap they precede
         // (a `{@debug}` is non-rendering — dropped from `items` — so it rides a gap, never
         // a DOM position). Emitted INTERLEAVED at their document position, never hoisted.
-        let gaps = self.debug_gaps(&scope.roots, &last_indices);
+        let gaps = self.interleaved_gaps(&scope.roots, &last_indices);
 
         if mounts_fragment {
             // Multi-root fragment: the clone var IS the fragment.
@@ -543,7 +540,7 @@ impl<'a> ClientEmitter<'a> {
                 // No rendered element — a region whose only content is non-rendering
                 // (e.g. a `{@debug}`-only block body). Emit the region-root debug effects
                 // at their document position (never dropped); there is no DOM walk.
-                self.emit_debug_gap(out, &gaps[0]);
+                self.emit_interleaved_gap(out, &gaps[0]);
                 return;
             };
             let only = *only;
@@ -560,7 +557,7 @@ impl<'a> ClientEmitter<'a> {
             };
             // A region-root `{@debug}` that PRECEDES the clone-root element emits right
             // after the clone frame (gaps[0]), before the element's own inits.
-            self.emit_debug_gap(out, &gaps[0]);
+            self.emit_interleaved_gap(out, &gaps[0]);
             // The clone-root element's own bind PRELUDE cleanup, INIT-domain attribute
             // ops, and `bind:this` are emitted right after the clone frame named it.
             // The official per-element order (`RegularElement.js`) is: the bind prelude
@@ -573,7 +570,7 @@ impl<'a> ClientEmitter<'a> {
             self.emit_node_inline_inits(out, only);
             self.emit_inline_bind_this(out, only);
             let (child_items, child_last) = clean_nodes_indexed(self.ir(), &el.children, child_ctx);
-            let child_gaps = self.debug_gaps(&el.children, &child_last);
+            let child_gaps = self.interleaved_gaps(&el.children, &child_last);
             self.emit_walk_over_items(
                 out,
                 &child_items,
@@ -588,7 +585,7 @@ impl<'a> ClientEmitter<'a> {
             }
             // A region-root `{@debug}` that FOLLOWS the clone-root element emits after its
             // subtree (gaps[1]).
-            self.emit_debug_gap(out, &gaps[1]);
+            self.emit_interleaved_gap(out, &gaps[1]);
         }
     }
 
@@ -639,10 +636,10 @@ impl<'a> ClientEmitter<'a> {
                 ) {
                     // A `{@debug}` sibling around a sole-controlled `{#each}` still emits at
                     // its document position (the each occupies the element itself).
-                    self.emit_debug_gap(out, &gaps[0]);
+                    self.emit_interleaved_gap(out, &gaps[0]);
                     self.node_var.insert(*only, base_var.to_string());
                     self.emit_block_call(out, *only, base_var, true);
-                    self.emit_debug_gap(out, gaps.get(1).map_or(&[][..], |g| g));
+                    self.emit_interleaved_gap(out, gaps.get(1).map_or(&[][..], |g| g));
                     return;
                 }
             }
@@ -650,7 +647,7 @@ impl<'a> ClientEmitter<'a> {
         for (idx, item) in items.iter().enumerate() {
             // Any `{@debug}` falling in document order BEFORE this clean position emits
             // here — at its source-order slot — before the position's own walk/getter.
-            self.emit_debug_gap(out, &gaps[idx]);
+            self.emit_interleaved_gap(out, &gaps[idx]);
             // Decide whether this position needs a name (it is dynamic, or hosts a
             // dynamic descendant we must reach). A non-named position is a STATIC
             // skip — count it for the trailing `$.next()` cursor advance.
@@ -727,6 +724,18 @@ impl<'a> ClientEmitter<'a> {
                         // the anchor position), recursing into the body region(s).
                         // (`emit_block_call` lives in `client_block_emit`.)
                         self.emit_block_call(out, *node, &var, false);
+                    } else if matches!(self.client_node(*node), ClientNode::SvelteElement(_)) {
+                        // A `<svelte:element this={…}>` dynamic element — emit its
+                        // `$.element(node, get_tag, is_svg, callback)` call INLINE here against
+                        // the walked `<!>` anchor var. (`emit_svelte_element` lives in
+                        // `client_svelte_element`.)
+                        self.emit_svelte_element(out, *node, &var);
+                    } else if matches!(self.client_node(*node), ClientNode::Boundary(_)) {
+                        // A `<svelte:boundary>` — emit its `$.boundary(node, props, callback)`
+                        // call (with the hoisted `failed`/`pending` snippet block) INLINE here
+                        // against the walked `<!>` anchor var. (`emit_svelte_boundary` lives in
+                        // `client_svelte_boundary`.)
+                        self.emit_svelte_boundary(out, *node, &var);
                     }
                     // The element is a NARROW `ClientNode::Element` (the emission
                     // decision); its children are the IR geometry the cleaner
@@ -755,7 +764,7 @@ impl<'a> ClientEmitter<'a> {
                             let child_ctx = ctx.for_children_of(tag);
                             let (child_items, child_last) =
                                 clean_nodes_indexed(self.ir(), &el.children, child_ctx);
-                            let child_gaps = self.debug_gaps(&el.children, &child_last);
+                            let child_gaps = self.interleaved_gaps(&el.children, &child_last);
                             self.emit_walk_over_items(
                                 out,
                                 &child_items,
@@ -774,7 +783,7 @@ impl<'a> ClientEmitter<'a> {
 
         // Any trailing `{@debug}` (after the last clean position) emits before the
         // hydration cursor advance — at its document-order slot following the last node.
-        self.emit_debug_gap(out, &gaps[items.len()]);
+        self.emit_interleaved_gap(out, &gaps[items.len()]);
 
         // The TRAILING static-run cursor advance (`$.next(skipped - 1)`): the
         // hydration cursor must skip past the static positions following the last
@@ -951,20 +960,34 @@ impl<'a> ClientEmitter<'a> {
         let deps = memoizer.into_deps();
         emit_text_effect(out, &update_bodies, &deps);
 
-        // (d) The POST-walk binds + events in source order — every op a NARROW
-        // `ClientRuntimeOp` (already-rewritten getter / setter / handler bodies). A
-        // `bind:this` is NOT emitted here: it is a render-side binding emitted INLINE
-        // during the walk (see `emit_inline_bind_this`), BEFORE this grouped text
-        // effect — matching the official op order. Only `bind:value` and delegated
-        // events are post-walk.
-        for op in self.plan.ops_in(scope_id) {
+        // (d) The POST-walk binds + events — every op a NARROW `ClientRuntimeOp`
+        // (already-rewritten getter / setter / handler bodies). A `bind:this` is NOT emitted
+        // here: it is a render-side binding emitted INLINE during the walk (see
+        // `emit_inline_bind_this`), BEFORE this grouped text effect — matching the official op
+        // order. Only `bind:value` and delegated events are post-walk.
+        //
+        // A GLOBAL-host special (`<svelte:window|document|body>`) groups its EVENTS before its
+        // BINDS (the official `visit_special_element` order — every `$.event(...)` then every
+        // `$.bind_*`), so the source-order op list is reordered per host node
+        // ([`Self::post_walk_ops_host_grouped`]). Regular-element ops keep SOURCE order.
+        for op in &self.post_walk_ops_host_grouped(scope_id) {
             match op {
                 ClientRuntimeOp::Bind {
-                    shape: ClientBindShape::This { .. },
-                    ..
+                    target,
+                    shape: shape @ ClientBindShape::This { .. },
+                    getter,
+                    setter,
                 } => {
-                    // `bind:this` is a render-side binding emitted INLINE in the walk
-                    // (see `emit_inline_bind_this`); skip here.
+                    // `bind:this` on an ORDINARY element is a render-side binding emitted
+                    // INLINE in the walk (see `emit_inline_bind_this`), BEFORE this grouped
+                    // text effect — skip here. A GLOBAL-host `bind:this`
+                    // (`<svelte:window|document|body>`) has NO DOM walk position, so it is
+                    // emitted HERE in the init body (in source order with the host's other
+                    // binds/events), matching official.
+                    let node = NodeId(target.0);
+                    if self.is_global_host_bind_node(node) {
+                        self.emit_bind(out, node, shape, getter, setter);
+                    }
                 }
                 ClientRuntimeOp::Bind {
                     target,
@@ -989,122 +1012,94 @@ impl<'a> ClientEmitter<'a> {
         }
     }
 
-    /// Emit a dynamic plain-attribute write body (`$.set_attribute(node, 'name',
-    /// value)` / `node.<prop> = value` / `$.autofocus(node, value)`), resolving the
-    /// node var and building the structured value.
-    ///
-    /// `memoizer` is `Some` on the REACTIVE (in-effect) path: a `has_call` expression
-    /// part is hoisted into a `$N` deps-array slot (the official `build_template_chunk`
-    /// rule). It is `None` on the INIT path (`$.autofocus` / a non-reactive write),
-    /// where the value is read once and is emitted INLINE with no memoization.
-    fn emit_reactive_attr(
-        &self,
-        target: NodeId,
-        emit: &ClientDynAttrEmit,
-        memoizer: &mut Option<&mut Memoizer>,
-    ) -> String {
-        let var = self.dom_var(target);
-        match emit {
-            ClientDynAttrEmit::SetAttribute { name, value } => {
-                let v = self.build_attr_value(value, memoizer);
-                format!("$.set_attribute({var}, '{name}', {v})")
+    /// The post-walk op list for `scope_id`, with each GLOBAL-host special's ops reordered so
+    /// its EVENTS precede its BINDS (the official `visit_special_element` grouping — every
+    /// `$.event(...)` then every `$.bind_*`). A host special's ops are CONTIGUOUS in the
+    /// source-order op list (one node's attributes), so each contiguous same-host run is
+    /// stable-partitioned events-before-binds; non-host ops (regular elements) keep SOURCE
+    /// order. Returns an OWNED snapshot so the emit calls (`&mut self`) borrow freely.
+    fn post_walk_ops_host_grouped(&self, scope_id: TemplateScopeId) -> Vec<ClientRuntimeOp> {
+        let ops = self.plan.ops_in(scope_id);
+        let mut result: Vec<ClientRuntimeOp> = Vec::with_capacity(ops.len());
+        let mut i = 0;
+        while i < ops.len() {
+            let group = self.op_host_group(&ops[i]);
+            let Some(_) = group else {
+                // A non-host op (regular element bind / event) keeps its source position.
+                result.push(ops[i].clone());
+                i += 1;
+                continue;
+            };
+            // Gather the CONTIGUOUS run of ops sharing this host group, then emit its EVENTS
+            // (source order) followed by its BINDS (source order).
+            let mut j = i;
+            while j < ops.len() && self.op_host_group(&ops[j]) == group {
+                j += 1;
             }
-            ClientDynAttrEmit::Property { prop, value } => {
-                let v = self.build_attr_value(value, memoizer);
-                format!("{var}.{prop} = {v}")
+            for op in &ops[i..j] {
+                if matches!(op, ClientRuntimeOp::Event { .. }) {
+                    result.push(op.clone());
+                }
             }
-            ClientDynAttrEmit::Autofocus { value } => {
-                // Autofocus is init-only — its value is a pre-flattened string (never
-                // memoized).
-                format!("$.autofocus({var}, {value})")
+            for op in &ops[i..j] {
+                if !matches!(op, ClientRuntimeOp::Event { .. }) {
+                    result.push(op.clone());
+                }
             }
+            i = j;
+        }
+        result
+    }
+
+    /// The GLOBAL-host special group (`Window` / `Document` / `Body`) an op belongs to — a
+    /// host EVENT (`$.event` against `$.window` / `$.document` / `$.document.body`) or a host
+    /// BIND (targeting a `<svelte:window|document|body>` node). `None` for a regular-element op
+    /// (never reordered) or a non-bind/-event op. Drives the events-before-binds host grouping.
+    fn op_host_group(&self, op: &ClientRuntimeOp) -> Option<super::ir::SpecialKind> {
+        match op {
+            ClientRuntimeOp::Event { emit, .. } => match emit.target {
+                super::client_plan_types::EventEmitTarget::Window => {
+                    Some(super::ir::SpecialKind::Window)
+                }
+                super::client_plan_types::EventEmitTarget::Document => {
+                    Some(super::ir::SpecialKind::Document)
+                }
+                super::client_plan_types::EventEmitTarget::Body => {
+                    Some(super::ir::SpecialKind::Body)
+                }
+                _ => None,
+            },
+            ClientRuntimeOp::Bind { target, .. } => {
+                let IrNode::Special(s) = self.ir().node(NodeId(target.0)) else {
+                    return None;
+                };
+                matches!(
+                    s.kind,
+                    super::ir::SpecialKind::Window
+                        | super::ir::SpecialKind::Document
+                        | super::ir::SpecialKind::Body
+                )
+                .then_some(s.kind)
+            }
+            _ => None,
         }
     }
 
-    /// Memoize a class/style ARGUMENT (the base `value` or the `next` directives
-    /// object/array) when it `has_call` and the op is reactive (`memoizer` is `Some`) —
-    /// the official `build_set_class` / `build_set_style` rule. On the init path
-    /// (`memoizer` is `None`) the argument is emitted inline. A non-`has_call` argument
-    /// always stays inline.
-    fn memoize_arg(
-        &self,
-        arg: &str,
-        has_call: bool,
-        memoizer: &mut Option<&mut Memoizer>,
-    ) -> String {
-        match memoizer {
-            Some(m) => m.add(arg.to_string(), has_call),
-            None => arg.to_string(),
-        }
-    }
-
-    /// Assemble the coalesced `$.set_class(node, 1, value, css_hash, prev, next)` call
-    /// body from the structured op pieces, with the real DOM var + accumulator name.
-    /// `prev` is the accumulator name (reactive directives), `{}` (non-reactive
-    /// directives), or absent (no directives); a reactive directive call prefixes the
-    /// `<acc> = ` assignment. The base `value` is routed through `build_attr_value` (so
-    /// a mixed base memoizes each EXPRESSION PART, a `$.clsx(...)` base memoizes the
-    /// whole wrap — the official `build_set_class`); the directives object is memoized
-    /// as a whole through `memoizer` when it `has_call`.
-    #[allow(clippy::too_many_arguments)]
-    fn emit_set_class(
-        &self,
-        target: NodeId,
-        value: &AttrValue,
-        css_hash: Option<&str>,
-        directives: Option<&str>,
-        directives_has_call: bool,
-        acc: Option<&str>,
-        memoizer: &mut Option<&mut Memoizer>,
-    ) -> String {
-        let var = self.dom_var(target);
-        let value = self.build_attr_value(value, memoizer);
-        // `prev`: the accumulator name (reactive) or `{}` (non-reactive); present only
-        // when there are directives (the same condition that produced `css_hash`).
-        let prev = directives.map(|_| acc.map(str::to_string).unwrap_or_else(|| "{}".to_string()));
-        let next = directives.map(|d| self.memoize_arg(d, directives_has_call, memoizer));
-        let args = super::client_codegen_helpers::trim_trailing_none(vec![
-            Some(var),
-            Some("1".to_string()),
-            Some(value),
-            css_hash.map(str::to_string),
-            prev,
-            next,
-        ]);
-        let call = format!("$.set_class({})", args.join(", "));
-        match acc {
-            Some(name) => format!("{name} = {call}"),
-            None => call,
-        }
-    }
-
-    /// Assemble the coalesced `$.set_style(node, value, prev, next)` call body from the
-    /// structured op pieces (see [`Self::emit_set_class`]).
-    #[allow(clippy::too_many_arguments)]
-    fn emit_set_style(
-        &self,
-        target: NodeId,
-        value: &AttrValue,
-        directives: Option<&str>,
-        directives_has_call: bool,
-        acc: Option<&str>,
-        memoizer: &mut Option<&mut Memoizer>,
-    ) -> String {
-        let var = self.dom_var(target);
-        let value = self.build_attr_value(value, memoizer);
-        let prev = directives.map(|_| acc.map(str::to_string).unwrap_or_else(|| "{}".to_string()));
-        let next = directives.map(|d| self.memoize_arg(d, directives_has_call, memoizer));
-        let args = super::client_codegen_helpers::trim_trailing_none(vec![
-            Some(var),
-            Some(value),
-            prev,
-            next,
-        ]);
-        let call = format!("$.set_style({})", args.join(", "));
-        match acc {
-            Some(name) => format!("{name} = {call}"),
-            None => call,
-        }
+    /// Whether `node` is a GLOBAL-host special (`<svelte:window|document|body>`) — a no-DOM
+    /// init-only bind/event host with no walk position. Its `bind:this` (and its other binds)
+    /// are emitted in the init body by `emit_ops` rather than inline during a walk (a global
+    /// host renders no element, so there is no walk). `<svelte:element>`'s `bind:this` is NOT
+    /// a global host — it is emitted inside the element's `($$element, …)` callback.
+    pub(super) fn is_global_host_bind_node(&self, node: NodeId) -> bool {
+        matches!(
+            self.ir().node(node),
+            IrNode::Special(s) if matches!(
+                s.kind,
+                super::ir::SpecialKind::Window
+                    | super::ir::SpecialKind::Document
+                    | super::ir::SpecialKind::Body
+            )
+        )
     }
 
     /// The emitted DOM-variable name reaching a node (from the walk's `node_var` map),

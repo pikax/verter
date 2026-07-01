@@ -17,7 +17,9 @@ use verter_span::Span;
 use super::entity_decode::decode_attr_entities;
 use super::events::{can_delegate_event, is_passive_event, normalize_event_name};
 use super::expr::ScopeId;
-use super::ir::{AttrIr, MixedAttrPart, StaticAttrValue, StyleDirectiveValue, TransitionKind};
+use super::ir::{
+    AttrIr, EventOrigin, MixedAttrPart, StaticAttrValue, StyleDirectiveValue, TransitionKind,
+};
 use super::{local_name_span, span_text, spread_expr_span, LoweringCtx};
 use crate::svelte::parser::tokenizer_scan::find_matching_brace_in;
 use crate::svelte::parser::{
@@ -176,6 +178,7 @@ fn lower_plain_attr(
                         capture,
                         modifiers: Vec::new(),
                         passive,
+                        origin: EventOrigin::ModernAttribute,
                     };
                 }
             }
@@ -465,6 +468,7 @@ fn lower_directive(
                 capture,
                 modifiers: directive.modifiers.clone(),
                 passive,
+                origin: EventOrigin::LegacyDirective,
             })
         }
         SvelteDirectiveKind::Use => {

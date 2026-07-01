@@ -474,3 +474,99 @@ fn member_rooted_at_global_or_bare_ident_is_not_state() {
         "a pure-global call is not a binding-rooted member"
     );
 }
+
+// ── `prop_value_has_state` (the `Component.js` / `SvelteBoundary.js` getter-vs-init
+//    discriminator) ──
+//
+// Official's `metadata.expression.has_state` for a component / boundary prop value is
+// the SYNCHRONOUS signal/prop/snippet reference scan PLUS the member-root half
+// (`MemberExpression.js`'s `!is_pure`): a member rooted at ANY declared binding — a
+// plain local, a deep-proxied `$state` object, a prop — makes the value state-bearing
+// (⇒ the `get name() { return <expr>; }` getter member); a bare plain-local ident or a
+// member read deferred inside a nested function body stays a plain `name: <expr>` init.
+// Verified against pinned svelte@5.56.3 (boundary + component emit identically):
+// `failed={obj.failed}` → getter; `onerror={() => obj.failed}` / `onerror={f}` → init.
+
+/// A root scope for the prop getter-vs-init predicate: a plain local `obj`, a
+/// deep-proxied `$state` object `st` (a `BareProxy`), a prop `failed`, and a plain
+/// local `f`.
+fn prop_scope() -> (BindingTable, ScopeGraph, super::super::expr::ScopeId) {
+    let mut bindings = BindingTable::new();
+    let (mut scopes, root) = ScopeGraph::with_root();
+    for (name, kind) in [
+        ("obj", BindingRuntimeKind::PlainLocal),
+        ("st", BindingRuntimeKind::BareProxy),
+        ("failed", BindingRuntimeKind::Prop),
+        ("f", BindingRuntimeKind::PlainLocal),
+    ] {
+        let id = bindings.push(BindingInfo {
+            name: name.to_string(),
+            scope: root,
+            kind,
+            state: None,
+        });
+        scopes.declare(root, name, id);
+    }
+    (bindings, scopes, root)
+}
+
+fn prop_has_state(src: &str) -> bool {
+    let (bindings, scopes, root) = prop_scope();
+    super::prop_value_has_state(src, root, &bindings, &scopes)
+}
+
+#[test]
+fn prop_value_member_rooted_at_binding_is_state() {
+    // `obj.failed` — a member rooted at a PLAIN LOCAL is impure (`!is_pure`) ⇒ the prop
+    // emits the getter (official: `get failed() { return obj.failed; }`).
+    assert!(
+        prop_has_state("obj.failed"),
+        "a member rooted at a plain local must be state-bearing (getter)"
+    );
+    // `st.failed` — a member rooted at a deep-proxied `$state` object (a `BareProxy`,
+    // whose reads are plain member access, not `$.get`) is ALSO impure ⇒ getter.
+    assert!(
+        prop_has_state("st.failed"),
+        "a member rooted at a deep-proxied $state object must be state-bearing (getter)"
+    );
+    // A deeper chain still roots at the binding.
+    assert!(
+        prop_has_state("obj.a.b"),
+        "a deep member chain rooted at a plain local must be state-bearing (getter)"
+    );
+}
+
+#[test]
+fn prop_value_member_inside_nested_fn_is_not_state() {
+    // `() => obj.failed` — the member read is DEFERRED inside the arrow body; official
+    // keeps the plain init (`onerror: () => obj.failed`). The member-root half must not
+    // descend into nested function bodies (the sync-only rule is preserved).
+    assert!(
+        !prop_has_state("() => obj.failed"),
+        "a member read inside a nested function body must stay a plain init"
+    );
+    assert!(
+        !prop_has_state("function () { return st.failed; }"),
+        "a member read inside a function expression body must stay a plain init"
+    );
+}
+
+#[test]
+fn prop_value_bare_local_and_global_member_are_not_state() {
+    // A BARE plain-local identifier (`onerror={f}`) is a plain init — the member rule
+    // does not cover bare reads, and a plain local is not a signal/prop/snippet.
+    assert!(
+        !prop_has_state("f"),
+        "a bare plain-local ident must stay a plain init"
+    );
+    // A member rooted at a GLOBAL stays pure ⇒ plain init.
+    assert!(
+        !prop_has_state("Math.PI"),
+        "a member rooted at a global must stay a plain init"
+    );
+    // The existing reference-scan half still fires: a PROP ident is state-bearing.
+    assert!(
+        prop_has_state("failed"),
+        "a prop reference must stay state-bearing (getter)"
+    );
+}

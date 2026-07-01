@@ -18,6 +18,8 @@
 /// projection.
 pub(crate) mod bind_contract;
 mod bind_contract_data;
+#[cfg(test)]
+mod bind_contract_tests;
 pub mod carrier;
 pub mod ide;
 pub mod parser;

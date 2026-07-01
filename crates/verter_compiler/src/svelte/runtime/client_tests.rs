@@ -1659,28 +1659,57 @@ fn delegated_onclick_is_unchanged_with_no_trailing_positional_args() {
 }
 
 #[test]
-fn special_element_global_events_stay_fail_closed() {
-    // The special-element event boundary: `<svelte:window|body|document on*>` EVENTS need
-    // the special-element node gate, so they fail closed at the special-element host gate
-    // — never reaching the (open) regular-element event surface. Asserts the refusal is
-    // preserved (a positive boundary assertion).
-    for (host, src) in [
+fn special_element_global_events_emit_direct_global_registrations() {
+    // `<svelte:window|body|document on*>` EVENTS emit a DIRECT `$.event('<type>', <host>,
+    // handler)` in the init body — NEVER `$.delegated`, NEVER a node var, and the no-DOM
+    // host root emits NO template / NO `$.from_html` / NO `$.append` / NO `$.comment`.
+    for (host_expr, event, src) in [
         (
-            "svelte:window",
+            "$.window",
+            "resize",
             "<script>let n = $state(0);</script>\n<svelte:window onresize={() => n++} />\n",
         ),
         (
-            "svelte:body",
+            "$.document.body",
+            "click",
             "<script>let n = $state(0);</script>\n<svelte:body onclick={() => n++} />\n",
         ),
         (
-            "svelte:document",
+            "$.document",
+            "keydown",
             "<script>let n = $state(0);</script>\n<svelte:document onkeydown={() => n++} />\n",
         ),
     ] {
-        assert_fail_closed(
-            src,
-            |s| matches!(s, UnsupportedSvelteRuntimeSurface::ComponentOrSnippet { construct, .. } if *construct == host),
+        let js = emit(src, "App.svelte");
+        let n = normalize_js_cosmetics(&js);
+        assert!(
+            n.contains(&nc(&format!(
+                "$.event('{event}', {host_expr}, () => $.update(n))"
+            ))),
+            "host event must emit a direct $.event against {host_expr}:\n{js}"
+        );
+        // NEGATIVE: a global event is never delegated, and the no-DOM host root has no clone
+        // frame / mount / comment anchor.
+        assert!(
+            !js.contains("$.delegated"),
+            "host event is never delegated:\n{js}"
+        );
+        assert!(
+            !js.contains("$.delegate("),
+            "host event registers no delegate epilogue:\n{js}"
+        );
+        assert!(
+            !js.contains("$.from_html"),
+            "host root clones no template:\n{js}"
+        );
+        assert!(!js.contains("$.append"), "host root mounts nothing:\n{js}");
+        assert!(
+            !js.contains("$.comment"),
+            "host root has no comment anchor:\n{js}"
+        );
+        assert!(
+            parses_as_js(&js),
+            "host event module must be valid JS:\n{js}"
         );
     }
 }
@@ -5489,108 +5518,1369 @@ fn component_bind_prop_unwritable_root_fails_closed() {
 }
 
 #[test]
-fn svelte_window_size_bind_fails_closed_until_special_element_hosts_are_supported() {
-    // `<svelte:window bind:innerWidth={w}/>` — the `<svelte:window>` special-element
-    // HOST is refused (every non-`<svelte:options>` `<svelte:*>` is a renderable 5f
-    // surface). Official emits `$.bind_window_size('innerWidth', ($$value) => $.set(w,
-    // $$value, true))` — a 5f shape with the window-host should_proxy flag.
-    assert_fail_closed(
+fn svelte_window_size_bind_emits_bind_window_size() {
+    // `<svelte:window bind:innerWidth={w}/>` → `$.bind_window_size('innerWidth', ($$value) =>
+    // $.set(w, $$value, true))` — the dimension NAME first, NO host expr, setter-only, with
+    // the window-host `should_proxy` flag.
+    let js = emit(
         "<script>let w = $state(0);</script>\n<svelte:window bind:innerWidth={w} />\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::ComponentOrSnippet { construct, .. } if *construct == "svelte:window"),
+        "App.svelte",
     );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.bind_window_size('innerWidth', ($$value) => $.set(w, $$value, true))"
+        )),
+        "bind:innerWidth must emit bind_window_size with the proxy flag:\n{js}"
+    );
+    // NEGATIVE: no host expr passed to bind_window_size, no DOM clone/append.
+    assert!(
+        !n.contains(&nc("$.bind_window_size($.window")),
+        "no host expr for window_size:\n{js}"
+    );
+    assert!(
+        !js.contains("$.from_html") && !js.contains("$.append"),
+        "no DOM frame:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
 }
 
 #[test]
-fn svelte_window_scroll_bind_fails_closed_until_special_element_hosts_are_supported() {
-    // `<svelte:window bind:scrollX={sx}/>` — the window host is refused. Official emits
-    // `$.bind_window_scroll('x', get, set)` — a 5f shape.
-    assert_fail_closed(
+fn svelte_window_scroll_bind_emits_bind_window_scroll() {
+    // `<svelte:window bind:scrollX={sx}/>` → `$.bind_window_scroll('x', () => $.get(sx),
+    // ($$value) => $.set(sx, $$value, true))` — the axis name REMAPPED to `'x'`, READ-WRITE
+    // (get+set), with the proxy flag.
+    let js = emit(
         "<script>let sx = $state(0);</script>\n<svelte:window bind:scrollX={sx} />\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::ComponentOrSnippet { construct, .. } if *construct == "svelte:window"),
+        "App.svelte",
     );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.bind_window_scroll('x', () => $.get(sx), ($$value) => $.set(sx, $$value, true))"
+        )),
+        "bind:scrollX must emit bind_window_scroll('x', get, set):\n{js}"
+    );
+    // NEGATIVE: the runtime name is 'x', NEVER the literal 'scrollX'.
+    assert!(
+        !n.contains(&nc("'scrollX'")),
+        "scrollX must remap to 'x', never 'scrollX':\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
 }
 
 #[test]
-fn svelte_body_bind_fails_closed_until_special_element_hosts_are_supported() {
-    // `<svelte:body bind:clientWidth={w}/>` — the `<svelte:body>` host is refused (5f).
-    // Official emits `$.bind_element_size($.document.body, …)` — a 5f shape.
-    assert_fail_closed(
+fn svelte_body_dimension_bind_emits_bind_element_size_against_body() {
+    // `<svelte:body bind:clientWidth={w}/>` → `$.bind_element_size($.document.body,
+    // 'clientWidth', ($$value) => $.set(w, $$value, true))` — the ELEMENT dimension helper
+    // reused with the `$.document.body` host AND the `should_proxy` flag (the element form
+    // has NO proxy flag).
+    let js = emit(
         "<script>let w = $state(0);</script>\n<svelte:body bind:clientWidth={w} />\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::ComponentOrSnippet { construct, .. } if *construct == "svelte:body"),
+        "App.svelte",
     );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.bind_element_size($.document.body, 'clientWidth', ($$value) => $.set(w, $$value, true))"
+        )),
+        "body bind:clientWidth must emit bind_element_size against $.document.body:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
 }
 
 #[test]
 fn svelte_body_scrollx_bind_is_invalid_and_fails_closed() {
-    // `<svelte:body bind:scrollX={sx}/>` is an OFFICIAL COMPILE ERROR — `<svelte:body>`
-    // has NO `scrollX`/`scrollY` (those belong to `<svelte:window>`). It must NEVER
-    // emit; Verter refuses it at the `<svelte:body>` host gate (the host is not yet
-    // supported, owned by 5f, where the official-invalid host/name pair is a
-    // NEGATIVE-coverage case).
+    // `<svelte:body bind:scrollX={sx}/>` is an OFFICIAL COMPILE ERROR — `<svelte:body>` has
+    // NO `scrollX`/`scrollY` (those are window-only). It must NEVER emit; Verter refuses it
+    // at the HOST-SCOPED bind contract (`scrollX` is window-only, so the body host has no
+    // routing) → the generic `Binding` refusal. The EXACT official `bind_invalid_target`
+    // code/order is the D-29 deferral; the bind STILL fails closed (never emits).
     assert_fail_closed(
         "<script>let sx = $state(0);</script>\n<svelte:body bind:scrollX={sx} />\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::ComponentOrSnippet { construct, .. } if *construct == "svelte:body"),
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "scrollX"),
     );
 }
 
 #[test]
-fn svelte_document_bind_fails_closed_until_special_element_hosts_are_supported() {
-    // `<svelte:document bind:activeElement={el}/>` — the `<svelte:document>` host is
-    // refused (5f). RED if accepted.
-    assert_fail_closed(
-        "<script>let el = $state();</script>\n<svelte:document bind:activeElement={el} />\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::ComponentOrSnippet { construct, .. } if *construct == "svelte:document"),
+fn svelte_document_active_element_bind_emits_bind_active_element() {
+    // `<svelte:document bind:activeElement={el}/>` → `$.bind_active_element(($$value) =>
+    // $.set(el, $$value, true))` — the DEDICATED setter-only helper, NO name, NO host expr
+    // (NOT `$.bind_property`).
+    let js = emit(
+        "<script>let el = $state(0);</script>\n<svelte:document bind:activeElement={el} />\n",
+        "App.svelte",
     );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.bind_active_element(($$value) => $.set(el, $$value, true))"
+        )),
+        "bind:activeElement must emit the dedicated bind_active_element:\n{js}"
+    );
+    // NEGATIVE: activeElement is NOT routed through $.bind_property.
+    assert!(
+        !n.contains(&nc("$.bind_property('activeElement'")),
+        "activeElement is not bind_property:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
 }
 
 #[test]
-fn svelte_document_this_bind_fails_closed_until_special_element_hosts_are_supported() {
-    // `<svelte:document bind:this={d}/>` — the `<svelte:document>` host `bind:this` is
-    // refused (5f). Official emits `$.bind_this($.document, …)` — a 5f shape. RED if
-    // accepted.
-    assert_fail_closed(
-        "<script>let d = $state();</script>\n<svelte:document bind:this={d} />\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::ComponentOrSnippet { construct, .. } if *construct == "svelte:document"),
+fn svelte_document_this_bind_emits_bind_this_against_document() {
+    // `<svelte:document bind:this={d}/>` → `$.bind_this($.document, ($$value) => $.set(d,
+    // $$value, true), () => $.get(d))`.
+    let js = emit(
+        "<script>let d = $state(0);</script>\n<svelte:document bind:this={d} />\n",
+        "App.svelte",
     );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.bind_this($.document, ($$value) => $.set(d, $$value, true), () => $.get(d))"
+        )),
+        "document bind:this must emit bind_this against $.document:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
 }
 
 #[test]
-fn svelte_window_this_bind_fails_closed_until_special_element_hosts_are_supported() {
-    // `<svelte:window bind:this={w}/>` — the `<svelte:window>` host `bind:this` is a
-    // DISTINCT special-element surface (not yet supported, owned by 5f). Official emits
-    // `$.bind_this($.window, ($$value)
-    // => $.set(w, $$value, true), () => $.get(w))` — a 5f shape with the window-host
-    // should_proxy flag. RED if the window host `bind:this` were wrongly accepted.
-    assert_fail_closed(
-        "<script>let w = $state();</script>\n<svelte:window bind:this={w} />\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::ComponentOrSnippet { construct, .. } if *construct == "svelte:window"),
+fn svelte_window_this_bind_emits_bind_this_against_window() {
+    // `<svelte:window bind:this={w}/>` → `$.bind_this($.window, ($$value) => $.set(w,
+    // $$value, true), () => $.get(w))` — the window-host should_proxy setter.
+    let js = emit(
+        "<script>let w = $state(0);</script>\n<svelte:window bind:this={w} />\n",
+        "App.svelte",
     );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.bind_this($.window, ($$value) => $.set(w, $$value, true), () => $.get(w))"
+        )),
+        "window bind:this must emit bind_this against $.window:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
 }
 
 #[test]
-fn svelte_window_online_bind_fails_closed_until_special_element_hosts_are_supported() {
-    // `<svelte:window bind:online={on}/>` — the `<svelte:window>` host is refused (5f).
-    // Official emits `$.bind_online(($$value) => $.set(on, $$value, true))` — a 5f
-    // shape (the D-21 zero-coverage-gap invariant requires 5c to retain this explicit
-    // refusal until 5f opens the `<svelte:window>` host). RED if the online bind were
-    // wrongly accepted.
-    assert_fail_closed(
+fn svelte_window_online_bind_emits_bind_online() {
+    // `<svelte:window bind:online={on}/>` → `$.bind_online(($$value) => $.set(on, $$value,
+    // true))` — setter-only, NO name, NO host.
+    let js = emit(
         "<script>let on = $state(false);</script>\n<svelte:window bind:online={on} />\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::ComponentOrSnippet { construct, .. } if *construct == "svelte:window"),
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("$.bind_online(($$value) => $.set(on, $$value, true))")),
+        "bind:online must emit the setter-only bind_online:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn svelte_body_this_bind_emits_bind_this_against_body() {
+    // `<svelte:body bind:this={b}/>` → `$.bind_this($.document.body, ($$value) => $.set(b,
+    // $$value, true), () => $.get(b))`.
+    let js = emit(
+        "<script>let b = $state(0);</script>\n<svelte:body bind:this={b} />\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.bind_this($.document.body, ($$value) => $.set(b, $$value, true), () => $.get(b))"
+        )),
+        "body bind:this must emit bind_this against $.document.body:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn svelte_host_bind_invalid_name_or_wrong_host_pairs_fail_closed() {
+    // The §1.8 wrong-host / unknown-name negatives — each is an official compile error
+    // (`bind_invalid_target` / `bind_invalid_name`); Verter fails them closed at the
+    // HOST-SCOPED bind contract (the bind never emits). The EXACT official code/order is the
+    // D-29 deferral, so the discriminator is the generic `Binding` refusal naming the bad
+    // bind target.
+    for (src, target) in [
+        // bind name valid on ANOTHER host, used on the WRONG host (bind_invalid_target).
+        (
+            "<script>let sx = $state(0);</script>\n<svelte:document bind:scrollX={sx} />\n",
+            "scrollX",
+        ),
+        (
+            "<script>let w = $state(0);</script>\n<svelte:document bind:innerWidth={w} />\n",
+            "innerWidth",
+        ),
+        (
+            "<script>let vs = $state(0);</script>\n<svelte:body bind:visibilityState={vs} />\n",
+            "visibilityState",
+        ),
+        // a dimension bind (window-INVALID per svelte's invalid_elements) on window
+        // (bind_invalid_name — clientWidth is not a window binding).
+        (
+            "<script>let cw = $state(0);</script>\n<svelte:window bind:clientWidth={cw} />\n",
+            "clientWidth",
+        ),
+        // a totally-unknown bind name (bind_invalid_name, no host).
+        (
+            "<script>let x = $state(0);</script>\n<svelte:window bind:fooBar={x} />\n",
+            "fooBar",
+        ),
+    ] {
+        assert_fail_closed(
+            src,
+            |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target: t, .. } if t == target),
+        );
+    }
+}
+
+#[test]
+fn svelte_element_dynamic_tag_emits_comment_anchored_element_call() {
+    // `<svelte:element this={tag}>hi</svelte:element>` → the comment-anchor frame + `$.element(
+    // node, () => tag, false, ($$element, $$anchor) => { … })` + `$.append`. The get-tag thunk
+    // wraps the rewritten `this` expression; the children are the callback's body region.
+    let js = emit(
+        "<script>let tag = $state('div');</script>\n<svelte:element this={tag}>hi</svelte:element>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("var fragment = $.comment();")),
+        "comment anchor:\n{js}"
+    );
+    assert!(
+        n.contains(&nc("var node = $.first_child(fragment);")),
+        "first_child:\n{js}"
+    );
+    assert!(
+        n.contains(&nc(
+            "$.element(node, () => tag, false, ($$element, $$anchor) =>"
+        )),
+        "element call with get-tag thunk + is_svg=false + callback:\n{js}"
+    );
+    assert!(
+        n.contains(&nc("$.append($$anchor, fragment);")),
+        "mount:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn svelte_element_attrs_fold_into_attribute_effect_with_hoisted_handler() {
+    // `<svelte:element this={tag} class={cls} onclick={() => n++}>` → the `on*` handler hoists
+    // to a stable `var event_handler = …;` local, then the single `$.attribute_effect($$element,
+    // () => ({ class: cls, onclick: event_handler }))` fold.
+    let js = emit(
+        "<script>let tag = $state('div');let cls = $state('a');let n = $state(0);</script>\n<svelte:element this={tag} class={cls} onclick={() => n++}>hi</svelte:element>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("var event_handler = () => $.update(n);")),
+        "the event handler must hoist to a stable local:\n{js}"
+    );
+    assert!(
+        n.contains(&nc(
+            "$.attribute_effect($$element, () => ({ class: cls, onclick: event_handler }))"
+        )),
+        "attrs + the hoisted handler fold into one attribute_effect:\n{js}"
+    );
+    // NEGATIVE: the handler is NOT inlined into the fold object.
+    assert!(
+        !n.contains(&nc("onclick: () => $.update(n)")),
+        "the handler must be hoisted, not inlined in the fold:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn svelte_element_binds_run_against_the_element_callback_param() {
+    // `bind:this` / dimension binds on `<svelte:element>` run against the `$$element` callback
+    // param with the proxied host setter.
+    let this_js = emit(
+        "<script>let tag = $state('div');let el = $state(0);</script>\n<svelte:element this={tag} bind:this={el}>hi</svelte:element>\n",
+        "App.svelte",
+    );
+    assert!(
+        normalize_js_cosmetics(&this_js).contains(&nc(
+            "$.bind_this($$element, ($$value) => $.set(el, $$value, true), () => $.get(el))"
+        )),
+        "element bind:this runs against $$element:\n{this_js}"
+    );
+    let dim_js = emit(
+        "<script>let tag = $state('div');let w = $state(0);</script>\n<svelte:element this={tag} bind:clientWidth={w}>hi</svelte:element>\n",
+        "App.svelte",
+    );
+    assert!(
+        normalize_js_cosmetics(&dim_js).contains(&nc(
+            "$.bind_element_size($$element, 'clientWidth', ($$value) => $.set(w, $$value, true))"
+        )),
+        "element dimension bind runs against $$element with the proxy flag:\n{dim_js}"
     );
 }
 
 #[test]
-fn svelte_body_this_bind_fails_closed_until_special_element_hosts_are_supported() {
-    // `<svelte:body bind:this={b}/>` — the `<svelte:body>` host `bind:this` is refused
-    // (5f). Official emits `$.bind_this($.document.body, ($$value) => $.set(b, $$value,
-    // true), () => $.get(b))` — a 5f shape (the D-21 zero-coverage-gap invariant
-    // requires 5c to retain this explicit refusal until 5f opens the `<svelte:body>`
-    // host). RED if the body `bind:this` were wrongly accepted.
-    assert_fail_closed(
-        "<script>let b = $state();</script>\n<svelte:body bind:this={b} />\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::ComponentOrSnippet { construct, .. } if *construct == "svelte:body"),
+fn svelte_element_empty_body_omits_the_callback() {
+    // `<svelte:element this={tag} />` with no attrs/binds/children → the OMITTED 3-argument
+    // `$.element(node, () => tag, false)` call (no callback).
+    let js = emit(
+        "<script>let tag = $state('div');</script>\n<svelte:element this={tag} />\n",
+        "App.svelte",
     );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("$.element(node, () => tag, false);")),
+        "an empty-bodied dynamic element omits the callback (3-arg call):\n{js}"
+    );
+    // NEGATIVE: no 4th callback argument.
+    assert!(
+        !n.contains(&nc("$.element(node, () => tag, false, (")),
+        "the empty-body call must NOT carry a callback:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn svelte_element_lone_static_class_emits_set_class_not_attribute_effect() {
+    // F7: the official `SvelteElement` LONE-static-class fast path — a `<svelte:element>` whose
+    // ONLY plain attribute is a static-text `class` emits `$.set_class($$element, 0, '<cls>')`
+    // (the `is_html` false ⇒ `0` flags arg), NOT the `$.attribute_effect` fold. Hardens the
+    // fast-path routing beyond the corpus golden.
+    let js = emit(
+        "<script>let tag = $state('div');</script>\n<svelte:element this={tag} class=\"card\">hi</svelte:element>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("$.set_class($$element, 0, 'card')")),
+        "a lone static class takes the set_class fast path:\n{js}"
+    );
+    // NEGATIVE: the lone static class does NOT route through the attribute_effect fold.
+    assert!(
+        !js.contains("attribute_effect"),
+        "a lone static class must NOT emit an attribute_effect fold:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+
+    // INVERSE (non-lone): a SECOND plain attribute (`id="x"`) disqualifies the fast path — the
+    // class folds into `$.attribute_effect` as a `class: '…'` entry, and NO lone `$.set_class`
+    // is emitted.
+    let js2 = emit(
+        "<script>let tag = $state('div');</script>\n<svelte:element this={tag} class=\"card\" id=\"x\">hi</svelte:element>\n",
+        "App.svelte",
+    );
+    let n2 = normalize_js_cosmetics(&js2);
+    assert!(
+        js2.contains("attribute_effect") && n2.contains(&nc("class: 'card'")),
+        "a non-lone class folds into the attribute_effect:\n{js2}"
+    );
+    assert!(
+        !n2.contains(&nc("$.set_class($$element, 0, 'card')")),
+        "the non-lone case must NOT take the lone set_class fast path:\n{js2}"
+    );
+    assert!(parses_as_js(&js2), "module must be valid JS:\n{js2}");
+}
+
+#[test]
+fn svelte_element_class_directive_takes_set_class_fast_path() {
+    // The official lone-class fast path fires WITH co-located `class:` directives: a
+    // `<svelte:element class="card" class:active={x}>` emits the directive-object form
+    // `$.set_class($$element, 0, 'card', null, {}, { active: x })` (verified against
+    // pinned svelte@5.56.3), NOT an `$.attribute_effect` fold with a `[$.CLASS]` entry.
+    let js = emit(
+        "<script>let tag = $state('div');let x = $state(false);</script>\n<svelte:element this={tag} class=\"card\" class:active={x}>hi</svelte:element>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.set_class($$element, 0, 'card', null, {}, { active: x })"
+        )),
+        "class + class: directive takes the set_class fast path with the directive object:\n{js}"
+    );
+    assert!(
+        !js.contains("attribute_effect"),
+        "class + class: directive must NOT fold into attribute_effect:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+
+    // INVERSE: a SECOND plain attribute disqualifies the fast path — the class + the
+    // `[$.CLASS]` directive entry fold into `$.attribute_effect` (official parity:
+    // `{ 'data-x': y, class: 'card', [$.CLASS]: { active: x } }`).
+    let js2 = emit(
+        "<script>let tag = $state('div');let x = $state(false);let y = $state(1);</script>\n<svelte:element this={tag} data-x={y} class=\"card\" class:active={x}>hi</svelte:element>\n",
+        "App.svelte",
+    );
+    let n2 = normalize_js_cosmetics(&js2);
+    assert!(
+        n2.contains(&nc(
+            "$.attribute_effect($$element, () => ({ 'data-x': y, class: 'card', [$.CLASS]: { active: x } }))"
+        )),
+        "a non-lone class + directive folds into attribute_effect:\n{js2}"
+    );
+    assert!(
+        !n2.contains(&nc("$.set_class")),
+        "the non-lone case must NOT take the set_class fast path:\n{js2}"
+    );
+    assert!(parses_as_js(&js2), "module must be valid JS:\n{js2}");
+}
+
+#[test]
+fn svelte_element_pure_class_directive_synthesizes_empty_class_base() {
+    // A `class:` directive with NO class attribute synthesizes the empty class base
+    // (official's analyze-phase empty-class synthesis): `$.set_class($$element, 0, '',
+    // null, {}, { active: x })` — verified against pinned svelte@5.56.3. NOT a bare
+    // `[$.CLASS]` attribute_effect fold.
+    let js = emit(
+        "<script>let tag = $state('div');let x = $state(false);</script>\n<svelte:element this={tag} class:active={x}>hi</svelte:element>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.set_class($$element, 0, '', null, {}, { active: x })"
+        )),
+        "a pure class: directive synthesizes the empty class base:\n{js}"
+    );
+    assert!(
+        !js.contains("attribute_effect"),
+        "a pure class: directive must NOT fold into attribute_effect:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn svelte_element_reactive_class_directive_uses_accumulator_effect() {
+    // A LIVE-signal `class:` directive on the fast path — official wraps the call in the
+    // accumulator effect: `let classes;` + `$.template_effect(() => classes =
+    // $.set_class($$element, 0, 'card', null, classes, { active: $.get(x) }))` (verified
+    // against pinned svelte@5.56.3), with the legacy `on:` registration AFTER the effect.
+    let js = emit(
+        "<script>let tag = $state('div');let x = $state(false);</script>\n<svelte:element this={tag} class=\"card\" class:active={x} on:click={() => (x = !x)}>hi</svelte:element>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("let classes;")),
+        "the reactive directive path declares the accumulator:\n{js}"
+    );
+    assert!(
+        n.contains(&nc(
+            "$.template_effect(() => classes = $.set_class($$element, 0, 'card', null, classes, { active: $.get(x) }))"
+        )),
+        "the reactive set_class joins a template_effect with the accumulator:\n{js}"
+    );
+    // The legacy `on:` registration stays AFTER the class effect (official after_update).
+    let effect_pos = n.find("template_effect").expect("class effect");
+    let event_pos = n
+        .find(&nc("$.event('click'"))
+        .expect("legacy on: registration");
+    assert!(
+        effect_pos < event_pos,
+        "the legacy on: registration must follow the class effect:\n{js}"
+    );
+    assert!(
+        !js.contains("attribute_effect"),
+        "the reactive fast path must NOT fold into attribute_effect:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn svelte_element_mixed_case_class_takes_set_class_fast_path() {
+    // Official matches the plain `class` attribute NAME case-insensitively
+    // (`SvelteElement.js`: `attributes[0].name.toLowerCase() === 'class'`), so a
+    // mixed-case `<svelte:element CLASS="card">` takes the lone-class fast path
+    // `$.set_class($$element, 0, 'card')` — verified against pinned svelte@5.56.3 —
+    // NOT an `$.attribute_effect` fold carrying a case-preserved `CLASS: 'card'`.
+    let js = emit(
+        "<script>let tag = $state('div');</script>\n<svelte:element this={tag} CLASS=\"card\">hi</svelte:element>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("$.set_class($$element, 0, 'card')")),
+        "a lone mixed-case CLASS takes the set_class fast path:\n{js}"
+    );
+    assert!(
+        !js.contains("attribute_effect"),
+        "a lone mixed-case CLASS must NOT fold into attribute_effect:\n{js}"
+    );
+    assert!(
+        !js.contains("CLASS: 'card'"),
+        "a lone mixed-case CLASS must NOT emit a case-preserved generic fold entry:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+
+    // WITH a co-located `class:` directive the fast path still fires (official passes
+    // the class directives into `build_set_class`): `$.set_class($$element, 0, 'card',
+    // null, {}, { active: x })` — and NO spurious analyze-phase `class: ''` synthesis
+    // (official's `has_class ||= attribute.name.toLowerCase() === 'class'` sees the
+    // mixed-case attribute).
+    let js2 = emit(
+        "<script>let tag = $state('div');let x = $state(false);</script>\n<svelte:element this={tag} CLASS=\"card\" class:active={x}>hi</svelte:element>\n",
+        "App.svelte",
+    );
+    let n2 = normalize_js_cosmetics(&js2);
+    assert!(
+        n2.contains(&nc(
+            "$.set_class($$element, 0, 'card', null, {}, { active: x })"
+        )),
+        "mixed-case CLASS + class: directive takes the set_class fast path with the directive object:\n{js2}"
+    );
+    assert!(
+        !js2.contains("attribute_effect"),
+        "mixed-case CLASS + class: directive must NOT fold into attribute_effect:\n{js2}"
+    );
+    assert!(
+        !n2.contains(&nc("class: ''")),
+        "the mixed-case CLASS suppresses the empty-class synthesis:\n{js2}"
+    );
+    assert!(parses_as_js(&js2), "module must be valid JS:\n{js2}");
+}
+
+#[test]
+fn regular_element_mixed_case_class_merges_into_set_class_base() {
+    // The regular-element surface shares the same case-insensitive class-name rule
+    // (official normalizes HTML attribute names via `get_attribute_name` →
+    // `normalize_attribute` before routing): `<div CLASS="card" class:active={x}>`
+    // emits `$.set_class(div, 1, 'card', null, {}, { active: x })` with the class
+    // PULLED OUT of the skeleton (`<div>hi</div>`) — verified against pinned
+    // svelte@5.56.3.
+    let js = emit(
+        "<script>let x = $state(false);</script>\n<div CLASS=\"card\" class:active={x}>hi</div>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("$.set_class(div, 1, 'card', null, {}, { active: x })")),
+        "mixed-case CLASS + class: directive merges into the set_class base:\n{js}"
+    );
+    // The base is pulled OUT of the cloned skeleton — no baked class attribute (which
+    // would double-apply the class), and no case-preserved generic entry anywhere.
+    assert!(
+        js.contains("$.from_html(`<div>hi</div>`)"),
+        "the class base must be pulled out of the skeleton:\n{js}"
+    );
+    assert!(
+        !js.contains("CLASS: 'card'") && !js.contains("class=\"card\""),
+        "the mixed-case CLASS must NOT bake into the skeleton or fold as a generic entry:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn regular_element_uppercase_dynamic_class_pins_divergent_emission() {
+    // PINS A DIVERGENCE: official svelte@5.56.3 normalizes the HTML attribute name
+    // (`get_attribute_name` → `normalize_attribute`, lowercase) BEFORE routing, so a
+    // lone `<div CLASS={k}>` emits a SINGLE `$.set_class(div, 1, k)` — with NO
+    // `$.clsx` (the clsx wrap is case-dependent: lowercase `class={k}` gets it,
+    // uppercase does not) and NO `$.set_attribute`. Verter's dynamic-attr routing
+    // recognizes only the lowercase spelling as the class channel, so the uppercase
+    // name takes the generic path: `$.set_attribute(div, 'class', k)` (the NAME
+    // lowercases at emission, but the routing decision already missed `$.set_class`).
+    // This is a TEMPORARY non-parity divergence owned by the general 5a/parser
+    // class/style attribute-identity + emission-routing layer and tracked as
+    // debt-ledger row D-37 (docs/arch/svelte-native-compiler-plan.md). This test pins
+    // the current divergent shape and MUST fail (go RED) when that convergence lands.
+    let js = emit(
+        "<script>let k = $state('x');</script>\n<div CLASS={k}>hi</div>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("$.set_attribute(div, 'class', k)")),
+        "a lone dynamic uppercase CLASS currently routes to the generic $.set_attribute channel:\n{js}"
+    );
+    assert!(
+        !js.contains("$.set_class("),
+        "a lone dynamic uppercase CLASS currently misses the $.set_class routing (official emits $.set_class(div, 1, k)):\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+
+    // Co-located with a `class:` directive, the divergence DOUBLE-EMITS: the merge
+    // into the `$.set_class` base fires (with the lowercase-authored `$.clsx` wrap),
+    // AND a redundant generic `$.set_attribute` survives for the same attribute.
+    // Official emits ONLY the merged `$.set_class`.
+    let js2 = emit(
+        "<script>let c = $state('x');let x = $state(true);</script>\n<div CLASS={c} class:active={x}>hi</div>\n",
+        "App.svelte",
+    );
+    let n2 = normalize_js_cosmetics(&js2);
+    assert!(
+        n2.contains(&nc("$.set_attribute(div, 'class', c)")),
+        "the co-located uppercase CLASS currently keeps a redundant $.set_attribute:\n{js2}"
+    );
+    assert!(
+        n2.contains(&nc(
+            "$.set_class(div, 1, $.clsx(c), null, {}, { active: x })"
+        )),
+        "the class: directive merge still emits the $.set_class base:\n{js2}"
+    );
+    assert!(parses_as_js(&js2), "module must be valid JS:\n{js2}");
+}
+
+#[test]
+fn regular_element_uppercase_static_lone_class_pins_fail_closed() {
+    // PINS A DIVERGENCE: official svelte@5.56.3 ACCEPTS a static lone uppercase
+    // `<div CLASS="card">` and bakes the LOWERCASED `class="card"` into the static
+    // skeleton (`<div class="card">hi</div>`). Verter's static-attribute allowlist is
+    // case-SENSITIVE, so the unrecognized uppercase spelling falls through to the
+    // dynamic-attr classifier and FAILS CLOSED as the `DynamicAttribute` surface with
+    // the authored name. This fail-close is a TEMPORARY non-parity divergence owned
+    // by the general 5a/parser static-attribute identity/serializer layer and tracked
+    // as debt-ledger row D-37 (docs/arch/svelte-native-compiler-plan.md). This test
+    // pins the current refusal and MUST fail (go RED — start accepting) when that
+    // convergence lands. (The fixture carries a rune so mode inference lands on runes
+    // mode; a script-less carrier refuses earlier as the unrelated LegacyMode gate.)
+    let result = emit_result("<script>let k = $state(0);</script>\n<div CLASS=\"card\">hi</div>\n");
+    assert!(
+        matches!(
+            &result,
+            Err(ClientCompileError::Unsupported(
+                UnsupportedSvelteRuntimeSurface::DynamicAttribute { name, .. }
+            )) if name == "CLASS"
+        ),
+        "a static lone uppercase CLASS currently fails closed as the DynamicAttribute surface with the authored name, got {result:?}"
+    );
+
+    // POSITIVE CONTRAST: the lowercase spelling is the supported static-class path —
+    // it bakes into the cloned skeleton with no runtime class helper at all.
+    let js = emit(
+        "<script>let k = $state(0);</script>\n<div class=\"card\">hi</div>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.from_html(`<div class=\"card\">hi</div>`)"),
+        "the lowercase static class bakes into the skeleton:\n{js}"
+    );
+    assert!(
+        !js.contains("$.set_class(") && !js.contains("$.set_attribute("),
+        "a baked static class needs no runtime class helper:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn svelte_element_mixed_case_style_attr_suppresses_empty_style_synthesis() {
+    // Official's analyze-phase empty-style synthesis checks the attribute name
+    // case-insensitively (`has_style ||= attribute.name.toLowerCase() === 'style'`), so
+    // `<svelte:element STYLE="background: blue" style:color={c}>` folds WITHOUT a
+    // synthesized `style: ''` entry: `$.attribute_effect($$element, () => ({ STYLE:
+    // 'background: blue', [$.STYLE]: { color: c } }))` — the generic entry keeps the
+    // authored case — verified against pinned svelte@5.56.3.
+    let js = emit(
+        "<script>let tag = $state('div');let c = $state('red');</script>\n<svelte:element this={tag} STYLE=\"background: blue\" style:color={c}>hi</svelte:element>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.attribute_effect($$element, () => ({ STYLE: 'background: blue', [$.STYLE]: { color: c } }))"
+        )),
+        "mixed-case STYLE folds with the authored case and the style-directive entry:\n{js}"
+    );
+    assert!(
+        !n.contains(&nc("style: ''")),
+        "the mixed-case STYLE suppresses the empty-style synthesis:\n{js}"
+    );
+    assert!(
+        !js.contains("set_style"),
+        "a <svelte:element> style surface folds — it never emits $.set_style:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn uppercase_style_directive_prefix_is_not_a_style_directive() {
+    // NEGATIVE RAIL: the DIRECTIVE prefix stays case-SENSITIVE — official recognizes
+    // only lowercase `style:`. An uppercase `STYLE:color={c}` is NOT a style directive
+    // in either compiler. Official ACCEPTS it and FOLDS it as a GENERIC attribute named
+    // `STYLE:color`; Verter's directive-kind table is lowercase-only, so the
+    // unknown-directive candidate FAILS CLOSED (never a `[$.STYLE]` / `$.set_style`
+    // emission). This fail-close is a TEMPORARY non-parity divergence — official accepts
+    // the generic-attribute fold, Verter refuses — owned by the general 5a/parser
+    // attribute-name case-normalization follow-up and tracked as debt-ledger row D-37
+    // (docs/arch/svelte-native-compiler-plan.md). It is NOT official parity. The
+    // conservative refusal is fail-close-safe until that convergence lands.
+    match emit_result(
+        "<script>let tag = $state('div');let c = $state('red');</script>\n<svelte:element this={tag} STYLE:color={c}>hi</svelte:element>\n",
+    ) {
+        Err(ClientCompileError::Lowering(errs)) => {
+            assert!(
+                errs.diagnostics
+                    .iter()
+                    .any(|d| d.code == "svelte-runtime-unknown-directive"),
+                "an uppercase STYLE: prefix must fail closed as an unknown directive:\n{errs:?}"
+            );
+        }
+        Ok(js) => {
+            panic!("an uppercase STYLE: prefix must NOT compile as a style directive:\n{js}")
+        }
+        Err(other) => panic!("expected an unknown-directive lowering error, got: {other:?}"),
+    }
+
+    // POSITIVE CONTRAST: the lowercase `style:` prefix IS the style directive.
+    let js = emit(
+        "<script>let tag = $state('div');let c = $state('red');</script>\n<svelte:element this={tag} style:color={c}>hi</svelte:element>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("[$.STYLE]: { color: c }")),
+        "the lowercase style: prefix is the style directive:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn svelte_element_style_directive_synthesizes_empty_style_fold_entry() {
+    // A `style:` directive synthesizes the empty `style` attribute (official's
+    // analyze-phase synthesis), which routes the element to the FOLD even when the only
+    // real attribute is a static-text class: `$.attribute_effect($$element, () => ({
+    // class: 'x', style: '', [$.STYLE]: { color: c } }))` — verified against pinned
+    // svelte@5.56.3. The lone-class set_class fast path must NOT fire.
+    let js = emit(
+        "<script>let tag = $state('div');let c = $state('red');</script>\n<svelte:element this={tag} class=\"x\" style:color={c}>hi</svelte:element>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.attribute_effect($$element, () => ({ class: 'x', style: '', [$.STYLE]: { color: c } }))"
+        )),
+        "class + style: directive folds with the synthesized empty style entry:\n{js}"
+    );
+    assert!(
+        !n.contains(&nc("$.set_class")),
+        "a style: directive must disqualify the set_class fast path:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+
+    // A PURE `style:` directive (no plain attrs) still synthesizes the empty style
+    // entry: `{ style: '', [$.STYLE]: { color: c } }` (official parity).
+    let js2 = emit(
+        "<script>let tag = $state('div');let c = $state('red');</script>\n<svelte:element this={tag} style:color={c}>hi</svelte:element>\n",
+        "App.svelte",
+    );
+    let n2 = normalize_js_cosmetics(&js2);
+    assert!(
+        n2.contains(&nc(
+            "$.attribute_effect($$element, () => ({ style: '', [$.STYLE]: { color: c } }))"
+        )),
+        "a pure style: directive folds with the synthesized empty style entry:\n{js2}"
+    );
+    assert!(parses_as_js(&js2), "module must be valid JS:\n{js2}");
+}
+
+#[test]
+fn svelte_element_bind_this_precedes_the_attribute_fold() {
+    // Official `<svelte:element>` setup order: `bind:this` is a REF CAPTURE pushed into
+    // the init body DURING the attribute loop, so it precedes the `$.attribute_effect`
+    // fold; measurement/property binds are `after_update` and FOLLOW the fold (verified
+    // against pinned svelte@5.56.3).
+    let js = emit(
+        "<script>let tag = $state('div');let w = $state(1);let el = $state(null);</script>\n<svelte:element this={tag} data-x={w} bind:this={el}>hi</svelte:element>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    let bind_pos = n.find("$.bind_this($$element").expect("bind_this emitted");
+    let fold_pos = n
+        .find("$.attribute_effect($$element")
+        .expect("fold emitted");
+    assert!(
+        bind_pos < fold_pos,
+        "bind:this must be emitted BEFORE the attribute fold:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+
+    // INVERSE lock: a MEASUREMENT bind stays AFTER the fold (already-official order —
+    // must not be dragged before the fold by the bind:this reorder).
+    let js2 = emit(
+        "<script>let tag = $state('div');let w = $state(1);let cw = $state(0);</script>\n<svelte:element this={tag} data-x={w} bind:clientWidth={cw}>hi</svelte:element>\n",
+        "App.svelte",
+    );
+    let n2 = normalize_js_cosmetics(&js2);
+    let fold_pos2 = n2
+        .find("$.attribute_effect($$element")
+        .expect("fold emitted");
+    let dim_pos = n2
+        .find("$.bind_element_size($$element")
+        .expect("dimension bind emitted");
+    assert!(
+        fold_pos2 < dim_pos,
+        "a measurement bind must stay AFTER the attribute fold:\n{js2}"
+    );
+    assert!(parses_as_js(&js2), "module must be valid JS:\n{js2}");
+}
+
+#[test]
+fn svelte_element_invalid_binds_fail_closed() {
+    // §1.8 element negatives — a bind valid only on ANOTHER host (`bind:value` on input/
+    // textarea/select, `bind:devicePixelRatio` on `<svelte:window>`) used on the generic
+    // dynamic-element host is an official `bind_invalid_target`; Verter fails it closed at the
+    // HOST-SCOPED bind contract (the bind never emits; the exact code is D-29).
+    for (src, target) in [
+        (
+            "<script>let tag = $state('div');let v = $state(0);</script>\n<svelte:element this={tag} bind:value={v} />\n",
+            "value",
+        ),
+        (
+            "<script>let tag = $state('div');let d = $state(0);</script>\n<svelte:element this={tag} bind:devicePixelRatio={d} />\n",
+            "devicePixelRatio",
+        ),
+    ] {
+        assert_fail_closed(
+            src,
+            |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target: t, .. } if t == target),
+        );
+    }
+}
+
+#[test]
+fn svelte_boundary_plain_emits_comment_anchored_boundary_call() {
+    // `<svelte:boundary><p>{x}</p></svelte:boundary>` → the comment-anchor frame + `$.boundary(
+    // node, {}, ($$anchor) => { <body> })` + `$.append`. Empty props, NO wrapping block.
+    let js = emit(
+        "<script>let { x } = $props();</script>\n<svelte:boundary><p>{x}</p></svelte:boundary>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("var fragment = $.comment();")),
+        "comment anchor:\n{js}"
+    );
+    assert!(
+        n.contains(&nc("$.boundary(node, {}, ($$anchor) =>")),
+        "boundary call with empty props:\n{js}"
+    );
+    assert!(
+        n.contains(&nc("$.append($$anchor, fragment);")),
+        "mount:\n{js}"
+    );
+    // NEGATIVE: no wrapping block (no hoisted snippet), no $.event for a (absent) onerror.
+    assert!(
+        !js.contains("$.event("),
+        "no $.event for the boundary:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn svelte_boundary_onerror_emits_the_props_member() {
+    // `<svelte:boundary onerror={() => n++}>` → `$.boundary(node, { onerror: () => $.update(n)
+    // }, cb)` — the onerror is a PROPS member (NOT a `$.event` listener, NOT hoisted).
+    let js = emit(
+        "<script>let n = $state(0);</script>\n<svelte:boundary onerror={() => n++}><p>x</p></svelte:boundary>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.boundary(node, {onerror: () => $.update(n)}, ($$anchor) =>"
+        )),
+        "onerror is a props member of $.boundary:\n{js}"
+    );
+    assert!(
+        !js.contains("$.event("),
+        "onerror is not a $.event listener:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn svelte_boundary_failed_snippet_hoists_into_the_wrapping_block() {
+    // `{#snippet failed(error, reset)}…{/snippet}` → the snippet hoists to a `const failed =
+    // ($$anchor, error = $.noop, reset = $.noop) => {…}` in a wrapping `{ … }` block above the
+    // call, passed by NAME (object shorthand) in the props.
+    let js = emit(
+        "<script>let { x } = $props();</script>\n<svelte:boundary><p>{x}</p>{#snippet failed(error, reset)}<p>oops</p>{/snippet}</svelte:boundary>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "const failed = ($$anchor, error = $.noop, reset = $.noop) =>"
+        )),
+        "failed snippet hoists with $.noop-defaulted params:\n{js}"
+    );
+    assert!(
+        n.contains(&nc("$.boundary(node, {failed}, ($$anchor) =>")),
+        "the failed snippet is passed by name (shorthand) in props:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn svelte_boundary_full_hoists_both_snippets_with_onerror() {
+    // onerror + failed + pending → both snippets hoist as consts, props `{ onerror: …, failed,
+    // pending }`.
+    let js = emit(
+        "<script>let n = $state(0);</script>\n<svelte:boundary onerror={() => n++}><p>content</p>{#snippet failed(error, reset)}<p>oops</p>{/snippet}{#snippet pending()}<p>loading</p>{/snippet}</svelte:boundary>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "const failed = ($$anchor, error = $.noop, reset = $.noop) =>"
+        )),
+        "failed hoist:\n{js}"
+    );
+    assert!(
+        n.contains(&nc("const pending = ($$anchor) =>")),
+        "pending hoist:\n{js}"
+    );
+    assert!(
+        n.contains(&nc(
+            "$.boundary(node, {onerror: () => $.update(n), failed, pending}, ($$anchor) =>"
+        )),
+        "props carry onerror + both snippet shorthands in source order:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn svelte_boundary_failed_attribute_emits_getter_prop() {
+    // MODERN `failed={expr}` ATTRIBUTE form (`expr` a state-bearing prop ref) → the props
+    // object carries the GETTER accessor `get failed() { return $$props.failed; }` — official's
+    // `has_state ? b.get(name, [b.return(expr)]) : b.init(name, expr)` rule (SvelteBoundary.js).
+    // NO `{#snippet}` hoist, NO wrapping block (the attribute form does not create a hoisted
+    // const). RED against cycle-2's conservative fail-close.
+    let js = emit(
+        "<script>let { failed } = $props();</script>\n<svelte:boundary failed={failed}><p>content</p></svelte:boundary>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.boundary(node, {get failed() { return $$props.failed; }}, ($$anchor) =>"
+        )),
+        "failed attr expr is a GETTER props member of $.boundary:\n{js}"
+    );
+    // NEGATIVE: the pure-attribute form hoists NO snippet const + opens NO wrapping block, and
+    // never emits the direct `{ failed }` snippet shorthand (that is the CHILD form).
+    assert!(
+        !n.contains(&nc("const failed =")),
+        "the attribute form must NOT hoist a snippet const:\n{js}"
+    );
+    assert!(
+        !n.contains(&nc("$.boundary(node, {failed}")),
+        "the attribute form must NOT emit the direct failed shorthand (that is the child form):\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn svelte_boundary_member_rooted_attribute_emits_getter_prop() {
+    // `failed={obj.failed}` over a PLAIN-LOCAL object (admitted as a DOM bind-target
+    // root) — the MEMBER-ROOT half of official's `has_state` (`MemberExpression.js`
+    // `!is_pure`): a member rooted at ANY declared binding is state-bearing, so the
+    // prop emits the GETTER member (verified against pinned svelte@5.56.3:
+    // `get failed() { return obj.failed; }`), NOT the plain `failed: obj.failed`
+    // init. The unrelated `$state` pins runes mode.
+    let js = emit(
+        "<script>let k = $state(0);\nlet obj = { failed: null };</script>\n<input bind:value={obj.failed} />\n<svelte:boundary failed={obj.failed}><p>hi</p></svelte:boundary>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.boundary(node, {get failed() { return obj.failed; }}, ($$anchor) =>"
+        )),
+        "a member-rooted failed value is a GETTER props member:\n{js}"
+    );
+    // NEGATIVE: never the plain init for a member-rooted value.
+    assert!(
+        !n.contains(&nc("failed: obj.failed")),
+        "a member-rooted failed value must NOT stay a plain init:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+
+    // INVERSE: a member read DEFERRED inside an arrow body stays the plain init (the
+    // sync-only rule) — official emits `onerror: () => obj.failed`.
+    let js2 = emit(
+        "<script>let k = $state(0);\nlet obj = { failed: null };</script>\n<input bind:value={obj.failed} />\n<svelte:boundary onerror={() => obj.failed}><p>hi</p></svelte:boundary>\n",
+        "App.svelte",
+    );
+    let n2 = normalize_js_cosmetics(&js2);
+    assert!(
+        n2.contains(&nc(
+            "$.boundary(node, {onerror: () => obj.failed}, ($$anchor) =>"
+        )),
+        "a deferred member read stays a plain onerror init:\n{js2}"
+    );
+    assert!(
+        !n2.contains(&nc("get onerror()")),
+        "a deferred member read must NOT promote to a getter:\n{js2}"
+    );
+    assert!(parses_as_js(&js2), "module must be valid JS:\n{js2}");
+}
+
+#[test]
+fn component_member_rooted_prop_emits_getter_not_init() {
+    // `<C x={obj.y}>` with `obj` a PLAIN LOCAL (admitted as a DOM bind-target root) —
+    // the SAME shared `prop_value_has_state` predicate drives the `Component.js`
+    // getter-vs-init decision, so the member-rooted value emits the GETTER
+    // `get x() { return obj.y; }` (verified against pinned svelte@5.56.3), NOT the
+    // plain `x: obj.y` init. Locks the shared predicate on the component surface. The
+    // unrelated `$state` pins runes mode.
+    let js = emit(
+        "<script>import C from './C.svelte';\nlet k = $state(0);\nlet obj = { y: '' };</script>\n<input bind:value={obj.y} />\n<C x={obj.y} />\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("get x() { return obj.y; }")),
+        "a member-rooted component prop is a GETTER member:\n{js}"
+    );
+    assert!(
+        !n.contains(&nc("x: obj.y")),
+        "a member-rooted component prop must NOT stay a plain init:\n{js}"
+    );
+    // INVERSE: a member read DEFERRED inside an arrow prop value stays the plain init
+    // (verified against pinned svelte@5.56.3: `C(node, { x: () => obj.y })`).
+    let js2 = emit(
+        "<script>import C from './C.svelte';\nlet k = $state(0);\nlet obj = { y: '' };</script>\n<input bind:value={obj.y} />\n<C x={() => obj.y} />\n",
+        "App.svelte",
+    );
+    let n2 = normalize_js_cosmetics(&js2);
+    assert!(
+        n2.contains(&nc("C(node, {x: () => obj.y})")),
+        "a deferred member read stays a plain prop init:\n{js2}"
+    );
+    assert!(
+        !n2.contains(&nc("get x()")),
+        "a deferred member read must NOT promote to a getter:\n{js2}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+    assert!(parses_as_js(&js2), "module must be valid JS:\n{js2}");
+}
+
+#[test]
+fn svelte_boundary_pending_attribute_emits_getter_prop() {
+    // MODERN `pending={expr}` ATTRIBUTE form → `get pending() { return $$props.pending; }`.
+    let js = emit(
+        "<script>let { pending } = $props();</script>\n<svelte:boundary pending={pending}><p>content</p></svelte:boundary>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.boundary(node, {get pending() { return $$props.pending; }}, ($$anchor) =>"
+        )),
+        "pending attr expr is a GETTER props member of $.boundary:\n{js}"
+    );
+    assert!(
+        !n.contains(&nc("const pending =")),
+        "the attribute form must NOT hoist a snippet const:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn svelte_boundary_all_attribute_forms_order_and_state_gate() {
+    // `onerror={() => n++} failed={failed} pending={pending}` — ALL three as attributes in
+    // SOURCE order. The onerror arrow is NOT state-bearing (its read is inside the arrow body,
+    // so official's `has_state` is false) ⇒ stays the PLAIN `onerror: …` init; the state-bearing
+    // failed/pending become GETTERS. So the props object is exactly `{ onerror: …, get failed()
+    // {…}, get pending() {…} }` — matching official's single attribute loop.
+    let js = emit(
+        "<script>let n = $state(0);\nlet { failed, pending } = $props();</script>\n<svelte:boundary onerror={() => n++} failed={failed} pending={pending}><p>content</p></svelte:boundary>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.boundary(node, {onerror: () => $.update(n), get failed() { return $$props.failed; }, get pending() { return $$props.pending; }}, ($$anchor) =>"
+        )),
+        "all-attribute boundary: plain onerror init THEN failed/pending getters in source order:\n{js}"
+    );
+    // NEGATIVE: the non-state onerror is NOT promoted to a getter (state-gate discriminates).
+    assert!(
+        !n.contains(&nc("get onerror()")),
+        "a non-state-bearing onerror arrow stays a plain init, not a getter:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn svelte_boundary_mixed_attribute_and_snippet_child() {
+    // A `failed={expr}` ATTRIBUTE + a `{#snippet pending}` CHILD together: the getter attr prop
+    // precedes the hoisted-snippet shorthand — `{ get failed() {…}, pending }` — inside the
+    // wrapping block that hoists the pending snippet const.
+    let js = emit(
+        "<script>let { failed } = $props();</script>\n<svelte:boundary failed={failed}><p>content</p>{#snippet pending()}<p>loading</p>{/snippet}</svelte:boundary>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("const pending = ($$anchor) =>")),
+        "the pending snippet still hoists to a const:\n{js}"
+    );
+    assert!(
+        n.contains(&nc(
+            "$.boundary(node, {get failed() { return $$props.failed; }, pending}, ($$anchor) =>"
+        )),
+        "getter attr prop precedes the snippet shorthand, in source order:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn svelte_boundary_conflict_attribute_and_snippet_same_name() {
+    // CONFLICT (official parity): BOTH a `failed={expr}` ATTRIBUTE and a `{#snippet failed}`
+    // CHILD. Official emits BOTH keys — the getter (from the attribute, source-first) then the
+    // shorthand (from the hoisted snippet) — a duplicate-key object literal `{ get failed() {…},
+    // failed }` (valid ES2015+, last-wins). Verter matches official; it does NOT dedupe, drop,
+    // or error. The snippet still hoists its const in the wrapping block.
+    let js = emit(
+        "<script>let { failedProp } = $props();</script>\n<svelte:boundary failed={failedProp}><p>content</p>{#snippet failed(error, reset)}<p>oops</p>{/snippet}</svelte:boundary>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "const failed = ($$anchor, error = $.noop, reset = $.noop) =>"
+        )),
+        "the failed snippet still hoists its const:\n{js}"
+    );
+    assert!(
+        n.contains(&nc(
+            "$.boundary(node, {get failed() { return $$props.failedProp; }, failed}, ($$anchor) =>"
+        )),
+        "official parity: BOTH the getter (attr) and the shorthand (snippet) keys, source order:\n{js}"
+    );
+    assert!(
+        parses_as_js(&js),
+        "a duplicate-key object literal is valid ES2015+ module JS:\n{js}"
+    );
+}
+
+#[test]
+fn svelte_boundary_async_runtime_fails_closed() {
+    // The justified ExperimentalAsync deferral: an ASYNC construct inside a `<svelte:boundary>`
+    // (here an async `onerror` handler — the experimental-async runtime surface) fails closed
+    // via `ExperimentalAsync`, never emitting. Plain (non-async) boundaries are supported.
+    assert_fail_closed(
+        "<script>let n = $state(0);</script>\n<svelte:boundary onerror={async () => { n++; }}><p>x</p></svelte:boundary>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::ExperimentalAsync { .. }),
+    );
+}
+
+// ── <svelte:head> ──────────────────────────────────────────────────────────
+
+#[test]
+fn svelte_head_static_title_emits_effect_with_literal() {
+    // A STATIC (constant-foldable) `<title>` → `$.head(hash(filename), ($$anchor) => { $.effect(
+    // () => { $.document.title = 'literal'; }); })` — `has_state` false ⇒ `$.effect` (NOT
+    // `$.deferred_template_effect`). A head-only root emits ONLY the `$.head(...)` op (no body
+    // skeleton, no `$.from_html`, no `$.append`).
+    let js = emit(
+        "<script>\n\tlet { locale } = $props();\n</script>\n\n<svelte:head>\n\t<title>Dashboard</title>\n</svelte:head>\n",
+        "special/svelte_head_static_title.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    // The `$.head` wrapper with the djb2-XOR hash of the filename (STRUCTURAL literal).
+    assert!(
+        n.contains(&nc("$.head('63bkss', ($$anchor) =>")),
+        "head wrapper with the filename hash:\n{js}"
+    );
+    assert!(
+        n.contains(&nc("$.effect(() => {$.document.title = 'Dashboard';})")),
+        "static title effect ($.effect + folded literal):\n{js}"
+    );
+    // NEGATIVE: a static title is NOT deferred, and a head-only root has NO body skeleton.
+    assert!(
+        !js.contains("deferred_template_effect"),
+        "static title must not defer:\n{js}"
+    );
+    assert!(
+        !js.contains("$.from_html") && !js.contains("$.append") && !js.contains("$.comment"),
+        "head-only root emits no body skeleton:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn svelte_head_prop_title_emits_deferred_with_nullish() {
+    // A PROP `<title>{t}</title>` (`t` not provably defined) → `$.deferred_template_effect(() =>
+    // { $.document.title = $$props.t ?? ''; })` — `has_state` true ⇒ deferred, `?? ''` since the
+    // value is not provably defined.
+    let js = emit(
+        "<script>\n\tlet { t } = $props();\n</script>\n\n<svelte:head>\n\t<title>{t}</title>\n</svelte:head>\n",
+        "special/svelte_head_prop_title.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("$.head('16e2757', ($$anchor) =>")),
+        "head wrapper:\n{js}"
+    );
+    assert!(
+        n.contains(&nc(
+            "$.deferred_template_effect(() => {$.document.title = $$props.t ?? '';})"
+        )),
+        "deferred title with `?? ''`:\n{js}"
+    );
+    // NEGATIVE: a stateful title is NOT a plain `$.effect`.
+    assert!(
+        !js.contains("$.effect("),
+        "stateful title must defer, not $.effect:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn svelte_head_state_title_emits_template_literal() {
+    // A MULTI-chunk `<title>page {t}</title>` over a MUTATED `$state` → `$.deferred_template_effect
+    // (() => { $.document.title = `page ${$.get(t) ?? ''}`; })` — a template literal with the
+    // per-interpolation `?? ''` (NOT an outer wrap; the template is provably defined). The `t`
+    // is a real signal (mutated by the button handler ⇒ `$.get(t)`, not a folded literal).
+    let js = emit(
+        "<script>\n\tlet count = $state(0);\n</script>\n\n<svelte:head>\n\t<title>page {count}</title>\n</svelte:head>\n\n<button onclick={() => count++}>inc</button>\n",
+        "special/svelte_head_state_title.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("$.head('1523ehv', ($$anchor) =>")),
+        "head wrapper:\n{js}"
+    );
+    assert!(
+        n.contains(&nc(
+            "$.deferred_template_effect(() => {$.document.title = `page ${$.get(count) ?? ''}`;})"
+        )),
+        "deferred template-literal title:\n{js}"
+    );
+    assert!(
+        !js.contains("$.effect("),
+        "mutated-state title must defer:\n{js}"
+    );
+    // The head op emits at its SOURCE position — before the sibling button's delegated event.
+    assert!(
+        n.contains(&nc("$.head('1523ehv',"))
+            && n.find(&nc("$.head('1523ehv',")) < n.find(&nc("$.delegated('click'")),
+        "head op precedes the sibling button's delegated event:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn svelte_head_title_meta_places_title_before_append() {
+    // A title + a SINGLE meta → the meta rides the `from_html` region INSIDE the callback and the
+    // title effect (after_update) sits BETWEEN the meta clone and its `$.append`. A single meta
+    // (single root) ⇒ NO `$.next()`.
+    let js = emit(
+        "<script>\n\tlet { t } = $props();\n</script>\n\n<svelte:head>\n\t<title>{t}</title>\n\t<meta name=\"x\" content=\"y\">\n</svelte:head>\n",
+        "special/svelte_head_title_meta.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("$.from_html(`<meta name=\"x\" content=\"y\"/>`)")),
+        "single-root meta template:\n{js}"
+    );
+    // The title effect emits AFTER the clone and BEFORE the append (the after_update slot).
+    assert!(
+        n.contains(&nc(
+            "var meta = root(); $.deferred_template_effect(() => {$.document.title = $$props.t ?? '';}); $.append($$anchor, meta);"
+        )),
+        "title effect between the meta clone and its append:\n{js}"
+    );
+    // NEGATIVE: a single meta root does NOT advance the fragment cursor.
+    assert!(!js.contains("$.next("), "single meta ⇒ no $.next():\n{js}");
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn svelte_head_meta_only_emits_fragment_next_append() {
+    // A meta-only head with TWO roots (meta + link, whitespace between) → `var fragment = root();
+    // $.next(2); $.append($$anchor, fragment);` in the callback, with NO title effect.
+    let js = emit(
+        "<script>\n\tlet { locale } = $props();\n</script>\n\n<svelte:head>\n\t<meta name=\"x\" content=\"y\">\n\t<link rel=\"stylesheet\" href=\"a.css\">\n</svelte:head>\n",
+        "special/svelte_head_meta.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.from_html(`<meta name=\"x\" content=\"y\"/> <link rel=\"stylesheet\" href=\"a.css\"/>`, 1)"
+        )),
+        "multi-root meta+link template with the fragment flag:\n{js}"
+    );
+    assert!(
+        n.contains(&nc(
+            "$.head('w8zktq', ($$anchor) => {var fragment = root(); $.next(2); $.append($$anchor, fragment);})"
+        )),
+        "meta-only callback body (fragment + $.next(2) + append):\n{js}"
+    );
+    // NEGATIVE: no title effect for a meta-only head.
+    assert!(
+        !js.contains("$.document.title"),
+        "no title write for a meta-only head:\n{js}"
+    );
+    assert!(
+        !js.contains("effect(") && !js.contains("deferred_template_effect"),
+        "no title effect for a meta-only head:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn svelte_head_body_sibling_emits_head_at_source_position() {
+    // `<svelte:head>…</svelte:head><p>hi</p>` → the sibling `<p>` clones its own `from_html`
+    // region and the `$.head(...)` emits at its SOURCE position (before the `<p>` sibling's
+    // `$.append`). The head itself is excluded from the body skeleton (no `<!>` anchor).
+    let js = emit(
+        "<script>\n\tlet { t } = $props();\n</script>\n\n<svelte:head>\n\t<title>{t}</title>\n</svelte:head>\n\n<p>hi</p>\n",
+        "special/svelte_head_body_sibling.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("$.from_html(`<p>hi</p>`)")),
+        "sibling `<p>` template:\n{js}"
+    );
+    // The head sits at its source position: after the `<p>` clone, before the append.
+    assert!(
+        n.contains(&nc(
+            "var p = root(); $.head('rlmige', ($$anchor) => {$.deferred_template_effect(() => {$.document.title = $$props.t ?? '';});}); $.append($$anchor, p);"
+        )),
+        "head op at source position (between the sibling clone and its append):\n{js}"
+    );
+    // NEGATIVE: the head is NOT a comment-anchored body node (no `<!>` skeleton for it).
+    assert!(
+        !js.contains("$.comment()"),
+        "head is excluded from the body skeleton (no comment anchor):\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn svelte_head_html_folded_state_title_emits_effect_and_html_body() {
+    // The pre-existing `special/svelte_head_html` fixture: a `<title>{title}</title>` over an
+    // UNMUTATED `$state('page')` folds to a KNOWN literal ⇒ `has_state` false ⇒ `$.effect(() => {
+    // $.document.title = 'page'; })`, alongside a `<div>{@html markup}</div>` body. The head op
+    // emits at its source position (after the `<div>` clone, before the div's `$.html`).
+    let js = emit(
+        "<script>\n\tlet title = $state('page');\n\tlet markup = $state('<b>bold</b>');\n</script>\n\n<svelte:head>\n\t<title>{title}</title>\n</svelte:head>\n\n<div>{@html markup}</div>\n",
+        "special/svelte_head_html.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.head('1tufvvq', ($$anchor) => {$.effect(() => {$.document.title = 'page';});})"
+        )),
+        "folded `$state` title ⇒ `$.effect` + literal:\n{js}"
+    );
+    // The `{@html}` body still emits its raw-markup insertion.
+    assert!(
+        n.contains(&nc("$.html(div, () => markup, true)")),
+        "the `{{@html}}` body:\n{js}"
+    );
+    // NEGATIVE: a folded (known) title is NOT deferred.
+    assert!(
+        !js.contains("deferred_template_effect"),
+        "a folded/known title must not defer:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
 }
 
 #[test]
@@ -5636,6 +6926,459 @@ fn top_level_style_fails_closed() {
         "<script>let c = $state(0);</script>\n<style>.r{color:red}</style>\n<button onclick={() => c++}>{c}</button>\n",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::Style { .. }),
     );
+}
+
+// ── Block 5f-b review-fix regression coverage (F1–F12) ──
+
+#[test]
+fn svelte_head_call_title_emits_memoized_deferred_template_effect() {
+    // F1: a `has_call` `<title>` chunk MEMOIZES into the official deps-array form
+    // `$.deferred_template_effect(($0) => { $.document.title = $0 ?? ''; }, [() => <call>])`
+    // (the `TitleElement` `memoizer.apply()` params + `sync_values()` deps) — NOT a rejection
+    // and NOT a non-memoized effect. RED against the pre-fix `reject_memoized_title_chunk`.
+    let js = emit(
+        "<script>\n\tlet count = $state(0);\n</script>\n\n<svelte:head>\n\t<title>{String(count)}</title>\n</svelte:head>\n\n<button onclick={() => count++}>inc</button>\n",
+        "special/svelte_head_title_call.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("$.head('mt25c0', ($$anchor) =>")),
+        "head wrapper with the filename hash:\n{js}"
+    );
+    assert!(
+        n.contains(&nc(
+            "$.deferred_template_effect(($0) => {$.document.title = $0 ?? '';}"
+        )),
+        "memoized deferred effect with the `$0` placeholder param + RHS:\n{js}"
+    );
+    // The memoized dependency is the call itself (`() => String($.get(count))`), paren-tolerant.
+    assert!(
+        n.contains("String($.get(count))"),
+        "the call is hoisted into the deps array:\n{js}"
+    );
+    // NEGATIVE: never a rejection, never a non-memoized `$.effect`, never inlining the call
+    // into the assignment RHS (the memoizer replaces it with `$0`).
+    assert!(
+        !js.contains("$.effect("),
+        "a call title defers (never $.effect):\n{js}"
+    );
+    assert!(
+        !js.contains("$.document.title = String("),
+        "the call must be memoized to `$0`, not inlined in the RHS:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn svelte_head_mixed_call_state_title_memoizes_only_the_call() {
+    // F1: a mixed `<title>n {String(count)} {count}</title>` memoizes ONLY the call chunk
+    // (`$0`) while the plain state read stays inline (`$.get(count)`) — the official
+    // per-chunk memoize rule (`has_call` ⇒ hoist, live-state ⇒ inline).
+    let js = emit(
+        "<script>\n\tlet count = $state(0);\n</script>\n\n<svelte:head>\n\t<title>n {String(count)} {count}</title>\n</svelte:head>\n\n<button onclick={() => count++}>inc</button>\n",
+        "special/svelte_head_title_call_mixed.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.document.title = `n ${$0 ?? ''} ${$.get(count) ?? ''}`"
+        )),
+        "the call memoizes to `$0` while the state read stays inline:\n{js}"
+    );
+    assert!(
+        n.contains("String($.get(count))"),
+        "the call is the single memoized dep:\n{js}"
+    );
+    // NEGATIVE: only ONE placeholder (the state read is NOT memoized to `$1`).
+    assert!(
+        !js.contains("$1"),
+        "the live state read stays inline, not memoized:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn svelte_head_title_non_text_child_fails_closed() {
+    // F4: a `<title>` containing a nested element / block / comment is the official
+    // `title_invalid_content` error — fail closed rather than SILENTLY dropping it. RED
+    // against the pre-fix `_ => {}` arm in `lower_title_chunks`.
+    for src in [
+        "<script>let n = $state(0);</script>\n<svelte:head><title><b>x</b></title></svelte:head>\n",
+        "<script>let a = $state(true);</script>\n<svelte:head><title>{#if a}x{/if}</title></svelte:head>\n",
+        "<script>let n = $state(0);</script>\n<svelte:head><title>hi<!--c--></title></svelte:head>\n",
+    ] {
+        assert_fail_closed(src, |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
+                    construct: "svelte:head <title> non-text content",
+                    ..
+                }
+            )
+        });
+    }
+    // A pure text + interpolation title is still ACCEPTED (regression).
+    assert!(emit_result(
+        "<script>let n = $state(0);</script>\n<svelte:head><title>Hi {n}</title></svelte:head>\n"
+    )
+    .is_ok());
+}
+
+#[test]
+fn svelte_head_attribute_fails_closed_matching_official_reject() {
+    // Official REJECTS any attribute / directive on `<svelte:head>`: its `SvelteHead` analyze
+    // visitor throws `svelte_head_illegal_attribute` ("`<svelte:head>` cannot have attributes nor
+    // directives") on every attribute. Verter fails closed on a head-borne attribute
+    // (`ComponentOrSnippet { construct: "svelte:head attribute" }`) — PARITY with official's
+    // reject, NOT a deviation. A head-with-attribute REFUSES; a plain head still EMITS.
+    assert_fail_closed(
+        "<script>let n = $state(0);</script>\n<svelte:head foo=\"bar\"><title>T</title></svelte:head>\n",
+        |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
+                    construct: "svelte:head attribute",
+                    ..
+                }
+            )
+        },
+    );
+    // An attribute-less head still emits (only the illegal attribute is rejected).
+    assert!(emit(
+        "<script>let n = $state(0);</script>\n<svelte:head><title>T</title></svelte:head>\n",
+        "App.svelte"
+    )
+    .contains("$.head("));
+}
+
+#[test]
+fn svelte_host_special_child_content_fails_closed() {
+    // F3: `<svelte:window|document|body>` render NO DOM, so child content is the official
+    // `svelte_meta_invalid_content` error (`cannot have children`) — fail closed rather than
+    // SILENTLY dropping it. RED against the pre-fix no-DOM path that dropped text children.
+    for (src, host) in [
+        (
+            "<script>let c = $state(0);</script>\n<svelte:window onresize={() => c++}>text</svelte:window>\n",
+            "svelte:window",
+        ),
+        (
+            "<script>let c = $state(0);</script>\n<svelte:window onresize={() => c++}><p></p></svelte:window>\n",
+            "svelte:window",
+        ),
+        (
+            "<script>let c = $state(0);</script>\n<svelte:body onclick={() => c++}>hi</svelte:body>\n",
+            "svelte:body",
+        ),
+        (
+            "<script>let c = $state(0);</script>\n<svelte:document onclick={() => c++}>x</svelte:document>\n",
+            "svelte:document",
+        ),
+    ] {
+        assert_fail_closed(src, |s| {
+            matches!(s, UnsupportedSvelteRuntimeSurface::ComponentOrSnippet { construct, .. } if *construct == host)
+        });
+    }
+    // A self-closing host (no children) still emits (regression).
+    assert!(emit_result(
+        "<script>let c = $state(0);</script>\n<svelte:window onresize={() => c++} />\n"
+    )
+    .is_ok());
+}
+
+#[test]
+fn svelte_window_host_legacy_on_modifiers_reach_the_direct_event() {
+    // F5 (host audit): a LEGACY `on:` directive WITH modifiers on `<svelte:window>` carries the
+    // modifier wrapper / capture through to the direct `$.event(...)` registration end-to-end
+    // (the global-host path already routes modifiers via `render_event_registration` — this
+    // locks the whole class, not just `<svelte:element>`).
+    let js = emit(
+        "<script>\n\tlet count = $state(0);\n</script>\n\n<svelte:window on:resize|preventDefault={() => count++} on:keydown|capture={() => count++} />\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.event('resize', $.window, $.preventDefault(() => $.update(count)))"
+        )),
+        "host on:resize|preventDefault → wrapped direct event:\n{js}"
+    );
+    assert!(
+        n.contains(&nc(
+            "$.event('keydown', $.window, () => $.update(count), true)"
+        )),
+        "host on:keydown|capture → capture 4th arg:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn svelte_element_legacy_on_directive_emits_direct_event_with_modifiers() {
+    // F5: a LEGACY `on:` directive on `<svelte:element>` emits a DIRECT `$.event('type',
+    // $$element, <wrapped>[, capture][, passive])` (the official `OnDirective` → `after_update`
+    // path) carrying the modifier wrapper / capture — NOT an `$.attribute_effect` fold that
+    // silently dropped them. RED against the pre-fix fold.
+    let js = emit(
+        "<script>\n\tlet tag = $state('div');\n\tlet count = $state(0);\n</script>\n\n<svelte:element this={tag} on:click|preventDefault={() => count++} on:keydown|capture={() => count++}>hi</svelte:element>\n",
+        "special/svelte_element_on_modifier.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.event('click', $$element, $.preventDefault(() => $.update(count)))"
+        )),
+        "legacy on:click|preventDefault → wrapped direct event:\n{js}"
+    );
+    assert!(
+        n.contains(&nc(
+            "$.event('keydown', $$element, () => $.update(count), true)"
+        )),
+        "legacy on:keydown|capture → capture 4th arg:\n{js}"
+    );
+    // NEGATIVE: the legacy `on:` is NOT folded into `$.attribute_effect` (that is the modern
+    // `onclick={…}` form), and the modifier is never dropped.
+    assert!(
+        !js.contains("attribute_effect"),
+        "legacy on: is a direct event, not an attribute_effect fold:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn svelte_element_modern_onclick_stays_attribute_effect() {
+    // F5 (do-not-touch guard): a MODERN `onclick={…}` on `<svelte:element>` STAYS an
+    // `$.attribute_effect` fold entry (NOT a `$.event`) — only the legacy `on:` form changed.
+    let js = emit(
+        "<script>let tag = $state('div');let c = $state(0);</script>\n<svelte:element this={tag} onclick={() => c++}>hi</svelte:element>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("attribute_effect") && js.contains("onclick:"),
+        "modern onclick stays in the attribute_effect fold:\n{js}"
+    );
+    assert!(
+        !js.contains("$.event("),
+        "modern onclick is NOT a direct $.event:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn svelte_boundary_legacy_on_error_with_modifier_fails_closed() {
+    // A LEGACY `on:error|<modifier>` on `<svelte:boundary>` is the official
+    // `svelte_boundary_invalid_attribute` reject: official's `Pw` accept-list ({onerror, failed,
+    // pending}) is gated on `type === "Attribute"`, and a legacy `on:error|…` is an `OnDirective`,
+    // never an `Attribute`. It fails closed on the lowering-recorded LEGACY `origin` (NOT the
+    // modifier-presence heuristic), so the reject is uniform with a BARE `on:error`. RED against
+    // the pre-fix classify that accepted the bare form and dropped the modifier.
+    assert_fail_closed(
+        "<script>let c = $state(0);</script>\n<svelte:boundary on:error|preventDefault={() => c++}><p>x</p></svelte:boundary>\n",
+        |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
+                    construct: "svelte:boundary legacy on: directive",
+                    ..
+                }
+            )
+        },
+    );
+    // The MODERN `onerror={…}` (no modifiers) still emits (regression).
+    assert!(emit_result("<script>let c = $state(0);</script>\n<svelte:boundary onerror={() => c++}><p>x</p></svelte:boundary>\n").is_ok());
+}
+
+#[test]
+fn svelte_boundary_legacy_on_error_fails_closed() {
+    // G2: a BARE LEGACY `on:error={h}` on `<svelte:boundary>` is the official
+    // `svelte_boundary_invalid_attribute` reject — official gates boundary attributes on `type ===
+    // "Attribute" && name ∈ {onerror, failed, pending}`, and a legacy `on:error` is an
+    // `OnDirective`, never an `Attribute`. A bare `on:error` collapses to the SAME `AttrIr::Event`
+    // shape as the modern `onerror` (no modifiers / capture / passive), so the lowering-recorded
+    // `origin` is the ONLY faithful discriminator. RED against the pre-fix modifier-heuristic
+    // classify that accepted the bare form and MIS-EMITTED it as a modern `{ onerror: h }`.
+    assert_fail_closed(
+        "<script>let c = $state(0);</script>\n<svelte:boundary on:error={() => c++}><p>x</p></svelte:boundary>\n",
+        |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
+                    construct: "svelte:boundary legacy on: directive",
+                    ..
+                }
+            )
+        },
+    );
+    // NEGATIVE: the bare legacy form never reaches emission (no mis-emitted `onerror` props member).
+    assert!(emit_result(
+        "<script>let c = $state(0);</script>\n<svelte:boundary on:error={() => c++}><p>x</p></svelte:boundary>\n"
+    )
+    .is_err());
+}
+
+#[test]
+fn svelte_boundary_invalid_attribute_fails_closed() {
+    // G2: the WHOLE boundary-attribute class outside official's `Pw` accept-list fails closed.
+    // A legacy `on:click` directive (an `OnDirective`) rejects on the LEGACY `origin`.
+    assert_fail_closed(
+        "<script>let c = $state(0);</script>\n<svelte:boundary on:click={() => c++}><p>x</p></svelte:boundary>\n",
+        |s| matches!(
+            s,
+            UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
+                construct: "svelte:boundary legacy on: directive",
+                ..
+            }
+        ),
+    );
+    // A modern non-`onerror` event (`onclick`), a modern `onerrorcapture` (a capture-suffixed name
+    // that is NOT the exact `onerror` in `Pw`), and an arbitrary static attribute all fail closed
+    // as `svelte:boundary attribute` (official rejects every non-{onerror,failed,pending} name).
+    for src in [
+        "<script>let c = $state(0);</script>\n<svelte:boundary onclick={() => c++}><p>x</p></svelte:boundary>\n",
+        "<script>let c = $state(0);</script>\n<svelte:boundary onerrorcapture={() => c++}><p>x</p></svelte:boundary>\n",
+        "<script>let c = $state(0);</script>\n<svelte:boundary foo=\"x\">{c}<p>y</p></svelte:boundary>\n",
+    ] {
+        assert_fail_closed(src, |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
+                    construct: "svelte:boundary attribute",
+                    ..
+                }
+            )
+        });
+    }
+}
+
+#[test]
+fn svelte_boundary_failed_pending_attribute_form_emits_getter_props() {
+    // Official accepts `failed` / `pending` as modern ATTRIBUTE forms
+    // (`<svelte:boundary failed={snip}>`) whose value is a state-bearing reference (a snippet
+    // ref / prop / signal). Verter now EMITS them through the SAME state-bearing-attribute →
+    // props path `onerror` uses: a state-bearing attribute value becomes the getter accessor
+    // `get <name>() { return <expr>; }` (SvelteBoundary.js's `has_state ? b.get : b.init`). This
+    // is the positive successor to cycle-2's conservative fail-close: the attribute form is a
+    // first-class boundary surface, distinct from the `{#snippet}` CHILD form.
+    for (src, getter) in [
+        (
+            "<script>let { snip } = $props();</script>\n<svelte:boundary failed={snip}><p>x</p></svelte:boundary>\n",
+            "get failed() { return $$props.snip; }",
+        ),
+        (
+            "<script>let { snip } = $props();</script>\n<svelte:boundary pending={snip}><p>x</p></svelte:boundary>\n",
+            "get pending() { return $$props.snip; }",
+        ),
+    ] {
+        let js = emit_result(src).expect("boundary failed/pending attribute form now emits");
+        let n = normalize_js_cosmetics(&js);
+        assert!(
+            n.contains(&nc(&format!("$.boundary(node, {{{getter}}}, ($$anchor) =>"))),
+            "the {getter} attribute expr is a getter props member:\n{js}"
+        );
+        // NEGATIVE: no snippet-const hoist for the pure-attribute form.
+        assert!(
+            !n.contains(&nc("= ($$anchor, error = $.noop")),
+            "the attribute form must NOT hoist a snippet const:\n{js}"
+        );
+        assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+    }
+    // POSITIVE regression: the `{#snippet failed/pending}` CHILD form remains the direct
+    // `{ failed }` shorthand surface (the attribute-form support does NOT change the child form).
+    let child = emit_result(
+        "<script>let { x } = $props();</script>\n<svelte:boundary><p>{x}</p>{#snippet failed(error, reset)}<p>oops</p>{/snippet}</svelte:boundary>\n"
+    )
+    .expect("the snippet child form still emits");
+    assert!(
+        normalize_js_cosmetics(&child).contains(&nc("$.boundary(node, {failed}, ($$anchor) =>")),
+        "the snippet CHILD form is still the direct failed shorthand (unchanged):\n{child}"
+    );
+}
+
+#[test]
+fn svelte_window_host_groups_events_before_binds() {
+    // F6: a `<svelte:window>` with INTERLEAVED events + binds emits ALL `$.event(...)` BEFORE
+    // ALL `$.bind_*` (the official `visit_special_element` grouping), NOT source order. RED
+    // against the pre-fix source-order emission (bind-before-event).
+    let js = emit(
+        "<script>\n\tlet width = $state(0);\n\tlet scroll = $state(0);\n</script>\n\n<svelte:window bind:innerWidth={width} onresize={() => scroll++} bind:scrollX={scroll} onkeydown={() => width++} />\n",
+        "special/svelte_window_event_and_bind.svelte",
+    );
+    // Both events precede both binds in the emitted order.
+    let resize = js.find("$.event('resize'").expect("resize event");
+    let keydown = js.find("$.event('keydown'").expect("keydown event");
+    let inner = js.find("$.bind_window_size").expect("innerWidth bind");
+    let scrollx = js.find("$.bind_window_scroll").expect("scrollX bind");
+    assert!(
+        resize < inner && resize < scrollx && keydown < inner && keydown < scrollx,
+        "host events must precede host binds (events-before-binds grouping):\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn svelte_window_element_sibling_emits_both() {
+    // F2: a MIXED root `<svelte:window/>` + `<p>` sibling emits BOTH — the `<p>` clones through
+    // the normal body path and the window `$.event(...)` interleaves (the host special is
+    // TRANSPARENT to root classification). RED against the concern that the host bypass drops
+    // the sibling.
+    let js = emit(
+        "<script>\n\tlet count = $state(0);\n</script>\n\n<svelte:window onresize={() => count++} />\n<p>hi</p>\n",
+        "special/svelte_window_element_sibling.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    // The `<p>` sibling clones from its OWN `$.from_html` template factory and is instantiated —
+    // precise, not the near-always-true `root()` disjunct the pre-tighten assertion used.
+    assert!(
+        js.contains("$.from_html(`<p>hi</p>`)"),
+        "the <p> sibling clones from its own template factory:\n{js}"
+    );
+    assert!(
+        n.contains(&nc("var p = root();")),
+        "the <p> sibling is instantiated from the template:\n{js}"
+    );
+    // The window event emits as a DIRECT global `$.event` listener (the full call, not a prefix).
+    assert!(
+        n.contains(&nc("$.event('resize', $.window, () => $.update(count));")),
+        "the window resize event emits a direct global listener:\n{js}"
+    );
+    // The sibling mounts precisely — the `p` node is appended to the render anchor.
+    assert!(
+        n.contains(&nc("$.append($$anchor, p);")),
+        "the <p> sibling mounts to the anchor:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn svelte_window_with_reactive_text_sibling_fails_closed() {
+    // F2: a MIXED root with a bare REACTIVE-TEXT sibling (`<svelte:window/>{x}`) fails closed
+    // as a `RootTextRegion` — EXACTLY as a reactive-text root WITHOUT a host special (the host
+    // is transparent). RED against the pre-fix over-broad bypass that accepted it and emitted a
+    // divergent shape (missing `$.next()` / wrong op order).
+    assert_fail_closed(
+        "<script>let x = $state('hi');</script>\n<svelte:window onresize={() => x = 'y'} />{x}\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::RootTextRegion { .. }),
+    );
+}
+
+#[test]
+fn regular_element_bind_focused_emits_unproxied_setter() {
+    // F12: a regular-element `bind:focused` emits `$.bind_focused(el, ($$value) => $.set(x,
+    // $$value))` — NO proxy 3rd arg (the proxy is HOST-driven and false on a regular element,
+    // true only on `<svelte:window>`). The positive regular-element shape for the flipped
+    // `focused` support.
+    let js = emit(
+        "<script>\n\tlet focused = $state(false);\n</script>\n\n<input bind:focused={focused} />\n",
+        "bindings/bind_focused.svelte",
+    );
+    assert!(
+        js.contains("$.bind_focused(input, ($$value) => $.set(focused, $$value))"),
+        "regular bind:focused → unproxied setter:\n{js}"
+    );
+    // NEGATIVE: a regular element bind is NOT proxied (no `, true)` 3rd arg on the setter).
+    assert!(
+        !js.contains("$.set(focused, $$value, true)"),
+        "a regular element bind:focused is NOT proxied:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
 }
 
 #[test]

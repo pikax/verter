@@ -225,9 +225,9 @@ pub(super) fn expr_references_signal(
 }
 
 /// Whether a COMPONENT-PROP value expression `has_state` — the official
-/// `metadata.expression.has_state` for the `Component.js` getter-vs-init decision
-/// (`has_state ? get name() {…} : name: value`). DISTINCT from
-/// [`expr_references_signal`] in two ways:
+/// `metadata.expression.has_state` for the `Component.js` / `SvelteBoundary.js`
+/// getter-vs-init decision (`has_state ? get name() {…} : name: value`). DISTINCT
+/// from [`expr_references_signal`] in three ways:
 ///
 /// 1. SYNCHRONOUS-only: a read INSIDE a nested function / arrow body is DEFERRED and
 ///    does NOT count, so `onclick={() => x}` is a plain prop init (`has_state = false`)
@@ -235,6 +235,14 @@ pub(super) fn expr_references_signal(
 /// 2. A `{#snippet}` NAME reference counts as state (a snippet passed as a prop emits
 ///    the getter `get tmpl() { return tmpl; }`, matching the pinned svelte@5.56.3
 ///    snippet-prop shape).
+/// 3. It includes the MEMBER-ROOT-AT-BINDING half ([`expr_member_roots_at_binding`],
+///    official `MemberExpression.js`'s `!is_pure`): a member rooted at ANY declared
+///    binding — a plain local, a deep-proxied `$state` object, a prop — is state-bearing
+///    (⇒ getter), so `failed={obj.failed}` / `x={obj.y}` emit `get name() { return
+///    obj.…; }` even though `obj` itself is neither a signal nor a prop. The member
+///    scan does NOT descend into nested function bodies, so `{() => obj.x}` stays a
+///    plain init (rule 1 is preserved). Verified against pinned svelte@5.56.3
+///    (component + boundary emit identically).
 #[must_use]
 pub(super) fn prop_value_has_state(
     source: &str,
@@ -254,7 +262,7 @@ pub(super) fn prop_value_has_state(
                         || k == BindingRuntimeKind::Prop
                         || k == BindingRuntimeKind::SnippetName
                 })
-    })
+    }) || expr_member_roots_at_binding(source, scope, bindings, scopes)
 }
 
 /// Whether a template expression contains a MEMBER access whose leftmost identifier

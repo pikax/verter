@@ -1,0 +1,49 @@
+{
+  "slug": "special/svelte_head_prop_title.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "svelte_head_prop_title",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "head",
+    "deferred_template_effect",
+    "document"
+  ],
+  "helperSet": [
+    "deferred_template_effect",
+    "document",
+    "head"
+  ],
+  "helperCounts": {
+    "head": 1,
+    "deferred_template_effect": 1,
+    "document": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; export default function svelte_head_prop_title($$anchor, $$props) {$.head('16e2757', ($$anchor) => {$.deferred_template_effect(() => {$.document.title = $$props.t ?? '';});});}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

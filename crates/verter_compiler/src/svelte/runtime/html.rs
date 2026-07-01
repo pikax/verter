@@ -293,15 +293,13 @@ pub struct NodePathPlan {
 /// / `<svelte:fragment>` ARE renderable body content (they keep their `<!>` anchor)
 /// and are NOT excluded here.
 ///
-/// TODO(follow-up): the full lowering of these non-body specials is owned by
-/// downstream layers and is intentionally out of scope here (this only excludes
-/// them from the body skeleton). The `<svelte:head>` / window / document / body
-/// region lowering (the `$.head(...)` region, the window/document/body listener
-/// wiring) is the special-element region-lowering layer; the
-/// `<svelte:options namespace>` root-helper selection (`from_svg` / `from_mathml`)
-/// plus the options fold is the namespace-aware root-helper selection layer. See
-/// the topology-oracle deferral ledger
-/// (`runtime_tests.rs::topology_oracle::DEFERRAL_LEDGER`).
+/// This predicate ONLY excludes the non-body specials from the body skeleton; each one's
+/// own emission is owned by a downstream layer. The `<svelte:head>` `$.head(...)` region
+/// (`client_svelte_head`), the window/document/body listener/bind wiring (the host-special
+/// op path), and the head/host no-DOM root-factory skip (`plan_static_templates`) are
+/// implemented. The `<svelte:options namespace>` root-helper selection (`from_svg` /
+/// `from_mathml`) plus the options fold is the still-deferred namespace-aware root-helper
+/// selection layer (see `runtime_tests.rs::topology_oracle::DEFERRAL_LEDGER`).
 pub(super) fn is_non_body_special(node: &IrNode) -> bool {
     matches!(
         node,
@@ -361,6 +359,13 @@ fn is_static_html_root(node: &IrNode) -> bool {
                 SpecialKind::Component | SpecialKind::SelfRef | SpecialKind::Fragment
             ) =>
         {
+            false
+        }
+        // A RENDERABLE special (`<svelte:element>` / `<svelte:boundary>`) is a
+        // `$.comment()`-anchored renderable (its `$.element` / `$.boundary` call targets a
+        // `<!>` anchor), NOT a static-HTML clone root — exactly like a control-flow block. A
+        // sole-root one is a comment anchor; among siblings it serializes to a `<!>` marker.
+        IrNode::Special(s) if matches!(s.kind, SpecialKind::Element | SpecialKind::Boundary) => {
             false
         }
         IrNode::Special(_) => !is_non_body_special(node),
@@ -524,8 +529,11 @@ fn serialize_static_attrs(attrs: &[AttrIr], is_custom: bool, html: &mut String) 
             }
             // A static `class` / `style` whose element ALSO carries a `class:` /
             // `style:` directive is pulled OUT of the skeleton (its value becomes the
-            // base arg to the merged `$.set_class` / `$.set_style`).
-            if (name == "class" && has_class_directive) || (name == "style" && has_style_directive)
+            // base arg to the merged `$.set_class` / `$.set_style`). The NAME matches
+            // case-insensitively — the same normalization the surface gate and the
+            // plan's base-consumption arms apply.
+            if (name.eq_ignore_ascii_case("class") && has_class_directive)
+                || (name.eq_ignore_ascii_case("style") && has_style_directive)
             {
                 continue;
             }
@@ -887,8 +895,10 @@ fn collect_node_slots(
             collect_attr_slots(scope, node_id, &s.attrs, slots);
             // A NON-BODY special (`<svelte:head>` / window / …) renders its CHILD content
             // in its OWN region, so do NOT fold its children into the body slot list. A
-            // renderable special (`<svelte:element>` / boundary) DOES host body children.
-            if !is_non_body_special(ir.node(node_id)) {
+            // RENDERABLE-REGION special (`<svelte:element>`) likewise hosts its children in
+            // its OWN body region (collected when the slot pass reaches that scope), so its
+            // children are not folded into THIS region either.
+            if !is_non_body_special(ir.node(node_id)) && s.body_region.is_none() {
                 for &child in &s.children {
                     collect_node_slots(ir, scope, child, slots);
                 }
@@ -1226,7 +1236,15 @@ fn collect_node_template_scopes(
         // named) + its `{#snippet}`-def body regions — NOT its raw `children` (the slot
         // content lives in those regions). Mirrors the emit-side `collect_child_regions`.
         IrNode::Component(c) => collect_component_slot_template_scopes(ir, &c.slots, out),
-        IrNode::Special(s) => collect_component_slot_template_scopes(ir, &s.slots, out),
+        IrNode::Special(s) => {
+            collect_component_slot_template_scopes(ir, &s.slots, out);
+            // A RENDERABLE-REGION special (`<svelte:element>`) hosts its children in its own
+            // body region (the `($$element, $$anchor) => {…}` callback scope) — collect it +
+            // its nested regions, mirroring the emit-side `collect_child_regions`.
+            if let Some(body) = s.body_region {
+                collect_template_scopes(ir, body, out);
+            }
+        }
         IrNode::Block(block) => match block {
             BlockIr::If { branches } => {
                 for b in branches {
@@ -1272,6 +1290,23 @@ fn collect_node_template_scopes(
 /// nested block body is found in the plan (not silently lost). A region's
 /// node-path walk is self-contained from THAT region's own cloned fragment.
 #[must_use]
+/// Whether a region directly hosts a NO-DOM host special (`<svelte:window|document|body>` or
+/// `<svelte:head>`) — an init-only host that clones no ROOT frame and mounts nothing at the
+/// region level (a `<svelte:head>` emits `$.head(...)`; its own body clone/append live INSIDE
+/// the head callback, not the enclosing region). Structural over the typed root nodes, never a
+/// source scan.
+fn region_has_no_dom_host_special(ir: &SvelteRuntimeIr, scope: &TemplateScope) -> bool {
+    scope.roots.iter().any(|&n| {
+        matches!(
+            ir.node(n),
+            IrNode::Special(s) if matches!(
+                s.kind,
+                SpecialKind::Window | SpecialKind::Document | SpecialKind::Body | SpecialKind::Head
+            )
+        )
+    })
+}
+
 pub fn plan_static_templates(ir: &SvelteRuntimeIr) -> StaticTemplatePlan {
     let mut plan = StaticTemplatePlan::default();
     let mut scopes = Vec::new();
@@ -1284,6 +1319,15 @@ pub fn plan_static_templates(ir: &SvelteRuntimeIr) -> StaticTemplatePlan {
         // no static template (an empty `{:else}` has nothing to mount). The cleaned
         // sequence is empty iff the region has no rendered DOM position.
         let region_empty = clean_nodes(ir, &scope.roots, CleanContext::region_root()).is_empty();
+        // A NO-DOM HOST-SPECIAL-only region (`<svelte:window|document|body>` or a
+        // `<svelte:head>` with no non-title body) is a no-DOM INIT-ONLY root: it clones no
+        // template and mounts nothing at the region level (its events/binds emit directly in
+        // the function init body; a `<svelte:head>` emits `$.head(...)`), so it contributes NO
+        // factory — NOT the `$.comment()` mount anchor a genuinely-empty root needs. This holds
+        // at the root AND in the (rare) nested case.
+        if region_empty && region_has_no_dom_host_special(ir, scope) {
+            continue;
+        }
         if scope_id != ir.root && region_empty {
             continue;
         }

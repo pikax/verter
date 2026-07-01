@@ -86,11 +86,17 @@ fn collect_node_ops(
             ) {
                 return;
             }
-            // A host / renderable special (the global `<svelte:*>` hosts): its event
-            // listeners target the global the element represents (`<svelte:window>` ⇒
-            // Window, `<svelte:document>` ⇒ Document, `<svelte:body>` ⇒ Body), NOT the
-            // node — verified against
-            // svelte@5.56.3 (`$.window` / `$.document` / `$.document.body`).
+            // A RENDERABLE-REGION special (`<svelte:element>`): its attrs (the
+            // `$.attribute_effect` fold) + binds (against `$$element`) are PROJECTED into the
+            // narrow node (NOT region ops), and its children are their OWN body region (their
+            // ops are collected when the op pass reaches that scope) — so it carries NO
+            // enclosing-region ops and recurses no children here, exactly like a component.
+            if s.body_region.is_some() {
+                return;
+            }
+            // A GLOBAL host special (`<svelte:window|document|body>`): its event listeners
+            // target the global the element represents (Window/Document/Body), NOT the node —
+            // verified against svelte@5.56.3 (`$.window` / `$.document` / `$.document.body`).
             let event_target = special_event_target(&s, node_id);
             collect_attr_ops(node_id, &s.attrs, event_target, ops, local);
             for child in s.children {
@@ -257,6 +263,8 @@ fn collect_attr_ops(
                 capture,
                 modifiers,
                 passive,
+                // The legacy-vs-modern origin does not change a regular element's event op.
+                origin: _,
             } => push_local(
                 ops,
                 local,

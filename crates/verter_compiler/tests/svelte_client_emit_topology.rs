@@ -616,6 +616,127 @@ const SUPPORTED_COMPONENTS: &[&str] = &[
     "components/fragment_slot_hyphen",
 ];
 
+/// The native-client SPECIAL-element corpus (5f-b) — the host / renderable specials
+/// (`<svelte:window|document|body|element|boundary|head>`). Each row runs through the
+/// IDENTICAL compile + OXC-parse + full-module-comparison gate as the matrix above: the
+/// committed `special/<slug>.client.json` is the official oracle, and Verter's normalized
+/// emitted module must equal `clientModule` exactly (argument/identifier-precise — the
+/// `$.window` / `$.document` host expressions, the `$.set(…, true)` proxy flags, the
+/// per-helper bind shapes, and the no-DOM init-only topology).
+const SUPPORTED_SPECIALS: &[&str] = &[
+    // <svelte:window> events — `$.event('<type>', $.window, handler)` in the init body, NO
+    // template / NO `$.append`.
+    "special/svelte_window_events",
+    // <svelte:window> bind family — `$.bind_window_size('<name>', set)` (set-only, name
+    // first), `$.bind_window_scroll('x', get, set)` (axis remapped, get+set),
+    // `$.bind_online(set)`, `$.bind_focused($.window, set)`, and
+    // `$.bind_property('devicePixelRatio', 'resize', $.window, set)` — every setter carrying
+    // the `$.set(…, true)` window-host proxy flag.
+    "special/svelte_window_binds",
+    // <svelte:window bind:this> — `$.bind_this($.window, set, get)`.
+    "special/svelte_window_this_bind",
+    // <svelte:document> event + binds — `$.event('visibilitychange', $.document, h)`,
+    // `$.bind_active_element(set)` (dedicated, set-only), and
+    // `$.bind_property('<name>', '<event>', $.document, set)` (fullscreenElement /
+    // visibilityState).
+    "special/svelte_document_binds",
+    // <svelte:document bind:this> — `$.bind_this($.document, set, get)`.
+    "special/svelte_document_this_bind",
+    // <svelte:body> event + dimension binds — `$.event('click', $.document.body, h)` and
+    // `$.bind_element_size($.document.body, '<name>', set)` (host expr + the proxy flag; the
+    // element form has NO proxy flag).
+    "special/svelte_body_binds",
+    // <svelte:body bind:this> — `$.bind_this($.document.body, set, get)`.
+    "special/svelte_body_this_bind",
+    // ── <svelte:element this={…}> dynamic element ──
+    // STATIC tag — `$.element(node, () => 'div', false, cb)` (the literal thunk) + a
+    // dimension bind against `$$element`.
+    "special/svelte_element_static",
+    // DYNAMIC tag — `$.element(node, () => tag, false, cb)` (comment-anchor + body region).
+    "special/svelte_element_dynamic",
+    // attrs + events — the `$.attribute_effect($$element, () => ({…}))` fold with the
+    // hoisted `var event_handler = …` handler-stability local.
+    "special/svelte_element_attrs",
+    // bind:this — `$.bind_this($$element, set, get)` in the callback.
+    "special/svelte_element_bind_this",
+    // dimension bind — `$.bind_element_size($$element, 'clientWidth', set)` in the callback.
+    "special/svelte_element_dimension",
+    // empty inner body — the OMITTED 3-argument `$.element(node, () => tag, false)` call.
+    "special/svelte_element_empty",
+    // element child — the body region clones a `$.from_html` template inside the callback.
+    "special/svelte_element_child",
+    // static class + `class:` directive — the official lone-class fast path WITH the
+    // directive object: `$.set_class($$element, 0, 'card', null, {}, { active: x })` (NOT
+    // an `$.attribute_effect` fold).
+    "special/svelte_element_class_directive",
+    // MIXED-CASE static `CLASS` + `class:` directive — official matches the plain class
+    // attribute name case-insensitively (`attributes[0].name.toLowerCase() === 'class'`),
+    // so the fast path still fires: `$.set_class($$element, 0, 'card', null, {},
+    // { active: x })` (NOT a case-preserved `CLASS: 'card'` attribute_effect fold).
+    "special/svelte_element_class_mixed_case",
+    // static class + `style:` directive — the directive synthesizes the empty `style`
+    // attribute, so the element routes to the fold: `$.attribute_effect($$element, () =>
+    // ({ class: 'x', style: '', [$.STYLE]: { color: c } }))`.
+    "special/svelte_element_style_directive",
+    // bind:this + an attribute fold — `$.bind_this($$element, …)` is a ref capture
+    // emitted BEFORE the `$.attribute_effect` fold (the official init order).
+    "special/svelte_element_this_and_fold",
+    // ── <svelte:boundary> error boundary ──
+    // plain — `$.boundary(node, {}, cb)` (empty props) + a reactive body region.
+    "special/svelte_boundary_plain",
+    // onerror — `$.boundary(node, { onerror: … }, cb)` (the state-bearing props member).
+    "special/svelte_boundary_onerror",
+    // failed snippet — the hoisted `const failed = ($$anchor, error = $.noop, reset = $.noop)
+    // => {…}` in the wrapping block + `{ failed }` props shorthand.
+    "special/svelte_boundary_failed",
+    // pending snippet — the hoisted `const pending = ($$anchor) => {…}` + `{ pending }`.
+    "special/svelte_boundary_pending",
+    // onerror + failed + pending — both snippets hoisted, `{ onerror, failed, pending }`.
+    "special/svelte_boundary_full",
+    // failed ATTRIBUTE expression (a state-bearing prop ref) — the getter props member
+    // `{ get failed() { return $$props.failed; } }` (NO snippet hoist, NO wrapping block).
+    "special/svelte_boundary_failed_attr",
+    // failed ATTRIBUTE rooted at a PLAIN-LOCAL member (`failed={obj.failed}`, `obj` a
+    // bind-target local) — the MEMBER-ROOT half of official's `has_state` promotes the
+    // prop to the getter `{ get failed() { return obj.failed; } }`.
+    "special/svelte_boundary_failed_member",
+    // pending ATTRIBUTE expression — the getter props member `{ get pending() { return
+    // $$props.pending; } }`.
+    "special/svelte_boundary_pending_attr",
+    // onerror + failed + pending ALL as attributes, in source order — a NON-state onerror
+    // arrow stays the plain `onerror: …` init, the state-bearing failed/pending become
+    // getters: `{ onerror: …, get failed() {…}, get pending() {…} }`.
+    "special/svelte_boundary_all_attrs",
+    // a failed ATTRIBUTE + a `{#snippet pending}` CHILD — the getter attr prop precedes the
+    // hoisted-snippet shorthand: `{ get failed() {…}, pending }` in a wrapping block.
+    "special/svelte_boundary_mixed_attr_snippet",
+    // CONFLICT: a failed ATTRIBUTE + a `{#snippet failed}` CHILD both present — official emits
+    // BOTH keys (getter then shorthand) in source order: `{ get failed() {…}, failed }` (a
+    // duplicate-key object, valid ES2015+). Verter matches official parity, no dedupe.
+    "special/svelte_boundary_conflict_attr_snippet",
+    // ── <svelte:head> ──
+    // static title — `$.head(hash, ($$anchor) => { $.effect(() => { $.document.title =
+    // 'literal'; }); })` (has_state false ⇒ `$.effect`), a head-only root (NO body skeleton).
+    "special/svelte_head_static_title",
+    // prop title — `$.deferred_template_effect(() => { $.document.title = $$props.t ?? ''; })`
+    // (has_state true ⇒ deferred; `?? ''` since the value is not provably defined).
+    "special/svelte_head_prop_title",
+    // mutated-$state title — `$.deferred_template_effect(() => { $.document.title = `page
+    // ${$.get(t) ?? ''}`; })` (a multi-chunk template literal, per-interpolation `?? ''`).
+    "special/svelte_head_state_title",
+    // title + single meta — the title effect (after_update) BETWEEN the meta clone and its
+    // `$.append` (single meta ⇒ NO `$.next()`).
+    "special/svelte_head_title_meta",
+    // meta-only (two roots) — `var fragment = root(); $.next(2); $.append(...)` in the
+    // callback, NO title effect.
+    "special/svelte_head_meta",
+    // head + body sibling — the `$.head(...)` at its SOURCE position (before the sibling `<p>`
+    // clone's `$.append`).
+    "special/svelte_head_body_sibling",
+    // pre-existing fixture — folded `$state` title (`$.effect` + literal) + a `{@html}` body.
+    "special/svelte_head_html",
+];
+
 /// The repository root (two levels up from this crate's `tests/` dir).
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -5677,8 +5798,31 @@ fn all_supported_slugs() -> Vec<&'static str> {
         .chain(SUPPORTED_BLOCKS.iter())
         .chain(SUPPORTED_DECLARATION_TAGS.iter())
         .chain(SUPPORTED_COMPONENTS.iter())
+        .chain(SUPPORTED_SPECIALS.iter())
         .copied()
         .collect()
+}
+
+#[test]
+fn supported_specials_cover_the_special_host_corpus() {
+    // The special-element corpus (5f-b) is the structural oracle for the host / renderable
+    // specials; a dropped row is a coverage regression. This count gate fails LOUDLY if a row
+    // is dropped, and the no-duplicate check guards against a typo.
+    assert_eq!(
+        SUPPORTED_SPECIALS.len(),
+        36,
+        "the special corpus must enumerate the 7 host-special + 11 svelte:element + 11 \
+         svelte:boundary + 7 svelte:head `special/*` 5f-b fixtures (window/document/body \
+         events+binds+this, svelte_element static/dynamic/attrs/bind_this/dimension/empty/child/\
+         class_directive/class_mixed_case/style_directive/this_and_fold, svelte_boundary \
+         plain/onerror/failed/pending/full + the failed/pending/all ATTRIBUTE forms + \
+         failed_member + mixed-attr-snippet + conflict-attr-snippet, and svelte_head \
+         static_title/prop_title/state_title/title_meta/meta/body_sibling/html)"
+    );
+    let mut seen = std::collections::BTreeSet::new();
+    for &slug in SUPPORTED_SPECIALS {
+        assert!(seen.insert(slug), "duplicate supported-special slug {slug}");
+    }
 }
 
 #[test]

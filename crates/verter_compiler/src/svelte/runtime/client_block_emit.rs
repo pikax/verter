@@ -128,6 +128,14 @@ impl<'a> ClientEmitter<'a> {
             }
             IrNode::Special(special) => {
                 self.collect_component_slot_regions(&special.slots, out, each_scopes);
+                // A RENDERABLE-REGION special (`<svelte:element>`) hosts its children in its
+                // own body region (the `($$element, $$anchor) => {…}` callback). Plan it in
+                // POST-ORDER so its `$.from_html` factory is hoisted before its parent's. It is
+                // NOT a `$.next()`-prelude scope (the element callback is not an each/slot
+                // render callback), so it is NOT added to `each_scopes`.
+                if let Some(body) = special.body_region {
+                    self.collect_post_order(body, out, each_scopes);
+                }
             }
             IrNode::Block(block) => match block {
                 BlockIr::If { branches } => {
@@ -207,10 +215,27 @@ impl<'a> ClientEmitter<'a> {
         scope_id: TemplateScopeId,
         anchor: &str,
     ) {
+        self.emit_region_with_after_update(out, scope_id, anchor, "");
+    }
+
+    /// [`emit_region`](Self::emit_region) plus an `after_update` statement emitted AFTER the
+    /// region's reactive ops and BEFORE its `$.append` (the official fragment `after_update`
+    /// slot). Only the `<svelte:head>` callback supplies one (the `<title>` →
+    /// `$.document.title` effect, which sits between the head's `<meta>`/`<link>` body clone and
+    /// its mount); every other caller passes `""`, so this is byte-identical to the plain region
+    /// emission. A title-only head (an empty body region) still emits its after_update effect.
+    pub(super) fn emit_region_with_after_update(
+        &mut self,
+        out: &mut String,
+        scope_id: TemplateScopeId,
+        anchor: &str,
+        after_update: &str,
+    ) {
         // A CONTENT-FREE region emits an EMPTY closure body (`($$anchor) => {}`) — no clone
         // frame, no mount — matching official. The present-but-empty pending body of a
-        // catch-only `{#await p}{:catch e}` is the canonical case.
-        if self.region_emits_nothing(scope_id) {
+        // catch-only `{#await p}{:catch e}` is the canonical case. A non-empty `after_update`
+        // (a title-only head) keeps emitting even when the body region is otherwise empty.
+        if self.region_emits_nothing(scope_id) && after_update.is_empty() {
             return;
         }
 
@@ -226,16 +251,26 @@ impl<'a> ClientEmitter<'a> {
             self.emit_region_snippets(out, scope_id);
         }
 
-        // A region with NO DOM skeleton (a `{@debug}`-only / `{@const}`-only body): the
-        // official emits a body of `state.consts` + `state.init` statements with NO clone
-        // frame and NO `$.append`. The hoisted decls already emitted in (a); emit the
-        // non-rendering `{@debug}` effects directly — they ARE the region roots, sitting at
-        // the start of an empty DOM sequence — then stop; there is no clone/walk/ops/mount.
+        // A region with NO DOM skeleton (a `{@debug}`-only / `{@const}`-only body, or a
+        // title-only `<svelte:head>` callback): the official emits a body of `state.consts` +
+        // `state.init` statements with NO clone frame and NO `$.append`. The hoisted decls
+        // already emitted in (a); emit the interleaved `{@debug}` / `<svelte:head>` gap directly
+        // — they ARE the region roots — then the ops + the after_update; there is no
+        // clone/walk/mount.
         let roots = self.ir().template_scope(scope_id).roots.clone();
         let has_dom = !clean_nodes(self.ir(), &roots, CleanContext::region_root()).is_empty();
         if !has_dom {
-            let gaps = self.debug_gaps(&roots, &[]);
-            self.emit_debug_gap(out, &gaps[0]);
+            let gaps = self.interleaved_gaps(&roots, &[]);
+            self.emit_interleaved_gap(out, &gaps[0]);
+            // A HOST-SPECIAL (`<svelte:window|document|body>`) region renders NO DOM but
+            // emits its init-only event + bind ops DIRECTLY (NO clone frame, NO
+            // `$.from_html`, NO `$.comment`, NO `$.append`) — the official no-template
+            // window/document/body root. A `{@debug}`/`{@const}`-only no-DOM body carries no
+            // such ops, so this is a no-op there (no regression — those bodies still emit only
+            // their hoisted consts + debug gaps).
+            self.emit_ops(out, scope_id);
+            // The after_update (a title-only head's `$.document.title` effect).
+            self.emit_after_update(out, after_update);
             return;
         }
 
@@ -245,7 +280,14 @@ impl<'a> ClientEmitter<'a> {
         // [`Self::plan_region_factories`]; clone it out so the body emission can mutate `self`.
         match self.region_frame[&scope_id].clone() {
             RegionFrame::TextNode { seed, prelude_next } => {
-                self.emit_text_first_region(out, scope_id, anchor, seed.as_deref(), prelude_next);
+                self.emit_text_first_region(
+                    out,
+                    scope_id,
+                    anchor,
+                    seed.as_deref(),
+                    prelude_next,
+                    after_update,
+                );
             }
             RegionFrame::FromHtml {
                 hoist_var,
@@ -267,6 +309,9 @@ impl<'a> ClientEmitter<'a> {
                 self.emit_walk(out, scope_id, &region_var, mounts_fragment);
                 // (d) The region's reactive ops (combined `$.template_effect` + binds + events).
                 self.emit_ops(out, scope_id);
+                // (d2) The after_update slot (a `<svelte:head>` `<title>` effect) — AFTER the
+                // ops, BEFORE the mount (the official fragment `after_update`).
+                self.emit_after_update(out, after_update);
                 // (e) The mount.
                 out.push_str(&format!("\t$.append({anchor}, {region_var});\n"));
             }
@@ -275,15 +320,30 @@ impl<'a> ClientEmitter<'a> {
                 out.push_str(&format!("\tvar {region_var} = $.comment();\n"));
                 self.emit_walk(out, scope_id, &region_var, true);
                 self.emit_ops(out, scope_id);
+                self.emit_after_update(out, after_update);
                 out.push_str(&format!("\t$.append({anchor}, {region_var});\n"));
             }
             // A STANDALONE component / static-`{@render}` root: NO clone frame, NO
             // `$.append` — the call targets `anchor` directly.
-            RegionFrame::Standalone { node } => match self.client_node(node) {
-                ClientNode::Component(_) => self.emit_component(out, node, anchor),
-                ClientNode::Render(_) => self.emit_render(out, node, anchor),
-                _ => {}
-            },
+            RegionFrame::Standalone { node } => {
+                match self.client_node(node) {
+                    ClientNode::Component(_) => self.emit_component(out, node, anchor),
+                    ClientNode::Render(_) => self.emit_render(out, node, anchor),
+                    _ => {}
+                }
+                self.emit_after_update(out, after_update);
+            }
+        }
+    }
+
+    /// Emit an `after_update` statement (a `<svelte:head>` `<title>` → `$.document.title`
+    /// effect) at the region's after_update slot, framed as one `\t<stmt>\n` line. Empty when
+    /// the region has no after_update (every non-head caller).
+    fn emit_after_update(&self, out: &mut String, after_update: &str) {
+        if !after_update.is_empty() {
+            out.push('\t');
+            out.push_str(after_update);
+            out.push('\n');
         }
     }
 
@@ -307,6 +367,7 @@ impl<'a> ClientEmitter<'a> {
         anchor: &str,
         seed: Option<&str>,
         prelude_next: bool,
+        after_update: &str,
     ) {
         if prelude_next {
             out.push_str("\t$.next();\n");
@@ -322,16 +383,18 @@ impl<'a> ClientEmitter<'a> {
         // Bind the sole text run's interpolations to `text_var` so the reactive
         // `$.set_text(text_var, …)` reuses it (instead of the unbound `"text"` fallback).
         self.bind_text_first_run(scope_id, &text_var);
-        // The `{@debug}` effects (non-rendering, dropped from the clean sequence) emit at
-        // their document gaps — all before the reactive ops, in source order.
+        // The interleaved `{@debug}` / `<svelte:head>` gap nodes (dropped from the clean
+        // sequence) emit at their document gaps — all before the reactive ops, in source order.
         let roots = self.ir().template_scope(scope_id).roots.clone();
         let (_, last_indices) = clean_nodes_indexed(self.ir(), &roots, CleanContext::region_root());
-        let gaps = self.debug_gaps(&roots, &last_indices);
+        let gaps = self.interleaved_gaps(&roots, &last_indices);
         for gap in &gaps {
-            self.emit_debug_gap(out, gap);
+            self.emit_interleaved_gap(out, gap);
         }
         // The reactive ops (`$.template_effect(() => $.set_text(text, …))`).
         self.emit_ops(out, scope_id);
+        // The after_update slot (a `<svelte:head>` `<title>` effect), before the mount.
+        self.emit_after_update(out, after_update);
         // The mount.
         out.push_str(&format!("\t$.append({anchor}, {text_var});\n"));
     }
@@ -341,15 +404,16 @@ impl<'a> ClientEmitter<'a> {
     /// official compiler emits an EMPTY closure body for such a region rather than a
     /// `$.comment()` clone frame + `$.append` — the present-but-empty pending body of a
     /// catch-only `{#await p}{:catch e}` is the canonical case.
-    fn region_emits_nothing(&self, scope_id: TemplateScopeId) -> bool {
+    pub(super) fn region_emits_nothing(&self, scope_id: TemplateScopeId) -> bool {
         let roots = &self.ir().template_scope(scope_id).roots;
         // A non-rendering root that still emits output: a `{@const}`/`{const}`/`{let}`
-        // hoist (`Declarations`), a `{@debug}` snapshot effect (`Debug`), or a `{#snippet}`
-        // DECLARATION (a block-body local `const`, emitted in a non-root region).
+        // hoist (`Declarations`), a `{@debug}` snapshot effect (`Debug`), a `<svelte:head>`
+        // region (`Head` — dropped from the DOM skeleton but still emits `$.head(...)`), or a
+        // `{#snippet}` DECLARATION (a block-body local `const`, emitted in a non-root region).
         for &root in roots {
             if matches!(
                 self.client_node(root),
-                ClientNode::Declarations { .. } | ClientNode::Debug { .. }
+                ClientNode::Declarations { .. } | ClientNode::Debug { .. } | ClientNode::Head(_)
             ) {
                 return false;
             }
@@ -415,21 +479,25 @@ impl<'a> ClientEmitter<'a> {
         }
     }
 
-    /// The non-rendering `{@debug}` nodes among `children`, grouped by the clean-item gap
-    /// they precede in document order: `gaps[g]` are the debugs before clean-item `g`, and
-    /// `gaps[last_indices.len()]` the trailing ones. A `{@debug}` rides a gap (never a DOM
-    /// position) because it is dropped from the clean sequence; `last_indices` maps each
-    /// clean item to its last original-child index, so a debug at original index `d` falls
-    /// in the gap counting the clean items whose last index precedes `d`. This places each
-    /// debug effect at its official source-order slot during the walk — never hoisted.
-    pub(super) fn debug_gaps(
+    /// The non-rendering INTERLEAVED nodes among `children` — a `{@debug}` effect or a
+    /// `<svelte:head>` region — grouped by the clean-item gap they precede in document order:
+    /// `gaps[g]` are the nodes before clean-item `g`, and `gaps[last_indices.len()]` the trailing
+    /// ones. Each rides a gap (never a DOM position) because it is dropped from the clean sequence
+    /// (`{@debug}` is non-rendering; `<svelte:head>` is a non-body special); `last_indices` maps
+    /// each clean item to its last original-child index, so a node at original index `d` falls in
+    /// the gap counting the clean items whose last index precedes `d`. This places each at its
+    /// official source-order slot during the walk — never hoisted.
+    pub(super) fn interleaved_gaps(
         &self,
         children: &[NodeId],
         last_indices: &[usize],
     ) -> Vec<Vec<NodeId>> {
         let mut gaps: Vec<Vec<NodeId>> = vec![Vec::new(); last_indices.len() + 1];
         for (orig, &child) in children.iter().enumerate() {
-            if matches!(self.client_node(child), ClientNode::Debug { .. }) {
+            if matches!(
+                self.client_node(child),
+                ClientNode::Debug { .. } | ClientNode::Head(_)
+            ) {
                 let gap = last_indices.iter().filter(|&&li| li < orig).count();
                 gaps[gap].push(child);
             }
@@ -437,11 +505,15 @@ impl<'a> ClientEmitter<'a> {
         gaps
     }
 
-    /// Emit each `{@debug}` in `debugs` at the current walk position (a gap slot from
-    /// [`Self::debug_gaps`]).
-    pub(super) fn emit_debug_gap(&self, out: &mut String, debugs: &[NodeId]) {
-        for &node in debugs {
-            self.emit_debug_effect(out, node);
+    /// Emit each interleaved node in `nodes` at the current walk position (a gap slot from
+    /// [`Self::interleaved_gaps`]): a `{@debug}` snapshot effect or a `<svelte:head>` region, in
+    /// source order.
+    pub(super) fn emit_interleaved_gap(&mut self, out: &mut String, nodes: &[NodeId]) {
+        for &node in nodes {
+            match self.client_node(node) {
+                ClientNode::Head(_) => self.emit_svelte_head(out, node),
+                _ => self.emit_debug_effect(out, node),
+            }
         }
     }
 

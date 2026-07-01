@@ -1,0 +1,70 @@
+{
+  "slug": "special/svelte_element_this_and_fold.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "svelte_element_this_and_fold",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "state",
+    "comment",
+    "first_child",
+    "element",
+    "bind_this",
+    "set",
+    "get",
+    "attribute_effect",
+    "text",
+    "append",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "attribute_effect",
+    "bind_this",
+    "comment",
+    "element",
+    "first_child",
+    "get",
+    "set",
+    "state",
+    "text"
+  ],
+  "helperCounts": {
+    "state": 1,
+    "comment": 1,
+    "first_child": 1,
+    "element": 1,
+    "bind_this": 1,
+    "set": 1,
+    "get": 1,
+    "attribute_effect": 1,
+    "text": 1,
+    "append": 2
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; export default function svelte_element_this_and_fold($$anchor) {let tag = 'div'; let w = 1; let el = $.state(null); var fragment = $.comment(); var node = $.first_child(fragment); $.element(node, () => tag, false, ($$element, $$anchor) => {$.bind_this($$element, ($$value) => $.set(el, $$value, true), () => $.get(el)); $.attribute_effect($$element, () => ({'data-x': w})); var text = $.text('hi'); $.append($$anchor, text);}); $.append($$anchor, fragment);}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

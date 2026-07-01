@@ -20,7 +20,9 @@ use super::client_plan_types::{
 };
 use super::client_shapes::ClientEventHandlerShape;
 use super::expr::ScopeId;
-use super::ir::{AttrIr, BindOp, EventOp, EventTarget, ExprId, MixedAttrPart, NodeId};
+use super::ir::{
+    AttrIr, BindOp, EventOp, EventTarget, ExprId, IrNode, MixedAttrPart, NodeId, SpecialKind,
+};
 use verter_span::Span;
 
 impl<'a> SupportedClientIr<'a> {
@@ -48,7 +50,12 @@ impl<'a> SupportedClientIr<'a> {
                 target: bind.target.clone(),
                 span: Span::new(0, 0),
             })?;
-        let (getter, setter) = self.bind_getter_setter(bind.expr, &bind.target)?;
+        // The `should_proxy` flag is HOST-driven: a bind on a SPECIAL host
+        // (`<svelte:window|document|body|element>`) emits the proxied setter
+        // `$.set(local, $$value, true)` (the window/document/body/dynamic-element setter
+        // baseline), while an ordinary DOM-element bind stays `$.set(local, $$value)`.
+        let should_proxy = bind_target_is_special_host(self.ir.node(target));
+        let (getter, setter) = self.bind_getter_setter(bind.expr, &bind.target, should_proxy)?;
         Ok(ClientRuntimeOp::Bind {
             target: ClientNodeId(target.0),
             shape,
@@ -63,49 +70,71 @@ impl<'a> SupportedClientIr<'a> {
     /// accepted [`ClientEventHandlerShape`](super::client_shapes::ClientEventHandlerShape)
     /// fact.
     ///
-    /// The regular-element surface feeds ONLY regular DOM-node hosts
-    /// (`EventTarget::Node`) — the special-element event hosts (window/body/document) are
-    /// refused upstream at the special-element node gate; the emit-target KIND is
-    /// nonetheless carried typed so the special-element event hosts reuse the SAME emitter
-    /// by feeding the global-host variants.
+    /// The regular-element surface feeds regular DOM-node hosts (`EventTarget::Node`); the
+    /// GLOBAL-host specials (`<svelte:window|document|body>`) feed the `Window` / `Document`
+    /// / `Body` variants (a direct `$.event(...)` against `$.window` / `$.document` /
+    /// `$.document.body`) — the SAME emitter serves both by feeding the global-host target
+    /// kind. A global host event has no DOM node id, so its accepted shape is resolved
+    /// host-keyed (by event type + handler expr).
     pub(super) fn project_event_op(
         &self,
         target: EventTarget,
         event: &EventOp,
         _scope: ScopeId,
     ) -> Result<ClientRuntimeOp, UnsupportedSvelteRuntimeSurface> {
-        let EventTarget::Node(node_id) = target else {
-            // A special-element event host (window/body/document) is refused upstream at
-            // the special-element node gate; defensively fail closed here too.
-            return Err(UnsupportedSvelteRuntimeSurface::NonDelegatedEvent {
-                event_type: event.event_type.clone(),
-                span: Span::new(0, 0),
-            });
+        // The accepted handler SHAPE the classifier recorded for THIS event. A regular DOM
+        // node resolves by the full (node, event type, handler expr) key so an element with
+        // multiple events resolves to its OWN fact, never a sibling event's. A GLOBAL host
+        // event (`<svelte:window|document|body>`) carries the global as its
+        // [`EventTarget`] — it has NO DOM node id — so its accepted shape is recorded
+        // host-keyed (the handler expr id is globally unique) and looked up by (event type,
+        // handler expr). An event op with NO recorded shape is a classifier/plan divergence
+        // — fail closed defensively (never emit an unclassified, possibly-non-function
+        // handler).
+        let (emit_target, shape) = match target {
+            EventTarget::Node(node_id) => {
+                let shape = find_event_shape(
+                    &self.event_shapes,
+                    node_id,
+                    &event.event_type,
+                    event.handler,
+                )
+                .ok_or_else(|| {
+                    UnsupportedSvelteRuntimeSurface::NonDelegatedEvent {
+                        event_type: event.event_type.clone(),
+                        span: Span::new(0, 0),
+                    }
+                })?;
+                (EventEmitTarget::Node(ClientNodeId(node_id.0)), shape)
+            }
+            EventTarget::Window | EventTarget::Document | EventTarget::Body => {
+                let shape =
+                    find_host_event_shape(&self.event_shapes, &event.event_type, event.handler)
+                        .ok_or_else(|| UnsupportedSvelteRuntimeSurface::NonDelegatedEvent {
+                            event_type: event.event_type.clone(),
+                            span: Span::new(0, 0),
+                        })?;
+                let host = match target {
+                    EventTarget::Window => EventEmitTarget::Window,
+                    EventTarget::Document => EventEmitTarget::Document,
+                    // The remaining arm is `Body` (Node handled above).
+                    _ => EventEmitTarget::Body,
+                };
+                (host, shape)
+            }
         };
-        // The accepted handler SHAPE the classifier recorded for THIS event — looked up
-        // by the full (node, event type, handler expr) key so an element with multiple
-        // events resolves to its OWN fact, never a sibling event's. An event op with NO
-        // recorded shape is a classifier/plan divergence — fail closed defensively (never
-        // emit an unclassified, possibly-non-function handler).
-        let shape = find_event_shape(
-            &self.event_shapes,
-            node_id,
-            &event.event_type,
-            event.handler,
-        )
-        .ok_or_else(|| UnsupportedSvelteRuntimeSurface::NonDelegatedEvent {
-            event_type: event.event_type.clone(),
-            span: Span::new(0, 0),
-        })?;
         let analyzed = self.ir.analysis.expressions.get(event.handler);
         let handler = self.rewrite(event.handler, analyzed.scope)?;
         let emit = EventEmit {
+            // A GLOBAL host event is ALWAYS a direct `$.event(...)` registration (never
+            // delegated) — the lowering records `delegated: false` for the host targets, so
+            // this maps to `Direct`.
             mode: if event.delegated {
                 EventMode::Delegated
             } else {
                 EventMode::Direct
             },
-            target: EventEmitTarget::Node(ClientNodeId(node_id.0)),
+            target: emit_target,
             event_type: event.event_type.clone(),
             capture: event.capture,
             passive: event.passive,
@@ -140,6 +169,7 @@ impl<'a> SupportedClientIr<'a> {
         &self,
         expr: ExprId,
         _target: &str,
+        should_proxy: bool,
     ) -> Result<(String, String), UnsupportedSvelteRuntimeSurface> {
         let analyzed = self.ir.analysis.expressions.get(expr);
         // `text` is the raw bound-target source — used ONLY as the human-readable diagnostic
@@ -191,7 +221,15 @@ impl<'a> SupportedClientIr<'a> {
                     .resolve_kind(&self.ir.analysis.scopes, analyzed.scope, root)
                     .is_some_and(is_signal_kind);
                 if is_signal {
-                    format!("$.set({root}, $$value)")
+                    // A SPECIAL-host bind (`should_proxy`) carries the 3rd `true` proxy-flag
+                    // arg (`$.set(local, $$value, true)`) — the window/document/body/dynamic-
+                    // element setter baseline; an ordinary DOM bind stays `$.set(local,
+                    // $$value)`.
+                    if should_proxy {
+                        format!("$.set({root}, $$value, true)")
+                    } else {
+                        format!("$.set({root}, $$value)")
+                    }
                 } else {
                     format!("{root} = $$value")
                 }
@@ -253,13 +291,49 @@ impl<'a> SupportedClientIr<'a> {
     }
 }
 
+/// Whether a `bind:` target node is a SPECIAL HOST (`<svelte:window|document|body|
+/// element>`) — the host-driven `should_proxy` discriminant. A special-host bind emits the
+/// proxied setter (`$.set(local, $$value, true)`); an ordinary element bind does not.
+/// Structural over the typed IR node, never a name scan.
+///
+/// This is the SOLE authority for the emitted proxy flag — NOT the `should_proxy` column on
+/// the bind-contract row (which is DOCUMENTARY, consumed only by the contract test). A row
+/// carrying `should_proxy: false` (e.g. `focused`) still emits the proxied setter on a special
+/// host because THIS predicate drives it. See the `BindContract::should_proxy` field doc.
+fn bind_target_is_special_host(node: &IrNode) -> bool {
+    matches!(
+        node,
+        IrNode::Special(s) if matches!(
+            s.kind,
+            SpecialKind::Window | SpecialKind::Document | SpecialKind::Body | SpecialKind::Element
+        )
+    )
+}
+
+/// Find the accepted handler shape recorded for a GLOBAL-host event (`<svelte:window|
+/// document|body>`), keyed by (event type, handler expr) — the host-keyed lookup that does
+/// NOT consult a DOM node id (a global host event carries the global as its event target,
+/// not a node). The handler expr id is globally unique in the expression arena, so the
+/// (event type, handler) pair is an unambiguous key. Returns `None` when no fact matches (a
+/// classifier/plan divergence the caller fails closed on).
+fn find_host_event_shape(
+    facts: &[(NodeId, String, ExprId, ClientEventHandlerShape)],
+    event_type: &str,
+    handler: ExprId,
+) -> Option<ClientEventHandlerShape> {
+    facts
+        .iter()
+        .find(|(_, ty, h, _)| ty == event_type && *h == handler)
+        .map(|(_, _, _, shape)| shape.clone())
+}
+
 /// Build the legacy modifier WRAPPER stack from an event's modifier set, in the FIXED
 /// official application order ([`EventWrapper::ORDER`], inner→outer) INDEPENDENT of
 /// source order — only the recognized wrapper modifiers (`stopPropagation` …`once`)
 /// contribute; `capture` / `passive` / `nonpassive` are positional args, not wrappers,
 /// and are skipped here. The result drives the emitter's inner-to-outer
 /// `$.<modifier>(handler)` nesting.
-fn event_wrappers(modifiers: &[String]) -> Vec<EventWrapper> {
+pub(super) fn event_wrappers(modifiers: &[String]) -> Vec<EventWrapper> {
     EventWrapper::ORDER
         .into_iter()
         .filter(|wrapper| {

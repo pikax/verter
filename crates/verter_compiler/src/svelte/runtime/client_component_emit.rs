@@ -46,6 +46,63 @@ impl<'a> ClientEmitter<'a> {
         lets: &[LetBinding],
         placement: CallbackPlacement<'_>,
     ) {
+        self.emit_region_callback_full(out, scope_id, params, lets, "", "", placement);
+    }
+
+    /// [`emit_region_callback`](Self::emit_region_callback) with an `after_update` statement — a
+    /// callback-body statement emitted INSIDE the region's frame, AFTER its reactive ops and
+    /// BEFORE its `$.append` (the official fragment `after_update` slot; a no-DOM region emits it
+    /// after its ops). The `<svelte:head>` callback uses it for the `<title>` →
+    /// `$.document.title` effect, which sits between the head's `<meta>`/`<link>` body clone and
+    /// its mount. A `after_update` is pre-built by the caller; the other callers pass `""`.
+    pub(super) fn emit_region_callback_with_after_update(
+        &mut self,
+        out: &mut String,
+        scope_id: TemplateScopeId,
+        params: &[String],
+        lets: &[LetBinding],
+        after_update: &str,
+        placement: CallbackPlacement<'_>,
+    ) {
+        self.emit_region_callback_full(out, scope_id, params, lets, "", after_update, placement);
+    }
+
+    /// [`emit_region_callback`](Self::emit_region_callback) with an additional `prelude` — a
+    /// block of callback-body statements emitted AFTER the `{` and the `let:` deriveds but
+    /// BEFORE the region body. The `<svelte:element>` callback uses it for the element's own
+    /// setup (the `$.set_class` / `$.attribute_effect` fold + the `$$element`-hosted binds + the
+    /// legacy `on:` `$.event` registrations, which precede the child-content region). A `prelude`
+    /// is pre-built by the caller (it may allocate names); the existing component/snippet/slot
+    /// callers pass `""`.
+    pub(super) fn emit_region_callback_with_prelude(
+        &mut self,
+        out: &mut String,
+        scope_id: TemplateScopeId,
+        params: &[String],
+        lets: &[LetBinding],
+        prelude: &str,
+        placement: CallbackPlacement<'_>,
+    ) {
+        self.emit_region_callback_full(out, scope_id, params, lets, prelude, "", placement);
+    }
+
+    /// The shared callback emitter both the `prelude` and `after_update` variants route through:
+    /// the header (`const NAME = (params) => {` / `(params) => {`), the `let:` slot-prop
+    /// deriveds, the `prelude` statements, the region body (with its `after_update` slot), and
+    /// the closing `}` / `};`. `prelude` is emitted BEFORE the region body; `after_update` INSIDE
+    /// the region frame after its ops; a caller needing neither passes `""` for both (an empty
+    /// `after_update` makes `emit_region_with_after_update` byte-identical to `emit_region`).
+    #[allow(clippy::too_many_arguments)]
+    fn emit_region_callback_full(
+        &mut self,
+        out: &mut String,
+        scope_id: TemplateScopeId,
+        params: &[String],
+        lets: &[LetBinding],
+        prelude: &str,
+        after_update: &str,
+        placement: CallbackPlacement<'_>,
+    ) {
         let param_str = params.join(", ");
         match &placement {
             CallbackPlacement::Const(name) => {
@@ -61,7 +118,8 @@ impl<'a> ClientEmitter<'a> {
                 binding.name, binding.key
             ));
         }
-        self.emit_region(out, scope_id, "$$anchor");
+        out.push_str(prelude);
+        self.emit_region_with_after_update(out, scope_id, "$$anchor", after_update);
         out.push('}');
         if matches!(placement, CallbackPlacement::Const(_)) {
             out.push(';');

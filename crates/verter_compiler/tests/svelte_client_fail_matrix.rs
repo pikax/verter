@@ -376,18 +376,9 @@ const FAIL_MATRIX: &[FailRow] = &[
         source: "<script>let h = $state(0);</script>\n<video bind:videoHeight={h}></video>\n",
         code: "svelte-runtime-unsupported-binding",
     },
-    // ── focused: an EXPLICIT runtime-unsupported registry row ⇒ fails closed ──
-    // `bind:focused` (→ official `$.bind_focused`) is an EXPLICIT bind-contract row
-    // recording its REAL official helper + `RuntimeSupport::Unsupported`, so
-    // `resolve_runtime_bind` returns `None` (refused on support status, NOT on
-    // absence) and the bind fails closed. Confirms the explicit-unsupported-row path
-    // routes to refusal — an official bind must be an explicit row (absent-row
-    // fail-closed and helper-identity erasure are both unacceptable).
-    FailRow {
-        name: "bind_focused_unsupported_fails_closed",
-        source: "<script>let fo = $state(false);</script>\n<input bind:focused={fo} />\n",
-        code: "svelte-runtime-unsupported-binding",
-    },
+    // (`bind:focused` was an EXPLICIT runtime-unsupported registry row here; 5f-b flips it to
+    // `RuntimeSupport::Supported` — `<input bind:focused>` now emits `$.bind_focused(input,
+    // ($$value) => $.set(fo, $$value))`, so its fail-closed row was removed.)
     // ── events ──────────────────────────────────────────────────────────
     FailRow {
         name: "event_call",
@@ -1854,8 +1845,9 @@ fn fail_matrix_covers_every_documented_sub_shape() {
     // whose official helper is a DEDICATED helper (a generic `$.bind_property` would be the
     // wrong helper), and the native runtime does not emit it yet, so the contract records
     // the real official helper + `RuntimeSupport::Unsupported` and the runtime router fails
-    // it closed. The `bind_focused_unsupported_fails_closed` row (+1) locks the
-    // explicit-unsupported-row path (a real row + `Unsupported` ⇒ fail closed). +9 rows.
+    // it closed. (5f-b flipped `bind:focused` to `RuntimeSupport::Supported`, so its former
+    // `bind_focused_unsupported_fails_closed` row was removed — `<input bind:focused>` now
+    // emits `$.bind_focused`.) +8 rows.
     //
     // The runtime-unsupported GENERIC-property binds add 8 MORE rows
     // (`bind_indeterminate_unsupported` on `<input>`;
@@ -1890,8 +1882,8 @@ fn fail_matrix_covers_every_documented_sub_shape() {
     // self-call — both formerly over-accepted (emitted a divergent Main).
     assert_eq!(
         FAIL_MATRIX.len(),
-        137,
-        "the fail matrix must enumerate all 137 documented unsupported-feature \
+        136,
+        "the fail matrix must enumerate all 136 documented unsupported-feature \
          fail-closed sub-shapes. The 5f-a component/snippet/slot vertical removed FIVE rows \
          (now accepted-positive with topology/emit goldens): `component` (a `<Foo />` direct \
          call), `bind_this_component` (a component `bind:this` → `$.bind_this`), \
@@ -1935,9 +1927,9 @@ fn fail_matrix_covers_every_documented_sub_shape() {
          now emits `$.remove_input_defaults` + `$.bind_checked` for `bind:checked`; the \
          8 runtime-unsupported DEDICATED-helper bind rows (files / playbackRate / volume / \
          muted + the four resize-observer binds) fail closed at the runtime router rather \
-         than emit the wrong generic `$.bind_property` helper, and the \
-         `bind_focused_unsupported_fails_closed` row locks the explicit-unsupported-row \
-         refusal — +9 rows; PLUS the 8 runtime-unsupported GENERIC-property bind rows \
+         than emit the wrong generic `$.bind_property` helper (5f-b flipped `bind:focused` \
+         to supported, so its former fail-closed row was removed) \
+         — +8 rows; PLUS the 8 runtime-unsupported GENERIC-property bind rows \
          (indeterminate on input; buffered / seekable / seeking / ended / readyState on \
          audio; videoWidth / videoHeight on video) that fail closed because the native \
          runtime does not emit them yet — naturalWidth / naturalHeight stay router-only \

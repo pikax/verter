@@ -174,10 +174,46 @@ fn walk_node_topology(
             if s.kind == SpecialKind::Head {
                 helpers.call(SvelteHelper::Head);
             }
-            // A host / renderable special-element (`<svelte:*>`) bind has no DOM host
-            // (the global `<svelte:window|body|document|head|element|boundary>` hosts).
-            for attr in &s.attrs {
-                record_attr_topology(attr, None, &[], helpers, delegated);
+            // A GLOBAL / dynamic-element host (`<svelte:window|document|body|element>`)
+            // resolves its `bind:` helper through the HOST-SCOPED bind contract — the host
+            // TOKEN (`svelte:window` / …) is the bind classifier's host key, so a window-only
+            // bind on the window host records `$.bind_window_size`, a body dimension bind
+            // records `$.bind_element_size`, etc. (a wrong-host pair records nothing — it
+            // fails closed). `<svelte:head|boundary>` have no host-scoped binds (host_token =
+            // None). Events record the direct `$.event` helper independent of the host.
+            let host_token = match s.kind {
+                SpecialKind::Window => Some("svelte:window"),
+                SpecialKind::Document => Some("svelte:document"),
+                SpecialKind::Body => Some("svelte:body"),
+                SpecialKind::Element => Some("svelte:element"),
+                _ => None,
+            };
+            // A `<svelte:boundary>`'s `onerror` lowers to an `error` event attr, but it is a
+            // PROPS member of the `$.boundary(node, { onerror }, …)` call — NOT a structural
+            // `$.event` listener — so the boundary records NO attr helper (its body + snippet
+            // regions ride the factory loop + the child walk; the `$.boundary` call itself is
+            // not in the owned-helper universe).
+            if s.kind != SpecialKind::Boundary {
+                for attr in &s.attrs {
+                    record_attr_topology(attr, host_token, &s.attrs, helpers, delegated);
+                }
+            }
+            // A `<svelte:element>` routed to the FOLD emits ONE `$.attribute_effect` for
+            // the whole co-located fold (the official dynamic-element fold) — record it
+            // once. The SHARED routing (`svelte_element_attr_route`) decides: the
+            // lone-static-class route (with or without co-located `class:` directives)
+            // emits the dedicated `$.set_class` (NOT folded, not in the owned-helper
+            // universe here); a `bind:` records its own bind helper above; a LEGACY
+            // `on:` (`AttrIr::Event`) records `$.event` above (NOT folded). Mirrors the
+            // emitter's routing exactly so the recorded helper never drifts from the
+            // emission.
+            if s.kind == SpecialKind::Element
+                && matches!(
+                    super::client_svelte_element::svelte_element_attr_route(&s.attrs),
+                    super::client_svelte_element::SvelteElementAttrRoute::Fold { .. }
+                )
+            {
+                helpers.call(SvelteHelper::AttributeEffect);
             }
             for &child in &s.children {
                 walk_node_topology(ir, child, helpers, delegated);
@@ -346,5 +382,10 @@ fn bind_helper_for(helper: crate::svelte::bind_contract::RuntimeHelper) -> Svelt
         RuntimeHelper::ContentEditable => SvelteHelper::BindContentEditable,
         RuntimeHelper::Property => SvelteHelper::BindProperty,
         RuntimeHelper::This => SvelteHelper::BindThis,
+        RuntimeHelper::WindowSize => SvelteHelper::BindWindowSize,
+        RuntimeHelper::WindowScroll => SvelteHelper::BindWindowScroll,
+        RuntimeHelper::Online => SvelteHelper::BindOnline,
+        RuntimeHelper::Focused => SvelteHelper::BindFocused,
+        RuntimeHelper::ActiveElement => SvelteHelper::BindActiveElement,
     }
 }
