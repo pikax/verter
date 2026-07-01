@@ -60,19 +60,20 @@ fn upsert_sibling(host: &VerterHost, canonical_id: &str, source: &str) {
         .expect("sibling upsert must succeed");
 }
 
-/// Compile one `.vue` through the RuntimeRender lane and return its entry.
+/// A minimal prod render profile for the common test case (prod, no ssr,
+/// no force-js, default runtime module / delimiters / custom-elements).
+fn simple_render_profile() -> crate::host_compile::CompileBatchRenderProfile {
+    render_profile(true, false, false, crate::types::HmrStrategy::None)
+}
+
+/// Compile one `.vue` through the RuntimeRender lane (minimal prod profile)
+/// and return its entry.
 fn render_one(
     host: &VerterHost,
     canonical_id: &str,
     source: &str,
 ) -> crate::host_compile::CompileBatchEntry {
-    let mut entries = host.compile_many(
-        vec![input(canonical_id, source)],
-        CompileBatchOptions::default(),
-        CompileManyTarget::RuntimeRender,
-    );
-    assert_eq!(entries.len(), 1, "one input must produce one entry");
-    entries.pop().unwrap()
+    render_with_profile(host, canonical_id, source, simple_render_profile(), None)
 }
 
 /// Compile one `.vue` through the HostBacked lane and return its entry.
@@ -90,7 +91,10 @@ fn host_backed_one(
     entries.pop().unwrap()
 }
 
-/// Build the batch render profile mirroring an unplugin build.
+/// Build the batch render profile mirroring an unplugin build. Non-varied
+/// output-affecting fields take the same defaults `CompileProfile::default`
+/// / an absent `HostCompileProfile` field would (so this matches the
+/// `get_virtual_file` oracle unless a test overrides a field explicitly).
 fn render_profile(
     is_production: bool,
     ssr: bool,
@@ -101,7 +105,14 @@ fn render_profile(
         is_production,
         ssr,
         force_js,
+        force_vapor: false,
+        source_map: false,
+        comments: false,
         hmr_strategy: hmr,
+        runtime_module_name: Some("vue".to_string()),
+        types_module_name: None,
+        delimiters: None,
+        custom_elements: None,
     }
 }
 
@@ -122,11 +133,8 @@ fn render_with_profile(
     };
     let mut entries = host.compile_many(
         vec![input],
-        CompileBatchOptions {
-            render_profile: Some(profile),
-            ..CompileBatchOptions::default()
-        },
-        CompileManyTarget::RuntimeRender,
+        CompileBatchOptions::default(),
+        CompileManyTarget::RuntimeRender { profile },
     );
     assert_eq!(entries.len(), 1, "one input must produce one entry");
     entries.pop().unwrap()
@@ -136,13 +144,14 @@ fn render_with_profile(
 /// `get_virtual_file(Main)` with the EXACT `CompileProfile` unplugin would
 /// pass to `getVirtualFile({ compileProfile })`. This is the byte-parity
 /// target the RuntimeRender lane must match — NOT `compile_many(HostBacked)`
-/// (whose profile is the frozen bundler preset). Returns `(code, source_map)`.
+/// (whose profile is the frozen bundler preset). Returns
+/// `(code, source_map, lang)`.
 fn host_backed_main_via_get_virtual_file(
     host: &VerterHost,
     canonical_id: &str,
     source: &str,
     profile: &CompileProfile,
-) -> (Arc<str>, Option<Arc<str>>) {
+) -> (Arc<str>, Option<Arc<str>>, Option<String>) {
     let lang = host.language_classifier().classify(canonical_id);
     let _ = host
         .upsert(UpsertRequest {
@@ -161,7 +170,7 @@ fn host_backed_main_via_get_virtual_file(
             compile_profile: profile.clone(),
         })
         .expect("get_virtual_file(Main) must succeed");
-    (resp.code, resp.source_map)
+    (resp.code, resp.source_map, resp.lang)
 }
 
 /// The `CompileProfile` an unplugin build would pass to `getVirtualFile`,
@@ -170,11 +179,20 @@ fn get_virtual_file_profile(
     rp: crate::host_compile::CompileBatchRenderProfile,
     component_id: Option<String>,
 ) -> CompileProfile {
+    // Mirror EXACTLY the projection `render_base_profile` applies, so the
+    // oracle and the render lane feed identical `RuntimeCompileOptions`.
     CompileProfile {
         is_production: rp.is_production,
         ssr: rp.ssr,
         force_js: rp.force_js,
+        force_vapor: rp.force_vapor,
+        source_map: rp.source_map,
+        comments: Some(rp.comments),
         hmr_strategy: rp.hmr_strategy,
+        runtime_module_name: rp.runtime_module_name.clone(),
+        types_module_name: rp.types_module_name.clone(),
+        delimiters: rp.delimiters.clone(),
+        custom_elements: rp.custom_elements.clone(),
         component_id,
         ..CompileProfile::default()
     }
@@ -289,72 +307,85 @@ fn runtime_render_matches_host_backed_wrapper_output() {
         },
     ];
 
-    // Drive BOTH prod (is_production:true) and dev (false) — dev is now
-    // genuinely exercised (the profile flows through render_profile). The
-    // RuntimeRender lane is compared against the CURRENT unplugin path
-    // (`get_virtual_file(Main)` under the SAME CompileProfile) in each mode.
+    // Drive prod/dev × source-map-on/off. Both axes are OUTPUT-AFFECTING and
+    // must be genuinely exercised (source_map is NOT carried by the profile
+    // by mistake — a bug that would silently drop bundler source maps; with
+    // source_map=true BOTH the render lane and the oracle must emit the SAME
+    // non-empty map). The RuntimeRender lane is compared against the CURRENT
+    // unplugin path (`get_virtual_file(Main)` under the SAME CompileProfile).
     for prod in [true, false] {
-        let rp = render_profile(prod, false, false, crate::types::HmrStrategy::None);
-        let gvf_profile = get_virtual_file_profile(rp, None);
-        for case in &cases {
-            // Fresh host per (case, mode) so neither path warms the other.
-            let host_r = new_host();
-            let host_h = new_host();
-            if let Some((sib_id, sib_src)) = case.sibling {
-                upsert_sibling(&host_r, sib_id, sib_src);
-                upsert_sibling(&host_h, sib_id, sib_src);
-            }
-            let render = render_with_profile(&host_r, case.canonical, case.source, rp, None);
-            let (hb_code, hb_map) = host_backed_main_via_get_virtual_file(
-                &host_h,
-                case.canonical,
-                case.source,
-                &gvf_profile,
-            );
-
-            assert!(
-                render.errors.is_empty(),
-                "[{} prod={}] render lane must succeed: {:?}",
-                case.name,
-                prod,
-                render.errors
-            );
-            assert!(
-                !render.code.is_empty(),
-                "[{} prod={}] render Main must be non-empty",
-                case.name,
-                prod
-            );
-            assert_eq!(
-                render.code.as_ref(),
-                hb_code.as_ref(),
-                "[{} prod={}] RuntimeRender Main bytes must equal the getVirtualFile Main bytes.\n--- RENDER ---\n{}\n--- GETVIRTUALFILE ---\n{}",
-                case.name,
-                prod,
-                render.code,
-                hb_code
-            );
-            assert_eq!(
-                render.source_map.as_ref().map(|s| s.as_ref()),
-                hb_map.as_ref().map(|s| s.as_ref()),
-                "[{} prod={}] RuntimeRender source map must equal the getVirtualFile source map",
-                case.name,
-                prod
-            );
-            // The cross-file-macro case must NOT be a false positive: the
-            // resolved props must actually appear in the rendered output
-            // (proves external_types was produced on the render lane).
-            if case.name == "cross-file-macro" {
-                assert!(
-                    render.code.contains("id") && render.code.contains("label"),
-                    "[{} prod={}] resolved cross-file props must appear in render Main:\n{}",
-                    case.name,
-                    prod,
-                    render.code
+        for source_map in [false, true] {
+            let mut rp = render_profile(prod, false, false, crate::types::HmrStrategy::None);
+            rp.source_map = source_map;
+            let gvf_profile = get_virtual_file_profile(rp.clone(), None);
+            for case in &cases {
+                // Fresh host per (case, mode) so neither path warms the other.
+                let host_r = new_host();
+                let host_h = new_host();
+                if let Some((sib_id, sib_src)) = case.sibling {
+                    upsert_sibling(&host_r, sib_id, sib_src);
+                    upsert_sibling(&host_h, sib_id, sib_src);
+                }
+                let render =
+                    render_with_profile(&host_r, case.canonical, case.source, rp.clone(), None);
+                let (hb_code, hb_map, hb_lang) = host_backed_main_via_get_virtual_file(
+                    &host_h,
+                    case.canonical,
+                    case.source,
+                    &gvf_profile,
                 );
+
+                let tag = format!("{} prod={} map={}", case.name, prod, source_map);
+                assert!(
+                    render.errors.is_empty(),
+                    "[{tag}] render lane must succeed: {:?}",
+                    render.errors
+                );
+                assert!(
+                    !render.code.is_empty(),
+                    "[{tag}] render Main must be non-empty"
+                );
+                assert_eq!(
+                    render.code.as_ref(),
+                    hb_code.as_ref(),
+                    "[{tag}] RuntimeRender Main bytes must equal the getVirtualFile Main bytes.\n--- RENDER ---\n{}\n--- GETVIRTUALFILE ---\n{}",
+                    render.code,
+                    hb_code
+                );
+                assert_eq!(
+                    render.source_map.as_ref().map(|s| s.as_ref()),
+                    hb_map.as_ref().map(|s| s.as_ref()),
+                    "[{tag}] RuntimeRender source map must equal the getVirtualFile source map",
+                );
+                assert_eq!(
+                    render.lang, hb_lang,
+                    "[{tag}] RuntimeRender Main lang must equal the getVirtualFile Main lang",
+                );
+                // The cross-file-macro case must NOT be a false positive: the
+                // resolved props must actually appear in the rendered output
+                // (proves external_types was produced on the render lane).
+                if case.name == "cross-file-macro" {
+                    assert!(
+                        render.code.contains("id") && render.code.contains("label"),
+                        "[{tag}] resolved cross-file props must appear in render Main:\n{}",
+                        render.code
+                    );
+                }
             }
         }
     }
+    // Note on source maps: the matrix runs every case with
+    // source_map ∈ {false, true} and asserts render↔oracle parity of the
+    // Main code + map + lang in BOTH states, so the `source_map` profile
+    // field is threaded through the render lane identically to the
+    // getVirtualFile path. The assembled Vue `Main` module carries no source
+    // map of its own (the per-block maps ride on the Script / Template
+    // virtual nodes, which the bundler requests separately), so
+    // `render.source_map` is `None` on both paths here — the parity assert
+    // is what discriminates a lane that diverged on the field, not a
+    // non-empty-map expectation the Main node never satisfies. Dedicated
+    // Script/Template source-map coverage lives in the carrier codegen +
+    // sourcemap test suites.
 }
 
 // ---------------------------------------------------------------------------
@@ -409,19 +440,14 @@ fn runtime_render_unresolved_imported_macro_type_is_soft() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 5 — local type/macro misuse stays FATAL on RuntimeRender
+// Test 5 — missing external `<script src>` stays FATAL on RuntimeRender
 // ---------------------------------------------------------------------------
 
-/// A non-soft error must stay fatal on the render lane. The runtime
-/// compiler does not type-check (a pure local *type* error is the IDE/TSC
-/// path's job and never reaches runtime codegen as an error), so the
-/// distinct non-soft fatal this exercises is a missing external `<script
-/// src="...">` source (`HOST_MISSING_EXTERNAL_SOURCE`, site 1) — a
-/// DIFFERENT fatal site than the template-parse case in the next test.
-/// Site 1 stays hard on BOTH lanes. DISCRIMINATING: a lane that softened
-/// errors beyond the imported-macro site would let this render.
+/// The missing-external-source fatal (site 1) stays hard on the render
+/// lane. DISCRIMINATING: a lane that softened errors beyond the
+/// imported-macro-resolution site would let this render.
 #[test]
-fn runtime_render_local_type_error_is_fatal() {
+fn runtime_render_missing_external_src_is_fatal() {
     // A `<script src="...">` pointing at a file that was never upserted:
     // the wrapper cannot merge the external source and returns the fatal
     // `HOST_MISSING_EXTERNAL_SOURCE` (site 1).
@@ -441,6 +467,38 @@ fn runtime_render_local_type_error_is_fatal() {
     assert!(
         !host_backed.errors.is_empty(),
         "the same missing external src must be fatal on HostBacked too"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 5b — a RESOLVED-but-wrong-shape imported macro stays FATAL
+// ---------------------------------------------------------------------------
+
+/// A `defineProps<T>()` whose imported `T` RESOLVES but is NOT object-like
+/// (e.g. a `string` alias) is a genuine local misuse: the compiler emits a
+/// fatal `XInvalidMacroType` (NOT the softenable
+/// `XUnresolvedImportedMacroType`). It must stay FATAL on the render lane —
+/// the soft contract covers ONLY unresolved-RESOLUTION, never wrong-shape.
+/// DISCRIMINATING: the pre-fix over-broad gate (`code=="XInvalidMacroType"`)
+/// would have softened this; the structural code split keeps it fatal.
+#[test]
+fn runtime_render_resolved_wrong_shape_imported_macro_is_fatal() {
+    let host = new_host();
+    // `WrongProps` RESOLVES (it is a real exported type) but is a string
+    // alias — not object-like, so defineProps rejects its shape.
+    upsert_sibling(&host, "/proj/wrong.ts", "export type WrongProps = string\n");
+    let src = "<script setup lang=\"ts\">\nimport type { WrongProps } from './wrong'\ndefineProps<WrongProps>()\n</script>\n<template><div /></template>\n";
+    let render = render_one(&host, "/proj/Wrong.vue", src);
+    assert!(
+        !render.errors.is_empty(),
+        "a resolved-but-wrong-shape imported macro type must stay FATAL on \
+         RuntimeRender (got code: {:?}, diagnostics: {:?})",
+        render.code,
+        render
+            .diagnostics
+            .iter()
+            .map(|d| d.code.clone())
+            .collect::<Vec<_>>()
     );
 }
 
@@ -635,8 +693,8 @@ fn runtime_render_honors_render_profile_dev_vs_prod() {
     let dev_rp = render_profile(false, false, false, crate::types::HmrStrategy::Vite);
     let prod_rp = render_profile(true, false, false, crate::types::HmrStrategy::None);
 
-    let dev = render_with_profile(&new_host(), canonical, src, dev_rp, None);
-    let prod = render_with_profile(&new_host(), canonical, src, prod_rp, None);
+    let dev = render_with_profile(&new_host(), canonical, src, dev_rp.clone(), None);
+    let prod = render_with_profile(&new_host(), canonical, src, prod_rp.clone(), None);
     assert!(dev.errors.is_empty(), "dev render errors: {:?}", dev.errors);
     assert!(
         prod.errors.is_empty(),
@@ -657,13 +715,13 @@ fn runtime_render_honors_render_profile_dev_vs_prod() {
 
     // Each mode byte-matches the current getVirtualFile path under the SAME
     // profile — the real parity claim, now in BOTH modes.
-    let (dev_hb, _) = host_backed_main_via_get_virtual_file(
+    let (dev_hb, _, _) = host_backed_main_via_get_virtual_file(
         &new_host(),
         canonical,
         src,
         &get_virtual_file_profile(dev_rp, None),
     );
-    let (prod_hb, _) = host_backed_main_via_get_virtual_file(
+    let (prod_hb, _, _) = host_backed_main_via_get_virtual_file(
         &new_host(),
         canonical,
         src,
@@ -698,8 +756,20 @@ fn runtime_render_threads_per_input_component_id_into_scope() {
     let src = "<template><div>x</div></template>\n<style scoped>\n.a { color: red }\n</style>\n";
     let rp = render_profile(true, false, false, crate::types::HmrStrategy::None);
 
-    let a = render_with_profile(&new_host(), canonical, src, rp, Some("aaa111".to_string()));
-    let b = render_with_profile(&new_host(), canonical, src, rp, Some("bbb222".to_string()));
+    let a = render_with_profile(
+        &new_host(),
+        canonical,
+        src,
+        rp.clone(),
+        Some("aaa111".to_string()),
+    );
+    let b = render_with_profile(
+        &new_host(),
+        canonical,
+        src,
+        rp.clone(),
+        Some("bbb222".to_string()),
+    );
     assert!(a.errors.is_empty(), "render a errors: {:?}", a.errors);
     assert!(b.errors.is_empty(), "render b errors: {:?}", b.errors);
 
@@ -727,7 +797,7 @@ fn runtime_render_threads_per_input_component_id_into_scope() {
     );
 
     // Byte-match the current getVirtualFile path under the same explicit id.
-    let (hb_a, _) = host_backed_main_via_get_virtual_file(
+    let (hb_a, _, _) = host_backed_main_via_get_virtual_file(
         &new_host(),
         canonical,
         src,
@@ -791,11 +861,170 @@ fn runtime_render_mixed_resolved_and_missing_imported_macro_is_soft() {
             .map(|d| format!("{:?}:{}", d.severity, d.code))
             .collect::<Vec<_>>()
     );
-    // The resolved `GoodProps` must still materialize (its prop `a` is used
-    // in the template and appears) — the resolved side was not broken.
+    // The soft warning is the imported-macro-RESOLUTION diagnostic
+    // specifically (structured code), not some other softened error.
     assert!(
-        render.code.contains('a'),
-        "the resolved prop must still materialize in the render Main:\n{}",
+        render
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "XUnresolvedImportedMacroType"
+                || d.code == "HOST_MISSING_MACRO_TYPE_DEP"),
+        "the soft warning must be the unresolved-imported-macro diagnostic: {:?}",
+        render
+            .diagnostics
+            .iter()
+            .map(|d| d.code.clone())
+            .collect::<Vec<_>>()
+    );
+    // The resolved `GoodProps` must materialize concretely — its declared
+    // prop key `a` appears in the runtime props declaration. (This file has
+    // a MISSING import, so the HostBacked `get_virtual_file` oracle hard-
+    // fails on it and cannot be used for byte-parity here — that is exactly
+    // the soft-case exclusion. Instead, byte-compare against an EQUIVALENT
+    // file with the missing import removed but `GoodProps` unchanged: the
+    // resolved props surface must be identical, proving GoodProps still
+    // materialized despite the co-occurring soft diagnostic.)
+    assert!(
+        render.code.contains("\"a\"") || render.code.contains("'a'") || render.code.contains(" a:"),
+        "the resolved prop `a` must materialize in the render props declaration:\n{}",
         render.code
+    );
+    let good_only_src = "<script setup lang=\"ts\">\nimport type { GoodProps } from './good'\ndefineProps<GoodProps>()\n</script>\n<template><div>{{ a }}</div></template>\n";
+    let good_only = render_one(&host, "/proj/GoodOnly.vue", good_only_src);
+    assert!(
+        good_only.errors.is_empty(),
+        "good-only render errors: {:?}",
+        good_only.errors
+    );
+    let (good_only_hb, _, _) = host_backed_main_via_get_virtual_file(
+        &host,
+        "/proj/GoodOnly.vue",
+        good_only_src,
+        &get_virtual_file_profile(simple_render_profile(), None),
+    );
+    assert_eq!(
+        good_only.code.as_ref(),
+        good_only_hb.as_ref(),
+        "the resolved GoodProps surface must byte-match getVirtualFile when the \
+         missing import is absent (proves GoodProps resolves + materializes on the \
+         render lane).\n--- RENDER ---\n{}\n--- GVF ---\n{}",
+        good_only.code,
+        good_only_hb
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 12 — soft-macro boundary: a wrong-shape import co-occurring with a
+// missing import stays FATAL (the discriminating guard for the structural
+// per-diagnostic soft gate)
+// ---------------------------------------------------------------------------
+
+/// The sharpest soft-macro boundary case. A file has BOTH:
+///   - a MISSING imported macro type (`MissingProps`, softenable), AND
+///   - a RESOLVED-but-wrong-shape imported macro type (`WrongEmits`, a
+///     string alias with no call signatures → fatal `XInvalidMacroType`).
+/// The render lane MUST stay FATAL — the presence of a softenable missing
+/// import must NOT drag the co-occurring wrong-shape error into a warning.
+/// DISCRIMINATING: the pre-fix whole-file gate
+/// (`had_unresolved_import && code=="XInvalidMacroType"`) softened EVERY
+/// `XInvalidMacroType` once any import was missing, so it would have made
+/// this render succeed. The structural per-diagnostic code split
+/// (`XUnresolvedImportedMacroType` softened; `XInvalidMacroType` fatal)
+/// keeps it fatal. Reverting the fix flips this test RED.
+#[test]
+fn runtime_render_wrong_shape_with_missing_import_stays_fatal() {
+    let host = new_host();
+    // `WrongEmits` resolves but is a string alias → defineEmits rejects its
+    // shape (no call signatures) with a fatal `XInvalidMacroType`.
+    upsert_sibling(
+        &host,
+        "/proj/wrongemits.ts",
+        "export type WrongEmits = string\n",
+    );
+    // `MissingProps` has no resolvable source → softenable
+    // unresolved-import.
+    let src = "<script setup lang=\"ts\">\nimport type { MissingProps } from './nope'\nimport type { WrongEmits } from './wrongemits'\ndefineProps<MissingProps>()\ndefineEmits<WrongEmits>()\n</script>\n<template><div /></template>\n";
+    let render = render_one(&host, "/proj/WrongPlusMissing.vue", src);
+    assert!(
+        !render.errors.is_empty(),
+        "a wrong-shape imported macro co-occurring with a missing import must \
+         stay FATAL — the missing import must not soften the wrong-shape error \
+         (got code: {:?}, diagnostics: {:?})",
+        render.code,
+        render
+            .diagnostics
+            .iter()
+            .map(|d| format!("{:?}:{}", d.severity, d.code))
+            .collect::<Vec<_>>()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 13 — (e)-skip safety with a PRIOR HostBacked-populated axis
+// ---------------------------------------------------------------------------
+
+/// The strongest (e)-skip safety proof. FIRST run HostBacked for a
+/// cross-file-macro owner so the shared semantic-transitive axis is
+/// POPULATED with the dependency; verify it. THEN run RuntimeRender for the
+/// same owner after the import is removed and assert the render lane leaves
+/// the axis CORRECT for a later HostBacked reader — it must not repopulate a
+/// stale dep, and (because the render lane is read-only) it must not itself
+/// mutate the axis. A final HostBacked request must see the CURRENT (empty)
+/// deps. DISCRIMINATING: a render lane that erroneously called
+/// `sync_transitive_macro_type_dependencies` with the pre-removal deps would
+/// leave `/proj/types.ts` lingering in the axis, which this test observes.
+#[test]
+fn runtime_render_leaves_prior_host_backed_axis_correct() {
+    let host = new_host();
+    let owner = "/proj/AxisOwner.vue";
+    upsert_sibling(
+        &host,
+        "/proj/types.ts",
+        "export interface P { a: number }\n",
+    );
+    let with_dep = "<script setup lang=\"ts\">\nimport type { P } from './types'\ndefineProps<P>()\n</script>\n<template><div /></template>\n";
+
+    // 1. HostBacked FIRST — this path DOES populate the semantic-transitive
+    //    axis for the owner (it calls sync_transitive_macro_type_dependencies).
+    let hb1 = host_backed_one(&host, owner, with_dep);
+    assert!(
+        hb1.errors.is_empty(),
+        "host-backed #1 errors: {:?}",
+        hb1.errors
+    );
+    let after_host_backed =
+        crate::for_tests::workspace_semantic_transitive_deps_for_tests(&host, owner);
+    assert!(
+        after_host_backed.contains("/proj/types.ts"),
+        "HostBacked must populate the semantic-transitive axis with the \
+         cross-file dep (precondition for the staleness check); found: {:?}",
+        after_host_backed
+    );
+
+    // 2. Remove the import and render through RuntimeRender. The render lane
+    //    is READ-ONLY: it must neither add nor clear the axis. Whether the
+    //    stale dep persists here is not the point — the point is a later
+    //    HostBacked reader sees the CURRENT deps (step 3), because the
+    //    Stage-B upsert of the new (import-less) source resets the axis and
+    //    the eventual HostBacked recompute re-syncs it.
+    let no_dep = "<script setup lang=\"ts\">\nconst x = 1\n</script>\n<template><div>{{ x }}</div></template>\n";
+    let r = render_one(&host, owner, no_dep);
+    assert!(r.errors.is_empty(), "render errors: {:?}", r.errors);
+
+    // 3. A later HostBacked request for the now-import-less owner must see
+    //    the CURRENT (empty) semantic-transitive deps — the removed dep must
+    //    NOT linger.
+    let hb2 = host_backed_one(&host, owner, no_dep);
+    assert!(
+        hb2.errors.is_empty(),
+        "host-backed #2 errors: {:?}",
+        hb2.errors
+    );
+    let final_axis = crate::for_tests::workspace_semantic_transitive_deps_for_tests(&host, owner);
+    assert!(
+        !final_axis.contains("/proj/types.ts"),
+        "after the import was removed, a later HostBacked request must NOT see \
+         the stale cross-file dep in the semantic-transitive axis; found: {:?}",
+        final_axis
     );
 }

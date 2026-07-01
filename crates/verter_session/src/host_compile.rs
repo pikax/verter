@@ -147,24 +147,46 @@ pub struct CompileBatchEntry {
 /// [`CompileManyTarget::RuntimeRender`] lane.
 ///
 /// These fields are output-affecting and uniform across a single bundler
-/// build (a build is entirely dev OR prod, client OR SSR), so they live on
-/// the batch options rather than per-input. Per-component identity
-/// (`component_id`) is separate — it rides on [`CompileBatchInput`]. When
-/// `CompileBatchOptions::render_profile` is `None`, the RuntimeRender lane
-/// falls back to the [`compile_profile_for_bundler`] preset.
+/// build (a build is entirely dev OR prod, client OR SSR, one runtime
+/// module, one delimiter set), so they live on the batch options rather
+/// than per-input. Per-component identity (`component_id`) is separate — it
+/// rides on [`CompileBatchInput`].
 ///
-/// Every field here MUST be reproduced from the caller's build profile so
-/// the render output stays byte-identical to the HostBacked
-/// `get_virtual_file` path: `is_production` toggles dev-only code
-/// (`__file`, HMR), `ssr` selects the SSR render function, `force_js`
-/// controls TS stripping, and `hmr_strategy` selects the HMR injection the
-/// host-side main-module assembly emits.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// This carries EVERY output-affecting field the render lane feeds into
+/// `RuntimeCompileOptions`, so the RuntimeRender lane reproduces the
+/// caller's build profile byte-for-byte against the HostBacked
+/// `get_virtual_file` path (which builds its profile from the same JS
+/// `HostCompileProfile`). Omitting a field would silently drop it — e.g.
+/// without `source_map` a production build would lose its source maps.
+/// Fields NOT here are handled elsewhere: `filename` defaults to the
+/// canonical id, `component_id` is per-input, the compile target is fixed
+/// (runtime render — no TSX), and the TSX-only knobs
+/// (`embed_ambient_types` / `conditional_root_narrowing` / `strict_slots`)
+/// do not affect the runtime `Main` and default identically on both lanes.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompileBatchRenderProfile {
+    /// Production codegen — strips dev-only code (`__file`, HMR).
     pub is_production: bool,
+    /// Server-side render function selection.
     pub ssr: bool,
+    /// TS type-stripping (plain-JS output).
     pub force_js: bool,
+    /// Vapor-mode codegen.
+    pub force_vapor: bool,
+    /// Emit a source map alongside the `Main` module.
+    pub source_map: bool,
+    /// Preserve template comments in the render output.
+    pub comments: bool,
+    /// HMR injection strategy the host-side main-module assembly emits.
     pub hmr_strategy: crate::types::HmrStrategy,
+    /// Runtime module import specifier (e.g. `"vue"`).
+    pub runtime_module_name: Option<String>,
+    /// Types module import specifier.
+    pub types_module_name: Option<String>,
+    /// Custom template interpolation delimiters (default `{{ }}`).
+    pub delimiters: Option<(String, String)>,
+    /// Custom-element tag names (affect template codegen).
+    pub custom_elements: Option<Vec<String>>,
 }
 
 /// Caller-configurable batch options.
@@ -182,11 +204,6 @@ pub struct CompileBatchOptions {
     /// [`CompileBatchInput::requested_mode`] is `None`. `None` resolves
     /// to [`CompileCacheMode::Session`] (the host default).
     pub default_mode: Option<CompileCacheMode>,
-    /// The batch-level render profile for the
-    /// [`CompileManyTarget::RuntimeRender`] lane. `None` falls back to the
-    /// [`compile_profile_for_bundler`] preset. Ignored by the
-    /// [`CompileManyTarget::HostBacked`] lane.
-    pub render_profile: Option<CompileBatchRenderProfile>,
 }
 
 /// The compile lane a [`VerterHost::compile_many`] batch runs under.
@@ -209,15 +226,19 @@ pub struct CompileBatchOptions {
 ///   through the ONE shared resolver so their render output stays
 ///   byte-identical. An unresolved imported macro type degrades to a
 ///   warning instead of a fatal error on this lane.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompileManyTarget {
     /// The full session-wrapper path (`compile_entry`). Byte-for-byte
     /// unchanged; used by every IDE / analysis / TSC / type-resolution
     /// consumer.
     HostBacked,
     /// The render-only bundler lane. Same substrate + same host-side
-    /// `Main` assembly, without the per-file session-wrapper overhead.
-    RuntimeRender,
+    /// `Main` assembly, without the per-file session-wrapper overhead. The
+    /// [`CompileBatchRenderProfile`] is REQUIRED — carried on the variant so
+    /// the lane is fail-closed by construction: you cannot request a runtime
+    /// render without supplying the output-affecting build profile, and the
+    /// host never substitutes a hidden preset for it.
+    RuntimeRender { profile: CompileBatchRenderProfile },
 }
 
 /// Bundler-default compile profile preset: production codegen, no SSR, no
@@ -235,21 +256,29 @@ pub fn compile_profile_for_bundler() -> CompileProfile {
 }
 
 /// Build the batch-level base `CompileProfile` for the `RuntimeRender`
-/// lane. With a supplied [`CompileBatchRenderProfile`], every
-/// output-affecting field is taken from it (reproducing the caller's build
-/// profile byte-for-byte); with `None`, the [`compile_profile_for_bundler`]
-/// preset is used. `component_id` is per-input and set later, so it is left
-/// `None` here.
-fn render_base_profile(render_profile: Option<CompileBatchRenderProfile>) -> CompileProfile {
-    match render_profile {
-        Some(rp) => CompileProfile {
-            is_production: rp.is_production,
-            ssr: rp.ssr,
-            force_js: rp.force_js,
-            hmr_strategy: rp.hmr_strategy,
-            ..CompileProfile::default()
-        },
-        None => compile_profile_for_bundler(),
+/// lane from the REQUIRED [`CompileBatchRenderProfile`] carried on
+/// [`CompileManyTarget::RuntimeRender`]. Every output-affecting field is
+/// taken from it (reproducing the caller's build profile byte-for-byte
+/// against the HostBacked `get_virtual_file` path); there is no
+/// preset-substitution fallback — the lane is fail-closed by construction
+/// (the profile cannot be absent). `component_id` is per-input and set
+/// later, so it is left `None` here. The compile target stays the default
+/// bundler target (no TSX); the TSX-only knobs keep their defaults (which
+/// match the HostBacked path, whose profile also defaults them).
+fn render_base_profile(rp: &CompileBatchRenderProfile) -> CompileProfile {
+    CompileProfile {
+        is_production: rp.is_production,
+        ssr: rp.ssr,
+        force_js: rp.force_js,
+        force_vapor: rp.force_vapor,
+        source_map: rp.source_map,
+        comments: Some(rp.comments),
+        hmr_strategy: rp.hmr_strategy,
+        runtime_module_name: rp.runtime_module_name.clone(),
+        types_module_name: rp.types_module_name.clone(),
+        delimiters: rp.delimiters.clone(),
+        custom_elements: rp.custom_elements.clone(),
+        ..CompileProfile::default()
     }
 }
 
@@ -279,13 +308,13 @@ impl VerterHost {
 
         // The batch-level base profile. `HostBacked` keeps the byte-frozen
         // bundler preset (its output is byte-unchanged); `RuntimeRender`
-        // builds from the caller-supplied `render_profile` (reproducing the
-        // build's dev/prod/ssr/force_js/hmr), falling back to the preset
-        // when `None`. Per-input `component_id` is layered on later, on the
-        // RuntimeRender lane only.
-        let profile = match target {
+        // builds from the REQUIRED render profile carried on the variant
+        // (reproducing the build's dev/prod/ssr/force_js/vapor/source-map/
+        // comments/hmr/runtime-module/delimiters/custom-elements). Per-input
+        // `component_id` is layered on later, on the RuntimeRender lane only.
+        let profile = match &target {
             CompileManyTarget::HostBacked => compile_profile_for_bundler(),
-            CompileManyTarget::RuntimeRender => render_base_profile(options.render_profile),
+            CompileManyTarget::RuntimeRender { profile } => render_base_profile(profile),
         };
         let priority = options.priority.unwrap_or(Priority::Background);
         // Batch default cache mode; a per-input `requested_mode` overrides
@@ -314,14 +343,29 @@ impl VerterHost {
         // keyed per-canonical and applies to every mode of that canonical.
         let mut group_errors: HashMap<String, String> = HashMap::new();
         let mut canonical_to_upsert: Vec<&CompileBatchInput> = Vec::new();
-        // Compile dedup is keyed by `(canonical, effective requested_mode)`:
-        // the requested mode is part of the compile identity (a different
-        // mode is a genuinely distinct compile with distinct routing and
-        // cache side-effects), so two inputs that share a canonical but
-        // request different modes each compile exactly once. The effective
-        // mode is `input.requested_mode.unwrap_or(default_mode)`, matching
-        // the per-input profile built in `compile_one_in_batch`.
-        let mut seen_compile_keys: HashSet<(String, CompileCacheMode)> = HashSet::new();
+        // Compile dedup is keyed by the full compile IDENTITY: `(canonical,
+        // effective requested_mode, effective component_id)`. The requested
+        // mode is part of the identity (a different mode is a genuinely
+        // distinct compile with distinct routing and cache side-effects). On
+        // the RuntimeRender lane `component_id` is ALSO output-affecting (it
+        // is the scoped-style / HMR id and is per-input, not per-build), so
+        // two inputs that share a canonical+mode but carry different
+        // component ids are DISTINCT compiles and must each run — otherwise
+        // one compiled result would be fanned to both and emit the wrong
+        // scope id. On the HostBacked lane the effective component id is
+        // always `None` (its profile carries `component_id: None`), so this
+        // key reduces to the historical `(canonical, mode)` identity with no
+        // behavior change. The effective mode is
+        // `input.requested_mode.unwrap_or(default_mode)`, matching the
+        // per-input profile built in `compile_one_in_batch`.
+        let key_component_id = |input: &CompileBatchInput| -> Option<String> {
+            match &target {
+                CompileManyTarget::RuntimeRender { .. } => input.component_id.clone(),
+                CompileManyTarget::HostBacked => None,
+            }
+        };
+        let mut seen_compile_keys: HashSet<(String, CompileCacheMode, Option<String>)> =
+            HashSet::new();
         let mut canonical_to_compile: Vec<&CompileBatchInput> = Vec::new();
         for (canonical_id, group) in &groups {
             let first = group[0];
@@ -340,10 +384,15 @@ impl VerterHost {
             if self.scheduler_source_differs_from(canonical_id, &first.source) {
                 canonical_to_upsert.push(first);
             }
-            // One compile per distinct `(canonical, effective mode)`.
+            // One compile per distinct `(canonical, effective mode, effective
+            // component_id)`.
             for input in group {
                 let effective_mode = input.requested_mode.unwrap_or(default_mode);
-                if seen_compile_keys.insert((canonical_id.clone(), effective_mode)) {
+                if seen_compile_keys.insert((
+                    canonical_id.clone(),
+                    effective_mode,
+                    key_component_id(input),
+                )) {
                     canonical_to_compile.push(input);
                 }
             }
@@ -415,19 +464,34 @@ impl VerterHost {
                 let input = panic.item;
                 let effective_mode = input.requested_mode.unwrap_or(default_mode);
                 let entry = compile_panic_entry(input, effective_mode, &panic.message());
-                ((input.canonical_id.clone(), effective_mode), entry)
+                (
+                    (
+                        input.canonical_id.clone(),
+                        effective_mode,
+                        key_component_id(input),
+                    ),
+                    entry,
+                )
             },
         };
-        let compiled: HashMap<(String, CompileCacheMode), CompileBatchEntry> = coordinator
-            .run_batch(&canonical_to_compile, &compile_policy, |input| {
-                let pre_err = group_errors.get(&input.canonical_id).cloned();
-                let entry =
-                    self.compile_one_in_batch(input, &profile, default_mode, target, pre_err);
-                let effective_mode = input.requested_mode.unwrap_or(default_mode);
-                ((input.canonical_id.clone(), effective_mode), entry)
-            })
-            .into_iter()
-            .collect();
+        let compiled: HashMap<(String, CompileCacheMode, Option<String>), CompileBatchEntry> =
+            coordinator
+                .run_batch(&canonical_to_compile, &compile_policy, |input| {
+                    let pre_err = group_errors.get(&input.canonical_id).cloned();
+                    let entry =
+                        self.compile_one_in_batch(input, &profile, default_mode, &target, pre_err);
+                    let effective_mode = input.requested_mode.unwrap_or(default_mode);
+                    (
+                        (
+                            input.canonical_id.clone(),
+                            effective_mode,
+                            key_component_id(input),
+                        ),
+                        entry,
+                    )
+                })
+                .into_iter()
+                .collect();
 
         // ── fan out to original input order ──
         // For canonicals that errored in Stage B (duplicate-source
@@ -462,9 +526,15 @@ impl VerterHost {
                 }
                 let effective_mode = input.requested_mode.unwrap_or(default_mode);
                 compiled
-                    .get(&(input.canonical_id.clone(), effective_mode))
+                    .get(&(
+                        input.canonical_id.clone(),
+                        effective_mode,
+                        key_component_id(input),
+                    ))
                     .cloned()
-                    .expect("stage C compiled every non-error (canonical, mode) group")
+                    .expect(
+                        "stage C compiled every non-error (canonical, mode, component_id) group",
+                    )
             })
             .collect()
     }
@@ -495,7 +565,7 @@ impl VerterHost {
         input: &CompileBatchInput,
         profile: &CompileProfile,
         default_mode: CompileCacheMode,
-        target: CompileManyTarget,
+        target: &CompileManyTarget,
         precomputed_error: Option<String>,
     ) -> CompileBatchEntry {
         // Test-only: increment the call counter at the VERY TOP of the
@@ -553,7 +623,7 @@ impl VerterHost {
             // the HostBacked lane keeps the preset's `component_id` (`None`)
             // so its profile — and output — is byte-unchanged.
             component_id: match target {
-                CompileManyTarget::RuntimeRender => input.component_id.clone(),
+                CompileManyTarget::RuntimeRender { .. } => input.component_id.clone(),
                 CompileManyTarget::HostBacked => profile.component_id.clone(),
             },
             ..profile.clone()
@@ -595,7 +665,7 @@ impl VerterHost {
         // lane (same shared substrate + host-side `Main` assembly, without
         // the per-file session-wrapper overhead); `HostBacked` runs the
         // full session wrapper via `get_virtual_file`.
-        if target == CompileManyTarget::RuntimeRender {
+        if matches!(target, CompileManyTarget::RuntimeRender { .. }) {
             return self.compile_one_runtime_render(
                 input,
                 &per_input_profile,

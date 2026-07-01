@@ -143,22 +143,20 @@ fn props_type_is_object_like(type_params: &MacroTypeParams) -> bool {
 
 fn push_invalid_macro_type_diagnostic(
     diagnostics: &mut Vec<Diagnostic>,
+    code: CompilerErrorCode,
     message: String,
     type_params: &MacroTypeParams,
     content_start: u32,
 ) {
     // The prepared setup parse runs at the SFC content offset, so `type_span` is
-    // SFC-absolute. The public XInvalidMacroType diagnostic span is content-local
+    // SFC-absolute. The public macro-type diagnostic span is content-local
     // (relative to the setup block content): localize it back here so the surfaced
     // span is identical regardless of where the block sits in the SFC.
     let local_span = Span::new(
         type_params.type_span.start - content_start,
         type_params.type_span.end - content_start,
     );
-    diagnostics.push(
-        Diagnostic::error_with_message("script", CompilerErrorCode::XInvalidMacroType, message)
-            .with_span(local_span),
-    );
+    diagnostics.push(Diagnostic::error_with_message("script", code, message).with_span(local_span));
 }
 
 fn validate_imported_macro_type(
@@ -174,8 +172,13 @@ fn validate_imported_macro_type(
     }
 
     if type_params.unresolved_type_ref {
+        // An imported type reference that could not be RESOLVED. Distinct
+        // code from the wrong-shape cases below: the render-only bundler
+        // lane softens ONLY this (the type degrades to `Unknown`), while a
+        // resolved-but-wrong-shape type stays a fatal `XInvalidMacroType`.
         push_invalid_macro_type_diagnostic(
             diagnostics,
+            CompilerErrorCode::XUnresolvedImportedMacroType,
             format!(
                 "{}() type argument '{}' could not be resolved.",
                 macro_name, type_text
@@ -189,8 +192,11 @@ fn validate_imported_macro_type(
     match macro_name {
         "defineProps" => {
             if !props_type_is_object_like(type_params) {
+                // Resolved-but-wrong-shape: a genuine local misuse. Always
+                // fatal, on both lanes.
                 push_invalid_macro_type_diagnostic(
                     diagnostics,
+                    CompilerErrorCode::XInvalidMacroType,
                     format!(
                         "defineProps() type argument '{}' must resolve to an object-like props type.",
                         type_text
@@ -203,6 +209,7 @@ fn validate_imported_macro_type(
         "defineEmits" if type_params.resolved.call_signatures.is_empty() => {
             push_invalid_macro_type_diagnostic(
                 diagnostics,
+                CompilerErrorCode::XInvalidMacroType,
                 format!(
                     "defineEmits() type argument '{}' must resolve to emit call signatures or a named-tuple emits object.",
                     type_text

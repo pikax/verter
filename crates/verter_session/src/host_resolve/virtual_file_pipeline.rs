@@ -2879,26 +2879,54 @@ impl VerterHost {
             (external_types, missing_macro_type_diags)
         };
 
-        // Soft-macro contract (site 2): on the RuntimeRender lane an
-        // unresolved imported macro type does NOT abort. The compiler already
-        // degrades the type to `Unknown` (renders as `null`); surface the
-        // collector's diagnostics as WARNING severity on the successful
-        // output instead of returning `Err`. `had_unresolved_import` gates
-        // the compiler-layer downgrade below: the SAME unresolved-import
-        // failure ALSO surfaces from `compile_bundle` as an error-severity
-        // `XInvalidMacroType` (which HostBacked never reaches because it
-        // aborts at site 2 first). A resolvable-but-wrong-shape type is NOT
-        // reported here, so its compiler diagnostic stays fatal.
-        let had_unresolved_import = !missing_macro_type_diags.is_empty();
-        let mut soft_warnings: Vec<HostDiagnostic> = missing_macro_type_diags
-            .into_iter()
-            .map(|d| HostDiagnostic {
-                severity: HostSeverity::Warning,
-                code: d.code,
-                message: d.message,
-                span: d.span,
-            })
-            .collect();
+        // Soft-macro contract — STRUCTURAL, per-diagnostic, imported-macro-
+        // RESOLUTION only. On the RuntimeRender lane an imported macro type
+        // that could not be RESOLVED (the dependency is absent) does NOT
+        // abort: the compiler degrades the type to `Unknown` (renders as
+        // `null`), so the resolution diagnostic is surfaced as a WARNING on
+        // the successful output. EVERY OTHER diagnostic stays FATAL — keyed
+        // on its structured code, never a whole-file flag:
+        //   - collector `HOST_MISSING_MACRO_TYPE_DEP` = the softenable
+        //     unresolved-import case;
+        //   - collector `HOST_EXTERNAL_TYPE_DEPTH_LIMIT` /
+        //     `HOST_EXTERNAL_TYPE_STEP_LIMIT` = resolution RESOURCE
+        //     exhaustion (a pathological/too-deep type), which stays FATAL —
+        //     it is not "the import is missing" and must not be silently
+        //     erased;
+        //   - compiler `XUnresolvedImportedMacroType` = the same
+        //     unresolved-import case surfaced from `compile_bundle` (the
+        //     compiler continues + degrades to `Unknown`), softened;
+        //   - compiler `XInvalidMacroType` = a RESOLVED-but-wrong-shape type
+        //     (a genuine local misuse), which stays FATAL.
+        // Each collector diagnostic is routed independently, so a file with
+        // one missing import AND one wrong-shape/budget failure keeps the
+        // latter fatal.
+        let mut soft_warnings: Vec<HostDiagnostic> = Vec::new();
+        let mut fatal_collector_diags: Vec<HostDiagnostic> = Vec::new();
+        for d in missing_macro_type_diags {
+            if d.code == "HOST_MISSING_MACRO_TYPE_DEP" {
+                soft_warnings.push(HostDiagnostic {
+                    severity: HostSeverity::Warning,
+                    code: d.code,
+                    message: d.message,
+                    span: d.span,
+                });
+            } else {
+                fatal_collector_diags.push(d);
+            }
+        }
+        // A collector diagnostic that is NOT the softenable unresolved-import
+        // case (e.g. a resolution budget overflow) stays FATAL on the render
+        // lane, exactly as on HostBacked.
+        if !fatal_collector_diags.is_empty() {
+            diagnostics = diagnostics.merge(DiagnosticsSnapshot::from_vec(fatal_collector_diags));
+            return Err(HostError::CompileError(CompileFailure {
+                diagnostics,
+                requested_mode: profile.requested_mode,
+                actual_mode: profile.requested_mode,
+                downgrade_reason: None,
+            }));
+        }
 
         let scope = self.config.effective_scope();
 
@@ -3038,17 +3066,17 @@ impl VerterHost {
         };
 
         // Lift the bundle's framework-neutral diagnostics into the host
-        // snapshot. Soft-macro contract, compiler layer: when the collector
-        // reported an unresolved imported macro type
-        // (`had_unresolved_import`), the SAME failure re-surfaces here as an
-        // error-severity `XInvalidMacroType` (the compiler continues and
-        // degrades the type to `Unknown`, but still emits the diagnostic).
-        // HostBacked never reaches this — it aborted at site 2. On the render
-        // lane, downgrade exactly those `XInvalidMacroType` errors to
-        // WARNINGs (moving them onto the soft output) so a successful render
-        // is produced; every OTHER compiler diagnostic — including an
-        // `XInvalidMacroType` shape error for a type that DID resolve (which
-        // never sets `had_unresolved_import`) — stays fatal at site 6.
+        // snapshot. Soft-macro contract, compiler layer: the compiler emits a
+        // DISTINCT `XUnresolvedImportedMacroType` code for an imported type
+        // that could not be RESOLVED (it continues and degrades the type to
+        // `Unknown`). On the render lane THAT code — and only that code — is
+        // downgraded to a WARNING (moved onto the soft output). Every OTHER
+        // compiler diagnostic stays FATAL, decided PER-DIAGNOSTIC on its own
+        // code — including `XInvalidMacroType`, which is now ONLY a
+        // RESOLVED-but-wrong-shape type (a genuine local misuse). There is no
+        // whole-file flag: a file with one unresolved import AND one
+        // wrong-shape macro keeps the wrong-shape error fatal. HostBacked
+        // never reaches this path (it aborts at the collector site first).
         let mut compile_diags = diagnostics.clone();
         let mut fatal_compiled_diags: Vec<HostDiagnostic> = Vec::new();
         for d in &compiled.diagnostics {
@@ -3057,8 +3085,7 @@ impl VerterHost {
                 RuntimeDiagnosticSeverity::Warning => HostSeverity::Warning,
                 RuntimeDiagnosticSeverity::Info => HostSeverity::Info,
             };
-            let is_soft_unresolved_import = had_unresolved_import && d.code == "XInvalidMacroType";
-            if is_soft_unresolved_import {
+            if d.code == "XUnresolvedImportedMacroType" {
                 soft_warnings.push(HostDiagnostic {
                     severity: HostSeverity::Warning,
                     code: d.code.clone(),

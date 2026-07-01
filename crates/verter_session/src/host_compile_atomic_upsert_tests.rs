@@ -224,7 +224,6 @@ fn compile_many_upsert_batch_captures_calling_thread_request_context() {
             CompileBatchOptions {
                 priority: Some(Priority::Interactive),
                 default_mode: None,
-                render_profile: None,
             },
             CompileManyTarget::HostBacked,
         );

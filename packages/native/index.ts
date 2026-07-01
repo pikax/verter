@@ -152,7 +152,20 @@ export interface CompileBatchRenderProfile {
   isProduction: boolean;
   ssr: boolean;
   forceJs: boolean;
+  forceVapor: boolean;
+  sourceMap: boolean;
+  comments: boolean;
   hmrStrategy: "none" | "vite" | "webpack";
+  /** Runtime module import specifier (e.g. "vue"). */
+  runtimeModuleName?: string;
+  /** Types module import specifier. */
+  typesModuleName?: string;
+  /** Custom interpolation delimiter — open. Set together with `delimiterClose`. */
+  delimiterOpen?: string;
+  /** Custom interpolation delimiter — close. */
+  delimiterClose?: string;
+  /** Custom-element tag names (affect template codegen). */
+  customElements?: string[];
 }
 
 export interface CompileBatchOptions {

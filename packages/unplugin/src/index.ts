@@ -65,16 +65,26 @@ function renderMainRuntime(
       target: "runtime-render",
       compileProfile: {
         // `HostCompileProfile` fields are optional; the render profile
-        // requires explicit booleans. Default to the same values the
+        // requires explicit values. Default to the same values the
         // `CompileProfile` default / FFI conversion applies for an absent
-        // field (`false`), so a caller that omitted a field renders exactly
-        // as `getVirtualFile` would have.
+        // field, so a caller that omitted a field renders EXACTLY as
+        // `getVirtualFile` would have. Every output-affecting field is
+        // forwarded so the render output stays byte-identical (omitting one
+        // — e.g. sourceMap — would silently drop it from the build).
         isProduction: profile.isProduction ?? false,
         ssr: profile.ssr ?? false,
         forceJs: profile.forceJs ?? false,
+        forceVapor: profile.forceVapor ?? false,
+        sourceMap: profile.sourceMap ?? false,
+        comments: profile.comments ?? false,
         // `HostCompileProfile.hmrStrategy` is already "none" | "vite" |
         // "webpack"; map it faithfully (default "none").
         hmrStrategy: profile.hmrStrategy ?? "none",
+        runtimeModuleName: profile.runtimeModuleName,
+        typesModuleName: profile.typesModuleName,
+        delimiterOpen: profile.delimiters?.[0],
+        delimiterClose: profile.delimiters?.[1],
+        customElements: profile.customElements,
       },
     },
   );

@@ -2200,38 +2200,55 @@ impl NapiVerterHost {
             .map(|m| ffi_compile_cache_mode_to_host(&m))
             .transpose()
             .map_err(ffi_err)?;
-        // The compile lane. Default `host-backed`.
+        // The compile lane. Default `host-backed`. FAIL-CLOSED: the
+        // RuntimeRender lane REQUIRES an explicit render profile carried on
+        // the variant — the host must never substitute production/client
+        // defaults for a bundler render. Every output-affecting field of the
+        // JS `compileProfile` is threaded so the render output reproduces the
+        // `getVirtualFile` path byte-for-byte; an unknown `hmrStrategy` is an
+        // error, never a silent drop. HostBacked ignores the profile (its
+        // profile is the frozen bundler preset).
         let target = match opts.target.as_deref() {
             None | Some("host-backed") => host_compile::CompileManyTarget::HostBacked,
-            Some("runtime-render") => host_compile::CompileManyTarget::RuntimeRender,
+            Some("runtime-render") => {
+                let p = opts.compileProfile.ok_or_else(|| {
+                    ffi_err(
+                        "compileProfile is required for target 'runtime-render' \
+                         (the output-affecting build profile must be explicit; \
+                         the host does not substitute defaults)"
+                            .to_string(),
+                    )
+                })?;
+                let delimiters =
+                    match (p.delimiterOpen, p.delimiterClose) {
+                        (Some(open), Some(close)) => Some((open, close)),
+                        (None, None) => None,
+                        _ => return Err(ffi_err(
+                            "compileProfile.delimiterOpen and delimiterClose must be set together"
+                                .to_string(),
+                        )),
+                    };
+                host_compile::CompileManyTarget::RuntimeRender {
+                    profile: host_compile::CompileBatchRenderProfile {
+                        is_production: p.isProduction,
+                        ssr: p.ssr,
+                        force_js: p.forceJs,
+                        force_vapor: p.forceVapor,
+                        source_map: p.sourceMap,
+                        comments: p.comments,
+                        hmr_strategy: ffi_hmr_strategy_to_host(&p.hmrStrategy).map_err(ffi_err)?,
+                        runtime_module_name: p.runtimeModuleName,
+                        types_module_name: p.typesModuleName,
+                        delimiters,
+                        custom_elements: p.customElements,
+                    },
+                }
+            }
             Some(other) => {
                 return Err(ffi_err(format!(
                     "invalid target '{other}', expected 'host-backed' or 'runtime-render'"
                 )));
             }
-        };
-        // The render profile. FAIL-CLOSED: the RuntimeRender lane REQUIRES an
-        // explicit profile — the host must never substitute
-        // production/client defaults for a bundler render. HostBacked
-        // ignores it (its profile is the frozen bundler preset).
-        let render_profile = match target {
-            host_compile::CompileManyTarget::RuntimeRender => {
-                let p = opts.compileProfile.ok_or_else(|| {
-                    ffi_err(
-                        "compileProfile is required for target 'runtime-render' \
-                         (is_production/ssr/force_js/hmr_strategy must be explicit; \
-                         the host does not substitute defaults)"
-                            .to_string(),
-                    )
-                })?;
-                Some(host_compile::CompileBatchRenderProfile {
-                    is_production: p.isProduction,
-                    ssr: p.ssr,
-                    force_js: p.forceJs,
-                    hmr_strategy: ffi_hmr_strategy_to_host(&p.hmrStrategy).map_err(ffi_err)?,
-                })
-            }
-            host_compile::CompileManyTarget::HostBacked => None,
         };
         let entries = catch_panic(std::panic::AssertUnwindSafe(|| {
             self.inner.compile_many(
@@ -2239,7 +2256,6 @@ impl NapiVerterHost {
                 host_compile::CompileBatchOptions {
                     priority,
                     default_mode,
-                    render_profile,
                 },
                 target,
             )
@@ -2952,14 +2968,30 @@ pub struct NapiCompileBatchInput {
 
 /// The batch-level render profile for the RuntimeRender lane (JS mirror of
 /// [`host_compile::CompileBatchRenderProfile`]). Every field is
-/// output-affecting and uniform across a single bundler build.
+/// output-affecting and uniform across a single bundler build. This carries
+/// the full output-affecting projection of the JS `HostCompileProfile` so
+/// the render lane reproduces the `getVirtualFile` path byte-for-byte.
 #[napi(object)]
 pub struct NapiCompileBatchRenderProfile {
     pub isProduction: bool,
     pub ssr: bool,
     pub forceJs: bool,
+    pub forceVapor: bool,
+    pub sourceMap: bool,
+    pub comments: bool,
     /// HMR strategy: "none" | "vite" | "webpack".
     pub hmrStrategy: String,
+    /// Runtime module import specifier (e.g. "vue").
+    pub runtimeModuleName: Option<String>,
+    /// Types module import specifier.
+    pub typesModuleName: Option<String>,
+    /// Custom interpolation delimiters — open. Must be set together with
+    /// `delimiterClose`.
+    pub delimiterOpen: Option<String>,
+    /// Custom interpolation delimiters — close.
+    pub delimiterClose: Option<String>,
+    /// Custom-element tag names (affect template codegen).
+    pub customElements: Option<Vec<String>>,
 }
 
 /// Caller-configurable options for [`NapiVerterHost::compile_many`].

@@ -318,7 +318,6 @@ fn compile_many_with_zero_inputs() {
         CompileBatchOptions {
             priority: None,
             default_mode: None,
-            render_profile: None,
         },
         CompileManyTarget::HostBacked,
     );
@@ -391,7 +390,6 @@ fn compile_many_propagates_interactive_priority() {
         CompileBatchOptions {
             priority: Some(Priority::Interactive),
             default_mode: None,
-            render_profile: None,
         },
         CompileManyTarget::HostBacked,
     );
@@ -411,7 +409,6 @@ fn compile_many_propagates_interactive_priority() {
         CompileBatchOptions {
             priority: Some(Priority::Background),
             default_mode: None,
-            render_profile: None,
         },
         CompileManyTarget::HostBacked,
     );
@@ -436,7 +433,6 @@ fn compile_many_priority_default_is_background() {
         CompileBatchOptions {
             priority: None,
             default_mode: None,
-            render_profile: None,
         },
         CompileManyTarget::HostBacked,
     );
@@ -513,7 +509,6 @@ fn compile_many_default_pool_has_8mib_stack() {
         CompileBatchOptions {
             priority: None,
             default_mode: None,
-            render_profile: None,
         },
         CompileManyTarget::HostBacked,
     );
