@@ -208,9 +208,10 @@ pub(super) struct ClientTitleEffect {
 
 /// A projected `<svelte:boundary>` — the comment-anchored `$.boundary(node, props, ($$anchor)
 /// => { <body> })` renderable. The `onerror` / `failed` / `pending` ATTRIBUTE props ride the
-/// props object (getter or plain init per state-bearing-ness); the `failed` / `pending` snippet
-/// defs hoist to `const`s in a wrapping `{ … }` block above the call (when present), referenced
-/// by name (object shorthand) in the props object AFTER the attribute props.
+/// props object (getter or plain init per state-bearing-ness); ALL of the boundary's snippet
+/// defs hoist to `const`s in a wrapping `{ … }` block above the call (when present), and only
+/// the `failed` / `pending` ones are referenced by name (object shorthand) in the props object
+/// AFTER the attribute props.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ClientBoundary {
     /// The `onerror` / `failed` / `pending` ATTRIBUTE props, in SOURCE order — official's single
@@ -218,10 +219,10 @@ pub(super) struct ClientBoundary {
     /// return <expr>; }`) when its value is state-bearing, else a plain init (`name: <expr>`).
     /// Empty for a boundary with no attributes.
     pub(super) attr_props: Vec<BoundaryAttrProp>,
-    /// The `failed` / `pending` `{#snippet}` def node ids, in source order — each hoisted to a
-    /// `const <name> = …;` in the wrapping block AND passed by NAME (object shorthand) in the
-    /// props AFTER the attribute props. Empty for a boundary with no snippet props (no wrapping
-    /// block).
+    /// ALL of the boundary's `{#snippet}` def node ids, in source order — each hoisted to a
+    /// `const <name> = …;` in the wrapping block; only the `failed` / `pending` ones are ALSO
+    /// passed by NAME (object shorthand) in the props AFTER the attribute props (filtered at
+    /// emit). Empty for a boundary with no snippet children (no wrapping block).
     pub(super) snippets: Vec<super::ir::NodeId>,
     /// The boundary body region — the `($$anchor) => { <body> }` callback's content.
     pub(super) body_region: TemplateScopeId,

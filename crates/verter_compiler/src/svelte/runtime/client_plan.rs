@@ -842,16 +842,18 @@ impl<'a> SupportedClientIr<'a> {
     /// `$.deferred_template_effect` (stateful).
     pub(super) fn expr_has_state(&self, expr_id: ExprId) -> bool {
         let analyzed = self.ir.analysis.expressions.get(expr_id);
-        // Official `has_state` is set by a reactive signal/prop reference OR by a MEMBER
-        // access rooted at any declared binding (`MemberExpression.js`'s `!is_pure(node)`
-        // rule — a member on a demoted `$state` / plain local is impure ⇒ has_state, so
-        // `{d.x}` joins the `$.template_effect` even though `d` is not a live signal).
+        // Official `has_state` is set by a reactive signal/prop reference OR by a BINDING
+        // IMPURITY: a MEMBER access rooted at any declared binding
+        // (`MemberExpression.js`'s `!is_pure(node)` rule — a member on a demoted `$state`
+        // / plain local is impure ⇒ has_state, so `{d.x}` joins the `$.template_effect`
+        // even though `d` is not a live signal) OR an assignment/update MUTATION (a write
+        // is not pure, so `{obj.x = 1}` / `{plain++}` also join the `$.template_effect`).
         super::reactive_analysis::expr_references_signal(
             analyzed.source,
             analyzed.scope,
             &self.ir.analysis.bindings,
             &self.ir.analysis.scopes,
-        ) || super::reactive_analysis::expr_member_roots_at_binding(
+        ) || super::reactive_analysis::expr_has_binding_impurity(
             analyzed.source,
             analyzed.scope,
             &self.ir.analysis.bindings,

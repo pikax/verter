@@ -235,13 +235,17 @@ pub(super) fn expr_references_signal(
 /// 2. A `{#snippet}` NAME reference counts as state (a snippet passed as a prop emits
 ///    the getter `get tmpl() { return tmpl; }`, matching the pinned svelte@5.56.3
 ///    snippet-prop shape).
-/// 3. It includes the MEMBER-ROOT-AT-BINDING half ([`expr_member_roots_at_binding`],
-///    official `MemberExpression.js`'s `!is_pure`): a member rooted at ANY declared
-///    binding — a plain local, a deep-proxied `$state` object, a prop — is state-bearing
-///    (⇒ getter), so `failed={obj.failed}` / `x={obj.y}` emit `get name() { return
-///    obj.…; }` even though `obj` itself is neither a signal nor a prop. The member
-///    scan does NOT descend into nested function bodies, so `{() => obj.x}` stays a
-///    plain init (rule 1 is preserved). Verified against pinned svelte@5.56.3
+/// 3. It includes the BINDING-IMPURITY half ([`expr_has_binding_impurity`], official
+///    `MemberExpression.js`'s `!is_pure` plus the mutation rule): a member rooted at
+///    ANY declared binding — a plain local, a deep-proxied `$state` object, a prop — is
+///    state-bearing (⇒ getter), so `failed={obj.failed}` / `x={obj.y}` emit `get name()
+///    { return obj.…; }` even though `obj` itself is neither a signal nor a prop; AND an
+///    assignment/update MUTATION whose write TARGET is rooted at a binding
+///    (`failed={obj.x = 1}` / `failed={plain++}`) is impure (a write ⇒ getter) — the scan
+///    covers binding-rooted mutations, not only member reads. A write to a GLOBAL /
+///    undeclared target (`failed={globalThis.x = 1}` / `failed={foo = 1}`) stays a plain
+///    init. The scan does NOT descend into nested function bodies, so `{() => obj.x}`
+///    stays a plain init (rule 1 is preserved). Verified against pinned svelte@5.56.3
 ///    (component + boundary emit identically).
 #[must_use]
 pub(super) fn prop_value_has_state(
@@ -262,12 +266,13 @@ pub(super) fn prop_value_has_state(
                         || k == BindingRuntimeKind::Prop
                         || k == BindingRuntimeKind::SnippetName
                 })
-    }) || expr_member_roots_at_binding(source, scope, bindings, scopes)
+    }) || expr_has_binding_impurity(source, scope, bindings, scopes)
 }
 
-/// Whether a template expression contains a MEMBER access whose leftmost identifier
-/// resolves (scope-awarely) to a declared binding — the official
-/// `phases/2-analyze/visitors/MemberExpression.js` `has_state ||= !is_pure(node)` rule.
+/// Whether a template expression carries a BINDING IMPURITY — a MEMBER access whose
+/// leftmost identifier resolves (scope-awarely) to a declared binding (the official
+/// `phases/2-analyze/visitors/MemberExpression.js` `has_state ||= !is_pure(node)` rule)
+/// OR an assignment/update MUTATION (the write half of `has_state`).
 ///
 /// `is_pure(member)` walks a member chain to its leftmost identifier and is pure ONLY
 /// when that root resolves to a GLOBAL (no binding); a root that is a declared binding
@@ -286,8 +291,18 @@ pub(super) fn prop_value_has_state(
 /// bare `{d}` stays a non-reactive inline write (the existing signal/prop scan correctly
 /// leaves it alone). Typed-IR only: re-parses the borrowed expression source through OXC
 /// (the same reparse the other analyses use) and walks the member chain.
+///
+/// The scan ALSO reports the MUTATION half of `has_state`: an assignment/update whose
+/// write TARGET LEAF is rooted at a declared binding is impure (a write), so `plain = 1` /
+/// `obj.x = 1` / `obj.x++` are `has_state` even when the target is a plain local binding
+/// (not a live signal). A write to a GLOBAL / undeclared leaf (`globalThis.x = 1` /
+/// `foo = 1`) is pure ⇒ NOT `has_state`, though a binding member appearing in an EVALUATED
+/// read position of the same expression is still reported — the RHS (`globalThis.x = obj.y`),
+/// an evaluated LHS computed key (`globalThis[obj.y] = 1`), or a destructuring default /
+/// computed key (`[foo = obj.y] = g` / `({ [obj.y]: foo } = g)`). Function bodies are not
+/// descended, so a mutation deferred inside `{() => plain = 1}` stays a plain init.
 #[must_use]
-pub(super) fn expr_member_roots_at_binding(
+pub(super) fn expr_has_binding_impurity(
     source: &str,
     scope: ScopeId,
     bindings: &BindingTable,
@@ -302,7 +317,7 @@ pub(super) fn expr_member_roots_at_binding(
     let Some(Statement::ExpressionStatement(stmt)) = parsed.program.body.first() else {
         return false;
     };
-    let mut scan = MemberRootScan {
+    let mut scan = BindingImpurityScan {
         bindings,
         scopes,
         scope,
@@ -312,17 +327,28 @@ pub(super) fn expr_member_roots_at_binding(
     scan.found
 }
 
-/// Walks an expression tree for a MEMBER access whose leftmost identifier resolves to a
-/// declared binding (the `!is_pure(member)` `has_state` member rule). Does NOT descend
-/// into nested function bodies (official sets `expression: null` there).
-struct MemberRootScan<'a> {
+/// Walks an expression tree for the IMPURE portion of `has_state`: a MEMBER access
+/// rooted at a declared binding (`!is_pure`) OR an assignment/update MUTATION whose write
+/// TARGET is rooted at a declared binding (a global-target write stays pure). Does NOT
+/// descend into nested function bodies (official sets `expression: null` there).
+struct BindingImpurityScan<'a> {
     bindings: &'a BindingTable,
     scopes: &'a ScopeGraph,
     scope: ScopeId,
     found: bool,
 }
 
-impl MemberRootScan<'_> {
+impl BindingImpurityScan<'_> {
+    /// Whether `name` resolves (scope-awarely) to a declared binding — the shared
+    /// "non-global root" test used by both the member-read half and the
+    /// assignment/update write-target half. A GLOBAL / undeclared name (`globalThis`,
+    /// `Math`, an undeclared `foo`) resolves to `None`.
+    fn ident_is_binding(&self, name: &str) -> bool {
+        self.bindings
+            .resolve_kind(self.scopes, self.scope, name)
+            .is_some()
+    }
+
     /// Whether a member chain's leftmost identifier resolves to a declared binding (a
     /// non-global root). Mirrors `is_pure`'s leftmost-walk: a `Foo.bar.baz` roots at
     /// `Foo`; a binding root ⇒ impure ⇒ has_state.
@@ -334,14 +360,227 @@ impl MemberRootScan<'_> {
                 Expression::ComputedMemberExpression(m) => node = &m.object,
                 Expression::PrivateFieldExpression(m) => node = &m.object,
                 Expression::ParenthesizedExpression(p) => node = &p.expression,
+                // TS skins are transparent for root resolution: `(obj as any).y`,
+                // `(obj satisfies T).y`, `obj!.y`, `(<T>obj).y` all root at `obj`.
                 Expression::TSNonNullExpression(e) => node = &e.expression,
-                Expression::Identifier(id) => {
-                    return self
-                        .bindings
-                        .resolve_kind(self.scopes, self.scope, id.name.as_str())
-                        .is_some();
-                }
+                Expression::TSAsExpression(e) => node = &e.expression,
+                Expression::TSSatisfiesExpression(e) => node = &e.expression,
+                Expression::TSTypeAssertion(e) => node = &e.expression,
+                Expression::Identifier(id) => return self.ident_is_binding(id.name.as_str()),
                 _ => return false,
+            }
+        }
+    }
+
+    /// Whether an ASSIGNMENT target writes to a leaf rooted at a declared BINDING — the
+    /// mutation half of `has_state`. A bare-identifier / member target roots at its
+    /// leftmost identifier; a destructuring pattern (`[a] = …` / `{ a } = …`) roots at
+    /// ANY of its write leaves. A write to a GLOBAL / undeclared leaf (`globalThis.x`,
+    /// `foo`) does NOT — matching official (`globalThis.x = 1` / `foo = 1` stay plain
+    /// init; `obj.x = 1` / `plain = 1` are stateful).
+    fn assignment_target_roots_at_binding(
+        &self,
+        target: &oxc_ast::ast::AssignmentTarget<'_>,
+    ) -> bool {
+        use oxc_ast::ast::AssignmentTarget as AT;
+        match target {
+            AT::AssignmentTargetIdentifier(id) => self.ident_is_binding(id.name.as_str()),
+            AT::StaticMemberExpression(m) => self.member_root_is_binding(&m.object),
+            AT::ComputedMemberExpression(m) => self.member_root_is_binding(&m.object),
+            AT::PrivateFieldExpression(m) => self.member_root_is_binding(&m.object),
+            AT::TSAsExpression(e) => self.lvalue_expr_roots_at_binding(&e.expression),
+            AT::TSSatisfiesExpression(e) => self.lvalue_expr_roots_at_binding(&e.expression),
+            AT::TSNonNullExpression(e) => self.lvalue_expr_roots_at_binding(&e.expression),
+            AT::TSTypeAssertion(e) => self.lvalue_expr_roots_at_binding(&e.expression),
+            AT::ArrayAssignmentTarget(arr) => {
+                arr.elements
+                    .iter()
+                    .flatten()
+                    .any(|el| self.maybe_default_roots_at_binding(el))
+                    || arr
+                        .rest
+                        .as_ref()
+                        .is_some_and(|r| self.assignment_target_roots_at_binding(&r.target))
+            }
+            AT::ObjectAssignmentTarget(obj) => {
+                obj.properties
+                    .iter()
+                    .any(|p| self.target_property_roots_at_binding(p))
+                    || obj
+                        .rest
+                        .as_ref()
+                        .is_some_and(|r| self.assignment_target_roots_at_binding(&r.target))
+            }
+        }
+    }
+
+    /// The SIMPLE-target (`UpdateExpression` argument — identifier / member, no
+    /// destructuring) form of [`Self::assignment_target_roots_at_binding`].
+    fn simple_target_roots_at_binding(
+        &self,
+        target: &oxc_ast::ast::SimpleAssignmentTarget<'_>,
+    ) -> bool {
+        use oxc_ast::ast::SimpleAssignmentTarget as ST;
+        match target {
+            ST::AssignmentTargetIdentifier(id) => self.ident_is_binding(id.name.as_str()),
+            ST::StaticMemberExpression(m) => self.member_root_is_binding(&m.object),
+            ST::ComputedMemberExpression(m) => self.member_root_is_binding(&m.object),
+            ST::PrivateFieldExpression(m) => self.member_root_is_binding(&m.object),
+            ST::TSAsExpression(e) => self.lvalue_expr_roots_at_binding(&e.expression),
+            ST::TSSatisfiesExpression(e) => self.lvalue_expr_roots_at_binding(&e.expression),
+            ST::TSNonNullExpression(e) => self.lvalue_expr_roots_at_binding(&e.expression),
+            ST::TSTypeAssertion(e) => self.lvalue_expr_roots_at_binding(&e.expression),
+        }
+    }
+
+    /// The write-leaf-root test for a TS-cast target's inner value expression.
+    fn lvalue_expr_roots_at_binding(&self, expr: &Expression<'_>) -> bool {
+        match expr {
+            Expression::Identifier(id) => self.ident_is_binding(id.name.as_str()),
+            Expression::StaticMemberExpression(m) => self.member_root_is_binding(&m.object),
+            Expression::ComputedMemberExpression(m) => self.member_root_is_binding(&m.object),
+            Expression::PrivateFieldExpression(m) => self.member_root_is_binding(&m.object),
+            Expression::ParenthesizedExpression(p) => {
+                self.lvalue_expr_roots_at_binding(&p.expression)
+            }
+            Expression::TSNonNullExpression(e) => self.lvalue_expr_roots_at_binding(&e.expression),
+            Expression::TSAsExpression(e) => self.lvalue_expr_roots_at_binding(&e.expression),
+            Expression::TSSatisfiesExpression(e) => {
+                self.lvalue_expr_roots_at_binding(&e.expression)
+            }
+            Expression::TSTypeAssertion(e) => self.lvalue_expr_roots_at_binding(&e.expression),
+            _ => false,
+        }
+    }
+
+    /// Whether a destructuring element (`[a]` / `[a = default]`) writes a leaf rooted
+    /// at a binding. The default initializer is a VALUE read, not a write leaf.
+    fn maybe_default_roots_at_binding(
+        &self,
+        el: &oxc_ast::ast::AssignmentTargetMaybeDefault<'_>,
+    ) -> bool {
+        use oxc_ast::ast::AssignmentTargetMaybeDefault as MD;
+        match el {
+            MD::AssignmentTargetWithDefault(wd) => {
+                self.assignment_target_roots_at_binding(&wd.binding)
+            }
+            other => other
+                .as_assignment_target()
+                .is_some_and(|t| self.assignment_target_roots_at_binding(t)),
+        }
+    }
+
+    /// Whether an object-destructuring property (`{ a }` / `{ k: t }`) writes a leaf
+    /// rooted at a binding.
+    fn target_property_roots_at_binding(
+        &self,
+        prop: &oxc_ast::ast::AssignmentTargetProperty<'_>,
+    ) -> bool {
+        use oxc_ast::ast::AssignmentTargetProperty as P;
+        match prop {
+            P::AssignmentTargetPropertyIdentifier(id) => {
+                self.ident_is_binding(id.binding.name.as_str())
+            }
+            P::AssignmentTargetPropertyProperty(pp) => {
+                self.maybe_default_roots_at_binding(&pp.binding)
+            }
+        }
+    }
+
+    /// Descend the EVALUATED READ subexpressions of an assignment TARGET — computed-member
+    /// keys, destructuring computed keys, and destructuring default initializers — so a
+    /// binding impurity in the LHS of a GLOBAL-target write is still reported. The write
+    /// LEAF itself is scored by [`Self::assignment_target_roots_at_binding`]; this covers
+    /// the remaining read positions official's `MemberExpression.js` rule fires on
+    /// (`globalThis[obj.y] = 1`, `[foo = obj.y] = g`, `({ [obj.y]: foo } = g)` are stateful,
+    /// while `globalThis[gk] = 1` over a GLOBAL key stays plain).
+    fn visit_assignment_target_reads(&mut self, target: &oxc_ast::ast::AssignmentTarget<'_>) {
+        use oxc_ast::ast::AssignmentTarget as AT;
+        match target {
+            AT::AssignmentTargetIdentifier(_) => {}
+            AT::StaticMemberExpression(m) => self.visit_expr(&m.object),
+            AT::ComputedMemberExpression(m) => {
+                self.visit_expr(&m.object);
+                self.visit_expr(&m.expression);
+            }
+            AT::PrivateFieldExpression(m) => self.visit_expr(&m.object),
+            AT::TSAsExpression(e) => self.visit_expr(&e.expression),
+            AT::TSSatisfiesExpression(e) => self.visit_expr(&e.expression),
+            AT::TSNonNullExpression(e) => self.visit_expr(&e.expression),
+            AT::TSTypeAssertion(e) => self.visit_expr(&e.expression),
+            AT::ArrayAssignmentTarget(arr) => {
+                for el in arr.elements.iter().flatten() {
+                    self.visit_maybe_default_reads(el);
+                }
+                if let Some(rest) = &arr.rest {
+                    self.visit_assignment_target_reads(&rest.target);
+                }
+            }
+            AT::ObjectAssignmentTarget(obj) => {
+                for prop in &obj.properties {
+                    self.visit_target_property_reads(prop);
+                }
+                if let Some(rest) = &obj.rest {
+                    self.visit_assignment_target_reads(&rest.target);
+                }
+            }
+        }
+    }
+
+    /// The SIMPLE-target (`UpdateExpression` argument) form of
+    /// [`Self::visit_assignment_target_reads`] — descend a global-rooted update target's
+    /// computed key (`globalThis[obj.y]++` is stateful).
+    fn visit_simple_target_reads(&mut self, target: &oxc_ast::ast::SimpleAssignmentTarget<'_>) {
+        use oxc_ast::ast::SimpleAssignmentTarget as ST;
+        match target {
+            ST::AssignmentTargetIdentifier(_) => {}
+            ST::StaticMemberExpression(m) => self.visit_expr(&m.object),
+            ST::ComputedMemberExpression(m) => {
+                self.visit_expr(&m.object);
+                self.visit_expr(&m.expression);
+            }
+            ST::PrivateFieldExpression(m) => self.visit_expr(&m.object),
+            ST::TSAsExpression(e) => self.visit_expr(&e.expression),
+            ST::TSSatisfiesExpression(e) => self.visit_expr(&e.expression),
+            ST::TSNonNullExpression(e) => self.visit_expr(&e.expression),
+            ST::TSTypeAssertion(e) => self.visit_expr(&e.expression),
+        }
+    }
+
+    /// Descend a destructuring element's read positions: nested target reads plus the
+    /// default initializer (`[foo = obj.y]` reads `obj.y`).
+    fn visit_maybe_default_reads(&mut self, el: &oxc_ast::ast::AssignmentTargetMaybeDefault<'_>) {
+        use oxc_ast::ast::AssignmentTargetMaybeDefault as MD;
+        match el {
+            MD::AssignmentTargetWithDefault(wd) => {
+                self.visit_assignment_target_reads(&wd.binding);
+                self.visit_expr(&wd.init);
+            }
+            other => {
+                if let Some(t) = other.as_assignment_target() {
+                    self.visit_assignment_target_reads(t);
+                }
+            }
+        }
+    }
+
+    /// Descend an object-destructuring property's read positions: a computed key
+    /// (`{ [obj.y]: foo }` reads `obj.y`), a shorthand default, and the nested binding.
+    fn visit_target_property_reads(&mut self, prop: &oxc_ast::ast::AssignmentTargetProperty<'_>) {
+        use oxc_ast::ast::AssignmentTargetProperty as P;
+        match prop {
+            P::AssignmentTargetPropertyIdentifier(id) => {
+                if let Some(init) = &id.init {
+                    self.visit_expr(init);
+                }
+            }
+            P::AssignmentTargetPropertyProperty(pp) => {
+                if pp.computed {
+                    if let Some(key) = pp.name.as_expression() {
+                        self.visit_expr(key);
+                    }
+                }
+                self.visit_maybe_default_reads(&pp.binding);
             }
         }
     }
@@ -455,6 +694,33 @@ impl MemberRootScan<'_> {
             Expression::TSAsExpression(e) => self.visit_expr(&e.expression),
             Expression::TSSatisfiesExpression(e) => self.visit_expr(&e.expression),
             Expression::TSNonNullExpression(e) => self.visit_expr(&e.expression),
+            // An ASSIGNMENT or UPDATE expression is a MUTATION. Official marks the
+            // containing expression `has_state` when the write TARGET LEAF is rooted at a
+            // declared BINDING (`obj.x = 1`, `plain = 1`, `obj.x++`, `plain++`,
+            // `[obj.x] = arr`); a write to a GLOBAL / undeclared leaf (`globalThis.x = 1`,
+            // `globalThis.x++`, `foo = 1`, `String(globalThis.x = 1)`) is a plain init.
+            // BEYOND the write leaf, every EVALUATED subexpression still participates in
+            // the member rule: the RHS AND the LHS's computed keys / destructuring
+            // keys+defaults (`globalThis.x = obj.y`, `globalThis[obj.y] = 1`,
+            // `globalThis[obj.y]++`, `[foo = obj.y] = g`, `({ [obj.y]: foo } = g)` are all
+            // stateful, while `globalThis[gk] = 1` over a GLOBAL key stays plain). Nested
+            // function bodies are never descended, so a mutation inside `{() => obj.x = 1}`
+            // is not reached and stays a plain init. Verified against pinned svelte@5.56.3.
+            Expression::AssignmentExpression(a) => {
+                if self.assignment_target_roots_at_binding(&a.left) {
+                    self.found = true;
+                    return;
+                }
+                self.visit_assignment_target_reads(&a.left);
+                self.visit_expr(&a.right);
+            }
+            Expression::UpdateExpression(u) => {
+                if self.simple_target_roots_at_binding(&u.argument) {
+                    self.found = true;
+                    return;
+                }
+                self.visit_simple_target_reads(&u.argument);
+            }
             // A bare identifier / literal carries no member; nested function bodies are
             // not descended (official sets `expression: null` there).
             _ => {}

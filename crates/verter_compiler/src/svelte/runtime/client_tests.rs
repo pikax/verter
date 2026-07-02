@@ -6442,6 +6442,59 @@ fn svelte_boundary_full_hoists_both_snippets_with_onerror() {
 }
 
 #[test]
+fn svelte_boundary_hoists_nonspecial_snippet_above_call() {
+    // Official hoists ALL of a boundary's `{#snippet}` decls into the wrapping `{ … }` block
+    // ABOVE the `$.boundary(...)` call — only `failed`/`pending` are boundary PROPS; every
+    // other snippet (`foo`) is a hoisted const referenced from the body (`foo($$anchor)`),
+    // NOT a body-local const and NOT a prop. Verified against pinned svelte@5.56.3. The
+    // unrelated `$state` pins runes mode.
+    let js = emit(
+        "<script>let k = $state(0);</script>\n<svelte:boundary>{#snippet failed(err)}<p>oops</p>{/snippet}{#snippet foo()}<span>F</span>{/snippet}{@render foo()}</svelte:boundary>\n",
+        "App.svelte",
+    );
+    let boundary_at = js.find("$.boundary(").expect("emits a boundary call");
+    let foo_const_at = js.find("const foo =").expect("emits a foo snippet const");
+    assert!(
+        foo_const_at < boundary_at,
+        "the non-special `foo` snippet const must HOIST above the boundary call, not into the body callback:\n{js}"
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("$.boundary(node, {failed}, ($$anchor) =>")),
+        "only `failed` is passed as a boundary prop shorthand (foo is hoisted, not propped):\n{js}"
+    );
+    assert!(
+        n.contains(&nc("foo($$anchor)")),
+        "the body renders the hoisted foo snippet by call:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn svelte_boundary_only_nonspecial_snippet_still_wraps_and_hoists() {
+    // A boundary with ONLY a non-failed/pending snippet still opens the wrapping block and
+    // hoists the const above the call with an EMPTY props object — official:
+    // `{ const foo = …; $.boundary(node, {}, ($$anchor) => { foo($$anchor); }); }`. The
+    // unrelated `$state` pins runes mode.
+    let js = emit(
+        "<script>let k = $state(0);</script>\n<svelte:boundary>{#snippet foo()}<span>F</span>{/snippet}{@render foo()}</svelte:boundary>\n",
+        "App.svelte",
+    );
+    let boundary_at = js.find("$.boundary(").expect("emits a boundary call");
+    let foo_const_at = js.find("const foo =").expect("emits a foo snippet const");
+    assert!(
+        foo_const_at < boundary_at,
+        "foo hoists above the boundary call:\n{js}"
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("$.boundary(node, {}, ($$anchor) =>")),
+        "the boundary props object is empty (foo is hoisted, not a prop):\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
 fn svelte_boundary_failed_attribute_emits_getter_prop() {
     // MODERN `failed={expr}` ATTRIBUTE form (`expr` a state-bearing prop ref) → the props
     // object carries the GETTER accessor `get failed() { return $$props.failed; }` — official's
@@ -6516,6 +6569,103 @@ fn svelte_boundary_member_rooted_attribute_emits_getter_prop() {
         "a deferred member read must NOT promote to a getter:\n{js2}"
     );
     assert!(parses_as_js(&js2), "module must be valid JS:\n{js2}");
+}
+
+#[test]
+fn svelte_boundary_mutation_attribute_emits_getter_prop() {
+    // WRITE half of official's `has_state`: an assignment/update in the `failed={…}` value
+    // is a mutation ⇒ has_state ⇒ the prop emits the GETTER accessor, not the plain init —
+    // for a member target (`obj.x = 1`), a bare-local target (`plain = 1`), and an update
+    // (`obj.x++`). Verified against pinned svelte@5.56.3 (all three → `get failed()`).
+    // The unrelated `$state` pins runes mode; the `bind:value` inputs admit the plain
+    // locals `obj` / `plain` as DOM bind-target roots (the plain-let admission gate).
+    for (expr, label) in [
+        ("obj.x = 1", "member assignment"),
+        ("plain = 1", "bare-local assignment"),
+        ("obj.x++", "member update"),
+    ] {
+        let src = format!(
+            "<script>let k = $state(0);\nlet obj = {{ x: 0 }};\nlet plain = 0;</script>\n<input bind:value={{obj.x}} />\n<input bind:value={{plain}} />\n<svelte:boundary failed={{{expr}}}><p>hi</p></svelte:boundary>\n"
+        );
+        let js = emit(&src, "App.svelte");
+        let n = normalize_js_cosmetics(&js);
+        assert!(
+            n.contains(&nc(&format!("get failed() {{ return {expr}; }}"))),
+            "a boundary failed={{{expr}}} ({label}) mutation is a GETTER props member:\n{js}"
+        );
+        assert!(
+            !n.contains(&nc(&format!("failed: {expr}"))),
+            "a mutation value must NOT stay a plain init ({label}):\n{js}"
+        );
+        assert!(
+            parses_as_js(&js),
+            "module must be valid JS ({label}):\n{js}"
+        );
+    }
+}
+
+#[test]
+fn svelte_boundary_global_mutation_attribute_stays_plain_init() {
+    // Over-fire guard at the boundary prop site: a GLOBAL-target write in `failed={…}` is
+    // PURE ⇒ a PLAIN init (`failed: globalThis.x = 1`), NOT a `get failed()` getter.
+    // Verified against pinned svelte@5.56.3
+    // (`$.boundary(node, { failed: globalThis.x = 1 }, …)`).
+    let js = emit(
+        "<script>let k = $state(0);</script>\n<svelte:boundary failed={globalThis.x = 1}><p>hi</p></svelte:boundary>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        !n.contains(&nc("get failed()")),
+        "a global-target mutation must NOT emit a getter prop:\n{js}"
+    );
+    assert!(
+        n.contains(&nc("failed: globalThis.x = 1")),
+        "a global-target mutation stays a plain init:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn dynamic_attribute_mutation_is_stateful_only_for_binding_targets() {
+    // End-to-end has_state at the dynamic-attribute call site (`RegularElement.js`
+    // `has_state ? template_effect : init`). A binding-rooted write joins
+    // `$.template_effect(() => $.set_attribute(div, 'data-x', …))`; a GLOBAL-target write
+    // stays a one-shot bare `$.set_attribute(div, 'data-x', …)` init. Verified against
+    // pinned svelte@5.56.3. The `bind:value` inputs admit `obj`/`plain` as plain-let DOM
+    // bind-target roots (the plain-let admission gate); the binds themselves emit no
+    // `$.template_effect`, so the wrapped-set_attribute discriminator is exact.
+    let pre = "<script>let k = $state(0);\nlet obj = { x: 0 };\nlet plain = 0;</script>\n<input bind:value={obj.x} />\n<input bind:value={plain} />\n";
+
+    for expr in ["obj.x = 1", "plain = 1", "obj.x++"] {
+        let js = emit(
+            &format!("{pre}<div data-x={{{expr}}}>hi</div>\n"),
+            "App.svelte",
+        );
+        let n = normalize_js_cosmetics(&js);
+        assert!(
+            n.contains(&nc("$.template_effect(() => $.set_attribute(div, 'data-x'")),
+            "a binding-rooted attribute mutation {expr} must wrap set_attribute in $.template_effect:\n{js}"
+        );
+        assert!(parses_as_js(&js), "module must be valid JS ({expr}):\n{js}");
+    }
+
+    for expr in ["globalThis.x = 1", "foo = 1", "globalThis.x++"] {
+        let js = emit(
+            &format!("{pre}<div data-x={{{expr}}}>hi</div>\n"),
+            "App.svelte",
+        );
+        let n = normalize_js_cosmetics(&js);
+        assert!(
+            n.contains(&nc("$.set_attribute(div, 'data-x'")),
+            "a global-target attribute mutation {expr} still emits set_attribute:\n{js}"
+        );
+        assert!(
+            !n.contains(&nc("$.template_effect(() => $.set_attribute(div, 'data-x'")),
+            "a global-target attribute mutation {expr} must stay a plain init (no template_effect wrap):\n{js}"
+        );
+        assert!(parses_as_js(&js), "module must be valid JS ({expr}):\n{js}");
+    }
 }
 
 #[test]

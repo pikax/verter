@@ -409,41 +409,47 @@ fn other_class_value_shapes_need_clsx() {
     );
 }
 
-// ── member `has_state` (`MemberExpression.js`'s `!is_pure(node)`) ──
+// ── binding impurity: member `has_state` (`MemberExpression.js`'s `!is_pure(node)`)
+//    + the assignment/update MUTATION half ──
 //
 // A member access rooted at a declared binding (`v`, a `PlainLocal` demoted
 // `$state`) is impure ⇒ has_state; a member rooted at a GLOBAL (`Math`,
 // `globalThis`) is pure ⇒ NOT has_state; a bare identifier (no member) carries no
-// member ⇒ NOT covered here. Verified against pinned svelte@5.56.3 (a `{d.x}` over a
-// demoted state joins the `$.template_effect`; a bare `{d}` stays inline).
+// member ⇒ NOT covered here. The scan ALSO covers the assignment/update MUTATION
+// half of `has_state`: a write whose TARGET LEAF roots at a binding (`v = 1`,
+// `v.x = 1`, `v++`, `v.x++`) is impure ⇒ has_state; a write to a GLOBAL leaf
+// (`globalThis.x = 1`, `foo = 1`) is a plain init, but a binding member in the
+// RHS or an evaluated LHS key/default (`globalThis[v.y] = 1`) still counts.
+// Verified against pinned svelte@5.56.3 (a `{d.x}` over a demoted state joins the
+// `$.template_effect`; a bare `{d}` stays inline).
 
-fn member_roots(src: &str) -> bool {
+fn has_binding_impurity(src: &str) -> bool {
     let (bindings, scopes, root, _declared) = scope_with_v();
-    super::expr_member_roots_at_binding(src, root, &bindings, &scopes)
+    super::expr_has_binding_impurity(src, root, &bindings, &scopes)
 }
 
 #[test]
 fn member_rooted_at_binding_is_state() {
     // `v.x` / `v?.x` / `v.a.b` / `v[k]` — all root at the declared binding `v`.
     assert!(
-        member_roots("v.x"),
+        has_binding_impurity("v.x"),
         "a member on a binding root is has_state"
     );
     assert!(
-        member_roots("v?.x"),
+        has_binding_impurity("v?.x"),
         "an optional member on a binding root is has_state"
     );
     assert!(
-        member_roots("v.a.b"),
+        has_binding_impurity("v.a.b"),
         "a deep member chain on a binding root is has_state"
     );
     assert!(
-        member_roots("v[k]"),
+        has_binding_impurity("v[k]"),
         "a computed member on a binding root is has_state"
     );
     // A member nested inside a larger expression still counts.
     assert!(
-        member_roots("'p-' + v.x"),
+        has_binding_impurity("'p-' + v.x"),
         "a member on a binding nested in a binary is has_state"
     );
 }
@@ -452,26 +458,139 @@ fn member_rooted_at_binding_is_state() {
 fn member_rooted_at_global_or_bare_ident_is_not_state() {
     // A member rooted at a GLOBAL (no binding) is pure ⇒ NOT has_state.
     assert!(
-        !member_roots("Math.PI"),
+        !has_binding_impurity("Math.PI"),
         "a member on a global root is NOT has_state"
     );
     assert!(
-        !member_roots("globalThis.x.y"),
+        !has_binding_impurity("globalThis.x.y"),
         "a deep member on a global root is NOT has_state"
     );
     // A BARE identifier (no member access) is not covered by the member rule.
     assert!(
-        !member_roots("v"),
+        !has_binding_impurity("v"),
         "a bare identifier read (no member) is not a member-rule has_state"
     );
     // A pure literal / call on a global carries no binding-rooted member.
     assert!(
-        !member_roots("'x'"),
+        !has_binding_impurity("'x'"),
         "a literal is not a binding-rooted member"
     );
     assert!(
-        !member_roots("String('x')"),
+        !has_binding_impurity("String('x')"),
         "a pure-global call is not a binding-rooted member"
+    );
+}
+
+#[test]
+fn assignment_and_update_are_has_state() {
+    // WRITE half of has_state: an assignment/update MUTATION is impure ⇒ has_state — for a
+    // member target (`v.x = 1` / `v.x++`) AND a bare-binding target (`v = 1` / `v++`). A
+    // mutation DEFERRED inside a function body is not descended (stays pure). Verified
+    // against pinned svelte@5.56.3.
+    assert!(
+        has_binding_impurity("v.x = 1"),
+        "member assignment target is has_state"
+    );
+    assert!(
+        has_binding_impurity("v = 1"),
+        "bare-binding assignment is has_state"
+    );
+    assert!(has_binding_impurity("v.x++"), "member update is has_state");
+    assert!(
+        has_binding_impurity("v++"),
+        "bare-binding update is has_state"
+    );
+    assert!(
+        !has_binding_impurity("() => v.x = 1"),
+        "assignment inside an arrow body is not has_state"
+    );
+    assert!(
+        !has_binding_impurity("() => v++"),
+        "update inside an arrow body is not has_state"
+    );
+}
+
+#[test]
+fn global_and_undeclared_mutations_are_not_state() {
+    // The over-fire guard: a MUTATION whose write TARGET is rooted at a GLOBAL / undeclared
+    // name is PURE ⇒ NOT has_state — official keeps `globalThis.x = 1`, `globalThis.x++`,
+    // `foo = 1` (undeclared), and `String(globalThis.x = 1)` as a PLAIN init. Only a
+    // binding-rooted write is stateful. Verified against pinned svelte@5.56.3.
+    assert!(
+        !has_binding_impurity("globalThis.x = 1"),
+        "a member assignment rooted at a GLOBAL is NOT has_state"
+    );
+    assert!(
+        !has_binding_impurity("globalThis.x++"),
+        "a member update rooted at a GLOBAL is NOT has_state"
+    );
+    assert!(
+        !has_binding_impurity("foo = 1"),
+        "an assignment to an UNDECLARED (global) name is NOT has_state"
+    );
+    assert!(
+        !has_binding_impurity("String(globalThis.x = 1)"),
+        "a global mutation nested in a pure-global call is NOT has_state"
+    );
+    // A computed key that is itself a GLOBAL/bare read (not a binding member) keeps the
+    // whole global-target write plain — official leaves `globalThis[gk] = 1` a plain init.
+    assert!(
+        !has_binding_impurity("globalThis[gk] = 1"),
+        "a global-target write with a global computed key is NOT has_state"
+    );
+}
+
+#[test]
+fn binding_impurity_in_evaluated_position_of_global_write_is_state() {
+    // Beyond the write leaf, a binding MEMBER appearing in any EVALUATED read position of a
+    // global-target assignment/update is still reported (official's `MemberExpression.js`
+    // `!is_pure` fires over the whole tree): the RHS, an evaluated LHS computed key, an
+    // update-target computed key, and a destructuring default / computed key. Verified
+    // against pinned svelte@5.56.3 (all STATE at both call sites).
+    assert!(
+        has_binding_impurity("globalThis.x = v.y"),
+        "a binding-member RHS of a global-target write is has_state"
+    );
+    assert!(
+        has_binding_impurity("globalThis[v.y] = 1"),
+        "a binding-member LHS computed key of a global-target write is has_state"
+    );
+    assert!(
+        has_binding_impurity("globalThis[v.y]++"),
+        "a binding-member computed key of a global-target UPDATE is has_state"
+    );
+    assert!(
+        has_binding_impurity("[foo = v.y] = arr"),
+        "a binding-member destructuring DEFAULT (global write leaf) is has_state"
+    );
+    assert!(
+        has_binding_impurity("({ [v.y]: foo } = src)"),
+        "a binding-member destructuring COMPUTED KEY (global write leaf) is has_state"
+    );
+}
+
+#[test]
+fn ts_wrapper_member_root_is_state() {
+    // A TS skin (`as` / `satisfies` / `!`) is transparent for root resolution: a member /
+    // write rooted at a binding through a cast is impure ⇒ has_state. Official marks
+    // `(obj as any).y` and `(obj as any).x = 1` stateful; verified against pinned
+    // svelte@5.56.3.
+    assert!(
+        has_binding_impurity("(v as any).y"),
+        "a member read through a TS `as` cast on a binding root is has_state"
+    );
+    assert!(
+        has_binding_impurity("(v as any).x = 1"),
+        "a write through a TS `as` cast on a binding root is has_state"
+    );
+    assert!(
+        has_binding_impurity("(v satisfies unknown).y"),
+        "a member read through a TS `satisfies` on a binding root is has_state"
+    );
+    // A TS cast over a GLOBAL root stays pure.
+    assert!(
+        !has_binding_impurity("(globalThis as any).y"),
+        "a member read through a TS cast on a GLOBAL root is NOT has_state"
     );
 }
 

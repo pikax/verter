@@ -303,9 +303,11 @@ fn default_slot_has_content(source: &str, nodes: &[SvelteNode]) -> bool {
 
 /// Lower a RENDERABLE-region special (`<svelte:element>` / `<svelte:boundary>`) child set into
 /// its own body TEMPLATE SCOPE — the callback region the special emits its children into.
-/// Returns the FULL child node-id list (the structural mirror), the slots (a boundary's
-/// `{#snippet failed/pending}` children hoisted into `snippet_defs`, recognized by name — the
-/// official boundary snippet rule; `<svelte:element>` has none), and the body region id.
+/// Returns the FULL child node-id list (the structural mirror), the slots (ALL of a boundary's
+/// `{#snippet}` children hoisted into `snippet_defs` — official hoists every boundary snippet
+/// into the wrapping block above the call; only `failed`/`pending` are ADDITIONALLY passed by
+/// name as boundary props, filtered at emit; `<svelte:element>` has none), and the body region
+/// id.
 pub(super) fn lower_renderable_special_region(
     ctx: &mut LoweringCtx,
     el: &SvelteElement,
@@ -321,11 +323,7 @@ pub(super) fn lower_renderable_special_region(
             && matches!(
                 child,
                 SvelteNode::Block(b)
-                    if matches!(
-                        &b.kind,
-                        SvelteBlockKind::Snippet { name_text, .. }
-                            if name_text == "failed" || name_text == "pending"
-                    )
+                    if matches!(&b.kind, SvelteBlockKind::Snippet { .. })
             );
         if let Some(id) = lower_node(ctx, child, scope) {
             all_children.push(id);
