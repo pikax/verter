@@ -70,7 +70,7 @@ Design:
 
 ## 5. Surface / blast radius — INTERNAL-ONLY
 
-Codex verdict: NO proto / FFI / wire-DTO / `HOT_TERMINAL_SINK` / architecture-guard cap / sealed-trait change. The materialize fence stays RED at 10 (untouched — a separate workstream). This is an internal `resolver_core` change.
+Codex verdict: NO proto / FFI / wire-DTO / `HOT_TERMINAL_SINK` / architecture-guard cap / sealed-trait change. The materialize fence (`hot_path_never_calls_materialize_type_expr`, enabled and green at zero offenders) stays untouched — a separate workstream. This is an internal `resolver_core` change.
 
 Visibility (`StableExecutionValue` / `RequestRunResult` / the rendezvous are currently `pub` in `resolver_core`, itself `pub`; adding a field is technically a Rust-API addition, NOT a user-facing wire/API break).
 
