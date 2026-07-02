@@ -244,10 +244,15 @@ captured carrier source (an un-synced edit ⇒ querying the provider would pair
 its OLD surface with a NEW mapper — wrong, not merely stale).
 
 Producers record on SUCCESS only: the tsserver publish path records through
-`record_and_version_carrier_companions`; every tsgo direct-open / bootstrap-
-unresolved IDE sync records through the `record_carrier_ide_snapshot` choke;
-the self-file shadow sync records a `Shadow` surface (content + rewrite-aware
-mapper) in `sync_self_file_shadow_state`. A failed sync records nothing.
+`record_and_version_carrier_companions`; the server-side interactive IDE syncs
+record through the `record_carrier_ide_snapshot` method choke; the free-function
+direct-open producers — the debounced coordinator (owner-resolved DirectOpen +
+open-unresolved preserve), the background drain (owner-resolved DirectOpen +
+open-unresolved preserve), and the workspace scanner — record through the
+`record_carrier_ide_surface` free choke; the self-file shadow sync records a
+`Shadow` surface (content + rewrite-aware mapper) in
+`sync_self_file_shadow_state`. A failed sync records nothing. Completeness is
+auditable by grepping the two IDE chokes the same way as the API choke.
 
 Every provider-backed handler (hover, completion + resolve, definition,
 type-definition, references, rename, document highlights, signature help, code

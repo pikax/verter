@@ -724,12 +724,13 @@ pub(super) async fn sync_pending_carrier_provider_file(
 /// later owner reconciliation.
 pub(super) async fn sync_open_unresolved_carrier_provider_file(
     sync: &ProjectSync,
-    provider_surfaces: &crate::provider_surface_store::ProviderSurfaceStore,
+    documents: &DocumentRegistry,
     provider_sync_states: &DashMap<String, ProviderSyncState>,
     canonical_id: &str,
     is_jsx: bool,
     ide: Option<&verter_session::IdeResponse>,
 ) -> bool {
+    let provider_surfaces = documents.provider_surfaces();
     // Build the DESIRED Unresolved target through the shared primitive: the
     // owner-independent desired-extension IDE path + the open-vs-update
     // syncability hint (`ide_background_loaded`). The binding is forced
@@ -779,7 +780,20 @@ pub(super) async fn sync_open_unresolved_carrier_provider_file(
         sync.open_tsx(&ide_path, &ide.code).await
     };
     let ide_synced = match result {
-        Ok(()) => true,
+        Ok(()) => {
+            // Record a fresh generation pinning the EXACT IDE bytes just synced
+            // (interactive queries capture this surface).
+            crate::provider_surface_store::record_carrier_ide_surface(
+                provider_surfaces,
+                Some(documents),
+                documents.host(),
+                canonical_id,
+                &ide_path,
+                &ide.code,
+                ide.source_map.as_deref(),
+            );
+            true
+        }
         Err(error) => {
             tracing::warn!(
                 "pending_snapshot: failed to sync open unresolved Vue IDE path {ide_path}: {error}"
@@ -859,7 +873,7 @@ async fn reconcile_unowned_carrier_buffer(
         let is_jsx = ide.map(|output| output.is_jsx).unwrap_or(false);
         sync_open_unresolved_carrier_provider_file(
             sync,
-            documents.provider_surfaces(),
+            documents,
             provider_sync_states,
             canonical_id,
             is_jsx,
@@ -1066,6 +1080,17 @@ async fn apply_owner_resolved_carrier_sync(
                     Ok(()) => {
                         committed_state.set_background_loaded(ProviderPathKind::Ide, true);
                         synced.push(ProviderPathKind::Ide);
+                        // Record a fresh generation pinning the EXACT IDE bytes just
+                        // synced (interactive queries capture this surface).
+                        crate::provider_surface_store::record_carrier_ide_surface(
+                            documents.provider_surfaces(),
+                            Some(documents),
+                            documents.host(),
+                            canonical_id,
+                            &ide_path,
+                            &ide.code,
+                            ide.source_map.as_deref(),
+                        );
                     }
                     Err(error) => {
                         tracing::warn!(

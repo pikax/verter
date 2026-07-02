@@ -307,6 +307,17 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
                         Ok(()) => {
                             committed_state.set_background_loaded(ProviderPathKind::Ide, true);
                             synced_kinds.push(ProviderPathKind::Ide);
+                            // Record a fresh generation pinning the EXACT IDE bytes
+                            // just synced (interactive queries capture this surface).
+                            crate::provider_surface_store::record_carrier_ide_surface(
+                                deps.documents.provider_surfaces(),
+                                Some(&deps.documents),
+                                deps.documents.host(),
+                                canonical_id,
+                                &ide_path,
+                                &ide.code,
+                                ide.source_map.as_deref(),
+                            );
                         }
                         Err(e) => {
                             tracing::warn!("sync_coordinator: tsx sync failed for {ide_path}: {e}")
@@ -440,7 +451,20 @@ async fn preserve_open_unresolved_carrier(
             deps.project_sync.open_tsx(&ide_path, &ide.code).await
         };
         match result {
-            Ok(()) => ide_synced = true,
+            Ok(()) => {
+                ide_synced = true;
+                // Record a fresh generation pinning the EXACT IDE bytes just
+                // synced (interactive queries capture this surface).
+                crate::provider_surface_store::record_carrier_ide_surface(
+                    deps.documents.provider_surfaces(),
+                    Some(&deps.documents),
+                    deps.documents.host(),
+                    canonical_id,
+                    &ide_path,
+                    &ide.code,
+                    ide.source_map.as_deref(),
+                );
+            }
             Err(error) => tracing::warn!(
                 "sync_coordinator: failed to sync open unresolved IDE path {ide_path}: {error}"
             ),

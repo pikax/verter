@@ -1163,6 +1163,42 @@ pub fn record_carrier_api_surface(
     );
 }
 
+/// THE free-function record choke point for a DIRECT IDE-surface sync outside
+/// the server (the coordinator / background-drain / workspace-scanner direct-
+/// open paths; the tsserver publish path records through
+/// [`record_and_version_carrier_companions`] inside the carrier-sync gateway,
+/// and the server-side interactive paths through
+/// `VerterLanguageServer::record_carrier_ide_snapshot`).
+///
+/// Records a fresh generation pinning the EXACT `ide_code` synced under
+/// `provider_path`, with the source map parsed from the SAME bytes. Called ONLY
+/// after a SUCCESSFUL provider sync (fail-closed: a failed sync records
+/// nothing). Without this record the interactive request-surface capture has
+/// no `CarrierIde` snapshot to serve, and every provider-backed feature drops
+/// its provider contribution for the synced file.
+pub fn record_carrier_ide_surface(
+    store: &ProviderSurfaceStore,
+    documents: Option<&DocumentRegistry>,
+    host: &VerterHost,
+    canonical_id: &str,
+    provider_path: &str,
+    ide_code: &str,
+    source_map_json: Option<&str>,
+) {
+    // These direct-open sites do not stamp a companion version, so the recorded
+    // generation is intentionally discarded here.
+    let _ = record_carrier_companion_surface(
+        store,
+        documents,
+        host,
+        canonical_id,
+        provider_path,
+        ProviderSurfaceKind::CarrierIde,
+        ide_code,
+        source_map_json,
+    );
+}
+
 /// Record a published carrier companion surface of ANY role (`CarrierIde` /
 /// `CarrierApi` / …) under a fresh generation — the role-generalised core of
 /// [`record_carrier_api_surface`]. Stamps the source-map identity (`map_hash`)

@@ -6753,7 +6753,7 @@ async fn open_unresolved_carrier_no_ide_output_commits_forced_unresolved_binding
     // Drive the no-IDE branch directly: no compiled IDE output this pass.
     let synced = sync_open_unresolved_carrier_provider_file(
         &sync,
-        &crate::provider_surface_store::ProviderSurfaceStore::new(),
+        &documents,
         &provider_sync_states,
         "/workspace/src/App.vue",
         false,
@@ -6870,7 +6870,7 @@ async fn open_unresolved_carrier_closes_dropped_owner_api_path_keeps_ide_tsx() {
     };
     let synced = sync_open_unresolved_carrier_provider_file(
         &sync,
-        &crate::provider_surface_store::ProviderSurfaceStore::new(),
+        &documents,
         &provider_sync_states,
         "/workspace/src/App.vue",
         false,
@@ -7664,7 +7664,7 @@ async fn drain_open_unresolved_carrier_no_ide_no_prior_commits_empty_unresolved(
 
     let synced = sync_open_unresolved_carrier_provider_file(
         &sync,
-        &crate::provider_surface_store::ProviderSurfaceStore::new(),
+        &documents,
         &provider_sync_states,
         "/workspace/src/App.vue",
         false,
@@ -18144,6 +18144,175 @@ async fn hover_fails_closed_when_surface_retired_mid_request() {
     assert!(
         !text.contains("PROVIDER_HOVER_SENTINEL"),
         "a provider hover racing a surface retirement must be DROPPED, got: {text}"
+    );
+}
+
+/// BOOTSTRAP-DRAIN reproduction: the editor opens a carrier during bootstrap so
+/// the file is queued (never interactively synced); the background drain then
+/// direct-opens its IDE surface (tsgo). The drain MUST record the `CarrierIde`
+/// surface it delivered to the provider — without the record, the interactive
+/// request-surface capture misses and EVERY provider-backed feature silently
+/// drops its provider contribution until the next `did_change`.
+#[tokio::test(flavor = "multi_thread")]
+async fn bootstrap_drained_carrier_records_surface_and_serves_provider_hover() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service_tsgo(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+    let uri = open_test_vue(server, "/workspace/src/App.vue", REQUEST_SURFACE_APP);
+
+    // Opened during bootstrap: queued for the drain, no interactive sync ran.
+    server
+        .pending_snapshot_provider_sync
+        .insert("/workspace/src/App.vue".to_string());
+    drain_pending_snapshot_provider_sync(
+        server.project_sync.as_ref(),
+        &server.documents,
+        &server.vfs_workspace,
+        &server.provider_sync_states,
+        &server.pending_snapshot_provider_sync,
+        true,
+        None,
+        None,
+    )
+    .await;
+
+    let ide_path = server
+        .active_ide_path_for_uri(&uri)
+        .expect("the drain must commit a live IDE path for the queued carrier");
+    let snapshot = server
+        .documents
+        .provider_surfaces()
+        .current_snapshot(&ide_path)
+        .expect("the drain's direct IDE open must record a CarrierIde surface");
+    assert_eq!(
+        snapshot.kind,
+        crate::provider_surface_store::ProviderSurfaceKind::CarrierIde,
+        "the drain-recorded surface must carry the CarrierIde role"
+    );
+    let ide = server
+        .documents
+        .get_ide(&uri)
+        .expect("IDE output should exist");
+    assert_eq!(
+        snapshot.provider_content.as_ref(),
+        ide.code.as_ref(),
+        "the drain-recorded surface must pin the EXACT bytes delivered to the provider"
+    );
+
+    // End-to-end: hover captures the drain-recorded surface and serves the
+    // provider contribution (no silent drop before the next did_change).
+    let position = find_document_position(server, &uri, "{{ msg", 3);
+    set_type_hover_at_vue_position(
+        server,
+        &provider,
+        &uri,
+        position,
+        "```typescript\nconst msg: string\n```",
+    );
+    let text = hover_text(
+        server
+            .hover(hover_params(&uri, position))
+            .await
+            .expect("hover request should succeed"),
+    );
+    assert!(
+        text.contains("const msg: string"),
+        "a drain-synced carrier must serve the provider hover, got: {text}"
+    );
+}
+
+/// The OPEN-UNRESOLVED drain path (owner not yet resolved, editor-liveness IDE
+/// open) must ALSO record the `CarrierIde` surface it delivers: the unresolved
+/// carrier is queryable (hover/completion work through the unresolved IDE
+/// path), so the request-surface capture needs a recorded surface here too.
+#[tokio::test(flavor = "multi_thread")]
+async fn open_unresolved_drain_ide_sync_records_carrier_ide_surface() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
+    let source = "<script setup lang=\"ts\">\nconst msg = 'hello'\n</script>\n\
+                  <template><div>{{ msg }}</div></template>\n";
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: source.to_string(),
+    });
+    let profile = documents.tsx_profile.read().clone();
+    let ide = host
+        .get_ide("/workspace/src/App.vue", &profile)
+        .expect("IDE output should exist for the open carrier");
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    let provider_sync_states = DashMap::new();
+
+    let synced = sync_open_unresolved_carrier_provider_file(
+        &sync,
+        &documents,
+        &provider_sync_states,
+        "/workspace/src/App.vue",
+        false,
+        Some(&ide),
+    )
+    .await;
+    assert!(
+        !synced,
+        "the unresolved preserve pass keeps the file queued (returns false)"
+    );
+
+    let state = provider_sync_states
+        .get("/workspace/src/App.vue")
+        .map(|entry| entry.clone())
+        .expect("the open unresolved carrier must commit provider state");
+    let ide_path = state
+        .ide_path
+        .clone()
+        .expect("the unresolved carrier must commit a live IDE path");
+    let snapshot = documents
+        .provider_surfaces()
+        .current_snapshot(&ide_path)
+        .expect("a successful open-unresolved IDE sync must record a CarrierIde surface");
+    assert_eq!(
+        snapshot.kind,
+        crate::provider_surface_store::ProviderSurfaceKind::CarrierIde,
+        "the recorded surface must carry the CarrierIde role"
+    );
+    assert_eq!(
+        snapshot.provider_content.as_ref(),
+        ide.code.as_ref(),
+        "the recorded surface must pin the EXACT bytes delivered to the provider"
+    );
+
+    // A FAILED open-unresolved IDE sync records NOTHING (fail closed).
+    let other_uri: Uri = "file:///workspace/src/Other.vue".parse().unwrap();
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: other_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: source.to_string(),
+    });
+    let other_ide = host
+        .get_ide("/workspace/src/Other.vue", &profile)
+        .expect("IDE output should exist for the second carrier");
+    provider.set_fail_sync_path("/workspace/src/Other.vue.tsx");
+    let _ = sync_open_unresolved_carrier_provider_file(
+        &sync,
+        &documents,
+        &provider_sync_states,
+        "/workspace/src/Other.vue",
+        false,
+        Some(&other_ide),
+    )
+    .await;
+    assert!(
+        documents
+            .provider_surfaces()
+            .current_snapshot("/workspace/src/Other.vue.tsx")
+            .is_none(),
+        "a failed open-unresolved IDE sync must not record a provider surface"
     );
 }
 

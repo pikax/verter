@@ -797,3 +797,169 @@ defineProps<{ msg: string }>()
         "a failed owner-change sync must not close any provider path, calls={calls:?}"
     );
 }
+
+/// The coordinator's owner-resolved DIRECT-OPEN (tsgo) IDE sync must record the
+/// `CarrierIde` surface it delivered: the debounced coordinator is the LIVE
+/// re-sync path after an edit, and without the record the interactive
+/// request-surface capture misses — every provider-backed feature then silently
+/// drops its provider contribution until another producer records.
+#[tokio::test(flavor = "multi_thread")]
+async fn coordinator_direct_ide_sync_records_carrier_ide_surface() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let canonical_id = "/workspace/src/App.vue";
+    let uri: Uri = "file:///workspace/src/App.vue".parse().expect("test uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<script setup lang=\"ts\">\nconst msg = 'hello'\n</script>\n\
+               <template><div>{{ msg }}</div></template>\n"
+            .to_string(),
+    });
+
+    let provider = Arc::new(MockTypeProvider::new());
+    // Owner-resolving snapshot rooted at the workspace: DirectOpen (tsgo).
+    let vfs_workspace = Arc::new(crate::test_utils::make_test_vfs_workspace_with_resolver(
+        "/workspace",
+        Some("/workspace/tsconfig.json"),
+    ));
+    let provider_sync_states = Arc::new(DashMap::new());
+
+    let deps = SyncCoordinatorDeps {
+        documents: Arc::clone(&documents),
+        project_sync: ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject),
+        needs_provider_sync: Arc::new(DashSet::new()),
+        pending_snapshot_provider_sync: Arc::new(DashSet::new()),
+        client: make_test_client(),
+        type_provider: None,
+        cached_verter_diags: Arc::new(DashMap::new()),
+        position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
+        provider_sync_states: Arc::clone(&provider_sync_states),
+        vfs_workspace,
+        type_provider_kind: crate::TypeProviderKind::Tsgo,
+        carrier_publish_coordinator: None,
+    };
+
+    sync_file(&deps, canonical_id, uri.as_str()).await;
+
+    let state = provider_sync_states
+        .get(canonical_id)
+        .map(|entry| entry.clone())
+        .expect("the owner-resolved coordinator sync must commit provider state");
+    assert!(
+        state.ide_background_loaded,
+        "the coordinator's direct IDE sync must mark the IDE kind live"
+    );
+    let ide_path = state
+        .ide_path
+        .clone()
+        .expect("the owner-resolved sync must commit an IDE path");
+    let snapshot = documents
+        .provider_surfaces()
+        .current_snapshot(&ide_path)
+        .expect("the coordinator's successful direct IDE sync must record a CarrierIde surface");
+    assert_eq!(
+        snapshot.kind,
+        crate::provider_surface_store::ProviderSurfaceKind::CarrierIde,
+        "the recorded surface must carry the CarrierIde role"
+    );
+    let profile = documents.tsx_profile.read().clone();
+    let ide = host
+        .get_ide(canonical_id, &profile)
+        .expect("IDE output should exist");
+    assert_eq!(
+        snapshot.provider_content.as_ref(),
+        ide.code.as_ref(),
+        "the recorded surface must pin the EXACT bytes delivered to the provider"
+    );
+
+    // A FAILED direct IDE sync records NOTHING (fail closed).
+    let other_id = "/workspace/src/Other.vue";
+    let other_uri: Uri = "file:///workspace/src/Other.vue".parse().expect("test uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: other_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<script setup lang=\"ts\">\nconst other = 1\n</script>\n\
+               <template><div>{{ other }}</div></template>\n"
+            .to_string(),
+    });
+    provider.set_fail_sync_path("/workspace/src/Other.vue.tsx");
+    sync_file(&deps, other_id, other_uri.as_str()).await;
+    assert!(
+        documents
+            .provider_surfaces()
+            .current_snapshot("/workspace/src/Other.vue.tsx")
+            .is_none(),
+        "a failed coordinator IDE sync must not record a provider surface"
+    );
+}
+
+/// The coordinator's OPEN-UNRESOLVED preserve (owner-None over a ready
+/// snapshot) keeps the open document's IDE TSX live AND queryable — so a
+/// successful preserve sync must record the `CarrierIde` surface it delivered,
+/// or the interactive capture misses for the unresolved carrier.
+#[tokio::test(flavor = "multi_thread")]
+async fn coordinator_open_unresolved_preserve_records_carrier_ide_surface() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let canonical_id = "/workspace/src/App.vue";
+    let uri: Uri = "file:///workspace/src/App.vue".parse().expect("test uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<script setup lang=\"ts\">\nconst msg = 'hello'\n</script>\n\
+               <template><div>{{ msg }}</div></template>\n"
+            .to_string(),
+    });
+
+    let provider = Arc::new(MockTypeProvider::new());
+    // Ready snapshot rooted ELSEWHERE: owner resolution returns None for the
+    // open file, driving the preserve-open-unresolved path.
+    let vfs_workspace = Arc::new(crate::test_utils::make_test_vfs_workspace_with_resolver(
+        "/other",
+        Some("/other/tsconfig.json"),
+    ));
+    let provider_sync_states = Arc::new(DashMap::new());
+
+    let deps = SyncCoordinatorDeps {
+        documents: Arc::clone(&documents),
+        project_sync: ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject),
+        needs_provider_sync: Arc::new(DashSet::new()),
+        pending_snapshot_provider_sync: Arc::new(DashSet::new()),
+        client: make_test_client(),
+        type_provider: None,
+        cached_verter_diags: Arc::new(DashMap::new()),
+        position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
+        provider_sync_states: Arc::clone(&provider_sync_states),
+        vfs_workspace,
+        type_provider_kind: crate::TypeProviderKind::Tsgo,
+        carrier_publish_coordinator: None,
+    };
+
+    sync_file(&deps, canonical_id, uri.as_str()).await;
+
+    let state = provider_sync_states
+        .get(canonical_id)
+        .map(|entry| entry.clone())
+        .expect("the open unresolved carrier must commit provider state");
+    assert!(
+        state.is_unresolved(),
+        "owner-None over a ready snapshot must commit an Unresolved binding"
+    );
+    let ide_path = state
+        .ide_path
+        .clone()
+        .expect("the preserve must keep a live IDE path");
+    let snapshot = documents
+        .provider_surfaces()
+        .current_snapshot(&ide_path)
+        .expect("a successful open-unresolved preserve sync must record a CarrierIde surface");
+    assert_eq!(
+        snapshot.kind,
+        crate::provider_surface_store::ProviderSurfaceKind::CarrierIde,
+        "the recorded surface must carry the CarrierIde role"
+    );
+}

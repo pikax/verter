@@ -932,6 +932,19 @@ async fn sync_file_to_provider(
                     if result.is_ok() {
                         committed_state.set_background_loaded(ProviderPathKind::Ide, true);
                         synced_kinds.push(ProviderPathKind::Ide);
+                        // Record a fresh generation pinning the EXACT IDE bytes just
+                        // synced (interactive queries capture this surface). The
+                        // background scan has no `DocumentRegistry`; the carrier
+                        // source resolves host/VFS-only.
+                        crate::provider_surface_store::record_carrier_ide_surface(
+                            provider_surfaces,
+                            None,
+                            host,
+                            canonical_id,
+                            &tsx_path,
+                            &ide.code,
+                            ide.source_map.as_deref(),
+                        );
                     }
                 }
             }
@@ -2253,6 +2266,87 @@ defineProps<{ msg: string }>()
         assert!(
             advertised_after.is_empty(),
             "owner loss MUST remove the carrier from the project's advertised set; got {advertised_after:?}"
+        );
+    }
+
+    /// The background scan's DIRECT-OPEN (tsgo) IDE sync must record the
+    /// `CarrierIde` surface it delivered: a scan-synced carrier is queryable,
+    /// so the interactive request-surface capture needs the recorded surface —
+    /// without it every provider-backed feature drops its provider
+    /// contribution for scan-synced files.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workspace_scan_direct_ide_sync_records_carrier_ide_surface() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let ws_root = format!("/verter_scan_ide_rec_{nanos}/ws");
+        let tsconfig = format!("{ws_root}/tsconfig.json");
+        let source = format!("{ws_root}/src/App.vue");
+
+        let host = VerterHost::new_standalone(verter_session::HostConfig::default());
+        let _ = host.upsert(UpsertRequest {
+            canonical_id: Some(source.clone()),
+            input_id: source.clone(),
+            source: Arc::<str>::from(
+                "<script setup lang=\"ts\">\nconst msg: string = 'hi'\n</script>\n\
+                 <template><div>{{ msg }}</div></template>\n",
+            ),
+            file_language: FileLanguage::vue(),
+            aliases: Vec::new(),
+        });
+        let profile = CompileProfile {
+            target: verter_session::CompileTarget::BUNDLER | verter_session::CompileTarget::TSX,
+            ..CompileProfile::default()
+        };
+        assert!(host.ensure_compiled(&source, &profile).is_ok());
+
+        let provider = Arc::new(MockTypeProvider::new());
+        let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+        let sync_states = DashMap::new();
+        let surfaces = crate::provider_surface_store::ProviderSurfaceStore::new();
+
+        let owning_vfs = make_configured_carrier_vfs(&ws_root, &tsconfig);
+        sync_file_to_provider(
+            &source,
+            &host,
+            &profile,
+            &sync,
+            &surfaces,
+            &owning_vfs,
+            true, // tsgo direct open
+            &sync_states,
+            None,
+        )
+        .await;
+
+        let state = sync_states
+            .get(&source)
+            .map(|entry| entry.clone())
+            .expect("the scan must commit provider state for the owned carrier");
+        assert!(
+            state.ide_background_loaded,
+            "the scan's direct IDE open must mark the IDE kind live"
+        );
+        let ide_path = state
+            .ide_path
+            .clone()
+            .expect("the owned carrier must commit an IDE path");
+        let snapshot = surfaces
+            .current_snapshot(&ide_path)
+            .expect("the scan's successful direct IDE open must record a CarrierIde surface");
+        assert_eq!(
+            snapshot.kind,
+            crate::provider_surface_store::ProviderSurfaceKind::CarrierIde,
+            "the recorded surface must carry the CarrierIde role"
+        );
+        let ide = host
+            .get_ide(&source, &profile)
+            .expect("IDE output should exist");
+        assert_eq!(
+            snapshot.provider_content.as_ref(),
+            ide.code.as_ref(),
+            "the recorded surface must pin the EXACT bytes delivered to the provider"
         );
     }
 }
