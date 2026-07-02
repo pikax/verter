@@ -19,7 +19,7 @@ tripwire stay welcome, but false-negative BROADENINGS (new reader rails that try
 syntactic scanner universal) are REFUSED — the gaps below are closed structurally by the later
 conversions, not by widening the scanner.
 
-## The two named residuals
+## The three named residuals
 
 ### FN4 — arbitrary expression-macro body blindness
 
@@ -48,6 +48,35 @@ The trait-default facet is now RECONCILED; one residual remains.
    that control sentinel with a typed degradation, at which point the control-flow shape itself
    disappears.
 
+### FN6 — inert detector-name spellings in the gate ident lists (deferred-from-§5a, closes-at-§5c, codex-sanctioned)
+
+- **Exact item**: the detector-name spellings `slot_callable_param_and_return`,
+  `callable_arm_from_raised`, and `snippet_callable_positional_bindings` in
+  `HOT_DECIDE_TAINTED_GATE_IDENTS` / `HOT_EXTRACTING_GATE_IDENTS`
+  (`crates/verter_session/tests/cases/output_projector_residual_guards.rs`) are now INERT: the
+  production fns they spell were deleted by the node-domain slots conversion (the legacy `TypeExpr`
+  callable-helper deletion), so the spellings can no longer match any production code. (The §5c
+  sweep covers both lists wholesale, which also catches the sibling stale spelling
+  `slot_callable_param_and_return_from_arms`.)
+- **Why not now (deferred from §5a)**: §5a was the codex-scoped orphaned-sink deletion
+  (`raise_realized_callable_member_value` + its guard authorizations). Under the frozen
+  Structural-Confinement-First ruling (above), these name-lists are a SUPPLEMENTARY syntactic
+  tripwire — the structural `NoTypeExpr` / sealed-capability rails are the primary defense — so an
+  inert supplementary spelling is not a correctness exposure, and sweeping the lists carries its own
+  non-vacuity (hollow-proof) obligation that is outside §5a's mechanical scope.
+- **Owning future block**: §5c.
+- **Temporary behavior**: the inert spellings stay in the two gate ident lists. The (T)
+  taint-through-extracting-gate self-test keeps exercising taint propagation through the retained
+  `slot_callable_param_and_return` GATE spelling, driven by the live mat-direct taint source
+  `raise_member_value`.
+- **Fail-closed guard/test preventing silent loss**: an inert gate spelling can only FAIL to match
+  production code — it cannot false-pass anything (unlike `HOT_TERMINAL_SINKS`, these lists carry no
+  per-entry located-fn accounting requirement); the hot-materialize fence and the per-entry
+  `HOT_TERMINAL_SINKS` accounting rail stay GREEN; the structural rails carry the invariant.
+- **Closing condition**: the §5c ident sweep of both lists (dropping every spelling with no
+  production fn) plus a both-rails hollow-proof that the syntactic tripwire and the structural rail
+  remain non-vacuous after the sweep.
+
 ## Structural-closure path (why the residual is a syntactic gap, not an invariant hole)
 
 FN4 (macro-body blindness) is closed by REMOVING the materialized `TypeExpr` from hot inputs. Once
@@ -68,6 +97,8 @@ the Unknown control-flow shape, not a hot-input exposure.
 - **FN5.2** (Unknown-fence typed-degradation end-state) is **Stage 10** — a downstream typed-state
   refinement that lands after the fence doc is deleted, which is why this debt row lives in a durable
   home.
+- **FN6** (inert detector-name spellings) closes at **§5c** — the ident sweep of both gate lists
+  plus the both-rails hollow-proof; codex-sanctioned deferred-from-§5a.
 
 ## The global Unknown fence STAYS ENABLED in Stage 9
 
@@ -83,4 +114,6 @@ syntactic surface (FN4 macro-body blindness, FN5.2 typed-degradation end-state) 
 This debt row is cleared when (a) the B1 / B2 / C node-domain conversions land (removing materialized
 `TypeExpr` from hot inputs, mooting FN4) and (b) the Stage-10 typed-degradation end-state replaces the
 `TypeExpr::Unknown` control-flow shape (closing FN5.2) — at which point the frozen tripwire's named
-residuals are empty and this file is deleted. (FN5.1, the trait-default scan, is already reconciled.)
+residuals are empty and this file is deleted. (FN5.1, the trait-default scan, is already reconciled.
+FN6 clears independently and earlier, at §5c, via the ident sweep + both-rails hollow-proof; its
+clearance removes the FN6 section but does not gate this file's deletion.)

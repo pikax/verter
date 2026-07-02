@@ -149,3 +149,26 @@ MECHANICALLY zero — then enables `hot_path_never_calls_materialize_type_expr` 
 Unknown fence. C5 is the KNOWN named-debt anchor, but its conversion alone is NOT the closure
 condition: the allowlist reaching 0 (after the fence-build's exhaustive audit converts every hot
 site it finds) is. At that point the fence is structurally TRUE and this debt row is obsolete.
+
+## §5a → §5c deferral row — `callable_view` module-allow narrowing (codex-sanctioned)
+
+A second, independent debt row (deferred-from-§5a, closes-at-§5c, codex-sanctioned). It clears at
+§5c — independent of, and expected before, the C5 fence-GREEN closure that deletes this file.
+
+- **Exact item**: narrow the module-wide `#![allow(dead_code)]` in
+  `crates/verter_session/src/meta_resolve/callable_view.rs` to per-method `#[allow(dead_code)]` on
+  the 3 verified-unconsumed completeness methods: `CallableNodeView::first_param_object_surface`
+  and `SignatureNodeView::{return_type, return_type_span}`.
+- **Why not now (deferred from §5a)**: §5a was the codex-scoped orphaned-sink deletion
+  (`raise_realized_callable_member_value` + its guard authorizations); the narrowing rides the
+  delete-or-wire decision on those 3 methods — a non-mechanical scope §5a does not sanction.
+- **Owning future block**: §5c (or the delete-or-wire decision on the 3 methods, whichever lands
+  first).
+- **Temporary behavior**: the blanket module allow stays; it is documented in-line and names the 3
+  items it exists for.
+- **Fail-closed guard/test preventing silent loss**: `cargo clippy --workspace -- -D warnings`
+  stays green; the blanket allow's in-line comment names exactly the 3 items, so any additional
+  dead item the allow would mask is visible as comment drift at review; this ledger row is the
+  named-debt record.
+- **Closing condition**: §5c lands the per-method narrowing (or the delete-or-wire outcome removes
+  or consumes the 3 methods), the module-wide allow is deleted, and this row is removed.
