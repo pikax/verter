@@ -284,6 +284,104 @@ fn single_callable_arm_ambiguous_two_callables_refuses() {
 }
 
 #[test]
+fn single_callable_arm_duplicate_identical_node_id_arms_dedupe_to_one() {
+    // Accept/dedupe direction of the node-identity dedupe boundary: a union
+    // whose arms classify to the SAME `SemanticNodeId` is ONE callable, not an
+    // ambiguous pair. Two flavors, both asserting the EXACT surviving node:
+    //
+    // 1. the same interned Function node appearing twice as a literal arm;
+    // 2. an `Alias(f)` arm (a DIFFERENT arm node id) whose classification
+    //    realizes to the SAME Function node `f` — pinning that the dedupe
+    //    boundary is the CLASSIFIED callable node identity, not the raw arm id.
+    //
+    // Companion to `single_callable_arm_distinct_node_ids_with_equal_raised_shape_refuse`
+    // (the narrowed refuse direction of the same comparison).
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let void = prim(&graph, PrimitiveKind::Void);
+    let row = prim(&graph, PrimitiveKind::Number);
+    let f = function(&graph, vec![param(Some("r"), row, false, false)], void);
+
+    let duplicated = union(&graph, vec![f, f]);
+    let view = CallableNodeView::new(&dispatch, duplicated);
+    assert_eq!(
+        view.single_callable_arm(navigate()),
+        Some(f),
+        "duplicate identical-`SemanticNodeId` arms dedupe to the ONE callable node"
+    );
+
+    let aliased_twin = alias(&graph, f);
+    assert_ne!(
+        aliased_twin, f,
+        "the alias arm is a distinct interned node from the function it wraps"
+    );
+    let via_alias = union(&graph, vec![aliased_twin, f]);
+    let view = CallableNodeView::new(&dispatch, via_alias);
+    assert_eq!(
+        view.single_callable_arm(navigate()),
+        Some(f),
+        "arms that CLASSIFY to the same callable node id dedupe to one arm"
+    );
+}
+
+#[test]
+fn single_callable_arm_distinct_node_ids_with_equal_raised_shape_refuse() {
+    // Refuse direction of the node-identity dedupe boundary: two callable arms
+    // whose classified nodes are DIFFERENT `SemanticNodeId`s refuse as
+    // ambiguous EVEN WHEN their raised shapes are equal. Node identity — not
+    // raised-shape equality — is the dedupe boundary: a raised-shape
+    // comparison is too broad (it can collapse distinct declarations or
+    // instantiations that happen to materialize identically).
+    //
+    // Fixture: `f_direct` takes `(r: number)`; `f_via_alias` takes
+    // `(r: Alias(number))`. The param-type NODES differ, so the two Function
+    // payloads intern to DIFFERENT node ids — but `Alias` folds through to its
+    // target at raise time, so both raise to the SAME `(r: number) => void`
+    // shape (proven via `raised_shape_eq_nodes` below, the retired dedupe
+    // comparison). A revert to shape-based dedupe would accept this union and
+    // FAIL this test. Companion to
+    // `single_callable_arm_ambiguous_two_callables_refuses` (the broader
+    // shape-DIFFERENT refuse edge).
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let void = prim(&graph, PrimitiveKind::Void);
+    let number = prim(&graph, PrimitiveKind::Number);
+    let aliased_number = alias(&graph, number);
+    let f_direct = function(&graph, vec![param(Some("r"), number, false, false)], void);
+    let f_via_alias = function(
+        &graph,
+        vec![param(Some("r"), aliased_number, false, false)],
+        void,
+    );
+    assert_ne!(
+        f_direct, f_via_alias,
+        "the two callables intern to distinct node ids (param-type nodes differ)"
+    );
+    assert_eq!(
+        crate::project_semantic_dispatch::raise::raised_shape_eq_nodes(
+            &host,
+            f_direct,
+            f_via_alias
+        ),
+        Some(true),
+        "premise: the two distinct nodes are raised-shape-EQUAL (the alias folds through)"
+    );
+
+    let ambiguous = union(&graph, vec![f_direct, f_via_alias]);
+    let view = CallableNodeView::new(&dispatch, ambiguous);
+    assert_eq!(
+        view.single_callable_arm(navigate()),
+        None,
+        "distinct node ids refuse as ambiguous even when raised-shape-equal — \
+         node identity is the dedupe boundary"
+    );
+}
+
+#[test]
 fn single_callable_arm_non_nullish_non_callable_union_refuses() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
