@@ -15,8 +15,12 @@ fn read_server_source(relative: &str) -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("src")
         .join(relative);
-    std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("guard must read {}: {e}", path.display()))
+    let source = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("guard must read {}: {e}", path.display()));
+    // Normalize line endings so the `\n`-anchored boundary searches below
+    // (`fn_slice`, the top-level `"\n}\n"` slice) behave identically on CRLF
+    // (Windows) and LF checkouts.
+    source.replace("\r\n", "\n")
 }
 
 /// Extract the source slice of one `fn <name>` item: from its declaration to

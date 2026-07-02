@@ -527,16 +527,20 @@ impl VerterLanguageServer {
             if let Some(transition) =
                 self.prepare_non_carrier_provider_sync_transition(canonical_id)
             {
-                // TODO(follow-up): this non-carrier (shadow/real) write is intentionally NOT
-                // recorded into the ProviderSurfaceStore. It is fail-closed-safe today because
-                // (1) only CarrierApi surfaces are ever recorded/vouched (the rename capture set
-                // filters on `kind == CarrierApi`), (2) a non-carrier `provider_path` lives in a
-                // disjoint namespace from a `{carrier}.ts` virtual path (a real rune module's own
-                // canonical path is never a sibling component's CarrierApi path), and (3)
-                // `close_provider_paths` below retires (forgets) any stale CarrierApi path BEFORE
-                // this write, so no stale CarrierApi generation can survive to vouch over this
-                // content. If the store later grows Real/Shadow snapshot producers, record this
-                // write here so the store stays the complete authority on every synced surface.
+                // This non-carrier (shadow/real) write is intentionally NOT recorded into the
+                // ProviderSurfaceStore. Recorded Shadow surfaces come from the self-file
+                // shadow-sync primitive (`sync_self_file_shadow_state`), which pins an open
+                // rune module's OWN provider buffer — the surface interactive queries capture.
+                // This write, by contrast, delivers dependency content the provider needs for
+                // cross-file resolution; no interactive query maps positions through it. It is
+                // fail-closed-safe unrecorded because (1) rename vouching is CarrierApi-only
+                // (the capture set classifies any non-CarrierApi path as non-mappable and
+                // drops it, never vouches), (2) a non-carrier `provider_path` lives in a
+                // disjoint namespace from a `{carrier}.ts` virtual path (a real rune module's
+                // own canonical path is never a sibling component's CarrierApi path), and (3)
+                // `close_provider_paths` below retires (forgets) any stale CarrierApi path
+                // BEFORE this write, so no stale CarrierApi generation can survive to vouch
+                // over this content.
                 self.close_provider_paths(&transition.stale_paths).await;
                 if let Err(error) = sync
                     .sync_file(&prepared.provider_path, &prepared.rewritten)
