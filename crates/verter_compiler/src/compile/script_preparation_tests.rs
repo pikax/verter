@@ -118,7 +118,7 @@ fn invalid_define_emits_surfaces_on_every_target() {
 /// block content, not the whole SFC. The prepared setup parse runs at the
 /// SFC content offset (so its spans are SFC-absolute for the codegen lanes),
 /// but the public diagnostic span is localized back to content coordinates,
-/// leaving it byte-identical to the historical span. (`INVALID_PROPS_SFC` is
+/// leaving it byte-identical to the content-local span. (`INVALID_PROPS_SFC` is
 /// the UNRESOLVED case, so the code is `XUnresolvedImportedMacroType`.)
 #[test]
 fn invalid_macro_type_diagnostic_span_is_content_local() {

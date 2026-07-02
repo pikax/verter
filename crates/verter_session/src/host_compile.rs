@@ -404,8 +404,8 @@ impl VerterHost {
         // one compiled result would be fanned to both and emit the wrong
         // scope id. On the HostBacked lane the effective component id is
         // always `None` (its profile carries `component_id: None`), so this
-        // key reduces to the historical `(canonical, mode)` identity with no
-        // behavior change. The effective mode is
+        // key reduces to the `(canonical, mode)` identity on that lane. The
+        // effective mode is
         // `input.requested_mode.unwrap_or(default_mode)`, matching the
         // per-input profile built in `compile_one_in_batch`.
         let key_component_id = |input: &CompileBatchInput| -> Option<String> {
