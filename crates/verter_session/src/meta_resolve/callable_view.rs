@@ -83,11 +83,13 @@ pub(crate) struct SlotCallableNodeParts {
 enum SnippetParamsArg {
     /// A tuple `Params` — one positional binding per element.
     Tuple,
-    /// A RESOLVED non-tuple `Params` (a concrete / decided type shape that is not
-    /// a tuple): a validated snippet with such a `Params` is a PRESENT,
-    /// binding-less slot (`Snippet<[a] | [b]>`, `Snippet<[a] & [b]>`,
-    /// `Snippet<Cond>`, an open-generic `Snippet<Params>`, an `Array`, a
-    /// scalar / object / function).
+    /// A REACHED non-tuple `Params` (a reached type shape that is not a tuple —
+    /// including reached-but-OPEN deferred shells like `KeyOf` /
+    /// `IndexedAccess` / `Mapped` / `Infer`, which are reached and bucketed
+    /// present-binding-less, not resolved/decided): a validated snippet with
+    /// such a `Params` is a PRESENT, binding-less slot (`Snippet<[a] | [b]>`,
+    /// `Snippet<[a] & [b]>`, `Snippet<Cond>`, an open-generic
+    /// `Snippet<Params>`, an `Array`, a scalar / object / function).
     ResolvedNonTuple,
     /// An UNRESOLVED residual carrier or a non-type artifact: the `Params` might
     /// still be a tuple we could not reach, so fail closed (never present a
@@ -113,11 +115,14 @@ fn classify_snippet_params_arg(data: Option<&SemanticNodeData>) -> SnippetParams
     match data {
         // A tuple `Params` — one positional binding per element.
         SemanticNodeData::Tuple { .. } => SnippetParamsArg::Tuple,
-        // RESOLVED NON-TUPLE — a concrete / decided type shape that is not a
-        // tuple. A validated snippet with such a `Params` is a PRESENT,
-        // binding-less slot (`Snippet<[a] | [b]>`, `Snippet<[a] & [b]>`,
-        // `Snippet<Cond>`, an open-generic `Snippet<Params>`, an `Array`, a
-        // scalar / object / function).
+        // RESOLVED NON-TUPLE — a reached type shape that is not a tuple
+        // (including reached-but-OPEN deferred shells: `KeyOf` /
+        // `IndexedAccess` / `Mapped` / `Infer` are reached and bucketed
+        // present-binding-less, not resolved/decided). A validated snippet
+        // with such a `Params` is a PRESENT, binding-less slot
+        // (`Snippet<[a] | [b]>`, `Snippet<[a] & [b]>`, `Snippet<Cond>`, an
+        // open-generic `Snippet<Params>`, an `Array`, a scalar / object /
+        // function).
         SemanticNodeData::Object(_)
         | SemanticNodeData::Union(_)
         | SemanticNodeData::Intersection(_)

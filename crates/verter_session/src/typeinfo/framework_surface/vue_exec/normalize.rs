@@ -802,11 +802,22 @@ fn binding_fields_from_param_node(
 ///   not `__builtin__`, so it fails here and each member mints its own concrete
 ///   (userland-Pick body) value instead of a symbolic access.
 /// - **Nominal source root** — `args[0]` is a NOMINAL named reference (`DeclRef` /
-///   `InstantiationRef`), the node-domain analogue of the legacy
-///   `pick_named_source_root`'s `TypeExpr::Ref` requirement. A STRUCTURAL source
-///   (`Pick<{ foo: string }, "foo">`) is NOT nominal, so publishing a symbolic
-///   `<object>['foo']` access would be bogus — return `None` and let each member
+///   `InstantiationRef` / the unresolved macro-carrier `BareRef`), mirroring the
+///   FULL breadth of the legacy `pick_named_source_root`'s `TypeExpr::Ref`
+///   requirement. An INLINE macro-authored `Pick<Source, K>` (in the
+///   `defineSlots` payload itself) lowers its source root to
+///   `SemanticNodeData::BareRef` — the node-domain mirror of an authored
+///   `TypeExpr::Ref` — and the published binding shape must NOT depend on
+///   inline-vs-named authorship, so `BareRef` is in the nominal set. A
+///   STRUCTURAL source (`Pick<{ foo: string }, "foo">`) lowers `args[0]` to an
+///   object/structural node — NOT nominal — so publishing a symbolic
+///   `<object>['foo']` access would be bogus: return `None` and let each member
 ///   mint its own concrete member value.
+///
+/// NOTE: this predicate does NOT mirror `extract_pick_omit_route`'s arm set. In
+/// that route extractor a non-nominal root returns `None` to PRESERVE the
+/// carrier; here `None` means CONCRETE materialization — the OPPOSITE
+/// consequence — so the arm sets are intentionally different.
 ///
 /// A typed-IR STRUCTURAL match (node-domain `canonical_id` / `decl_name` + the
 /// source-root shape) — NOT a `"Pick<"` text sniff and NOT a
@@ -826,15 +837,21 @@ fn pick_source_root_node(
                 && base.decl_name.as_ref() == "Pick"
                 && args.len() == 2 =>
         {
-            // Nominal-root restriction (mirrors `extract_pick_omit_route` and the
-            // legacy `pick_named_source_root`'s `TypeExpr::Ref` requirement):
-            // publish the symbolic `NamedRoot['member']` access ONLY for a nominal
-            // named-reference source root; a structural source mints each member's
-            // own concrete value at the sink instead.
+            // Nominal-root restriction (the legacy `pick_named_source_root`'s
+            // `TypeExpr::Ref` breadth, node-domain): publish the symbolic
+            // `NamedRoot['member']` access for a nominal named-reference source
+            // root — `DeclRef` / `InstantiationRef` / the unresolved
+            // macro-carrier `BareRef` (an inline macro-authored source); a
+            // structural source mints each member's own concrete value at the
+            // sink instead. NOT `extract_pick_omit_route`'s arm set — there
+            // `None` PRESERVES the carrier, here `None` means CONCRETE
+            // materialization.
             let root = args[0];
             match node_data_for(dispatch.ctx, root).as_deref() {
                 Some(
-                    SemanticNodeData::DeclRef { .. } | SemanticNodeData::InstantiationRef { .. },
+                    SemanticNodeData::DeclRef { .. }
+                    | SemanticNodeData::InstantiationRef { .. }
+                    | SemanticNodeData::BareRef(_),
                 ) => Some(root),
                 _ => None,
             }

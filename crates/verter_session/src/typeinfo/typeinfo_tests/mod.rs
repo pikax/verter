@@ -90,6 +90,7 @@ mod value_inference;
 mod variadic_tuples;
 mod vue_adapter;
 mod vue_adapter_cache;
+mod vue_adapter_slots;
 mod vue_import_recursion;
 mod vue_sfc_absolute_spans;
 mod wide_deep;
