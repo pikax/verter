@@ -9094,7 +9094,7 @@ fn overlay_session_vue_macro_dtos_define_model_reads_overlay_without_leaking_to_
 /// binding MUST NOT leak into the base read.
 ///
 /// Discrimination: the pre-fix slot path built a FRESH base `HostResolverContext`
-/// inside `raise_realized_callable_member_value` / `navigate_param_to_object_surface`,
+/// inside the pre-node-domain slot raise path / `navigate_param_to_object_surface`,
 /// so the overlay session's slot bindings were resolved against the BASE
 /// `/slots.ts` and surfaced `old`, not `fresh`. Routing those reads through
 /// `ctx.dispatch()` fixes the leak. Verified by mutation (reverting the slot

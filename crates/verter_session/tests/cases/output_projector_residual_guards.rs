@@ -4624,15 +4624,11 @@ const SINK_LOCAL_RAW_AUTHORITY_ALLOWLIST: &[(&str, &str)] = &[
         "crate::resolver_core::component_meta_query_engine::surface",
         "project_admitted_route_node_to_expanded_object_shape",
     ),
-    // The framework-surface member raisers — confined to `vue_exec`, reachable
+    // The framework-surface member raiser — confined to `vue_exec`, reachable
     // only through a token-gated normalizer.
     (
         "crate::typeinfo::framework_surface::vue_exec",
         "raise_member_value",
-    ),
-    (
-        "crate::typeinfo::framework_surface::vue_exec",
-        "raise_realized_callable_member_value",
     ),
     // The Svelte-specific callback-events normalizer — a PRIVATE svelte fn fed a
     // resolution-derived `TypeInfoSurface` (from `navigate_param_to_object_surface`),
@@ -12001,7 +11997,6 @@ const HOT_MAT_DIRECT_IDENTS: &[&str] = &[
     "materialize_component_meta_type_expr_until_stable",
     "materialize_component_meta_type_expr_until_stable_full",
     "materialize_admitted_expansion_node",
-    "raise_realized_callable_member_value",
     "raise_member_value",
 ];
 
@@ -12325,7 +12320,6 @@ const HOT_TERMINAL_SINKS: &[(&str, &str)] = &[
     ("macro_output_expansion.rs", "expand_slot_binding_output"),
     ("typeinfo/raise.rs", "project_node_to_type_expr_json_bytes"),
     ("vue_exec/mod.rs", "raise_member_value"),
-    ("vue_exec/mod.rs", "raise_realized_callable_member_value"),
     ("vue_exec/normalize.rs", "index_signatures_from_surface"),
     ("vue_exec/normalize.rs", "model_prop_fields"),
     // The sealed carrier mint accessors — the lowest-level sanctioned mint
@@ -15437,7 +15431,7 @@ fn hot_materialize_fence_self_test_closes_evasions() {
     //     launder to untainted at the gate).
     let extracting_gate = r#"
         fn slots(&mut self, ctx: &C, member: M) -> Option<X> {
-            let value = raise_realized_callable_member_value(ctx, member)?;
+            let value = raise_member_value(ctx, member)?;
             let (first_param, _ret, _span) = slot_callable_param_and_return(&value)?;
             let _hit = matches!(first_param, Some(TypeExpr::Object(_)));
             None

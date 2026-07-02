@@ -224,9 +224,9 @@ struct FrameworkSurfaceSeal;
 /// [`super::resolved_surface_access::ResolvedSurfaceAccess`].
 ///
 /// The leak this closes: the normalizers (`props_from_typeinfo_surface` etc.)
-/// together with the member raisers (`raise_member_value` /
-/// `raise_realized_callable_member_value`) take a `VueMacroSurface` /
-/// `TypeInfoSurfaceMember` and reverse-materialize a `TypeExpr`-bearing DTO.
+/// together with the member raiser (`raise_member_value`) take a
+/// `VueMacroSurface` / `TypeInfoSurfaceMember` and reverse-materialize a
+/// `TypeExpr`-bearing DTO.
 /// `VueMacroSurface` is a `pub` wire-adjacent carrier with public fields, so
 /// outside `framework_surface` ANY code could forge one and drive the
 /// normalizers. Gating the normalizers on the sealed
@@ -761,42 +761,6 @@ pub(in crate::typeinfo::framework_surface::vue_exec) fn raise_member_value(
     let dispatch = ctx.dispatch();
     let cap = TypeinfoVueSurfaceOutputCap::new(&dispatch);
     cap.materialize_output_type_expr(member.value)
-        .map(|raised| raised.into_type_expr(&cap))
-}
-
-/// Realize a slot member's value to its underlying callable through the SHARED
-/// `realize_callable_member` substrate (Alias / Conditional / InstantiationRef /
-/// DeclRef carrier normalization), then raise the realized node to a
-/// [`TypeExpr`]. Falls back to the un-realized value when realization finds no
-/// callable. This keeps the DTO slot surface in agreement with
-/// `slot_binding_graph::compute_bindings_via_graph`, which realizes the same
-/// member value before reading `Function.params`.
-///
-/// The node-domain slot path is the production decider:
-/// [`normalize::slots_from_typeinfo_surface`] decides callable/slot facts through
-/// [`crate::meta_resolve::callable_view::CallableNodeView`] and mints the return
-/// `TypeExpr` at the registered `materialize_slot_return_node` sink, so this
-/// realize-then-raise verb has NO production caller. It STAYS a registered
-/// `HOT_TERMINAL_SINKS` entry (the sink allowlist is additive-only) and is
-/// retained caller-free.
-#[allow(dead_code)]
-pub(in crate::typeinfo::framework_surface::vue_exec) fn raise_realized_callable_member_value(
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    member: &TypeInfoSurfaceMember,
-) -> Option<TypeExpr> {
-    let dispatch = ctx.dispatch();
-    let realized = crate::meta_resolve::dispatch_helpers::realize_callable_member(
-        &dispatch,
-        member.value,
-        crate::semantic_query::ProjectionReductionContext::published(
-            crate::semantic_query::ProjectionMode::Shallow,
-        ),
-    )
-    .unwrap_or(member.value);
-    // Publication sink (DTO slot surface): materialize into a sealed carrier
-    // and unwrap via the typeinfo output capability.
-    let cap = TypeinfoVueSurfaceOutputCap::new(&dispatch);
-    cap.materialize_output_type_expr(realized)
         .map(|raised| raised.into_type_expr(&cap))
 }
 
