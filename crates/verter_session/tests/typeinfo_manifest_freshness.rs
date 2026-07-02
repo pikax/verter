@@ -190,6 +190,10 @@ fn candidate_is_windows_apps_alias(path: &Path) -> bool {
 /// and the generator's named-file diff is echoed in the panic message.
 #[test]
 fn typeinfo_manifest_files_are_byte_equal_to_regenerated_generator_output() {
+    // `locate_python` reads the process-global `PATH`; hold the probe-env
+    // lock so a fixture `PATH` installed by a parallel probe test can never
+    // bleed into the real interpreter lookup.
+    let _env = lock_probe_env();
     let root = workspace_root();
     let script = root.join("scripts").join("gen-typeinfo-ignore-manifest.py");
     assert!(
@@ -405,6 +409,43 @@ fn manifest_block_counts_reflect_lifts() {
 // actually runs when python is installed — the skip cannot become vacuous).
 // ---------------------------------------------------------------------------
 
+/// Serializes every test that READS or WRITES the process-global `PATH`
+/// variable. `std::env::set_var` mutates whole-process state and the test
+/// harness runs tests on parallel threads, so a fixture `PATH` installed by
+/// one test must never be observable from another test's `PATH` lookup
+/// (`which_on_path` / `locate_python`).
+static PROBE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn lock_probe_env() -> std::sync::MutexGuard<'static, ()> {
+    PROBE_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Scope guard that swaps the process `PATH` to a fixture value and restores
+/// the prior value on drop — INCLUDING on panic (drop runs during unwind) —
+/// so a fixture `PATH` can never leak past the owning test.
+struct PathEnvGuard {
+    saved: Option<std::ffi::OsString>,
+}
+
+impl PathEnvGuard {
+    fn swap(fixture_path: &std::ffi::OsStr) -> Self {
+        let saved = std::env::var_os("PATH");
+        std::env::set_var("PATH", fixture_path);
+        Self { saved }
+    }
+}
+
+impl Drop for PathEnvGuard {
+    fn drop(&mut self) {
+        match self.saved.take() {
+            Some(previous) => std::env::set_var("PATH", previous),
+            None => std::env::remove_var("PATH"),
+        }
+    }
+}
+
 /// Temp-dir guard: removes the fixture directory (and the fakes inside)
 /// even when the owning test panics.
 struct TempDirGuard(PathBuf);
@@ -544,6 +585,50 @@ fn locate_probes_past_shadowing_stub_to_functional_candidate() {
         "with only the stub available the locator must reject it AND report \
          it in the rejected trail, so the caller skips loudly instead of \
          accepting a non-functional interpreter",
+    );
+}
+
+/// `which_on_path` `PATH` contract: EVERY `PATH` match is returned, in
+/// `PATH` order — never just the first hit. With a NON-functional stub dir
+/// FIRST on `PATH` and a functional-interpreter dir SECOND (the MS-Store
+/// shadowing layout), the returned candidate vec must contain BOTH shims,
+/// stub first, functional after. A first-match-only regression (an early
+/// `return` / `.first()` at the `PATH` loop) returns only the stub — the
+/// first assertion goes RED — and would re-introduce the vacuous skip:
+/// `locate_first_functional([stub])` is `Err`, so the freshness check would
+/// skip even though a real interpreter sits later on `PATH`. The terminal
+/// assertion pins the end-to-end chain over the vec `which_on_path`
+/// ACTUALLY returned: the locator selects the functional interpreter PAST
+/// the shadowing stub.
+#[test]
+fn which_on_path_returns_all_path_matches_in_path_order() {
+    let _env = lock_probe_env();
+    let (stub_dir, _stub_guard) = unique_probe_fixture_dir("path_order_stub");
+    let (good_dir, _good_guard) = unique_probe_fixture_dir("path_order_good");
+    let stub = write_fake_interpreter(&stub_dir, "python", "Python was not found", 9009);
+    let good = write_fake_interpreter(&good_dir, "python", "Python 3.12.0", 0);
+
+    let fixture_path =
+        std::env::join_paths([stub_dir.clone(), good_dir.clone()]).expect("join fixture PATH dirs");
+    let _path = PathEnvGuard::swap(&fixture_path);
+
+    let candidates = which_on_path(Path::new("python"));
+    assert_eq!(
+        candidates,
+        vec![stub.clone(), good.clone()],
+        "`which_on_path` must return EVERY `PATH` match in `PATH` order — \
+         the shadowing stub first, the functional interpreter after. A \
+         first-match-only regression returns only the front-of-`PATH` stub \
+         and re-introduces the vacuous skip",
+    );
+
+    assert_eq!(
+        locate_first_functional(candidates),
+        Ok(good),
+        "the multi-match candidate vec must let the locator probe PAST the \
+         front-of-`PATH` stub to the functional interpreter shadowed behind \
+         it — first-match-only shadowing turns an installed interpreter \
+         into a vacuous skip",
     );
 }
 
