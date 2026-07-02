@@ -12127,51 +12127,24 @@ const HOT_MAT_BRIDGE_IDENTS: &[&str] = &["lower_and_project_to_expanded_via_host
 const HOT_DECIDE_STANDALONE_IDENTS: &[&str] = &["type_expr_to_object_shape"];
 
 /// TAINTED-OPERAND semantic-gate idents — a node-domain-only classifier that, fed
-/// a MATERIALIZED `TypeExpr`, makes a sentinel / miss / reducibility / callable /
+/// a MATERIALIZED `TypeExpr`, makes a sentinel / miss / reducibility /
 /// registry-shape / route-materializedness decision. These fire ONLY when their
 /// operand is tainted (a materialized value), so a benign classification of an
 /// INPUT parameter is not a decide and the shared classifier DEFINITIONS (which
-/// match on a borrowed `&TypeExpr` parameter) never fire.
+/// match on a borrowed `&TypeExpr` parameter) never fire. Every entry is LIVE in
+/// production source or explicitly synthetic-only — enforced by
+/// `hot_detector_spellings_are_live_or_synthetic`; an inert spelling is swept,
+/// not retained. A structural `TypeExpr` EXTRACTOR needs no name-list of its
+/// own: a re-minting extractor is caught name-independently by the RETURN-taint
+/// rail (characterized by
+/// `hot_renamed_minting_extractor_is_caught_by_return_taint`), and a pure
+/// non-minting extractor's SOURCE mint is flagged at its own mint site.
 const HOT_DECIDE_TAINTED_GATE_IDENTS: &[&str] = &[
     "type_expr_contains_semantic_miss",
     "type_expr_root_is_unmaterialized_sentinel",
-    "materialized_root_is_unmaterialized_sentinel",
     "type_expr_contains_reducible_operator",
-    "slot_callable_param_and_return",
-    "callable_arm_from_raised",
-    "snippet_callable_positional_bindings",
     "component_meta_registry_has_explicit_object_surface",
     "dispatch_route_expr_is_materialized",
-];
-
-/// EXTRACTING gate idents — a node-domain helper that, fed a MATERIALIZED
-/// `TypeExpr`, returns a `TypeExpr`-bearing SUB-value (a param/return type, a
-/// callable arm). An extractor of a materialized value yields a materialized
-/// value, so the gate's RESULT is itself tainted (propagation), in addition to
-/// the call being a decide. This keeps the
-/// `slots_from_typeinfo_surface → slot_callable_param_and_return → …` chain
-/// tainted end-to-end instead of laundering the extracted sub-expr to untainted.
-///
-/// Enumerated inherent limit — a syntactic / name-based heuristic, NOT a
-/// universal-soundness claim. The universal no-hot-materialize-then-decide
-/// guarantee is STRUCTURAL (the `NoTypeExpr` marker trait, the sealed
-/// `OutputProjector`, and the node-domain `RaisedShapeFacts` / `RaisedShapeKey`
-/// conversions); this name-list is a supplementary residual tripwire. It is a
-/// CLOSED set of the known structural `TypeExpr` extractors. A PURE NON-MINTING
-/// rename — a renamed helper that returns a BORROWED sub-expression of an
-/// already-materialized input WITHOUT re-minting (`fn first_param(x: &TypeExpr)
-/// -> Option<TypeExpr>` destructuring `x`) — is not propagated by this name-list.
-/// That is SOUND to leave: the SOURCE mint of that materialized input is itself
-/// flagged at its own mint site (the same rail-anchored-at-the-mint-source
-/// rationale as the location rail), so the value is never laundered into a silent
-/// decide. A renamed extractor that RE-MINTS is caught by the orthogonal
-/// RETURN-taint rail regardless of its name (characterized by
-/// `hot_renamed_minting_extractor_is_caught_by_return_taint`). The list is an
-/// enumerated residual, not an open hole.
-const HOT_EXTRACTING_GATE_IDENTS: &[&str] = &[
-    "slot_callable_param_and_return",
-    "slot_callable_param_and_return_from_arms",
-    "callable_arm_from_raised",
 ];
 
 /// Lowering / pipeline-feed idents — passing a value to one of these LOWERS a
@@ -13893,13 +13866,6 @@ impl<'a> HotMaterializeScanner<'a> {
                 {
                     return Some(HotTaintKind::Output);
                 }
-                // An EXTRACTING gate fed a tainted value yields a materialized
-                // SUB-value (param/return/callable arm) — itself output.
-                if HOT_EXTRACTING_GATE_IDENTS.contains(&m.as_str())
-                    && mc.args.iter().any(|a| self.expr_taint(a))
-                {
-                    return Some(HotTaintKind::Output);
-                }
                 if HOT_TAINT_PROPAGATE_METHODS.contains(&m.as_str()) {
                     return self.expr_taint_kind(&mc.receiver);
                 }
@@ -13912,14 +13878,6 @@ impl<'a> HotMaterializeScanner<'a> {
                         if hot_free_fn_is_direct_verb(&id)
                             || HOT_MAT_BRIDGE_IDENTS.contains(&id.as_str())
                             || self.call_returns_mat_path(&p.path)
-                        {
-                            return Some(HotTaintKind::Output);
-                        }
-                        // An EXTRACTING gate fed a tainted value yields a
-                        // materialized SUB-value (param/return/callable arm), so
-                        // the chain stays tainted through the extractor.
-                        if HOT_EXTRACTING_GATE_IDENTS.contains(&id.as_str())
-                            && c.args.iter().any(|a| self.expr_taint(a))
                         {
                             return Some(HotTaintKind::Output);
                         }
@@ -14546,7 +14504,8 @@ impl<'a, 'ast> syn::visit::Visit<'ast> for HotMaterializeScanner<'a> {
             );
         }
         // A gate passed as a higher-order argument on a tainted receiver
-        // (`.filter(dispatch_route_expr_is_materialized)` / `.any(callable_arm_from_raised)`).
+        // (`.filter(dispatch_route_expr_is_materialized)` /
+        // `.any(type_expr_contains_semantic_miss)`).
         // The DECIDE is over the receiver (the iterated materialized collection).
         if receiver_tainted {
             for a in &mc.args {
@@ -14588,7 +14547,6 @@ impl<'a, 'ast> syn::visit::Visit<'ast> for HotMaterializeScanner<'a> {
             && !HOT_TAINT_CLOSURE_METHODS.contains(&m.as_str())
             && !HOT_CARDINALITY_METHODS.contains(&m.as_str())
             && !HOT_VALUE_FORWARD_METHODS.contains(&m.as_str())
-            && !HOT_EXTRACTING_GATE_IDENTS.contains(&m.as_str())
             && !HOT_TERMINAL_PASSTHROUGH_IDENTS.contains(&m.as_str())
             && !HOT_SERIALIZER_PUBLISH_IDENTS.contains(&m.as_str())
             && !hot_method_is_direct_verb(&m, !mc.args.is_empty())
@@ -14642,7 +14600,6 @@ impl<'a, 'ast> syn::visit::Visit<'ast> for HotMaterializeScanner<'a> {
                     && !hot_free_fn_is_direct_verb(&id)
                     && !HOT_MAT_BRIDGE_IDENTS.contains(&id.as_str())
                     && !HOT_LOWERING_IDENTS.contains(&id.as_str())
-                    && !HOT_EXTRACTING_GATE_IDENTS.contains(&id.as_str())
                     && !self.call_returns_mat_path(&p.path)
                     && !self.returns_typeexpr.contains(&id)
                     && !HOT_TAINT_WRAP_CTORS.contains(&id.as_str())
@@ -15432,10 +15389,9 @@ fn hot_materialize_fence_self_test_discriminates() {
 /// Discrimination self-test for the qualified-resolution + extended-taint
 /// closures: qualified return-taint (no same-name cross-merge, incl. the
 /// same-file non-minting-restitcher-beside-minting-sibling shape), assignment /
-/// field-write / method-arg-reader taint, the aliased `TypeExpr` variant,
-/// taint-through an extracting gate, and the allowlist self-policing rail (a
-/// decide-bearing fn cannot sit on the allowlist; a lowering symbolic-input
-/// terminal can).
+/// field-write / method-arg-reader taint, the aliased `TypeExpr` variant, and
+/// the allowlist self-policing rail (a decide-bearing fn cannot sit on the
+/// allowlist; a lowering symbolic-input terminal can).
 #[test]
 fn hot_materialize_fence_self_test_closes_evasions() {
     let scan = |rel: &str, src: &str| hot_scan_snippet(rel, src);
@@ -15563,27 +15519,6 @@ fn hot_materialize_fence_self_test_closes_evasions() {
             .any(|m| m.contains("::classify ") && m.contains("decide")),
         "self-test (S): an aliased `match raised {{ TE::Object(_) }}` (TE = TypeExpr) decide \
          MUST fire; got: {v:?}"
-    );
-
-    // (T) TAINT-THROUGH-EXTRACTING-GATE: a materialized value fed to the
-    //     extracting gate `slot_callable_param_and_return` yields a TAINTED
-    //     extracted param — a later `matches!` on it fires (the chain does NOT
-    //     launder to untainted at the gate).
-    let extracting_gate = r#"
-        fn slots(&mut self, ctx: &C, member: M) -> Option<X> {
-            let value = raise_member_value(ctx, member)?;
-            let (first_param, _ret, _span) = slot_callable_param_and_return(&value)?;
-            let _hit = matches!(first_param, Some(TypeExpr::Object(_)));
-            None
-        }
-    "#;
-    let v = scan("foo/normalize.rs", extracting_gate);
-    assert!(
-        v.iter()
-            .any(|m| m.contains("::slots ") && m.contains("matches!(materialized")),
-        "self-test (T): a `matches!` on the param EXTRACTED by \
-         `slot_callable_param_and_return` from a materialized value MUST fire (taint \
-         propagates through the extracting gate); got: {v:?}"
     );
 
     // (V) DIFFERENT-IMPL NO CROSS-TAINT (return-taint): a materializing
@@ -16634,26 +16569,25 @@ fn hot_location_rail_anchored_at_mint_source() {
     );
 }
 
-/// Discrimination self-test for the RETURN-taint coverage of a renamed
-/// structural extractor: a helper whose name is NOT a member of the closed
-/// `HOT_EXTRACTING_GATE_IDENTS` set but that RE-MINTS a fresh `TypeExpr` (so its
-/// return is materialization-tainted) and whose result is then DECIDED on is
-/// caught at the decider through the RETURN-taint rail (`call_returns_mat` /
-/// `returns_mat`), INDEPENDENT of the extractor name-list. This pins the SAFE
-/// half of the enumerated `HOT_EXTRACTING_GATE_IDENTS` inherent limit: a
-/// re-minting rename cannot launder its result past the decide rail, because the
-/// catch is anchored at the RETURN-taint of the mint, not at the helper's name.
-/// The core assertion would FAIL if the return-taint rail were removed — the
-/// renamed helper is in no name-list, so its result would then be untainted and
-/// the decide silent (the test isolates the rail, not the name-list).
+/// Discrimination self-test for the RETURN-taint rail (`call_returns_mat` /
+/// `returns_mat`) as the sole, name-independent coverage of structural
+/// `TypeExpr` extractors: a helper of ANY name that RE-MINTS a fresh `TypeExpr`
+/// has a materialization-tainted return, so a caller that decides on its result
+/// is caught at the decider — no extractor name-list exists or is needed. The
+/// core assertion FAILS if the return-taint rail is broken: `weird_extract` is
+/// in no name-list, so the ONLY taint source for its result is the rail itself.
+/// The negative control pins the sound residual: a PURE NON-MINTING extractor
+/// (returning a borrowed sub-expression of its input without re-minting) taints
+/// nothing here — its SOURCE mint is flagged at its own mint site (the same
+/// rail-anchored-at-the-mint-source rationale as the location rail), so the
+/// value is never laundered into a silent decide.
 #[test]
 fn hot_renamed_minting_extractor_is_caught_by_return_taint() {
     let scan = |rel: &str, src: &str| hot_scan_snippet(rel, src);
     let rk = "foo/route_keys.rs";
-    // `weird_extract` is a NATURALLY-renamed structural extractor — NOT a member
-    // of `HOT_EXTRACTING_GATE_IDENTS` — that RE-MINTS a fresh `TypeExpr`. Its
-    // result is fed to a `matches!` decide in a SEPARATE non-terminal caller (so
-    // the caller itself performs no direct mint).
+    // `weird_extract` is an arbitrarily-named structural extractor that RE-MINTS
+    // a fresh `TypeExpr`. Its result is fed to a `matches!` decide in a SEPARATE
+    // non-terminal caller (so the caller itself performs no direct mint).
     let renamed_minting_extractor = r#"
         fn weird_extract(x: &TypeExpr) -> TypeExpr {
             let cap = Cap::new();
@@ -16673,28 +16607,38 @@ fn hot_renamed_minting_extractor_is_caught_by_return_taint() {
     assert!(
         v.iter()
             .any(|m| m.contains("::decide_on_extracted ") && m.contains("decide")),
-        "self-test (renamed-extractor): a re-minting renamed extractor whose result is decided on \
-         MUST fire at the decider via the RETURN-taint rail, independent of \
-         `HOT_EXTRACTING_GATE_IDENTS`; got: {v:?}"
-    );
-    // Premise guard (test isolation): the renamed helper is genuinely OUTSIDE the
-    // closed extractor name-list, so the catch above is rail-anchored, not
-    // name-list-anchored. If `weird_extract` were ever added to the list this
-    // premise breaks and the test no longer isolates the return-taint rail.
-    assert!(
-        !HOT_EXTRACTING_GATE_IDENTS.contains(&"weird_extract"),
-        "self-test (renamed-extractor): the renamed helper must NOT be in the closed extractor \
-         name-list (else the test would not isolate the return-taint rail)"
+        "self-test (renamed-extractor): a re-minting extractor whose result is decided on MUST \
+         fire at the decider via the RETURN-taint rail, independent of the helper's name; \
+         got: {v:?}"
     );
     // The re-minting extractor ALSO fires at its OWN definition — the location
-    // rail anchors at the mint SOURCE, which is why a PURE non-minting rename
-    // (one that returns a borrowed sub-expression of an already-materialized
-    // input without re-minting) is the sound enumerated residual: its source mint
-    // is flagged at its own site.
+    // rail anchors at the mint SOURCE.
     assert!(
         v.iter()
             .any(|m| m.contains("::weird_extract ") && m.contains("materialize")),
         "self-test (renamed-extractor): the re-minting extractor is flagged at its own mint source; \
+         got: {v:?}"
+    );
+    // NEGATIVE control (rail isolation): the SAME extractor shape WITHOUT the
+    // re-mint — it returns a clone of its borrowed input — has an untainted
+    // return, so neither the extractor nor the decider fires. This proves the
+    // positive catch above is anchored at the RETURN-taint of the mint, not at
+    // the call shape, and pins the pure-non-minting-extractor residual as the
+    // sound leave-out (its source mint is flagged at its own site).
+    let non_minting_extractor = r#"
+        fn weird_extract(x: &TypeExpr) -> TypeExpr {
+            x.clone()
+        }
+        fn decide_on_extracted(x: &TypeExpr) {
+            let sub = weird_extract(x);
+            let _hit = matches!(sub, TypeExpr::Object(_));
+        }
+    "#;
+    let v = scan(rk, non_minting_extractor);
+    assert!(
+        v.is_empty(),
+        "self-test (renamed-extractor anti-FP): a NON-minting extractor of an un-minted input \
+         must taint nothing — the return-taint rail keys on the mint, not the extractor shape; \
          got: {v:?}"
     );
 }
@@ -16869,6 +16813,114 @@ fn hot_collection_mutation_receiver_taint_discriminates() {
         v.is_empty(),
         "self-test (CM-d): mutating a collection with an UNTAINTED value then deciding on the \
          collection must NOT fire — receiver taint requires a materialized argument; got: {v:?}"
+    );
+}
+
+/// Detector-spelling LIVENESS guard: every spelling retained across the six
+/// hot-materialize detector name-lists must be LIVE in production source
+/// (`crates/*/src`, test files excluded) — or be an explicitly-declared
+/// SYNTHETIC-ONLY spelling, planted and proven by a named discriminating
+/// self-test in this file. An inert spelling is a false-confidence detector
+/// row: it can never fire in production, so it must either be swept or carry
+/// the self-test that proves the rail it exercises.
+#[test]
+fn hot_detector_spellings_are_live_or_synthetic() {
+    /// Spellings that exist ONLY synthetically, each naming the self-test fn
+    /// (in this file) that plants it and proves its rail fires.
+    const SYNTHETIC_ONLY: &[(&str, &str)] = &[(
+        "lower_and_project_to_expanded_via_host_threaded",
+        "hot_materialize_fence_self_test_discriminates",
+    )];
+
+    // Production `.rs` sources across EVERY workspace crate (`crates/*/src`),
+    // test files excluded. The detector spellings police call sites that can
+    // live in any crate (`type_expr_to_object_shape` is defined in
+    // `verter_semantic`), so liveness is workspace-wide, not session-local.
+    let crates_root = crate_root()
+        .parent()
+        .expect("verter_session crate dir must live under crates/")
+        .to_path_buf();
+    let mut prod_sources: Vec<String> = Vec::new();
+    for entry in WalkDir::new(&crates_root) {
+        let entry = entry.expect("walkdir entry");
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        let rel = path
+            .strip_prefix(&crates_root)
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        // Only `<crate>/src/**` production files; test files excluded.
+        let Some((_, in_crate)) = rel.split_once('/') else {
+            continue;
+        };
+        if !in_crate.starts_with("src/") || is_test_file(&rel) {
+            continue;
+        }
+        prod_sources
+            .push(std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {rel}: {e}")));
+    }
+    assert!(
+        prod_sources.len() > 100,
+        "sanity: the workspace production walk found only {} files — the walk root is wrong",
+        prod_sources.len()
+    );
+
+    let own_src = read_rel("tests/cases/output_projector_residual_guards.rs");
+
+    let lists: &[(&str, &[&str])] = &[
+        ("HOT_MAT_DIRECT_IDENTS", HOT_MAT_DIRECT_IDENTS),
+        ("HOT_MAT_BRIDGE_IDENTS", HOT_MAT_BRIDGE_IDENTS),
+        ("HOT_DECIDE_STANDALONE_IDENTS", HOT_DECIDE_STANDALONE_IDENTS),
+        (
+            "HOT_DECIDE_TAINTED_GATE_IDENTS",
+            HOT_DECIDE_TAINTED_GATE_IDENTS,
+        ),
+        ("HOT_LOWERING_IDENTS", HOT_LOWERING_IDENTS),
+        (
+            "HOT_TERMINAL_PASSTHROUGH_IDENTS",
+            HOT_TERMINAL_PASSTHROUGH_IDENTS,
+        ),
+    ];
+    let mut failures: Vec<String> = Vec::new();
+    for (list_name, idents) in lists {
+        for ident in *idents {
+            let live = prod_sources
+                .iter()
+                .any(|src| whole_ident_occurrences(src, ident) > 0);
+            let synthetic = SYNTHETIC_ONLY.iter().find(|(i, _)| i == ident);
+            match (live, synthetic) {
+                (true, None) => {}
+                (true, Some((_, test_fn))) => failures.push(format!(
+                    "`{ident}` ({list_name}) is declared SYNTHETIC-ONLY (self-test `{test_fn}`) \
+                     but IS live in production source — drop the stale SYNTHETIC_ONLY row"
+                )),
+                (false, Some((_, test_fn))) => {
+                    if !own_src.contains(&format!("fn {test_fn}(")) {
+                        failures.push(format!(
+                            "`{ident}` ({list_name}) is SYNTHETIC-ONLY but its declared planting \
+                             self-test `{test_fn}` does not exist in this guard file"
+                        ));
+                    }
+                }
+                (false, None) => failures.push(format!(
+                    "`{ident}` ({list_name}) is INERT: it appears in no production source under \
+                     crates/*/src and has no SYNTHETIC_ONLY declaration — sweep it or add the \
+                     planting self-test row"
+                )),
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "detector-spelling liveness: {} spelling(s) are unaccounted:\n{}",
+        failures.len(),
+        failures.join("\n")
     );
 }
 
