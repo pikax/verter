@@ -4674,10 +4674,6 @@ const SINK_LOCAL_RAW_AUTHORITY_ALLOWLIST: &[(&str, &str)] = &[
         "crate::meta_resolve::projectors::output_sink",
         "shell_raise_to_type_expr",
     ),
-    (
-        "crate::project_semantic_dispatch::raise",
-        "index_key_to_type_expr",
-    ),
 ];
 
 /// All idents referenced in a `syn::Type`'s token stream (the type names a
@@ -6709,6 +6705,92 @@ fn cross_sink_raw_authority_violations(
     violations
 }
 
+/// Per-entry stale-entry accounting for [`SINK_LOCAL_RAW_AUTHORITY_ALLOWLIST`] —
+/// the SAME strengthening [`hot_terminal_allowlist_accounting_failures`] applies
+/// to `HOT_TERMINAL_SINKS`, so a deleted / renamed / moved sink-local raiser
+/// cannot linger silently allowlisted. Every `(module_path, fn_name)` entry must
+/// be listed exactly once AND be located in at least one collected production
+/// sink fn definition (`located[i] >= 1`). A DUPLICATE tuple and a MISSING /
+/// stale entry (located in zero collected fns) each report independently. Empty
+/// result == accounted. `located` is `>= 1` (NOT `== 1`): one fn name may have
+/// several production definitions (an overloaded sink-internal projector), so
+/// "located" means present, while "exactly once" governs the allowlist tuple.
+fn sink_local_raw_authority_accounting_failures(
+    entries: &[(&str, &str)],
+    located: &[usize],
+) -> Vec<String> {
+    let mut failures = Vec::new();
+    for (i, (module, name)) in entries.iter().enumerate() {
+        if entries[..i].contains(&(*module, *name)) {
+            failures.push(format!(
+                "DUPLICATE allowlist entry `{module}::{name}` (listed more than once in \
+                 SINK_LOCAL_RAW_AUTHORITY_ALLOWLIST — each sink-local raiser tuple must appear \
+                 exactly once)"
+            ));
+        }
+    }
+    for (i, (module, name)) in entries.iter().enumerate() {
+        if located.get(i).copied().unwrap_or(0) == 0 {
+            failures.push(format!(
+                "MISSING sink-local raiser `{module}::{name}` — located in ZERO collected \
+                 production sink fns (a stale allowlist entry whose fn was renamed/removed/moved, \
+                 or a wrong module path)"
+            ));
+        }
+    }
+    failures
+}
+
+/// Discrimination self-test for the sink-local raw-authority allowlist
+/// per-entry accounting (mirrors `hot_terminal_allowlist_accounting_is_per_entry_not_aggregate`):
+/// a MISSING entry (located in zero fns) fails EVEN WHEN a sibling over-locates so
+/// the aggregate total still clears `>= len`; a DUPLICATE tuple fails; a clean
+/// list (each tuple once, each located `>= 1`, a legitimate multi-definition
+/// sibling located twice) is accounted.
+#[test]
+fn sink_local_raw_authority_accounting_is_per_entry_not_aggregate() {
+    // One entry located ZERO, a sibling located TWO: the aggregate (0 + 2) >= 2
+    // would PASS an aggregate check; per-entry accounting FAILS the zero-located
+    // entry by module::name.
+    let missing = sink_local_raw_authority_accounting_failures(
+        &[("crate::a", "foo"), ("crate::b", "bar")],
+        &[0, 2],
+    );
+    assert!(
+        missing
+            .iter()
+            .any(|m| m.contains("MISSING") && m.contains("crate::a::foo")),
+        "self-test: a zero-located entry MUST fail per-entry accounting even when an over-locating \
+         sibling clears the aggregate; got: {missing:?}"
+    );
+    assert!(
+        !missing.iter().any(|m| m.contains("crate::b::bar")),
+        "self-test: a sibling located TWICE (a legitimate multi-definition fn) must NOT be \
+         reported — located means `>= 1`; got: {missing:?}"
+    );
+
+    // A DUPLICATE tuple fails by module::name.
+    let dup = sink_local_raw_authority_accounting_failures(
+        &[("crate::a", "foo"), ("crate::a", "foo")],
+        &[1, 1],
+    );
+    assert!(
+        dup.iter()
+            .any(|m| m.contains("DUPLICATE") && m.contains("crate::a::foo")),
+        "self-test: a duplicate allowlist tuple MUST fail by name; got: {dup:?}"
+    );
+
+    // A clean list (each tuple once, each located `>= 1`) is accounted (empty).
+    let clean = sink_local_raw_authority_accounting_failures(
+        &[("crate::a", "foo"), ("crate::b", "bar")],
+        &[1, 2],
+    );
+    assert!(
+        clean.is_empty(),
+        "self-test: a list with every tuple once and located `>= 1` must be accounted; got: {clean:?}"
+    );
+}
+
 /// The SEALED CONSTRUCTION-CHAIN structs (qualified by owning module): the
 /// PRE-admission stages of the publication-authority chain
 /// (`ResolvedMacroPayload` → `ResolvedPayloadSurface` → `SurfaceMemberCandidate`,
@@ -8124,6 +8206,33 @@ fn cross_sink_raw_authority_to_type_expr_boundary() {
         !sigs.is_empty(),
         "expected to collect production fns from the registered sink scopes; found none — the \
          scanner or scope prefixes regressed"
+    );
+    // Per-entry stale-entry accounting for
+    // `SINK_LOCAL_RAW_AUTHORITY_ALLOWLIST` (the same pattern `HOT_TERMINAL_SINKS`
+    // has via `hot_terminal_allowlist_accounting_failures`). Every allowlisted
+    // `(module_path, fn_name)` sink-local raiser must resolve to at least one
+    // collected production sink fn — a deleted / renamed / moved raiser cannot
+    // linger silently allowlisted, and a duplicate tuple fails. `located[i]`
+    // counts collected sink fn defs (test-gated + module-private INCLUDED, since
+    // the collector records them) matching the entry's exact module + name.
+    let raw_authority_located: Vec<usize> = SINK_LOCAL_RAW_AUTHORITY_ALLOWLIST
+        .iter()
+        .map(|(module, name)| {
+            sigs.iter()
+                .filter(|s| s.module_path == *module && s.name == *name)
+                .count()
+        })
+        .collect();
+    let raw_authority_accounting = sink_local_raw_authority_accounting_failures(
+        SINK_LOCAL_RAW_AUTHORITY_ALLOWLIST,
+        &raw_authority_located,
+    );
+    assert!(
+        raw_authority_accounting.is_empty(),
+        "SINK-LOCAL RAW-AUTHORITY ALLOWLIST ACCOUNTING: {} entry(ies) are unaccounted (duplicate \
+         listing or located in zero collected production sink fns):\n{}",
+        raw_authority_accounting.len(),
+        raw_authority_accounting.join("\n")
     );
     // FAIL-CLOSED completeness: every OUTPUT ident a sink fn returns must be
     // CLASSIFIABLE — RESOLVED to a `TypeDefId` (so the field-closure could decide
@@ -14724,11 +14833,11 @@ fn hot_self_policing_summaries(
 /// a host-threaded surface bridge, or via a return-tainted helper) into a
 /// semantic decision.
 ///
-/// The fence is currently RED on this tree by design: it reports the complete
-/// materialize-then-decide inventory the node-domain conversion must move onto
-/// interned `RaisedShapeKey` / `RaisedShapeFacts` facts, materializing ONCE at a
-/// registered terminal sink. It turns GREEN only when every flagged site is
-/// converted; it must not be weakened to pass early.
+/// The fence holds at ZERO offenders: every semantic decision runs on the
+/// interned `RaisedShapeKey` / `RaisedShapeFacts` node-domain facts, with
+/// materialization happening ONCE at a registered terminal sink. Any
+/// materialize-then-decide site that appears is a regression; the fence reports
+/// the complete offender inventory and must not be weakened to admit one.
 #[test]
 fn hot_path_never_calls_materialize_type_expr() {
     // Pass 1: build the global QUALIFIED fn index + the return-taint set
