@@ -18862,6 +18862,258 @@ async fn definition_drops_foreign_carrier_location_when_foreign_surface_advances
     );
 }
 
+/// The tsserver PUBLISH path (the store-membership route, distinct from the
+/// tsgo direct-open the sibling tests model): the carrier-sync gateway records
+/// both companion surfaces at publish time (`record_and_version_carrier_
+/// companions` in `external_ts/carrier_sync.rs`) and commits a `Published`
+/// store-resident provider state. The interactive request-surface capture must
+/// resolve THAT surface — a key mismatch between the recorded companion path
+/// and `active_ide_path_for_uri`, a missing `ide_background_loaded` flag, or a
+/// carrier-source byte-gate miss here would silently drop EVERY provider
+/// result on the live tsserver engine. A genuinely torn surface (an edit after
+/// the publish) must still fail closed.
+#[tokio::test(flavor = "multi_thread")]
+async fn tsserver_published_carrier_surface_is_captured_and_serves_hover() {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let root = format!("/verter_reqsurf_pub_{nanos}/ws");
+    let tsconfig = format!("{root}/tsconfig.json");
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    // Tsserver-kind service: the server constructs the carrier-publish
+    // coordinator, so the gateway takes the PUBLISH (membership) route.
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    install_test_resolver_for_root(server, &root, Some(&tsconfig));
+
+    let uri = open_test_vue(server, &format!("{root}/src/App.vue"), REQUEST_SURFACE_APP);
+    server.sync_ide_to_provider(&uri).await;
+
+    // The PUBLISH route ran (membership advertised) — not a direct buffer open.
+    let canonical = format!("{root}/src/App.vue");
+    let advertised = server
+        .membership_ledger()
+        .expect("tsserver kind constructs the coordinator")
+        .is_advertised(&crate::external_ts::CanonicalSource::from(
+            canonical.as_str(),
+        ));
+    assert!(
+        advertised,
+        "the tsserver publish must advertise the carrier's store membership"
+    );
+
+    // CAPTURE the published surface (no over-drop): the companion recorded at
+    // publish time is keyed exactly at the committed live IDE path.
+    let ide_path = server
+        .active_ide_path_for_uri(&uri)
+        .expect("the Published commit must mark the IDE path store-resident");
+    let snapshot = server.capture_provider_request_surface(&uri).expect(
+        "a published-and-current tsserver carrier surface must be CAPTURED — \
+         dropping it silently drops every provider result on the live engine",
+    );
+    assert_eq!(
+        snapshot.kind,
+        crate::provider_surface_store::ProviderSurfaceKind::CarrierIde,
+        "the captured surface must be the publish-recorded CarrierIde companion"
+    );
+    assert_eq!(
+        snapshot.stamp.provider_path.as_ref(),
+        ide_path.as_str(),
+        "the recorded companion key must equal the committed live IDE path"
+    );
+
+    // And it SERVES end-to-end (hover through the captured surface).
+    let position = find_document_position(server, &uri, "{{ msg", 3);
+    set_type_hover_at_vue_position(
+        server,
+        &provider,
+        &uri,
+        position,
+        "```typescript\nconst msg: string\n```",
+    );
+    let text = hover_text(
+        server
+            .hover(hover_params(&uri, position))
+            .await
+            .expect("hover request should succeed"),
+    );
+    assert!(
+        text.contains("const msg: string"),
+        "a published tsserver carrier must serve the provider hover, got: {text}"
+    );
+
+    // A genuinely TORN surface still drops: an edit lands AFTER the publish
+    // (the store still serves the old surface) — capture must fail closed.
+    let _ = server.documents.did_change(
+        &uri,
+        2,
+        "<script setup lang=\"ts\">\nconst msg = 'edited'\n</script>\n\
+         <template><div>{{ msg }}</div></template>\n",
+    );
+    assert!(
+        server.capture_provider_request_surface(&uri).is_none(),
+        "an edit after the publish must fail the capture closed — the provider \
+         still holds the pre-edit surface"
+    );
+}
+
+/// REFERENCES runtime drop coverage (representative of the navigation class):
+/// a re-sync landing a fresh surface generation while the references request
+/// awaits the provider must drop the provider locations (fail closed).
+#[tokio::test(flavor = "multi_thread")]
+async fn references_drop_provider_locations_when_surface_regenerates_mid_request() {
+    let (service, provider, uri) = make_request_surface_carrier().await;
+    let server = service.inner();
+
+    // A provider references response at the mapped `msg` position, pointing at
+    // the carrier's own IDE surface (would map back into the source).
+    let position = find_document_position(server, &uri, "{{ msg", 3);
+    let ctx = synced_type_provider_context(server, &uri);
+    let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
+        &position,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    )
+    .expect("position maps to tsx");
+    // The provider's reference points at the STRING LITERAL — a location
+    // Verter's own reference analysis never emits, so its presence/absence in
+    // the response discriminates the PROVIDER contribution specifically.
+    let target = ctx.tsx_content.find("'hello'").expect("token in tsx") as u32;
+    provider.set_references(
+        &ctx.tsx_path,
+        tsx_offset,
+        vec![crate::type_provider::protocol::TypeLocation {
+            path: ctx.tsx_path.clone(),
+            start: target,
+            end: target + 7,
+        }],
+    );
+
+    let ide_path = server.active_ide_path_for_uri(&uri).expect("live IDE path");
+    let store = server.documents.provider_surfaces().clone();
+    let raced_path = ide_path.clone();
+    provider.set_on_query(
+        &ide_path,
+        Box::new(move || {
+            store.record(
+                crate::provider_surface_store::RecordSurface::carrier_legacy(
+                    crate::provider_surface_store::ProviderSurfaceKind::CarrierIde,
+                    raced_path,
+                    "/workspace/src/App.vue".to_string(),
+                    Arc::from("// drifted ide content"),
+                    None,
+                    Arc::from("// drifted carrier source"),
+                ),
+            );
+        }),
+    );
+
+    let response = server
+        .references(ReferenceParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position,
+            },
+            context: ReferenceContext {
+                include_declaration: true,
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        })
+        .await
+        .expect("references request should succeed");
+    // The provider's literal-position location must not survive; Verter-native
+    // `msg` references (from its own analysis) may still be present — the
+    // invariant is the PROVIDER contribution dropped.
+    let literal_pos = find_document_position(server, &uri, "'hello'", 0);
+    let has_provider_ref = response.iter().flatten().any(|l| {
+        l.uri == uri
+            && l.range.start.line == literal_pos.line
+            && l.range.start.character == literal_pos.character
+    });
+    assert!(
+        !has_provider_ref,
+        "provider references produced against a superseded surface must be DROPPED, \
+         got {response:?}"
+    );
+}
+
+/// SIGNATURE-HELP runtime drop coverage (representative of the aux class): a
+/// re-sync landing a fresh surface generation while the request awaits the
+/// provider must drop the provider signature (fail closed).
+#[tokio::test(flavor = "multi_thread")]
+async fn signature_help_drops_provider_result_when_surface_regenerates_mid_request() {
+    let (service, provider, uri) = make_request_surface_carrier().await;
+    let server = service.inner();
+
+    let position = find_document_position(server, &uri, "{{ msg", 3);
+    let ctx = synced_type_provider_context(server, &uri);
+    let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
+        &position,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    )
+    .expect("position maps to tsx");
+    provider.set_signature_help(
+        &ctx.tsx_path,
+        tsx_offset,
+        Some(crate::type_provider::protocol::SignatureHelp {
+            signatures: vec![crate::type_provider::protocol::SignatureInfo {
+                label: "SIGNATURE_SENTINEL(msg: string): void".to_string(),
+                documentation: None,
+                parameters: Vec::new(),
+                active_parameter: None,
+            }],
+            active_signature: Some(0),
+            active_parameter: None,
+        }),
+    );
+
+    let ide_path = server.active_ide_path_for_uri(&uri).expect("live IDE path");
+    let store = server.documents.provider_surfaces().clone();
+    let raced_path = ide_path.clone();
+    provider.set_on_query(
+        &ide_path,
+        Box::new(move || {
+            store.record(
+                crate::provider_surface_store::RecordSurface::carrier_legacy(
+                    crate::provider_surface_store::ProviderSurfaceKind::CarrierIde,
+                    raced_path,
+                    "/workspace/src/App.vue".to_string(),
+                    Arc::from("// drifted ide content"),
+                    None,
+                    Arc::from("// drifted carrier source"),
+                ),
+            );
+        }),
+    );
+
+    let response = server
+        .signature_help(SignatureHelpParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position,
+            },
+            work_done_progress_params: Default::default(),
+            context: None,
+        })
+        .await
+        .expect("signature help request should succeed");
+    assert!(
+        !response
+            .iter()
+            .flat_map(|s| s.signatures.iter())
+            .any(|sig| sig.label.contains("SIGNATURE_SENTINEL")),
+        "a provider signature produced against a superseded surface must be DROPPED, \
+         got {response:?}"
+    );
+}
+
 /// With a STABLE captured surface (no concurrent mutation) the provider
 /// contribution IS served and mapped — guards against an over-eager
 /// fail-closed gate dropping healthy results.
