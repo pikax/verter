@@ -628,7 +628,17 @@ pub(crate) async fn sync_self_file_shadow_state(
             // bytes just synced, paired with the rewrite-aware mapper refreshed
             // from the SAME replacements above — the surface interactive queries
             // capture. Recorded ONLY on a successful provider sync (fail-closed:
-            // a failed sync records nothing).
+            // a failed sync records nothing). The stamped `map_hash` is the
+            // mapper's structural identity (the self-file analogue of the
+            // carrier map-JSON hash) so a mapper-only re-sync is a DISTINCT
+            // capture the byte-match honored gate rejects.
+            let source_map = documents.get_position_mapper(uri);
+            let map_hash = match &source_map {
+                Some(crate::documents::provider_projection::ProviderPositionMapper::SelfFile(
+                    mapper,
+                )) => mapper.identity_hash16(),
+                _ => [0u8; 16],
+            };
             documents
                 .provider_surfaces()
                 .record(crate::provider_surface_store::RecordSurface {
@@ -636,9 +646,9 @@ pub(crate) async fn sync_self_file_shadow_state(
                     kind: crate::provider_surface_store::ProviderSurfaceKind::Shadow,
                     source_canonical: canonical_id.to_string(),
                     provider_content: std::sync::Arc::from(built.content.as_str()),
-                    source_map: documents.get_position_mapper(uri),
+                    source_map,
                     carrier_source: source,
-                    map_hash: [0u8; 16],
+                    map_hash,
                     project_owner: None,
                     regen_key: None,
                     engine_recheck: None,

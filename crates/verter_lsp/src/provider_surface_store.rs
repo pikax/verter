@@ -600,22 +600,28 @@ impl ProviderSurfaceStore {
     /// generation / content-hash agreement rules below).
     ///
     /// Agrees when the captured path still has a current generation AND either
-    /// (a) that current generation EQUALS the captured one, OR (b) BOTH content
-    /// identities match — the current provider `{carrier}.ts` `content_hash` EQUALS
-    /// the captured one AND the current carrier `.vue` `source_hash` EQUALS the
-    /// captured one. Branch (b) captures the byte-IDENTICAL background re-sync case —
-    /// a fresh generation for the same bytes — where identical provider content over
-    /// an identical carrier source means an identical source map AND an identical map
-    /// target, so the captured offsets would still map correctly.
+    /// (a) that current generation EQUALS the captured one, OR (b) ALL THREE
+    /// identities match — the current provider `{carrier}.ts` `content_hash`
+    /// EQUALS the captured one, the current carrier `.vue` `source_hash` EQUALS
+    /// the captured one, AND the current `map_hash` EQUALS the captured one.
+    /// Branch (b) captures the byte-IDENTICAL background re-sync case — a fresh
+    /// generation for the same bytes and the same mapping — where the captured
+    /// offsets would still map correctly. The generation-match arm (a) is
+    /// inherently exact (same recorded surface) and needs no per-field compare.
     ///
     /// The carrier `source_hash` is load-bearing, not redundant: the provider
     /// `{carrier}.ts` text can be byte-identical across two generations while the
     /// carrier `.vue` source CHANGED (a comment inserted before `<script setup>`, or
     /// template text edited — shifts `.vue` byte offsets while leaving the lifted
     /// `$props` public-API text identical). Comparing on `content_hash` alone would
-    /// then equate the OLD carrier source map with the NEW live `.vue`. A path with no
-    /// current snapshot (closed/forgotten), a differing provider content, OR a
-    /// differing carrier source does NOT agree.
+    /// then equate the OLD carrier source map with the NEW live `.vue`.
+    ///
+    /// The `map_hash` is equally load-bearing on arm (b): a map-only re-sync
+    /// (same provider bytes, same carrier source, CHANGED mapping) must NOT keep
+    /// honoring the captured snapshot — a result mapped through the superseded
+    /// mapper would be WRONG, not stale. A path with no current snapshot
+    /// (closed/forgotten), a differing provider content, a differing carrier
+    /// source, OR a differing map identity does NOT agree.
     #[must_use]
     pub fn captured_snapshot_still_honored(&self, captured: &ProviderSurfaceSnapshot) -> bool {
         let Some(current) = self.current_snapshot(&captured.stamp.provider_path) else {
@@ -623,7 +629,8 @@ impl ProviderSurfaceStore {
         };
         current.stamp.generation == captured.stamp.generation
             || (current.stamp.content_hash == captured.stamp.content_hash
-                && current.stamp.source_hash == captured.stamp.source_hash)
+                && current.stamp.source_hash == captured.stamp.source_hash
+                && current.stamp.map_hash == captured.stamp.map_hash)
     }
 
     /// The owning configured project (tsconfig URI) of `provider_path`'s CURRENT

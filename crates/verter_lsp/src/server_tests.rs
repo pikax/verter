@@ -17984,6 +17984,32 @@ async fn self_file_shadow_sync_records_shadow_surface_on_success_only() {
         snapshot.source_map.is_some(),
         "the recorded Shadow surface must carry the rewrite-aware mapper"
     );
+    // The Shadow surface must stamp a REAL map identity derived from its
+    // rewrite-aware mapper — a zeroed identity would let a mapper-changing
+    // re-sync pass the byte-match honored gate and map through a stale mapper.
+    assert_ne!(
+        snapshot.stamp.map_hash, [0u8; 16],
+        "the recorded Shadow surface must stamp a real (mapper-derived) map identity"
+    );
+    // Identity is deterministic: an identical re-sync stamps the SAME identity
+    // (so a byte-identical re-record stays honored, no over-drop).
+    assert!(
+        server.sync_self_file_shadow_unresolved(&rune_uri).await,
+        "the identical shadow re-sync should succeed"
+    );
+    let resynced = server
+        .documents
+        .provider_surfaces()
+        .current_snapshot("/workspace/store.svelte.ts")
+        .expect("the re-sync must record a fresh Shadow generation");
+    assert_ne!(
+        resynced.stamp.generation, snapshot.stamp.generation,
+        "the re-sync must mint a fresh generation"
+    );
+    assert_eq!(
+        resynced.stamp.map_hash, snapshot.stamp.map_hash,
+        "an identical shadow re-sync must stamp the SAME map identity"
+    );
 
     // A FAILED shadow sync records nothing.
     let other_uri: Uri = "file:///workspace/other.svelte.ts".parse().unwrap();

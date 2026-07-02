@@ -164,6 +164,61 @@ fn content_changing_resync_is_not_honored_fail_closed() {
     );
 }
 
+/// Map-identity gate on the byte-match honored arm: a re-sync recording
+/// byte-IDENTICAL provider content over a byte-IDENTICAL carrier source but a
+/// DIFFERENT source map (map-only regeneration) must NOT honor the captured
+/// snapshot. The captured offsets would map through the OLD mapper while the
+/// provider answered against the NEW mapping — same bytes, different
+/// correlation — so the mapped result would be wrong, not stale. The
+/// generation-match arm is inherently exact and needs no map compare.
+#[test]
+fn byte_identical_resync_with_changed_map_identity_is_not_honored() {
+    let store = ProviderSurfaceStore::new();
+
+    let provider = "API IDENTICAL\n";
+    let carrier = "carrier identical\n";
+    let mut surface_a = record_surface(provider, carrier);
+    surface_a.map_hash = [1u8; 16];
+    let a = store.record(surface_a);
+    let captured_a = store.current_snapshot(VPATH).expect("A is current");
+    assert_eq!(captured_a.stamp.generation, a.stamp.generation);
+
+    // A map-only re-sync: same provider bytes, same carrier source, CHANGED map.
+    let mut surface_b = record_surface(provider, carrier);
+    surface_b.map_hash = [2u8; 16];
+    let b = store.record(surface_b);
+    assert_eq!(
+        b.stamp.content_hash, a.stamp.content_hash,
+        "byte-identical content must hash identically"
+    );
+    assert_eq!(
+        b.stamp.source_hash, a.stamp.source_hash,
+        "byte-identical carrier source must hash identically"
+    );
+    assert_ne!(
+        b.stamp.map_hash, a.stamp.map_hash,
+        "the changed source map must stamp a different map identity"
+    );
+
+    assert!(
+        !store.captured_snapshot_still_honored(&captured_a),
+        "a map-only re-sync must NOT honor the captured snapshot — mapping the \
+         provider's response through the superseded mapper would be WRONG"
+    );
+
+    // Positive control: an identical-map byte-identical re-sync IS still honored.
+    let mut surface_c = record_surface(provider, carrier);
+    surface_c.map_hash = [2u8; 16];
+    let _c = store.record(surface_c);
+    let captured_b = store
+        .snapshot_at(VPATH, b.stamp.generation)
+        .expect("B retrievable");
+    assert!(
+        store.captured_snapshot_still_honored(&captured_b),
+        "an identical-map byte-identical re-sync must stay honored (no over-drop)"
+    );
+}
+
 /// DESIGN TEST (b): a generation-A result with only B available → DROP. If the
 /// pinned request held a stamp whose generation the store does not have, the
 /// lookup returns None. (Here A was never recorded; only B is.)
