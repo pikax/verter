@@ -17,7 +17,6 @@ use tower_lsp_server::ls_types::*;
 use verter_workspace::WorkspaceRead;
 
 use crate::documents::line_index::LineIndex;
-use crate::documents::provider_projection::ProviderPositionMapper;
 use crate::external_ts::AbsentReason;
 use crate::provider_sync::ProviderPathKind;
 use crate::type_provider::auto_import::{
@@ -50,6 +49,10 @@ impl VerterLanguageServer {
         if let Some(tp) = &self.type_provider {
             match self.provider_projection_context(uri) {
                 Some(ctx) => {
+                    // Pin the FOREIGN carrier IDE surfaces BEFORE the query, so
+                    // a foreign `.tsx` related span maps through the generation
+                    // this request began against.
+                    let foreign_ide_set = self.capture_foreign_carrier_ide_set();
                     match tp.get_diagnostics(&ctx.provider_path).await {
                         Ok(type_diags) => {
                             // Post-await validation: diagnostics produced against a
@@ -82,7 +85,9 @@ impl VerterLanguageServer {
                                 &ctx.provider_line_index,
                                 &ctx.mapper,
                                 &ctx.source_line_index,
-                                Some(&|ide_path: &str| self.external_ide_context(ide_path)),
+                                Some(&|ide_path: &str| {
+                                    self.foreign_ide_context(&foreign_ide_set, ide_path)
+                                }),
                                 &carrier_source_exists,
                                 negotiated_encoding,
                                 &|p: &str| {
@@ -1466,21 +1471,6 @@ impl VerterLanguageServer {
         now.saturating_sub(last) < 300
     }
 
-    /// Get the carrier IDE context for TypeProvider queries: `(ide_path,
-    /// ide_code, mapper)`. Thin carrier-compat wrapper over
-    /// [`Self::provider_projection_context`] for the two cross-file carrier
-    /// callers (`ide_context_by_path` / `external_ide_context`) that need the
-    /// narrow `(provider_path, provider_content, mapper)` shape; every feature
-    /// handler routes through `provider_projection_context` /
-    /// `type_provider_context`.
-    pub(super) fn ide_context(
-        &self,
-        uri: &Uri,
-    ) -> Option<(String, Arc<str>, ProviderPositionMapper)> {
-        let ctx = self.provider_projection_context(uri)?;
-        Some((ctx.provider_path, ctx.provider_content, ctx.mapper))
-    }
-
     /// Capture the immutable provider-surface snapshot an interactive
     /// provider-backed query for `uri` must be built from — the request-scoped
     /// capture half of the fail-closed request-snapshot discipline.
@@ -1921,20 +1911,6 @@ impl VerterLanguageServer {
         (state.ide_path.as_deref() == Some(desired_path.as_str())).then_some(desired_path)
     }
 
-    /// Get IDE content and mapper by IDE path (reverse lookup).
-    pub(super) fn ide_context_by_path(
-        &self,
-        ide_path: &str,
-    ) -> Option<(String, Arc<str>, ProviderPositionMapper)> {
-        let snapshot = self.published_resolver()?;
-        let canonical_id = source_id_from_provider_carrier_path(
-            &snapshot.resolver,
-            self.documents.host(),
-            ide_path,
-        )?;
-        let uri = self.documents.canonical_id_to_uri(&canonical_id)?;
-        self.ide_context(&uri)
-    }
     pub(super) async fn spawn_background_init(
         &self,
         init_lint_opts: Option<serde_json::Value>,

@@ -853,17 +853,31 @@ mod inner {
         }
 
         fn get_definition(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
-            let mut state = self.state.lock().unwrap();
-            state.calls.push(MockCall::GetDefinition {
-                path: path.to_string(),
-                offset,
-            });
-            let result = state
-                .definition_responses
-                .iter()
-                .find(|(p, o, _)| p == path && *o == offset)
-                .map(|(_, _, locs)| locs.clone())
-                .unwrap_or_default();
+            let (result, on_query) = {
+                let mut state = self.state.lock().unwrap();
+                state.calls.push(MockCall::GetDefinition {
+                    path: path.to_string(),
+                    offset,
+                });
+                let result = state
+                    .definition_responses
+                    .iter()
+                    .find(|(p, o, _)| p == path && *o == offset)
+                    .map(|(_, _, locs)| locs.clone())
+                    .unwrap_or_default();
+                let on_query = match &state.on_query {
+                    Some((armed_path, _)) if armed_path == path => {
+                        state.on_query.take().map(|(_, cb)| cb)
+                    }
+                    _ => None,
+                };
+                (result, on_query)
+            };
+            // Run the one-shot mid-request seam AFTER releasing the state lock
+            // (a callback that re-enters the mock must not deadlock).
+            if let Some(callback) = on_query {
+                callback();
+            }
             Box::pin(async move { Ok(result) })
         }
 

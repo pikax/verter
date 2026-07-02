@@ -221,6 +221,10 @@ pub(super) async fn handle_goto_definition(
                     "definition: querying type provider at tsx offset {}",
                     tsx_offset
                 );
+                // Pin the FOREIGN carrier IDE surfaces BEFORE the query, so a
+                // returned foreign location maps through the generation the
+                // request began against (never the merge-time current one).
+                let foreign_ide_set = server.capture_foreign_carrier_ide_set();
                 match tp.get_definition(&ctx.tsx_path, tsx_offset).await {
                     Ok(type_defs) => {
                         // Post-await validation: a response produced against a
@@ -251,7 +255,9 @@ pub(super) async fn handle_goto_definition(
                             &ctx.tsx_line_index,
                             &ctx.mapper,
                             &ctx.carrier_line_index,
-                            Some(&|ide_path: &str| server.external_ide_context(ide_path)),
+                            Some(&|ide_path: &str| {
+                                server.foreign_ide_context(&foreign_ide_set, ide_path)
+                            }),
                             uri,
                             &carrier_source_exists,
                             Some(&barrel_resolver),
@@ -383,6 +389,9 @@ pub(super) async fn handle_goto_type_definition(
                     "type_definition: querying type provider at tsx offset {}",
                     tsx_offset
                 );
+                // Pin the FOREIGN carrier IDE surfaces BEFORE the query (see
+                // handle_goto_definition).
+                let foreign_ide_set = server.capture_foreign_carrier_ide_set();
                 match tp.get_type_definition(&ctx.tsx_path, tsx_offset).await {
                     Ok(type_defs) => {
                         // Post-await validation: a response produced against a
@@ -413,7 +422,9 @@ pub(super) async fn handle_goto_type_definition(
                             &ctx.tsx_line_index,
                             &ctx.mapper,
                             &ctx.carrier_line_index,
-                            Some(&|ide_path: &str| server.external_ide_context(ide_path)),
+                            Some(&|ide_path: &str| {
+                                server.foreign_ide_context(&foreign_ide_set, ide_path)
+                            }),
                             uri,
                             &carrier_source_exists,
                             Some(&barrel_resolver),
@@ -568,6 +579,9 @@ pub(super) async fn handle_references(
                     "references: querying type provider at tsx offset {}",
                     tsx_offset
                 );
+                // Pin the FOREIGN carrier IDE surfaces BEFORE the query (see
+                // handle_goto_definition).
+                let foreign_ide_set = server.capture_foreign_carrier_ide_set();
                 match tp.get_references(&ctx.tsx_path, tsx_offset).await {
                     Ok(type_refs) => {
                         // Post-await validation: a response produced against a
@@ -594,7 +608,9 @@ pub(super) async fn handle_references(
                             &ctx.tsx_line_index,
                             &ctx.mapper,
                             &ctx.carrier_line_index,
-                            Some(&|ide_path: &str| server.external_ide_context(ide_path)),
+                            Some(&|ide_path: &str| {
+                                server.foreign_ide_context(&foreign_ide_set, ide_path)
+                            }),
                             &carrier_source_exists,
                             negotiated_encoding,
                             &|p: &str| {
@@ -755,6 +771,10 @@ pub(super) async fn handle_rename(
                         .documents
                         .provider_surfaces()
                         .capture_current_carrier_api_set();
+                    // And the FOREIGN carrier IDE set, pinned under the same
+                    // fence, so a returned foreign `.vue.tsx` location maps
+                    // through the generation this request began against.
+                    let foreign_ide_set = server.capture_foreign_carrier_ide_set();
 
                     // IMPORTED-TYPE declaration UPGRADE: a `defineProps<ImportedType>()`
                     // child prop has no inline macro-field span (its declaration lives
@@ -854,7 +874,9 @@ pub(super) async fn handle_rename(
                                 &ctx.tsx_line_index,
                                 &ctx.mapper,
                                 &ctx.carrier_line_index,
-                                Some(&|ide_path: &str| server.external_ide_context(ide_path)),
+                                Some(&|ide_path: &str| {
+                                    server.foreign_ide_context(&foreign_ide_set, ide_path)
+                                }),
                                 Some(&api_resolver),
                                 &carrier_source_exists,
                                 negotiated_encoding.clone(),

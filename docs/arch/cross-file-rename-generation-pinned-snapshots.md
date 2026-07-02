@@ -285,12 +285,12 @@ as Block H-membership. The `suppress_imported_carrier_prewarm` seam and the
 the exact validation harness for that work; the lane's `#[ignore]` is lifted when
 it lands.
 
-References and code-actions now capture their OWN document's request surface and
-run the post-await gate (see "Interactive request-surface capture" above), but
-their CROSS-FILE `{carrier}.ts` legs still map through the live
-`external_ide_context` resolver rather than a fenced multi-surface capture like
-rename's `capture_current_carrier_api_set`. Adopting the fenced capture +
-snapshot-anchored merge for those cross-file legs remains follow-up work. The
-merge-time mapping helpers (`external_ide_context_from_snapshot`,
-`api_surface_range_to_carrier_range`) and the capture API are already reusable
-for those surfaces.
+Cross-file FOREIGN-carrier IDE legs (definition / type-definition / references /
+rename / code-actions / diagnostics related spans, plus the imported-type
+declaration hop) now pin the whole `CarrierIde` surface set BEFORE the provider
+query (`capture_current_carrier_ide_set`, mirroring rename's
+`capture_current_carrier_api_set`) and map each foreign location through the
+pinned snapshot via `foreign_ide_context_from_captured` — validated at merge
+time (still honored + foreign open document byte-match) and fail-closed on any
+miss. The former live-current `external_ide_context` / `ide_context_by_path` /
+`ide_context` resolver chain is deleted.

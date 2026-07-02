@@ -422,6 +422,11 @@ impl VerterLanguageServer {
         }
         let prop_name = target.usage.parent_prop_name.clone();
 
+        // Pin the FOREIGN carrier IDE surfaces BEFORE the definition hop, so a
+        // returned foreign carrier location maps through the generation this
+        // request began against.
+        let foreign_ide_set = self.capture_foreign_carrier_ide_set();
+
         // Resolve the declaration target via the provider DEFINITION hop, mapped to
         // a source `{uri, range}` exactly as go-to-definition maps it.
         let Ok(type_defs) = type_provider
@@ -455,6 +460,7 @@ impl VerterLanguageServer {
             parent_tsx_path,
             &prop_name,
             &parent_usage_ranges,
+            &foreign_ide_set,
         ) else {
             return;
         };
@@ -488,6 +494,7 @@ impl VerterLanguageServer {
         parent_tsx_path: &str,
         prop_name: &str,
         parent_usage_ranges: &[(Uri, Range)],
+        foreign_ide_set: &crate::provider_surface_store::ProviderQuerySnapshot,
     ) -> Option<(Uri, Range)> {
         use crate::server::handler_guard::block_in_place_if_available;
 
@@ -512,7 +519,7 @@ impl VerterLanguageServer {
             &ctx.tsx_line_index,
             &ctx.mapper,
             &ctx.carrier_line_index,
-            Some(&|ide_path: &str| self.external_ide_context(ide_path)),
+            Some(&|ide_path: &str| self.foreign_ide_context(foreign_ide_set, ide_path)),
             // A sentinel document URI that no real target equals, so a same-file
             // short-circuit never fires (this is a definition merge over foreign
             // locations, never the queried file's own surface).

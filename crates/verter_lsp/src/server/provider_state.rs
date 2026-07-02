@@ -24,26 +24,36 @@ use super::server_utils::source_id_from_provider_carrier_path;
 use super::{TypeProviderContext, VerterLanguageServer};
 
 impl VerterLanguageServer {
-    pub(super) fn external_ide_context(&self, ide_path: &str) -> Option<merge::ExternalIdeContext> {
-        let (_tsx_path, tsx_content, mapper) = self.ide_context_by_path(ide_path)?;
-        let tsx_line_index = LineIndex::new(&tsx_content, self.documents.encoding());
-        // Get the Vue file's line index
-        let snapshot = self.published_resolver()?;
-        let canonical_id = source_id_from_provider_carrier_path(
-            &snapshot.resolver,
-            self.documents.host(),
+    /// Capture the immutable FOREIGN-carrier IDE surface set a provider-backed
+    /// request pins BEFORE its provider query, so a returned foreign carrier
+    /// location maps through the generation the request began against — never
+    /// whatever surface is current at merge time.
+    pub(super) fn capture_foreign_carrier_ide_set(
+        &self,
+    ) -> crate::provider_surface_store::ProviderQuerySnapshot {
+        self.documents
+            .provider_surfaces()
+            .capture_current_carrier_ide_set()
+    }
+
+    /// Resolve the merge-time mapping context for a FOREIGN carrier IDE
+    /// location from the pinned set `captured`
+    /// ([`Self::capture_foreign_carrier_ide_set`]), fail-closed: an uncaptured
+    /// path, a no-longer-honored surface, or a drifted/closed foreign open
+    /// document drops the location.
+    pub(super) fn foreign_ide_context(
+        &self,
+        captured: &crate::provider_surface_store::ProviderQuerySnapshot,
+        ide_path: &str,
+    ) -> Option<merge::ExternalIdeContext> {
+        let encoding = self.position_encoding.read().clone();
+        crate::provider_surface_store::foreign_ide_context_from_captured(
+            self.documents.provider_surfaces(),
+            &self.documents,
+            captured,
             ide_path,
-        )?;
-        let uri = self.documents.canonical_id_to_uri(&canonical_id)?;
-        let doc = self.documents.get(&uri)?;
-        Some(merge::ExternalIdeContext {
-            tsx_line_index,
-            mapper,
-            carrier_line_index: doc.line_index.clone(),
-            // The legacy IDE path keeps its in-context (negotiated-encoding)
-            // indexes; the API-only UTF-16→negotiated re-emission is opt-in.
-            carrier_negotiated_line_index: None,
-        })
+            encoding,
+        )
     }
 
     /// THE server-side record choke point for an API-surface sync.

@@ -509,6 +509,10 @@ pub(super) async fn handle_code_action(
                     &ctx.tsx_line_index,
                 );
                 if let (Some(so), Some(eo)) = (start_offset, end_offset) {
+                    // Pin the FOREIGN carrier IDE surfaces BEFORE the query, so
+                    // a returned foreign-file edit maps through the generation
+                    // this request began against.
+                    let foreign_ide_set = server.capture_foreign_carrier_ide_set();
                     if let Ok(type_actions) =
                         tp.get_code_actions(&ctx.tsx_path, so, eo, &diag_ctx).await
                     {
@@ -568,7 +572,9 @@ pub(super) async fn handle_code_action(
                             &ctx.tsx_line_index,
                             &ctx.mapper,
                             &ctx.carrier_line_index,
-                            Some(&|ide_path: &str| server.external_ide_context(ide_path)),
+                            Some(&|ide_path: &str| {
+                                server.foreign_ide_context(&foreign_ide_set, ide_path)
+                            }),
                             &carrier_source_exists,
                             negotiated_encoding,
                             &|p: &str| {

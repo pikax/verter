@@ -11649,10 +11649,11 @@ async fn missing_ide_context_for_real_carrier_fails_resolve_not_drops_edits() {
         !server.is_self_file_projection(&vue_uri),
         "precondition: a `.vue` carrier is not a self-file projection"
     );
-    // Precondition 3: the IDE context IS missing (no committed sync state).
+    // Precondition 3: the request surface IS missing (no committed sync state).
     assert!(
-        server.ide_context_by_path(tsx_path).is_none(),
-        "precondition: with no committed provider sync state the carrier has no live IDE context"
+        server.capture_provider_request_surface(&vue_uri).is_none(),
+        "precondition: with no committed provider sync state the carrier has no \
+         capturable request surface"
     );
 
     // A NON-EMPTY auto-import edit set — the only case the carrier re-anchor
@@ -18687,6 +18688,177 @@ async fn virtual_file_query_serves_provider_result_from_stable_matched_surface()
         text.contains("VIRTUAL_HOVER_SENTINEL"),
         "a byte-matched virtual tab over a stable surface must serve the provider \
          hover, got: {text}"
+    );
+}
+
+/// Shared setup for the FOREIGN-carrier mapping tests: parent + child carriers
+/// synced (both CarrierIde surfaces recorded), with the mock provider primed to
+/// return a definition location inside the CHILD's IDE surface for a query at
+/// the parent's mapped `msg` position.
+async fn make_foreign_mapping_fixture() -> (
+    tower_lsp_server::LspService<VerterLanguageServer>,
+    Arc<MockTypeProvider>,
+    Uri,
+    Position,
+    String,
+) {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service_tsgo(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let parent_uri = open_test_vue(server, "/workspace/src/App.vue", REQUEST_SURFACE_APP);
+    let child_uri = open_test_vue(server, "/workspace/src/Child.vue", REQUEST_SURFACE_APP);
+    server.sync_ide_to_provider(&parent_uri).await;
+    server.sync_ide_to_provider(&child_uri).await;
+
+    let child_ide_path = server
+        .active_ide_path_for_uri(&child_uri)
+        .expect("child IDE path is live");
+    let child_snapshot = server
+        .documents
+        .provider_surfaces()
+        .current_snapshot(&child_ide_path)
+        .expect("child CarrierIde surface recorded");
+    // A definition target inside the CHILD's IDE surface: the mapped `msg`
+    // declaration token.
+    let child_target = child_snapshot
+        .provider_content
+        .find("msg")
+        .expect("token present in child IDE content") as u32;
+
+    // The parent query position + the tsx offset the handler will compute.
+    // A STRING LITERAL position: Verter's own definition resolution yields
+    // nothing there, so the merge consumes the PROVIDER locations (a Verter
+    // same-file definition would short-circuit the merge and never reach the
+    // foreign-mapping path under test).
+    let position = find_document_position(server, &parent_uri, "'hello'", 1);
+    let parent_ctx = synced_type_provider_context(server, &parent_uri);
+    let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
+        &position,
+        &parent_ctx.carrier_line_index,
+        &parent_ctx.mapper,
+        &parent_ctx.tsx_line_index,
+    )
+    .expect("parent position maps to tsx");
+    provider.set_definitions(
+        &parent_ctx.tsx_path,
+        tsx_offset,
+        vec![crate::type_provider::protocol::TypeLocation {
+            path: child_ide_path.clone(),
+            start: child_target,
+            end: child_target + 3,
+        }],
+    );
+    (service, provider, parent_uri, position, child_ide_path)
+}
+
+/// STABLE foreign surface: a provider definition landing in a FOREIGN carrier's
+/// IDE surface maps back onto the foreign `.vue` through the surface pinned at
+/// request start — guards against the pinned-set resolver over-dropping.
+#[tokio::test(flavor = "multi_thread")]
+async fn definition_maps_foreign_carrier_location_through_pinned_surface() {
+    let (service, _provider, parent_uri, position, _child_ide_path) =
+        make_foreign_mapping_fixture().await;
+    let server = service.inner();
+
+    let response = server
+        .goto_definition(GotoDefinitionParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier {
+                    uri: parent_uri.clone(),
+                },
+                position,
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        })
+        .await
+        .expect("definition request should succeed");
+    let locations = match response {
+        Some(GotoDefinitionResponse::Array(locs)) => locs,
+        Some(GotoDefinitionResponse::Scalar(loc)) => vec![loc],
+        other => panic!("expected definition locations, got {other:?}"),
+    };
+    assert!(
+        locations
+            .iter()
+            .any(|l| l.uri.as_str().ends_with("/Child.vue")),
+        "a stable foreign surface must map the child location onto Child.vue, got {locations:?}"
+    );
+}
+
+/// A FOREIGN carrier re-sync landing a fresh generation with drifted content
+/// while the request is awaiting the provider must cause the foreign location
+/// to be DROPPED: the provider answered against the surface pinned at request
+/// start, and mapping its offsets through the merge-time current surface would
+/// land on wrong `.vue` positions (torn, not stale).
+#[tokio::test(flavor = "multi_thread")]
+async fn definition_drops_foreign_carrier_location_when_foreign_surface_advances_mid_request() {
+    let (service, provider, parent_uri, position, child_ide_path) =
+        make_foreign_mapping_fixture().await;
+    let server = service.inner();
+
+    // Mid-request seam: a concurrent CHILD re-sync lands a fresh generation
+    // with DIFFERENT provider content between the request-start pin and the
+    // merge. The racing surface's carrier source byte-matches the live child
+    // document and carries a usable mapper — exactly the shape a merge-time
+    // live-current resolver would ACCEPT and mis-map the provider's
+    // request-start offsets through.
+    let parent_ctx = synced_type_provider_context(server, &parent_uri);
+    let store = server.documents.provider_surfaces().clone();
+    let raced_child_path = child_ide_path.clone();
+    let pinned_child = store
+        .current_snapshot(&child_ide_path)
+        .expect("child surface current");
+    let raced_mapper = pinned_child.source_map.as_ref().map(|m| (**m).clone());
+    // Same prefix + trailing drift: the request-start offsets still MAP through
+    // the racing surface (a merge-time live-current resolver would serve them),
+    // but the content hash differs — the pinned-set resolver must drop.
+    let raced_content: String = format!("{}\n// trailing drift", pinned_child.provider_content);
+    provider.set_on_query(
+        &parent_ctx.tsx_path,
+        Box::new(move || {
+            store.record(
+                crate::provider_surface_store::RecordSurface::carrier_legacy(
+                    crate::provider_surface_store::ProviderSurfaceKind::CarrierIde,
+                    raced_child_path,
+                    "/workspace/src/Child.vue".to_string(),
+                    Arc::from(raced_content.as_str()),
+                    raced_mapper,
+                    Arc::from(REQUEST_SURFACE_APP),
+                ),
+            );
+        }),
+    );
+
+    let response = server
+        .goto_definition(GotoDefinitionParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier {
+                    uri: parent_uri.clone(),
+                },
+                position,
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        })
+        .await
+        .expect("definition request should succeed");
+    let locations = match response {
+        Some(GotoDefinitionResponse::Array(locs)) => locs,
+        Some(GotoDefinitionResponse::Scalar(loc)) => vec![loc],
+        None => Vec::new(),
+        other => panic!("unexpected definition response shape: {other:?}"),
+    };
+    assert!(
+        !locations
+            .iter()
+            .any(|l| l.uri.as_str().ends_with("/Child.vue")),
+        "a foreign location must be DROPPED when the foreign surface advanced \
+         mid-request — mapping through the merge-time surface would be wrong, \
+         got {locations:?}"
     );
 }
 

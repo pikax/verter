@@ -803,6 +803,21 @@ impl ProviderSurfaceStore {
     /// entry resolves to — the no-race property the third-TOCTOU fix completes.
     #[must_use]
     pub fn capture_current_carrier_api_set(&self) -> ProviderQuerySnapshot {
+        self.capture_current_set_of_kind(ProviderSurfaceKind::CarrierApi)
+    }
+
+    /// Capture EVERY tracked path's lifecycle state with `CarrierIde` snapshots
+    /// as the mappable role — the immutable in-flight pinned set a navigation
+    /// handler holds across its provider query so a returned FOREIGN carrier
+    /// IDE location maps through the surface captured when the request began,
+    /// never whatever surface is current at merge time. Same atomicity and
+    /// completeness contract as [`Self::capture_current_carrier_api_set`].
+    #[must_use]
+    pub fn capture_current_carrier_ide_set(&self) -> ProviderQuerySnapshot {
+        self.capture_current_set_of_kind(ProviderSurfaceKind::CarrierIde)
+    }
+
+    fn capture_current_set_of_kind(&self, kind: ProviderSurfaceKind) -> ProviderQuerySnapshot {
         // ONE read guard for the ENTIRE capture (atomicity, condition a).
         let lifecycle = self.inner.lifecycle.read();
         let mut by_path: HashMap<Arc<str>, CapturedPathState> =
@@ -815,12 +830,12 @@ impl ProviderSurfaceStore {
                 ProviderPathState::Closing { .. } => CapturedPathState::KnownNonMappable,
                 // `Current`: resolve its snapshot Arc UNDER THIS SAME READ GUARD so
                 // the (state, snapshot) pair is consistent and cannot tear (see
-                // ATOMICITY above). A `CarrierApi` snapshot is mappable; anything
-                // else (non-CarrierApi kind, or a missing snapshot) is known-virtual
-                // but not mappable → drop.
+                // ATOMICITY above). A snapshot of the requested role is mappable;
+                // anything else (a different role, or a missing snapshot) is
+                // known-virtual but not mappable → drop.
                 ProviderPathState::Current { generation } => {
                     match self.inner.snapshots.get(&(Arc::clone(path), *generation)) {
-                        Some(entry) if entry.value().kind == ProviderSurfaceKind::CarrierApi => {
+                        Some(entry) if entry.value().kind == kind => {
                             CapturedPathState::Current(Arc::clone(entry.value()))
                         }
                         _ => CapturedPathState::KnownNonMappable,
@@ -883,6 +898,45 @@ pub fn external_ide_context_from_snapshot(
         carrier_line_index: snapshot.carrier_utf16_line_index.clone(),
         carrier_negotiated_line_index: Some(carrier_negotiated_line_index),
     })
+}
+
+/// Resolve the merge-time mapping context for a FOREIGN carrier IDE location
+/// from the [`ProviderQuerySnapshot`] captured when the request BEGAN — never
+/// the surface current at merge time.
+///
+/// The provider answered against the surfaces it held when the request was
+/// issued; a foreign carrier re-synced mid-request would make a live-current
+/// merge map the provider's generation-A offsets through a generation-B
+/// mapper (torn, not stale). Fail-closed gates (any miss ⇒ `None`, the
+/// location drops):
+/// - the path was not captured as a `Current` `CarrierIde` surface when the
+///   request began;
+/// - the captured surface is no longer honored at merge time (a mid-request
+///   re-sync with different content, or a close, invalidates — a
+///   byte-identical same-map re-sync stays honored);
+/// - the foreign carrier's OPEN document no longer byte-matches the captured
+///   carrier source (a closed foreign document also drops — mapping targets
+///   the open buffer, matching the live resolver this replaces);
+/// - the captured surface has no usable source map.
+#[must_use]
+pub fn foreign_ide_context_from_captured(
+    store: &ProviderSurfaceStore,
+    documents: &DocumentRegistry,
+    captured: &ProviderQuerySnapshot,
+    ide_path: &str,
+    negotiated_encoding: tower_lsp_server::ls_types::PositionEncodingKind,
+) -> Option<crate::type_provider::merge::ExternalIdeContext> {
+    let snapshot = captured.snapshot_for(ide_path)?;
+    if snapshot.kind != ProviderSurfaceKind::CarrierIde {
+        return None;
+    }
+    if !store.captured_snapshot_still_honored(snapshot) {
+        return None;
+    }
+    if !surface_matches_open_document_source(documents, &snapshot.source_canonical, snapshot) {
+        return None;
+    }
+    external_ide_context_from_snapshot(snapshot, negotiated_encoding)
 }
 
 /// Locate the byte range of a child component's prop identifier IN the captured
