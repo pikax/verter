@@ -834,3 +834,83 @@ fn define_slots_two_param_callback_binds_first_param_only() {
          binding, got {binding_names:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// (4f) defineSlots normalizer — a slot RETURN written as the degenerate
+//      composite `{} & X` publishes EXACTLY `X`, never a
+//      `TypeExpr::Intersection`. The shared shape-engine fold drops
+//      empty-object / object-surface-sentinel intersection arms
+//      (`{} & X ≡ X`) and collapses a single surviving arm to that arm —
+//      the normalized terminal-DTO behavior. This pins the DEGENERATE
+//      collapse direction through the PUBLIC slot path (the non-degenerate
+//      multi-arm direction is pinned elsewhere).
+//
+//      Discriminating: against a fold that keeps the vacuous `{}` arm (or
+//      wraps the lone survivor in a one-arm intersection), the published
+//      `return_expr` is a `TypeExpr::Intersection` and BOTH the exact-shape
+//      and the negative assertions FAIL.
+// ---------------------------------------------------------------------------
+
+const VUE_SLOTS_DEGENERATE_INTERSECTION_RETURN: &str = r#"<script setup lang="ts">
+defineSlots<{
+  default(props: { item: string }): {} & { label: string };
+}>();
+</script>
+"#;
+
+#[test]
+fn slot_return_empty_object_intersection_arm_collapses_to_real_arm() {
+    use verter_type_expr::{ObjectMember, PrimitiveName, TypeExpr};
+
+    const FILE: &str = "/w/SlotsDegenerateIntersection.vue";
+    let host = make_host();
+    upsert(&host, FILE, VUE_SLOTS_DEGENERATE_INTERSECTION_RETURN);
+
+    let request = props_request(&host, FILE, AnalyzedMacroKind::DefineSlots);
+    let surface = host
+        .resolve_vue_macro_surface(&request)
+        .expect("defineSlots resolves a surface");
+    let slots =
+        slots_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+
+    let default_slot = slots
+        .iter()
+        .find(|s| s.name == "default")
+        .expect("the `default` slot is published");
+    let return_expr = default_slot
+        .return_expr
+        .as_ref()
+        .expect("the slot publishes a typed return_expr");
+
+    // NEGATIVE: the degenerate `{}` arm never survives into a published
+    // intersection — `{} & X` is NOT `TypeExpr::Intersection([...])`.
+    assert!(
+        !matches!(return_expr, TypeExpr::Intersection(_)),
+        "`{{}} & X` must collapse at the publication fold — the published DTO \
+         is the real arm, never an Intersection; got {return_expr:?}"
+    );
+
+    // POSITIVE (exact shape): the published return IS the real arm
+    // `{ label: string }` — one public property, `label: string`.
+    let TypeExpr::Object(object) = return_expr else {
+        panic!("`{{}} & X` publishes exactly the real arm X (an Object), got {return_expr:?}");
+    };
+    assert_eq!(
+        object.properties.len(),
+        1,
+        "the real arm has exactly one member, got {:?}",
+        object.properties
+    );
+    let ObjectMember::Property(label) = &object.properties[0] else {
+        panic!(
+            "the real arm's member is the `label` property, got {:?}",
+            object.properties[0]
+        );
+    };
+    assert_eq!(label.name, "label", "the surviving arm's member is `label`");
+    assert!(
+        matches!(label.ty, TypeExpr::Primitive(PrimitiveName::String)),
+        "`label` keeps its `string` primitive type, got {:?}",
+        label.ty
+    );
+}
