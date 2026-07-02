@@ -193,9 +193,16 @@ pub(super) async fn handle_document_highlight(
 
     // Virtual file: route directly through TSGO
     if let Some(tp) = &server.type_provider {
-        if let Some((tsx_path, vf_li)) = server.virtual_file_context(uri) {
+        if let Some(vf_ctx) = server.virtual_file_context(uri) {
+            let tsx_path = vf_ctx.tsx_path.clone();
+            let vf_li = vf_ctx.line_index.clone();
             if let Some(offset) = vf_li.position_to_offset(position) {
                 if let Ok(type_highlights) = tp.get_document_highlights(&tsx_path, offset).await {
+                    // Post-await validation (fail closed): highlights produced
+                    // against a superseded surface must be dropped.
+                    if !server.virtual_request_surface_still_valid(uri, &vf_ctx) {
+                        return Ok(None);
+                    }
                     let highlights: Vec<DocumentHighlight> = type_highlights
                         .into_iter()
                         .filter_map(|h| {
@@ -288,9 +295,14 @@ pub(super) async fn handle_signature_help(
 
     // Virtual file: route directly through TSGO
     if let Some(tp) = &server.type_provider {
-        if let Some((tsx_path, vf_li)) = server.virtual_file_context(uri) {
-            if let Some(offset) = vf_li.position_to_offset(position) {
-                if let Ok(type_sig) = tp.get_signature_help(&tsx_path, offset).await {
+        if let Some(vf_ctx) = server.virtual_file_context(uri) {
+            if let Some(offset) = vf_ctx.line_index.position_to_offset(position) {
+                if let Ok(type_sig) = tp.get_signature_help(&vf_ctx.tsx_path, offset).await {
+                    // Post-await validation (fail closed): signature help
+                    // produced against a superseded surface must be dropped.
+                    if !server.virtual_request_surface_still_valid(uri, &vf_ctx) {
+                        return Ok(None);
+                    }
                     return Ok(merge::merge_signature_help(type_sig));
                 }
             }
@@ -812,11 +824,18 @@ pub(super) async fn handle_inlay_hint(
     // Virtual file: route directly through type provider (positions already in TSX coordinates)
     if !typing && inlay_enabled {
         if let Some(tp) = &server.type_provider {
-            if let Some((tsx_path, vf_li)) = server.virtual_file_context(uri) {
+            if let Some(vf_ctx) = server.virtual_file_context(uri) {
+                let tsx_path = vf_ctx.tsx_path.clone();
+                let vf_li = vf_ctx.line_index.clone();
                 let start = vf_li.position_to_offset(&range.start);
                 let end = vf_li.position_to_offset(&range.end);
                 if let (Some(so), Some(eo)) = (start, end) {
                     if let Ok(type_hints) = tp.get_inlay_hints(&tsx_path, so, eo).await {
+                        // Post-await validation (fail closed): hints produced
+                        // against a superseded surface must be dropped.
+                        if !server.virtual_request_surface_still_valid(uri, &vf_ctx) {
+                            return Ok(None);
+                        }
                         let hints: Vec<InlayHint> = type_hints
                             .into_iter()
                             .filter_map(|h| {

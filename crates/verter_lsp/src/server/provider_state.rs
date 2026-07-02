@@ -546,9 +546,18 @@ impl VerterLanguageServer {
     /// The cursor position is in TSX coordinates, so we can query TSGO directly
     /// without position mapping.
     ///
-    /// Returns `Some((tsx_path, virtual_doc_line_index))` if this is a virtual file
-    /// that should be routed through the source .vue file's TSX.
-    pub(super) fn virtual_file_context(&self, uri: &Uri) -> Option<(String, LineIndex)> {
+    /// Fail-closed gates (any miss ⇒ `None`):
+    /// - the SOURCE document has no capturable request surface
+    ///   ([`Self::capture_provider_request_surface`]);
+    /// - the VIRTUAL document's bytes do not match the captured surface's
+    ///   provider content — a stale virtual tab holding generation N while the
+    ///   provider serves generation N+1 would compute offsets against content
+    ///   the provider no longer holds (torn, not merely stale).
+    ///
+    /// The returned context carries the captured snapshot for the post-await
+    /// gate ([`Self::virtual_request_surface_still_valid`]) every virtual-file
+    /// branch runs before mapping/returning provider output.
+    pub(super) fn virtual_file_context(&self, uri: &Uri) -> Option<VirtualFileContext> {
         let source_uri_str = self.documents.get_virtual_source_uri(uri)?;
         let source_uri: Uri = source_uri_str.parse().ok()?;
 
@@ -558,10 +567,52 @@ impl VerterLanguageServer {
         let snapshot = self.capture_provider_request_surface(&source_uri)?;
         let tsx_path = snapshot.stamp.provider_path.to_string();
 
-        // Build LineIndex from the virtual file's content (for offset conversion)
+        // Build LineIndex from the virtual file's content (for offset
+        // conversion) and require those bytes to MATCH the captured surface —
+        // the offsets computed from a drifted virtual buffer would index
+        // content the provider does not hold.
         let doc = self.documents.get(uri)?;
+        if *doc.source != *snapshot.provider_content {
+            return None;
+        }
         let line_index = doc.line_index.clone();
 
-        Some((tsx_path, line_index))
+        Some(VirtualFileContext {
+            tsx_path,
+            line_index,
+            snapshot,
+        })
     }
+
+    /// Post-await validation for a virtual-file provider query: the captured
+    /// surface is still honored AND the virtual document still byte-matches
+    /// the captured provider content. `false` ⇒ the provider response was
+    /// produced against a surface that no longer matches the virtual tab —
+    /// the branch must DROP the provider contribution (fail closed).
+    pub(super) fn virtual_request_surface_still_valid(
+        &self,
+        uri: &Uri,
+        ctx: &VirtualFileContext,
+    ) -> bool {
+        self.documents
+            .provider_surfaces()
+            .captured_snapshot_still_honored(&ctx.snapshot)
+            && self
+                .documents
+                .get(uri)
+                .is_some_and(|doc| *doc.source == *ctx.snapshot.provider_content)
+    }
+}
+
+/// The routing context for a `verter-virtual://` document's provider query:
+/// the provider path and line index the offsets are computed against, plus the
+/// captured request surface the post-await gate revalidates.
+pub(super) struct VirtualFileContext {
+    /// The provider path the query routes to (the captured surface's path).
+    pub(super) tsx_path: String,
+    /// Line index over the VIRTUAL document's bytes (byte-matched to the
+    /// captured surface at capture).
+    pub(super) line_index: LineIndex,
+    /// The captured request surface for post-await revalidation.
+    pub(super) snapshot: std::sync::Arc<crate::provider_surface_store::ProviderSurfaceSnapshot>,
 }

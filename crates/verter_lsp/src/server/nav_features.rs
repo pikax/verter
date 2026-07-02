@@ -53,9 +53,14 @@ pub(super) async fn handle_hover(
 
     // Virtual file: route directly through TSGO (position is already in TSX coordinates)
     if let Some(tp) = &server.type_provider {
-        if let Some((tsx_path, vf_li)) = server.virtual_file_context(uri) {
-            if let Some(offset) = vf_li.position_to_offset(position) {
-                if let Ok(Some(info)) = tp.get_hover(&tsx_path, offset).await {
+        if let Some(vf_ctx) = server.virtual_file_context(uri) {
+            if let Some(offset) = vf_ctx.line_index.position_to_offset(position) {
+                if let Ok(Some(info)) = tp.get_hover(&vf_ctx.tsx_path, offset).await {
+                    // Post-await validation (fail closed): a hover produced
+                    // against a superseded surface must be dropped.
+                    if !server.virtual_request_surface_still_valid(uri, &vf_ctx) {
+                        return Ok(None);
+                    }
                     return Ok(Some(Hover {
                         contents: HoverContents::Markup(MarkupContent {
                             kind: MarkupKind::Markdown,
@@ -346,12 +351,18 @@ pub(super) async fn handle_completion(
 
     // Virtual file: route directly through TSGO
     if let Some(tp) = &server.type_provider {
-        if let Some((tsx_path, vf_li)) = server.virtual_file_context(uri) {
-            if let Some(offset) = vf_li.position_to_offset(position) {
+        if let Some(vf_ctx) = server.virtual_file_context(uri) {
+            let tsx_path = vf_ctx.tsx_path.clone();
+            if let Some(offset) = vf_ctx.line_index.position_to_offset(position) {
                 if let Ok(result) = tp
                     .get_completions(&tsx_path, offset, trigger_character)
                     .await
                 {
+                    // Post-await validation (fail closed): completions produced
+                    // against a superseded surface must be dropped.
+                    if !server.virtual_request_surface_still_valid(uri, &vf_ctx) {
+                        return Ok(None);
+                    }
                     // Route through the SAME provider→LSP envelope mapper as the
                     // normal completion path so a provider auto-import returned on
                     // the virtual-file path preserves its actionable

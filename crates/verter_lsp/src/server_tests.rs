@@ -17233,11 +17233,11 @@ async fn virtual_file_completion_routes_actionable_handle_through_envelope() {
     // Sanity: the virtual-file context resolves to the carrier TSX path (so we
     // know the branch under test is actually entered, not silently fallen
     // through to the normal completion path).
-    let (resolved_tsx, _li) = server
+    let vf_ctx = server
         .virtual_file_context(&virtual_uri)
         .expect("virtual-file context must resolve to the source TSX path");
     assert_eq!(
-        resolved_tsx, tsx_path,
+        vf_ctx.tsx_path, tsx_path,
         "virtual-file context must route to the backing .vue's generated TSX"
     );
 
@@ -18470,6 +18470,223 @@ async fn did_close_retires_shadow_surface_so_reopen_fails_closed_until_resync() 
         server.capture_provider_request_surface(&rune_uri).is_none(),
         "a reopened, not-yet-resynced rune module must fail closed at capture — \
          the provider no longer holds the closed shadow buffer"
+    );
+}
+
+/// Shared setup for the virtual-file request-surface tests: a synced carrier
+/// with a recorded CarrierIde surface, plus a `verter-virtual://` document
+/// opened over `virtual_content` (which may deliberately differ from the
+/// recorded surface to model a stale tab).
+async fn make_virtual_file_fixture(
+    recorded_content: &str,
+    virtual_content: &str,
+) -> (
+    tower_lsp_server::LspService<VerterLanguageServer>,
+    Arc<MockTypeProvider>,
+    Uri,
+    String,
+) {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service_tsgo(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let tsx_path = "/workspace/src/App.vue.tsx".to_string();
+    let source_uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: source_uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<template><div/></template>".to_string(),
+    });
+    server.provider_sync_states.insert(
+        "/workspace/src/App.vue".to_string(),
+        ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Unresolved,
+            ide_path: Some(tsx_path.clone()),
+            api_path: None,
+            decl_path: None,
+            shadow_path: None,
+            ide_background_loaded: true,
+            api_background_loaded: false,
+            decl_background_loaded: false,
+            shadow_background_loaded: false,
+        },
+    );
+    server.record_carrier_ide_snapshot("/workspace/src/App.vue", &tsx_path, recorded_content, None);
+
+    let virtual_uri_str = format!(
+        "verter-virtual://generated/App.vue.tsx?sourceUri={}",
+        source_uri.as_str()
+    );
+    let virtual_uri: Uri = virtual_uri_str.parse().expect("virtual uri parses");
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: virtual_uri.clone(),
+        language_id: "typescriptreact".to_string(),
+        version: 1,
+        text: virtual_content.to_string(),
+    });
+    (service, provider, virtual_uri, tsx_path)
+}
+
+/// A STALE virtual tab (its bytes hold a generation the provider no longer
+/// serves) must FAIL CLOSED at context capture: offsets computed against the
+/// drifted virtual buffer would index content the provider does not hold, so
+/// no provider query may be issued and no provider result served.
+#[tokio::test(flavor = "multi_thread")]
+async fn virtual_file_query_fails_closed_when_virtual_buffer_is_stale() {
+    // The recorded (provider-held) surface DIFFERS from the virtual tab bytes.
+    let recorded = "const fresh = 1;\ncomputed\n";
+    let stale_virtual = "computed\n";
+    let (service, provider, virtual_uri, tsx_path) =
+        make_virtual_file_fixture(recorded, stale_virtual).await;
+    let server = service.inner();
+
+    // A hover the PRE-GATE path would have served: keyed at the offset the
+    // stale virtual buffer computes.
+    let stale_offset = "computed".len() as u32;
+    provider.set_hover(
+        &tsx_path,
+        stale_offset,
+        Some(crate::type_provider::protocol::HoverInfo {
+            contents: "VIRTUAL_HOVER_SENTINEL".to_string(),
+            range_start: None,
+            range_end: None,
+        }),
+    );
+
+    assert!(
+        server.virtual_file_context(&virtual_uri).is_none(),
+        "a virtual tab whose bytes do not match the captured surface must fail \
+         closed at context capture"
+    );
+
+    let hover = server
+        .hover(hover_params(
+            &virtual_uri,
+            Position {
+                line: 0,
+                character: stale_offset,
+            },
+        ))
+        .await
+        .expect("hover request should succeed");
+    let text = hover
+        .map(|h| match h.contents {
+            HoverContents::Markup(m) => m.value,
+            _ => String::new(),
+        })
+        .unwrap_or_default();
+    assert!(
+        !text.contains("VIRTUAL_HOVER_SENTINEL"),
+        "a stale virtual tab must not serve a provider hover computed against \
+         drifted bytes, got: {text}"
+    );
+}
+
+/// A provider re-sync advancing the surface generation while a virtual-file
+/// query is awaiting the provider must cause the provider result to be
+/// DROPPED (fail closed): the response was produced against a surface the
+/// virtual tab no longer matches.
+#[tokio::test(flavor = "multi_thread")]
+async fn virtual_file_query_drops_provider_result_when_surface_advances_mid_request() {
+    let content = "computed\n";
+    let (service, provider, virtual_uri, tsx_path) =
+        make_virtual_file_fixture(content, content).await;
+    let server = service.inner();
+
+    let offset = "computed".len() as u32;
+    provider.set_hover(
+        &tsx_path,
+        offset,
+        Some(crate::type_provider::protocol::HoverInfo {
+            contents: "VIRTUAL_HOVER_SENTINEL".to_string(),
+            range_start: None,
+            range_end: None,
+        }),
+    );
+
+    // Mid-request seam: a concurrent re-sync lands a NEW generation with
+    // drifted content between the capture and the response handling.
+    let store = server.documents.provider_surfaces().clone();
+    let raced_path = tsx_path.clone();
+    provider.set_on_query(
+        &tsx_path,
+        Box::new(move || {
+            store.record(
+                crate::provider_surface_store::RecordSurface::carrier_legacy(
+                    crate::provider_surface_store::ProviderSurfaceKind::CarrierIde,
+                    raced_path,
+                    "/workspace/src/App.vue".to_string(),
+                    Arc::from("// drifted ide content"),
+                    None,
+                    Arc::from("// drifted carrier source"),
+                ),
+            );
+        }),
+    );
+
+    let hover = server
+        .hover(hover_params(
+            &virtual_uri,
+            Position {
+                line: 0,
+                character: offset,
+            },
+        ))
+        .await
+        .expect("hover request should succeed");
+    let text = hover
+        .map(|h| match h.contents {
+            HoverContents::Markup(m) => m.value,
+            _ => String::new(),
+        })
+        .unwrap_or_default();
+    assert!(
+        !text.contains("VIRTUAL_HOVER_SENTINEL"),
+        "a virtual-file hover produced against a superseded surface generation \
+         must be DROPPED, got: {text}"
+    );
+}
+
+/// With a byte-matched virtual tab and a stable surface, the virtual-file
+/// branch DOES serve the provider result — guards against an over-eager
+/// fail-closed gate breaking healthy virtual-file queries.
+#[tokio::test(flavor = "multi_thread")]
+async fn virtual_file_query_serves_provider_result_from_stable_matched_surface() {
+    let content = "computed\n";
+    let (service, provider, virtual_uri, tsx_path) =
+        make_virtual_file_fixture(content, content).await;
+    let server = service.inner();
+
+    let offset = "computed".len() as u32;
+    provider.set_hover(
+        &tsx_path,
+        offset,
+        Some(crate::type_provider::protocol::HoverInfo {
+            contents: "VIRTUAL_HOVER_SENTINEL".to_string(),
+            range_start: None,
+            range_end: None,
+        }),
+    );
+
+    let text = hover_text(
+        server
+            .hover(hover_params(
+                &virtual_uri,
+                Position {
+                    line: 0,
+                    character: offset,
+                },
+            ))
+            .await
+            .expect("hover request should succeed"),
+    );
+    assert!(
+        text.contains("VIRTUAL_HOVER_SENTINEL"),
+        "a byte-matched virtual tab over a stable surface must serve the provider \
+         hover, got: {text}"
     );
 }
 
