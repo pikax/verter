@@ -18342,6 +18342,137 @@ async fn open_unresolved_drain_ide_sync_records_carrier_ide_surface() {
     );
 }
 
+/// The PRODUCTION `did_close` path must retire the carrier's `CarrierIde`
+/// surface from the store, not only close the provider buffer. Without the
+/// retire, reopening the same text BEFORE any successful re-sync lets the
+/// interactive capture resolve the stale surface (source bytes match) and
+/// serve a query against a provider buffer that is CLOSED.
+#[tokio::test(flavor = "multi_thread")]
+async fn did_close_retires_carrier_ide_surface_so_reopen_fails_closed_until_resync() {
+    let (service, provider, uri) = make_request_surface_carrier().await;
+    let server = service.inner();
+
+    let ide_path = server.active_ide_path_for_uri(&uri).expect("live IDE path");
+    assert!(
+        server
+            .documents
+            .provider_surfaces()
+            .current_snapshot(&ide_path)
+            .is_some(),
+        "precondition: the synced carrier has a recorded CarrierIde surface"
+    );
+
+    // PRODUCTION close: the did_close handler closes the tsgo IDE buffer.
+    server
+        .did_close(DidCloseTextDocumentParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+        })
+        .await;
+    assert!(
+        provider
+            .file_sync_calls()
+            .iter()
+            .any(|call| matches!(call, MockCall::CloseFile { path } if path == &ide_path)),
+        "the did_close handler must close the tsgo IDE buffer"
+    );
+
+    // Reopen the SAME text; no successful re-sync has happened yet.
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 2,
+        text: REQUEST_SURFACE_APP.to_string(),
+    });
+
+    // The closed surface must NOT be capturable: the provider buffer is closed,
+    // so serving a query against the stale snapshot would be torn.
+    assert!(
+        server
+            .documents
+            .provider_surfaces()
+            .current_snapshot(&ide_path)
+            .is_none(),
+        "did_close must retire the CarrierIde surface's active generation"
+    );
+    assert!(
+        server.capture_provider_request_surface(&uri).is_none(),
+        "a reopened, not-yet-resynced carrier must fail closed at capture — the \
+         provider no longer holds the closed IDE buffer"
+    );
+
+    // A fresh successful sync restores capture (no permanent over-drop).
+    server.sync_ide_to_provider(&uri).await;
+    assert!(
+        server.capture_provider_request_surface(&uri).is_some(),
+        "a successful re-sync must restore the capturable surface"
+    );
+}
+
+/// The PRODUCTION self-file `did_close` path must retire the rune module's
+/// `Shadow` surface: the SelfFile capture arm resolves by canonical path with
+/// no committed-state gate, so a lingering `Current` Shadow surface would be
+/// captured for a reopened module whose provider buffer is CLOSED.
+#[tokio::test(flavor = "multi_thread")]
+async fn did_close_retires_shadow_surface_so_reopen_fails_closed_until_resync() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+
+    let rune_uri: Uri = "file:///workspace/store.svelte.ts".parse().unwrap();
+    let rune_text = "export const s = $state(0);\n";
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: rune_uri.clone(),
+        language_id: "typescript".to_string(),
+        version: 1,
+        text: rune_text.to_string(),
+    });
+    assert!(
+        server.sync_self_file_shadow_unresolved(&rune_uri).await,
+        "the shadow sync should succeed"
+    );
+    assert!(
+        server
+            .documents
+            .provider_surfaces()
+            .current_snapshot("/workspace/store.svelte.ts")
+            .is_some(),
+        "precondition: the synced rune module has a recorded Shadow surface"
+    );
+
+    // PRODUCTION close: the did_close handler clears the self-file state and
+    // closes the own-path provider buffer.
+    server
+        .did_close(DidCloseTextDocumentParams {
+            text_document: TextDocumentIdentifier {
+                uri: rune_uri.clone(),
+            },
+        })
+        .await;
+
+    // Reopen the SAME text; no successful re-sync has happened yet.
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: rune_uri.clone(),
+        language_id: "typescript".to_string(),
+        version: 2,
+        text: rune_text.to_string(),
+    });
+
+    assert!(
+        server
+            .documents
+            .provider_surfaces()
+            .current_snapshot("/workspace/store.svelte.ts")
+            .is_none(),
+        "did_close must retire the Shadow surface's active generation"
+    );
+    assert!(
+        server.capture_provider_request_surface(&rune_uri).is_none(),
+        "a reopened, not-yet-resynced rune module must fail closed at capture — \
+         the provider no longer holds the closed shadow buffer"
+    );
+}
+
 /// With a STABLE captured surface (no concurrent mutation) the provider
 /// contribution IS served and mapped — guards against an over-eager
 /// fail-closed gate dropping healthy results.

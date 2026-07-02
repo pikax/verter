@@ -1041,11 +1041,25 @@ impl VerterLanguageServer {
                     .as_ref()
                     .filter(|path| path.as_str() != ide_path.as_str())
                 {
-                    if let Err(error) = sync.close_tsx(stale_ide_path).await {
-                        tracing::warn!(
-                            "ensure_current_file_synced: failed to close stale IDE path {}: {error}",
-                            stale_ide_path
-                        );
+                    // Retire the stale path's recorded surface under a close
+                    // EPOCH (a `Current` surface for a closed buffer would stay
+                    // capturable); finalize only on a CONFIRMED close.
+                    let close_token = self
+                        .documents
+                        .provider_surfaces()
+                        .forget(stale_ide_path.as_str());
+                    match sync.close_tsx(stale_ide_path).await {
+                        Ok(()) => {
+                            self.documents
+                                .provider_surfaces()
+                                .finalize_close(close_token);
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                "ensure_current_file_synced: failed to close stale IDE path {}: {error}",
+                                stale_ide_path
+                            );
+                        }
                     }
                 }
 
@@ -1090,12 +1104,22 @@ impl VerterLanguageServer {
             return;
         };
 
-        if let Err(error) = sync.close_tsx(&ide_path).await {
-            tracing::warn!(
-                "force_reopen_current_file_in_type_provider: failed to close {}: {error}",
-                ide_path
-            );
-        }
+        // Retire the surface for the close half of the close+reopen: a capture
+        // racing the gap must fail closed rather than resolve a surface whose
+        // provider buffer is mid-flip. The successful reopen below re-records a
+        // fresh generation (re-Currenting the path); the close token is then
+        // intentionally superseded and never finalized.
+        let close_token = self.documents.provider_surfaces().forget(&ide_path);
+        let closed = match sync.close_tsx(&ide_path).await {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(
+                    "force_reopen_current_file_in_type_provider: failed to close {}: {error}",
+                    ide_path
+                );
+                false
+            }
+        };
 
         match sync.open_tsx(&ide_path, &ide.code).await {
             Ok(()) => {
@@ -1117,6 +1141,15 @@ impl VerterLanguageServer {
                     "force_reopen_current_file_in_type_provider: failed to reopen {}: {error}",
                     uri.as_str()
                 );
+                // Reopen failed AFTER a confirmed close: the buffer is fully
+                // gone, so finalize the retire (the path is unknown until the
+                // queued re-sync records it fresh). An unconfirmed close keeps
+                // the `Closing` state (drop the token — fail closed).
+                if closed {
+                    self.documents
+                        .provider_surfaces()
+                        .finalize_close(close_token);
+                }
                 self.needs_ide_sync.insert(canonical_id);
             }
         }

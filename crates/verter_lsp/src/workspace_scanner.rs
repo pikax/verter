@@ -993,17 +993,15 @@ async fn close_stale_paths(
     stale_paths: &[(NonDeclProviderPathKind, String)],
 ) {
     for (kind, path) in stale_paths {
-        // A closing API path is no longer the active synced virtual surface —
-        // retire its active generation under a fresh close EPOCH (in-flight rename
-        // captures stay valid; the `Closing` state keeps it classifying VirtualDrop
-        // until the provider close is CONFIRMED, so a failed close cannot let it
-        // degrade to NotVirtual and corrupt a same-named real file). Capture the
-        // epoch-stamped token so the finalize is scoped to THIS close.
-        let close_token = if *kind == NonDeclProviderPathKind::Api {
-            Some(provider_surfaces.forget(path))
-        } else {
-            None
-        };
+        // EVERY closing store-backed surface (IDE / API / Shadow) is no longer
+        // the active synced virtual surface — retire its active generation under
+        // a fresh close EPOCH (in-flight captures stay valid; the `Closing`
+        // state keeps the path failing closed until the provider close is
+        // CONFIRMED). Retiring only the API role would leave a closed IDE /
+        // Shadow surface `Current` — capturable by an interactive query against
+        // a CLOSED provider buffer. Capture the epoch-stamped token so the
+        // finalize is scoped to THIS close.
+        let close_token = provider_surfaces.forget(path);
         // A declaration overlay (`Decl`) is unrepresentable here — its lifecycle is
         // owned by `DeclOverlayOwner`, never this generic close.
         let result = match kind {
@@ -1012,15 +1010,12 @@ async fn close_stale_paths(
             NonDeclProviderPathKind::Shadow => sync.close_file(path).await,
         };
         match result {
-            // Only a CONFIRMED API close finalizes, and only via THIS close's token —
-            // a reopen (or newer close) during the await makes the epoch mismatch and
-            // the finalize a no-op (the fresh snapshot survives). An error drops the
-            // token, leaving the `Closing` state (fail closed). Ide/Shadow have no
-            // token.
+            // Only a CONFIRMED close finalizes, and only via THIS close's token —
+            // a reopen (or newer close) during the await makes the epoch mismatch
+            // and the finalize a no-op (the fresh snapshot survives). An error
+            // drops the token, leaving the `Closing` state (fail closed).
             Ok(()) => {
-                if let Some(token) = close_token {
-                    provider_surfaces.finalize_close(token);
-                }
+                provider_surfaces.finalize_close(close_token);
             }
             Err(error) => {
                 tracing::warn!(

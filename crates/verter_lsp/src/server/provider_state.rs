@@ -468,18 +468,18 @@ impl VerterLanguageServer {
                     .await;
                 continue;
             }
-            // A closing API path is no longer the active synced virtual surface —
-            // retire its active generation under a fresh close EPOCH (historical
-            // snapshots stay valid for any in-flight rename that already captured
-            // them; the `Closing` state keeps the path classifying VirtualDrop
-            // until the provider close is CONFIRMED, so a failed close cannot let it
-            // degrade to NotVirtual and corrupt a same-named real file). Capture the
-            // epoch-stamped close token so the finalize is scoped to THIS close.
-            let close_token = if *kind == ProviderPathKind::Api {
-                Some(self.documents.provider_surfaces().forget(path))
-            } else {
-                None
-            };
+            // EVERY closing store-backed surface (IDE / API / Shadow) is no longer
+            // the active synced virtual surface — retire its active generation
+            // under a fresh close EPOCH (historical snapshots stay valid for any
+            // in-flight rename that already captured them; the `Closing` state
+            // keeps the path failing closed until the provider close is
+            // CONFIRMED). Retiring only the API role would leave a closed IDE /
+            // Shadow surface `Current`: after a `did_close`, a reopen of the same
+            // text (before a successful re-sync) could then capture the stale
+            // snapshot and serve a query against a CLOSED provider buffer.
+            // Capture the epoch-stamped close token so the finalize is scoped to
+            // THIS close.
+            let close_token = self.documents.provider_surfaces().forget(path);
             let result = match kind {
                 ProviderPathKind::Ide => sync.close_tsx(path).await,
                 ProviderPathKind::Api => sync.close_dts(path).await,
@@ -488,16 +488,16 @@ impl VerterLanguageServer {
                 ProviderPathKind::Decl => unreachable!("Decl is delegated to the guarded close"),
             };
             match result {
-                // Only a CONFIRMED API close finalizes, and only via THIS close's
+                // Only a CONFIRMED close finalizes, and only via THIS close's
                 // token — if the path was reopened (or retired again by a newer
                 // close) during the await, the epoch no longer matches and the
-                // finalize is a no-op (the fresh snapshot is preserved). On an error
-                // the token is dropped, so the `Closing` state persists (fail
-                // closed). Ide/Shadow are not carrier-API surfaces (token is None).
+                // finalize is a no-op (the fresh snapshot is preserved). On an
+                // error the token is dropped, so the `Closing` state persists
+                // (fail closed).
                 Ok(()) => {
-                    if let Some(token) = close_token {
-                        self.documents.provider_surfaces().finalize_close(token);
-                    }
+                    self.documents
+                        .provider_surfaces()
+                        .finalize_close(close_token);
                 }
                 Err(error) => {
                     tracing::warn!("failed to close provider path {path}: {error}");
