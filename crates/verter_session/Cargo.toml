@@ -212,6 +212,16 @@ quote = "1.0.45"
 name = "gen-query-key-spec"
 path = "src/bin/gen_query_key_spec.rs"
 
+# Generator for the typeinfo manifest ledger (sole writer of
+# `tests/manifest_data/typeinfo_ignored_test_manifest_rows.rs`,
+# `tests/manifest_data/typeinfo_additional_proof_rows.rs`, and
+# `tests/manifest_data/typeinfo_parity_blocks.rs`). Run via the pnpm script
+# `gen:typeinfo-manifest`; the freshness test invokes `--check`, which only
+# re-renders in memory + runs an LF-normalized content compare (exit 6 on drift), never writes.
+[[bin]]
+name = "gen-typeinfo-manifest"
+path = "src/bin/gen_typeinfo_manifest/main.rs"
+
 # The TS7 oracle harness snapshot GENERATOR. `required-features` gates it behind
 # `oracle-gen` so a default `cargo build` / `cargo clippy --workspace` SKIPS it
 # entirely — the default closure stays tsgo-free (design §3 inv 1). Run via

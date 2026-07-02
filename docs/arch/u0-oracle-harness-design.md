@@ -3101,7 +3101,7 @@ coverage is true **by construction**.
    INDEPENDENT declared count: a NEW `IgnoredTestRow` field
    **`oracle_query_ordinals: u16`** (the number of oracle queries the row declares it
    issues). The manifest table is SCRIPT-GENERATED — both tables and every per-column
-   value are produced by `scripts/gen-typeinfo-ignore-manifest.py`
+   value are produced by the `gen-typeinfo-manifest` bin
    (stated in `typeinfo_ignored_test_manifest.rs`'s header) and emitted into the `include!`'d
    `manifest_data/typeinfo_ignored_test_manifest_rows.rs` data file
    (consumed by `typeinfo_ignored_test_manifest.rs`); the guards only diff/fail, never write.

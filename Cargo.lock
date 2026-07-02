@@ -4720,6 +4720,7 @@ dependencies = [
 name = "xtask"
 version = "0.0.1-beta.1"
 dependencies = [
+ "regex",
  "serde",
  "serde_json",
  "toml",

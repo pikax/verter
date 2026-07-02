@@ -469,6 +469,24 @@ Format: `- [{category}] \`{file_path}\` — Brief description`
 
 ## Dependencies Policy
 
+**Repo-owned toolchain is Rust + JS/Node only — no committed Python.** Repo-owned gate, build, CI, test,
+code-generation, packaging, and release tooling is implemented as Rust bins or JS/Node scripts; Python is
+not a committed implementation language for those paths.
+
+- No tracked repo-owned `.py` file (outside third-party / non-toolchain trees `node_modules`,
+  `.integration-tests`, `vendored`/`vendor`, `.claude`, `target`).
+- No `python`/`python3`/`py -3` command invocation in `package.json`, `.github/workflows/*`, or tracked
+  repo-owned command wrappers (`*.sh`/`*.bash`/`*.ps1`/`*.cmd`/`*.bat`). Thin shell/PowerShell/cmd wrappers
+  are allowed as command-entry shims but must not invoke Python; Node/TS tool scripts must not spawn Python
+  transitively.
+- New or ported repo-owned tooling lands as a Rust bin (e.g. the `gen-typeinfo-manifest` cargo bin, the
+  xtask `check-four-mode-terminology` bin) or a Node script — never a committed Python script.
+- Agents may use Python transiently and locally for ad-hoc analysis, but such use is never committed and
+  never on a gate/build/CI/test path.
+- Committing repo-owned Python is allowed only if it is 100% necessary AND neither Rust nor JS/Node can do
+  it, adopted via an architecture-reviewed change to this policy with a narrow documented justification.
+  Until then, do not add Python.
+
 - Keep dependencies at their latest versions
 - Rust deps: update in `Cargo.toml`, run `cargo update`
 - JS deps: `pnpm up -r -i -L` to interactively update all
