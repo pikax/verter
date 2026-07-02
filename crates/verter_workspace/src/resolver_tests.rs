@@ -3426,3 +3426,177 @@ fn join_paths_preserves_unc_host_prefix() {
         "/server/share/proj/src/Foo.vue"
     );
 }
+
+// ── Project-reference cycle termination ──
+
+/// Builds a package project rooted at `/workspace/packages/{name}` with its
+/// tsconfig at `/workspace/packages/{name}/tsconfig.json`, referencing the
+/// given tsconfig paths.
+fn referencing_project(name: &str, references: &[&str]) -> IdeProjectConfig {
+    let root = format!("/workspace/packages/{name}");
+    let mut config = project(
+        &root,
+        "/workspace",
+        Some(&format!("{root}/tsconfig.json")),
+        ProjectMembership::MatchAll,
+    );
+    config.references = references.iter().map(|r| (*r).to_string()).collect();
+    config
+}
+
+/// A project that resolves the given bare specifier to `src/index.ts` under
+/// its own root via tsconfig `paths` + `baseUrl`.
+fn resolving_project(name: &str, specifier: &str) -> IdeProjectConfig {
+    let mut config = referencing_project(name, &[]);
+    config.compiler_options = IdeProjectCompilerOptions {
+        base_url: Some(format!("/workspace/packages/{name}/src")),
+        paths: vec![(specifier.to_string(), vec!["index".to_string()])],
+        ..Default::default()
+    };
+    config
+}
+
+fn resolve_bare(
+    resolver: &ProjectResolver,
+    reader: &TestReader,
+    importer_id: &str,
+    specifier: &str,
+) -> Option<ResolveResult> {
+    resolver.resolve_with_reader(
+        reader,
+        &ResolveRequest {
+            importer_id: importer_id.to_string(),
+            specifier: specifier.to_string(),
+            kind: ResolveRequestKind::EsmImport,
+            phase: ResolvePhase::ProviderGraph,
+        },
+    )
+}
+
+#[test]
+fn cyclic_project_references_terminate_without_overflow() {
+    // Two-cycle: A references B's tsconfig, B references A's. A specifier
+    // that no branch resolves must return None instead of recursing across
+    // the reference cycle until the stack overflows.
+    let a = referencing_project("a", &["/workspace/packages/b/tsconfig.json"]);
+    let b = referencing_project("b", &["/workspace/packages/a/tsconfig.json"]);
+    let resolver = ProjectResolver::new(vec![a, b]);
+    let reader = TestReader::default();
+
+    let resolved = resolve_bare(
+        &resolver,
+        &reader,
+        "/workspace/packages/a/src/App.ts",
+        "missing-lib",
+    );
+    assert!(
+        resolved.is_none(),
+        "unresolvable specifier across a reference cycle must be None"
+    );
+
+    // Control: the same shape WITHOUT the back-edge resolves through the
+    // single reference — cycle termination must not disable reference
+    // resolution itself.
+    let a = referencing_project("a", &["/workspace/packages/b/tsconfig.json"]);
+    let b = resolving_project("b", "shared");
+    let resolver = ProjectResolver::new(vec![a, b]);
+    let reader = TestReader::with_files(&["/workspace/packages/b/src/index.ts"]);
+
+    let resolved = resolve_bare(
+        &resolver,
+        &reader,
+        "/workspace/packages/a/src/App.ts",
+        "shared",
+    )
+    .expect("non-cyclic single reference must still resolve");
+    assert_eq!(resolved.source_id, "/workspace/packages/b/src/index.ts");
+    assert_eq!(resolved.resolution_kind, ResolutionKind::ProjectReference);
+}
+
+#[test]
+fn n_cycle_project_references_terminate() {
+    // Three-cycle: A → B → C → A. Must terminate with None, not overflow.
+    let a = referencing_project("a", &["/workspace/packages/b/tsconfig.json"]);
+    let b = referencing_project("b", &["/workspace/packages/c/tsconfig.json"]);
+    let c = referencing_project("c", &["/workspace/packages/a/tsconfig.json"]);
+    let resolver = ProjectResolver::new(vec![a, b, c]);
+    let reader = TestReader::default();
+
+    let resolved = resolve_bare(
+        &resolver,
+        &reader,
+        "/workspace/packages/a/src/App.ts",
+        "missing-lib",
+    );
+    assert!(
+        resolved.is_none(),
+        "unresolvable specifier across a 3-cycle must be None"
+    );
+}
+
+#[test]
+fn deep_acyclic_project_reference_chain_still_resolves() {
+    // Acyclic chain A → B → C → D where only D resolves the specifier. The
+    // terminal project must still be reached: cycle/stack guards must not
+    // block legitimately deep transitive reference chains, and declared
+    // first-match-wins ordering must hold.
+    let a = referencing_project("a", &["/workspace/packages/b/tsconfig.json"]);
+    let b = referencing_project("b", &["/workspace/packages/c/tsconfig.json"]);
+    let c = referencing_project("c", &["/workspace/packages/d/tsconfig.json"]);
+    let d = resolving_project("d", "deep-lib");
+    let resolver = ProjectResolver::new(vec![a, b, c, d]);
+    let reader = TestReader::with_files(&["/workspace/packages/d/src/index.ts"]);
+
+    let resolved = resolve_bare(
+        &resolver,
+        &reader,
+        "/workspace/packages/a/src/App.ts",
+        "deep-lib",
+    )
+    .expect("deep acyclic reference chain must resolve through the terminal project");
+    assert_eq!(resolved.source_id, "/workspace/packages/d/src/index.ts");
+    assert_eq!(resolved.resolution_kind, ResolutionKind::ProjectReference);
+    assert_eq!(
+        resolved.owner_tsconfig_path.as_deref(),
+        Some("/workspace/packages/d/tsconfig.json")
+    );
+}
+
+#[test]
+fn cyclic_branch_skipped_but_sibling_reference_resolves() {
+    // Importer project A references [B, C] in declared order. B references
+    // back to A (a cycle); C resolves the specifier. The cyclic B branch is
+    // skipped without poisoning the walk — the later sibling C must still
+    // resolve.
+    let a = referencing_project(
+        "a",
+        &[
+            "/workspace/packages/b/tsconfig.json",
+            "/workspace/packages/c/tsconfig.json",
+        ],
+    );
+    let b = referencing_project("b", &["/workspace/packages/a/tsconfig.json"]);
+    let c = resolving_project("c", "sib");
+    let resolver = ProjectResolver::new(vec![a, b, c]);
+    let reader = TestReader::with_files(&["/workspace/packages/c/src/index.ts"]);
+
+    let resolved = resolve_bare(
+        &resolver,
+        &reader,
+        "/workspace/packages/a/src/App.ts",
+        "sib",
+    )
+    .expect("sibling reference after a cyclic branch must still resolve");
+    assert_eq!(resolved.source_id, "/workspace/packages/c/src/index.ts");
+    assert_eq!(resolved.resolution_kind, ResolutionKind::ProjectReference);
+
+    // NEGATIVE: a specifier nothing resolves still terminates as None even
+    // with the cyclic branch present.
+    assert!(resolve_bare(
+        &resolver,
+        &reader,
+        "/workspace/packages/a/src/App.ts",
+        "missing-lib",
+    )
+    .is_none());
+}

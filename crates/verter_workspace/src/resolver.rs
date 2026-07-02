@@ -5,7 +5,7 @@
 //! relative/absolute paths. Produces [`ResolveResult`] containing both the
 //! source path and the provider-graph path used by the type provider.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::types::PackageManifest;
@@ -744,6 +744,10 @@ impl ProjectResolver {
         best
     }
 
+    /// Non-recursive entry for project-reference resolution: seeds the
+    /// traversal state with the importing project's own tsconfig so a
+    /// reference back-edge to the importer terminates instead of reprocessing
+    /// it, then delegates to the bounded recursive walk.
     fn resolve_project_references(
         &self,
         reader: &dyn crate::traits::WorkspaceRead,
@@ -751,7 +755,36 @@ impl ProjectResolver {
         specifier: &str,
         ctx: ResolutionContext,
     ) -> Option<String> {
+        let mut state =
+            ProjectReferenceTraversalState::seeded_with(importer_owner.tsconfig_path.as_deref());
+        self.resolve_project_references_inner(reader, importer_owner, specifier, ctx, &mut state)
+    }
+
+    /// Walks the importer's declared `references` in order (first match wins):
+    /// each referenced project's workspace aliases, tsconfig `paths`, and
+    /// `baseUrl` are checked before descending into its own references.
+    ///
+    /// The descent is bounded by [`ProjectReferenceTraversalState`]: an edge
+    /// to a tsconfig already on the active path (a `references` cycle) or past
+    /// the depth fuse terminates only that branch — later sibling references
+    /// still run. Active-set discipline is push-on-descend / pop-on-return, so
+    /// a diamond (A refs B and C, both ref D) resolves through both arms.
+    fn resolve_project_references_inner(
+        &self,
+        reader: &dyn crate::traits::WorkspaceRead,
+        importer_owner: &IdeProjectConfig,
+        specifier: &str,
+        ctx: ResolutionContext,
+        state: &mut ProjectReferenceTraversalState,
+    ) -> Option<String> {
         for reference in &importer_owner.references {
+            // Back-edge to a project already on the active descent path: its
+            // aliases/paths/baseUrl were checked when it was entered (or by
+            // the entry point, for the seed), so skip only this branch.
+            if state.active.contains(reference.as_str()) {
+                continue;
+            }
+
             let Some(project) = self
                 .projects
                 .iter()
@@ -782,13 +815,58 @@ impl ProjectResolver {
                 }
             }
 
-            if let Some(resolved) = self.resolve_project_references(reader, project, specifier, ctx)
-            {
-                return Some(resolved);
+            // Transitive descent, gated by the stack-safety fuse. Exhaustion
+            // terminates only this branch; siblings still run.
+            if state.remaining_depth == 0 {
+                continue;
+            }
+            state.remaining_depth -= 1;
+            state.active.insert(reference.clone());
+            let resolved =
+                self.resolve_project_references_inner(reader, project, specifier, ctx, state);
+            state.active.remove(reference.as_str());
+            state.remaining_depth += 1;
+            if resolved.is_some() {
+                return resolved;
             }
         }
 
         None
+    }
+}
+
+/// Traversal state for one project-reference resolution walk.
+///
+/// Two guards with distinct roles: `active` is the semantic cycle guard (the
+/// set of tsconfig canonical paths currently on the descent path — tsconfig
+/// paths here are already normalized upstream via `normalize_canonical_id`,
+/// so value comparison is exact), and `remaining_depth` is the stack-safety
+/// fuse for pathological acyclic depth the active-set cannot bound.
+struct ProjectReferenceTraversalState {
+    active: HashSet<String>,
+    remaining_depth: u32,
+}
+
+/// Stack-safety fuse for transitive project-reference descent. Generous
+/// enough for any real acyclic reference chain (monorepo chains are at most
+/// tens of projects deep) while staying far below the recursion depth that
+/// exhausts a thread stack — the unbounded walk overflowed at tens of
+/// thousands of frames.
+const PROJECT_REFERENCE_DEPTH_LIMIT: u32 = 256;
+
+impl ProjectReferenceTraversalState {
+    /// Fresh state whose active set is seeded with the starting project's own
+    /// tsconfig path (when it has one), so a reference cycle back to the
+    /// importer terminates at the back-edge.
+    fn seeded_with(importer_tsconfig: Option<&str>) -> Self {
+        let mut active = HashSet::new();
+        if let Some(tsconfig) = importer_tsconfig {
+            active.insert(tsconfig.to_string());
+        }
+        Self {
+            active,
+            remaining_depth: PROJECT_REFERENCE_DEPTH_LIMIT,
+        }
     }
 }
 
