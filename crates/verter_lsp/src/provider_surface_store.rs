@@ -1170,6 +1170,109 @@ pub fn record_carrier_api_surface(
     );
 }
 
+/// Whether the live source for `canonical_id` still byte-matches the captured
+/// surface's carrier source — the by-canonical source-identity half of the
+/// request-snapshot validation used by the background diagnostics paths (the
+/// server-side handlers use the uri-keyed
+/// `VerterLanguageServer::request_surface_matches_live_source`).
+///
+/// The OPEN document buffer is the authority: a closed document (no uri, or a
+/// registry miss) does NOT match — the background diagnostics paths publish
+/// for open files only, so a mid-flight close retires the context (fail
+/// closed).
+#[must_use]
+pub fn surface_matches_open_document_source(
+    documents: &DocumentRegistry,
+    canonical_id: &str,
+    snapshot: &ProviderSurfaceSnapshot,
+) -> bool {
+    let Some(uri) = documents.canonical_id_to_uri(canonical_id) else {
+        return false;
+    };
+    let Some(doc) = documents.get(&uri) else {
+        return false;
+    };
+    ContentHash::of(&doc.source) == snapshot.source_hash
+}
+
+/// Capture the recorded `CarrierIde` request surface for `canonical_id` — the
+/// by-canonical capture the background diagnostics paths (debounced
+/// coordinator, post-init/post-scan publishers) build their provider query
+/// from, mirroring the server-side `capture_provider_request_surface`
+/// fail-closed gates:
+/// - the committed sync state must hold a LIVE (`ide_background_loaded`) IDE
+///   path (the key lookup only — the snapshot is the content/mapper
+///   authority);
+/// - the store must hold a CURRENT `CarrierIde` snapshot at that path;
+/// - the snapshot must belong to THIS canonical;
+/// - the OPEN document source must byte-match the captured carrier source.
+#[must_use]
+pub fn capture_committed_carrier_ide_surface(
+    store: &ProviderSurfaceStore,
+    provider_sync_states: &DashMap<String, crate::provider_sync::ProviderSyncState>,
+    documents: &DocumentRegistry,
+    canonical_id: &str,
+) -> Option<Arc<ProviderSurfaceSnapshot>> {
+    let ide_path = provider_sync_states.get(canonical_id).and_then(|state| {
+        state
+            .ide_background_loaded
+            .then(|| state.ide_path.clone())
+            .flatten()
+    })?;
+    let snapshot = store.current_snapshot(&ide_path)?;
+    if snapshot.kind != ProviderSurfaceKind::CarrierIde {
+        return None;
+    }
+    if snapshot.source_canonical.as_ref() != canonical_id {
+        return None;
+    }
+    surface_matches_open_document_source(documents, canonical_id, &snapshot).then_some(snapshot)
+}
+
+/// Capture the recorded `Shadow` request surface for a self-file rune module —
+/// the by-canonical Shadow analogue of
+/// [`capture_committed_carrier_ide_surface`]: the committed state must hold
+/// the module's own path as a live shadow buffer, the store must hold a
+/// CURRENT `Shadow` snapshot at that path for THIS canonical, and the OPEN
+/// document source must byte-match the captured carrier source.
+#[must_use]
+pub fn capture_committed_shadow_surface(
+    store: &ProviderSurfaceStore,
+    provider_sync_states: &DashMap<String, crate::provider_sync::ProviderSyncState>,
+    documents: &DocumentRegistry,
+    canonical_id: &str,
+) -> Option<Arc<ProviderSurfaceSnapshot>> {
+    let committed = provider_sync_states.get(canonical_id).is_some_and(|state| {
+        state.shadow_background_loaded && state.shadow_path.as_deref() == Some(canonical_id)
+    });
+    if !committed {
+        return None;
+    }
+    let snapshot = store.current_snapshot(canonical_id)?;
+    if snapshot.kind != ProviderSurfaceKind::Shadow {
+        return None;
+    }
+    if snapshot.source_canonical.as_ref() != canonical_id {
+        return None;
+    }
+    surface_matches_open_document_source(documents, canonical_id, &snapshot).then_some(snapshot)
+}
+
+/// Post-await validation for a by-canonical captured surface: still honored by
+/// the store AND the open document still byte-matches. `false` ⇒ the provider
+/// response was produced against a surface that no longer matches the live
+/// state — the caller must DROP the provider contribution (fail closed).
+#[must_use]
+pub fn captured_surface_still_valid_for_canonical(
+    store: &ProviderSurfaceStore,
+    documents: &DocumentRegistry,
+    canonical_id: &str,
+    snapshot: &ProviderSurfaceSnapshot,
+) -> bool {
+    store.captured_snapshot_still_honored(snapshot)
+        && surface_matches_open_document_source(documents, canonical_id, snapshot)
+}
+
 /// THE free-function record choke point for a DIRECT IDE-surface sync outside
 /// the server (the coordinator / background-drain / workspace-scanner direct-
 /// open paths; the tsserver publish path records through

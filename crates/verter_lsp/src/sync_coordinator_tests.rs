@@ -485,52 +485,11 @@ async fn rune_module_debounced_diagnostics_map_through_self_file_projection() {
     });
 
     let file_language = crate::server::adapter_module_language_for(canonical_id).unwrap();
-    // Build the EXACT provider buffer the coordinator will query against,
-    // so we can place a diagnostic at a known user-source token's provider
-    // byte offset (no snapshot → empty rewrites → pure prelude offset).
-    let provider_content = crate::server::self_file_provider_content(
-        &documents,
-        None,
-        canonical_id,
-        &file_language,
-        source,
-    )
-    .expect("rune provider content builds");
-    // The prelude shifts every user line down; locate the user token `bad`
-    // (source line 1) inside the provider buffer and set a type diagnostic
-    // over it at provider byte offsets.
-    let provider_bad = provider_content
-        .find("bad")
-        .expect("token present in provider buffer");
     let provider = Arc::new(MockTypeProvider::new());
-    provider.set_diagnostics(
-        canonical_id,
-        vec![TypeDiagnostic {
-            message: "Type 'string' is not assignable to type 'number'.".to_string(),
-            severity: TypeDiagnosticSeverity::Error,
-            start: provider_bad as u32,
-            end: (provider_bad + 3) as u32,
-            code: Some("2322".to_string()),
-            tags: Vec::new(),
-            related_information: Vec::new(),
-        }],
-    );
 
-    // Pre-seed the rune module's Shadow state so the diagnostics path queries
-    // the provider at its own path.
     let provider_sync_states = Arc::new(DashMap::new());
-    provider_sync_states.insert(
-        canonical_id.to_string(),
-        ProviderSyncState {
-            owner_binding: crate::provider_sync::ProviderOwnerBinding::Unresolved,
-            shadow_path: Some(canonical_id.to_string()),
-            shadow_background_loaded: true,
-            ..Default::default()
-        },
-    );
-
     let deps = SyncCoordinatorDeps {
-        documents,
+        documents: Arc::clone(&documents),
         project_sync: ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
@@ -544,15 +503,49 @@ async fn rune_module_debounced_diagnostics_map_through_self_file_projection() {
         carrier_publish_coordinator: None,
     };
 
-    let merged = rune_module_diagnostics(
-        &deps,
-        provider.as_ref(),
+    // A REAL shadow sync (the production primitive): commits the Shadow state
+    // AND records the Shadow surface the diagnostics path captures.
+    assert!(
+        crate::server::sync_self_file_shadow_state(
+            &deps.documents,
+            &deps.project_sync,
+            &deps.provider_sync_states,
+            None,
+            &uri,
+            canonical_id,
+            &file_language,
+        )
+        .await,
+        "the shadow sync should succeed against the mock provider"
+    );
+
+    // The EXACT provider buffer the coordinator queries against is the recorded
+    // Shadow surface. The prelude shifts every user line down; locate the user
+    // token `bad` (source line 1) inside the provider buffer and set a type
+    // diagnostic over it at provider byte offsets.
+    let provider_content = documents
+        .provider_surfaces()
+        .current_snapshot(canonical_id)
+        .expect("the shadow sync records a Shadow surface")
+        .provider_content
+        .clone();
+    let provider_bad = provider_content
+        .find("bad")
+        .expect("token present in provider buffer");
+    provider.set_diagnostics(
         canonical_id,
-        &file_language,
-        &uri,
-        Vec::new(),
-    )
-    .await;
+        vec![TypeDiagnostic {
+            message: "Type 'string' is not assignable to type 'number'.".to_string(),
+            severity: TypeDiagnosticSeverity::Error,
+            start: provider_bad as u32,
+            end: (provider_bad + 3) as u32,
+            code: Some("2322".to_string()),
+            tags: Vec::new(),
+            related_information: Vec::new(),
+        }],
+    );
+
+    let merged = rune_module_diagnostics(&deps, provider.as_ref(), canonical_id, Vec::new()).await;
 
     // The type provider must have been queried at the module's OWN canonical
     // path (the Shadow buffer), never a derived `.tsx`.
@@ -961,5 +954,306 @@ async fn coordinator_open_unresolved_preserve_records_carrier_ide_surface() {
         snapshot.kind,
         crate::provider_surface_store::ProviderSurfaceKind::CarrierIde,
         "the recorded surface must carry the CarrierIde role"
+    );
+}
+
+/// Shared setup for the background carrier-diagnostics tests: an owner-resolved,
+/// coordinator-synced carrier (its CarrierIde surface recorded), plus a provider
+/// type diagnostic positioned over the script's `const msg` statement so a
+/// successful merge maps it back into the `.vue` source.
+async fn make_carrier_diagnostics_fixture() -> (
+    Arc<DocumentRegistry>,
+    Arc<DashMap<String, ProviderSyncState>>,
+    Arc<MockTypeProvider>,
+    String,
+    String,
+) {
+    use crate::type_provider::protocol::{TypeDiagnostic, TypeDiagnosticSeverity};
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let canonical_id = "/workspace/src/App.vue".to_string();
+    let uri: Uri = "file:///workspace/src/App.vue".parse().expect("test uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: "<script setup lang=\"ts\">\nconst msg = 'hello'\n</script>\n\
+               <template><div>{{ msg }}</div></template>\n"
+            .to_string(),
+    });
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let vfs_workspace = Arc::new(crate::test_utils::make_test_vfs_workspace_with_resolver(
+        "/workspace",
+        Some("/workspace/tsconfig.json"),
+    ));
+    let provider_sync_states = Arc::new(DashMap::new());
+
+    let deps = SyncCoordinatorDeps {
+        documents: Arc::clone(&documents),
+        project_sync: ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject),
+        needs_provider_sync: Arc::new(DashSet::new()),
+        pending_snapshot_provider_sync: Arc::new(DashSet::new()),
+        client: make_test_client(),
+        type_provider: Some(provider.clone()),
+        cached_verter_diags: Arc::new(DashMap::new()),
+        position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
+        provider_sync_states: Arc::clone(&provider_sync_states),
+        vfs_workspace,
+        type_provider_kind: crate::TypeProviderKind::Tsgo,
+        carrier_publish_coordinator: None,
+    };
+    sync_file(&deps, &canonical_id, uri.as_str()).await;
+
+    let ide_path = provider_sync_states
+        .get(&canonical_id)
+        .and_then(|state| state.ide_path.clone())
+        .expect("the owner-resolved sync must commit an IDE path");
+    let profile = documents.tsx_profile.read().clone();
+    let ide = host
+        .get_ide(&canonical_id, &profile)
+        .expect("IDE output should exist");
+    let diag_start = ide
+        .code
+        .find("const msg")
+        .expect("script statement present in IDE output")
+        + "const ".len();
+    provider.set_diagnostics(
+        &ide_path,
+        vec![TypeDiagnostic {
+            message: "PROVIDER_DIAG_SENTINEL".to_string(),
+            severity: TypeDiagnosticSeverity::Error,
+            start: diag_start as u32,
+            end: (diag_start + 3) as u32,
+            code: Some("2322".to_string()),
+            tags: Vec::new(),
+            related_information: Vec::new(),
+        }],
+    );
+    (
+        documents,
+        provider_sync_states,
+        provider,
+        canonical_id,
+        ide_path,
+    )
+}
+
+/// STABLE surface: the background carrier-diagnostics merge serves the
+/// provider's type diagnostic mapped into the `.vue` source — guards against
+/// an over-eager fail-closed gate dropping healthy background diagnostics.
+#[tokio::test(flavor = "multi_thread")]
+async fn carrier_diagnostics_serve_provider_results_from_stable_recorded_surface() {
+    let (documents, provider_sync_states, provider, canonical_id, _ide_path) =
+        make_carrier_diagnostics_fixture().await;
+
+    let merged = carrier_provider_diagnostics(
+        &documents,
+        &provider_sync_states,
+        provider.as_ref(),
+        PositionEncodingKind::UTF16,
+        &canonical_id,
+        Vec::new(),
+    )
+    .await;
+    assert!(
+        merged.iter().any(|d| d.message == "PROVIDER_DIAG_SENTINEL"),
+        "a stable recorded surface must serve the provider diagnostic, got {merged:?}"
+    );
+}
+
+/// A provider re-sync landing a FRESH surface generation while the background
+/// diagnostics request is awaiting the provider must cause the provider
+/// diagnostics to be DROPPED (fail closed): the response was produced against a
+/// surface that no longer matches, and mapping it through a torn context would
+/// publish wrong positions. The Verter-only diagnostics still publish.
+#[tokio::test(flavor = "multi_thread")]
+async fn carrier_diagnostics_drop_provider_results_when_surface_regenerates_mid_request() {
+    let (documents, provider_sync_states, provider, canonical_id, ide_path) =
+        make_carrier_diagnostics_fixture().await;
+
+    let store = documents.provider_surfaces().clone();
+    let raced_path = ide_path.clone();
+    let raced_canonical = canonical_id.clone();
+    provider.set_on_query(
+        &ide_path,
+        Box::new(move || {
+            // A concurrent re-sync lands a NEW generation with drifted content
+            // between the capture and the merge of the response.
+            store.record(
+                crate::provider_surface_store::RecordSurface::carrier_legacy(
+                    crate::provider_surface_store::ProviderSurfaceKind::CarrierIde,
+                    raced_path,
+                    raced_canonical,
+                    Arc::from("// drifted ide content"),
+                    None,
+                    Arc::from("// drifted carrier source"),
+                ),
+            );
+        }),
+    );
+
+    let merged = carrier_provider_diagnostics(
+        &documents,
+        &provider_sync_states,
+        provider.as_ref(),
+        PositionEncodingKind::UTF16,
+        &canonical_id,
+        Vec::new(),
+    )
+    .await;
+    assert!(
+        !merged.iter().any(|d| d.message == "PROVIDER_DIAG_SENTINEL"),
+        "provider diagnostics produced against a superseded surface generation must be \
+         DROPPED, got {merged:?}"
+    );
+}
+
+/// A surface retirement (a racing close) while the background diagnostics
+/// request is awaiting the provider must fail closed: the provider diagnostics
+/// drop, the Verter-only set survives, no panic.
+#[tokio::test(flavor = "multi_thread")]
+async fn carrier_diagnostics_drop_provider_results_when_surface_retired_mid_request() {
+    let (documents, provider_sync_states, provider, canonical_id, ide_path) =
+        make_carrier_diagnostics_fixture().await;
+
+    let store = documents.provider_surfaces().clone();
+    let raced_path = ide_path.clone();
+    provider.set_on_query(
+        &ide_path,
+        Box::new(move || {
+            // The surface is retired mid-request (a racing close began); the
+            // close is not yet confirmed, so the token is deliberately kept.
+            let _token = store.forget(&raced_path);
+        }),
+    );
+
+    let merged = carrier_provider_diagnostics(
+        &documents,
+        &provider_sync_states,
+        provider.as_ref(),
+        PositionEncodingKind::UTF16,
+        &canonical_id,
+        Vec::new(),
+    )
+    .await;
+    assert!(
+        !merged.iter().any(|d| d.message == "PROVIDER_DIAG_SENTINEL"),
+        "provider diagnostics racing a surface retirement must be DROPPED, got {merged:?}"
+    );
+}
+
+/// A shadow-surface mutation landing while the rune-module diagnostics request
+/// is awaiting the provider must cause the provider diagnostics to be DROPPED
+/// (fail closed): the response was produced against a Shadow surface that no
+/// longer matches, so mapping it through the superseded rewrite-aware mapper
+/// would publish wrong positions.
+#[tokio::test(flavor = "multi_thread")]
+async fn rune_diagnostics_drop_provider_results_when_shadow_surface_regenerates_mid_request() {
+    use crate::type_provider::protocol::{TypeDiagnostic, TypeDiagnosticSeverity};
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let canonical_id = "/workspace/store.svelte.ts";
+    let source = "export const s = $state(0);\nexport const bad: number = 'x';\n";
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(canonical_id.to_string()),
+        input_id: canonical_id.to_string(),
+        source: Arc::<str>::from(source),
+        file_language: crate::server::adapter_module_language_for(canonical_id)
+            .expect("the path classifies as a rune module"),
+        aliases: Vec::new(),
+    });
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri: Uri = "file:///workspace/store.svelte.ts"
+        .parse()
+        .expect("test uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "typescript".to_string(),
+        version: 1,
+        text: source.to_string(),
+    });
+    let file_language = crate::server::adapter_module_language_for(canonical_id).unwrap();
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let provider_sync_states = Arc::new(DashMap::new());
+    let deps = SyncCoordinatorDeps {
+        documents: Arc::clone(&documents),
+        project_sync: ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject),
+        needs_provider_sync: Arc::new(DashSet::new()),
+        pending_snapshot_provider_sync: Arc::new(DashSet::new()),
+        client: make_test_client(),
+        type_provider: Some(provider.clone()),
+        cached_verter_diags: Arc::new(DashMap::new()),
+        position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
+        provider_sync_states,
+        vfs_workspace: Arc::new(parking_lot::RwLock::new(None)),
+        type_provider_kind: crate::TypeProviderKind::Tsgo,
+        carrier_publish_coordinator: None,
+    };
+    assert!(
+        crate::server::sync_self_file_shadow_state(
+            &deps.documents,
+            &deps.project_sync,
+            &deps.provider_sync_states,
+            None,
+            &uri,
+            canonical_id,
+            &file_language,
+        )
+        .await,
+        "the shadow sync should succeed against the mock provider"
+    );
+
+    let provider_content = documents
+        .provider_surfaces()
+        .current_snapshot(canonical_id)
+        .expect("the shadow sync records a Shadow surface")
+        .provider_content
+        .clone();
+    let provider_bad = provider_content
+        .find("bad")
+        .expect("token present in provider buffer");
+    provider.set_diagnostics(
+        canonical_id,
+        vec![TypeDiagnostic {
+            message: "RUNE_PROVIDER_DIAG_SENTINEL".to_string(),
+            severity: TypeDiagnosticSeverity::Error,
+            start: provider_bad as u32,
+            end: (provider_bad + 3) as u32,
+            code: Some("2322".to_string()),
+            tags: Vec::new(),
+            related_information: Vec::new(),
+        }],
+    );
+
+    // Mid-request seam: a concurrent shadow re-sync lands a fresh generation
+    // with drifted content between the capture and the merge.
+    let store = documents.provider_surfaces().clone();
+    let raced_canonical = canonical_id.to_string();
+    provider.set_on_query(
+        canonical_id,
+        Box::new(move || {
+            store.record(
+                crate::provider_surface_store::RecordSurface::carrier_legacy(
+                    crate::provider_surface_store::ProviderSurfaceKind::Shadow,
+                    raced_canonical.clone(),
+                    raced_canonical,
+                    Arc::from("// drifted shadow content"),
+                    None,
+                    Arc::from("// drifted module source"),
+                ),
+            );
+        }),
+    );
+
+    let merged = rune_module_diagnostics(&deps, provider.as_ref(), canonical_id, Vec::new()).await;
+    assert!(
+        !merged
+            .iter()
+            .any(|d| d.message == "RUNE_PROVIDER_DIAG_SENTINEL"),
+        "rune provider diagnostics produced against a superseded Shadow surface must be \
+         DROPPED, got {merged:?}"
     );
 }

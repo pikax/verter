@@ -825,16 +825,30 @@ mod inner {
         }
 
         fn get_diagnostics(&self, path: &str) -> ProviderFuture<'_, Vec<TypeDiagnostic>> {
-            let mut state = self.state.lock().unwrap();
-            state.calls.push(MockCall::GetDiagnostics {
-                path: path.to_string(),
-            });
-            let result = state
-                .diagnostic_responses
-                .iter()
-                .find(|(p, _)| p == path)
-                .map(|(_, diags)| diags.clone())
-                .unwrap_or_default();
+            let (result, on_query) = {
+                let mut state = self.state.lock().unwrap();
+                state.calls.push(MockCall::GetDiagnostics {
+                    path: path.to_string(),
+                });
+                let result = state
+                    .diagnostic_responses
+                    .iter()
+                    .find(|(p, _)| p == path)
+                    .map(|(_, diags)| diags.clone())
+                    .unwrap_or_default();
+                let on_query = match &state.on_query {
+                    Some((armed_path, _)) if armed_path == path => {
+                        state.on_query.take().map(|(_, cb)| cb)
+                    }
+                    _ => None,
+                };
+                (result, on_query)
+            };
+            // Run the one-shot mid-request seam AFTER releasing the state lock
+            // (a callback that re-enters the mock must not deadlock).
+            if let Some(callback) = on_query {
+                callback();
+            }
             Box::pin(async move { Ok(result) })
         }
 

@@ -6,7 +6,6 @@ use tower_lsp_server::ls_types::*;
 use tower_lsp_server::{Client, LanguageServer};
 
 use crate::documents::line_index::LineIndex;
-use crate::documents::position_map::PositionMapper;
 use crate::documents::provider_projection::ProviderPositionMapper;
 use crate::documents::{uri_to_canonical_id, DocumentRegistry};
 use crate::features::cursor_context::ExpressionContext;
@@ -144,7 +143,7 @@ use self::server_utils::*;
 pub(crate) use self::server_utils::{
     adapter_module_language_for, carrier_language_for, compute_verter_diagnostics_for_with_views,
     is_default_export_component_carrier, prepare_non_carrier_provider_sync,
-    self_file_provider_content, sync_self_file_shadow_state,
+    sync_self_file_shadow_state,
 };
 
 #[path = "../background_drain.rs"]

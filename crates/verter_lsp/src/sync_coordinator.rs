@@ -19,7 +19,6 @@ use tower_lsp_server::ls_types::*;
 use tower_lsp_server::Client;
 
 use crate::documents::line_index::LineIndex;
-use crate::documents::position_map::PositionMapper;
 use crate::documents::DocumentRegistry;
 use crate::provider_sync::{
     commit_sync_transition, genuinely_stale_after_sync, non_decl_close_targets,
@@ -564,61 +563,60 @@ async fn close_stale_paths(
 /// SELF-FILE projection: query the type provider at the module's OWN canonical
 /// path (the Shadow provider buffer `<rune prelude> + <rewritten module
 /// bytes>`), then map each type diagnostic back to the user-source position
-/// through the document's rewrite-aware self-file mapper (prelude offset +
-/// per-line rewrite delta). Falls back to the verter diagnostics alone when the
-/// provider has no committed Shadow path, the mapper/content is unavailable, or
-/// the provider errors.
+/// through the rewrite-aware self-file mapper (prelude offset + per-line
+/// rewrite delta).
+///
+/// Built EXCLUSIVELY from ONE captured immutable
+/// [`ProviderSurfaceSnapshot`](crate::provider_surface_store::ProviderSurfaceSnapshot)
+/// (`capture_committed_shadow_surface`): the provider buffer bytes, mapper, and
+/// carrier source all come from the same recorded surface, so the tuple can
+/// never be torn by a concurrent re-sync/close. After the provider await the
+/// captured surface is RE-VALIDATED; on mismatch the provider diagnostics are
+/// DROPPED and the Verter-only set publishes (fail closed). Falls back to the
+/// verter diagnostics alone when no capturable Shadow surface exists or the
+/// provider errors.
 async fn rune_module_diagnostics(
     deps: &SyncCoordinatorDeps,
     tp: &dyn TypeProvider,
     canonical_id: &str,
-    file_language: &verter_session::FileLanguage,
-    uri: &Uri,
     verter_diags: Vec<Diagnostic>,
 ) -> Vec<Diagnostic> {
-    // Only query the provider when the rune module's Shadow buffer is actually
-    // committed at its own path (avoids querying an unmaterialized path).
-    let has_shadow = deps
-        .provider_sync_states
-        .get(canonical_id)
-        .is_some_and(|state| state.shadow_path.as_deref() == Some(canonical_id));
-    if !has_shadow {
-        return verter_diags;
-    }
-
-    let Some(source) = deps.documents.get(uri).map(|d| d.source.clone()) else {
-        return verter_diags;
-    };
-    let Some(mapper) = deps.documents.get_position_mapper(uri) else {
-        return verter_diags;
-    };
-    let snapshot = {
-        let ws = deps.vfs_workspace.read();
-        ws.as_ref().and_then(|ws| {
-            let published = ws.load_published()?;
-            Some(crate::server::PublishedResolverSnapshot {
-                resolver: published.snapshot.resolver.clone(),
-                ownership_ready: published.ownership_ready,
-            })
-        })
-    };
-    let Some(provider_content) = crate::server::self_file_provider_content(
+    let store = deps.documents.provider_surfaces();
+    let Some(snapshot) = crate::provider_surface_store::capture_committed_shadow_surface(
+        store,
+        &deps.provider_sync_states,
         &deps.documents,
-        snapshot.as_ref(),
         canonical_id,
-        file_language,
-        &source,
     ) else {
+        return verter_diags;
+    };
+    // No usable mapper ⇒ the provider's offsets could not be mapped back onto
+    // the module source ⇒ fail closed to Verter-only.
+    let Some(mapper) = snapshot.source_map.as_ref().map(|m| (**m).clone()) else {
         return verter_diags;
     };
 
     let encoding = deps.position_encoding.read().clone();
-    let provider_li = LineIndex::new(&provider_content, encoding.clone());
-    let source_li = LineIndex::new(&source, encoding.clone());
+    let provider_li = LineIndex::new(&snapshot.provider_content, encoding.clone());
+    let source_li = LineIndex::new(&snapshot.carrier_source, encoding.clone());
     let encoding_for_related = encoding;
 
     match tp.get_diagnostics(canonical_id).await {
         Ok(type_diags) => {
+            // Post-await validation: diagnostics produced against a surface that
+            // no longer matches must be DROPPED (fail closed).
+            if !crate::provider_surface_store::captured_surface_still_valid_for_canonical(
+                store,
+                &deps.documents,
+                canonical_id,
+                &snapshot,
+            ) {
+                tracing::debug!(
+                    "sync_coordinator: dropping rune-module provider diagnostics for \
+                     {canonical_id} — captured surface no longer valid"
+                );
+                return verter_diags;
+            }
             // Related-span map-back: a same-file related span maps through the
             // in-context mapper; a real `.ts` related span reads its own source via
             // the VFS reader. A FOREIGN carrier `.tsx` related span needs the
@@ -726,16 +724,9 @@ async fn publish_merged_diagnostics(deps: &SyncCoordinatorDeps, canonical_id: &s
     // offset source position — NOT through the carrier IDE-source-map path
     // below (which requires an `ide_path` the rune module never has).
     if let Some(tp) = &deps.type_provider {
-        if let Some(file_language) = crate::server::adapter_module_language_for(canonical_id) {
-            let diagnostics = rune_module_diagnostics(
-                deps,
-                tp.as_ref(),
-                canonical_id,
-                &file_language,
-                &uri,
-                verter_diags,
-            )
-            .await;
+        if crate::server::adapter_module_language_for(canonical_id).is_some() {
+            let diagnostics =
+                rune_module_diagnostics(deps, tp.as_ref(), canonical_id, verter_diags).await;
             return deps
                 .client
                 .publish_diagnostics(uri, diagnostics, None)
@@ -744,86 +735,16 @@ async fn publish_merged_diagnostics(deps: &SyncCoordinatorDeps, canonical_id: &s
     }
 
     let diagnostics = if let Some(tp) = &deps.type_provider {
-        // Build IDE context from the host
-        let profile = deps.documents.tsx_profile.read().clone();
-        let ide =
-            tokio::task::block_in_place(|| deps.documents.host.get_ide(canonical_id, &profile));
-
-        if let Some(ide) = ide {
-            // Use committed provider sync state for the tsx_path.
-            // This ensures we only query the type provider for paths
-            // that are actually materialized in provider state.
-            let Some(tsx_path) = deps
-                .provider_sync_states
-                .get(canonical_id)
-                .and_then(|state| state.ide_path.clone())
-            else {
-                return deps
-                    .client
-                    .publish_diagnostics(uri, verter_diags, None)
-                    .await;
-            };
-            let encoding = deps.position_encoding.read().clone();
-            let tsx_li = LineIndex::new(&ide.code, encoding.clone());
-
-            // Build position mapper from IDE source map
-            let mapper = ide
-                .source_map
-                .as_ref()
-                .and_then(|sm| PositionMapper::from_json(sm).ok());
-
-            // Build Vue source line index
-            let carrier_source = deps.documents.host.get_source(canonical_id);
-
-            match (tp.get_diagnostics(&tsx_path).await, mapper, carrier_source) {
-                (Ok(type_diags), Some(mapper), Some(carrier_src)) => {
-                    let carrier_li = LineIndex::new(&carrier_src, encoding.clone());
-                    let mapper =
-                        crate::documents::provider_projection::ProviderPositionMapper::source_map(
-                            mapper,
-                        );
-                    tracing::debug!(
-                        "sync_coordinator: publish {} verter + {} type diags for {}",
-                        verter_diags.len(),
-                        type_diags.len(),
-                        canonical_id
-                    );
-                    // Related-span map-back: same-file related spans map through the
-                    // in-context mapper; real `.ts` related spans read their own
-                    // source via the VFS reader. A FOREIGN carrier `.tsx` related
-                    // span needs the server-side external resolver (unavailable on
-                    // this background path) → drops fail-closed (`None`).
-                    let carrier_source_exists =
-                        |p: &str| deps.documents.host().get_source(p).is_some();
-                    merge::merge_diagnostics(
-                        verter_diags,
-                        type_diags,
-                        &tsx_path,
-                        &tsx_li,
-                        &mapper,
-                        &carrier_li,
-                        None,
-                        &carrier_source_exists,
-                        encoding,
-                        &|p: &str| {
-                            crate::server::block_in_place_guarded(|| {
-                                deps.documents.host().workspace_read().read_file(p)
-                            })
-                        },
-                    )
-                }
-                (Err(e), _, _) => {
-                    tracing::warn!(
-                        "sync_coordinator: type provider error for {}: {e}",
-                        canonical_id
-                    );
-                    verter_diags
-                }
-                _ => verter_diags,
-            }
-        } else {
-            verter_diags
-        }
+        let encoding = deps.position_encoding.read().clone();
+        carrier_provider_diagnostics(
+            &deps.documents,
+            &deps.provider_sync_states,
+            tp.as_ref(),
+            encoding,
+            canonical_id,
+            verter_diags,
+        )
+        .await
     } else {
         verter_diags
     };
@@ -836,6 +757,102 @@ async fn publish_merged_diagnostics(deps: &SyncCoordinatorDeps, canonical_id: &s
     deps.client
         .publish_diagnostics(uri, diagnostics, None)
         .await;
+}
+
+/// Merge a carrier's provider type diagnostics into `verter_diags` for a
+/// BACKGROUND publish (the debounced coordinator and the post-init/post-scan
+/// publishers).
+///
+/// Built EXCLUSIVELY from ONE captured immutable
+/// [`ProviderSurfaceSnapshot`](crate::provider_surface_store::ProviderSurfaceSnapshot)
+/// (`capture_committed_carrier_ide_surface`): the provider path, content,
+/// mapper, and carrier source all come from the same recorded surface, so the
+/// tuple can never be torn by a concurrent re-sync/close. After the provider
+/// await the captured surface is RE-VALIDATED (still honored + open document
+/// still matches); on mismatch the provider diagnostics are DROPPED and the
+/// Verter-only set publishes (fail closed) — the debounced coordinator
+/// republishes after the next sync lands. Returns `verter_diags` unchanged
+/// when the query context is unavailable.
+pub(crate) async fn carrier_provider_diagnostics(
+    documents: &DocumentRegistry,
+    provider_sync_states: &DashMap<String, ProviderSyncState>,
+    tp: &dyn crate::type_provider::traits::TypeProvider,
+    encoding: PositionEncodingKind,
+    canonical_id: &str,
+    verter_diags: Vec<Diagnostic>,
+) -> Vec<Diagnostic> {
+    let store = documents.provider_surfaces();
+    let Some(snapshot) = crate::provider_surface_store::capture_committed_carrier_ide_surface(
+        store,
+        provider_sync_states,
+        documents,
+        canonical_id,
+    ) else {
+        return verter_diags;
+    };
+    // No usable source map ⇒ the provider's offsets could not be mapped back
+    // onto the carrier ⇒ fail closed to Verter-only.
+    let Some(mapper) = snapshot.source_map.as_ref().map(|m| (**m).clone()) else {
+        return verter_diags;
+    };
+    let tsx_path = snapshot.stamp.provider_path.to_string();
+    let tsx_li = LineIndex::new(&snapshot.provider_content, encoding.clone());
+    let carrier_li = LineIndex::new(&snapshot.carrier_source, encoding.clone());
+
+    match tp.get_diagnostics(&tsx_path).await {
+        Ok(type_diags) => {
+            // Post-await validation: diagnostics produced against a surface that
+            // no longer matches must be DROPPED (fail closed).
+            if !crate::provider_surface_store::captured_surface_still_valid_for_canonical(
+                store,
+                documents,
+                canonical_id,
+                &snapshot,
+            ) {
+                tracing::debug!(
+                    "carrier_provider_diagnostics: dropping provider diagnostics for {} — \
+                     captured surface no longer valid",
+                    canonical_id
+                );
+                return verter_diags;
+            }
+            tracing::debug!(
+                "carrier_provider_diagnostics: merge {} verter + {} type diags for {}",
+                verter_diags.len(),
+                type_diags.len(),
+                canonical_id
+            );
+            // Related-span map-back: same-file related spans map through the
+            // in-context mapper; real `.ts` related spans read their own
+            // source via the VFS reader. A FOREIGN carrier `.tsx` related
+            // span needs the server-side external resolver (unavailable on
+            // this background path) → drops fail-closed (`None`).
+            let carrier_source_exists = |p: &str| documents.host().get_source(p).is_some();
+            merge::merge_diagnostics(
+                verter_diags,
+                type_diags,
+                &tsx_path,
+                &tsx_li,
+                &mapper,
+                &carrier_li,
+                None,
+                &carrier_source_exists,
+                encoding,
+                &|p: &str| {
+                    crate::server::block_in_place_guarded(|| {
+                        documents.host().workspace_read().read_file(p)
+                    })
+                },
+            )
+        }
+        Err(e) => {
+            tracing::warn!(
+                "carrier_provider_diagnostics: type provider error for {}: {e}",
+                canonical_id
+            );
+            verter_diags
+        }
+    }
 }
 
 #[cfg(test)]

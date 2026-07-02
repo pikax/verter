@@ -387,7 +387,6 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         let documents = documents.clone();
         let cached_verter_diags = Arc::clone(&cached_verter_diags);
         let type_provider = type_provider.clone();
-        let tsx_profile = tsx_profile.clone();
         let position_encoding = position_encoding.clone();
         let init_generation = Arc::clone(&init_generation);
         let vfs_workspace = Arc::clone(&vfs_workspace);
@@ -429,70 +428,16 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
 
                 let diagnostics = if let Some(tp) = &type_provider {
                     let canonical_id = crate::documents::uri_to_canonical_id(&uri);
-                    let profile = tsx_profile.read().clone();
-                    let ide = documents.host.get_ide(&canonical_id, &profile);
-
-                    if let Some(ide) = ide {
-                        let tsx_path = provider_sync_states
-                            .get(&canonical_id)
-                            .and_then(|state| state.ide_path.clone());
-                        let encoding = position_encoding.read().clone();
-                        let tsx_li = crate::documents::line_index::LineIndex::new(
-                            &ide.code,
-                            encoding.clone(),
-                        );
-                        let mapper = ide
-                            .source_map
-                            .as_ref()
-                            .and_then(|sm| PositionMapper::from_json(sm).ok());
-                        let vue_source = documents.host.get_source(&canonical_id);
-
-                        let type_diags = if let Some(tsx_path) = tsx_path.as_ref() {
-                            tp.get_diagnostics(tsx_path).await.ok()
-                        } else {
-                            None
-                        };
-
-                        match (type_diags, mapper, vue_source) {
-                            (Some(type_diags), Some(mapper), Some(vue_src)) => {
-                                let vue_li = crate::documents::line_index::LineIndex::new(
-                                    &vue_src,
-                                    encoding.clone(),
-                                );
-                                let mapper =
-                                    crate::documents::provider_projection::ProviderPositionMapper::source_map(mapper);
-                                // `type_diags` is Some only when `tsx_path` was Some,
-                                // so the current-TSX path is present here. Related-span
-                                // map-back: same-file related spans map through the
-                                // in-context mapper, real `.ts` related spans read via
-                                // the VFS reader; a FOREIGN carrier `.tsx` related span
-                                // needs the server external resolver (unavailable on
-                                // this background path) → drops fail-closed (`None`).
-                                let current_tsx_path = tsx_path.as_deref().unwrap_or("");
-                                let carrier_source_exists =
-                                    |p: &str| documents.host().get_source(p).is_some();
-                                crate::type_provider::merge::merge_diagnostics(
-                                    verter_diags,
-                                    type_diags,
-                                    current_tsx_path,
-                                    &tsx_li,
-                                    &mapper,
-                                    &vue_li,
-                                    None,
-                                    &carrier_source_exists,
-                                    encoding,
-                                    &|p: &str| {
-                                        crate::server::block_in_place_guarded(|| {
-                                            documents.host().workspace_read().read_file(p)
-                                        })
-                                    },
-                                )
-                            }
-                            _ => verter_diags,
-                        }
-                    } else {
-                        verter_diags
-                    }
+                    let encoding = position_encoding.read().clone();
+                    crate::sync_coordinator::carrier_provider_diagnostics(
+                        &documents,
+                        &provider_sync_states,
+                        tp.as_ref(),
+                        encoding,
+                        &canonical_id,
+                        verter_diags,
+                    )
+                    .await
                 } else {
                     verter_diags
                 };
@@ -538,67 +483,16 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
 
             let diagnostics = if let Some(tp) = &type_provider {
                 let canonical_id = crate::documents::uri_to_canonical_id(&uri);
-                let profile = tsx_profile.read().clone();
-                let ide = documents.host.get_ide(&canonical_id, &profile);
-
-                if let Some(ide) = ide {
-                    let tsx_path = provider_sync_states
-                        .get(&canonical_id)
-                        .and_then(|state| state.ide_path.clone());
-                    let encoding = position_encoding.read().clone();
-                    let tsx_li =
-                        crate::documents::line_index::LineIndex::new(&ide.code, encoding.clone());
-                    let mapper = ide
-                        .source_map
-                        .as_ref()
-                        .and_then(|sm| PositionMapper::from_json(sm).ok());
-                    let vue_source = documents.host.get_source(&canonical_id);
-
-                    let type_diags = if let Some(tsx_path) = tsx_path.as_ref() {
-                        tp.get_diagnostics(tsx_path).await.ok()
-                    } else {
-                        None
-                    };
-
-                    match (type_diags, mapper, vue_source) {
-                        (Some(type_diags), Some(mapper), Some(vue_src)) => {
-                            let vue_li = crate::documents::line_index::LineIndex::new(
-                                &vue_src,
-                                encoding.clone(),
-                            );
-                            let mapper =
-                                crate::documents::provider_projection::ProviderPositionMapper::source_map(mapper);
-                            // `type_diags` is Some only when `tsx_path` was Some.
-                            // Related-span map-back: same-file related spans map
-                            // through the in-context mapper, real `.ts` related spans
-                            // read via the VFS reader; a FOREIGN carrier `.tsx` related
-                            // span needs the server external resolver (unavailable on
-                            // this background path) → drops fail-closed (`None`).
-                            let current_tsx_path = tsx_path.as_deref().unwrap_or("");
-                            let carrier_source_exists =
-                                |p: &str| documents.host().get_source(p).is_some();
-                            crate::type_provider::merge::merge_diagnostics(
-                                verter_diags,
-                                type_diags,
-                                current_tsx_path,
-                                &tsx_li,
-                                &mapper,
-                                &vue_li,
-                                None,
-                                &carrier_source_exists,
-                                encoding,
-                                &|p: &str| {
-                                    crate::server::block_in_place_guarded(|| {
-                                        documents.host().workspace_read().read_file(p)
-                                    })
-                                },
-                            )
-                        }
-                        _ => verter_diags,
-                    }
-                } else {
-                    verter_diags
-                }
+                let encoding = position_encoding.read().clone();
+                crate::sync_coordinator::carrier_provider_diagnostics(
+                    &documents,
+                    &provider_sync_states,
+                    tp.as_ref(),
+                    encoding,
+                    &canonical_id,
+                    verter_diags,
+                )
+                .await
             } else {
                 verter_diags
             };

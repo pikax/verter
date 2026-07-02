@@ -494,47 +494,6 @@ pub(crate) fn apply_specifier_replacements(
     rewritten
 }
 
-/// Build the self-file provider content (`<rune prelude> + <rewritten module
-/// bytes>`) for a rune module from its OPEN-document source, applying the
-/// resolver-backed import-specifier rewrites when a published snapshot is
-/// available (empty otherwise). This is the SAME pipeline
-/// `prepare_non_carrier_provider_sync` uses, sourced from the open buffer —
-/// shared by the server's generalized projection context and the coordinator's
-/// debounced diagnostics so both produce a byte-identical self-file buffer.
-pub(crate) fn self_file_provider_content(
-    documents: &DocumentRegistry,
-    snapshot: Option<&super::PublishedResolverSnapshot>,
-    canonical_id: &str,
-    file_language: &verter_session::FileLanguage,
-    source: &str,
-) -> Option<String> {
-    let module_references: Vec<verter_session::ScriptModuleReference> = documents
-        .host()
-        .get_analysis(canonical_id)
-        .map(|analysis| {
-            analysis
-                .module_references
-                .iter()
-                .map(verter_session::ScriptModuleReference::from)
-                .collect()
-        })
-        .unwrap_or_default();
-    let rewritten = if let Some(snapshot) = snapshot {
-        let ws = documents.host().workspace_read();
-        rewrite_non_carrier_source_with_resolver(
-            &snapshot.resolver,
-            ws.as_ref(),
-            canonical_id,
-            source,
-            &module_references,
-        )
-    } else {
-        source.to_string()
-    };
-    verter_session::framework::rune_module_provider_content(file_language, &rewritten)
-        .map(|built| built.content)
-}
-
 /// Sync an OPEN rune module's self-file provider buffer (`<rune prelude> +
 /// <rewritten module bytes>`) to the type provider as UNRESOLVED open-document
 /// state, keyed at the module's OWN canonical path (the Shadow provider path).
