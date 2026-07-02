@@ -151,9 +151,22 @@ fn provider_surface_store_is_defined_exactly_once() {
         "ProviderSurfaceStore must be defined EXACTLY once (the single store). \
          Found in: {definitions:?}"
     );
+    // Canonical location: either the flat module file `provider_surface_store.rs`
+    // or the directory-module form `provider_surface_store/mod.rs`. Compare by
+    // path COMPONENTS so the check is separator-agnostic (Windows `\` vs Unix `/`).
+    let def_path = Path::new(&definitions[0]);
+    let mut trailing = def_path
+        .components()
+        .rev()
+        .filter_map(|c| c.as_os_str().to_str());
+    let last = trailing.next();
+    let second_last = trailing.next();
+    let in_canonical_location = last == Some("provider_surface_store.rs")
+        || (last == Some("mod.rs") && second_last == Some("provider_surface_store"));
     assert!(
-        definitions[0].ends_with("provider_surface_store.rs"),
-        "ProviderSurfaceStore must live in provider_surface_store.rs, found in {}",
+        in_canonical_location,
+        "ProviderSurfaceStore must live in its canonical location — \
+         provider_surface_store.rs or provider_surface_store/mod.rs — found in {}",
         definitions[0]
     );
 }
