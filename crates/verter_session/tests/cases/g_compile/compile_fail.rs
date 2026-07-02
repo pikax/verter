@@ -86,3 +86,29 @@ fn output_projector_non_owner_impl_is_compiler_sealed() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/cases/compile-fail/output_projector_not_impl_outside_crate.rs");
 }
+
+/// ALWAYS-ON structural-rail smoke — the load-bearing proof that the
+/// hot-materialize STRUCTURAL rails reject their regression shapes in the
+/// DEFAULT gate (no feature flag; the full compile-fail suite above stays
+/// feature-gated as-is). Scoped to exactly the hot-materialize regressions,
+/// reusing the existing fixtures:
+///
+/// 1. a carrier owning a DIRECT `TypeExpr` field cannot derive `NoTypeExpr`;
+/// 2. a carrier owning an ALIASED `TypeExpr` field (type-alias laundering)
+///    cannot derive `NoTypeExpr`;
+/// 3. an out-of-crate `impl OutputProjector` fails the seal (the trait is not
+///    even nameable outside `verter_session`).
+///
+/// The compile-fail fixture IS the discrimination: if a rail went hollow (the
+/// derive stopped recursing into fields, the alias resolution broke, the seal
+/// visibility widened), the fixture would COMPILE and trybuild would fail this
+/// test. Together with the in-memory scanner revert-probe
+/// (`hot_materialize_scanner_flags_in_memory_injected_offender`) this pins both
+/// hot-materialize rails as live in every default-gate run.
+#[test]
+fn hot_materialize_structural_rails_smoke() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/cases/compile-fail/no_typeexpr_direct_field.rs");
+    t.compile_fail("tests/cases/compile-fail/no_typeexpr_aliased_field.rs");
+    t.compile_fail("tests/cases/compile-fail/output_projector_not_impl_outside_crate.rs");
+}

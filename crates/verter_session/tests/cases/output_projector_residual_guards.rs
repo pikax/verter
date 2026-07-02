@@ -12090,6 +12090,33 @@ fn authority_scopes_no_unsafe_self_test_discriminates() {
 //   hardening_history: round 3 (codex-s9-5c-scope-consult-2026-07-02) = collection-mutation receiver taint through push/insert/extend — a materialized value moved into a collection taints the receiver, closing the collect-then-decide false negative
 // ===========================================================================
 
+/// ALWAYS-ON structural-rail negative assertions (compile-time, default gate):
+/// the symbolic IR and its common owner shapes must never implement
+/// `NoTypeExpr`. If any ever gained the marker, every hot-carrier `NoTypeExpr`
+/// field bound would silently stop rejecting `TypeExpr` ownership — the
+/// structural rail would go hollow while staying green. `assert_not_impl_any!`
+/// fails to COMPILE on regression, so this file (compiled in both default-gate
+/// surfaces) carries the proof without running a test. The public alias
+/// `TypeArgList` pins that a public type ALIAS cannot re-admit the marker
+/// either — the compiler resolves the alias to its `TypeExpr`-owning target.
+/// (The compile-FAIL half of the structural proof — the `#[derive(NoTypeExpr)]`
+/// rejection shapes and the out-of-crate `OutputProjector` seal — runs as the
+/// always-on trybuild smoke `hot_materialize_structural_rails_smoke` in the
+/// `compile_fail` case module.)
+mod hot_structural_rail_not_impl_asserts {
+    use static_assertions::assert_not_impl_any;
+    use verter_no_typeexpr::NoTypeExpr;
+    use verter_session::typeinfo::types::TypeArgList;
+    use verter_type_expr::TypeExpr;
+
+    assert_not_impl_any!(TypeExpr: NoTypeExpr);
+    assert_not_impl_any!(Option<TypeExpr>: NoTypeExpr);
+    assert_not_impl_any!(Vec<TypeExpr>: NoTypeExpr);
+    assert_not_impl_any!(std::sync::Arc<TypeExpr>: NoTypeExpr);
+    assert_not_impl_any!(Box<TypeExpr>: NoTypeExpr);
+    assert_not_impl_any!(TypeArgList<'static>: NoTypeExpr);
+}
+
 /// Direct materialize PRIMITIVE idents — obtaining a bare `TypeExpr` from the
 /// sealed output boundary (the capability accessors `materialize_output_type_expr`
 /// / `materialize_reduced_output_type_expr` / `into_type_expr` / the
@@ -14741,6 +14768,45 @@ fn hot_scan_snippet(rel: &str, src: &str) -> Vec<String> {
     hot_materialize_violations_in_src(rel, src, &index, &returns_mat, &returns_typeexpr)
 }
 
+/// Run the full two-pass fence pipeline over a set of production sources
+/// (`(rel, src)` pairs): pass 1 builds the global QUALIFIED fn index + the
+/// return-taint sets across every source; pass 2 scans each source for
+/// materialize-then-decide violations. Returns the sorted offender inventory.
+///
+/// THE ONE production scan path: the fence test
+/// (`hot_path_never_calls_materialize_type_expr`) feeds it the on-disk tree;
+/// the in-memory revert-probe
+/// (`hot_materialize_scanner_flags_in_memory_injected_offender`) feeds it a
+/// cloned + injected copy. Source ACQUISITION is the only difference between
+/// the two entry points — there is no parallel scanner clone, so the probe's
+/// RED proof exercises exactly the pipeline the fence trusts.
+fn hot_materialize_offenders_in_sources(sources: &[(String, String)]) -> Vec<String> {
+    let parsed: Vec<(String, syn::File)> = sources
+        .iter()
+        .filter(|(rel, _)| !rel.contains("/typeinfo_tests/") && !rel.ends_with("/test_only.rs"))
+        .filter_map(|(rel, src)| syn::parse_file(src).ok().map(|f| (rel.clone(), f)))
+        .collect();
+    let index = build_hot_index(&parsed);
+    let returns_mat = hot_returns_materialized(&index);
+    let returns_typeexpr = hot_returns_typeexpr_bare(&index);
+
+    let mut offenders: Vec<String> = Vec::new();
+    for (rel, src) in sources {
+        if rel.contains("/typeinfo_tests/") || rel.ends_with("/test_only.rs") {
+            continue;
+        }
+        offenders.extend(hot_materialize_violations_in_src(
+            rel,
+            src,
+            &index,
+            &returns_mat,
+            &returns_typeexpr,
+        ));
+    }
+    offenders.sort();
+    offenders
+}
+
 /// A terminal-sink fn's self-policing summary (its `TypeExpr` params seeded
 /// materialized): whether it decides on a MATERIALIZED-OUTPUT value, plus the
 /// SEEDED symbolic-input params it decides on vs the ones it lowers (the
@@ -14828,32 +14894,10 @@ fn hot_self_policing_summaries(
 /// the complete offender inventory and must not be weakened to admit one.
 #[test]
 fn hot_path_never_calls_materialize_type_expr() {
-    // Pass 1: build the global QUALIFIED fn index + the return-taint set
-    // (qualified entry indices) across every production file.
-    let parsed: Vec<(String, syn::File)> = production_src_files()
-        .into_iter()
-        .filter(|(rel, _)| !rel.contains("/typeinfo_tests/") && !rel.ends_with("/test_only.rs"))
-        .filter_map(|(rel, src)| syn::parse_file(&src).ok().map(|f| (rel, f)))
-        .collect();
-    let index = build_hot_index(&parsed);
-    let returns_mat = hot_returns_materialized(&index);
-    let returns_typeexpr = hot_returns_typeexpr_bare(&index);
-
-    // Pass 2: scan each file for materialize-then-decide violations.
-    let mut offenders: Vec<String> = Vec::new();
-    for (rel, src) in production_src_files() {
-        if rel.contains("/typeinfo_tests/") || rel.ends_with("/test_only.rs") {
-            continue;
-        }
-        offenders.extend(hot_materialize_violations_in_src(
-            &rel,
-            &src,
-            &index,
-            &returns_mat,
-            &returns_typeexpr,
-        ));
-    }
-    offenders.sort();
+    // Collection step: the on-disk production tree. The scan/assert step is the
+    // SHARED factored pipeline (`hot_materialize_offenders_in_sources`) — the
+    // same path the in-memory revert-probe exercises.
+    let offenders = hot_materialize_offenders_in_sources(&production_src_files());
 
     // Anti-false-positive rail: NO sanctioned terminal one-shot sink may appear
     // in the violation set. A terminal that publishes a materialized value with
@@ -14888,6 +14932,74 @@ fn hot_path_never_calls_materialize_type_expr() {
          materialize ONCE at a registered terminal sink. Sites:\n{}",
         offenders.len(),
         offenders.join("\n")
+    );
+}
+
+/// LOAD-BEARING proof for the syntactic rail, in the default gate: an in-memory
+/// revert-probe through the SAME factored production scan path the fence uses
+/// (`hot_materialize_offenders_in_sources` — no parallel scanner clone).
+///
+/// 1. GREEN: the real on-disk production tree scans to zero offenders.
+/// 2. RED: the collected sources are cloned IN MEMORY and one synthetic
+///    materialize-then-decide fn is appended to ONE real production source
+///    string; the same scan path must report the planted qualified (file, fn).
+///    If the scanner ever went hollow (e.g. an over-broad exclusion, a broken
+///    index pass, an emptied detector list), this step fails — a green fence
+///    would no longer be evidence.
+/// 3. GREEN: the unmodified sources scan to zero again. No disk writes happen
+///    at any point, so the probe is self-restoring by construction.
+#[test]
+fn hot_materialize_scanner_flags_in_memory_injected_offender() {
+    let sources = production_src_files();
+
+    // (1) GREEN on the real tree through the shared factored scan path.
+    let baseline = hot_materialize_offenders_in_sources(&sources);
+    assert!(
+        baseline.is_empty(),
+        "probe step 1: the real production tree must scan green through the factored scan path; \
+         got: {baseline:#?}"
+    );
+
+    // (2) RED: clone in memory, inject a synthetic hot materialize-then-decide
+    //     fn into ONE real production source (a direct mint via the sealed
+    //     accessor, then a `matches!` decide on the minted value).
+    const PROBE_FN: &str = "in_memory_probe_materializes_then_decides";
+    let target_rel = "src/lib.rs";
+    let mut injected: Vec<(String, String)> = sources.clone();
+    let slot = injected
+        .iter_mut()
+        .find(|(rel, _)| rel == target_rel)
+        .unwrap_or_else(|| panic!("`{target_rel}` must exist in the production tree"));
+    slot.1.push_str(&format!(
+        r#"
+fn {PROBE_FN}(x: &TypeExpr) -> bool {{
+    let cap = ProbeCap::new();
+    let minted = cap.materialize_output_type_expr(x).map(|r| r.into_type_expr(&cap));
+    matches!(minted, Some(TypeExpr::Object(_)))
+}}
+"#
+    ));
+    let offenders = hot_materialize_offenders_in_sources(&injected);
+    let expected_key = {
+        let mut parts = hot_mod_path_from_rel(target_rel);
+        parts.push(PROBE_FN.to_string());
+        parts.join("::")
+    };
+    assert!(
+        offenders
+            .iter()
+            .any(|o| o.contains(&format!("{expected_key} ")) && o.contains("materialize+decide")),
+        "probe step 2 (RED proof): the synthetic materialize-then-decide fn planted into \
+         `{target_rel}` must be reported as `{expected_key}` with a materialize+decide verdict \
+         by the SAME factored scan path the fence uses; got: {offenders:#?}"
+    );
+
+    // (3) GREEN again on the untouched sources — the probe was purely in-memory.
+    let restored = hot_materialize_offenders_in_sources(&sources);
+    assert!(
+        restored.is_empty(),
+        "probe step 3: the unmodified sources must scan green again (the probe never touches \
+         disk); got: {restored:#?}"
     );
 }
 
