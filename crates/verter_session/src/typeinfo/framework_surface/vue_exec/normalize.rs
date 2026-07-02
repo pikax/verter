@@ -526,12 +526,11 @@ pub(crate) fn slots_from_typeinfo_surface(
                 .map(|first_param| binding_fields_from_param_node(ctx, first_param, &scope))
                 .unwrap_or_default();
             // `return_expr`: materialize the return NODE ONCE at the terminal sink
-            // (kept as `Option<TypeExpr>`; the normalizer only stores + renders it,
-            // never decides on its variant).
-            let return_expr = parts
-                .return_type
-                .map(|return_node| materialize_slot_return_node(ctx, return_node));
-            let return_expr_scope = return_expr.as_ref().map(|_| scope.clone());
+            // (the normalizer only stores + renders it, never decides on its
+            // variant; a return-absent slot normalizes to the opaque `Unknown`
+            // carrier — see `normalized_slot_return_parts`).
+            let (return_expr, return_expr_scope) =
+                normalized_slot_return_parts(ctx, parts.return_type, &scope);
             // Display `return_type`: prefer the EXACT source text sliced from the
             // return-type annotation span (single-arm) — this preserves a name the
             // typed return cannot surface (an unresolved imported `VNode`). Fall
@@ -559,6 +558,28 @@ pub(crate) fn slots_from_typeinfo_surface(
             })
         })
         .collect()
+}
+
+/// Normalize a slot's (optional) return NODE into the published
+/// `return_expr` / `return_expr_scope` sidecar pair.
+///
+/// The resolver-published invariant: `return_expr` is never `None` — a
+/// return-absent slot publishes the opaque `Unknown` carrier with its paired
+/// scope (`return_expr.is_some() == return_expr_scope.is_some()` holds). A
+/// syntactically absent return type is a DEGRADED slot return, not a graph
+/// raise miss, so it does NOT suppress warm admission (unlike the binding
+/// raise-miss normalization in [`slot_binding_field`]'s non-Pick arm). The
+/// display `return_type` field is computed separately at the call site and is
+/// untouched by this normalization (`Unknown` renders no display text).
+fn normalized_slot_return_parts(
+    ctx: &dyn crate::resolver_core::ResolverContext,
+    return_type: Option<SemanticNodeId>,
+    scope: &TypeExprScope,
+) -> (Option<TypeExpr>, Option<TypeExprScope>) {
+    let return_expr = return_type
+        .map(|return_node| materialize_slot_return_node(ctx, return_node))
+        .unwrap_or(TypeExpr::Unknown { raw: String::new() });
+    (Some(return_expr), Some(scope.clone()))
 }
 
 /// Materialize a Vue slot RETURN node into its display `TypeExpr` — a GENUINE
@@ -732,7 +753,10 @@ fn pick_source_root_node(
 ///   (internally) and the `IndexedAccess` is a pure syntactic display build (NOT
 ///   a reverse-materialisation), the shallow-by-default Pick policy;
 /// - any other member mints its own value ONCE through the registered
-///   [`raise_member_value`] sink.
+///   [`raise_member_value`] sink, raise-miss-normalized: a published binding
+///   never carries `binding_expr: None` (a miss publishes the opaque `Unknown`
+///   carrier with its paired scope and marks the materialization-cache
+///   suppress — see the non-Pick arm).
 ///
 /// The `pick_root` branch is a NODE-DOMAIN `Option` match, never a `TypeExpr`
 /// decide; the display renders through the by-name `.and_then` form. The mint cap
@@ -743,39 +767,60 @@ fn slot_binding_field(
     pick_root: Option<SemanticNodeId>,
     scope: &TypeExprScope,
 ) -> AnalyzedSlotFieldBinding {
-    let host = ctx.host_for_fact_tracer_install();
-    let (binding_expr, binding_expr_scope) = match pick_root {
-        Some(root_node) => {
-            // Mint the Pick source-root ONCE, then build the symbolic
-            // `NamedRoot['member']` display access (a pure syntactic build).
-            let dispatch = ctx.dispatch();
-            let cap = super::TypeinfoVueSurfaceOutputCap::new(&dispatch);
-            let named_root = cap
-                .materialize_output_type_expr(root_node)
-                .map(|raised| raised.into_type_expr(&cap))
-                .unwrap_or(TypeExpr::Unknown { raw: String::new() });
-            let symbolic = TypeExpr::IndexedAccess {
-                object: Arc::new(named_root),
-                index: Arc::new(TypeExpr::Literal(LiteralValue::String(
-                    member.name.as_ref().to_string(),
-                ))),
-            };
-            (Some(symbolic), Some(scope.clone()))
-        }
-        None => {
-            let binding_expr = raise_member_value(ctx, member);
-            let binding_expr_scope = binding_expr
-                .as_ref()
-                .map(|_| macro_member_value_scope(host, member, scope));
-            (binding_expr, binding_expr_scope)
-        }
+    let Some(root_node) = pick_root else {
+        // Non-Pick member: mint the member's own value ONCE through the
+        // registered [`raise_member_value`] sink, with resolver-owned
+        // RAISE-MISS normalization. The resolver-published invariant: slot
+        // bindings never carry `binding_expr: None`, and
+        // `binding_expr.is_some() == binding_expr_scope.is_some()` holds (the
+        // same normalization the Svelte snippet bindings apply). On a raise
+        // miss — the member's value node does not materialize, a torn graph
+        // read — the binding publishes the opaque `Unknown` carrier with its
+        // paired scope and NO fabricated display text, and marks the request's
+        // materialization-cache suppress so the torn result is never admitted
+        // warm as complete metadata (the no-poison completion fence).
+        let raised = raise_member_value(ctx, member);
+        // Display renders through the by-name `.and_then` form BEFORE the
+        // miss fold, so an unraisable value fabricates no display text (no
+        // decision on the materialized value).
+        let type_annotation = raised.as_ref().and_then(render_type_expr_display);
+        // Raise-miss fold: the absent-value arm supplies the opaque `Unknown`
+        // carrier AND marks the materialization-cache suppress — a pure
+        // default fold on absence, never a variant decide on the materialized
+        // value.
+        let binding_expr = Some(raised.unwrap_or_else(|| {
+            crate::request_context::mark_request_materialization_cache_suppress();
+            TypeExpr::Unknown { raw: String::new() }
+        }));
+        let host = ctx.host_for_fact_tracer_install();
+        return AnalyzedSlotFieldBinding {
+            name: member.name.as_ref().to_string(),
+            type_annotation,
+            binding_expr,
+            binding_expr_scope: Some(macro_member_value_scope(host, member, scope)),
+            span: verter_span::Span::default(),
+        };
     };
-    let type_annotation = binding_expr.as_ref().and_then(render_type_expr_display);
+    // Mint the Pick source-root ONCE, then build the symbolic
+    // `NamedRoot['member']` display access (a pure syntactic build).
+    let dispatch = ctx.dispatch();
+    let cap = super::TypeinfoVueSurfaceOutputCap::new(&dispatch);
+    let named_root = cap
+        .materialize_output_type_expr(root_node)
+        .map(|raised| raised.into_type_expr(&cap))
+        .unwrap_or(TypeExpr::Unknown { raw: String::new() });
+    let symbolic = TypeExpr::IndexedAccess {
+        object: Arc::new(named_root),
+        index: Arc::new(TypeExpr::Literal(LiteralValue::String(
+            member.name.as_ref().to_string(),
+        ))),
+    };
+    let type_annotation = render_type_expr_display(&symbolic);
     AnalyzedSlotFieldBinding {
         name: member.name.as_ref().to_string(),
         type_annotation,
-        binding_expr,
-        binding_expr_scope,
+        binding_expr: Some(symbolic),
+        binding_expr_scope: Some(scope.clone()),
         span: verter_span::Span::default(),
     }
 }
@@ -802,4 +847,118 @@ fn macro_member_value_scope(
                 .map(|canonical| TypeExprScope::new(canonical.as_ref()))
         })
         .unwrap_or_else(|| fallback.clone())
+}
+
+#[cfg(test)]
+mod raise_miss_normalization_tests {
+    use std::sync::Arc;
+
+    use verter_type_expr::{MemberVisibility, TypeExpr, TypeExprScope};
+
+    use super::{normalized_slot_return_parts, slot_binding_field};
+    use crate::request_context::{current_cold_compute_completeness, ColdComputeCompletenessScope};
+    use crate::semantic_query::{MemberMergeRole, SemanticNodeId};
+    use crate::typeinfo::surface::{JsdocTagSpan, SurfaceMemberOrigin, TypeInfoSurfaceMember};
+    use crate::types::HostConfig;
+    use crate::VerterHost;
+
+    fn make_host() -> Arc<VerterHost> {
+        Arc::new(VerterHost::new_standalone(HostConfig::default()))
+    }
+
+    /// A synthetic surface member whose `value` node id was never interned in
+    /// the host's semantic graph, so `raise_member_value` genuinely MISSES
+    /// (`materialize_output_type_expr` returns `None` for an absent node).
+    fn raise_miss_member() -> TypeInfoSurfaceMember {
+        TypeInfoSurfaceMember {
+            name: Arc::from("item"),
+            name_span: None,
+            value: SemanticNodeId(u64::MAX),
+            type_annotation_span: None,
+            optional: false,
+            readonly: false,
+            is_method: false,
+            visibility: MemberVisibility::Public,
+            declared_in_macro_type_arg: false,
+            jsdoc_description_span: None,
+            jsdoc_tag_spans: Arc::from(Vec::<JsdocTagSpan>::new().into_boxed_slice()),
+            origin: SurfaceMemberOrigin {
+                canonical_file: None,
+                declaration_span: None,
+                merge_role: MemberMergeRole::Authored,
+            },
+        }
+    }
+
+    /// The resolver-published slot-binding invariant on a raise MISS: the
+    /// binding publishes the opaque `Unknown` carrier (never
+    /// `binding_expr: None`), keeps its paired scope, fabricates no display
+    /// text, and marks the cold compute PARTIAL so the torn graph read is
+    /// never warmed as complete metadata (the no-poison fence). Exercised
+    /// through the non-Pick arm of the registered [`slot_binding_field`]
+    /// terminal (`pick_root: None`).
+    #[test]
+    fn slot_binding_raise_miss_publishes_unknown_carrier_scope_and_cache_suppress() {
+        let host = make_host();
+        let member = raise_miss_member();
+        let scope = TypeExprScope::new("/w/Owner.vue");
+
+        let guard = ColdComputeCompletenessScope::enter();
+        let binding = slot_binding_field(&*host, &member, None, &scope);
+        let completeness = current_cold_compute_completeness();
+        drop(guard);
+
+        assert_eq!(
+            binding.binding_expr,
+            Some(TypeExpr::Unknown { raw: String::new() }),
+            "a raise miss must publish the opaque Unknown carrier, never binding_expr: None"
+        );
+        assert_eq!(
+            binding.binding_expr_scope,
+            Some(scope),
+            "the miss binding keeps its paired scope (pairing invariant: \
+             binding_expr.is_some() == binding_expr_scope.is_some())"
+        );
+        assert!(
+            binding.type_annotation.is_none(),
+            "no display text is fabricated for an unraisable binding value"
+        );
+        assert!(
+            completeness.is_partial(),
+            "a raise miss must mark the cold compute partial so the torn \
+             result is never admitted warm"
+        );
+    }
+
+    /// A RETURN-ABSENT slot publishes `return_expr: Some(Unknown)` with its
+    /// paired scope — never `None` — but does NOT suppress warm admission: a
+    /// syntactically absent return type is a degraded slot return, not a
+    /// graph raise miss.
+    #[test]
+    fn slot_return_absent_publishes_unknown_carrier_without_cache_suppress() {
+        let host = make_host();
+        let scope = TypeExprScope::new("/w/Owner.vue");
+
+        let guard = ColdComputeCompletenessScope::enter();
+        let (return_expr, return_expr_scope) = normalized_slot_return_parts(&*host, None, &scope);
+        let completeness = current_cold_compute_completeness();
+        drop(guard);
+
+        assert_eq!(
+            return_expr,
+            Some(TypeExpr::Unknown { raw: String::new() }),
+            "a return-absent slot publishes the opaque Unknown carrier, never return_expr: None"
+        );
+        assert_eq!(
+            return_expr_scope,
+            Some(scope),
+            "the normalized return keeps its paired scope (pairing invariant: \
+             return_expr.is_some() == return_expr_scope.is_some())"
+        );
+        assert!(
+            !completeness.is_partial(),
+            "a return-absent slot must NOT mark the cold compute partial — \
+             absence is a degraded return, not a torn graph read"
+        );
+    }
 }

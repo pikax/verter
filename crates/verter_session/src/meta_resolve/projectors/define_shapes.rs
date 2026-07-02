@@ -402,9 +402,14 @@ fn dto_request(
 }
 
 /// Construct the typed `(props: { ... }) => RT` function expression for a
-/// resolved slot directly from the analyzer-populated typed sidecars
-/// (`AnalyzedSlotFieldBinding.binding_expr` and `AnalyzedSlotField.return_expr`).
-/// No source-text reparse. Empty-bindings slots produce `() => RT` (no `props`
+/// resolved slot from the normalized Vue `defineSlots` RESOLVER DTO typed
+/// sidecars (`AnalyzedSlotFieldBinding.binding_expr` /
+/// `AnalyzedSlotField.return_expr`, produced by
+/// [`crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx`]'s
+/// `slots_from_typeinfo_surface` normalizer). The resolver normalizes an
+/// unraisable value to the opaque `Unknown` carrier, so the sidecars are
+/// always `Some` — the `expect`s below assert that producer contract. No
+/// source-text reparse. Empty-bindings slots produce `() => RT` (no `props`
 /// parameter).
 pub(crate) fn slot_field_function_type_expr(
     slot: &verter_semantic::analysis::AnalyzedSlotField,
@@ -414,13 +419,13 @@ pub(crate) fn slot_field_function_type_expr(
         TypeExpr,
     };
 
-    // W0.2 invariant: the analyzer populates AnalyzedSlotField.return_expr
-    // whenever an OXC return-type TSType<'_> is in scope. A None here is a
+    // Producer contract: the Vue slot resolver normalizes a return-absent /
+    // unraisable return to `Unknown`, never `None`. A `None` here is a
     // producer-chain bug; panic loudly rather than silently substituting Any.
     let return_type = slot
         .return_expr
         .clone()
-        .expect("AnalyzedSlotField.return_expr populated by analyzer (W0.2 invariant)");
+        .expect("Vue defineSlots resolver DTO must carry AnalyzedSlotField.return_expr");
 
     let parameters = if slot.bindings.is_empty() {
         Vec::new()
@@ -430,7 +435,7 @@ pub(crate) fn slot_field_function_type_expr(
             .iter()
             .map(|binding| {
                 let ty = binding.binding_expr.clone().expect(
-                    "AnalyzedSlotFieldBinding.binding_expr populated by analyzer (W0.2 invariant)",
+                    "Vue defineSlots resolver DTO must carry AnalyzedSlotFieldBinding.binding_expr",
                 );
                 // The analyzed binding tracks the NAME span only.
                 ObjectMember::Property(ObjectProperty::with_spans_public(

@@ -1096,9 +1096,13 @@ pub struct AnalyzedSlotField {
     /// Used by strict slots to validate slot children types.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub return_type: Option<String>,
-    /// Lowered typed form of the slot's return type. Populated by the
-    /// producer that has the OXC `TSType<'_>` AST node in scope. Authoritative
-    /// for resolver / projector / registry / policy / materialiser consumers —
+    /// Lowered typed form of the slot's return type. Parser/analyzer
+    /// producers lower the OXC `TSType<'_>` AST node they hold; framework-
+    /// surface RESOLVER producers raise the slot's semantic graph node and
+    /// may normalize an absent or unraisable published value to
+    /// `TypeExpr::Unknown` (the Vue slot resolver always does — its
+    /// published `return_expr` is never `None`). Authoritative for resolver /
+    /// projector / registry / policy / materialiser consumers —
     /// `return_type` is display-only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub return_expr: Option<TypeExpr>,
@@ -1124,11 +1128,15 @@ pub struct AnalyzedSlotFieldBinding {
     /// Type annotation text extracted from source (e.g., `"string"`, `"MyItem"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub type_annotation: Option<String>,
-    /// Lowered typed form of the binding's type. Populated by the producer
-    /// that has the OXC `TSType<'_>` AST node in scope (typically
+    /// Lowered typed form of the binding's type (typically
     /// `TypeExpr::IndexedAccess` against the slot parameter object).
-    /// Authoritative for resolver / projector / registry / policy /
-    /// materialiser consumers — `type_annotation` is display-only.
+    /// Parser/analyzer producers lower the OXC `TSType<'_>` AST node they
+    /// hold; framework-surface RESOLVER producers raise the binding's
+    /// semantic graph node and normalize an unraisable published value to
+    /// `TypeExpr::Unknown` (a resolver-published binding never carries
+    /// `binding_expr: None`). Authoritative for resolver / projector /
+    /// registry / policy / materialiser consumers — `type_annotation` is
+    /// display-only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binding_expr: Option<TypeExpr>,
     /// Scope of `binding_expr`: canonical_id of the file whose OXC parse
