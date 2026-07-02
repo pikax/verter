@@ -9,8 +9,8 @@
 //! asserts the outcome contract that must hold under EVERY interleaving:
 //!
 //! - while the edit is un-synced, the response carries NO provider-derived
-//!   item (fail closed; the pre-fix behaviour merged provider items computed
-//!   against the stale surface and anchored them through the fresh mapper);
+//!   item (fail closed — merging provider items computed against the stale
+//!   surface and anchoring them through the fresh mapper would be torn);
 //! - after the sync lands, provider-derived items are served again (the
 //!   fail-closed gate is not over-eager).
 
