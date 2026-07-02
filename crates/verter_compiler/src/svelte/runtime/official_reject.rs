@@ -1046,6 +1046,11 @@ fn push_attribute_expression_sources(source: &str, attr: &SvelteAttribute, out: 
         SvelteAttributeKind::Spread(span) => {
             out.push(source[span.start as usize..span.end as usize].to_string());
         }
+        // An `{@attach expr}` attachment carries one expression (the tokenizer-captured
+        // expr span) — scanned like any other attribute expression.
+        SvelteAttributeKind::Attach { expr_span } => {
+            out.push(source[expr_span.start as usize..expr_span.end as usize].to_string());
+        }
     }
 }
 

@@ -125,6 +125,7 @@ impl<'a> SupportedClientIr<'a> {
                     capture,
                     modifiers,
                     passive,
+                    origin,
                     ..
                 } => {
                     // A LEGACY `on:` directive on a `<svelte:element>` is a DIRECT
@@ -139,6 +140,7 @@ impl<'a> SupportedClientIr<'a> {
                     let handler_body = self.rewrite(*handler, scope)?;
                     let emit = EventEmit {
                         mode: EventMode::Direct,
+                        origin: *origin,
                         target: EventEmitTarget::SvelteElement,
                         event_type: event_type.clone(),
                         capture: *capture,
@@ -241,9 +243,15 @@ impl<'a> SupportedClientIr<'a> {
                     };
                     style_dirs.push(entry);
                 }
-                // A `use:` / `transition:` / `let:` directive on a dynamic element is a 5f-c
-                // surface — fail closed (the gate already refuses it, this is defensive).
-                AttrIr::Use { .. } | AttrIr::Transition { .. } | AttrIr::Let { .. } => {
+                // A lifecycle directive (`use:` / `transition:` / `animate:` /
+                // `{@attach}`) or `let:` on a dynamic element is the DEFERRED
+                // host-lifecycle surface (ledger D-39) — fail closed (the gate already
+                // refuses it, this is defensive).
+                AttrIr::Use { .. }
+                | AttrIr::Transition { .. }
+                | AttrIr::Animate { .. }
+                | AttrIr::Attach { .. }
+                | AttrIr::Let { .. } => {
                     return Err(UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
                         construct: "directive",
                         span: s.span,

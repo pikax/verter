@@ -43,8 +43,8 @@ use verter_span::Span;
 // keep importing the vocabulary as `super::client_plan::<Type>`.
 pub(super) use super::client_plan_types::{
     AttrValue, AttrValuePart, ClientAttr, ClientBindTarget, ClientBlock, ClientDynAttrEmit,
-    ClientNode, ClientNodeId, ClientRuntimeOp, ClientScriptItem, EventEmit, EventEmitTarget,
-    EventMode, RegionOps,
+    ClientNode, ClientNodeId, ClientRuntimeOp, ClientScriptItem, ElementLifecycleOp, EventEmit,
+    EventEmitTarget, EventMode, RegionOps,
 };
 
 /// The narrow client module plan — the SOLE emitter input.
@@ -609,13 +609,19 @@ impl<'a> SupportedClientIr<'a> {
             | AttrIr::Class { .. }
             | AttrIr::Style { .. }
             | AttrIr::Spread { .. } => Ok(ClientAttr::Dynamic),
-            // Any other attribute kind was refused by the classifier — defensive.
-            AttrIr::Use { .. } | AttrIr::Transition { .. } | AttrIr::Let { .. } => {
-                Err(UnsupportedSvelteRuntimeSurface::DynamicAttribute {
-                    name: "unsupported-attr".to_string(),
-                    span: Span::new(0, 0),
-                })
-            }
+            // An element LIFECYCLE directive (`use:` / `transition:` / `animate:` /
+            // element `{@attach}`) — the emission lives on the corresponding
+            // `ClientRuntimeOp::Lifecycle`; the element attr records the supported
+            // KIND only (the structural mirror).
+            AttrIr::Use { .. }
+            | AttrIr::Transition { .. }
+            | AttrIr::Animate { .. }
+            | AttrIr::Attach { .. } => Ok(ClientAttr::Lifecycle),
+            // A `let:` on an ordinary element was refused by the classifier — defensive.
+            AttrIr::Let { .. } => Err(UnsupportedSvelteRuntimeSurface::DynamicAttribute {
+                name: "unsupported-attr".to_string(),
+                span: Span::new(0, 0),
+            }),
         }
     }
 
@@ -733,8 +739,20 @@ impl<'a> SupportedClientIr<'a> {
             ) {
                 return Ok(None);
             }
+            // A spread element's ATTRIBUTE-domain ops are absorbed into the fold; its
+            // LIFECYCLE ops (`use:` / `transition:` / `animate:` / `{@attach}`) are
+            // NOT — official emits them ALONGSIDE the fold (`$.attribute_effect` →
+            // `$.action` → `$.transition`, the fixture-#18 order), so they project
+            // normally.
             if self.spread_elements.contains(&target)
-                && !matches!(self.ir.op(op_id), RuntimeOp::SpreadAttrs { .. })
+                && !matches!(
+                    self.ir.op(op_id),
+                    RuntimeOp::SpreadAttrs { .. }
+                        | RuntimeOp::Action { .. }
+                        | RuntimeOp::Transition { .. }
+                        | RuntimeOp::Animation { .. }
+                        | RuntimeOp::Attachment { .. }
+                )
             {
                 return Ok(None);
             }
@@ -820,15 +838,68 @@ impl<'a> SupportedClientIr<'a> {
                     out = Some(self.project_attribute_effect_op(*target)?);
                 }
             }
-            // A broad op the supported surface never produces — defensive refusal (never
-            // silently dropped).
-            RuntimeOp::Attachment { .. }
-            | RuntimeOp::Action { .. }
-            | RuntimeOp::Transition { .. } => {
-                return Err(UnsupportedSvelteRuntimeSurface::DynamicAttribute {
-                    name: "unsupported-op".to_string(),
-                    span: Span::new(0, 0),
-                });
+            // A `use:` action — the callee is the rewritten action expression (an
+            // identifier / member path; a signal callee reads `$.get(fn)`), the
+            // optional argument the concise-arrow-wrapped getter-thunk body.
+            RuntimeOp::Action { target, action } => {
+                let analyzed = self.ir.analysis.expressions.get(action.expr);
+                let callee = self.rewrite(action.expr, analyzed.scope)?;
+                let arg = match action.arg {
+                    Some(arg) => Some(self.rewrite_arrow_body_value(arg)?),
+                    None => None,
+                };
+                out = Some(ClientRuntimeOp::Lifecycle(ElementLifecycleOp::Action {
+                    target: ClientNodeId(target.0),
+                    callee,
+                    arg,
+                }));
+            }
+            // A `transition:` / `in:` / `out:` — the FLAG integer is precomputed from
+            // the typed kind + `|global` (the official TRANSITION_IN|OUT|GLOBAL
+            // arithmetic); the fn expression is the directive NAME rewritten in the
+            // op's scope (so a signal / prop transition fn lowers).
+            RuntimeOp::Transition { target, transition } => {
+                let kind_flags = match transition.kind {
+                    super::ir::TransitionKind::Transition => 3,
+                    super::ir::TransitionKind::In => 1,
+                    super::ir::TransitionKind::Out => 2,
+                };
+                let flags = kind_flags | if transition.global { 4 } else { 0 };
+                let get_fn = self.rewrite_source(&transition.name, scope_lexical)?;
+                let params = match transition.expr {
+                    Some(expr) => Some(self.rewrite_arrow_body_value(expr)?),
+                    None => None,
+                };
+                out = Some(ClientRuntimeOp::Lifecycle(ElementLifecycleOp::Transition {
+                    target: ClientNodeId(target.0),
+                    flags,
+                    get_fn,
+                    params,
+                }));
+            }
+            // An `animate:` — its OWN `$.animation` family (validated keyed-each-only
+            // by the classifier's placement pre-pass; never a `$.transition`).
+            RuntimeOp::Animation { target, animation } => {
+                let get_fn = self.rewrite_source(&animation.name, scope_lexical)?;
+                let params = match animation.expr {
+                    Some(expr) => Some(self.rewrite_arrow_body_value(expr)?),
+                    None => None,
+                };
+                out = Some(ClientRuntimeOp::Lifecycle(ElementLifecycleOp::Animation {
+                    target: ClientNodeId(target.0),
+                    get_fn,
+                    params,
+                }));
+            }
+            // An element-position `{@attach expr}` — the payload is the
+            // concise-arrow-wrapped getter-thunk body (an inline arrow / object
+            // payload stays a valid expression body).
+            RuntimeOp::Attachment { target, expr } => {
+                let payload = self.rewrite_arrow_body_value(*expr)?;
+                out = Some(ClientRuntimeOp::Lifecycle(ElementLifecycleOp::Attachment {
+                    target: ClientNodeId(target.0),
+                    payload,
+                }));
             }
         }
         Ok(out)

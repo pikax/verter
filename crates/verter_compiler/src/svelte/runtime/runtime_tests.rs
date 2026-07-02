@@ -2426,9 +2426,128 @@ fn transition_directive_emits_transition_op() {
         ir.ops.iter().any(|o| matches!(
             o,
             RuntimeOp::Transition { transition, .. }
-                if transition.kind == TransitionKind::Transition && transition.name == "fade"
+                if transition.kind == TransitionKind::Transition
+                    && transition.name == "fade"
+                    && !transition.global
         )),
-        "a `transition:fade` emits a Transition op"
+        "a `transition:fade` emits a Transition op (no `|global` modifier ⇒ global false)"
+    );
+}
+
+#[test]
+fn transition_global_modifier_is_typed_local_is_default() {
+    // The `|global` modifier is a TYPED lowering fact (the official
+    // `TRANSITION_GLOBAL` bit source); `|local` (and no modifier) is the default
+    // `false`. One element per kind so the three kinds' flags stay distinct.
+    use super::ir::{RuntimeOp, TransitionKind};
+    let alloc = Allocator::default();
+    let src = "<script>let c = $state(0);</script><div in:fade|global onclick={() => c++}>x</div><p out:fly|local>y</p><a transition:blur>z</a>";
+    let ir = lower(src, &alloc);
+    let transitions: Vec<_> = ir
+        .ops
+        .iter()
+        .filter_map(|o| match o {
+            RuntimeOp::Transition { transition, .. } => Some(transition.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(transitions.len(), 3, "three transition ops lower");
+    assert!(
+        transitions
+            .iter()
+            .any(|t| t.kind == TransitionKind::In && t.name == "fade" && t.global),
+        "`in:fade|global` carries global: true"
+    );
+    assert!(
+        transitions
+            .iter()
+            .any(|t| t.kind == TransitionKind::Out && t.name == "fly" && !t.global),
+        "`out:fly|local` is the DEFAULT (global: false — `|local` adds no bit)"
+    );
+    assert!(
+        transitions
+            .iter()
+            .any(|t| t.kind == TransitionKind::Transition && t.name == "blur" && !t.global),
+        "a bare `transition:blur` carries global: false"
+    );
+}
+
+#[test]
+fn animate_directive_emits_animation_op_not_transition() {
+    // `animate:` is its OWN op family (`RuntimeOp::Animation` → `$.animation`) —
+    // NEVER a Transition op masquerade. Both the no-params and params forms lower.
+    use super::ir::RuntimeOp;
+    let alloc = Allocator::default();
+    let src = "<script>let { items } = $props();</script>{#each items as item (item.id)}<div animate:flip>{item}</div>{/each}";
+    let ir = lower(src, &alloc);
+    let animation = ir
+        .ops
+        .iter()
+        .find_map(|o| match o {
+            RuntimeOp::Animation { animation, .. } => Some(animation.clone()),
+            _ => None,
+        })
+        .expect("an `animate:flip` emits an Animation op");
+    assert_eq!(animation.name, "flip");
+    assert!(animation.expr.is_none(), "no params ⇒ no expr");
+    assert!(
+        !ir.ops
+            .iter()
+            .any(|o| matches!(o, RuntimeOp::Transition { .. })),
+        "an `animate:` directive must NOT lower to a Transition op"
+    );
+
+    let src2 = "<script>let { items } = $props();</script>{#each items as item (item.id)}<div animate:flip={{ duration: 200 }}>{item}</div>{/each}";
+    let ir2 = lower(src2, &alloc);
+    let animation2 = ir2
+        .ops
+        .iter()
+        .find_map(|o| match o {
+            RuntimeOp::Animation { animation, .. } => Some(animation.clone()),
+            _ => None,
+        })
+        .expect("an `animate:flip={{…}}` emits an Animation op");
+    assert!(animation2.expr.is_some(), "params ⇒ the expr is carried");
+}
+
+#[test]
+fn attach_attribute_position_lowers_to_attach_attr_and_attachment_op() {
+    // ELEMENT-position `{@attach expr}` is a dedicated ATTRIBUTE kind
+    // (`AttrIr::Attach` → `RuntimeOp::Attachment`) with the expression span captured
+    // by the tokenizer — NOT the empty-name-Plain fallthrough (whose `@attach fn`
+    // body would fail the expression parse) and NOT the child-form `TagIr::Attach`.
+    use super::ir::{AttrIr, IrNode, RuntimeOp};
+    let alloc = Allocator::default();
+    let src = "<script>let c = $state(0);</script><div {@attach fn} onclick={() => c++}>x</div>";
+    let ir = lower(src, &alloc);
+    let attach_expr = ir
+        .nodes
+        .iter()
+        .find_map(|n| match n {
+            IrNode::Element(el) => el.attrs.iter().find_map(|a| match a {
+                AttrIr::Attach { expr } => Some(*expr),
+                _ => None,
+            }),
+            _ => None,
+        })
+        .expect("an element `{@attach fn}` lowers to AttrIr::Attach");
+    // The captured expression is exactly `fn` (the span excludes the keyword).
+    assert_eq!(ir.analysis.expressions.get(attach_expr).source.trim(), "fn");
+    assert!(
+        ir.ops
+            .iter()
+            .any(|o| matches!(o, RuntimeOp::Attachment { expr, .. } if *expr == attach_expr)),
+        "the element `{{@attach}}` emits an Attachment op carrying the captured expr"
+    );
+    // NEGATIVE: no empty-name Dynamic attr leaked from the old Plain fallthrough.
+    assert!(
+        !ir.nodes.iter().any(|n| matches!(
+            n,
+            IrNode::Element(el) if el.attrs.iter().any(
+                |a| matches!(a, AttrIr::Dynamic { name, .. } if name.is_empty())
+            )
+        )),
+        "no empty-name Dynamic attr may leak from the retired Plain fallthrough"
     );
 }
 

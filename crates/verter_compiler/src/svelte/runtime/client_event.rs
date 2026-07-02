@@ -28,6 +28,27 @@ pub(super) fn render_event_registration(
     emit: &EventEmit,
     node_var: &rustc_hash::FxHashMap<NodeId, String>,
 ) -> String {
+    format!("\t{};\n", render_event_call(emit, node_var))
+}
+
+/// Render the effect-wrapped registration for a NON-DELEGATED event on a `use:`
+/// action host — the official `$.effect(() => $.event(…));` statement (svelte@5.56.3
+/// wraps each such event in its OWN init-domain effect so the listener re-registers
+/// in action order; delegated events and action-less elements keep the bare form).
+/// The inner call is the SAME [`render_event_call`] rendering the bare registration
+/// uses — only the `$.effect(() => …)` wrapper differs.
+pub(super) fn render_effect_wrapped_event(
+    emit: &EventEmit,
+    node_var: &rustc_hash::FxHashMap<NodeId, String>,
+) -> String {
+    format!("\t$.effect(() => {});\n", render_event_call(emit, node_var))
+}
+
+/// Render the bare `$.event` / `$.delegated` call expression (no indent, no
+/// terminating `;`) — the single arg-assembly authority both the bare statement
+/// ([`render_event_registration`]) and the `use:`-host effect wrap
+/// ([`render_effect_wrapped_event`]) share.
+fn render_event_call(emit: &EventEmit, node_var: &rustc_hash::FxHashMap<NodeId, String>) -> String {
     let target = event_target_host(emit.target, node_var);
     // Nest the handler in the modifier wrappers inner→outer: the FIRST wrapper in
     // the (fixed-order) stack is the INNERMOST (closest to the handler).
@@ -52,7 +73,7 @@ pub(super) fn render_event_registration(
         None => String::new(),
     };
     format!(
-        "\t{helper}('{}', {target}, {handler}{trailing});\n",
+        "{helper}('{}', {target}, {handler}{trailing})",
         emit.event_type
     )
 }
@@ -141,6 +162,9 @@ mod event_target_host_tests {
         let emit =
             |target, event_type: &str, capture, passive, wrappers: Vec<EventWrapper>| EventEmit {
                 mode: EventMode::Direct,
+                // The global-host listeners here model the legacy `on:` directive form
+                // (`<svelte:window on:resize>`); the render shape is origin-independent.
+                origin: crate::svelte::runtime::ir::EventOrigin::LegacyDirective,
                 target,
                 event_type: event_type.to_string(),
                 capture,

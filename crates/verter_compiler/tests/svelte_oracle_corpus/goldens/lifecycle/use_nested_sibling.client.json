@@ -1,0 +1,94 @@
+{
+  "slug": "lifecycle/use_nested_sibling.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "use_nested_sibling",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "state",
+    "child",
+    "child",
+    "child",
+    "reset",
+    "reset",
+    "action",
+    "sibling",
+    "child",
+    "reset",
+    "reset",
+    "template_effect",
+    "set_text",
+    "get",
+    "set_text",
+    "get",
+    "delegated",
+    "update",
+    "append",
+    "delegate"
+  ],
+  "helperSet": [
+    "action",
+    "append",
+    "child",
+    "delegate",
+    "delegated",
+    "from_html",
+    "get",
+    "reset",
+    "set_text",
+    "sibling",
+    "state",
+    "template_effect",
+    "update"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "state": 1,
+    "child": 4,
+    "reset": 4,
+    "action": 1,
+    "sibling": 1,
+    "template_effect": 1,
+    "set_text": 2,
+    "get": 2,
+    "delegated": 1,
+    "update": 1,
+    "append": 1,
+    "delegate": 1
+  },
+  "delegatedEvents": [
+    "click"
+  ],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div><span><span> </span></span><span> </span></div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div><span><span> </span></span><span> </span></div>`); export default function use_nested_sibling($$anchor) {let c = $.state(0); var div = root(); var span = $.child(div); var span_1 = $.child(span); var text = $.child(span_1, true); $.reset(span_1); $.reset(span); $.action(span, ($$node) => foo?.($$node)); var span_2 = $.sibling(span); var text_1 = $.child(span_2, true); $.reset(span_2); $.reset(div); $.template_effect(() => {$.set_text(text, $.get(c)); $.set_text(text_1, $.get(c));}); $.delegated('click', div, () => $.update(c)); $.append($$anchor, div);} $.delegate(['click']);",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

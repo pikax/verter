@@ -8,9 +8,10 @@
 
 use super::html::cannot_be_set_statically;
 use super::ir::{
-    ActionOp, AttrIr, AttrOp, AttrOpKind, BindOp, EventOp, EventTarget, IrNode, MixedAttrPart,
-    NodeId, NonStaticPropertyKind, NonStaticPropertyOp, NonStaticPropertyValue, OpId, RuntimeOp,
-    SpecialElementIr, SpecialKind, StyleDirectiveValue, TagIr, TemplateScope, TransitionOp,
+    ActionOp, AnimationOp, AttrIr, AttrOp, AttrOpKind, BindOp, EventOp, EventTarget, IrNode,
+    MixedAttrPart, NodeId, NonStaticPropertyKind, NonStaticPropertyOp, NonStaticPropertyValue,
+    OpId, RuntimeOp, SpecialElementIr, SpecialKind, StyleDirectiveValue, TagIr, TemplateScope,
+    TransitionOp,
 };
 
 /// Populate the reactive runtime ops for every reactive surface the lowering
@@ -263,8 +264,7 @@ fn collect_attr_ops(
                 capture,
                 modifiers,
                 passive,
-                // The legacy-vs-modern origin does not change a regular element's event op.
-                origin: _,
+                origin,
             } => push_local(
                 ops,
                 local,
@@ -277,6 +277,7 @@ fn collect_attr_ops(
                         capture: *capture,
                         modifiers: modifiers.clone(),
                         passive: *passive,
+                        origin: *origin,
                     },
                 },
             ),
@@ -299,7 +300,12 @@ fn collect_attr_ops(
                     },
                 },
             ),
-            AttrIr::Transition { kind, name, expr } => push_local(
+            AttrIr::Transition {
+                kind,
+                name,
+                expr,
+                global,
+            } => push_local(
                 ops,
                 local,
                 RuntimeOp::Transition {
@@ -308,7 +314,30 @@ fn collect_attr_ops(
                         kind: *kind,
                         name: name.clone(),
                         expr: *expr,
+                        global: *global,
                     },
+                },
+            ),
+            // An `animate:` directive — its OWN op family (`$.animation`), never a
+            // transition masquerade.
+            AttrIr::Animate { name, expr } => push_local(
+                ops,
+                local,
+                RuntimeOp::Animation {
+                    target,
+                    animation: AnimationOp {
+                        name: name.clone(),
+                        expr: *expr,
+                    },
+                },
+            ),
+            // An element-position `{@attach expr}` attachment.
+            AttrIr::Attach { expr } => push_local(
+                ops,
+                local,
+                RuntimeOp::Attachment {
+                    target,
+                    expr: *expr,
                 },
             ),
             // A STATIC-TEXT (`style:color="red"`) or MIXED (`style:color="a{x}b"`) style

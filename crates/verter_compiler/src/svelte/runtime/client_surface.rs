@@ -33,8 +33,8 @@ use super::client_surface_element_query::{
     element_has_spread, element_has_style_directive, element_own_namespace,
 };
 use super::client_surface_refuse::{
-    namespace_label, refuse_invalid_self_placement, refuse_tag, refuse_unsupported_special_content,
-    special_label,
+    namespace_label, refuse_invalid_animate_placement, refuse_invalid_self_placement, refuse_tag,
+    refuse_transition_conflicts, refuse_unsupported_special_content, special_label,
 };
 use super::client_surface_script::{classify_props_usage, classify_script_items};
 use super::client_surface_special::{
@@ -193,6 +193,17 @@ impl ClientSyntaxSurface {
             ir.analysis.scripts.module_source,
             ir.analysis.scripts.instance_source,
         );
+        // (4b) `animate:` PLACEMENT gate (pre-pass): the official `AnimateDirective`
+        // analyze rules — one `animate:` per element (`animation_duplicate`), the
+        // animated element the ONLY significant child of an `{#each}` body
+        // (`animation_invalid_placement`), and that each KEYED
+        // (`animation_missing_key`). Runs BEFORE the node walk so a misplaced
+        // `animate:` refuses with its placement identity (the per-attr classifier
+        // accepts the directive itself), and the each-FLAG widening downstream only
+        // ever sees a validated placement.
+        if let Some(surface) = refuse_invalid_animate_placement(ir) {
+            return Err(surface);
+        }
         let facts = RefCell::new(SurfaceFacts::default());
         for (idx, scope) in ir.template_scopes.iter().enumerate() {
             // A region root is the COMPONENT root or a BLOCK BODY root — the placement axis
@@ -619,6 +630,11 @@ fn classify_node(
                     return Err(surface);
                 }
             }
+            // OVERLAPPING transition directives (`in:`/`out:`/`transition:` halves) are
+            // the official `transition_duplicate` / `transition_conflict` compile
+            // errors — refused here (before the per-attr loop, which accepts each
+            // transition individually).
+            refuse_transition_conflicts(el, el.span)?;
             // The static attributes are classified against the strict per-element attr
             // allowlist (the typed `SupportedHtmlElement` is the per-tag key). A custom
             // element already failed closed at step (2), so the attr walk sees only an
@@ -757,8 +773,9 @@ fn classify_node(
         // validated + rewritten at projection), EXCEPT a render call carrying a SPREAD
         // argument (`{@render row(...xs)}`), which official `svelte@5.56.3` HARD-ERRORS
         // (`render_tag_invalid_spread_argument`). It fails closed here rather than silently
-        // dropping the spread and emitting a wrong-arity `$.snippet` call. `{@attach}` stays
-        // CLOSED via `refuse_tag`.
+        // dropping the spread and emitting a wrong-arity `$.snippet` call. A
+        // CHILD-position `{@attach}` stays CLOSED via `refuse_tag` (official
+        // `expected_tag` parity — attribute-position-only).
         IrNode::Tag(TagIr::Render {
             spread_arg_span, ..
         }) => match spread_arg_span {
@@ -768,8 +785,9 @@ fn classify_node(
             }),
             None => Ok(()),
         },
-        // `{@html}` is accepted above; `{@attach}` (the attachment-directive surface, not yet
-        // supported) stays refused via `refuse_tag`.
+        // `{@html}` is accepted above; a CHILD-position `{@attach}` (officially
+        // attribute-position-only — the element form is the supported `AttrIr::Attach`)
+        // stays refused via `refuse_tag`.
         IrNode::Tag(tag) => Err(refuse_tag(tag)),
     }
 }
@@ -796,11 +814,13 @@ fn static_non_static_property_shape(name: &str) -> Option<ClientDynamicAttrShape
 }
 
 /// Refuse a spread element that carries an attribute the `$.attribute_effect` fold does
-/// not model: an event handler / `bind:` / `use:` / `transition:` / `let:` directive
-/// (the handler-hoist / two-way-binding surface a spread fold leaves to its owning
-/// vertical). The foldable set — static / dynamic / mixed / `class:` / `style:` / a plain
-/// `class` / `style` attribute / further spreads — returns `None`. Driven from the typed
-/// `AttrIr` inventory, never a source scan.
+/// not model: an event handler / `bind:` / `let:` directive (the handler-hoist /
+/// two-way-binding surface a spread fold leaves to its owning vertical). The foldable /
+/// co-existing set — static / dynamic / mixed / `class:` / `style:` / a plain `class` /
+/// `style` attribute / further spreads, PLUS the lifecycle directives (`use:` /
+/// `transition:` / `animate:` / `{@attach}`, which official emits ALONGSIDE the fold:
+/// `$.attribute_effect` → `$.action` → `$.transition` in source order) — returns `None`.
+/// Driven from the typed `AttrIr` inventory, never a source scan.
 fn refuse_spread_incompatible_attr(
     el: &super::ir::ElementIr,
     el_span: Span,
@@ -812,7 +832,11 @@ fn refuse_spread_incompatible_attr(
             | AttrIr::Mixed { .. }
             | AttrIr::Spread { .. }
             | AttrIr::Class { .. }
-            | AttrIr::Style { .. } => {}
+            | AttrIr::Style { .. }
+            | AttrIr::Use { .. }
+            | AttrIr::Transition { .. }
+            | AttrIr::Animate { .. }
+            | AttrIr::Attach { .. } => {}
             AttrIr::Event { event_type, .. } => {
                 return Some(UnsupportedSvelteRuntimeSurface::NonDelegatedEvent {
                     event_type: event_type.clone(),
@@ -822,12 +846,6 @@ fn refuse_spread_incompatible_attr(
             AttrIr::Bind { target, .. } => {
                 return Some(UnsupportedSvelteRuntimeSurface::Binding {
                     target: target.clone(),
-                    span: el_span,
-                });
-            }
-            AttrIr::Use { .. } | AttrIr::Transition { .. } => {
-                return Some(UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
-                    construct: "directive",
                     span: el_span,
                 });
             }
@@ -1167,12 +1185,18 @@ fn classify_attr(
                 .push((node_id, event_type.clone(), *handler, shape));
             Ok(())
         }
-        AttrIr::Use { .. } | AttrIr::Transition { .. } => {
-            Err(UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
-                construct: "directive",
-                span: el_span,
-            })
-        }
+        // The element LIFECYCLE directives — `use:` actions, `transition:`/`in:`/`out:`
+        // transitions, `animate:` animations, and element-position `{@attach}`
+        // attachments — are ACCEPTED on a regular intrinsic element. Their emission is
+        // owned by the corresponding `ClientRuntimeOp::Lifecycle` projection; the
+        // transition-overlap conflict and the `animate:` keyed-each placement are
+        // validated by the dedicated element/pre-pass gates
+        // ([`refuse_transition_conflicts`] / [`refuse_invalid_animate_placement`]),
+        // which run BEFORE this per-attr accept.
+        AttrIr::Use { .. }
+        | AttrIr::Transition { .. }
+        | AttrIr::Animate { .. }
+        | AttrIr::Attach { .. } => Ok(()),
         AttrIr::Let { .. } => Err(UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
             construct: "let-directive",
             span: el_span,

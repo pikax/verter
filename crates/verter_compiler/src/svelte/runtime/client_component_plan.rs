@@ -219,14 +219,20 @@ impl<'a> SupportedClientIr<'a> {
                 // let form already failed closed via the `has_unsupported_let` gate above, so
                 // a supported `let:` is a no-op here.
                 AttrIr::Let { .. } => {}
-                // A `class:` / `style:` / `use:` / `transition:` directive on a COMPONENT is
-                // invalid Svelte the official compiler rejects (a component is not a DOM
-                // element host). Fail CLOSED — there is NO upstream classifier gate for these
-                // (the classifier delegates component-attr validation to this projection).
+                // A `class:` / `style:` / `use:` / `transition:` / `animate:` directive on
+                // a COMPONENT is invalid Svelte the official compiler rejects
+                // (`component_invalid_directive` — a component is not a DOM element host),
+                // and a component `{@attach}` — which official ACCEPTS as the computed-key
+                // `[$.attachment()]` prop — is the DEFERRED component-attachment forwarding
+                // (ledger D-38). Both fail CLOSED — there is NO upstream classifier gate for
+                // these (the classifier delegates component-attr validation to this
+                // projection).
                 AttrIr::Class { .. }
                 | AttrIr::Style { .. }
                 | AttrIr::Use { .. }
-                | AttrIr::Transition { .. } => {
+                | AttrIr::Transition { .. }
+                | AttrIr::Animate { .. }
+                | AttrIr::Attach { .. } => {
                     return Err(UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
                         construct: "directive",
                         span,

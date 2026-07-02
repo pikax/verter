@@ -54,31 +54,75 @@ impl<'a> ClientEmitter<'a> {
         }
     }
 
-    /// Emit any `bind:this` op targeting `node` INLINE during the walk, right after
-    /// the node's own init-domain writes (and after `$.remove_input_defaults`). The
-    /// official compiler emits `$.bind_this(node, …)` as a RENDER-side binding
-    /// interleaved into element setup — AFTER the element's init-domain attribute
-    /// writes (`$.autofocus` / `$.set_class` / `$.set_attribute` / accumulator decls),
-    /// BEFORE the next sibling walk and BEFORE the grouped `$.template_effect` for
-    /// sibling reactive text — whereas `$.bind_value` / delegated events are emitted
-    /// post-walk (after the text effect). Emitting `bind:this` here, and SKIPPING the
-    /// `This` arm in [`Self::emit_ops`], matches that order byte-for-byte.
-    pub(super) fn emit_inline_bind_this(&mut self, out: &mut String, node: NodeId) {
-        // O(1) drain of this node's inline `bind:this` ops from the per-node index built
-        // once in `ClientEmitter::new` (no per-node re-scan of the full op vector). Emitted
-        // in stored (plan-op) order; SKIPPING the `This` arm in `emit_ops` keeps each
-        // inline bind emitted exactly once, here.
-        let Some(binds) = self.inline_this_binds.remove(&node) else {
+    /// Emit any INIT-DOMAIN render op targeting `node` INLINE during the walk, right
+    /// after the node's ENTIRE child block (the child-walk descents and the trailing
+    /// `$.reset`): the inline `bind:this` binds, the init-domain lifecycle ops
+    /// (`$.action` / `$.attach`), and the effect-wrapped legacy events + non-`this`
+    /// binds of a `use:` action host, in attribute SOURCE order. The official
+    /// compiler emits `$.bind_this(node, …)` / `$.action(…)` / `$.attach(…)` /
+    /// `$.effect(() => …)` as RENDER-side setup interleaved into the element walk —
+    /// AFTER the element's init-domain attribute writes (`$.autofocus` /
+    /// `$.set_class` / `$.set_attribute` / accumulator decls) AND after its child
+    /// fragment (a static-children element has an empty child block, so the ops
+    /// follow the inits directly), BEFORE the next sibling walk and BEFORE the
+    /// grouped `$.template_effect` for sibling reactive text — whereas the bare
+    /// non-`this` binds (no `use:`) join the after-update directive batch alongside
+    /// `$.transition` / `$.animation` LAST, and modern events emit post-walk (after
+    /// the text effect). Emitting them here, and SKIPPING the `This` / `Lifecycle`
+    /// arms in [`Self::emit_ops`], matches that order byte-for-byte.
+    pub(super) fn emit_inline_render_ops(&mut self, out: &mut String, node: NodeId) {
+        // O(1) drain of this node's inline render ops from the per-node index built
+        // once in `ClientEmitter::new` (no per-node re-scan of the full op vector).
+        // Emitted in stored (plan-op = attribute source) order, so a `bind:this` and
+        // an adjacent `use:` / `{@attach}` keep the official interleave.
+        let Some(inline_ops) = self.inline_render_ops.remove(&node) else {
             return;
         };
-        for (getset, getter, setter) in binds {
-            self.emit_bind(
-                out,
-                node,
-                &ClientBindShape::This { getset },
-                &getter,
-                &setter,
-            );
+        for op in inline_ops {
+            match op {
+                super::client_lifecycle::InlineRenderOp::BindThis {
+                    getset,
+                    getter,
+                    setter,
+                } => {
+                    self.emit_bind(
+                        out,
+                        node,
+                        &ClientBindShape::This { getset },
+                        &getter,
+                        &setter,
+                    );
+                }
+                super::client_lifecycle::InlineRenderOp::Lifecycle(lifecycle) => {
+                    out.push_str(&super::client_lifecycle::render_lifecycle_op(
+                        &lifecycle,
+                        &self.node_var,
+                    ));
+                }
+                // A LEGACY `on:` event on a `use:` action host — the official
+                // `$.effect(() => $.event(…));` wrap at the event's attribute
+                // source position (the same arg assembly as the bare form).
+                super::client_lifecycle::InlineRenderOp::EffectEvent(emit) => {
+                    out.push_str(&super::client_event::render_effect_wrapped_event(
+                        &emit,
+                        &self.node_var,
+                    ));
+                }
+                // A non-`this` DOM bind on a `use:` action host — the official
+                // `$.effect(() => $.bind_*(…));` wrap at the bind's attribute
+                // source position (the same arg assembly as the bare statement,
+                // through the shared `render_bind_bare`).
+                super::client_lifecycle::InlineRenderOp::EffectBind {
+                    shape,
+                    getter,
+                    setter,
+                } => {
+                    out.push_str(&format!(
+                        "\t$.effect(() => {});\n",
+                        self.render_bind_bare(node, &shape, &getter, &setter)
+                    ));
+                }
+            }
         }
     }
 
@@ -267,7 +311,9 @@ impl<'a> ClientEmitter<'a> {
     /// `bind:this` emits the dedicated `$.bind_this(host, set, get)`; every DOM-value
     /// bind emits its routed `$.bind_*` / `$.bind_property` call (the helper / arity /
     /// event come from the shared [`RuntimeBindRouting`]). A `group` bind carries its
-    /// extra `binding_group` + per-input value args (see [`Self::emit_bind_group`]).
+    /// extra `binding_group` + per-input value args. The body delegates to the
+    /// IMMUTABLE [`Self::render_bind_stmt`]; the `&mut self` receiver is kept for the
+    /// existing walk/post-walk call sites, which hold the emitter mutably.
     pub(super) fn emit_bind(
         &mut self,
         out: &mut String,
@@ -276,6 +322,42 @@ impl<'a> ClientEmitter<'a> {
         getter: &str,
         setter: &str,
     ) {
+        out.push_str(&self.render_bind_stmt(target, shape, getter, setter));
+    }
+
+    /// The full `\t$.bind_*(…);\n` STATEMENT form of [`Self::render_bind_bare`] —
+    /// the shape every bare (unwrapped) bind registration emits: the walk-inline
+    /// `bind:this`, the post-walk special/global-host binds, and the after-update
+    /// directive-batch binds. Immutable (`&self`) so the directive-batch render
+    /// loop, which holds `&ClientRuntimeOp` borrows of the plan, can call it.
+    pub(super) fn render_bind_stmt(
+        &self,
+        target: NodeId,
+        shape: &ClientBindShape,
+        getter: &str,
+        setter: &str,
+    ) -> String {
+        format!(
+            "\t{};\n",
+            self.render_bind_bare(target, shape, getter, setter)
+        )
+    }
+
+    /// Render the BARE `$.bind_*(…)` call expression — no leading indent, no
+    /// terminating `;` — the single arg-assembly authority BOTH the statement form
+    /// ([`Self::render_bind_stmt`]) and the `use:`-host effect wrap
+    /// (`$.effect(() => $.bind_*(…))`, the [`InlineRenderOp::EffectBind`] arm of
+    /// [`Self::emit_inline_render_ops`]) share, so the helper / arity / group logic
+    /// can never diverge between the two carriers (mirrors `render_event_call`).
+    ///
+    /// [`InlineRenderOp::EffectBind`]: super::client_lifecycle::InlineRenderOp::EffectBind
+    pub(super) fn render_bind_bare(
+        &self,
+        target: NodeId,
+        shape: &ClientBindShape,
+        getter: &str,
+        setter: &str,
+    ) -> String {
         let var = self.bind_host_expr(target);
         match shape {
             ClientBindShape::This { getset } => {
@@ -290,31 +372,30 @@ impl<'a> ClientEmitter<'a> {
                     }
                     BindGetSetForm::FunctionPair => (setter.to_string(), getter.to_string()),
                 };
-                out.push_str(&format!("\t$.bind_this({var}, {set_tok}, {get_tok});\n"));
+                format!("$.bind_this({var}, {set_tok}, {get_tok})")
             }
             ClientBindShape::DomBind {
                 name,
                 routing,
                 getset,
                 group_key,
-            } => {
-                out.push_str(&self.format_dom_bind(
-                    name,
-                    *routing,
-                    *getset,
-                    group_key.as_ref(),
-                    target,
-                    &var,
-                    getter,
-                    setter,
-                ));
-            }
+            } => self.format_dom_bind(
+                name,
+                *routing,
+                *getset,
+                group_key.as_ref(),
+                target,
+                &var,
+                getter,
+                setter,
+            ),
         }
     }
 
     /// Format ONE DOM-value/property bind call from its typed routing — the
-    /// DATA-DRIVEN emit (no per-name match arm pile). The shape follows the pinned
-    /// `svelte@5.56.3` forms exactly:
+    /// DATA-DRIVEN emit (no per-name match arm pile), as a BARE call expression
+    /// (no indent, no terminating `;` — the [`Self::render_bind_bare`] carrier
+    /// contract). The shape follows the pinned `svelte@5.56.3` forms exactly:
     /// - get/set helpers: `$.bind_value(el, () => GET, ($$value) => SET)`,
     ///   `$.bind_select_value` / `$.bind_checked` / `$.bind_current_time` /
     ///   `$.bind_paused` / `$.bind_content_editable('name', el, get, set)`;
@@ -356,30 +437,28 @@ impl<'a> ClientEmitter<'a> {
         };
         match routing.helper {
             RuntimeHelper::Value => {
-                format!("\t$.bind_value({var}, {get_thunk}, {set_thunk});\n")
+                format!("$.bind_value({var}, {get_thunk}, {set_thunk})")
             }
             RuntimeHelper::SelectValue => {
-                format!("\t$.bind_select_value({var}, {get_thunk}, {set_thunk});\n")
+                format!("$.bind_select_value({var}, {get_thunk}, {set_thunk})")
             }
             RuntimeHelper::Checked => {
-                format!("\t$.bind_checked({var}, {get_thunk}, {set_thunk});\n")
+                format!("$.bind_checked({var}, {get_thunk}, {set_thunk})")
             }
             RuntimeHelper::CurrentTime => {
-                format!("\t$.bind_current_time({var}, {get_thunk}, {set_thunk});\n")
+                format!("$.bind_current_time({var}, {get_thunk}, {set_thunk})")
             }
             RuntimeHelper::Paused => {
-                format!("\t$.bind_paused({var}, {get_thunk}, {set_thunk});\n")
+                format!("$.bind_paused({var}, {get_thunk}, {set_thunk})")
             }
-            RuntimeHelper::Played => format!("\t$.bind_played({var}, {set_thunk});\n"),
+            RuntimeHelper::Played => format!("$.bind_played({var}, {set_thunk})"),
             RuntimeHelper::ElementSize => {
                 // `$.bind_element_size(el, 'name', ($$value) => SET)`.
-                format!("\t$.bind_element_size({var}, '{bind_name}', {set_thunk});\n")
+                format!("$.bind_element_size({var}, '{bind_name}', {set_thunk})")
             }
             RuntimeHelper::ContentEditable => {
                 // `$.bind_content_editable('name', el, () => GET, ($$value) => SET)`.
-                format!(
-                    "\t$.bind_content_editable('{bind_name}', {var}, {get_thunk}, {set_thunk});\n"
-                )
+                format!("$.bind_content_editable('{bind_name}', {var}, {get_thunk}, {set_thunk})")
             }
             RuntimeHelper::Property => {
                 // `$.bind_property('name', 'event', el, set [, get])` — the getter is
@@ -388,12 +467,12 @@ impl<'a> ClientEmitter<'a> {
                 let _ = routing.arity; // arity is Property by construction here.
                 if routing.direction == BindDirection::ReadWrite {
                     format!(
-                        "\t$.bind_property('{bind_name}', '{event}', {var}, {set_thunk}, {get_thunk});\n",
+                        "$.bind_property('{bind_name}', '{event}', {var}, {set_thunk}, {get_thunk})",
                         event = routing.prop_event,
                     )
                 } else {
                     format!(
-                        "\t$.bind_property('{bind_name}', '{event}', {var}, {set_thunk});\n",
+                        "$.bind_property('{bind_name}', '{event}', {var}, {set_thunk})",
                         event = routing.prop_event,
                     )
                 }
@@ -422,12 +501,12 @@ impl<'a> ClientEmitter<'a> {
                     .group_dynamic_value_dep_read(node)
                     .map(|dep| format!("() => {{\n\t\t{dep};\n\n\t\treturn {getter};\n\t}}"))
                     .unwrap_or(get_thunk);
-                format!("\t$.bind_group({group}, [], {var}, {get_tok}, {set_thunk});\n")
+                format!("$.bind_group({group}, [], {var}, {get_tok}, {set_thunk})")
             }
             RuntimeHelper::WindowSize => {
                 // `$.bind_window_size('<name>', set)` — the dimension NAME is the first
                 // string-literal arg, NO host expr, setter-only.
-                format!("\t$.bind_window_size('{bind_name}', {set_thunk});\n")
+                format!("$.bind_window_size('{bind_name}', {set_thunk})")
             }
             RuntimeHelper::WindowScroll => {
                 // `$.bind_window_scroll('x'|'y', get, set)` — the runtime axis name is
@@ -441,21 +520,21 @@ impl<'a> ClientEmitter<'a> {
                         "a WindowScroll routing carries only scrollX/scrollY, got `{other}`"
                     ),
                 };
-                format!("\t$.bind_window_scroll('{axis}', {get_thunk}, {set_thunk});\n")
+                format!("$.bind_window_scroll('{axis}', {get_thunk}, {set_thunk})")
             }
             RuntimeHelper::Online => {
                 // `$.bind_online(set)` — setter-only, NO name, NO host expr.
-                format!("\t$.bind_online({set_thunk});\n")
+                format!("$.bind_online({set_thunk})")
             }
             RuntimeHelper::Focused => {
                 // `$.bind_focused(host, set)` — host expr + setter-only. The host is the
                 // element var on a regular element and `$.window` on the window host.
-                format!("\t$.bind_focused({var}, {set_thunk});\n")
+                format!("$.bind_focused({var}, {set_thunk})")
             }
             RuntimeHelper::ActiveElement => {
                 // `$.bind_active_element(set)` — the dedicated setter-only helper, NO name,
                 // NO host expr (NOT the generic `$.bind_property`).
-                format!("\t$.bind_active_element({set_thunk});\n")
+                format!("$.bind_active_element({set_thunk})")
             }
             RuntimeHelper::This => {
                 // `this` never reaches the DOM router: the bind classifier maps the
@@ -484,32 +563,4 @@ impl<'a> ClientEmitter<'a> {
         }
         self.dom_var(target)
     }
-}
-
-/// Pre-index every inline `bind:this` op by its target node id, so the walk emits each
-/// node's inline `bind:this` in O(1) (a map drain in [`ClientEmitter::emit_inline_bind_this`])
-/// instead of re-scanning + cloning the full op vector per named node. Built ONCE in
-/// [`ClientEmitter::new`]. Within a node, ordering is the plan-op order — the official
-/// emission order for multiple inline binds on one node.
-pub(super) fn build_inline_this_index(
-    plan: &ClientModulePlan<'_>,
-) -> rustc_hash::FxHashMap<NodeId, Vec<(BindGetSetForm, String, String)>> {
-    let mut index: rustc_hash::FxHashMap<NodeId, Vec<(BindGetSetForm, String, String)>> =
-        rustc_hash::FxHashMap::default();
-    for op in plan.all_ops() {
-        if let ClientRuntimeOp::Bind {
-            target,
-            shape: ClientBindShape::This { getset },
-            getter,
-            setter,
-        } = op
-        {
-            index.entry(NodeId(target.0)).or_default().push((
-                *getset,
-                getter.clone(),
-                setter.clone(),
-            ));
-        }
-    }
-    index
 }

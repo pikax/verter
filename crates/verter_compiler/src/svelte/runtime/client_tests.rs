@@ -1376,6 +1376,632 @@ fn block_smoke_modules_match_the_committed_jsdom_fixtures() {
     }
 }
 
+/// The behavioral jsdom LIFECYCLE-directive smoke fixture sources (kept in lockstep
+/// with the committed `.client.mjs` by
+/// `lifecycle_smoke_modules_match_the_committed_jsdom_fixtures`). The lifecycle
+/// callables (action / transition / animation fns, the attachment) are PROP-driven so
+/// the happy-dom spec passes real recording functions through `mount(App, { props })`
+/// — the instance script stays inside the supported allowlist (no top-level
+/// `function` declarations).
+const LIFECYCLE_SMOKE_FIXTURES: &[(&str, &str)] = &[
+    // `use:act` — a prop-backed action: `$.action(div, ($$node) => $$props.act?.($$node))`
+    // runs the action once with the mounted element.
+    (
+        "lifecycle_use",
+        "<script>\n\tlet { act } = $props();\n</script>\n\n<div use:act>x</div>\n",
+    ),
+    // `transition:fx` inside an `{#if}` — toggling the branch on runs the intro through
+    // the prop-backed transition fn (FLAG 3, the bidirectional kind).
+    (
+        "lifecycle_transition",
+        "<script>\n\tlet { fx } = $props();\n\tlet show = $state(false);\n</script>\n\n<button onclick={() => show = !show}>t</button>\n{#if show}\n\t<div transition:fx>x</div>\n{/if}\n",
+    ),
+    // Element-position `{@attach hook}` — the attachment runs on mount with the element.
+    (
+        "lifecycle_attach",
+        "<script>\n\tlet { hook } = $props();\n</script>\n\n<div {@attach hook}>x</div>\n",
+    ),
+    // `animate:fx` in a KEYED each (the ternary source reorders on a `$state` flip) —
+    // the each mounts with the ANIMATED flag and reorders on click.
+    (
+        "lifecycle_animate",
+        "<script>\n\tlet { fx } = $props();\n\tlet flipped = $state(false);\n</script>\n\n<button onclick={() => flipped = !flipped}>swap</button>\n{#each (flipped ? ['b', 'a'] : ['a', 'b']) as item (item)}\n\t<p animate:fx>{item}</p>\n{/each}\n",
+    ),
+    // `use:act` + legacy `on:click` — the non-delegated event is EFFECT-WRAPPED
+    // (`$.effect(() => $.event('click', div, …))`, after `$.action`) and the
+    // listener still fires: a click increments the rendered count.
+    (
+        "lifecycle_use_legacy_event",
+        "<script>\n\tlet { act } = $props();\n\tlet c = $state(0);\n</script>\n\n<div use:act on:click={() => c++}>{c}</div>\n",
+    ),
+];
+
+#[test]
+fn lifecycle_smoke_modules_match_the_committed_jsdom_fixtures() {
+    // Each behavioral lifecycle-smoke fixture's emitted module stays in lockstep with
+    // the committed `.client.mjs` the happy-dom spec
+    // (`svelte-client-lifecycle-smoke.spec.ts`) mounts — so the behavioral smoke can
+    // never drift from `compile_client`.
+    for (name, src) in LIFECYCLE_SMOKE_FIXTURES {
+        assert_jsdom_fixture_in_sync(src, &format!("{name}.client.mjs"));
+    }
+}
+
+#[test]
+#[ignore = "generator: writes the committed lifecycle smoke fixtures (run once, then oxfmt)"]
+fn regen_lifecycle_smoke_fixtures() {
+    for (name, src) in LIFECYCLE_SMOKE_FIXTURES {
+        let js = emit(src, "App.svelte");
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../packages/core/test/fixtures/svelte")
+            .join(format!("{name}.client.mjs"));
+        std::fs::write(&path, js).unwrap();
+        println!("wrote {}", path.display());
+    }
+}
+
+#[test]
+#[ignore = "generator: writes the committed event smoke fixtures (run once, then oxfmt)"]
+fn regen_event_smoke_fixtures() {
+    for (name, src) in EVENT_SMOKE_FIXTURES {
+        let js = emit(src, "App.svelte");
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../packages/core/test/fixtures/svelte")
+            .join(format!("{name}.client.mjs"));
+        std::fs::write(&path, js).unwrap();
+        println!("wrote {}", path.display());
+    }
+}
+
+#[test]
+fn animate_only_child_check_ignores_const_and_declaration_tags() {
+    // The official `animate:` "only child of a keyed each" check IGNORES `{@const}`
+    // and the `{const …}` / `{let …}` declaration tags (svelte@5.56.3
+    // `2-analyze/visitors/shared/element.js`) — a keyed each whose body is a
+    // declaration tag + ONE animated element is ACCEPTED. (The `{@const}` variant
+    // also READS the binding — the `lifecycle/animate_keyed_const` golden shape;
+    // the `{const}`/`{let}` variants keep a static body: the inert-declaration
+    // read surface is a separate boundary, not the placement check under test.)
+    for (label, tag, body) in [
+        ("legacy {@const}", "{@const l = item.n}", "{l}"),
+        ("declaration {const}", "{const l = item.n}", "x"),
+        ("declaration {let}", "{let l = item.n}", "x"),
+    ] {
+        let src = format!(
+            "<script>let {{ items }} = $props();</script>\n{{#each items as item (item.id)}}{tag}<div animate:flip>{body}</div>{{/each}}\n"
+        );
+        let js = emit(&src, "App.svelte");
+        assert!(
+            js.contains("$.animation(div, () => flip, null);"),
+            "{label}: a declaration-tag sibling must not refuse the animate placement:\n{js}"
+        );
+    }
+    // NEGATIVE discriminators — official keeps these SIGNIFICANT (rejects), and so
+    // must Verter: a `{@debug}` sibling, a sibling ELEMENT, and non-whitespace TEXT.
+    for (label, body) in [
+        (
+            "{@debug} sibling",
+            "{@debug item}<div animate:flip>{item.n}</div>",
+        ),
+        (
+            "sibling element",
+            "<span></span><div animate:flip>{item.n}</div>",
+        ),
+        ("sibling text", "text<div animate:flip>{item.n}</div>"),
+    ] {
+        let src = format!(
+            "<script>let {{ items }} = $props();</script>\n{{#each items as item (item.id)}}{body}{{/each}}\n"
+        );
+        let err = emit_result(&src).expect_err(label);
+        assert!(
+            matches!(
+                err,
+                ClientCompileError::Unsupported(
+                    UnsupportedSvelteRuntimeSurface::ComponentOrSnippet { .. }
+                )
+            ),
+            "{label}: a significant sibling must still refuse the animate placement: {err:?}"
+        );
+    }
+}
+
+#[test]
+fn use_action_effect_wraps_each_nondelegated_event() {
+    // A `use:` action co-located with LEGACY `on:` events wraps EACH event
+    // registration in its OWN `$.effect(() => $.event(…))`, emitted in the INIT
+    // domain after `$.action` and before `$.transition` — the official
+    // action-triggered effect wrap (svelte@5.56.3). The wrap trigger is the
+    // LEGACY origin + the action host: a MODERN non-delegated event beside
+    // `use:` stays a BARE `$.event` (the `lifecycle/use_modern_nondelegated_event`
+    // golden + `lifecycle_event_origin_gates_effect_wrap_and_directive_batch_order`).
+    let js = emit(
+        "<script>let c = $state(0);</script>\n<div use:foo on:click={() => c++} on:keydown={() => c++}>x</div>\n",
+        "App.svelte",
+    );
+    let norm = normalize_js_cosmetics(&js);
+    assert!(
+        norm.contains(&nc(
+            "$.effect(() => $.event('click', div, () => $.update(c)))"
+        )),
+        "use:+on:click must effect-wrap the click registration:\n{js}"
+    );
+    assert!(
+        norm.contains(&nc(
+            "$.effect(() => $.event('keydown', div, () => $.update(c)))"
+        )),
+        "use:+on:keydown must effect-wrap the keydown registration in its OWN effect:\n{js}"
+    );
+    // Order: `$.action` precedes both event effects (source order: use: first).
+    let action = js.find("$.action(").expect("emits the action");
+    let click = js.find("$.event('click'").expect("emits the click event");
+    let keydown = js
+        .find("$.event('keydown'")
+        .expect("emits the keydown event");
+    assert!(
+        action < click && click < keydown,
+        "init order must be action → effect(click) → effect(keydown):\n{js}"
+    );
+    // NEGATIVE: no BARE (unwrapped) `$.event` registration statement remains — every
+    // `$.event` on this element is inside an effect wrap.
+    assert!(
+        !js.contains("\t$.event("),
+        "a use:-hosted legacy on: event must not ALSO emit a bare $.event:\n{js}"
+    );
+}
+
+#[test]
+fn use_action_effect_wrap_orders_before_transition() {
+    // `use:` + `transition:` + `on:click` — the official init order is
+    // `$.action` → `$.effect(() => $.event(…))` → `$.transition(3, …)`.
+    let js = emit(
+        "<script>let c = $state(0);</script>\n<div use:foo transition:fade on:click={() => c++}>x</div>\n",
+        "App.svelte",
+    );
+    let action = js.find("$.action(").expect("emits the action");
+    let effect = js
+        .find("$.effect(() => $.event('click'")
+        .expect("effect-wraps the click event");
+    let transition = js.find("$.transition(3, ").expect("emits the transition");
+    assert!(
+        action < effect && effect < transition,
+        "init order must be action → effect(event) → transition:\n{js}"
+    );
+}
+
+#[test]
+fn use_action_effect_wraps_non_this_bind() {
+    // A non-`this` DOM bind on a `use:` action host wraps its registration in its
+    // OWN `$.effect(() => $.bind_*(...))` in the INIT domain at the bind's
+    // attribute source position — after the source-first `$.action` (official
+    // svelte@5.56.3 `RegularElement.js` under `has_use`). `bind:this` is NEVER
+    // wrapped (`lifecycle/use_bind_this` pins the unwrapped inline interleave).
+    let js = emit(
+        "<script>let v = $state(\"\");</script>\n<input use:foo bind:value={v} />\n",
+        "App.svelte",
+    );
+    let norm = normalize_js_cosmetics(&js);
+    assert!(
+        norm.contains(&nc(
+            "$.effect(() => $.bind_value(input, () => $.get(v), ($$value) => $.set(v, $$value)))"
+        )),
+        "use:+bind:value must effect-wrap the bind registration:\n{js}"
+    );
+    // Order: the source-first `$.action` precedes the wrapped bind.
+    let action = js.find("$.action(").expect("emits the action");
+    let bind = js.find("$.bind_value(").expect("emits the bind");
+    assert!(
+        action < bind,
+        "init order must be action → effect(bind_value):\n{js}"
+    );
+    // NEGATIVE: no BARE (unwrapped) `$.bind_value` statement remains — the sole
+    // registration on this element lives inside the effect wrap.
+    assert!(
+        !js.contains("\t$.bind_value("),
+        "a use:-hosted non-this bind must not ALSO emit a bare $.bind_value:\n{js}"
+    );
+}
+
+#[test]
+fn transition_and_bind_preserve_source_order_in_batch() {
+    // A non-`this` bind on a lifecycle host WITHOUT `use:` joins the element's
+    // after-update DIRECTIVE BATCH, source-ordered with `$.transition` — BARE,
+    // never effect-wrapped, in BOTH source directions (official svelte@5.56.3
+    // batches the bind with `other_directives`).
+    let first = emit(
+        "<script>let v = $state(\"\");</script>\n<input transition:fade bind:value={v} />\n",
+        "App.svelte",
+    );
+    let t = first
+        .find("$.transition(3, ")
+        .expect("emits the transition");
+    let b = first.find("$.bind_value(").expect("emits the bind");
+    assert!(
+        t < b,
+        "a source-first transition precedes the bind in the batch:\n{first}"
+    );
+    assert!(
+        first.contains("\t$.bind_value("),
+        "the batch bind is a BARE statement:\n{first}"
+    );
+    // NEGATIVE: no effect wrap without `use:`.
+    assert!(
+        !first.contains("$.effect(() => $.bind_value("),
+        "a non-use: host must not effect-wrap the bind:\n{first}"
+    );
+    // The reverse source order reverses the emission.
+    let second = emit(
+        "<script>let v = $state(\"\");</script>\n<input bind:value={v} transition:fade />\n",
+        "App.svelte",
+    );
+    let b = second.find("$.bind_value(").expect("emits the bind");
+    let t = second
+        .find("$.transition(3, ")
+        .expect("emits the transition");
+    assert!(
+        b < t,
+        "a source-first bind precedes the transition in the batch:\n{second}"
+    );
+    assert!(
+        !second.contains("$.effect(() => $.bind_value("),
+        "the reverse source order must not effect-wrap either:\n{second}"
+    );
+}
+
+#[test]
+fn legacy_event_and_bind_source_order_without_lifecycle() {
+    // WITHOUT any lifecycle directive, a bare LEGACY `on:` event and a non-`this`
+    // bind share the after-update batch in attribute SOURCE order — the batch is
+    // not lifecycle-gated (a bind/event element with no `use:`/`transition:` still
+    // batches), and neither registration wraps.
+    let event_first = emit(
+        "<script>let c = $state(0); let v = $state(\"\");</script>\n<input on:input={() => c++} bind:value={v} />\n",
+        "App.svelte",
+    );
+    let e = event_first
+        .find("$.event('input'")
+        .expect("emits the event");
+    let b = event_first.find("$.bind_value(").expect("emits the bind");
+    assert!(
+        e < b,
+        "a source-first legacy on:input precedes the bind:\n{event_first}"
+    );
+    // NEGATIVE: both BARE — no effect wrap on either registration (no `use:`).
+    assert!(
+        !event_first.contains("$.effect(() =>"),
+        "neither registration may effect-wrap without use::\n{event_first}"
+    );
+    // The reverse source order reverses the emission.
+    let bind_first = emit(
+        "<script>let c = $state(0); let v = $state(\"\");</script>\n<input bind:value={v} on:input={() => c++} />\n",
+        "App.svelte",
+    );
+    let b = bind_first.find("$.bind_value(").expect("emits the bind");
+    let e = bind_first.find("$.event('input'").expect("emits the event");
+    assert!(
+        b < e,
+        "a source-first bind precedes the legacy on:input:\n{bind_first}"
+    );
+}
+
+#[test]
+fn modern_nondelegated_event_emits_before_bind() {
+    // A MODERN non-delegated `on*` attribute pushes its bare `$.event` BEFORE the
+    // element's after-update batch, so it precedes the bind even when the bind is
+    // authored FIRST — the modern event never joins the batch and never wraps.
+    let js = emit(
+        "<script>let c = $state(0); let v = $state(\"\");</script>\n<input bind:value={v} onmouseenter={() => c++} />\n",
+        "App.svelte",
+    );
+    let e = js.find("$.event('mouseenter'").expect("emits the event");
+    let b = js.find("$.bind_value(").expect("emits the bind");
+    assert!(
+        e < b,
+        "the modern non-delegated event precedes the source-first bind:\n{js}"
+    );
+    // NEGATIVE: neither registration effect-wraps (no `use:` host).
+    assert!(
+        !js.contains("$.effect(() =>"),
+        "no effect wrap without use::\n{js}"
+    );
+}
+
+#[test]
+fn use_action_modern_event_and_bind_ordering() {
+    // Mixed slots on one `use:` host: the init domain emits `$.action` then the
+    // WRAPPED bind (at its attribute source position), and the MODERN
+    // non-delegated event emits post-walk — the wrapped bind (init) BEFORE the
+    // bare modern `$.event`, even though the event is authored before the bind.
+    let js = emit(
+        "<script>let c = $state(0); let v = $state(\"\");</script>\n<input use:foo onmouseenter={() => c++} bind:value={v} />\n",
+        "App.svelte",
+    );
+    let action = js.find("$.action(").expect("emits the action");
+    let bind = js
+        .find("$.effect(() => $.bind_value(")
+        .expect("effect-wraps the bind");
+    let event = js
+        .find("$.event('mouseenter'")
+        .expect("emits the modern event");
+    assert!(
+        action < bind && bind < event,
+        "order must be action → effect(bind_value) → event('mouseenter'):\n{js}"
+    );
+    // NEGATIVE: no bare bind statement remains, and the modern event stays
+    // UNwrapped (the wrap is bind/legacy-`on:`-scoped, never a modern event).
+    assert!(
+        !js.contains("\t$.bind_value("),
+        "the use:-hosted bind must not also emit bare:\n{js}"
+    );
+    assert!(
+        !js.contains("$.effect(() => $.event("),
+        "a modern event never effect-wraps:\n{js}"
+    );
+}
+
+#[test]
+fn nested_parent_child_binds_validate_post_order() {
+    // Cross-element batch order is POST-ORDER (the official after_update merge:
+    // `…child_state.after_update, …element_state.after_update`): the CHILD's bind
+    // registration precedes the PARENT's even though the parent's attribute is
+    // authored first. Bind-only elements still batch — batching is not gated on a
+    // co-located transition/event.
+    let js = emit(
+        "<script>let v = $state(\"\"); let w = $state(0);</script>\n<div bind:clientWidth={w}><input bind:value={v} /></div>\n",
+        "App.svelte",
+    );
+    let child = js.find("$.bind_value(input").expect("emits the child bind");
+    let parent = js
+        .find("$.bind_element_size(div")
+        .expect("emits the parent bind");
+    assert!(
+        child < parent,
+        "the child's bind must precede the parent's (post-order batch merge):\n{js}"
+    );
+    // NEGATIVE: neither bind effect-wraps (no `use:` anywhere).
+    assert!(
+        !js.contains("$.effect(() =>"),
+        "no effect wrap without use::\n{js}"
+    );
+}
+
+#[test]
+fn global_host_bind_this_creates_no_stale_inline_index_entry() {
+    // `bind_emission_slot` is the LITERAL single authority for `bind:this`
+    // placement: `build_inline_render_index` admits ONLY the `InlineThis` slot.
+    // A GLOBAL-host `bind:this` (`<svelte:window|document|body>` — the
+    // `SpecialHost` slot) gets NO inline entry: a global host renders no element,
+    // so an indexed entry could never drain (a stale index row); its registration
+    // emits post-walk in the init body instead.
+    use crate::svelte::runtime::client_lifecycle::{
+        action_host_nodes, build_inline_render_index, InlineRenderOp,
+    };
+    use crate::svelte::runtime::client_plan::SupportedClientIr;
+    use crate::svelte::runtime::client_plan_types::ClientNode;
+    use crate::svelte::runtime::client_surface::ClientSyntaxSurface;
+    use crate::svelte::runtime::ir::NodeId;
+    use crate::svelte::runtime::lower_parsed_svelte_to_ir;
+
+    let source = "<script>let w = $state(0); let d = $state(0);</script>\n<svelte:window bind:this={w} />\n<div bind:this={d}></div>\n";
+    let alloc = Allocator::default();
+    let parsed = parse_svelte(source);
+    let opts = SvelteRuntimeOptions {
+        filename: Some("App.svelte".to_string()),
+        ..Default::default()
+    };
+    let ir = lower_parsed_svelte_to_ir(source, &parsed, &opts, &alloc).expect("lowering succeeds");
+    let classified = ClientSyntaxSurface::classify(&ir).expect("the surface classifies");
+    let plan = SupportedClientIr::build(&classified, &ir).expect("the plan builds");
+    let hosts = action_host_nodes(&plan);
+    let index = build_inline_render_index(&plan, &hosts);
+    // NEGATIVE: the global-host node has NO inline render sequence at all.
+    let host = plan
+        .nodes
+        .iter()
+        .position(|n| matches!(n, ClientNode::SpecialHost { .. }))
+        .expect("the plan carries the global-host node");
+    assert!(
+        !index.contains_key(&NodeId(host as u32)),
+        "a global-host bind:this must not create an inline index entry (it can never drain)"
+    );
+    // POSITIVE: the regular `<div bind:this>` stays inline-indexed — exactly ONE
+    // BindThis entry across the whole index.
+    let bind_this_entries = index
+        .values()
+        .flatten()
+        .filter(|op| matches!(op, InlineRenderOp::BindThis { .. }))
+        .count();
+    assert_eq!(
+        bind_this_entries, 1,
+        "exactly the regular-element bind:this is indexed inline"
+    );
+    // The emitted module still registers the global-host bind post-walk (the
+    // routing change is output-preserving).
+    let js = emit(source, "App.svelte");
+    assert!(
+        js.contains("$.bind_this($.window, "),
+        "the global-host bind:this still emits in the init body:\n{js}"
+    );
+}
+
+#[test]
+fn euler_parent_transition_precedes_after_child_modern_event() {
+    // Euler-tour nesting, batch × modern event: the CHILD's modern non-delegated
+    // event joins the after-update stream at the child's ENTER rank, while the
+    // PARENT's transition (its own directive batch) merges at the parent's EXIT
+    // rank — every descendant position precedes the parent's exit, so the child's
+    // `$.event` emits BEFORE the parent's `$.transition` even though the
+    // transition is authored first (official svelte@5.56.3:
+    // `$.event('mouseenter', input, …)` then `$.transition(3, div, …)`).
+    let js = emit(
+        "<script>let c = $state(0);</script>\n<div transition:fade><input onmouseenter={() => c++} /></div>\n",
+        "App.svelte",
+    );
+    let event = js
+        .find("$.event('mouseenter'")
+        .expect("emits the child's modern event");
+    let transition = js
+        .find("$.transition(3, div")
+        .expect("emits the parent's transition");
+    assert!(
+        event < transition,
+        "the child's modern event (ENTER) must precede the parent's transition (EXIT):\n{js}"
+    );
+    // NEGATIVE: the reverse order does NOT hold — no transition is emitted
+    // anywhere before the child's event (a flat source-order model would put the
+    // parent's authored-first transition first).
+    assert!(
+        js[..event].find("$.transition(").is_none(),
+        "no $.transition may precede the child's modern event:\n{js}"
+    );
+    // NEGATIVE: the modern event stays a BARE direct registration — never
+    // effect-wrapped, never delegated (mouseenter is not in the delegated set).
+    assert!(
+        !js.contains("$.effect(() => $.event(") && !js.contains("$.delegated("),
+        "the modern non-delegated event stays a bare $.event:\n{js}"
+    );
+}
+
+#[test]
+fn euler_parent_bind_emits_after_child_modern_event() {
+    // Euler-tour nesting, bind × modern event: the PARENT's non-`this` bind
+    // (`bind:clientWidth` — its directive batch) merges at the parent's EXIT
+    // rank, AFTER the child's ENTER-ranked modern event (official svelte@5.56.3:
+    // `$.event('mouseenter', input, …)` then
+    // `$.bind_element_size(div, 'clientWidth', …)`).
+    let js = emit(
+        "<script>let c = $state(0); let w = $state(0);</script>\n<div bind:clientWidth={w}><input onmouseenter={() => c++} /></div>\n",
+        "App.svelte",
+    );
+    let event = js
+        .find("$.event('mouseenter'")
+        .expect("emits the child's modern event");
+    let bind = js
+        .find("$.bind_element_size(div")
+        .expect("emits the parent's bind");
+    assert!(
+        event < bind,
+        "the child's modern event (ENTER) must precede the parent's bind (EXIT):\n{js}"
+    );
+    // NEGATIVE: the reverse order does NOT hold — no bind registration is emitted
+    // anywhere before the child's event.
+    assert!(
+        js[..event].find("$.bind_element_size(").is_none(),
+        "no $.bind_element_size may precede the child's modern event:\n{js}"
+    );
+    // NEGATIVE: neither registration effect-wraps (no `use:` host anywhere).
+    assert!(
+        !js.contains("$.effect(() =>"),
+        "no effect wrap without use::\n{js}"
+    );
+}
+
+#[test]
+fn euler_parent_modern_event_precedes_child_transition() {
+    // Euler-tour nesting, the other direction: the PARENT's modern event joins
+    // the stream at the parent's ENTER rank — BEFORE every child position — while
+    // the CHILD's transition merges at the child's EXIT rank, so the parent's
+    // `$.event` emits FIRST even though a child's batch beats a PARENT's batch
+    // (official svelte@5.56.3: `$.event('mouseenter', div, …)` then
+    // `$.transition(3, span, …)`).
+    let js = emit(
+        "<script>let c = $state(0);</script>\n<div onmouseenter={() => c++}><span transition:fade></span></div>\n",
+        "App.svelte",
+    );
+    let event = js
+        .find("$.event('mouseenter'")
+        .expect("emits the parent's modern event");
+    let transition = js
+        .find("$.transition(3, span")
+        .expect("emits the child's transition");
+    assert!(
+        event < transition,
+        "the parent's modern event (ENTER) must precede the child's transition (EXIT):\n{js}"
+    );
+    // NEGATIVE: the reverse order does NOT hold — no transition is emitted
+    // anywhere before the parent's event (a child-batch-always-first model would
+    // put the span's transition first).
+    assert!(
+        js[..event].find("$.transition(").is_none(),
+        "no $.transition may precede the parent's modern event:\n{js}"
+    );
+}
+
+#[test]
+fn euler_sibling_transition_precedes_sibling_modern_event() {
+    // Euler-tour SIBLINGS keep document order: the first sibling's transition
+    // (its EXIT rank) precedes the second sibling's modern event (its ENTER rank)
+    // — enter/exit pairs of disjoint subtrees never interleave (official
+    // svelte@5.56.3: `$.transition(3, span, …)` then
+    // `$.event('mouseenter', input, …)`). A phase-split model that hoists every
+    // modern event before every batch item would reverse this.
+    let js = emit(
+        "<script>let c = $state(0);</script>\n<div><span transition:fade></span><input onmouseenter={() => c++} /></div>\n",
+        "App.svelte",
+    );
+    let transition = js
+        .find("$.transition(3, span")
+        .expect("emits the first sibling's transition");
+    let event = js
+        .find("$.event('mouseenter'")
+        .expect("emits the second sibling's modern event");
+    assert!(
+        transition < event,
+        "the first sibling's transition must precede the second sibling's modern event (document order):\n{js}"
+    );
+    // NEGATIVE: the reverse order does NOT hold — no modern-event registration is
+    // emitted anywhere before the transition.
+    assert!(
+        js[..transition].find("$.event('mouseenter'").is_none(),
+        "no $.event may precede the sibling transition:\n{js}"
+    );
+}
+
+#[test]
+fn nondelegated_event_without_use_action_stays_bare() {
+    // The effect wrap is triggered SPECIFICALLY by a `use:` action on a LEGACY
+    // `on:` event — a co-located `transition:`, `{@attach}`, or reactive attribute
+    // does NOT wrap: the legacy event stays the BARE `$.event(…)` registration
+    // (in the post-transition directive batch). And a MODERN delegated event stays
+    // delegated even beside `use:`.
+    for (label, src) in [
+        (
+            "transition:+on:",
+            "<script>let c = $state(0);</script>\n<div transition:fade on:click={() => c++}>x</div>\n",
+        ),
+        (
+            "attach+on:",
+            "<script>let c = $state(0);</script>\n<div {@attach fn} on:click={() => c++}>x</div>\n",
+        ),
+        (
+            "reactive-attr+on:",
+            "<script>let c = $state(0);</script>\n<div id={c} on:click={() => c++}>x</div>\n",
+        ),
+    ] {
+        let js = emit(src, "App.svelte");
+        assert!(
+            js.contains("\t$.event('click', div, "),
+            "{label}: a non-use element keeps the BARE $.event registration:\n{js}"
+        );
+        assert!(
+            !js.contains("$.effect(() => $.event("),
+            "{label}: only a `use:` action triggers the effect wrap:\n{js}"
+        );
+    }
+    // MODERN delegated events are unaffected by `use:` — still `$.delegate`, no wrap.
+    let js = emit(
+        "<script>let c = $state(0);</script>\n<div use:foo onclick={() => c++}>x</div>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.delegate(['click']);"),
+        "use:+MODERN onclick stays delegated:\n{js}"
+    );
+    assert!(
+        !js.contains("$.effect(() => $.event("),
+        "a delegated event must never effect-wrap:\n{js}"
+    );
+}
+
 #[test]
 fn nondelegated_event_emits_a_direct_event_listener() {
     // A non-bubbling event (`onfocus`, not in the delegated set) is a DIRECT

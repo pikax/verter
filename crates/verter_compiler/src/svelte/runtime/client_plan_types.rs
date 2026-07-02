@@ -10,7 +10,7 @@ use verter_span::Span;
 
 use super::client_allowlist::SupportedHtmlElement;
 use super::client_shapes::{ClientBindShape, ClientEventHandlerShape};
-use super::ir::{ExprId, LetBinding, TemplateScopeId};
+use super::ir::{EventOrigin, ExprId, LetBinding, TemplateScopeId};
 
 /// A typed module-scope USER import the client module hoists ABOVE the component
 /// function — the general prelude/import carrier (`ClientModulePlan.user_imports`).
@@ -753,6 +753,13 @@ pub(super) enum ClientAttr {
     /// records the supported KIND only (the narrow node tree stays a faithful
     /// structural mirror).
     Dynamic,
+    /// An element LIFECYCLE directive (`use:` / `transition:`/`in:`/`out:` /
+    /// `animate:` / element-position `{@attach}`) — the emission (`$.action` /
+    /// `$.transition` / `$.animation` / `$.attach`, with the FLAG arithmetic and
+    /// thunk shapes) lives on the corresponding
+    /// [`ClientRuntimeOp::Lifecycle`]'s [`ElementLifecycleOp`]. The element attr
+    /// records the supported KIND only.
+    Lifecycle,
 }
 
 /// The COARSE supported bind target kind — the structural-mirror discriminant on
@@ -783,6 +790,14 @@ pub(super) enum ClientBindTarget {
 pub(super) struct EventEmit {
     /// The registration mode (delegated `$.delegated` vs direct `$.event`).
     pub mode: EventMode,
+    /// Which authored syntax produced this event (modern `on*` attribute vs legacy
+    /// `on:` directive) — the discriminant the EMISSION SLOT keys on
+    /// ([`super::client_lifecycle::event_emission_slot`]): a bare LEGACY `on:` event
+    /// on a regular node joins the post-walk directive batch (source-ordered with
+    /// `$.transition` / `$.animation`) and effect-wraps into the init domain on a
+    /// `use:` action host; a MODERN event emits in the pre-batch post-walk phase and
+    /// never wraps. Delegation (`mode`) is NOT the wrap/order discriminant.
+    pub origin: EventOrigin,
     /// The registration target host (the regular-element surface emits only `Node`).
     pub target: EventEmitTarget,
     /// The normalized event type (`click`, `focus`, …) — the `$.event` / `$.delegated`
@@ -1087,6 +1102,16 @@ pub(super) enum ClientRuntimeOp {
         /// 2-argument call otherwise.
         input_trailing: bool,
     },
+    /// An element LIFECYCLE op (`$.action` / `$.transition` / `$.animation` /
+    /// `$.attach`) — the typed [`ElementLifecycleOp`] carries the target node var +
+    /// the already-rewritten expression pieces (and, for a transition, the
+    /// precomputed FLAG integer). The emitter renders the exact official call shape
+    /// from this substrate in TWO phases: `Action` / `Attachment` emit INLINE during
+    /// the walk (the init domain — after the element's attr inits, interleaved with
+    /// `bind:this` in source order), while `Transition` / `Animation` emit LAST in
+    /// the post-walk op stage (after the binds + events) — the official
+    /// `RegularElement` phase order.
+    Lifecycle(ElementLifecycleOp),
     /// A `{@html node, () => h [, true])` raw-markup insertion. The payload is the
     /// already-assembled SECOND argument — a `() => <rewritten-expr>` thunk, or the bare
     /// callee identifier when the payload is a direct zero-argument identifier call
@@ -1108,6 +1133,93 @@ pub(super) enum ClientRuntimeOp {
         /// `$.reset(parent)`.
         only_child: bool,
     },
+}
+
+/// A narrow supported element LIFECYCLE op — the closed `{Action, Transition,
+/// Animation, Attachment}` family behind [`ClientRuntimeOp::Lifecycle`]. Each
+/// variant carries its target node id plus the ALREADY-REWRITTEN expression pieces
+/// (signal/prop reads lowered through the shared rewriter at plan-build time); the
+/// emitter assembles the exact official `svelte/internal/client` call shape with the
+/// real DOM var — no emit-time re-inference, no post-hoc string substitution.
+///
+/// The family keeps each helper distinct BY CONSTRUCTION: an `animate:` is an
+/// `Animation` (the `$.animation` helper — never a `$.transition` masquerade), an
+/// element `{@attach}` is an `Attachment` (attribute-position — the child form is
+/// fail-closed upstream), and the transition FLAG integer is precomputed from the
+/// typed kind + `|global` modifier at projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ElementLifecycleOp {
+    /// A `use:` action — `$.action(el, ($$node) => callee?.($$node))`, gaining the
+    /// `$$action_arg` closure param + the `() => arg` getter thunk when an argument
+    /// is present (`use:fn={arg}`).
+    Action {
+        /// The target node id.
+        target: ClientNodeId,
+        /// The rewritten action callee (an identifier / member path — `foo`,
+        /// `obj.foo`, `$.get(foo)`); the emitter appends the official
+        /// optional-chained call (`?.(…)`).
+        callee: String,
+        /// The rewritten argument THUNK BODY (concise-arrow-wrapped), when the
+        /// directive carries `={arg}` — the 3rd positional `() => <arg>` getter.
+        arg: Option<String>,
+    },
+    /// A `transition:` / `in:` / `out:` — `$.transition(FLAG, el, () => fn[, ()
+    /// => params])`.
+    Transition {
+        /// The target node id.
+        target: ClientNodeId,
+        /// The PRECOMPUTED official flag integer: `TRANSITION_IN(1) |
+        /// TRANSITION_OUT(2) | TRANSITION_GLOBAL(4)` — `in`=1, `out`=2,
+        /// `transition`=3, `|global` adds 4 (5/6/7); `|local` is the default
+        /// (no +4).
+        flags: u8,
+        /// The rewritten transition-function expression (the directive name resolved
+        /// in the op's scope — `fade`, `$.get(fade)`, `$$props.fx`); the emitter
+        /// wraps it in the `() => <fn>` getter.
+        get_fn: String,
+        /// The rewritten params THUNK BODY (concise-arrow-wrapped), present IFF the
+        /// directive carries `={params}` — the 4th positional `() => ({ … })`
+        /// getter (absent → a 3-argument call).
+        params: Option<String>,
+    },
+    /// An `animate:` — `$.animation(el, () => fn, PARAMS)`, ALWAYS 3 args.
+    Animation {
+        /// The target node id.
+        target: ClientNodeId,
+        /// The rewritten animation-function expression (wrapped in `() => <fn>`).
+        get_fn: String,
+        /// The rewritten params THUNK BODY (concise-arrow-wrapped); `None` emits the
+        /// official literal `null` 3rd argument.
+        params: Option<String>,
+    },
+    /// An element-position `{@attach expr}` — `$.attach(el, () => expr)` (2 args).
+    Attachment {
+        /// The target node id.
+        target: ClientNodeId,
+        /// The rewritten attachment THUNK BODY (concise-arrow-wrapped — an inline
+        /// arrow payload stays a valid expression body: `() => (() => {})`).
+        payload: String,
+    },
+}
+
+impl ElementLifecycleOp {
+    /// The target node id (uniform accessor across the four variants).
+    pub(super) fn target(&self) -> ClientNodeId {
+        match self {
+            Self::Action { target, .. }
+            | Self::Transition { target, .. }
+            | Self::Animation { target, .. }
+            | Self::Attachment { target, .. } => *target,
+        }
+    }
+
+    /// Whether this op emits INLINE during the walk (the init domain — `Action` /
+    /// `Attachment`, interleaved with `bind:this` in source order) vs LAST in the
+    /// post-walk op stage (`Transition` / `Animation`, after binds + events) — the
+    /// official `RegularElement` phase split.
+    pub(super) fn is_init_domain(&self) -> bool {
+        matches!(self, Self::Action { .. } | Self::Attachment { .. })
+    }
 }
 
 /// One part of a dynamic attribute value carried to the emitter — a literal text

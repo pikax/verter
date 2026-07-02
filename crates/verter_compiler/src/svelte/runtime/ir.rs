@@ -461,10 +461,14 @@ pub enum AttrIr {
         /// byte-identical to `onclick`), so this is the sole faithful discriminator
         /// downstream. Consumed where the two forms have DIFFERENT validity — a
         /// `<svelte:boundary>` accepts ONLY the modern `onerror` attribute and rejects
-        /// every legacy `on:` directive (official `svelte_boundary_invalid_attribute`).
-        /// For a regular element / global host both forms are valid and emit the same
-        /// (`delegated` / `modifiers` already carry the emission-relevant differences),
-        /// so those consumers ignore it.
+        /// every legacy `on:` directive (official `svelte_boundary_invalid_attribute`)
+        /// — AND where they have different EMISSION semantics: on a regular element the
+        /// LEGACY `on:` form never delegates, joins the element's post-walk DIRECTIVE
+        /// BATCH (source-ordered with `transition:` / `animate:`, official
+        /// `RegularElement.js` `other_directives` → `element_state.after_update`), and
+        /// effect-wraps into the init domain on a `use:` action host; the MODERN
+        /// attribute form emits BEFORE that batch and never effect-wraps (`delegated` /
+        /// `modifiers` carry the remaining per-form differences).
         origin: EventOrigin,
     },
     /// A `use:action` directive (`use:fn` / `use:fn={arg}`).
@@ -474,7 +478,8 @@ pub enum AttrIr {
         /// The action argument expression, if present (`use:fn={arg}`).
         arg: Option<ExprId>,
     },
-    /// A `transition:` / `in:` / `out:` / `animate:` directive.
+    /// A `transition:` / `in:` / `out:` directive (`animate:` is its OWN
+    /// [`Animate`](Self::Animate) family — a distinct runtime helper, `$.animation`).
     Transition {
         /// The transition kind.
         kind: TransitionKind,
@@ -482,6 +487,26 @@ pub enum AttrIr {
         name: String,
         /// The transition argument expression, if present.
         expr: Option<ExprId>,
+        /// Whether the `|global` modifier is present — the official
+        /// `TRANSITION_GLOBAL` (4) flag bit. `|local` (or no modifier) is the
+        /// default and carries `false`.
+        global: bool,
+    },
+    /// An `animate:` directive (keyed-each-only; the official `$.animation` helper —
+    /// NEVER a transition).
+    Animate {
+        /// The animation function name (the part after `animate:`).
+        name: String,
+        /// The animation argument expression, if present.
+        expr: Option<ExprId>,
+    },
+    /// An element-position `{@attach expr}` attachment (the official `AttachTag`
+    /// in attribute position — `$.attach(el, () => expr)`). The CHILD-position form
+    /// (`<div>{@attach expr}</div>`) is a parse-level official reject
+    /// (`expected_tag`) and never lowers to this.
+    Attach {
+        /// The attachment expression.
+        expr: ExprId,
     },
     /// A `let:` slot-prop binding directive.
     Let {
@@ -529,7 +554,8 @@ pub enum MixedAttrPart {
     Expr(ExprId),
 }
 
-/// The closed family of transition-directive kinds.
+/// The closed family of transition-directive kinds (`animate:` is NOT a transition —
+/// it is the distinct [`AttrIr::Animate`] family emitting `$.animation`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransitionKind {
     /// `transition:` (bidirectional).
@@ -538,8 +564,6 @@ pub enum TransitionKind {
     In,
     /// `out:` (one-way out).
     Out,
-    /// `animate:`.
-    Animate,
 }
 
 /// A reactive runtime op attached to a node or scope.
@@ -608,12 +632,19 @@ pub enum RuntimeOp {
         /// surface the backend builds from the action + argument).
         action: ActionOp,
     },
-    /// A `transition:` / `in:` / `out:` / `animate:` directive.
+    /// A `transition:` / `in:` / `out:` directive.
     Transition {
         /// The target node.
         target: NodeId,
         /// The transition op.
         transition: TransitionOp,
+    },
+    /// An `animate:` directive — a keyed-each item animation (`$.animation`).
+    Animation {
+        /// The target node.
+        target: NodeId,
+        /// The animation op.
+        animation: AnimationOp,
     },
     /// A "cannot be set statically" attribute init (`autofocus` / `muted` /
     /// `defaultValue` / `defaultChecked`). These attributes are EXCLUDED from the
@@ -686,14 +717,27 @@ pub struct ActionOp {
     pub arg: Option<ExprId>,
 }
 
-/// A transition / animation op.
+/// A transition op (`transition:` / `in:` / `out:`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransitionOp {
     /// The transition kind.
     pub kind: TransitionKind,
-    /// The transition/animation function name.
+    /// The transition function name.
     pub name: String,
     /// The transition argument expression, if present.
+    pub expr: Option<ExprId>,
+    /// Whether the `|global` modifier is present (the official `TRANSITION_GLOBAL`
+    /// flag bit; `|local` / no modifier is the default `false`).
+    pub global: bool,
+}
+
+/// An `animate:` op — the keyed-each item animation (`$.animation(el, () => fn,
+/// PARAMS)`), a DISTINCT helper family from [`TransitionOp`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnimationOp {
+    /// The animation function name.
+    pub name: String,
+    /// The animation argument expression, if present.
     pub expr: Option<ExprId>,
 }
 
@@ -761,6 +805,12 @@ pub struct EventOp {
     /// `$.delegated` argument): `Some(true)` passive, `Some(false)` nonpassive,
     /// `None` omitted. Carried from lowering (the modern-vs-legacy passive rule).
     pub passive: Option<bool>,
+    /// Which authored syntax produced this event (modern `on*` attribute vs legacy
+    /// `on:` directive) — threaded from [`AttrIr::Event`]. The emission phase keys
+    /// on it: a bare LEGACY event joins the post-walk directive batch and
+    /// effect-wraps on a `use:` host; a MODERN event emits before that batch and
+    /// never wraps.
+    pub origin: EventOrigin,
 }
 
 /// A block construct.

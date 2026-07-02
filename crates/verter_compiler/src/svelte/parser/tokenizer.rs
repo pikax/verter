@@ -381,8 +381,11 @@ impl<'a> SvelteParser<'a> {
         // Walk the attributes in SOURCE ORDER, mirroring upstream's `for (const attribute …)`.
         for attr in &attributes {
             match &attr.kind {
-                // A spread / directive is not an `Attribute` → `svelte_options_invalid_attribute`.
-                SvelteAttributeKind::Spread(_) | SvelteAttributeKind::Directive(_) => {
+                // A spread / directive / `{@attach}` is not an `Attribute` →
+                // `svelte_options_invalid_attribute`.
+                SvelteAttributeKind::Spread(_)
+                | SvelteAttributeKind::Directive(_)
+                | SvelteAttributeKind::Attach { .. } => {
                     self.record_options_invalid("svelte_options_invalid_attribute", attr.span);
                     return;
                 }
@@ -1654,10 +1657,20 @@ impl<'a> SvelteParser<'a> {
                 kind: SvelteAttributeKind::Spread(inner),
                 span,
             }
+        } else if let Some(expr_span) = attach_attribute_expr_span(self.src, inner) {
+            // `{@attach expr}` in ATTRIBUTE position — the official 5.29 `AttachTag`
+            // (attribute-only; the child-position form is the official `expected_tag`
+            // reject). A DEDICATED kind carrying the expression span (after the
+            // `@attach` keyword + separating whitespace, mirroring the child-form
+            // tag parse) so lowering never re-slices the body text.
+            SvelteAttribute {
+                kind: SvelteAttributeKind::Attach { expr_span },
+                span,
+            }
         } else if body.starts_with('@') || body.starts_with('#') || body.starts_with('/') {
-            // `{@attach expr}` / other tag used in attribute position — record
-            // as a plain attribute carrying the inner span so the projector
-            // can dispatch on the leading sigil.
+            // A NON-attach tag sigil used in attribute position — record as a plain
+            // attribute carrying the inner span so the projector can dispatch on
+            // the leading sigil.
             SvelteAttribute {
                 kind: SvelteAttributeKind::Plain {
                     name: String::new(),
@@ -2325,6 +2338,38 @@ impl<'a> SvelteParser<'a> {
 }
 
 // ── Free helpers ───────────────────────────────────────────────────────
+
+/// The EXPRESSION span of an attribute-position `{@attach expr}` body, or `None`
+/// when the brace body is not an `@attach` tag. `inner` is the brace-inner span
+/// (braces excluded). The keyword scan mirrors the child-form tag parse
+/// (`parse_at_tag`): the `@` is followed by the ASCII-alphabetic keyword run, which
+/// must be exactly `attach` (`@attachment` scans the longer keyword and does NOT
+/// match); the expression begins after the keyword plus any separating whitespace
+/// and runs to the closing brace. An empty expression (`{@attach}`) yields an empty
+/// span — the downstream expression parse fails it closed.
+fn attach_attribute_expr_span(src: &[u8], inner: Span) -> Option<Span> {
+    let text = std::str::from_utf8(&src[inner.start as usize..inner.end as usize]).ok()?;
+    // Allow leading whitespace inside the braces (consistent with the brace-attribute
+    // body dispatch, which trims before sigil-matching).
+    let lead_ws = text.len() - text.trim_start().len();
+    let body = &text[lead_ws..];
+    let after_at = body.strip_prefix('@')?;
+    let kw_end = after_at
+        .bytes()
+        .position(|b| !b.is_ascii_alphabetic())
+        .unwrap_or(after_at.len());
+    if &after_at[..kw_end] != "attach" {
+        return None;
+    }
+    // The expression starts after `@attach` plus separating whitespace.
+    let after_kw = &after_at[kw_end..];
+    let expr_lead = after_kw.len() - after_kw.trim_start().len();
+    let expr_start = inner.start as usize + lead_ws + 1 + kw_end + expr_lead;
+    Some(Span::new(
+        expr_start.min(inner.end as usize) as u32,
+        inner.end,
+    ))
+}
 
 /// Read a quoted/text attribute value by name (case-insensitive) from a parsed
 /// attribute list, returning the value text.

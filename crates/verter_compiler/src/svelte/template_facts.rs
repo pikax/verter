@@ -122,6 +122,10 @@ fn component_usage_for(element: &SvelteElement, source: &str) -> Option<RawCompo
             SvelteAttributeKind::Spread(_) => {
                 has_spread = true;
             }
+            // An `{@attach expr}` on a component usage is the element-attachment
+            // machinery (officially a computed-key `[$.attachment()]` prop) — it has
+            // no named prop / binding / event surface at the usage site.
+            SvelteAttributeKind::Attach { .. } => {}
             SvelteAttributeKind::Directive(directive) => match directive.kind {
                 SvelteDirectiveKind::On => {
                     // Legacy `on:click` → event named by the directive local.

@@ -93,6 +93,13 @@ pub(super) fn lower_attributes(
                     out.push(ir);
                 }
             }
+            // An attribute-position `{@attach expr}` — the expression span was
+            // captured cleanly by the tokenizer (after the `@attach` keyword + ws),
+            // so the lowering pushes it directly (no body re-slicing).
+            SvelteAttributeKind::Attach { expr_span } => {
+                let expr = ctx.push_expr(*expr_span, scope);
+                out.push(AttrIr::Attach { expr });
+            }
         }
     }
     out
@@ -479,23 +486,31 @@ fn lower_directive(
             let arg = value_expr(ctx);
             Some(AttrIr::Use { expr: action, arg })
         }
+        // A `transition:` / `in:` / `out:` directive. The `|global` modifier is the
+        // official `TRANSITION_GLOBAL` flag bit; `|local` (or no modifier) is the
+        // default — recorded at LOWERING so the projection computes the FLAG integer
+        // from typed data, never a re-scan of the modifier list.
         SvelteDirectiveKind::Transition => Some(AttrIr::Transition {
             kind: TransitionKind::Transition,
             name: directive.local.clone(),
             expr: value_expr(ctx),
+            global: directive.modifiers.iter().any(|m| m == "global"),
         }),
         SvelteDirectiveKind::In => Some(AttrIr::Transition {
             kind: TransitionKind::In,
             name: directive.local.clone(),
             expr: value_expr(ctx),
+            global: directive.modifiers.iter().any(|m| m == "global"),
         }),
         SvelteDirectiveKind::Out => Some(AttrIr::Transition {
             kind: TransitionKind::Out,
             name: directive.local.clone(),
             expr: value_expr(ctx),
+            global: directive.modifiers.iter().any(|m| m == "global"),
         }),
-        SvelteDirectiveKind::Animate => Some(AttrIr::Transition {
-            kind: TransitionKind::Animate,
+        // `animate:` is its OWN attribute family (the `$.animation` helper), NOT a
+        // transition kind — keyed-each placement is validated by the client surface.
+        SvelteDirectiveKind::Animate => Some(AttrIr::Animate {
             name: directive.local.clone(),
             expr: value_expr(ctx),
         }),

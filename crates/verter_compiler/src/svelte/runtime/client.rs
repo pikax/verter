@@ -25,11 +25,11 @@
 //! [`UnsupportedSvelteRuntimeSurface`] carrying its owning vertical — never a
 //! silent empty module, never a panic.
 
-use super::client_effect::{emit_text_effect, EffectBody, Memoizer};
+use super::client_effect::Memoizer;
 use super::client_event::{emit_delegate_epilogue, render_event_registration};
 use super::client_module_frame::{emit_imports, escape_template_literal};
 use super::client_plan::{ClientBlock, ClientModulePlan, ClientNode, ClientRuntimeOp, EventEmit};
-use super::client_shapes::{BindGetSetForm, ClientBindShape, GroupBindKey};
+use super::client_shapes::GroupBindKey;
 use super::client_walk::{
     any_item_needs_name, first_descent, item_needs_name, sibling_descent, WalkBase,
 };
@@ -106,15 +106,15 @@ pub(super) fn emit_client_module(
 /// allocator state.
 pub(super) struct ClientEmitter<'a> {
     /// The narrow plan — the SOLE emission input.
-    plan: &'a ClientModulePlan<'a>,
+    pub(super) plan: &'a ClientModulePlan<'a>,
     /// Reserved + already-allocated names (collision avoidance).
     used: rustc_hash::FxHashSet<String>,
     /// The emitted var name reaching each named DOM node (populated by the walk,
     /// read by the op emission).
-    node_var: rustc_hash::FxHashMap<NodeId, String>,
+    pub(super) node_var: rustc_hash::FxHashMap<NodeId, String>,
     /// The emitted var name reaching each interpolation's text node (populated by
     /// the walk, read by the reactive-text op emission).
-    interp_var: rustc_hash::FxHashMap<NodeId, String>,
+    pub(super) interp_var: rustc_hash::FxHashMap<NodeId, String>,
     /// The allocated class/style accumulator name per `(node, kind)` — the
     /// `let <name>;` is emitted INLINE in the walk right after the node's var
     /// (matching the official per-element `init` placement), and the same name is
@@ -124,7 +124,7 @@ pub(super) struct ClientEmitter<'a> {
     /// independent (a directive-less class op adjacent to a directive-bearing style op
     /// must NOT borrow the style accumulator). Populated by the walk's inline-init
     /// emission, read by the reactive class/style op.
-    acc_name: rustc_hash::FxHashMap<(NodeId, AccKind), String>,
+    pub(super) acc_name: rustc_hash::FxHashMap<(NodeId, AccKind), String>,
     /// The collision-safe `bind:group` accumulator name PER DISTINCT GROUP, keyed by the
     /// structural bind target + scope ([`GroupBindKey`]). Populated ONCE in [`Self::new`]
     /// (one [`Self::alloc_name`] per distinct key, in source order — `binding_group`,
@@ -137,12 +137,35 @@ pub(super) struct ClientEmitter<'a> {
     /// key was first seen). The component body declares one `const <name> = [];` per entry,
     /// in this order — matching official svelte's insertion-order accumulator decl loop.
     pub(super) group_binding_decls: Vec<String>,
-    /// Inline `bind:this` ops pre-indexed by target node (built ONCE in [`Self::new`]) so
-    /// [`Self::emit_inline_bind_this`] is an O(1) drain, not an O(ops) per-node re-scan.
-    /// Each entry carries the bind's [`BindGetSetForm`] (identifier-thunk vs function-pair)
-    /// alongside its rewritten getter/setter bodies.
-    pub(super) inline_this_binds:
-        rustc_hash::FxHashMap<NodeId, Vec<(BindGetSetForm, String, String)>>,
+    /// INIT-DOMAIN inline render ops (inline `bind:this` + `Action` / `Attachment`
+    /// lifecycle + the effect-wrapped LEGACY `on:` events of `use:` action hosts)
+    /// pre-indexed by target node in plan-op (attribute source) order
+    /// (built ONCE in [`Self::new`]) so [`Self::emit_inline_render_ops`] is an O(1)
+    /// drain, not an O(ops) per-node re-scan — ONE ordered sequence per node, so a
+    /// `bind:this` and an adjacent `use:` / `{@attach}` / wrapped event keep their
+    /// official source interleave.
+    pub(super) inline_render_ops:
+        rustc_hash::FxHashMap<NodeId, Vec<super::client_lifecycle::InlineRenderOp>>,
+    /// The nodes hosting a `use:` action — the trigger set for the official
+    /// effect wrap of co-located LEGACY `on:` events. Computed ONCE in
+    /// [`Self::new`] via [`super::client_lifecycle::action_host_nodes`] and
+    /// shared by the inline index build AND both post-walk event stages through
+    /// the single [`super::client_lifecycle::event_emission_slot`] classifier,
+    /// so the sides can never disagree on where an event emits.
+    pub(super) action_hosts: rustc_hash::FxHashSet<NodeId>,
+    /// The EULER-TOUR rank pair of every narrow template node — the AFTER-UPDATE
+    /// stream emission order. A MODERN `on*` event registration joins the stream
+    /// at its element's ENTER position (`pre` — official pushes it onto the
+    /// enclosing after_update at attribute-visit time), while the element's own
+    /// directive-batch items (`$.transition` / `$.animation` / bare legacy
+    /// `$.event` / bare non-`this` `$.bind_*`) join at its EXIT position (`post`
+    /// — the `…child_state.after_update, …element_state.after_update` merge), so
+    /// a child element's batch precedes its parent's while items WITHIN one
+    /// element keep attribute source order. Computed ONCE in [`Self::new`] over
+    /// the narrow node arena ([`super::client_lifecycle::after_update_ranks`]);
+    /// ranks are compared only within a template scope.
+    pub(super) after_update_rank:
+        rustc_hash::FxHashMap<NodeId, super::client_lifecycle::AfterUpdateRank>,
     /// The function-pair component-bind locals (`bind_get` / `bind_set`) per
     /// component-function-scoped pair INDEX, minted ONCE in [`Self::new`] through the shared
     /// scope-aware allocator (so they avoid every user binding AND each other). The component
@@ -210,7 +233,7 @@ pub(super) enum RegionFrame {
 /// class op and one style op, so `(node, Class)` / `(node, Style)` are distinct
 /// accumulator slots — the discriminant the per-node accumulator map keys on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum AccKind {
+pub(super) enum AccKind {
     Class,
     Style,
 }
@@ -270,6 +293,7 @@ impl<'a> ClientEmitter<'a> {
         for reserved in ["$", "$$anchor", "$$props", "$$value"] {
             used.insert(reserved.to_string());
         }
+        let action_hosts = super::client_lifecycle::action_host_nodes(plan);
         let mut emitter = Self {
             plan,
             used,
@@ -278,7 +302,12 @@ impl<'a> ClientEmitter<'a> {
             acc_name: rustc_hash::FxHashMap::default(),
             group_binding_names: rustc_hash::FxHashMap::default(),
             group_binding_decls: Vec::new(),
-            inline_this_binds: super::client_bind::build_inline_this_index(plan),
+            inline_render_ops: super::client_lifecycle::build_inline_render_index(
+                plan,
+                &action_hosts,
+            ),
+            action_hosts,
+            after_update_rank: super::client_lifecycle::after_update_ranks(plan),
             region_frame: rustc_hash::FxHashMap::default(),
             fn_pair_bind_names: rustc_hash::FxHashMap::default(),
         };
@@ -479,7 +508,8 @@ impl<'a> ClientEmitter<'a> {
     /// in-closure `$.text(...)` node var instead of the unbound `"text"` fallback (the X8
     /// ReferenceError). A no-op when the region is not a single text run. The owning
     /// emission (`emit_text_first_region`) lives in the sibling block-emit module, so this is
-    /// the `pub(super)` seam that keeps the private `interp_var` map encapsulated here.
+    /// the `pub(super)` seam through which the walk populates the sibling-shared
+    /// `pub(super)` `interp_var` map.
     pub(super) fn bind_text_first_run(&mut self, scope_id: TemplateScopeId, text_var: &str) {
         let scope = self.ir().template_scope(scope_id);
         let items = clean_nodes(self.ir(), &scope.roots, CleanContext::region_root());
@@ -558,17 +588,16 @@ impl<'a> ClientEmitter<'a> {
             // A region-root `{@debug}` that PRECEDES the clone-root element emits right
             // after the clone frame (gaps[0]), before the element's own inits.
             self.emit_interleaved_gap(out, &gaps[0]);
-            // The clone-root element's own bind PRELUDE cleanup, INIT-domain attribute
-            // ops, and `bind:this` are emitted right after the clone frame named it.
-            // The official per-element order (`RegularElement.js`) is: the bind prelude
+            // The clone-root element's own bind PRELUDE cleanup and INIT-domain
+            // attribute ops are emitted right after the clone frame named it. The
+            // official per-element order (`RegularElement.js`) is: the bind prelude
             // (`remove_input_defaults` for an input value/checked/group bind,
             // `remove_textarea_child` for a `<textarea bind:value>`) → the init-domain
             // writes (`$.autofocus` / `$.set_class` / `$.set_attribute` / the reactive
-            // accumulator decls) → `$.bind_this` LAST (a render-side binding emitted
-            // after the element's own inits).
+            // accumulator decls) → the element's CHILD block → the inline RENDER ops
+            // (below, after the walk).
             self.emit_bind_prelude(out, only, region_var);
             self.emit_node_inline_inits(out, only);
-            self.emit_inline_bind_this(out, only);
             let (child_items, child_last) = clean_nodes_indexed(self.ir(), &el.children, child_ctx);
             let child_gaps = self.interleaved_gaps(&el.children, &child_last);
             self.emit_walk_over_items(
@@ -583,6 +612,14 @@ impl<'a> ClientEmitter<'a> {
             if any_item_needs_name(self.ir(), &child_items) {
                 out.push_str(&format!("\t$.reset({region_var});\n"));
             }
+            // The element's inline RENDER ops (`$.bind_this` / `$.action` / `$.attach`
+            // / the action-host effect-wrapped events, in attribute source order) emit
+            // AFTER the element's ENTIRE child block — the walk descents and the
+            // `$.reset` — matching the official per-element order (child fragment
+            // first, render-side setup after, before the grouped `$.template_effect`).
+            // With no named child the block above is empty, so the ops land right
+            // after the element's own inits — the static-children form.
+            self.emit_inline_render_ops(out, only);
             // A region-root `{@debug}` that FOLLOWS the clone-root element emits after its
             // subtree (gaps[1]).
             self.emit_interleaved_gap(out, &gaps[1]);
@@ -756,11 +793,6 @@ impl<'a> ClientEmitter<'a> {
                             // per-element `init` placement — after the input cleanup
                             // and BEFORE the next sibling.
                             self.emit_node_inline_inits(out, *node);
-                            // `bind:this` is a RENDER-side binding emitted inline,
-                            // right after the node's own inits (matching the official
-                            // per-element order where `bind_this` follows the element's
-                            // init-domain writes), BEFORE the next sibling.
-                            self.emit_inline_bind_this(out, *node);
                             let child_ctx = ctx.for_children_of(tag);
                             let (child_items, child_last) =
                                 clean_nodes_indexed(self.ir(), &el.children, child_ctx);
@@ -775,6 +807,17 @@ impl<'a> ClientEmitter<'a> {
                             if any_item_needs_name(self.ir(), &child_items) {
                                 out.push_str(&format!("\t$.reset({var});\n"));
                             }
+                            // `bind:this` + the init-domain lifecycle ops (`$.action`
+                            // / `$.attach`) + the action-host effect-wrapped events
+                            // are RENDER-side, emitted (in attribute SOURCE order)
+                            // AFTER the element's ENTIRE child block — the walk
+                            // descents and the `$.reset` — and BEFORE the next
+                            // sibling's descent, matching the official per-element
+                            // order (child fragment first, render-side setup after).
+                            // With no named child the block above is empty, so the
+                            // ops land right after the element's own inits — the
+                            // static-children form.
+                            self.emit_inline_render_ops(out, *node);
                         }
                     }
                 }
@@ -848,260 +891,6 @@ impl<'a> ClientEmitter<'a> {
         )
     }
 
-    /// Emit the POST-WALK reactive ops for a region: the single combined
-    /// `$.template_effect` (the reactive text plus the reactive dynamic attr / class /
-    /// style, in source order), then the binds + events. The NON-REACTIVE attribute
-    /// inits (autofocus, non-reactive attr/property/class/style) and the reactive
-    /// class/style `let <acc>;` accumulator declarations are emitted INLINE during the
-    /// walk ([`Self::emit_node_inline_inits`]) at each element's `init` position —
-    /// matching official — so this stage does NOT emit them. Every op is the NARROW
-    /// [`ClientRuntimeOp`] vocabulary — no broad `RuntimeOp` is matched.
-    pub(super) fn emit_ops(&mut self, out: &mut String, scope_id: TemplateScopeId) {
-        // The single combined `$.template_effect` — ALL reactive updates in source
-        // order: reactive text (one `$.set_text` per text-node run, the official
-        // `flush_sequence` dedup), then the reactive dynamic attr / class / style
-        // writes. A reactive-text chunk that `has_call` is MEMOIZED through the shared
-        // deps-array form (`$0, $1, …`); a bare read stays inline. A reactive
-        // class/style op reads the accumulator name allocated for its node during the
-        // walk (`self.acc_name[node]`), so the `prev` arg + `<acc> =` assignment match
-        // the inline-declared `let <acc>;`.
-        let mut memoizer = Memoizer::default();
-        let mut update_bodies: Vec<EffectBody> = Vec::new();
-        let mut seen_text_vars = rustc_hash::FxHashSet::default();
-        for op in self.plan.ops_in(scope_id) {
-            match op {
-                ClientRuntimeOp::ReactiveText { target, .. } => {
-                    let node = NodeId(target.0);
-                    let var = self
-                        .interp_var
-                        .get(&node)
-                        .cloned()
-                        .unwrap_or_else(|| "text".to_string());
-                    if !seen_text_vars.insert(var) {
-                        continue;
-                    }
-                    let body = self.emit_set_text(node, &mut memoizer);
-                    update_bodies.push(EffectBody::Expr(body));
-                }
-                // A `bind:group` input with a REACTIVE dynamic/mixed `value={…}` folds its
-                // guarded change-detection write into THIS combined effect, in source order
-                // (the input precedes a sibling reactive text), BEFORE the post-walk
-                // `$.bind_group`. It is a STATEMENT body (the `if (…) { … }` guard), so it
-                // forces the block form. The value routes through the SHARED memoizer (a
-                // `has_call` value → a `$N` deps slot, reused in the guard + write).
-                ClientRuntimeOp::Bind {
-                    shape:
-                        ClientBindShape::DomBind {
-                            group_key: Some(_), ..
-                        },
-                    target,
-                    ..
-                } => {
-                    if let Some(body) =
-                        self.emit_group_dynamic_value_effect(NodeId(target.0), &mut memoizer)
-                    {
-                        update_bodies.push(EffectBody::Stmt(body));
-                    }
-                }
-                ClientRuntimeOp::ReactiveAttr {
-                    emit,
-                    reactive: true,
-                    target,
-                } => {
-                    update_bodies.push(EffectBody::Expr(self.emit_reactive_attr(
-                        NodeId(target.0),
-                        emit,
-                        &mut Some(&mut memoizer),
-                    )));
-                }
-                ClientRuntimeOp::SetClass {
-                    target,
-                    value,
-                    css_hash,
-                    directives,
-                    directives_has_call,
-                    reactive: true,
-                    ..
-                } => {
-                    let node = NodeId(target.0);
-                    let acc = self.acc_name.get(&(node, AccKind::Class)).cloned();
-                    update_bodies.push(EffectBody::Expr(self.emit_set_class(
-                        node,
-                        value,
-                        css_hash.as_deref(),
-                        directives.as_deref(),
-                        *directives_has_call,
-                        acc.as_deref(),
-                        &mut Some(&mut memoizer),
-                    )));
-                }
-                ClientRuntimeOp::SetStyle {
-                    target,
-                    value,
-                    directives,
-                    directives_has_call,
-                    reactive: true,
-                    ..
-                } => {
-                    let node = NodeId(target.0);
-                    let acc = self.acc_name.get(&(node, AccKind::Style)).cloned();
-                    update_bodies.push(EffectBody::Expr(self.emit_set_style(
-                        node,
-                        value,
-                        directives.as_deref(),
-                        *directives_has_call,
-                        acc.as_deref(),
-                        &mut Some(&mut memoizer),
-                    )));
-                }
-                _ => {}
-            }
-        }
-        let deps = memoizer.into_deps();
-        emit_text_effect(out, &update_bodies, &deps);
-
-        // (d) The POST-walk binds + events — every op a NARROW `ClientRuntimeOp`
-        // (already-rewritten getter / setter / handler bodies). A `bind:this` is NOT emitted
-        // here: it is a render-side binding emitted INLINE during the walk (see
-        // `emit_inline_bind_this`), BEFORE this grouped text effect — matching the official op
-        // order. Only `bind:value` and delegated events are post-walk.
-        //
-        // A GLOBAL-host special (`<svelte:window|document|body>`) groups its EVENTS before its
-        // BINDS (the official `visit_special_element` order — every `$.event(...)` then every
-        // `$.bind_*`), so the source-order op list is reordered per host node
-        // ([`Self::post_walk_ops_host_grouped`]). Regular-element ops keep SOURCE order.
-        for op in &self.post_walk_ops_host_grouped(scope_id) {
-            match op {
-                ClientRuntimeOp::Bind {
-                    target,
-                    shape: shape @ ClientBindShape::This { .. },
-                    getter,
-                    setter,
-                } => {
-                    // `bind:this` on an ORDINARY element is a render-side binding emitted
-                    // INLINE in the walk (see `emit_inline_bind_this`), BEFORE this grouped
-                    // text effect — skip here. A GLOBAL-host `bind:this`
-                    // (`<svelte:window|document|body>`) has NO DOM walk position, so it is
-                    // emitted HERE in the init body (in source order with the host's other
-                    // binds/events), matching official.
-                    let node = NodeId(target.0);
-                    if self.is_global_host_bind_node(node) {
-                        self.emit_bind(out, node, shape, getter, setter);
-                    }
-                }
-                ClientRuntimeOp::Bind {
-                    target,
-                    shape,
-                    getter,
-                    setter,
-                    ..
-                } => self.emit_bind(out, NodeId(target.0), shape, getter, setter),
-                ClientRuntimeOp::Event { emit, .. } => self.emit_event(out, emit),
-                // The reactive-text / reactive-attr / class / style ops were grouped
-                // above; the non-reactive attr inits were emitted in (b). The
-                // `$.attribute_effect` spread fold and the `$.html` raw-markup op are
-                // INLINE init-domain ops (emitted during the walk at the element's init
-                // position / the `{@html}` anchor descent), so they are not emitted here.
-                ClientRuntimeOp::ReactiveText { .. }
-                | ClientRuntimeOp::ReactiveAttr { .. }
-                | ClientRuntimeOp::SetClass { .. }
-                | ClientRuntimeOp::SetStyle { .. }
-                | ClientRuntimeOp::AttributeEffect { .. }
-                | ClientRuntimeOp::Html { .. } => {}
-            }
-        }
-    }
-
-    /// The post-walk op list for `scope_id`, with each GLOBAL-host special's ops reordered so
-    /// its EVENTS precede its BINDS (the official `visit_special_element` grouping — every
-    /// `$.event(...)` then every `$.bind_*`). A host special's ops are CONTIGUOUS in the
-    /// source-order op list (one node's attributes), so each contiguous same-host run is
-    /// stable-partitioned events-before-binds; non-host ops (regular elements) keep SOURCE
-    /// order. Returns an OWNED snapshot so the emit calls (`&mut self`) borrow freely.
-    fn post_walk_ops_host_grouped(&self, scope_id: TemplateScopeId) -> Vec<ClientRuntimeOp> {
-        let ops = self.plan.ops_in(scope_id);
-        let mut result: Vec<ClientRuntimeOp> = Vec::with_capacity(ops.len());
-        let mut i = 0;
-        while i < ops.len() {
-            let group = self.op_host_group(&ops[i]);
-            let Some(_) = group else {
-                // A non-host op (regular element bind / event) keeps its source position.
-                result.push(ops[i].clone());
-                i += 1;
-                continue;
-            };
-            // Gather the CONTIGUOUS run of ops sharing this host group, then emit its EVENTS
-            // (source order) followed by its BINDS (source order).
-            let mut j = i;
-            while j < ops.len() && self.op_host_group(&ops[j]) == group {
-                j += 1;
-            }
-            for op in &ops[i..j] {
-                if matches!(op, ClientRuntimeOp::Event { .. }) {
-                    result.push(op.clone());
-                }
-            }
-            for op in &ops[i..j] {
-                if !matches!(op, ClientRuntimeOp::Event { .. }) {
-                    result.push(op.clone());
-                }
-            }
-            i = j;
-        }
-        result
-    }
-
-    /// The GLOBAL-host special group (`Window` / `Document` / `Body`) an op belongs to — a
-    /// host EVENT (`$.event` against `$.window` / `$.document` / `$.document.body`) or a host
-    /// BIND (targeting a `<svelte:window|document|body>` node). `None` for a regular-element op
-    /// (never reordered) or a non-bind/-event op. Drives the events-before-binds host grouping.
-    fn op_host_group(&self, op: &ClientRuntimeOp) -> Option<super::ir::SpecialKind> {
-        match op {
-            ClientRuntimeOp::Event { emit, .. } => match emit.target {
-                super::client_plan_types::EventEmitTarget::Window => {
-                    Some(super::ir::SpecialKind::Window)
-                }
-                super::client_plan_types::EventEmitTarget::Document => {
-                    Some(super::ir::SpecialKind::Document)
-                }
-                super::client_plan_types::EventEmitTarget::Body => {
-                    Some(super::ir::SpecialKind::Body)
-                }
-                _ => None,
-            },
-            ClientRuntimeOp::Bind { target, .. } => {
-                let IrNode::Special(s) = self.ir().node(NodeId(target.0)) else {
-                    return None;
-                };
-                matches!(
-                    s.kind,
-                    super::ir::SpecialKind::Window
-                        | super::ir::SpecialKind::Document
-                        | super::ir::SpecialKind::Body
-                )
-                .then_some(s.kind)
-            }
-            _ => None,
-        }
-    }
-
-    /// Whether `node` is a GLOBAL-host special (`<svelte:window|document|body>`) — a no-DOM
-    /// init-only bind/event host with no walk position. Its `bind:this` (and its other binds)
-    /// are emitted in the init body by `emit_ops` rather than inline during a walk (a global
-    /// host renders no element, so there is no walk). `<svelte:element>`'s `bind:this` is NOT
-    /// a global host — it is emitted inside the element's `($$element, …)` callback.
-    pub(super) fn is_global_host_bind_node(&self, node: NodeId) -> bool {
-        matches!(
-            self.ir().node(node),
-            IrNode::Special(s) if matches!(
-                s.kind,
-                super::ir::SpecialKind::Window
-                    | super::ir::SpecialKind::Document
-                    | super::ir::SpecialKind::Body
-            )
-        )
-    }
-
     /// The emitted DOM-variable name reaching a node (from the walk's `node_var` map),
     /// or the `node` fallback (unreachable on the accept path).
     pub(super) fn dom_var(&self, target: NodeId) -> String {
@@ -1118,7 +907,7 @@ impl<'a> ClientEmitter<'a> {
     /// a text node mixing static text with interpolation(s) emits the
     /// `` `..${EXPR ?? ''}..` `` template literal. The text node's content is
     /// recovered from the owning element's cleaned child run.
-    fn emit_set_text(&self, target: NodeId, memoizer: &mut Memoizer) -> String {
+    pub(super) fn emit_set_text(&self, target: NodeId, memoizer: &mut Memoizer) -> String {
         let var = self
             .interp_var
             .get(&target)
@@ -1466,7 +1255,7 @@ impl<'a> ClientEmitter<'a> {
     /// The target host resolves the global hosts (`$.window` / `$.document` /
     /// `$.document.body`) for the reusable special-element event substrate; the
     /// regular-element surface feeds only the regular-`Node` host.
-    fn emit_event(&mut self, out: &mut String, emit: &EventEmit) {
+    pub(super) fn emit_event(&mut self, out: &mut String, emit: &EventEmit) {
         out.push_str(&render_event_registration(emit, &self.node_var));
     }
 }

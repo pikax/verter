@@ -134,6 +134,7 @@ impl<'a> SupportedClientIr<'a> {
             } else {
                 EventMode::Direct
             },
+            origin: event.origin,
             target: emit_target,
             event_type: event.event_type.clone(),
             capture: event.capture,

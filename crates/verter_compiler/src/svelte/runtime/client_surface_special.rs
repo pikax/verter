@@ -123,6 +123,8 @@ pub(super) fn classify_special_host(
                     AttrIr::Spread { .. } => "spread".to_string(),
                     AttrIr::Use { .. } => "use:".to_string(),
                     AttrIr::Transition { name, .. } => name.clone(),
+                    AttrIr::Animate { name, .. } => format!("animate:{name}"),
+                    AttrIr::Attach { .. } => "{@attach}".to_string(),
                     AttrIr::Let { name, .. } => format!("let:{name}"),
                     AttrIr::Event { .. } | AttrIr::Bind { .. } => unreachable!(),
                 };
@@ -211,9 +213,15 @@ pub(super) fn classify_svelte_element(
             | AttrIr::Class { .. }
             | AttrIr::Style { .. }
             | AttrIr::Spread { .. } => {}
-            // A directive (`use:` / `transition:` / `let:`) on a dynamic element is a 5f-c
-            // surface — fail closed.
-            AttrIr::Use { .. } | AttrIr::Transition { .. } | AttrIr::Let { .. } => {
+            // A lifecycle directive (`use:` / `transition:` / `animate:` / `{@attach}`)
+            // on a dynamic element is the DEFERRED host-lifecycle surface (ledger D-39,
+            // official ACCEPTS it against `$$element`); `let:` stays the slot-prop
+            // refusal. All fail closed.
+            AttrIr::Use { .. }
+            | AttrIr::Transition { .. }
+            | AttrIr::Animate { .. }
+            | AttrIr::Attach { .. }
+            | AttrIr::Let { .. } => {
                 return Err(UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
                     construct: "directive",
                     span: special.span,

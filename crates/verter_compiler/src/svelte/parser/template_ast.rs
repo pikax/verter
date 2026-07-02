@@ -951,6 +951,15 @@ pub enum SvelteAttributeKind {
     /// A directive attribute (`bind:`, `class:`, `style:`, `use:`,
     /// `transition:`/`in:`/`out:`, `animate:`, legacy `on:`).
     Directive(SvelteDirective),
+    /// An attribute-position `{@attach expr}` attachment (the official `AttachTag`,
+    /// valid ONLY inside an open tag — the child-position form is the official
+    /// `expected_tag` parse reject). Carries the inner EXPRESSION span (after the
+    /// `@attach` keyword + separating whitespace), captured cleanly at tokenization —
+    /// downstream lowering never re-slices the body text.
+    Attach {
+        /// The attachment expression span.
+        expr_span: Span,
+    },
 }
 
 /// An attribute value (a quoted string body or an interpolation expression).

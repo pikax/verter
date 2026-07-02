@@ -18,7 +18,7 @@ use super::client::UnsupportedSvelteRuntimeSurface;
 use super::client_allowlist::SupportedHtmlElement;
 use super::ir::{
     AttrIr, BlockIr, ComponentSlots, DeclKind, IrNode, NodeId, SpecialKind, SvelteRuntimeIr, TagIr,
-    TemplateScopeId,
+    TemplateScopeId, TransitionKind,
 };
 use super::whitespace::Namespace;
 use verter_span::Span;
@@ -26,7 +26,9 @@ use verter_span::Span;
 /// The fail-closed reason for a standalone tag. The `{@html}` (`$.html`) and `{@render}`
 /// (snippet-render) tags are ACCEPTED by `classify_node` BEFORE this is reached, so their
 /// arms are unreachable (retained only for `TagIr` match exhaustiveness); the live
-/// refusals are `{@attach}` (the attachment-directive surface, not yet supported) and a
+/// refusals are the CHILD-position `{@attach}` (official parity: `{@attach}` is
+/// attribute-position-only — the official parser rejects the child form with
+/// `expected_tag`; the ELEMENT-position form is the SUPPORTED `AttrIr::Attach`) and a
 /// placement-invalid `{@const}` / `{const}` / `{let}`.
 pub(super) fn refuse_tag(tag: &TagIr) -> UnsupportedSvelteRuntimeSurface {
     match tag {
@@ -39,6 +41,9 @@ pub(super) fn refuse_tag(tag: &TagIr) -> UnsupportedSvelteRuntimeSurface {
                 span: Span::new(0, 0),
             }
         }
+        // CHILD-position `{@attach}` (`<div>{@attach fn}</div>`) — the official
+        // `expected_tag` parse reject (attribute-position-only in `svelte@5.56.3`).
+        // The element-position `<div {@attach fn}>` is the supported attachment.
         TagIr::Attach { .. } => UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
             construct: "attach",
             span: Span::new(0, 0),
@@ -59,6 +64,147 @@ pub(super) fn refuse_tag(tag: &TagIr) -> UnsupportedSvelteRuntimeSurface {
             span: Span::new(0, 0),
         },
     }
+}
+
+/// Refuse an element whose transition directives OVERLAP — the official
+/// `validate_element` rule: each `transition:` / `in:` / `out:` directive carries an
+/// (intro, outro) half-pair (`transition:` = both, `in:` = intro, `out:` = outro); a
+/// directive whose half overlaps an EARLIER directive's half is the official
+/// `transition_duplicate` (same kind twice) / `transition_conflict` (`in:`/`out:`
+/// alongside `transition:`) compile error. `in:` + `out:` do NOT overlap and stay
+/// accepted. Driven from the typed [`AttrIr::Transition`] inventory in source order.
+pub(super) fn refuse_transition_conflicts(
+    el: &super::ir::ElementIr,
+    el_span: Span,
+) -> Result<(), UnsupportedSvelteRuntimeSurface> {
+    let mut seen: Vec<(bool, bool)> = Vec::new();
+    for attr in &el.attrs {
+        if let AttrIr::Transition { kind, .. } = attr {
+            let (intro, outro) = match kind {
+                TransitionKind::Transition => (true, true),
+                TransitionKind::In => (true, false),
+                TransitionKind::Out => (false, true),
+            };
+            if seen.iter().any(|(i, o)| (*i && intro) || (*o && outro)) {
+                return Err(UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
+                    construct: "transition directive conflict",
+                    span: el_span,
+                });
+            }
+            seen.push((intro, outro));
+        }
+    }
+    Ok(())
+}
+
+/// Refuse an INVALIDLY-PLACED / duplicated `animate:` directive — the official
+/// `AnimateDirective` analyze rules:
+///
+/// - an element may carry at most ONE `animate:` (`animation_duplicate`);
+/// - the animated element must be the ONLY significant child of an `{#each}` block
+///   body (`animation_invalid_placement`) — "significant" excludes comments,
+///   whitespace-only text, and the `{@const}` / `{const …}` / `{let …}`
+///   declaration tags, matching the official check (which filters `Comment` and
+///   the const/declaration tag nodes from the trimmed each body; `{@debug}` /
+///   `{@html}` / `{@render}` / non-whitespace text / elements stay SIGNIFICANT);
+///   an animated element nested inside another element, at the component root, or
+///   sharing the each body with a significant sibling is invalid;
+/// - that `{#each}` must be KEYED (`animation_missing_key`).
+///
+/// Walks the typed IR: every `{#each}` body scope is inventoried (keyed flag +
+/// significant roots), then every element bearing an [`AttrIr::Animate`] validates
+/// against its owning body scope. Returns the FIRST violation in node order, or
+/// `None`. Runs as a classify() PRE-PASS so a wrong each FLAG / a divergent module is
+/// never emitted for an input the official compiler rejects.
+pub(super) fn refuse_invalid_animate_placement(
+    ir: &SvelteRuntimeIr,
+) -> Option<UnsupportedSvelteRuntimeSurface> {
+    // Whether a node is a SIGNIFICANT each-body child — the official only-child
+    // rule: comments, whitespace-only text, and `{@const}` / `{const …}` /
+    // `{let …}` declaration tags do not count; `{@debug}` / `{@html}` /
+    // `{@render}` / non-whitespace text / elements DO (official does not filter
+    // those).
+    fn is_significant(ir: &SvelteRuntimeIr, node: NodeId) -> bool {
+        match ir.node(node) {
+            IrNode::Comment { .. } => false,
+            IrNode::Text { text, .. } => !text.trim().is_empty(),
+            IrNode::Tag(TagIr::LegacyConst { .. } | TagIr::Declaration { .. }) => false,
+            _ => true,
+        }
+    }
+
+    // The `{#each}` body-scope inventory: body scope id → whether the each is keyed.
+    let mut each_bodies: rustc_hash::FxHashMap<TemplateScopeId, bool> =
+        rustc_hash::FxHashMap::default();
+    for node in &ir.nodes {
+        if let IrNode::Block(BlockIr::Each { key, body, .. }) = node {
+            each_bodies.insert(*body, key.is_some());
+        }
+    }
+
+    for (idx, node) in ir.nodes.iter().enumerate() {
+        let IrNode::Element(el) = node else {
+            continue;
+        };
+        let animate_count = el
+            .attrs
+            .iter()
+            .filter(|a| matches!(a, AttrIr::Animate { .. }))
+            .count();
+        if animate_count == 0 {
+            continue;
+        }
+        if animate_count > 1 {
+            // Official `animation_duplicate`: an element can only have one `animate`.
+            return Some(UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
+                construct: "duplicate animate directive",
+                span: el.span,
+            });
+        }
+        let node_id = NodeId(idx as u32);
+        // The owning scope whose ROOTS contain this element (an animated element must
+        // be a region root — a nested element is inside another element, invalid).
+        let owning_scope = ir
+            .template_scopes
+            .iter()
+            .enumerate()
+            .find(|(_, scope)| scope.roots.contains(&node_id))
+            .map(|(scope_idx, _)| TemplateScopeId(scope_idx as u32));
+        let Some(scope_id) = owning_scope else {
+            return Some(UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
+                construct: "animate directive outside a keyed each",
+                span: el.span,
+            });
+        };
+        let Some(&keyed) = each_bodies.get(&scope_id) else {
+            // Not an `{#each}` body — official `animation_invalid_placement`.
+            return Some(UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
+                construct: "animate directive outside a keyed each",
+                span: el.span,
+            });
+        };
+        if !keyed {
+            // An UNKEYED each — official `animation_missing_key`.
+            return Some(UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
+                construct: "animate directive in an unkeyed each",
+                span: el.span,
+            });
+        }
+        // The animated element must be the ONLY significant child of the each body.
+        let significant = ir
+            .template_scope(scope_id)
+            .roots
+            .iter()
+            .filter(|&&root| is_significant(ir, root))
+            .count();
+        if significant != 1 {
+            return Some(UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
+                construct: "animate directive with sibling each-body content",
+                span: el.span,
+            });
+        }
+    }
+    None
 }
 
 /// Refuse a bindings-breadth special-content host (`<textarea>` / `<select>` /

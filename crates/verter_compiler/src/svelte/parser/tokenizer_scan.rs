@@ -77,7 +77,9 @@ pub(crate) fn duplicate_attribute_key(attr: &SvelteAttribute) -> Option<(Duplica
             | SvelteDirectiveKind::Let
             | SvelteDirectiveKind::Unknown => None,
         },
-        SvelteAttributeKind::Spread(_) => None,
+        // A spread and an `{@attach}` attachment are NOT duplicate-checked (official
+        // parity: attachments stack — `<div {@attach a} {@attach b}>` is valid).
+        SvelteAttributeKind::Spread(_) | SvelteAttributeKind::Attach { .. } => None,
     }
 }
 

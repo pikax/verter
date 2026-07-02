@@ -791,35 +791,29 @@ impl TemplateProjector<'_, '_> {
             SvelteAttributeKind::Directive(dir) => {
                 self.project_directive(el, attr, dir);
             }
+            // An attribute-position `{@attach expr}` — element-attachment machinery
+            // with NO published prop. Projected to a JSX spread that void-checks the
+            // attachment expression through `__verter_attach` while contributing no
+            // props: `{...(__verter_attach(expr), {})}`. The expression span was
+            // captured by the tokenizer (no body re-slicing here).
+            SvelteAttributeKind::Attach { expr_span } => {
+                // F11: a store-sub in the attachment expression (`{@attach $a}`).
+                self.rewrite_store_subs_in(*expr_span);
+                // `{@attach ` → `{...(__verter_attach(`
+                self.ct
+                    .overwrite(attr.span.start, expr_span.start, "{...(__verter_attach(");
+                // closing `}` → `), {})}`
+                self.ct.overwrite(expr_span.end, attr.span.end, "), {})}");
+            }
         }
     }
 
-    /// Project an inline-tag attribute (`{@attach expr}` used in an element
-    /// open tag). The `{@attach}` form is element-attachment machinery: it has
-    /// NO published prop. We project it to a JSX spread that void-checks
-    /// the attachment expression through `__verter_attach` while contributing
-    /// no props: `{...(__verter_attach(expr), {})}`.
+    /// Project a NON-attach inline-tag attribute (a brace comment or unrecognised
+    /// inline tag used in an element open tag) — strip it (no type surface). The
+    /// `{@attach}` form is the typed [`SvelteAttributeKind::Attach`] and never
+    /// reaches here.
     fn project_inline_tag_attribute(&mut self, attr: &SvelteAttribute, inner: Span) {
-        let body = self.slice(inner).trim_start();
-        if let Some(rest) = body.strip_prefix("@attach") {
-            // Replace the whole `{@attach EXPR}` attribute with the spread,
-            // keeping EXPR mapped: overwrite the `{@attach ` prefix with the
-            // spread opener and the trailing `}` with the spread closer.
-            // Find EXPR start: inner.start + offset of rest within body.
-            let rest_trimmed = rest.trim_start();
-            let expr_offset = body.len() - rest_trimmed.len();
-            let expr_start = inner.start + expr_offset as u32;
-            // F11: a store-sub in the attachment expression (`{@attach $a}`).
-            self.rewrite_store_subs_in(Span::new(expr_start, inner.end));
-            // `{@attach ` → `{...(__verter_attach(`
-            self.ct
-                .overwrite(attr.span.start, expr_start, "{...(__verter_attach(");
-            // closing `}` → `), {})}`
-            self.ct.overwrite(inner.end, attr.span.end, "), {})}");
-            return;
-        }
-        // A brace comment or unrecognised inline tag in attribute position —
-        // strip it (no type surface).
+        let _ = inner;
         remove_span(self.ct, attr.span);
     }
 

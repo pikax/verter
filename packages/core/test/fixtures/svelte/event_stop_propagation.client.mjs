@@ -14,11 +14,11 @@ export default function App($$anchor) {
   var text = $.child(p);
   $.reset(p);
   $.template_effect(() => $.set_text(text, `${$.get(inner) ?? ""}-${$.get(outer) ?? ""}`));
-  $.event("click", div, () => $.update(outer));
   $.event(
     "click",
     button,
     $.stopPropagation(() => $.update(inner)),
   );
+  $.event("click", div, () => $.update(outer));
   $.append($$anchor, fragment);
 }

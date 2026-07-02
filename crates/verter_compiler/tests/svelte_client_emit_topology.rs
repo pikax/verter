@@ -616,6 +616,161 @@ const SUPPORTED_COMPONENTS: &[&str] = &[
     "components/fragment_slot_hyphen",
 ];
 
+/// The native-client element LIFECYCLE-directive corpus (5f-c) — `use:` actions,
+/// `transition:`/`in:`/`out:` transitions (with the `|global`/`|local` FLAG arithmetic),
+/// keyed-each `animate:` animations, and element-position `{@attach}` attachments. Each
+/// row runs the IDENTICAL compile + OXC-parse + AST-structural full-module comparison as
+/// the other corpora — the committed `lifecycle/<slug>.client.json` is the official
+/// `svelte@5.56.3` oracle. The structural comparison signs every helper call argument
+/// (the `$.transition` FLAG integer literal, the `$.animation` 3-arg arity with its
+/// literal `null`, the `$.action` `$$node`/`$$action_arg` closure params, the getter
+/// thunks), so a wrong flag, a wrong helper family (`$.transition` for an `animate:`),
+/// a dropped params thunk, or a phase-order drift (init-domain action/attach vs
+/// post-event transition/animation) fails here.
+const SUPPORTED_LIFECYCLE: &[&str] = &[
+    // `use:foo` no-arg — `$.action(div, ($$node) => foo?.($$node))` (2 args,
+    // optional-chained callee), emitted in the INIT domain (before events).
+    "lifecycle/use_noarg",
+    // `use:foo={c}` — 3 args: the closure gains `$$action_arg` and the 3rd arg is the
+    // getter thunk `() => $.get(c)` (the arg rides the shared signal rewrite).
+    "lifecycle/use_arg",
+    // `use:obj.foo` — the dotted callee is preserved literally (`obj.foo?.($$node)`).
+    "lifecycle/use_dotted",
+    // ── The transition FLAG map: TRANSITION_IN(1) | TRANSITION_OUT(2) | TRANSITION_GLOBAL(4) ──
+    // `transition:fade` → FLAG 3 (IN|OUT); no params → 3 args (no getParams thunk).
+    "lifecycle/transition_both",
+    // `in:fade` → FLAG 1.
+    "lifecycle/transition_in",
+    // `out:fade` → FLAG 2.
+    "lifecycle/transition_out",
+    // `in:fade|global` → FLAG 5 (1|4).
+    "lifecycle/transition_in_global",
+    // `out:fade|global` → FLAG 6 (2|4).
+    "lifecycle/transition_out_global",
+    // `transition:fade|global` → FLAG 7 (3|4).
+    "lifecycle/transition_both_global",
+    // `transition:fade|local` → FLAG 3 — `|local` is the DEFAULT (no +4), identical to
+    // the bare `transition:fade`.
+    "lifecycle/transition_local",
+    // `transition:fade={{ duration: 200 }}` → the 4th getParams thunk
+    // `() => ({ duration: 200 })` (present IFF params are given).
+    "lifecycle/transition_params",
+    // `animate:flip` in a KEYED each — `$.animation(div, () => flip, null)` (ALWAYS
+    // 3 args; no params → the literal `null`), and the each FLAGS gain
+    // `EACH_IS_ANIMATED` (8): 16 immutable + 1 item-reactive + 8 animated = 25.
+    "lifecycle/animate_keyed",
+    // `animate:flip={{ duration: 200 }}` — the 3rd arg becomes the getParams thunk.
+    "lifecycle/animate_keyed_params",
+    // `{@const l = item.n}` + `<div animate:flip>` in a keyed each — the official
+    // "only child" placement check IGNORES `{@const}` / declaration-tag siblings
+    // (`2-analyze/visitors/shared/element.js`), so the animate is ACCEPTED and the
+    // each keeps the ANIMATED flag widening (25).
+    "lifecycle/animate_keyed_const",
+    // `<div {@attach fn}>` — element-position attachment: `$.attach(div, () => fn)`
+    // (2 args, getter thunk), init-domain (before events).
+    "lifecycle/attach_element",
+    // `<div class="x" {@attach fn}>` — the static attr bakes into the `from_html`
+    // template; the attach call is unchanged.
+    "lifecycle/attach_colocated",
+    // `<div {...c} use:foo transition:fade>` — spread + lifecycle CO-EXIST: the emission
+    // order is `$.attribute_effect` (spread fold) → `$.action` → `$.transition`.
+    "lifecycle/spread_lifecycle",
+    // `<div use:foo on:click={…}>` — a `use:` action co-located with a NON-DELEGATED
+    // event wraps the registration in its OWN effect: `$.action(div, …)` then
+    // `$.effect(() => $.event('click', div, …))` in the init domain (the official
+    // action-triggered effect wrap; without `use:` the same event emits BARE `$.event`).
+    "lifecycle/use_legacy_event",
+    // Two non-delegated events beside `use:` — one `$.effect(() => $.event(…))` PER
+    // event (never a single effect grouping both registrations).
+    "lifecycle/use_legacy_event_multi",
+    // `use:` + `transition:` + `on:click` — the init-order proof: `$.action` →
+    // `$.effect(() => $.event(…))` → `$.transition(3, …)`.
+    "lifecycle/use_transition_legacy_event",
+    // `<div use:foo bind:this={el}>` — the official SOURCE-ORDER interleave of the
+    // init-domain render ops: `$.action` (first in source) then `$.bind_this` (the
+    // reverse source order reverses the emission). Pinned by the full-module
+    // comparator.
+    "lifecycle/use_bind_this",
+    // ── DYNAMIC-children placement: an inline render op on an element WITH a child
+    // walk emits AFTER the element's entire child block (`$.child` descents /
+    // `$.reset`), immediately before the post-walk effects — NOT before the walk.
+    // (A static-children element has an empty child block, so its op stays right
+    // after the clone frame — the rows above pin that half.) ──
+    // `<div use:foo onclick><span>{c}</span></div>` — `$.action(div, …)` emits after
+    // `$.reset(div)`, before the grouped `$.template_effect`.
+    "lifecycle/use_dynamic_child",
+    // `<div use:foo onclick>{c}</div>` — a pure-interp TEXT child still walks
+    // (`$.child(div, true)` + `$.reset`); the action follows the reset.
+    "lifecycle/use_text_child",
+    // `<div {@attach foo} onclick><span>{c}</span></div>` — `$.attach` after the walk.
+    "lifecycle/attach_dynamic_child",
+    // `<div bind:this={el} onclick><span>{c}</span></div>` — `$.bind_this` after the
+    // walk (the render-side binding follows the element's child block, not its inits).
+    "lifecycle/bind_this_dynamic_child",
+    // `<div use:foo on:click><span>{c}</span></div>` — the action-host effect-wrapped
+    // non-delegated event rides the SAME post-child-walk slot: `$.reset(div)` →
+    // `$.action` → `$.effect(() => $.event(…))` → `$.template_effect`.
+    "lifecycle/use_event_dynamic_child",
+    // `<div><span use:foo><span>{c}</span></span><span>{c}</span></div>` — a NESTED
+    // action host: `$.action(span, …)` emits after `$.reset(span)` and BEFORE the
+    // `$.sibling(span)` descent (the op stays at the element's walk position).
+    "lifecycle/use_nested_sibling",
+    // `<div transition:fade onclick><span>{c}</span></div>` — the POST-EVENT phase op
+    // keeps its official slot with a dynamic child: `$.template_effect` →
+    // `$.delegated` → `$.transition` → `$.append`.
+    "lifecycle/transition_dynamic_child",
+    // ── The event ORIGIN split: the official effect wrap AND the event↔transition
+    // ordering key on the LEGACY `on:` origin, NOT on delegation. A MODERN
+    // non-delegated `on*` attribute NEVER wraps and emits BEFORE the directive batch;
+    // a bare LEGACY `on:` event joins the per-element directive batch (source-ordered
+    // with `transition:` / `animate:`, child batches before the parent's). ──
+    // `<div use:foo onmouseenter>` — a MODERN non-delegated event on a `use:` host
+    // stays a BARE `$.event(…)` (the effect wrap is legacy-`on:`-only): `$.action` →
+    // `$.event`, NO `$.effect`.
+    "lifecycle/use_modern_nondelegated_event",
+    // `<div transition:fade on:click>` — a bare LEGACY `on:` event joins the directive
+    // batch in source order: `$.transition(3, …)` THEN `$.event('click', …)`.
+    "lifecycle/transition_legacy_event_order",
+    // `{#each … (key)}<div animate:flip on:click>` — the same batch order with an
+    // animation: `$.animation(…)` THEN `$.event('click', …)`.
+    "lifecycle/animate_legacy_event_order",
+    // `<div transition:fade onmouseenter>` — the MODERN non-delegated event emits
+    // BEFORE the batch: `$.event('mouseenter', …)` THEN `$.transition(3, …)`.
+    "lifecycle/transition_modern_nondelegated_event",
+    // `<div use:foo on:mouseenter>` — the LEGACY event on a `use:` host wraps:
+    // `$.action` → `$.effect(() => $.event('mouseenter', …))`.
+    "lifecycle/use_legacy_nondelegated_event",
+    // `<div use:foo use:bar>` — two `$.action` calls in source order.
+    "lifecycle/multiple_use",
+    // `<div in:foo out:bar>` — `$.transition(1, …)` then `$.transition(2, …)`.
+    "lifecycle/in_out_same",
+    // `<div use:foo>{#if c}…{/if}</div>` — the inline render op emits after the
+    // element's child block descent.
+    "lifecycle/use_nested_if_child",
+    // `{#if c}<div use:foo>x</div>{/if}` — a lifecycle element inside a block body.
+    "lifecycle/lifecycle_in_if",
+    // `<div on:click transition:fade>` — the batch is SOURCE-ordered, not a hard
+    // events-after-transitions phase: `$.event('click', …)` THEN `$.transition(3, …)`.
+    "lifecycle/legacy_event_before_transition",
+    // `<div transition:fade><span on:click>x</span></div>` — element batches merge
+    // POST-ORDER (the official `…child_state.after_update, …element_state.after_update`
+    // merge): the CHILD's `$.event` precedes the PARENT's `$.transition`.
+    "lifecycle/transition_parent_legacy_event_child",
+    // `<div on:click><span transition:fade>x</span></div>` — the reverse nesting: the
+    // CHILD's `$.transition` precedes the PARENT's `$.event`.
+    "lifecycle/legacy_event_parent_transition_child",
+    // ── The non-`this` DOM bind linearization: a bind on a `use:` action host wraps
+    // in its OWN init-domain `$.effect(() => $.bind_*(…))` at its attribute source
+    // position; without `use:` it joins the after-update directive batch (bare,
+    // source-ordered with `$.transition`). `bind:this` NEVER wraps (use_bind_this). ──
+    // `<input use:foo bind:value={v}>` — `$.action` then
+    // `$.effect(() => $.bind_value(…))` in the init domain.
+    "lifecycle/use_bind_value",
+    // `<input transition:fade bind:value={v}>` — BOTH bare in the batch, source
+    // order: `$.transition(3, …)` THEN `$.bind_value(…)`.
+    "lifecycle/transition_bind_value",
+];
+
 /// The native-client SPECIAL-element corpus (5f-b) — the host / renderable specials
 /// (`<svelte:window|document|body|element|boundary|head>`). Each row runs through the
 /// IDENTICAL compile + OXC-parse + full-module-comparison gate as the matrix above: the
@@ -5799,8 +5954,267 @@ fn all_supported_slugs() -> Vec<&'static str> {
         .chain(SUPPORTED_DECLARATION_TAGS.iter())
         .chain(SUPPORTED_COMPONENTS.iter())
         .chain(SUPPORTED_SPECIALS.iter())
+        .chain(SUPPORTED_LIFECYCLE.iter())
         .copied()
         .collect()
+}
+
+#[test]
+fn supported_lifecycle_covers_the_full_lifecycle_corpus() {
+    // The lifecycle-directive corpus (5f-c) is the structural oracle for `use:` /
+    // `transition:`/`in:`/`out:` / `animate:` / element `{@attach}`; a dropped row is a
+    // coverage regression. This count gate fails LOUDLY if a row is dropped, and the
+    // no-duplicate check guards against a typo.
+    assert_eq!(
+        SUPPORTED_LIFECYCLE.len(),
+        42,
+        "the lifecycle corpus must enumerate all 42 `lifecycle/*` 5f-c fixtures (use \
+         noarg/arg/dotted, the 8-cell transition FLAG map both/in/out/in-global/out-global/\
+         both-global/local/params, animate keyed/keyed-params/keyed-const, attach \
+         element/colocated, the spread co-location row, the `use:`+legacy-event \
+         effect-wrap rows single/multi/transition-order, the use:↔bind:this \
+         source-interleave row, the 7 dynamic-children placement rows use-dynamic/\
+         use-text/attach-dynamic/bind-this-dynamic/use-event-dynamic/use-nested-sibling/\
+         transition-dynamic, the 12 event-ORIGIN rows: use-modern-nondelegated/\
+         transition-legacy-order/animate-legacy-order/transition-modern-nondelegated/\
+         use-legacy-nondelegated/multiple-use/in-out-same/use-nested-if-child/\
+         lifecycle-in-if/legacy-before-transition/transition-parent-legacy-child/\
+         legacy-parent-transition-child, and the 2 non-this bind linearization rows: \
+         use-bind-value/transition-bind-value)"
+    );
+    let mut seen = std::collections::BTreeSet::new();
+    for &slug in SUPPORTED_LIFECYCLE {
+        assert!(
+            seen.insert(slug),
+            "duplicate supported-lifecycle slug {slug}"
+        );
+    }
+}
+
+#[test]
+fn lifecycle_transition_flag_map_is_the_official_bit_arithmetic() {
+    // The transition FLAG map is semantic, not cosmetic: `in`=1, `out`=2, `transition`
+    // (both)=3; `|global` adds 4 (→ 5/6/7); `|local` is the default (NO +4, so
+    // `transition|local`=3). Assert the exact integer literal in each emitted module —
+    // a wrong flag flips the runtime intro/outro/global behavior while keeping the
+    // helper topology identical, so the sequence oracle alone cannot catch it.
+    for (slug, flag) in [
+        ("lifecycle/transition_both", 3),
+        ("lifecycle/transition_in", 1),
+        ("lifecycle/transition_out", 2),
+        ("lifecycle/transition_in_global", 5),
+        ("lifecycle/transition_out_global", 6),
+        ("lifecycle/transition_both_global", 7),
+        ("lifecycle/transition_local", 3),
+    ] {
+        let code = emit(slug);
+        let expected = format!("$.transition({flag}, ");
+        assert!(
+            code.contains(&expected),
+            "{slug} must emit `{expected}…` (the official FLAG arithmetic):\n{code}"
+        );
+        // NEGATIVE: exactly one transition call, and no other flag integer leaked in.
+        assert_eq!(
+            code.matches("$.transition(").count(),
+            1,
+            "{slug} must emit exactly ONE `$.transition` call:\n{code}"
+        );
+    }
+    // The params thunk is present IFF params are given: the bare form emits 3 args
+    // (no trailing thunk), the params form emits the 4th `() => ({ … })` getter.
+    let bare = emit("lifecycle/transition_both");
+    assert!(
+        bare.contains("$.transition(3, div, () => fade);"),
+        "the no-params transition emits exactly 3 args (no getParams thunk):\n{bare}"
+    );
+    let params = emit("lifecycle/transition_params");
+    assert!(
+        params.contains("$.transition(3, div, () => fade, ") && params.contains("duration: 200"),
+        "the params transition emits the 4th getParams thunk:\n{params}"
+    );
+}
+
+#[test]
+fn lifecycle_animate_emits_animation_not_transition_and_widens_each_flags() {
+    // `animate:` is its OWN op family: `$.animation(el, () => fn, PARAMS)` — ALWAYS
+    // 3 args (`null` when no params) — NEVER a `$.transition` masquerade. And the
+    // KEYED each hosting the animated element widens its FLAGS by `EACH_IS_ANIMATED`
+    // (8): the runes keyed base here is 17 (EACH_ITEM_IMMUTABLE 16 | EACH_ITEM_REACTIVE
+    // 1), so the animate each pins 25.
+    let code = emit("lifecycle/animate_keyed");
+    assert!(
+        code.contains("$.animation(div, () => flip, null);"),
+        "animate_keyed must emit the 3-arg `$.animation` with the literal `null`:\n{code}"
+    );
+    assert!(
+        !code.contains("$.transition("),
+        "an `animate:` directive must NOT emit `$.transition`:\n{code}"
+    );
+    assert!(
+        code.contains("$.each(node, 25, "),
+        "the keyed-animate each must OR in EACH_IS_ANIMATED=8 (16|1|8 = 25):\n{code}"
+    );
+    let params = emit("lifecycle/animate_keyed_params");
+    assert!(
+        params.contains("$.animation(div, () => flip, () => ({ duration: 200 }));"),
+        "animate_keyed_params must emit the getParams thunk as the 3rd arg:\n{params}"
+    );
+    assert!(
+        params.contains("$.each(node, 25, "),
+        "the params variant keeps the ANIMATED flag widening:\n{params}"
+    );
+    // NEGATIVE: the non-animated keyed corpus stays UN-widened (flag 8 absent) — the
+    // widening is animate-scoped, not a blanket keyed-each change.
+    let keyed_plain = emit("blocks/each_keyed_index");
+    assert!(
+        keyed_plain.contains("$.each(node, 19, "),
+        "a keyed each WITHOUT `animate:` keeps its un-widened flags (19):\n{keyed_plain}"
+    );
+}
+
+#[test]
+fn lifecycle_attach_is_attribute_position_and_action_callee_shapes_hold() {
+    // Element-position `{@attach expr}` emits the 2-arg `$.attach(el, () => expr)` getter
+    // thunk; the action closures use the EXACT official param names `$$node` /
+    // `$$action_arg` with the optional-chained callee.
+    // The payload rides the shared unconditional concise-arrow-body wrap (`() => (fn)`
+    // vs official `() => fn` — a behavior-preserving redundant paren the structural
+    // comparator waives, same as the `$.html` payload convention).
+    let attach = emit("lifecycle/attach_element");
+    assert!(
+        attach.contains("$.attach(div, () => (fn));"),
+        "attach_element must emit the 2-arg getter-thunk `$.attach`:\n{attach}"
+    );
+    let noarg = emit("lifecycle/use_noarg");
+    assert!(
+        noarg.contains("$.action(div, ($$node) => foo?.($$node));"),
+        "use_noarg must emit the official `$$node` closure + optional-chain call:\n{noarg}"
+    );
+    let arg = emit("lifecycle/use_arg");
+    assert!(
+        arg.contains("$.action(div, ($$node, $$action_arg) => foo?.($$node, $$action_arg), "),
+        "use_arg must emit the `$$action_arg` closure + the 3rd getter-thunk arg:\n{arg}"
+    );
+    let dotted = emit("lifecycle/use_dotted");
+    assert!(
+        dotted.contains("obj.foo?.($$node)"),
+        "use_dotted must preserve the dotted callee literally:\n{dotted}"
+    );
+    // Spread co-location: `$.attribute_effect` (the spread fold) precedes the action,
+    // which precedes the transition — the official init-order for fixture #18.
+    let spread = emit("lifecycle/spread_lifecycle");
+    let fold = spread
+        .find("$.attribute_effect(")
+        .expect("spread_lifecycle emits the spread fold");
+    let action = spread
+        .find("$.action(")
+        .expect("spread_lifecycle emits the action");
+    let transition = spread
+        .find("$.transition(")
+        .expect("spread_lifecycle emits the transition");
+    assert!(
+        fold < action && action < transition,
+        "spread co-location order must be attribute_effect → action → transition:\n{spread}"
+    );
+}
+
+#[test]
+fn lifecycle_event_origin_gates_effect_wrap_and_directive_batch_order() {
+    // The effect wrap AND the event↔transition/animation ordering key on the LEGACY
+    // `on:` ORIGIN, not on delegation (official `RegularElement.js`: only an
+    // `OnDirective` joins `other_directives` — a modern `on*` attribute pushes its
+    // `$.event` BEFORE the element's directive batch and never effect-wraps).
+    //
+    // A MODERN non-delegated event on a `use:` host stays a BARE `$.event(…)` —
+    // the wrap trigger is legacy-`on:`-only.
+    let modern_use = emit("lifecycle/use_modern_nondelegated_event");
+    assert!(
+        modern_use.contains("$.event('mouseenter', div, "),
+        "use:+modern non-delegated must emit the BARE $.event:\n{modern_use}"
+    );
+    assert!(
+        !modern_use.contains("$.effect(() => $.event("),
+        "use:+modern non-delegated must NOT be effect-wrapped:\n{modern_use}"
+    );
+    // The LEGACY `on:` form on the same host DOES wrap (the positive contrast).
+    let legacy_use = emit("lifecycle/use_legacy_nondelegated_event");
+    assert!(
+        legacy_use.contains("$.effect(() => $.event('mouseenter', div, "),
+        "use:+legacy on: must effect-wrap the registration:\n{legacy_use}"
+    );
+    // A bare LEGACY `on:` event joins the directive batch: `$.transition` /
+    // `$.animation` BEFORE `$.event` when the directive precedes it in source.
+    let legacy_transition = emit("lifecycle/transition_legacy_event_order");
+    let t = legacy_transition
+        .find("$.transition(")
+        .expect("transition_legacy_event_order emits the transition");
+    let e = legacy_transition
+        .find("$.event(")
+        .expect("transition_legacy_event_order emits the event");
+    assert!(
+        t < e,
+        "a source-first transition precedes the bare legacy on: event:\n{legacy_transition}"
+    );
+    let legacy_animate = emit("lifecycle/animate_legacy_event_order");
+    let a = legacy_animate
+        .find("$.animation(")
+        .expect("animate_legacy_event_order emits the animation");
+    let e = legacy_animate
+        .find("$.event(")
+        .expect("animate_legacy_event_order emits the event");
+    assert!(
+        a < e,
+        "a source-first animation precedes the bare legacy on: event:\n{legacy_animate}"
+    );
+    // A MODERN non-delegated event stays BEFORE the transition (the pre-batch phase).
+    let modern_transition = emit("lifecycle/transition_modern_nondelegated_event");
+    let e = modern_transition
+        .find("$.event(")
+        .expect("transition_modern_nondelegated_event emits the event");
+    let t = modern_transition
+        .find("$.transition(")
+        .expect("transition_modern_nondelegated_event emits the transition");
+    assert!(
+        e < t,
+        "a modern non-delegated event precedes the transition:\n{modern_transition}"
+    );
+    // The batch is SOURCE-ordered, not a hard events-after-transitions phase: a
+    // source-first legacy event precedes the transition.
+    let legacy_first = emit("lifecycle/legacy_event_before_transition");
+    let e = legacy_first
+        .find("$.event(")
+        .expect("legacy_event_before_transition emits the event");
+    let t = legacy_first
+        .find("$.transition(")
+        .expect("legacy_event_before_transition emits the transition");
+    assert!(
+        e < t,
+        "a source-first bare legacy on: event precedes the transition:\n{legacy_first}"
+    );
+    // Element batches merge POST-ORDER: a CHILD's batch item precedes the PARENT's,
+    // in both nesting directions.
+    let n1 = emit("lifecycle/transition_parent_legacy_event_child");
+    let e = n1
+        .find("$.event('click', span, ")
+        .expect("transition_parent_legacy_event_child emits the child event");
+    let t = n1
+        .find("$.transition(")
+        .expect("transition_parent_legacy_event_child emits the parent transition");
+    assert!(
+        e < t,
+        "the child's bare legacy event precedes the parent's transition:\n{n1}"
+    );
+    let n2 = emit("lifecycle/legacy_event_parent_transition_child");
+    let t = n2
+        .find("$.transition(")
+        .expect("legacy_event_parent_transition_child emits the child transition");
+    let e = n2
+        .find("$.event('click', div, ")
+        .expect("legacy_event_parent_transition_child emits the parent event");
+    assert!(
+        t < e,
+        "the child's transition precedes the parent's bare legacy event:\n{n2}"
+    );
 }
 
 #[test]

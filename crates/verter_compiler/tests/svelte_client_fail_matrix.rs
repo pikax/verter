@@ -516,11 +516,128 @@ const FAIL_MATRIX: &[FailRow] = &[
         source: "<script>let c = $state(0);</script>\n<input {...c} bind:value={c} />\n",
         code: "svelte-runtime-unsupported-binding",
     },
+    // (`spread_with_use` is GONE — 5f-c opened the spread + lifecycle co-location gate:
+    // official folds `{...p}` alongside `use:` / `transition:`, emitting
+    // `$.attribute_effect` → `$.action` → `$.transition` in source order, and Verter now
+    // matches it — the positive `lifecycle/spread_lifecycle` golden pins the order. A
+    // spread co-located with an event / `bind:` / `let:` stays fail-closed above.)
+    // ── 5f-c lifecycle-directive fail-closed boundary ─────────────────────
     FailRow {
-        // An element spread co-located with a `use:` action directive — fails closed with the
-        // component/snippet (directive) diagnostic, NOT folded.
-        name: "spread_with_use",
-        source: "<script>let c = $state(0); function act() {}</script>\n<div {...c} use:act></div>\n",
+        // CHILD-form `{@attach}` (`<div>{@attach fn}</div>`) — official `svelte@5.56.3`
+        // REJECTS it at parse (`expected_tag`): `{@attach}` is attribute-position-only.
+        // Verter keeps the child-form `TagIr::Attach` fail-closed (`refuse_tag`), while
+        // the ELEMENT-position `<div {@attach fn}>` is the accepted form (the positive
+        // `lifecycle/attach_element` golden).
+        name: "attach_child_form",
+        source: "<script>let c = $state(0);</script>\n<div onclick={() => c++}>{@attach fn}</div>\n",
+        code: "svelte-runtime-unsupported-component",
+    },
+    FailRow {
+        // `{@attach}` on a COMPONENT — official ACCEPTS it as a computed-key prop
+        // (`Comp($$anchor, { [$.attachment()]: fn })`); that component-attachment
+        // forwarding is DEFERRED (ledger D-38), so Verter fails it closed at the
+        // component-call projection rather than dropping the attachment.
+        name: "component_attach",
+        source: "<script>import Comp from './Comp.svelte'; let c = $state(0);</script>\n<Comp {@attach fn} />\n<button onclick={() => c++}>x</button>\n",
+        code: "svelte-runtime-unsupported-component",
+    },
+    FailRow {
+        // `use:` on a COMPONENT — official REJECTS (`component_invalid_directive`:
+        // a component is not a DOM element host). Verter fails closed at the
+        // component-call projection.
+        name: "component_use",
+        source: "<script>import Comp from './Comp.svelte'; let c = $state(0);</script>\n<Comp use:foo />\n<button onclick={() => c++}>x</button>\n",
+        code: "svelte-runtime-unsupported-component",
+    },
+    FailRow {
+        // `animate:` on an element NOT inside an each — official REJECTS
+        // (`animation_invalid_placement`: the animated element must be the only child
+        // of a keyed `{#each}`).
+        name: "animate_outside_each",
+        source: "<script>let c = $state(0);</script>\n<div animate:flip onclick={() => c++}></div>\n",
+        code: "svelte-runtime-unsupported-component",
+    },
+    FailRow {
+        // `animate:` inside an UNKEYED each — official REJECTS (`animation_missing_key`).
+        name: "animate_unkeyed_each",
+        source: "<script>let c = $state(0);</script>\n{#each items as item}<div animate:flip onclick={() => c++}>{item}</div>{/each}\n",
+        code: "svelte-runtime-unsupported-component",
+    },
+    FailRow {
+        // `animate:` sharing the keyed-each body with a SIBLING ELEMENT — official
+        // REJECTS (`animation_invalid_placement`: the animated element must be the
+        // ONLY child). A `{@const}` / `{const}` / `{let}` declaration-tag sibling is
+        // IGNORED by the official check (the positive `lifecycle/animate_keyed_const`
+        // golden); a sibling ELEMENT stays significant and refuses.
+        name: "animate_sibling_element",
+        source: "<script>let { items } = $props();</script>\n{#each items as item (item.id)}<span></span><div animate:flip>{item.n}</div>{/each}\n",
+        code: "svelte-runtime-unsupported-component",
+    },
+    FailRow {
+        // TWO `animate:` directives on one element — official REJECTS
+        // (`animation_duplicate`: an element can only have one `animate` directive).
+        // The parser's duplicate-attribute key EXCLUDES animate (official parity), so
+        // this reaches the runtime animate gate, not the parse duplicate mint.
+        name: "animate_duplicate",
+        source: "<script>let c = $state(0);</script>\n{#each items as item (item.id)}<div animate:flip animate:fade onclick={() => c++}>{item}</div>{/each}\n",
+        code: "svelte-runtime-unsupported-component",
+    },
+    FailRow {
+        // `in:` alongside an existing `transition:` on one element — official REJECTS
+        // (`transition_conflict`: the intro halves overlap). The overlap rule also
+        // covers `out:`+`transition:` and same-kind duplicates (`transition_duplicate`);
+        // `in:`+`out:` do NOT overlap and stay accepted (the positive FLAG-map goldens).
+        name: "transition_conflict",
+        source: "<script>let c = $state(0);</script>\n<div in:fade transition:fade onclick={() => c++}></div>\n",
+        code: "svelte-runtime-unsupported-component",
+    },
+    FailRow {
+        // An `await` inside a lifecycle expression (`{@attach await p}`) — the
+        // async/blocker wrapping of lifecycle expressions (official experimental-async
+        // `run_after_blockers`) is DEFERRED (ledger D-40): the shared fallible
+        // rewriter refuses the `await` before the plan exists.
+        name: "lifecycle_async_expr",
+        source: "<script>let c = $state(0);</script>\n<div {@attach await p} onclick={() => c++}></div>\n",
+        code: "svelte-runtime-unsupported-experimental-async",
+    },
+    FailRow {
+        // A lifecycle directive on a `<svelte:element>` dynamic element — official
+        // ACCEPTS it (the callback body emits `$.action($$element, …)`), but the
+        // dynamic-element lifecycle surface is DEFERRED (ledger D-39): Verter fails it
+        // closed at the `<svelte:element>` attr gate rather than emitting a divergent
+        // callback body.
+        name: "svelte_element_use",
+        source: "<script>let t = $state('div');</script>\n<svelte:element this={t} use:foo onclick={() => t}></svelte:element>\n",
+        code: "svelte-runtime-unsupported-component",
+    },
+    FailRow {
+        // `use:` on a GLOBAL host (`<svelte:window>`) — official ACCEPTS it
+        // (`$.action($.window, …)` in the init body), but the global-host lifecycle
+        // surface is DEFERRED (ledger D-39): Verter fails it closed at the
+        // global-host attr gate (`classify_special_host`) rather than emitting a
+        // divergent init body. This row locks the fail-closed intent (NOT reject
+        // parity — official accepts).
+        name: "svelte_window_use",
+        source: "<script>let c = $state(0);</script>\n<svelte:window use:foo />\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-dynamic-attribute",
+    },
+    FailRow {
+        // `{@attach}` on a GLOBAL host (`<svelte:body>`) — official ACCEPTS it
+        // (`$.attach($.document.body, …)`), but the global-host lifecycle surface is
+        // DEFERRED (ledger D-39): Verter fails it closed at the same global-host
+        // attr gate. Fail-closed intent, not reject parity.
+        name: "svelte_body_attach",
+        source: "<script>let c = $state(0);</script>\n<svelte:body {@attach fn} />\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-dynamic-attribute",
+    },
+    FailRow {
+        // `transition:` on a `<svelte:element>` dynamic element — official ACCEPTS it
+        // (`$.transition(3, $$element, …)` in the element callback), but the
+        // dynamic-element lifecycle surface is DEFERRED (ledger D-39): Verter fails
+        // it closed at the `<svelte:element>` attr gate — the transition sibling of
+        // the `svelte_element_use` row (same refusal arm, distinct directive family).
+        name: "svelte_element_transition",
+        source: "<script>let t = $state('div');</script>\n<svelte:element this={t} transition:fade onclick={() => t}></svelte:element>\n",
         code: "svelte-runtime-unsupported-component",
     },
     FailRow {
@@ -1880,10 +1997,31 @@ fn fail_matrix_covers_every_documented_sub_shape() {
     // `svelte_self_root_bind_this`) refuse a self-reference with NO allowed enclosing context
     // (the official `svelte_self_invalid_placement`) instead of emitting the recursive
     // self-call — both formerly over-accepted (emitted a divergent Main).
+    // The 5f-c lifecycle vertical FLIPPED `spread_with_use` positive (official folds a
+    // spread alongside `use:`/`transition:` — the `lifecycle/spread_lifecycle` golden pins
+    // the `$.attribute_effect` → `$.action` → `$.transition` order) and added EIGHT
+    // fail-closed rows: the child-form `{@attach}` (`attach_child_form`, official
+    // `expected_tag` — attribute-position-only), the DEFERRED component attachment
+    // (`component_attach`, D-38) and `<svelte:element>` lifecycle (`svelte_element_use`,
+    // D-39), the official-reject parity rows `component_use`
+    // (`component_invalid_directive`), `animate_outside_each`
+    // (`animation_invalid_placement`), `animate_unkeyed_each` (`animation_missing_key`),
+    // `animate_duplicate` (`animation_duplicate`), and `transition_conflict`
+    // (`transition_conflict`), plus the DEFERRED async-lifecycle-expression row
+    // (`lifecycle_async_expr`, D-40) — net +8 rows, 136 → 144. The animate
+    // only-child refinement (declaration-tag siblings are IGNORED per official —
+    // the positive `lifecycle/animate_keyed_const` golden) added the
+    // `animate_sibling_element` reject-parity row locking that a sibling ELEMENT
+    // still refuses (`animation_invalid_placement`) — +1 row, 144 → 145. The D-39
+    // fail-closed surface is locked by THREE more rows (official ACCEPTS all three;
+    // Verter defers them fail-closed, NOT reject parity): `svelte_window_use` +
+    // `svelte_body_attach` (global-host lifecycle/attach at the
+    // `classify_special_host` gate) and `svelte_element_transition` (the transition
+    // sibling of `svelte_element_use`) — +3 rows, 145 → 148.
     assert_eq!(
         FAIL_MATRIX.len(),
-        136,
-        "the fail matrix must enumerate all 136 documented unsupported-feature \
+        148,
+        "the fail matrix must enumerate all 148 documented unsupported-feature \
          fail-closed sub-shapes. The 5f-a component/snippet/slot vertical removed FIVE rows \
          (now accepted-positive with topology/emit goldens): `component` (a `<Foo />` direct \
          call), `bind_this_component` (a component `bind:this` → `$.bind_this`), \
@@ -1919,9 +2057,10 @@ fn fail_matrix_covers_every_documented_sub_shape() {
          The remaining \
          rows: the element-spread + `{{@html}}` surface removed the \
          `spread` / `html_tag` refusal rows now SUPPORTED, replacing them with the \
-         `props_rest_spread` row PLUS the three spread-incompatible-directive rows \
-         `spread_with_event` / `spread_with_bind` / `spread_with_use` that lock the \
-         fail-closed identity of a spread co-located with an event/bind/use; the value \
+         `props_rest_spread` row PLUS the two spread-incompatible-directive rows \
+         `spread_with_event` / `spread_with_bind` that lock the fail-closed identity of \
+         a spread co-located with an event/bind (5f-c flipped `spread_with_use` \
+         positive — spread + lifecycle co-exist per official); the value \
          emitter is source-preserving, so the five `value_paren_*` rows are GONE — author \
          parens are kept verbatim, never refused; the `bind_checked` row is GONE — 5c \
          now emits `$.remove_input_defaults` + `$.bind_checked` for `bind:checked`; the \

@@ -32,6 +32,10 @@ const EACH_INDEX_REACTIVE: u8 = 2;
 /// PLAN facts — controlledness is a DOM-POSITION fact decided by the walk, so this bit is
 /// OR'd onto the projected flags at emit time ([`super::client_block_emit`]), not here.
 pub(super) const EACH_IS_CONTROLLED: u8 = 4;
+/// The official `EACH_IS_ANIMATED` bit: the each body's sole element carries an
+/// `animate:` directive (validated keyed-each-only by the classifier's placement
+/// pre-pass), so the runtime tracks item movement for the animation.
+const EACH_IS_ANIMATED: u8 = 8;
 const EACH_ITEM_IMMUTABLE: u8 = 16;
 
 impl<'a> SupportedClientIr<'a> {
@@ -140,6 +144,13 @@ impl<'a> SupportedClientIr<'a> {
         if matches!(self.ir.component.mode, SvelteMode::Runes) {
             flags |= EACH_ITEM_IMMUTABLE;
         }
+        // The official `EACH_IS_ANIMATED` widening: the each body's element carries an
+        // `animate:` directive (the classifier's placement pre-pass already proved it
+        // is the SOLE significant child of THIS keyed each — the flag never reflects
+        // an unvalidated placement). Read from the typed body-root inventory.
+        if self.each_body_has_animate(body) {
+            flags |= EACH_IS_ANIMATED;
+        }
 
         // The official `uses_index` render-param rule: the index render param is emitted
         // when the index is READ in the body, OR the item is reassigned / mutated. A forced
@@ -188,6 +199,19 @@ impl<'a> SupportedClientIr<'a> {
             emit_index,
             body,
             else_body,
+        })
+    }
+
+    /// Whether the each BODY region's roots include an element bearing an
+    /// `animate:` directive — the `EACH_IS_ANIMATED` trigger. Structural over the
+    /// typed body-root `AttrIr` inventory, never a source scan.
+    fn each_body_has_animate(&self, body: super::ir::TemplateScopeId) -> bool {
+        self.ir.template_scope(body).roots.iter().any(|&root| {
+            matches!(
+                self.ir.node(root),
+                super::ir::IrNode::Element(el)
+                    if el.attrs.iter().any(|a| matches!(a, super::ir::AttrIr::Animate { .. }))
+            )
         })
     }
 

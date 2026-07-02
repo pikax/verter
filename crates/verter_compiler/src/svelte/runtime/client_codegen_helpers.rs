@@ -25,6 +25,7 @@ pub(super) fn op_target_node(op: &RuntimeOp) -> Option<NodeId> {
         | RuntimeOp::Attachment { target, .. }
         | RuntimeOp::Action { target, .. }
         | RuntimeOp::Transition { target, .. }
+        | RuntimeOp::Animation { target, .. }
         | RuntimeOp::NonStaticProperty { target, .. } => Some(*target),
         RuntimeOp::Event { target, .. } => match target {
             EventTarget::Node(node) => Some(*node),

@@ -306,8 +306,10 @@ fn options_attr_name(attr: &SvelteAttribute) -> Option<String> {
     use crate::svelte::parser::SvelteAttributeKind;
     match &attr.kind {
         SvelteAttributeKind::Plain { name, .. } => Some(name.clone()),
-        // A spread / directive on `<svelte:options>` is never the supported
-        // `runes` axis — `None` routes it to the 5m unsupported-options arm.
-        SvelteAttributeKind::Spread(_) | SvelteAttributeKind::Directive(_) => None,
+        // A spread / directive / `{@attach}` on `<svelte:options>` is never the
+        // supported `runes` axis — `None` routes it to the 5m unsupported-options arm.
+        SvelteAttributeKind::Spread(_)
+        | SvelteAttributeKind::Directive(_)
+        | SvelteAttributeKind::Attach { .. } => None,
     }
 }
