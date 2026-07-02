@@ -1,0 +1,39 @@
+{
+  "slug": "components/slot_prop_component_dynamic.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "./Inner.svelte",
+      "kind": "default",
+      "names": [
+        "default:Inner"
+      ]
+    },
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "slot_prop_component_dynamic",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [],
+  "helperSet": [],
+  "helperCounts": {},
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

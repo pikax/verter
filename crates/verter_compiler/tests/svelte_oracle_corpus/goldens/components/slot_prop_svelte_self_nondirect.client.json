@@ -1,0 +1,61 @@
+{
+  "slug": "components/slot_prop_svelte_self_nondirect.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "slot_prop_svelte_self_nondirect",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "comment",
+    "first_child",
+    "comment",
+    "first_child",
+    "derived",
+    "get",
+    "append",
+    "if",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "comment",
+    "derived",
+    "first_child",
+    "get",
+    "if"
+  ],
+  "helperCounts": {
+    "comment": 2,
+    "first_child": 2,
+    "derived": 1,
+    "get": 1,
+    "append": 2,
+    "if": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; export default function slot_prop_svelte_self_nondirect($$anchor, $$props) {var fragment = $.comment(); var node = $.first_child(fragment); {var consequent = ($$anchor) => {var fragment_1 = $.comment(); var node_1 = $.first_child(fragment_1); {let $0 = $.derived(() => $$props.depth - 1); slot_prop_svelte_self_nondirect(node_1, {slot: 'a', get depth() {return $.get($0);}});} $.append($$anchor, fragment_1);}; $.if(node, ($$render) => {if ($$props.depth > 0) $$render(consequent);});} $.append($$anchor, fragment);}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

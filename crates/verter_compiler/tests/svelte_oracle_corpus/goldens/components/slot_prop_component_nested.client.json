@@ -1,0 +1,65 @@
+{
+  "slug": "components/slot_prop_component_nested.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "./Inner.svelte",
+      "kind": "default",
+      "names": [
+        "default:Inner"
+      ]
+    },
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "slot_prop_component_nested",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "child",
+    "reset",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "from_html",
+    "reset"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "child": 1,
+    "reset": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div><!></div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; import Inner from './Inner.svelte'; var root = $.from_html(`<div><!></div>`); export default function slot_prop_component_nested($$anchor, $$props) {var div = root(); var node = $.child(div); Inner(node, {slot: 'bar', get label() {return $$props.x;}}); $.reset(div); $.append($$anchor, div);}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

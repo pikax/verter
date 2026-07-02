@@ -1,0 +1,32 @@
+{
+  "slug": "components/slot_prop_svelte_self_nondirect.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "slot_prop_svelte_self_nondirect",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [],
+  "helperSet": [],
+  "helperCounts": {},
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

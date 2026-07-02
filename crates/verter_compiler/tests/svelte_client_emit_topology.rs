@@ -640,6 +640,54 @@ const SUPPORTED_COMPONENTS: &[&str] = &[
     // `{@render row?.(1)}` on a LOCAL snippet — the DIRECT optional call
     // `row?.($$anchor, () => 1)` (the official `b.maybe_call` form; no `?? $.noop`).
     "components/render_optional_local",
+    // The `Inner.svelte` leaf the slot-disposition fixtures import.
+    "components/Inner",
+    // ── The official `slot=` three-class disposition ──
+    // `<Child><Inner slot="foo" label={x}/></Child>` — a DIRECT component filler:
+    // routed into `$$slots.foo` AND the inner call keeps the `slot` prop in source
+    // order (`Inner($$anchor, { slot: 'foo', get label() {…} })`).
+    "components/slot_filler_component_child",
+    // `<Child><svelte:component this={comp} slot="foo"/></Child>` — the dynamic
+    // component filler: `$$slots.foo` wraps `$.component(node, () => comp, ($$anchor,
+    // $$component) => { $$component($$anchor, { slot: 'foo' }); })`.
+    "components/slot_filler_svelte_component_child",
+    // `<Child><svelte:self slot="foo" depth={depth - 1}/></Child>` — the recursive
+    // self filler: `$$slots.foo` wraps the self-call with the `slot` prop + the
+    // memoized `depth` derived.
+    "components/slot_filler_svelte_self_child",
+    // `<Child><svelte:element this="div" slot="foo" id={x}/></Child>` — the dynamic
+    // element filler: `$$slots.foo` wraps `$.element(…)` and the `slot` FOLDS into
+    // `$.attribute_effect($$element, () => ({ slot: 'foo', id: x }))` in source order.
+    "components/slot_filler_svelte_element_child",
+    // `<Inner slot="top" label={x}/>` at the ROOT — a NON-direct component `slot` is
+    // an ordinary plain prop (`Inner($$anchor, { slot: 'top', … })`; no `$$slots`).
+    "components/slot_prop_component_top_level",
+    // `<div><Inner slot="bar" label={x}/></div>` — nested in an ELEMENT: still the
+    // plain-prop route (`Inner(node, { slot: 'bar', … })`).
+    "components/slot_prop_component_nested",
+    // `<Child><div><Inner slot="bar" label={x}/></div></Child>` — nested in an
+    // element INSIDE a component's default content: the element breaks direct-child
+    // placement, so the `slot` stays a plain prop inside the `children:` callback
+    // (`Inner(node, { slot: 'bar', … })`) and mints NO `bar` slot entry.
+    "components/slot_prop_component_nested_in_component",
+    // `<Inner slot={x}/>` — a DYNAMIC `slot` on a NON-direct component host is an
+    // ordinary reactive prop (`get slot() { return $$props.x; }`) — official's
+    // static-value rule fires only on a DIRECT component child.
+    "components/slot_prop_component_dynamic",
+    // `<svelte:component this={comp} slot="a"/>` at the root — the plain prop rides
+    // the `$$component($$anchor, { slot: 'a' })` call.
+    "components/slot_prop_svelte_component_top_level",
+    // `{#if depth > 0}<svelte:self slot="a" depth={depth - 1}/>{/if}` — a validly
+    // placed NON-direct `<svelte:self>`: the `slot` is a plain prop on the self-call.
+    "components/slot_prop_svelte_self_nondirect",
+    // `<Child><svelte:fragment slot="head"><Inner slot="x" …/></svelte:fragment></Child>`
+    // — a component HOISTED out of a slotted fragment is NOT a direct component child
+    // (officially `owner !== parent`), so its `slot="x"` stays a plain prop inside the
+    // `head` callback and mints NO `x` slot entry.
+    "components/slot_prop_component_in_slotted_fragment",
+    // `{#if show}<Inner slot="c"/>{/if}` — a block body is not direct-child
+    // placement: the plain prop inside the consequent callback.
+    "components/slot_prop_component_in_block",
 ];
 
 /// The native-client element LIFECYCLE-directive corpus (5f-c) — `use:` actions,
@@ -6275,12 +6323,12 @@ fn supported_components_cover_the_full_component_corpus() {
     // dropped row is a coverage regression. This count gate fails LOUDLY if a row is dropped,
     // and the no-duplicate check guards against a typo. THREE `components/*` fixtures are
     // EXCLUDED — standalone_child (legacy-mode), snippet_capture_state (reactive-text
-    // const-fold) and child_and_snippet (array-$state / $.proxy) — so the count is the 38
+    // const-fold) and child_and_snippet (array-$state / $.proxy) — so the count is the 51
     // `components/*` fixtures minus 3.
     assert_eq!(
         SUPPORTED_COMPONENTS.len(),
-        35,
-        "the component corpus must enumerate the 35 runes-mode `components/*` 5f-a conformance \
+        48,
+        "the component corpus must enumerate the 48 runes-mode `components/*` 5f-a conformance \
          fixtures (Child / component_props / component_full / component_children_default / \
          component_snippet_children / component_bind_prop / component_bind_this / \
          component_bind_function / component_bind_function_multi / component_spread / \
@@ -6290,7 +6338,14 @@ fn supported_components_cover_the_full_component_corpus() {
          svelte_component / svelte_component_bind_this / svelte_component_import / svelte_self / \
          svelte_fragment / component_prop_hyphen / component_event_hyphen / fragment_slot_hyphen / \
          named_slot_span / named_slot_entity / fragment_slot_text_first / render_spread_arg / \
-         render_paren_callee / render_optional_local), \
+         render_paren_callee / render_optional_local, plus the `slot=` disposition rows: Inner / \
+         slot_filler_component_child / slot_filler_svelte_component_child / \
+         slot_filler_svelte_self_child / slot_filler_svelte_element_child / \
+         slot_prop_component_top_level / slot_prop_component_nested / \
+         slot_prop_component_nested_in_component / \
+         slot_prop_component_dynamic / slot_prop_svelte_component_top_level / \
+         slot_prop_svelte_self_nondirect / slot_prop_component_in_slotted_fragment / \
+         slot_prop_component_in_block), \
          excluding \
          the legacy-mode standalone_child (Block 5i) AND the two deferred-surface fixtures \
          snippet_capture_state (reactive-text const-fold) + child_and_snippet (array-$state / \
