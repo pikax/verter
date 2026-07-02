@@ -224,6 +224,48 @@ UTF-8 / UTF-16 / UTF-32 sessions.
   handler. It is `#[ignore]`'d on the tsserver program-membership gap tracked as
   Block H-membership (see above); it goes green once that follow-up lands.
 
+## Interactive request-surface capture (every provider-backed handler)
+
+The interactive query path rides the SAME generation-stamped store. The shared
+context builders (`provider_projection_context` → `type_provider_context`, and
+`virtual_file_context` for `verter-virtual://` documents) build the query
+context EXCLUSIVELY from ONE captured immutable `ProviderSurfaceSnapshot`
+(`VerterLanguageServer::capture_provider_request_surface`): the provider path,
+content, mapper, and both line indexes all come from one recorded surface, so a
+concurrent `did_change`/`did_close` can never tear the tuple the way the former
+independent live reads (committed path + live-compiled IDE content + projection
+mapper + document line index) could.
+
+Capture resolves canonical → projection kind → provider path → the store's
+CURRENT snapshot, and fails closed on: no recorded surface, a role mismatch
+(`CarrierIde` for a carrier, `Shadow` for a self-file rune module), a foreign
+`source_canonical`, or an open-document source that no longer byte-matches the
+captured carrier source (an un-synced edit ⇒ querying the provider would pair
+its OLD surface with a NEW mapper — wrong, not merely stale).
+
+Producers record on SUCCESS only: the tsserver publish path records through
+`record_and_version_carrier_companions`; every tsgo direct-open / bootstrap-
+unresolved IDE sync records through the `record_carrier_ide_snapshot` choke;
+the self-file shadow sync records a `Shadow` surface (content + rewrite-aware
+mapper) in `sync_self_file_shadow_state`. A failed sync records nothing.
+
+Every provider-backed handler (hover, completion + resolve, definition,
+type-definition, references, rename, document highlights, signature help, code
+actions, semantic tokens, inlay hints, `$/verter/getBindingTypes`, the
+diagnostics merge) re-validates the captured surface AFTER the provider await
+(`provider_context_still_valid` / `provider_request_surface_still_valid`:
+`captured_snapshot_still_honored` AND live-source match) and DROPS the provider
+contribution on mismatch. Rename, code actions, and completion-resolve import
+edits are STRICT — the whole provider edit/action set drops (a corrupt edit is
+worse than no edit); read-only features fall back to the Verter-native result.
+
+Guards: `crates/verter_lsp/src/server/request_surface_guard_tests.rs`
+(builders use the captured surface, handler modules never read the live
+context ingredients, every handler runs the post-await gate) plus the
+mid-request race regression tests in `server_tests.rs` (the mock `on_query`
+seam) and the gated real-provider determinism lane
+(`real_provider_tests/request_surface.rs`).
+
 ## Follow-up
 
 **Block H-membership — tsserver program-membership for cross-file nav handlers.**
@@ -238,10 +280,12 @@ as Block H-membership. The `suppress_imported_carrier_prewarm` seam and the
 the exact validation harness for that work; the lane's `#[ignore]` is lifted when
 it lands.
 
-References and code-actions report cross-file results against the same
-`{carrier}.ts` surfaces and should adopt the SAME generation-pinned snapshot
-mechanism (a fenced capture + snapshot-anchored merge). `merge_references` and
-`merge_code_actions` are intentionally untouched here; they will adopt this in a
-separate change. The merge-time mapping helpers (`external_ide_context_from_snapshot`,
-`api_surface_range_to_carrier_range`) and the capture API are already reusable for
-those surfaces.
+References and code-actions now capture their OWN document's request surface and
+run the post-await gate (see "Interactive request-surface capture" above), but
+their CROSS-FILE `{carrier}.ts` legs still map through the live
+`external_ide_context` resolver rather than a fenced multi-surface capture like
+rename's `capture_current_carrier_api_set`. Adopting the fenced capture +
+snapshot-anchored merge for those cross-file legs remains follow-up work. The
+merge-time mapping helpers (`external_ide_context_from_snapshot`,
+`api_surface_range_to_carrier_range`) and the capture API are already reusable
+for those surfaces.
