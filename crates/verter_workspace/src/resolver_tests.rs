@@ -3600,3 +3600,131 @@ fn cyclic_branch_skipped_but_sibling_reference_resolves() {
     )
     .is_none());
 }
+
+/// Builds `count` chained projects `{prefix}0 → {prefix}1 → …`, each
+/// referencing the next one's tsconfig (acyclic by construction). The LAST
+/// project resolves `specifier` via its own tsconfig `paths` + `baseUrl`.
+fn chained_projects(prefix: &str, count: usize, specifier: &str) -> Vec<IdeProjectConfig> {
+    (0..count)
+        .map(|i| {
+            let name = format!("{prefix}{i}");
+            if i + 1 == count {
+                resolving_project(&name, specifier)
+            } else {
+                let next = format!("/workspace/packages/{prefix}{}/tsconfig.json", i + 1);
+                referencing_project(&name, &[next.as_str()])
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn diamond_project_references_resolve_through_both_arms() {
+    // Diamond whose arms share one long chain: A references [B, C]; B reaches
+    // the shared chain head l1 through a 10-project prefix (p1..p10), C
+    // references l1 directly; the chain l1 → … → l250 ends in a reference to
+    // R, the only project resolving the specifier.
+    //
+    // The B arm runs first and walks the shared chain, but its longer prefix
+    // exhausts the depth fuse before reaching R (1 + 10 + 250 > 256), so it
+    // pushes and pops l1..l245 on the way out. The C arm then re-enters the
+    // SAME chain on a shorter path (1 + 250 <= 256) and resolves through R.
+    // This discriminates push-on-descend/pop-on-return: if the active-set pop
+    // (or the depth restore) on branch return were missing, the C arm would
+    // see l1 as still active (or run on a drained budget), skip the chain,
+    // and return None instead of Some.
+    let mut projects = vec![
+        referencing_project(
+            "a",
+            &[
+                "/workspace/packages/b/tsconfig.json",
+                "/workspace/packages/c/tsconfig.json",
+            ],
+        ),
+        referencing_project("b", &["/workspace/packages/p1/tsconfig.json"]),
+        referencing_project("c", &["/workspace/packages/l1/tsconfig.json"]),
+    ];
+    for i in 1..=10usize {
+        let next = if i < 10 {
+            format!("/workspace/packages/p{}/tsconfig.json", i + 1)
+        } else {
+            "/workspace/packages/l1/tsconfig.json".to_string()
+        };
+        projects.push(referencing_project(&format!("p{i}"), &[next.as_str()]));
+    }
+    for i in 1..=250usize {
+        let next = if i < 250 {
+            format!("/workspace/packages/l{}/tsconfig.json", i + 1)
+        } else {
+            "/workspace/packages/r/tsconfig.json".to_string()
+        };
+        projects.push(referencing_project(&format!("l{i}"), &[next.as_str()]));
+    }
+    projects.push(resolving_project("r", "diamond-lib"));
+    let resolver = ProjectResolver::new(projects);
+    let reader = TestReader::with_files(&["/workspace/packages/r/src/index.ts"]);
+
+    let resolved = resolve_bare(
+        &resolver,
+        &reader,
+        "/workspace/packages/a/src/App.ts",
+        "diamond-lib",
+    )
+    .expect("second diamond arm must re-enter the shared chain the first arm popped");
+    assert_eq!(resolved.source_id, "/workspace/packages/r/src/index.ts");
+    assert_eq!(resolved.resolution_kind, ResolutionKind::ProjectReference);
+
+    // NEGATIVE: a specifier nothing resolves still terminates as None across
+    // the same diamond instead of hanging or overflowing.
+    assert!(resolve_bare(
+        &resolver,
+        &reader,
+        "/workspace/packages/a/src/App.ts",
+        "missing-lib",
+    )
+    .is_none());
+}
+
+#[test]
+fn project_reference_depth_budget_bounds_deep_chain() {
+    // Over-budget side: an ACYCLIC chain of 300 linked projects whose LAST
+    // project is the only resolver. No cycle exists, so the active-set guard
+    // never fires — only the depth fuse bounds this walk. The terminal
+    // project sits beyond PROJECT_REFERENCE_DEPTH_LIMIT, so the fuse must
+    // stop the descent and return None rather than walk (or overflow into)
+    // arbitrarily deep reference chains.
+    let projects = chained_projects("deep", 300, "over-lib");
+    let resolver = ProjectResolver::new(projects);
+    let reader = TestReader::with_files(&["/workspace/packages/deep299/src/index.ts"]);
+
+    let resolved = resolve_bare(
+        &resolver,
+        &reader,
+        "/workspace/packages/deep0/src/App.ts",
+        "over-lib",
+    );
+    // NEGATIVE: the beyond-budget terminal resolver must NOT be reached.
+    assert!(
+        resolved.is_none(),
+        "resolver beyond the depth budget must not be reached: {resolved:?}"
+    );
+
+    // Under-budget side: the same shape at 10 projects — comfortably inside
+    // the fuse. The budget must not cut off legitimate sub-budget chains.
+    let projects = chained_projects("short", 10, "under-lib");
+    let resolver = ProjectResolver::new(projects);
+    let reader = TestReader::with_files(&["/workspace/packages/short9/src/index.ts"]);
+
+    let resolved = resolve_bare(
+        &resolver,
+        &reader,
+        "/workspace/packages/short0/src/App.ts",
+        "under-lib",
+    )
+    .expect("sub-budget acyclic chain must still resolve through its terminal project");
+    assert_eq!(
+        resolved.source_id,
+        "/workspace/packages/short9/src/index.ts"
+    );
+    assert_eq!(resolved.resolution_kind, ResolutionKind::ProjectReference);
+}

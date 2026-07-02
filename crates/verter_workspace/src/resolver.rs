@@ -837,11 +837,13 @@ impl ProjectResolver {
 
 /// Traversal state for one project-reference resolution walk.
 ///
-/// Two guards with distinct roles: `active` is the semantic cycle guard (the
-/// set of tsconfig canonical paths currently on the descent path — tsconfig
-/// paths here are already normalized upstream via `normalize_canonical_id`,
-/// so value comparison is exact), and `remaining_depth` is the stack-safety
-/// fuse for pathological acyclic depth the active-set cannot bound.
+/// Two guards with distinct roles: `active` is the semantic cycle guard —
+/// the set of tsconfig paths currently on the descent path, matched by exact
+/// string equality against the same `tsconfig_path` values stored on the
+/// resolver's projects (production paths arrive canonicalized through the
+/// snapshot/VFS path; `ProjectResolver::new` does not normalize them itself)
+/// — and `remaining_depth` is the stack-safety fuse that unconditionally
+/// bounds the walk regardless of key normalization.
 struct ProjectReferenceTraversalState {
     active: HashSet<String>,
     remaining_depth: u32,
