@@ -1487,14 +1487,13 @@ impl VerterHost {
             // Structural-materialisation preference is the graph-native predicate:
             // lower the raw TypeExpr to a Navigate-mode SemanticNodeId and consult
             // `component_meta_registry_prefers_structural_materialization_node`.
-            // The structural materialiser returns the surface PAIRED with its
-            // object-surface fact. That fact is NOT node-domain here: it is an interim
-            // `component_meta_registry_has_explicit_object_surface(&result)` computed on
-            // the FINAL materialised `TypeExpr`, threaded out of the structural
-            // materialiser (which still materialises a `TypeExpr` and is flagged by the
-            // hot-path fence at its own site). The host READS this precomputed fact
-            // rather than re-deriving it; a later block converts the structural path
-            // node-native and the fact along with it.
+            // The structural materialiser (`materialize_registry_structural_candidate`,
+            // node-domain) returns the surface PAIRED with its object-surface fact:
+            // each reference/route leaf resolves through the node-domain Class-A /
+            // whole-surface helpers (materialised ONCE at the surface sink) and
+            // carries its producing node's object-surface fact; compound arms compose
+            // the leaf facts. The host READS that precomputed fact rather than
+            // re-deriving it from the materialised result.
             if let Some(raw) = raw_body.filter(|expr| {
                 if !component_meta_registry_has_non_object_top_level_surface(expr) {
                     return false;

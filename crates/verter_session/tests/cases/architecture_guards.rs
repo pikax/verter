@@ -1796,8 +1796,13 @@ fn component_meta_resolution_path_has_no_eager_materializer_or_member_fallback()
 /// `project_class_a_terminal_node`, `lower_and_project_to_expanded_node`,
 /// `project_admitted_node_to_expanded_node`. Whole-identifier matching keeps the
 /// retired `dispatch_projected_surface` from colliding with the live
-/// `dispatch_projected_surface_with_node`.
+/// `dispatch_projected_surface_with_node`, and the retired
+/// `lower_and_project_to_expanded_via_host_threaded` (the deleted materializing
+/// bridge, also call-fenced by `HOT_MAT_BRIDGE_IDENTS` — this tombstone
+/// additionally catches an uncalled reintroduced DEFINITION) from colliding
+/// with the live `lower_and_project_to_expanded_node_via_host_threaded`.
 const RETIRED_UTILITY_SHAPE_CLUSTER: &[&str] = &[
+    "lower_and_project_to_expanded_via_host_threaded",
     "project_type_surface_expr_via_host_threaded",
     "project_expr_surface_shape_via_host_threaded",
     "project_route_surface_expr_via_host_threaded",
@@ -2051,6 +2056,16 @@ fn retired_utility_shape_cluster_tombstone_discriminates() {
         "self-test: the LIVE `dispatch_projected_surface_with_node` must NOT match the retired \
          `dispatch_projected_surface` (whole-identifier matching)"
     );
+    // RED: an UNCALLED reintroduced DEFINITION of the retired materializing
+    // bridge is flagged (the call-fence `HOT_MAT_BRIDGE_IDENTS` only fires on a
+    // call; this tombstone catches the dormant definition too).
+    assert!(
+        scan("fn lower_and_project_to_expanded_via_host_threaded(e: &mut E) -> Option<T> { None }")
+            .contains(&"lower_and_project_to_expanded_via_host_threaded".to_string()),
+        "self-test: an uncalled reintroduced `lower_and_project_to_expanded_via_host_threaded` \
+         definition MUST be flagged"
+    );
+
     // GREEN — preserved-live node-domain rail idents are not in the retired set.
     assert!(
         scan(
@@ -2058,6 +2073,7 @@ fn retired_utility_shape_cluster_tombstone_discriminates() {
              let _ = project_expr_class_a_node_via_dispatch_threaded(); \
              let _ = project_admitted_node_to_expanded_node(); \
              let _ = project_route_surface_node_via_host_threaded(); \
+             let _ = lower_and_project_to_expanded_node_via_host_threaded(); \
              let _ = project_admitted_route_node_to_expanded_object_shape(); }"
         )
         .is_empty(),
