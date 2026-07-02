@@ -26,9 +26,9 @@
 //! silent empty module, never a panic.
 
 use super::client_effect::Memoizer;
-use super::client_event::{emit_delegate_epilogue, render_event_registration};
+use super::client_event::emit_delegate_epilogue;
 use super::client_module_frame::{emit_imports, escape_template_literal};
-use super::client_plan::{ClientBlock, ClientModulePlan, ClientNode, ClientRuntimeOp, EventEmit};
+use super::client_plan::{ClientBlock, ClientModulePlan, ClientNode, ClientRuntimeOp};
 use super::client_shapes::GroupBindKey;
 use super::client_walk::{
     any_item_needs_name, first_descent, item_needs_name, sibling_descent, WalkBase,
@@ -1240,23 +1240,6 @@ impl<'a> ClientEmitter<'a> {
                 }
             }
         }
-    }
-
-    /// Emit a DOM event registration from its [`EventEmit`] substrate — the official
-    /// `$.event` (direct) / `$.delegated` (delegated) shape:
-    /// `$.<helper>('<type>', <target>, <wrapped-handler>[, <capture>][, <passive>])`.
-    ///
-    /// - The handler is nested inner→outer in its modifier wrappers (`$.<modifier>(…)`).
-    /// - The 4th positional `capture` arg is `true` when capture is enabled; when a 5th
-    ///   `passive` arg is present without capture, the capture slot is the `void 0`
-    ///   placeholder (mirroring the official `b.call` falsy-arg trimming).
-    /// - The 5th positional `passive` boolean is emitted only when `passive` is set.
-    ///
-    /// The target host resolves the global hosts (`$.window` / `$.document` /
-    /// `$.document.body`) for the reusable special-element event substrate; the
-    /// regular-element surface feeds only the regular-`Node` host.
-    pub(super) fn emit_event(&mut self, out: &mut String, emit: &EventEmit) {
-        out.push_str(&render_event_registration(emit, &self.node_var));
     }
 }
 

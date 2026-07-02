@@ -689,3 +689,69 @@ fn prop_value_bare_local_and_global_member_are_not_state() {
         "a prop reference must stay state-bearing (getter)"
     );
 }
+
+// ── spread PRESENCE marks `has_state` (official `SpreadElement.js`:
+//    `has_call = true; has_state = true` — "treat e.g. `[...x]` the same as
+//    `[...x.values()]`") ──
+
+#[test]
+fn spread_presence_marks_has_state() {
+    // An ARRAY spread — even over a pure GLOBAL source — is has_state (the official
+    // `SpreadElement` visitor fires on presence, not on the argument's purity).
+    assert!(
+        has_binding_impurity("[...globalThis.things]"),
+        "an array spread must mark has_state"
+    );
+    // An OBJECT spread likewise.
+    assert!(
+        has_binding_impurity("{ ...globalThis.things }"),
+        "an object spread must mark has_state"
+    );
+    // A CALL-ARGUMENT spread (`f(...xs)`) — the same estree `SpreadElement` node.
+    assert!(
+        has_binding_impurity("globalThis.f(...globalThis.a)"),
+        "a call-argument spread must mark has_state"
+    );
+    // A NEW-ARGUMENT spread.
+    assert!(
+        has_binding_impurity("new globalThis.C(...globalThis.a)"),
+        "a new-argument spread must mark has_state"
+    );
+    // Nested inside an evaluated container (a conditional arm) still counts.
+    assert!(
+        has_binding_impurity("globalThis.c ? [...globalThis.a] : 0"),
+        "a spread nested in an evaluated container must mark has_state"
+    );
+}
+
+#[test]
+fn spread_inside_function_bodies_stays_not_state() {
+    // NEGATIVE: a spread DEFERRED inside a nested arrow / function / class body is
+    // NOT the evaluated value — official sets `expression: null` inside function
+    // bodies, so the presence rule must not fire there.
+    assert!(
+        !has_binding_impurity("() => [...globalThis.things]"),
+        "a spread inside an arrow body must NOT mark has_state"
+    );
+    assert!(
+        !has_binding_impurity("_=>{}"),
+        "a plain arrow value must NOT mark has_state"
+    );
+    assert!(
+        !has_binding_impurity("function f() { return [...globalThis.things]; }"),
+        "a spread inside a function body must NOT mark has_state"
+    );
+    assert!(
+        !has_binding_impurity("class C { m() { return [...globalThis.things]; } }"),
+        "a spread inside a class-expression method must NOT mark has_state"
+    );
+    // A no-spread array/object literal stays pure.
+    assert!(
+        !has_binding_impurity("[1, 2]"),
+        "a plain array literal must NOT mark has_state"
+    );
+    assert!(
+        !has_binding_impurity("{ a: 1 }"),
+        "a plain object literal must NOT mark has_state"
+    );
+}

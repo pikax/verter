@@ -5935,9 +5935,11 @@ fn render_parenthesized_whole_call_spread_fails_closed() {
 fn render_array_internal_spread_argument_still_emits() {
     // NARROWNESS CONTROL: an ARRAY-INTERNAL spread (`{@render row([...xs])}`) is a normal
     // array-expression argument, NOT a call-argument spread — official ACCEPTS it. It must
-    // STILL emit the `$.snippet` call with the array spread PRESERVED in its argument thunk
-    // (`() => [...$$props.xs]`); peeling outer author parens for the whole-call-spread
-    // refusal must not over-refuse this accepted shape.
+    // STILL emit the `$.snippet` call; peeling outer author parens for the whole-call-spread
+    // refusal must not over-refuse this accepted shape. The spread argument is
+    // `has_call`-bearing (official `SpreadElement` analysis), so it rides the memoized
+    // `let $0 = $.derived(() => [...$$props.xs]);` hoist and the `() => $.get($0)` thunk —
+    // the DYNAMIC-callee `$.snippet` form memoizes exactly like the static call.
     let js = emit(
         "<script>let { row, xs } = $props();</script>\n{@render row([...xs])}\n",
         "App.svelte",
@@ -5947,8 +5949,17 @@ fn render_array_internal_spread_argument_still_emits() {
         "an array-internal spread render arg must still emit the $.snippet call:\n{js}"
     );
     assert!(
-        js.contains("() => [...$$props.xs]"),
-        "the array-internal spread `() => [...$$props.xs]` must be preserved:\n{js}"
+        js.contains("let $0 = $.derived(() => ([...$$props.xs]));"),
+        "the array-internal spread must memoize into the derived hoist:\n{js}"
+    );
+    assert!(
+        js.contains("$.snippet(node, () => $$props.row, () => $.get($0));"),
+        "the $.snippet call must read the memoized $.get thunk:\n{js}"
+    );
+    // NEGATIVE: never the un-memoized inline spread thunk.
+    assert!(
+        !js.contains("$.snippet(node, () => $$props.row, () => [...$$props.xs])"),
+        "the spread arg must not stay an un-memoized inline thunk:\n{js}"
     );
 }
 
@@ -10958,5 +10969,864 @@ fn component_function_bind_renames_past_each_item_binding_collision() {
     assert!(
         !js.contains("var bind_get = "),
         "the generated bind local must not clobber the each-item binding:\n{js}"
+    );
+}
+
+// ─── Regular-element / `<svelte:fragment>` named-slot lowering + slot-attribute gate ───
+
+#[test]
+fn named_slot_on_regular_element_emits_dollar_slots_entry() {
+    // A STATIC `slot="foo-bar"` on an allowlisted regular element that is a DIRECT
+    // component child is the official NAMED-SLOT form: the element becomes the
+    // `$$slots: { 'foo-bar': ($$anchor, $$slotProps) => {…} }` callback region and the
+    // `slot` attribute BAKES into the cloned skeleton (`<span slot="foo-bar"> </span>`),
+    // exactly the pinned svelte@5.56.3 output.
+    let js = emit_result(
+        "<script>import Child from './Child.svelte'; let { x } = $props();</script>\n<Child><span slot=\"foo-bar\">{x}</span></Child>\n",
+    )
+    .expect("a static named-slot span emits a module");
+    assert!(
+        js.contains("$$slots: {'foo-bar': ($$anchor, $$slotProps) =>"),
+        "missing the quoted named-slot callback entry:\n{js}"
+    );
+    assert!(
+        js.contains("$.from_html(`<span slot=\"foo-bar\"> </span>`)"),
+        "the slot attribute must bake into the cloned skeleton:\n{js}"
+    );
+    // NEGATIVE: a NAMED-slot region body has NO leading `$.next()` (official emits the
+    // cursor advance for default-children / snippet / each callbacks, NOT named slots).
+    assert!(
+        !js.contains("$.next()"),
+        "a named-slot region must not emit a leading $.next():\n{js}"
+    );
+    // NEGATIVE: the named content must not leak into a `children:` default region.
+    assert!(
+        !js.contains("children:"),
+        "named-slot content must not produce a default children prop:\n{js}"
+    );
+}
+
+#[test]
+fn fragment_named_slot_text_first_body_has_no_leading_next() {
+    // A TEXT-FIRST `<svelte:fragment slot="foo">` named-slot body: official emits the
+    // callback WITHOUT the leading `$.next()` cursor advance (`var text = $.text();`
+    // directly) — the named-slot region is NOT an each/children-style render callback.
+    let js = emit_result(
+        "<script>import Child from './Child.svelte'; let { x } = $props();</script>\n<Child><svelte:fragment slot=\"foo\">hello {x}</svelte:fragment></Child>\n",
+    )
+    .expect("a text-first fragment named slot emits a module");
+    assert!(
+        js.contains("$$slots: {foo: ($$anchor, $$slotProps) =>"),
+        "missing the bare-identifier named-slot callback entry:\n{js}"
+    );
+    // The DISCRIMINATOR: no `$.next()` prelude in the named region body.
+    assert!(
+        !js.contains("$.next()"),
+        "a text-first named-slot region must not emit the $.next() prelude:\n{js}"
+    );
+}
+
+#[test]
+fn snippet_and_default_children_text_first_bodies_keep_next_prelude() {
+    // NEGATIVE CONTROLS for the named-slot `$.next()` removal: a `{#snippet}`-as-child
+    // named slot AND a text-first default-children region BOTH keep the official
+    // `$.next()` cursor advance — the removal is scoped to `slots.named` ONLY.
+    let snippet_js = emit_result(
+        "<script>import Child from './Child.svelte'; let { x } = $props();</script>\n<Child>{#snippet foo()}hello {x}{/snippet}</Child>\n",
+    )
+    .expect("a snippet named slot emits a module");
+    assert!(
+        snippet_js.contains("$.next()"),
+        "a text-first {{#snippet}} body must keep the $.next() prelude:\n{snippet_js}"
+    );
+    let children_js = emit_result(
+        "<script>import Child from './Child.svelte'; let { x } = $props();</script>\n<Child>hello {x}</Child>\n",
+    )
+    .expect("text-first default children emit a module");
+    assert!(
+        children_js.contains("children: ($$anchor, $$slotProps) =>"),
+        "missing the default-children callback:\n{children_js}"
+    );
+    assert!(
+        children_js.contains("$.next()"),
+        "a text-first default-children body must keep the $.next() prelude:\n{children_js}"
+    );
+}
+
+#[test]
+fn slot_attr_outside_component_child_placement_still_fails_closed() {
+    // A `slot="a"` on an element that is NOT a direct component child is the official
+    // `slot_attribute_invalid_placement` compile error — Verter keeps it fail-closed
+    // (the slot attribute is accepted ONLY at valid component-child slot placement).
+    // Top-level:
+    assert_fail_closed(
+        "<script>let x = $state(0);</script>\n<div slot=\"a\">{x}</div>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::DynamicAttribute { name, .. } if name == "slot"),
+    );
+    // Nested INSIDE a component child (still invalid placement — official errors):
+    assert_fail_closed(
+        "<script>import Child from './Child.svelte'; let x = $state(0);</script>\n<Child><div><span slot=\"a\">{x}</span></div></Child>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::DynamicAttribute { name, .. } if name == "slot"),
+    );
+}
+
+#[test]
+fn dynamic_or_mixed_slot_attr_fails_closed() {
+    // A DYNAMIC `slot={x}` (and the mixed `slot="a{x}"`) is the official
+    // `slot_attribute_invalid` compile error ("slot attribute must be a static value").
+    // It must fail CLOSED — never be accepted as a generic `$.set_attribute` and never
+    // mis-place the element into the default children region.
+    assert_fail_closed(
+        "<script>import Child from './Child.svelte'; let x = $state('a');</script>\n<Child><span slot={x}>hi</span></Child>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::DynamicAttribute { name, .. } if name == "slot"),
+    );
+    assert_fail_closed(
+        "<script>import Child from './Child.svelte'; let x = $state('a');</script>\n<Child><span slot=\"a{x}\">hi</span></Child>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::DynamicAttribute { name, .. } if name == "slot"),
+    );
+}
+
+#[test]
+fn duplicate_named_slot_fails_closed() {
+    // Two component children carrying the SAME `slot` name is the official
+    // `slot_attribute_duplicate` compile error — Verter fails closed rather than
+    // silently MERGING the two groups into one region (an output official refuses).
+    assert_fail_closed(
+        "<script>import Child from './Child.svelte'; let { x } = $props();</script>\n<Child><span slot=\"a\">{x}</span><p slot=\"a\">2</p></Child>\n",
+        |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
+                    construct: "duplicate slot name",
+                    ..
+                }
+            )
+        },
+    );
+    // The `<svelte:fragment>` form duplicates identically (official errors the same).
+    assert_fail_closed(
+        "<script>import Child from './Child.svelte'; let { x } = $props();</script>\n<Child><svelte:fragment slot=\"a\">{x}</svelte:fragment><svelte:fragment slot=\"a\">2</svelte:fragment></Child>\n",
+        |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
+                    construct: "duplicate slot name",
+                    ..
+                }
+            )
+        },
+    );
+}
+
+#[test]
+fn entity_encoded_static_slot_name_decodes_to_the_official_key() {
+    // Official decodes attribute values at parse (`decode_character_references`), so a
+    // `slot="foo&amp;bar"` child names the slot `foo&bar` — the slot name is a DECODED
+    // semantic key, never the raw escape bytes — and the emitted `$$slots` entry key is
+    // the quoted `'foo&bar'` (matching svelte@5.56.3; pinned corpus-wide by the
+    // `components/named_slot_entity` oracle golden).
+    let js = emit_result(
+        "<script>import Child from './Child.svelte'; let { x } = $props();</script>\n<Child><span slot=\"foo&amp;bar\">{x}</span></Child>\n",
+    )
+    .expect("an entity-encoded named slot emits a module");
+    assert!(
+        js.contains("$$slots: {'foo&bar': ($$anchor, $$slotProps) =>"),
+        "the $$slots key must be the DECODED slot name:\n{js}"
+    );
+    // NEGATIVE: the raw entity bytes are never the key.
+    assert!(
+        !js.contains("'foo&amp;bar':"),
+        "the raw entity bytes must not leak into the $$slots key:\n{js}"
+    );
+    // The slot ATTRIBUTE still bakes into the skeleton in its re-escaped HTML form
+    // (decode + re-escape round-trips `&amp;` — the skeleton is HTML, the key is JS).
+    assert!(
+        js.contains("slot=\"foo&amp;bar\""),
+        "the baked skeleton keeps the re-escaped HTML attribute form:\n{js}"
+    );
+}
+
+#[test]
+fn plain_static_slot_name_is_not_over_decoded() {
+    // NEGATIVE guard for the decode step: a plain `slot="foo"` (no entity) still emits
+    // the bare identifier key `foo:` — the decoder must be a no-op on entity-free names.
+    let js = emit_result(
+        "<script>import Child from './Child.svelte'; let { x } = $props();</script>\n<Child><span slot=\"foo\">{x}</span></Child>\n",
+    )
+    .expect("a plain named slot emits a module");
+    assert!(
+        js.contains("$$slots: {foo: ($$anchor, $$slotProps) =>"),
+        "a plain slot name stays the bare identifier key:\n{js}"
+    );
+    assert!(
+        !js.contains("'foo':"),
+        "an entity-free identifier slot name must not be quoted:\n{js}"
+    );
+}
+
+#[test]
+fn entity_and_literal_slot_names_denote_the_same_slot() {
+    // `slot="a&amp;b"` and `slot="a&b"` DECODE to the same semantic name (`a&b` — the
+    // legacy no-`;` `&b` is not a named reference, so it stays literal), so the pair is
+    // the official `slot_attribute_duplicate` compile error: the duplicate gate compares
+    // DECODED names. Pre-decode, the raw spans differ and the pair would silently
+    // become TWO distinct slot regions — an output official refuses.
+    assert_fail_closed(
+        "<script>import Child from './Child.svelte'; let { x } = $props();</script>\n<Child><span slot=\"a&amp;b\">{x}</span><p slot=\"a&b\">2</p></Child>\n",
+        |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
+                    construct: "duplicate slot name",
+                    ..
+                }
+            )
+        },
+    );
+}
+
+#[test]
+fn explicit_default_slot_with_implicit_content_fails_closed() {
+    // An explicit `slot="default"` child ALONGSIDE implicit default content is the
+    // official `slot_default_duplicate` compile error — fail closed, never merge.
+    assert_fail_closed(
+        "<script>import Child from './Child.svelte'; let { x } = $props();</script>\n<Child>{x}<span slot=\"default\">1</span></Child>\n",
+        |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
+                    construct: "default slot conflict",
+                    ..
+                }
+            )
+        },
+    );
+}
+
+#[test]
+fn slot_default_named_child_routes_to_children_prop() {
+    // A `slot="default"` child is the DEFAULT slot in official output: it emits the
+    // `children:` callback + the `$$slots: { default: true }` marker — NOT a
+    // `$$slots: { default: (…) => {…} }` callback entry (the named-slot form).
+    let js = emit_result(
+        "<script>import Child from './Child.svelte'; let { x } = $props();</script>\n<Child><span slot=\"default\">{x}</span></Child>\n",
+    )
+    .expect("a slot=\"default\" child emits a module");
+    assert!(
+        js.contains("children: ($$anchor, $$slotProps) =>"),
+        "slot=\"default\" content must become the children prop:\n{js}"
+    );
+    assert!(
+        js.contains("$$slots: {default: true}"),
+        "the default marker must be the `default: true` form:\n{js}"
+    );
+    assert!(
+        js.contains("$.from_html(`<span slot=\"default\"> </span>`)"),
+        "the slot=\"default\" attribute must bake into the skeleton:\n{js}"
+    );
+    // NEGATIVE: never the named-callback form for `default`.
+    assert!(
+        !js.contains("default: ($$anchor"),
+        "slot=\"default\" must not emit a named-slot callback entry:\n{js}"
+    );
+}
+
+#[test]
+fn validate_slot_placement_fails_closed_for_every_attr_bearing_kind() {
+    // The per-kind EXHAUSTIVE no-residual-member proof for the unified slot
+    // choke-point (`validate_slot_placement`, run at `classify_node` entry for EVERY
+    // node): a `slot`-bearing node of EVERY `SpecialKind`, a COMPONENT, and a
+    // NON-OWNER element all fail closed with the slot diagnostic; the ONLY accepted
+    // route is a STATIC `slot` on an OWNER regular element (the supported filler
+    // placement), and a DYNAMIC / MIXED `slot` fails closed even there.
+    use crate::svelte::runtime::client_surface::validate_slot_placement;
+    use crate::svelte::runtime::expr::ScopeId;
+    use crate::svelte::runtime::ir::{
+        AttrIr, ComponentIrNode, ComponentSlots, ElementIr, ExprId, IrNode, MixedAttrPart, NodeId,
+        SpecialElementIr, SpecialKind, StaticAttrValue,
+    };
+    use verter_span::Span;
+
+    let span = Span::new(0, 0);
+    let static_slot = || AttrIr::Static {
+        name: "slot".to_string(),
+        value: Some(StaticAttrValue {
+            value: "x".to_string(),
+        }),
+    };
+    let dynamic_slot = || AttrIr::Dynamic {
+        name: "slot".to_string(),
+        expr: ExprId(0),
+    };
+    let mixed_slot = || AttrIr::Mixed {
+        name: "slot".to_string(),
+        parts: vec![
+            MixedAttrPart::Literal("a".to_string()),
+            MixedAttrPart::Expr(ExprId(0)),
+        ],
+    };
+    let no_owners = rustc_hash::FxHashSet::default();
+    let owner: rustc_hash::FxHashSet<NodeId> = std::iter::once(NodeId(0)).collect();
+
+    let special = |kind: SpecialKind, attrs: Vec<AttrIr>| {
+        IrNode::Special(SpecialElementIr {
+            kind,
+            span,
+            attrs,
+            this_expr: None,
+            static_tag: None,
+            children: Vec::new(),
+            scope: ScopeId(0),
+            slots: ComponentSlots::default(),
+            body_region: None,
+            head_title: None,
+        })
+    };
+    let component = |attrs: Vec<AttrIr>| {
+        IrNode::Component(ComponentIrNode {
+            name: "Inner".to_string(),
+            span,
+            attrs,
+            children: Vec::new(),
+            scope: ScopeId(0),
+            slots: ComponentSlots::default(),
+        })
+    };
+    let element = |attrs: Vec<AttrIr>| {
+        IrNode::Element(ElementIr {
+            tag: "span".to_string(),
+            span,
+            attrs,
+            children: Vec::new(),
+            scope: ScopeId(0),
+        })
+    };
+
+    let rejects = |node: &IrNode, owners: &rustc_hash::FxHashSet<NodeId>, label: &str| {
+        let err = validate_slot_placement(node, NodeId(0), owners)
+            .expect_err(&format!("{label}: a slot-bearing node must fail closed"));
+        assert!(
+            matches!(
+                &err,
+                UnsupportedSvelteRuntimeSurface::DynamicAttribute { name, .. } if name == "slot"
+            ),
+            "{label}: wrong refusal surface: {err:?}"
+        );
+        assert_eq!(
+            err.diagnostic_code(),
+            "svelte-runtime-unsupported-dynamic-attribute",
+            "{label}: wrong diagnostic id"
+        );
+    };
+
+    // EXHAUSTIVE `SpecialKind` coverage — the wildcard-free match forces a compile
+    // error here when a new kind is added without extending this proof.
+    let all_kinds = [
+        SpecialKind::Head,
+        SpecialKind::Window,
+        SpecialKind::Document,
+        SpecialKind::Body,
+        SpecialKind::Element,
+        SpecialKind::Boundary,
+        SpecialKind::Options,
+        SpecialKind::Component,
+        SpecialKind::SelfRef,
+        SpecialKind::Fragment,
+    ];
+    for kind in all_kinds {
+        match kind {
+            SpecialKind::Head
+            | SpecialKind::Window
+            | SpecialKind::Document
+            | SpecialKind::Body
+            | SpecialKind::Element
+            | SpecialKind::Boundary
+            | SpecialKind::Options
+            | SpecialKind::Component
+            | SpecialKind::SelfRef
+            | SpecialKind::Fragment => {}
+        }
+        rejects(
+            &special(kind, vec![static_slot()]),
+            &no_owners,
+            &format!("special {kind:?} static slot"),
+        );
+        rejects(
+            &special(kind, vec![dynamic_slot()]),
+            &no_owners,
+            &format!("special {kind:?} dynamic slot"),
+        );
+    }
+    // A COMPONENT bearing `slot` (the headline former fail-open member) — every form.
+    rejects(
+        &component(vec![static_slot()]),
+        &no_owners,
+        "component static slot",
+    );
+    rejects(
+        &component(vec![dynamic_slot()]),
+        &no_owners,
+        "component dynamic slot",
+    );
+    rejects(
+        &component(vec![mixed_slot()]),
+        &no_owners,
+        "component mixed slot",
+    );
+    // A NON-OWNER regular element — the official `slot_attribute_invalid_placement`.
+    rejects(
+        &element(vec![static_slot()]),
+        &no_owners,
+        "non-owner element static slot",
+    );
+    // A DYNAMIC / MIXED `slot` fails closed EVEN ON AN OWNER (the official
+    // `slot_attribute_invalid` — "slot attribute must be a static value").
+    rejects(
+        &element(vec![dynamic_slot()]),
+        &owner,
+        "owner element dynamic slot",
+    );
+    rejects(
+        &element(vec![mixed_slot()]),
+        &owner,
+        "owner element mixed slot",
+    );
+    // The ONLY accepted route: a STATIC `slot` on an OWNER regular element.
+    assert!(
+        validate_slot_placement(&element(vec![static_slot()]), NodeId(0), &owner).is_ok(),
+        "an owner element's static slot is the accepted filler route"
+    );
+    // Negative controls: a slot-free attr inventory validates trivially on every
+    // attr-bearing kind, and a node kind with no attribute surface always validates.
+    let plain_attr = || AttrIr::Static {
+        name: "class".to_string(),
+        value: Some(StaticAttrValue {
+            value: "c".to_string(),
+        }),
+    };
+    assert!(
+        validate_slot_placement(&component(vec![plain_attr()]), NodeId(0), &no_owners).is_ok(),
+        "a slot-free component attr inventory must validate"
+    );
+    assert!(
+        validate_slot_placement(&element(vec![plain_attr()]), NodeId(0), &no_owners).is_ok(),
+        "a slot-free element attr inventory must validate"
+    );
+    assert!(
+        validate_slot_placement(
+            &special(SpecialKind::Element, vec![plain_attr()]),
+            NodeId(0),
+            &no_owners
+        )
+        .is_ok(),
+        "a slot-free special attr inventory must validate"
+    );
+    let text = IrNode::Text {
+        span,
+        text: "hi".to_string(),
+    };
+    assert!(
+        validate_slot_placement(&text, NodeId(0), &no_owners).is_ok(),
+        "a text node has no attribute surface"
+    );
+}
+
+// ─── `{@render}` argument memoization (the official per-RenderTag `Memoizer`) ───
+
+#[test]
+fn render_arg_spread_hoists_local_derived() {
+    // A `has_call`-bearing render argument (`[...xs]` — a spread counts as a call, the
+    // official `SpreadElement` analysis) is MEMOIZED: official hoists a local
+    // `let $0 = $.derived(() => [...$$props.xs]);` in a wrapping block and passes the
+    // `() => $.get($0)` thunk — NOT the un-memoized inline `() => [...$$props.xs]`
+    // (which would rebuild the array identity on every read).
+    let js = emit_result(
+        "<script>let { xs } = $props();</script>\n{#snippet row(items)}<p>{items}</p>{/snippet}\n{@render row([...xs])}\n",
+    )
+    .expect("a spread render arg emits a module");
+    assert!(
+        js.contains("let $0 = $.derived(() => ([...$$props.xs]));"),
+        "missing the memoized render-arg derived hoist:\n{js}"
+    );
+    assert!(
+        js.contains("row($$anchor, () => $.get($0));"),
+        "the render call must pass the memoized $.get thunk:\n{js}"
+    );
+    // NEGATIVE: the un-memoized inline thunk must be GONE.
+    assert!(
+        !js.contains("row($$anchor, () => [...$$props.xs])"),
+        "the render arg must not stay an un-memoized inline thunk:\n{js}"
+    );
+}
+
+#[test]
+fn render_arg_simple_prop_read_stays_inline_thunk() {
+    // NEGATIVE CONTROL: a SIMPLE identifier render arg (`row(xs)`) has no call and no
+    // await — official passes the plain `() => $$props.xs` thunk with NO memoization
+    // (the Memoizer's `memoize_if_state` is false for render args, so has_state alone
+    // never memoizes).
+    let js = emit_result(
+        "<script>let { xs } = $props();</script>\n{#snippet row(items)}<p>{items}</p>{/snippet}\n{@render row(xs)}\n",
+    )
+    .expect("a simple render arg emits a module");
+    assert!(
+        js.contains("row($$anchor, () => $$props.xs);"),
+        "a simple render arg stays the inline thunk:\n{js}"
+    );
+    assert!(
+        !js.contains("$.derived"),
+        "a simple render arg must not be memoized:\n{js}"
+    );
+}
+
+#[test]
+fn nonprimitive_state_array_init_fails_closed_at_rune_gate() {
+    // A RUNE-BOUNDARY regression guard (the D-31 `$state()` non-primitive-init
+    // boundary): a `$state([1])` ARRAY init fails closed at the `$state` shape gate
+    // (`AdvancedRune`) — the refusal fires BEFORE template render projection is ever
+    // reached, so this test guards the rune boundary, NOT the render-arg memoizer
+    // (which would be unreachable here regardless). The `$props`-spread render-arg
+    // memoizer has its own discriminating golden — `render_arg_spread_hoists_local_derived`
+    // above plus the `components/render_spread_arg` corpus oracle — asserting the
+    // `$.derived` hoist positively.
+    assert_fail_closed(
+        "<script>let xs = $state([1]);</script>\n{#snippet row(items)}<p>{items}</p>{/snippet}\n{@render row([...xs])}\n",
+        |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::AdvancedRune {
+                    rune: "$state() non-primitive init",
+                    ..
+                }
+            )
+        },
+    );
+}
+
+// ─── `{@render}` static-callee paren peel + static-optional direct call ───
+
+#[test]
+fn render_paren_wrapped_local_snippet_callee_emits_direct_call() {
+    // `{@render (row)(1)}` — the transparent author parens around the callee peel to the
+    // bare identifier, which resolves to the LOCAL `{#snippet row}` — official emits the
+    // DIRECT static call `row($$anchor, () => 1);`, NOT the dynamic `$.snippet` route.
+    let js = emit_result(
+        "<script>let __r = $state(0);</script>\n{#snippet row(a)}<p>{a}</p>{/snippet}\n{@render (row)(1)}\n",
+    )
+    .expect("a paren-wrapped local-snippet callee emits a module");
+    assert!(
+        js.contains("row($$anchor, () => 1);"),
+        "a peeled static callee must emit the direct call:\n{js}"
+    );
+    // NEGATIVE: no `$.snippet` dynamic route for a resolved static callee.
+    assert!(
+        !js.contains("$.snippet("),
+        "a resolved static callee must not route through $.snippet:\n{js}"
+    );
+}
+
+#[test]
+fn render_optional_local_snippet_call_emits_direct_optional_call() {
+    // `{@render row?.(1)}` on a LOCAL `{#snippet row}` — official emits the DIRECT
+    // optional call `row?.($$anchor, () => 1);` (the `b.maybe_call` form), NOT the
+    // dynamic `$.snippet(node, () => row ?? $.noop, …)` route.
+    let js = emit_result(
+        "<script>let __r = $state(0);</script>\n{#snippet row(a)}<p>{a}</p>{/snippet}\n{@render row?.(1)}\n",
+    )
+    .expect("an optional local-snippet call emits a module");
+    assert!(
+        js.contains("row?.($$anchor, () => 1);"),
+        "a static-optional callee must emit the direct optional call:\n{js}"
+    );
+    // NEGATIVE: neither the `$.snippet` route nor the `?? $.noop` dynamic fallback.
+    assert!(
+        !js.contains("$.snippet("),
+        "a resolved static-optional callee must not route through $.snippet:\n{js}"
+    );
+    assert!(
+        !js.contains("?? $.noop"),
+        "a resolved static-optional callee must not carry the noop fallback:\n{js}"
+    );
+}
+
+#[test]
+fn render_dynamic_prop_callees_stay_on_the_snippet_route() {
+    // NEGATIVE CONTROLS: a PROP-resolving callee is DYNAMIC — official keeps the
+    // `$.snippet` route for both the plain and the optional form (the static-name
+    // fast path applies ONLY to a resolved local `{#snippet}` binding).
+    let plain = emit_result("<script>let { row } = $props();</script>\n{@render row(1)}\n")
+        .expect("a plain prop render callee emits a module");
+    assert!(
+        plain.contains("$.snippet(node, () => $$props.row, () => 1);"),
+        "a plain prop callee must stay on the $.snippet route:\n{plain}"
+    );
+    let optional = emit_result("<script>let { row } = $props();</script>\n{@render row?.(1)}\n")
+        .expect("an optional prop render callee emits a module");
+    assert!(
+        optional.contains("$.snippet(node, () => $$props.row ?? $.noop, () => 1);"),
+        "an optional prop callee must stay on the $.snippet + noop route:\n{optional}"
+    );
+    assert!(
+        !optional.contains("row?.($$anchor"),
+        "an optional prop callee must not take the static direct-call form:\n{optional}"
+    );
+}
+
+// ─── spread PRESENCE ⇒ `has_state` on component / boundary props (getter form) ───
+
+#[test]
+fn component_array_spread_prop_emits_memoized_getter() {
+    // `items={[...globalThis.things]}` — spread presence is has_state AND has_call
+    // (official `SpreadElement.js`), so the prop memoizes into the wrapping-block
+    // derived AND surfaces as the reactive GETTER accessor — official emits
+    // `let $0 = $.derived(() => [...globalThis.things]); … get items() { return $.get($0); }`.
+    let js = emit_result(
+        "<script>import Child from './Child.svelte'; let __r = $state(0);</script>\n<Child items={[...globalThis.things]} />\n",
+    )
+    .expect("an array-spread component prop emits a module");
+    assert!(
+        js.contains("let $0 = $.derived(() => ([...globalThis.things]));"),
+        "missing the memoized spread-prop derived:\n{js}"
+    );
+    assert!(
+        js.contains("get items() {return $.get($0);}"),
+        "a spread prop must surface as the reactive getter accessor:\n{js}"
+    );
+    // NEGATIVE: never the one-shot init member (`items: $.get($0)`).
+    assert!(
+        !js.contains("items: $.get($0)"),
+        "a spread prop must not emit the one-shot init form:\n{js}"
+    );
+}
+
+#[test]
+fn component_object_spread_prop_emits_valid_memoized_getter() {
+    // The OBJECT-spread prop (`items={{ ...globalThis.things }}`): the memoized derived
+    // must embed the object literal as a CONCISE ARROW BODY (`() => ({ … })`) — the
+    // bare `() => { ...x }` would parse as a broken block body — and the prop surfaces
+    // as the getter.
+    let js = emit_result(
+        "<script>import Child from './Child.svelte'; let __r = $state(0);</script>\n<Child items={{ ...globalThis.things }} />\n",
+    )
+    .expect("an object-spread component prop emits a module");
+    assert!(
+        js.contains("let $0 = $.derived(() => ({ ...globalThis.things }));"),
+        "the object-spread derived must paren-wrap its arrow body:\n{js}"
+    );
+    assert!(
+        js.contains("get items() {return $.get($0);}"),
+        "an object-spread prop must surface as the reactive getter:\n{js}"
+    );
+    // NEGATIVE: the broken block-body arrow must be absent.
+    assert!(
+        !js.contains("$.derived(() => { ...globalThis.things })"),
+        "the derived arrow body must not be a bare object literal (broken JS):\n{js}"
+    );
+}
+
+#[test]
+fn component_arrow_prop_stays_plain_init() {
+    // NEGATIVE CONTROL: an ARROW-function prop value (`cb={_=>{}}`) has no spread in
+    // EVALUATED position (the body is deferred) — it stays the plain one-shot init
+    // (`cb: _=>{}`), never a getter and never memoized.
+    let js = emit_result(
+        "<script>import Child from './Child.svelte'; let __r = $state(0);</script>\n<Child cb={_=>{}} />\n",
+    )
+    .expect("an arrow prop emits a module");
+    assert!(
+        js.contains("cb: _=>{}"),
+        "an arrow prop stays the plain init member:\n{js}"
+    );
+    assert!(
+        !js.contains("get cb()") && !js.contains("$.derived"),
+        "an arrow prop must not become a getter nor memoize:\n{js}"
+    );
+}
+
+#[test]
+fn boundary_spread_attr_prop_emits_getter() {
+    // `<svelte:boundary failed={[...xs]}>` (xs a prop) — the boundary attr-prop rides
+    // the SAME `prop_value_has_state` decision: spread presence ⇒ the getter accessor.
+    // Official svelte@5.56.3 emits the identical UNMEMOIZED getter (`get failed() {
+    // return [...$$props.xs]; }` — boundary props are never `$.derived`-hoisted),
+    // pinned full-module by the committed `special/svelte_boundary_spread` oracle
+    // golden (`svelte_client_emit_topology.rs`).
+    let js = emit_result(
+        "<script>let { xs } = $props();</script>\n<svelte:boundary onerror={() => {}}><p>hi</p></svelte:boundary>\n",
+    )
+    .expect("a plain boundary emits a module");
+    // Control: the boundary itself emits.
+    assert!(js.contains("$.boundary("), "boundary call expected:\n{js}");
+    let js = emit_result(
+        "<script>let { xs } = $props();</script>\n<svelte:boundary onerror={() => {}} failed={[...xs]}><p>hi</p></svelte:boundary>\n",
+    )
+    .expect("a spread boundary attr prop emits a module");
+    assert!(
+        js.contains("get failed() { return [...$$props.xs]; }"),
+        "a spread boundary attr prop must surface as the getter accessor:\n{js}"
+    );
+    // NEGATIVE: never the one-shot init form.
+    assert!(
+        !js.contains("failed: [...$$props.xs]"),
+        "a spread boundary attr prop must not emit the one-shot init form:\n{js}"
+    );
+}
+
+// ─── after-update rank completeness + fail-loud unranked-op invariant ───
+
+#[test]
+fn every_after_update_op_target_is_ranked_across_representative_scopes() {
+    // The RANKING-COMPLETENESS invariant: every op the after-update stream sorts —
+    // a non-init-domain lifecycle op (`$.transition` / `$.animation`), a modern
+    // `on*` event with a Node target, a bind op — targets a node the Euler-tour
+    // rank map covers, ACROSS region-body scopes (an `{#each}` body, a `{#snippet}`
+    // body, a NAMED-slot region, a `<svelte:boundary>` body) as well as the root.
+    // A miss would silently tail-sort the op (the retired `u32::MAX` fallback) —
+    // now a hard error at emit, and a coverage failure here.
+    use super::super::client_lifecycle;
+    use super::super::client_plan::ClientRuntimeOp;
+    use super::super::client_plan_types::EventEmitTarget;
+    use super::super::ir::{NodeId, TemplateScopeId};
+    for (label, source) in [
+        (
+            "root elements",
+            "<script>let c = $state(0);</script>\n<div transition:fade><button onclick={() => c++}>{c}</button></div>\n",
+        ),
+        (
+            "each body",
+            "<script>let { items } = $props(); let c = $state(0);</script>\n{#each items as item}<button onclick={() => c++}>{item}</button>{/each}\n",
+        ),
+        (
+            "snippet body + render",
+            "<script>let c = $state(0);</script>\n{#snippet row(a)}<button onclick={() => c++}>{a}</button>{/snippet}\n{@render row(1)}\n",
+        ),
+        (
+            "named-slot region",
+            "<script>import Child from './Child.svelte'; let c = $state(0);</script>\n<Child><span slot=\"a\"><button onclick={() => c++}>{c}</button></span></Child>\n",
+        ),
+        (
+            "boundary body",
+            "<script>let c = $state(0);</script>\n<svelte:boundary onerror={() => {}}><button onclick={() => c++}>{c}</button></svelte:boundary>\n",
+        ),
+    ] {
+        let alloc = Allocator::default();
+        let parsed = parse_svelte(source);
+        let opts = SvelteRuntimeOptions {
+            filename: Some("App.svelte".to_string()),
+            ..Default::default()
+        };
+        let ir = crate::svelte::runtime::lower_parsed_svelte_to_ir(source, &parsed, &opts, &alloc)
+            .unwrap_or_else(|e| panic!("[{label}] lowering: {e:?}"));
+        let classified = super::super::client_surface::ClientSyntaxSurface::classify(&ir)
+            .unwrap_or_else(|e| panic!("[{label}] classify: {e:?}"));
+        let plan = super::super::client_plan::SupportedClientIr::build(&classified, &ir)
+            .unwrap_or_else(|e| panic!("[{label}] plan build: {e:?}"));
+        let ranks = client_lifecycle::after_update_ranks(&plan);
+        let mut streamed_ops = 0usize;
+        for idx in 0..plan.build.ir.template_scopes.len() {
+            let scope_id = TemplateScopeId(idx as u32);
+            for op in plan.ops_in(scope_id) {
+                let target = match op {
+                    ClientRuntimeOp::Lifecycle(l) if !l.is_init_domain() => Some(l.target()),
+                    ClientRuntimeOp::Event { emit, .. } => match emit.target {
+                        EventEmitTarget::Node(id) => Some(id),
+                        _ => None,
+                    },
+                    ClientRuntimeOp::Bind { target, .. } => Some(*target),
+                    _ => None,
+                };
+                if let Some(t) = target {
+                    streamed_ops += 1;
+                    assert!(
+                        ranks.contains_key(&NodeId(t.0)),
+                        "[{label}] after-update op target node {} must be ranked",
+                        t.0
+                    );
+                }
+            }
+        }
+        assert!(
+            streamed_ops > 0,
+            "[{label}] the fixture must exercise at least one rankable op"
+        );
+    }
+}
+
+#[test]
+fn ranked_lookup_returns_the_assigned_rank() {
+    // The fail-loud lookup returns the ASSIGNED rank for a present node.
+    use super::super::client_lifecycle::{require_after_update_rank, AfterUpdateRank};
+    use super::super::ir::NodeId;
+    let mut map = rustc_hash::FxHashMap::default();
+    map.insert(NodeId(3), AfterUpdateRank { pre: 4, post: 9 });
+    let rank = require_after_update_rank(&map, NodeId(3));
+    assert_eq!((rank.pre, rank.post), (4, 9));
+}
+
+#[test]
+#[should_panic(expected = "after-update op target not ranked")]
+fn unranked_after_update_op_is_a_hard_error_not_a_silent_tail_sort() {
+    // An UNRANKED after-update op target is a HARD ERROR — never the retired
+    // silent `u32::MAX` tail position (which would misorder the stream without a
+    // trace). The panic message names the invariant.
+    use super::super::client_lifecycle::require_after_update_rank;
+    use super::super::ir::NodeId;
+    let map = rustc_hash::FxHashMap::default();
+    let _ = require_after_update_rank(&map, NodeId(7));
+}
+
+/// Run the REAL emit path (`ClientEmitter::emit`) for `source` with the emitter's
+/// after-update rank map emptied AFTER construction — the synthetic "unranked op"
+/// drive of the actual `client_emit.rs` after-update batch. The two call-site
+/// fail-loud tests below use this: they discriminate the CALL SITES
+/// (`after_update_pre_rank` / `after_update_post_rank`), not just the helper —
+/// reverting either call-site body to a silent `.unwrap_or(u32::MAX)` fallback
+/// (while `require_after_update_rank` stays intact) makes the emit SUCCEED with a
+/// silent tail sort, and the `#[should_panic]` tests FAIL.
+fn emit_with_after_update_ranks_cleared(source: &str) -> String {
+    let alloc = Allocator::default();
+    let parsed = parse_svelte(source);
+    let opts = SvelteRuntimeOptions {
+        filename: Some("App.svelte".to_string()),
+        ..Default::default()
+    };
+    let ir = crate::svelte::runtime::lower_parsed_svelte_to_ir(source, &parsed, &opts, &alloc)
+        .expect("lowering succeeds for the ranked-op fixture");
+    let classified = super::super::client_surface::ClientSyntaxSurface::classify(&ir)
+        .expect("classification succeeds for the ranked-op fixture");
+    let plan = super::super::client_plan::SupportedClientIr::build(&classified, &ir)
+        .expect("plan build succeeds for the ranked-op fixture");
+    let html_plan = crate::svelte::runtime::plan_static_templates(&ir);
+    let topology = crate::svelte::runtime::plan_client_topology(&ir, &html_plan);
+    let mut emitter = super::ClientEmitter::new(&plan);
+    emitter.after_update_rank.clear();
+    emitter.emit(&html_plan, &topology).code
+}
+
+#[test]
+#[should_panic(expected = "after-update op target not ranked")]
+fn modern_event_emit_panics_loudly_when_its_target_rank_is_missing() {
+    // The ENTER-rank half: a regular-element MODERN `on*` event streams at
+    // `after_update_pre_rank` (`client_emit.rs`). Driving the real emit with the
+    // event target's rank entry removed must panic AT THE CALL SITE with the
+    // invariant message — reverting `after_update_pre_rank` to
+    // `.unwrap_or(u32::MAX)` makes this emit succeed (a silent tail sort) and this
+    // test fail (no panic), so it catches a re-introduced silent MAX where the
+    // direct-helper test above cannot.
+    let _ = emit_with_after_update_ranks_cleared(
+        "<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n",
+    );
+}
+
+#[test]
+#[should_panic(expected = "after-update op target not ranked")]
+fn directive_batch_emit_panics_loudly_when_its_target_rank_is_missing() {
+    // The EXIT-rank half: a bare LEGACY `on:` event joins the directive batch at
+    // `after_update_post_rank` (`client_emit.rs`) — the fixture's SOLE streamed op,
+    // so no pre-rank lookup can mask a reverted post call site. Same discrimination
+    // as the pre-rank test — reverting `after_update_post_rank` to
+    // `.unwrap_or(u32::MAX)` makes this test fail (no panic).
+    let _ = emit_with_after_update_ranks_cleared(
+        "<script>let c = $state(0);</script>\n<div on:click={() => c++}>{c}</div>\n",
     );
 }

@@ -556,10 +556,15 @@ pub(super) struct ClientRender {
     /// The rewritten callee — a static snippet name (`pair`), or the dynamic snippet
     /// function thunk body (`$$props.children ?? $.noop` / `cond ? $$props.a : $$props.b`).
     pub(super) callee: String,
-    /// Whether a STATIC callee is a direct call (`pair(node, …)`) vs a `$.maybe_call`
-    /// (`{@render maybeSnippet?.()}` — but a resolved static snippet is always a direct
-    /// call, so this is `false` in the supported surface).
+    /// Whether a STATIC callee is the direct OPTIONAL call (`pair?.(node, …)` — a
+    /// resolved local-snippet `{@render pair?.(1)}`, the official `b.maybe_call` form)
+    /// vs the plain direct call (`pair(node, …)`). Meaningful only when `dynamic` is
+    /// `false`.
     pub(super) maybe_call: bool,
+    /// The memoized-argument hoist statements (`let $N = $.derived(() => …);`, the
+    /// official per-`RenderTag` `Memoizer.deriveds()`), emitted inside a wrapping
+    /// `{ … }` block before the render call. Empty when no argument memoizes.
+    pub(super) memo_hoists: Vec<String>,
     /// The rewritten argument thunks (`() => 1`, `() => $.get(n)`), in source order.
     pub(super) args: Vec<String>,
 }

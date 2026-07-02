@@ -144,9 +144,11 @@ pub(super) fn classify_special_host(
 /// are §1.8 negatives), and validate each event handler against the inline-handler surface.
 /// Plain attributes (static / dynamic / mixed / `class:` / `style:` / spread) are ACCEPTED —
 /// they fold into the runtime `$.attribute_effect` (NO static-attr allowlist; the tag is
-/// dynamic). A `use:` / `transition:` / `let:` directive is a 5f-c surface and fails closed.
-/// The children are the element's OWN body region (classified independently by the scope
-/// loop), so they are not recursed here.
+/// dynamic). A `slot` attribute never reaches the fold: the unified slot choke-point
+/// (`validate_slot_placement` at `classify_node` entry) refused it upstream — a special is
+/// never a slot owner. A `use:` / `transition:` / `let:` directive is a 5f-c surface and
+/// fails closed. The children are the element's OWN body region (classified independently
+/// by the scope loop), so they are not recursed here.
 pub(super) fn classify_svelte_element(
     ir: &SvelteRuntimeIr,
     node_id: NodeId,

@@ -614,6 +614,32 @@ const SUPPORTED_COMPONENTS: &[&str] = &[
     // must QUOTE (`$$slots: { 'foo-bar': ($$anchor, $$slotProps) => {…} }`), not the bare
     // `foo-bar:` (unparseable JS).
     "components/fragment_slot_hyphen",
+    // `<Child><span slot="foo-bar">{x}</span></Child>` — a REGULAR-ELEMENT named slot: the
+    // element becomes the `$$slots: { 'foo-bar': (…) => {…} }` callback region AND its
+    // `slot` attribute BAKES into the cloned skeleton (`<span slot="foo-bar"> </span>`);
+    // the named region body has NO leading `$.next()`.
+    "components/named_slot_span",
+    // `<Child><span slot="foo&amp;bar">{x}</span></Child>` — an ENTITY-ENCODED named-slot
+    // name: the slot name is the DECODED semantic key, so the `$$slots` entry is
+    // `'foo&bar'` (official decodes attribute values at parse), while the baked skeleton
+    // keeps the re-escaped HTML form (`<span slot="foo&amp;bar"> </span>`).
+    "components/named_slot_entity",
+    // `<Child><svelte:fragment slot="foo">hello {x}</svelte:fragment></Child>` — a
+    // TEXT-FIRST fragment named slot: official emits the callback body WITHOUT the
+    // `$.next()` cursor advance (`var text = $.text();` directly) — the named-slot region
+    // is not an each/children-style render callback.
+    "components/fragment_slot_text_first",
+    // `{@render row([...xs])}` — a `has_call`-bearing render ARGUMENT (a spread counts as
+    // a call): official memoizes it into a wrapping-block `let $0 = $.derived(() =>
+    // [...$$props.xs]);` hoist and passes the `() => $.get($0)` thunk.
+    "components/render_spread_arg",
+    // `{@render (row)(1)}` — a paren-wrapped LOCAL-snippet callee peels to the bare
+    // identifier and emits the DIRECT static call `row($$anchor, () => 1)` (never the
+    // dynamic `$.snippet` route).
+    "components/render_paren_callee",
+    // `{@render row?.(1)}` on a LOCAL snippet — the DIRECT optional call
+    // `row?.($$anchor, () => 1)` (the official `b.maybe_call` form; no `?? $.noop`).
+    "components/render_optional_local",
 ];
 
 /// The native-client element LIFECYCLE-directive corpus (5f-c) — `use:` actions,
@@ -855,6 +881,10 @@ const SUPPORTED_SPECIALS: &[&str] = &[
     // bind-target local) — the MEMBER-ROOT half of official's `has_state` promotes the
     // prop to the getter `{ get failed() { return obj.failed; } }`.
     "special/svelte_boundary_failed_member",
+    // failed ATTRIBUTE carrying a SPREAD expression (`failed={[...xs]}`, `xs` a prop) —
+    // official emits the plain UNMEMOIZED getter `{ get failed() { return [...$$props.xs];
+    // } }` (`has_state` promotes to `b.get`; boundary props are never `$.derived`-hoisted).
+    "special/svelte_boundary_spread",
     // pending ATTRIBUTE expression — the getter props member `{ get pending() { return
     // $$props.pending; } }`.
     "special/svelte_boundary_pending_attr",
@@ -6224,13 +6254,13 @@ fn supported_specials_cover_the_special_host_corpus() {
     // is dropped, and the no-duplicate check guards against a typo.
     assert_eq!(
         SUPPORTED_SPECIALS.len(),
-        36,
-        "the special corpus must enumerate the 7 host-special + 11 svelte:element + 11 \
+        37,
+        "the special corpus must enumerate the 7 host-special + 11 svelte:element + 12 \
          svelte:boundary + 7 svelte:head `special/*` 5f-b fixtures (window/document/body \
          events+binds+this, svelte_element static/dynamic/attrs/bind_this/dimension/empty/child/\
          class_directive/class_mixed_case/style_directive/this_and_fold, svelte_boundary \
          plain/onerror/failed/pending/full + the failed/pending/all ATTRIBUTE forms + \
-         failed_member + mixed-attr-snippet + conflict-attr-snippet, and svelte_head \
+         failed_member + spread + mixed-attr-snippet + conflict-attr-snippet, and svelte_head \
          static_title/prop_title/state_title/title_meta/meta/body_sibling/html)"
     );
     let mut seen = std::collections::BTreeSet::new();
@@ -6245,12 +6275,12 @@ fn supported_components_cover_the_full_component_corpus() {
     // dropped row is a coverage regression. This count gate fails LOUDLY if a row is dropped,
     // and the no-duplicate check guards against a typo. THREE `components/*` fixtures are
     // EXCLUDED — standalone_child (legacy-mode), snippet_capture_state (reactive-text
-    // const-fold) and child_and_snippet (array-$state / $.proxy) — so the count is the 26
+    // const-fold) and child_and_snippet (array-$state / $.proxy) — so the count is the 38
     // `components/*` fixtures minus 3.
     assert_eq!(
         SUPPORTED_COMPONENTS.len(),
-        29,
-        "the component corpus must enumerate the 29 runes-mode `components/*` 5f-a conformance \
+        35,
+        "the component corpus must enumerate the 35 runes-mode `components/*` 5f-a conformance \
          fixtures (Child / component_props / component_full / component_children_default / \
          component_snippet_children / component_bind_prop / component_bind_this / \
          component_bind_function / component_bind_function_multi / component_spread / \
@@ -6258,7 +6288,9 @@ fn supported_components_cover_the_full_component_corpus() {
          multi_component_import / snippet_multi_param / snippet_to_component / render_optional / \
          render_dynamic_ternary / render_dynamic_prop_arg / render_dynamic_optional_arg / \
          svelte_component / svelte_component_bind_this / svelte_component_import / svelte_self / \
-         svelte_fragment / component_prop_hyphen / component_event_hyphen / fragment_slot_hyphen), \
+         svelte_fragment / component_prop_hyphen / component_event_hyphen / fragment_slot_hyphen / \
+         named_slot_span / named_slot_entity / fragment_slot_text_first / render_spread_arg / \
+         render_paren_callee / render_optional_local), \
          excluding \
          the legacy-mode standalone_child (Block 5i) AND the two deferred-surface fixtures \
          snippet_capture_state (reactive-text const-fold) + child_and_snippet (array-$state / \

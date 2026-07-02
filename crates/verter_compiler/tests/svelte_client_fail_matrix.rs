@@ -723,9 +723,164 @@ const FAIL_MATRIX: &[FailRow] = &[
         source: "<script>let c = $state(0); c = 1;</script>\n<slot></slot>\n",
         code: "svelte-runtime-unsupported-element",
     },
-    // (`span_element` removed — `<span>` / `<ul>` / `<li>` were added to the element
-    // allowlist as the plain structural hosts the 5f-a component-slot / `{#snippet}`-body
-    // fixtures need, so a `<span>` no longer fails closed.)
+    // ── `slot` attribute placement / validity (official slot_attribute_* errors) ──
+    FailRow {
+        // A `slot="a"` on an element that is NOT a direct component child (top level) —
+        // the official `slot_attribute_invalid_placement` compile error stays fail-closed.
+        name: "slot_attr_outside_component_child",
+        source: "<script>let c = $state(0);</script>\n<div slot=\"a\">{c}</div>\n",
+        code: "svelte-runtime-unsupported-dynamic-attribute",
+    },
+    FailRow {
+        // A `slot="a"` NESTED inside a component child (not a DIRECT child) — the same
+        // official placement error; the accept set is exactly the SOURCE-LEVEL direct
+        // slot-declaring children of the component.
+        name: "slot_attr_nested_in_component_child",
+        source: "<script>import Child from './Child.svelte'; let c = $state(0);</script>\n<Child><div><span slot=\"a\">{c}</span></div></Child>\n",
+        code: "svelte-runtime-unsupported-dynamic-attribute",
+    },
+    FailRow {
+        // A NAMED `slot="bar"` NESTED inside a transparent `<svelte:fragment slot="foo">`
+        // — the fragment's children are HOISTED into the `foo` region at lowering, but
+        // hoisting does NOT make them direct slot-declaring component children: the inner
+        // `slot="bar"` is the same official `slot_attribute_invalid_placement` error and
+        // must fail closed, never bake `slot="bar"` into the `foo` callback or mint a
+        // `bar` slot.
+        name: "slot_attr_nested_in_slotted_fragment",
+        source: "<script>import Child from './Child.svelte'; let { x } = $props();</script>\n<Child><svelte:fragment slot=\"foo\"><span slot=\"bar\">{x}</span></svelte:fragment></Child>\n",
+        code: "svelte-runtime-unsupported-dynamic-attribute",
+    },
+    FailRow {
+        // The same nested-placement error with `slot="default"` inside a slotted
+        // fragment — `default` gets NO special dispensation: a hoisted fragment child
+        // is not a direct component child, so the inner `slot="default"` fails closed.
+        name: "slot_attr_default_nested_in_slotted_fragment",
+        source: "<script>import Child from './Child.svelte'; let { x } = $props();</script>\n<Child><svelte:fragment slot=\"foo\"><span slot=\"default\">{x}</span></svelte:fragment></Child>\n",
+        code: "svelte-runtime-unsupported-dynamic-attribute",
+    },
+    FailRow {
+        // A DYNAMIC `slot={x}` — the official `slot_attribute_invalid` compile error
+        // ("slot attribute must be a static value"); never a generic `$.set_attribute`.
+        name: "slot_attr_dynamic",
+        source: "<script>import Child from './Child.svelte'; let c = $state('a');</script>\n<Child><span slot={c}>hi</span></Child>\n",
+        code: "svelte-runtime-unsupported-dynamic-attribute",
+    },
+    FailRow {
+        // A MIXED `slot="a{x}"` — the same official `slot_attribute_invalid` error.
+        name: "slot_attr_mixed",
+        source: "<script>import Child from './Child.svelte'; let c = $state('a');</script>\n<Child><span slot=\"a{c}\">hi</span></Child>\n",
+        code: "svelte-runtime-unsupported-dynamic-attribute",
+    },
+    FailRow {
+        // TWO children carrying the SAME `slot` name — the official
+        // `slot_attribute_duplicate` compile error; never a silently merged region.
+        name: "slot_attr_duplicate",
+        source: "<script>import Child from './Child.svelte'; let { x } = $props();</script>\n<Child><span slot=\"a\">{x}</span><p slot=\"a\">2</p></Child>\n",
+        code: "svelte-runtime-unsupported-component",
+    },
+    FailRow {
+        // An explicit `slot=\"default\"` child ALONGSIDE implicit default content — the
+        // official `slot_default_duplicate` compile error.
+        name: "slot_attr_default_conflict",
+        source: "<script>import Child from './Child.svelte'; let { x } = $props();</script>\n<Child>{x}<span slot=\"default\">1</span></Child>\n",
+        code: "svelte-runtime-unsupported-component",
+    },
+    // ── `slot` attribute on COMPONENT / `<svelte:*>` hosts (unified choke-point) ──
+    // Official routes a component-child filler into `$$slots`; Verter does not emit
+    // component/special named-slot fillers (ledger D-41), so the unified slot
+    // choke-point fails EVERY such `slot=` closed — never a plain `slot` prop
+    // projection, never an `$.attribute_effect` fold entry.
+    FailRow {
+        // The headline former fail-OPEN member: a STATIC `slot="foo"` on a DIRECT
+        // COMPONENT child projected `slot: 'foo'` as a plain prop instead of failing
+        // closed (official routes it into `$$slots`).
+        name: "slot_attr_on_component_child",
+        source: "<script>import Child from './Child.svelte'; import Inner from './Inner.svelte'; let { x } = $props();</script>\n<Child><Inner slot=\"foo\"/>{x}</Child>\n",
+        code: "svelte-runtime-unsupported-dynamic-attribute",
+    },
+    FailRow {
+        // A COMPONENT bearing `slot="bar"` NESTED inside an element (invalid placement
+        // even officially) — the choke-point rejects it on the component node itself.
+        name: "slot_attr_on_nested_component",
+        source: "<script>import Child from './Child.svelte'; import Inner from './Inner.svelte'; let { x } = $props();</script>\n<Child><div><Inner slot=\"bar\"/>{x}</div></Child>\n",
+        code: "svelte-runtime-unsupported-dynamic-attribute",
+    },
+    FailRow {
+        // A DYNAMIC `slot={x}` on a COMPONENT child — the official
+        // `slot_attribute_invalid` compile error; dynamic/mixed `slot` is invalid on
+        // EVERY host.
+        name: "slot_attr_dynamic_on_component",
+        source: "<script>import Child from './Child.svelte'; import Inner from './Inner.svelte'; let x = $state('a');</script>\n<Child><Inner slot={x}/></Child>\n",
+        code: "svelte-runtime-unsupported-dynamic-attribute",
+    },
+    FailRow {
+        // A STATIC `slot="a"` on a `<svelte:element>` formerly FOLDED into the runtime
+        // `$.attribute_effect` (quiet-wrong output) — now fail-closed at the choke-point
+        // (invalid placement: a special is never a slot owner).
+        name: "slot_attr_on_svelte_element",
+        source: "<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n<svelte:element this=\"div\" slot=\"a\"></svelte:element>\n",
+        code: "svelte-runtime-unsupported-dynamic-attribute",
+    },
+    FailRow {
+        // A DYNAMIC `slot={c}` on a `<svelte:element>` — same fold leak, same refusal.
+        name: "slot_attr_dynamic_on_svelte_element",
+        source: "<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n<svelte:element this=\"div\" slot={c}></svelte:element>\n",
+        code: "svelte-runtime-unsupported-dynamic-attribute",
+    },
+    FailRow {
+        // A STATIC `slot="a"` on a `<svelte:component>` invocation — the component-family
+        // special formerly projected it as a plain prop; the choke-point rejects the node.
+        name: "slot_attr_on_svelte_component",
+        source: "<script>import Child from './Child.svelte'; let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n<svelte:component this={Child} slot=\"a\"/>\n",
+        code: "svelte-runtime-unsupported-dynamic-attribute",
+    },
+    FailRow {
+        // A STATIC `slot="a"` on a validly-placed `<svelte:self>` — same component-family
+        // plain-prop leak, same refusal.
+        name: "slot_attr_on_svelte_self",
+        source: "<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n{#if c}<svelte:self slot=\"a\"/>{/if}\n",
+        code: "svelte-runtime-unsupported-dynamic-attribute",
+    },
+    // (NO `<svelte:options slot>` row: `<svelte:options>` attributes are validated at
+    // PARSE — `slot` is refused as the official `svelte_options_unknown_attribute`
+    // reject-parity defect (`svelte_parse_defect_exact_codes.rs`) before lowering ever
+    // runs, so the node can never reach the slot choke-point and a row here would be
+    // non-discriminating. The choke-point still covers the `Options` kind at the
+    // function level via the per-kind unit proof.)
+    // (NO `<svelte:window|document|body slot>` rows either: the global-host classifier
+    // already refuses EVERY non-event/bind attribute with the SAME
+    // `svelte-runtime-unsupported-dynamic-attribute` code, so an SFC row would pass
+    // identically pre/post choke-point — non-discriminating. The per-kind unit proof
+    // covers all three kinds at the choke-point itself.)
+    FailRow {
+        // A `slot="x"` on `<svelte:boundary>` — formerly refused as a generic boundary
+        // attribute (`svelte-runtime-unsupported-component`); the choke-point now owns
+        // the refusal with the slot diagnostic (slot validation runs BEFORE per-host
+        // attribute acceptance).
+        name: "slot_attr_on_svelte_boundary",
+        source: "<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n<svelte:boundary slot=\"x\"><p>b</p></svelte:boundary>\n",
+        code: "svelte-runtime-unsupported-dynamic-attribute",
+    },
+    FailRow {
+        // A `slot="x"` on `<svelte:head>` — formerly the head-attribute reject-parity
+        // arm (`svelte-runtime-unsupported-component`); the choke-point now owns the
+        // refusal with the slot diagnostic.
+        name: "slot_attr_on_svelte_head",
+        source: "<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n<svelte:head slot=\"x\"><title>t</title></svelte:head>\n",
+        code: "svelte-runtime-unsupported-dynamic-attribute",
+    },
+    FailRow {
+        // A `slot="x"` on a STANDALONE `<svelte:fragment>` (not a component child) —
+        // formerly the transparent-fragment construct refusal
+        // (`svelte-runtime-unsupported-component`); the choke-point now owns the
+        // refusal with the slot diagnostic.
+        name: "slot_attr_on_standalone_fragment",
+        source: "<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n<svelte:fragment slot=\"x\">hi</svelte:fragment>\n",
+        code: "svelte-runtime-unsupported-dynamic-attribute",
+    },
+    // (`span_element` removed — `<span>` joined the element allowlist as the plain
+    // structural host the component-slot / `{#snippet}`-body fixtures need, so a `<span>`
+    // no longer fails closed. `<ul>` / `<li>` did NOT join and remain rejected.)
     FailRow {
         name: "svg_root",
         source: "<script>let c = $state(0);</script>\n<svg onclick={() => c++}><circle r=\"5\" /></svg>\n",
@@ -1190,6 +1345,37 @@ fn fail_matrix_has_no_duplicate_rows() {
     let before = names.len();
     names.dedup();
     assert_eq!(before, names.len(), "duplicate fail-matrix row names");
+}
+
+#[test]
+fn valid_regular_element_and_fragment_fillers_still_compile() {
+    // POSITIVE control for the unified slot choke-point: the SUPPORTED static
+    // named-slot filler routes stay ACCEPTED — a direct regular-element filler and a
+    // `<svelte:fragment slot>` filler both compile to a `Main` carrying the `$$slots`
+    // region. Fail-closing the component/special `slot=` class must NOT close the
+    // valid element/fragment route.
+    let js = compile(
+        "<script>import Child from './Child.svelte'; let { x } = $props();</script>\n<Child><span slot=\"foo\">{x}</span></Child>\n",
+    )
+    .expect("a direct element named-slot filler must still compile");
+    assert!(
+        js.contains("$$slots: {foo: ($$anchor, $$slotProps) =>"),
+        "missing the $$slots region for the element filler:\n{js}"
+    );
+    // The `slot` attribute BAKES into the cloned skeleton (the official output keeps
+    // it in the template HTML) — the accepted route is the filler, not a dropped attr.
+    assert!(
+        js.contains("<span slot=\"foo\">"),
+        "the element filler's slot attribute must bake into the skeleton:\n{js}"
+    );
+    let fragment_js = compile(
+        "<script>import Child from './Child.svelte'; let { x } = $props();</script>\n<Child><svelte:fragment slot=\"foo\">hello {x}</svelte:fragment></Child>\n",
+    )
+    .expect("a fragment named-slot filler must still compile");
+    assert!(
+        fragment_js.contains("$$slots: {foo: ($$anchor, $$slotProps) =>"),
+        "missing the $$slots region for the fragment filler:\n{fragment_js}"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1984,7 +2170,7 @@ fn fail_matrix_covers_every_documented_sub_shape() {
     // them) — NO fail-matrix row, which would fail at the element gate instead of the bind
     // gate. +8 rows.
     // The render reject-parity + `<svelte:self>` placement rows add NINE fail-closed rows
-    // (net +9, 128 → 137), STRENGTHENING the matrix: SEVEN `{@render …(…spread)}` rows refuse
+    // (net +9, 127 → 136), STRENGTHENING the matrix: SEVEN `{@render …(…spread)}` rows refuse
     // a SPREAD argument the official compiler hard-errors
     // (`render_tag_invalid_spread_argument`) instead of silently dropping it — the three
     // direct forms (`render_spread_prop_callee` / `render_spread_local_snippet_callee` /
@@ -2018,16 +2204,51 @@ fn fail_matrix_covers_every_documented_sub_shape() {
     // `svelte_body_attach` (global-host lifecycle/attach at the
     // `classify_special_host` gate) and `svelte_element_transition` (the transition
     // sibling of `svelte_element_use`) — +3 rows, 145 → 148.
+    // The regular-element / `<svelte:fragment>` named-slot completion added SIX
+    // `slot`-attribute rows (the static `slot="x"` is now ACCEPTED only at valid
+    // component-child slot placement, so the whole refusal boundary is enumerated):
+    // `slot_attr_outside_component_child` + `slot_attr_nested_in_component_child`
+    // (official `slot_attribute_invalid_placement`), `slot_attr_dynamic` +
+    // `slot_attr_mixed` (official `slot_attribute_invalid`), `slot_attr_duplicate`
+    // (official `slot_attribute_duplicate`), and `slot_attr_default_conflict`
+    // (official `slot_default_duplicate`) — +6 rows, 148 → 154.
+    // The slot-placement gate keys on the SOURCE-LEVEL slot-attribute OWNER set (the
+    // direct slot-declaring component children recorded at lowering), NOT on lowered
+    // slot-region-root membership — a transparent `<svelte:fragment slot>`'s hoisted
+    // children never inherit slot-placement validity. TWO rows lock that boundary
+    // (both formerly fail-OPEN — the inner `slot=` was wrongly baked into the outer
+    // slot's callback): `slot_attr_nested_in_slotted_fragment` (a named `slot="bar"`
+    // inside a slotted fragment) and `slot_attr_default_nested_in_slotted_fragment`
+    // (a `slot="default"` inside a slotted fragment) — +2 rows, 154 → 156.
+    // The unified slot-validation choke-point (`validate_slot_placement` at
+    // `classify_node` entry — the sole `slot=` authority, run before every per-kind
+    // accept/fold/prop projection) fail-closed the former fail-OPEN `slot=` class on
+    // component/special hosts with TEN rows: the direct/nested/dynamic COMPONENT
+    // fillers (`slot_attr_on_component_child` / `slot_attr_on_nested_component` /
+    // `slot_attr_dynamic_on_component` — formerly projected `slot` as a plain prop),
+    // the static/dynamic `<svelte:element>` forms (`slot_attr_on_svelte_element` /
+    // `slot_attr_dynamic_on_svelte_element` — formerly folded into
+    // `$.attribute_effect`), the component-family specials
+    // (`slot_attr_on_svelte_component` / `slot_attr_on_svelte_self` — the same
+    // plain-prop leak), and the choke-point-owns-the-refusal ordering rows
+    // (`slot_attr_on_svelte_boundary` / `slot_attr_on_svelte_head` /
+    // `slot_attr_on_standalone_fragment` — formerly the generic construct refusal,
+    // now the slot diagnostic). `<svelte:options slot>` is refused at PARSE
+    // (`svelte_options_unknown_attribute` reject parity) and the global hosts
+    // (`<svelte:window|document|body>`) already refuse `slot` with the same code, so
+    // those kinds have NO row here (non-discriminating) and are covered by the
+    // per-kind choke-point unit proof — +10 rows, 156 → 166.
     assert_eq!(
         FAIL_MATRIX.len(),
-        148,
-        "the fail matrix must enumerate all 148 documented unsupported-feature \
+        166,
+        "the fail matrix must enumerate all 166 documented unsupported-feature \
          fail-closed sub-shapes. The 5f-a component/snippet/slot vertical removed FIVE rows \
          (now accepted-positive with topology/emit goldens): `component` (a `<Foo />` direct \
          call), `bind_this_component` (a component `bind:this` → `$.bind_this`), \
          `snippet_in_if_block` (a block-body `{{#snippet}}` const), `render_in_each_block` (a \
-         block-body `{{@render}}` → `$.snippet`), and `span_element` (`<span>`/`<ul>`/`<li>` \
-         joined the element allowlist as the plain slot/snippet structural hosts) — net −5 \
+         block-body `{{@render}}` → `$.snippet`), and `span_element` (only `<span>` \
+         joined the element allowlist as the plain slot/snippet structural host; `<ul>` / \
+         `<li>` remain rejected) — net −5 \
          rows from the prior 133. The declaration-tag PLACEMENT gate adds four rows: a \
          `{{@const}}` / `{{const}}` / `{{let}}` NESTED inside an element \
          (`const_tag_nested_in_element` / `decl_const_nested_in_element` / \

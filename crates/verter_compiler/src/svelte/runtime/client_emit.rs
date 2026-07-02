@@ -140,9 +140,14 @@ impl<'a> ClientEmitter<'a> {
         // A GLOBAL-host special (`<svelte:window|document|body>`) groups its EVENTS before its
         // BINDS (the official `visit_special_element` order — every `$.event(...)` then every
         // `$.bind_*`), so the source-order op list is reordered per host node
-        // ([`Self::post_walk_ops_host_grouped`]). Regular-element ops keep SOURCE order.
-        for op in &self.post_walk_ops_host_grouped(scope_id) {
-            match op {
+        // ([`Self::post_walk_ops_host_grouped`] — a borrow-free INDEX permutation over the
+        // plan's op slice; the ops themselves are never cloned). The plan reference is
+        // copied out of `self` so the borrowed ops coexist with the `&self` renderers.
+        let plan = self.plan;
+        let post_walk_order = self.post_walk_ops_host_grouped(scope_id);
+        let scope_ops = plan.ops_in(scope_id);
+        for &op_idx in &post_walk_order {
+            match &scope_ops[op_idx] {
                 ClientRuntimeOp::Bind {
                     target,
                     shape,
@@ -173,7 +178,10 @@ impl<'a> ClientEmitter<'a> {
                         node,
                     ) == super::client_lifecycle::BindEmissionSlot::SpecialHost
                     {
-                        self.emit_bind(out, node, shape, getter, setter);
+                        // Rendered through the IMMUTABLE statement renderer — the op
+                        // borrows the plan (not `self`), so no `&mut self` wrapper and
+                        // no payload clone are needed.
+                        out.push_str(&self.render_bind_stmt(node, shape, getter, setter));
                     }
                 }
                 ClientRuntimeOp::Event { emit, .. } => {
@@ -196,7 +204,9 @@ impl<'a> ClientEmitter<'a> {
                             super::client_plan_types::EventEmitTarget::Node(_)
                         )
                     {
-                        self.emit_event(out, emit);
+                        // The IMMUTABLE registration renderer (shared with the
+                        // after-update batch below).
+                        out.push_str(&render_event_registration(emit, &self.node_var));
                     }
                 }
                 // The reactive-text / reactive-attr / class / style ops were grouped
@@ -320,16 +330,18 @@ impl<'a> ClientEmitter<'a> {
     /// `$.event(...)` then every `$.bind_*`). A host special's ops are CONTIGUOUS in the
     /// source-order op list (one node's attributes), so each contiguous same-host run is
     /// stable-partitioned events-before-binds; non-host ops (regular elements) keep SOURCE
-    /// order. Returns an OWNED snapshot so the emit calls (`&mut self`) borrow freely.
-    fn post_walk_ops_host_grouped(&self, scope_id: TemplateScopeId) -> Vec<ClientRuntimeOp> {
+    /// order. Returns the INDEX PERMUTATION over `plan.ops_in(scope_id)` — the caller
+    /// indexes the plan's own op slice (no payload clone), and renders through the
+    /// IMMUTABLE statement renderers.
+    fn post_walk_ops_host_grouped(&self, scope_id: TemplateScopeId) -> Vec<usize> {
         let ops = self.plan.ops_in(scope_id);
-        let mut result: Vec<ClientRuntimeOp> = Vec::with_capacity(ops.len());
+        let mut result: Vec<usize> = Vec::with_capacity(ops.len());
         let mut i = 0;
         while i < ops.len() {
             let group = self.op_host_group(&ops[i]);
             let Some(_) = group else {
                 // A non-host op (regular element bind / event) keeps its source position.
-                result.push(ops[i].clone());
+                result.push(i);
                 i += 1;
                 continue;
             };
@@ -339,14 +351,16 @@ impl<'a> ClientEmitter<'a> {
             while j < ops.len() && self.op_host_group(&ops[j]) == group {
                 j += 1;
             }
-            for op in &ops[i..j] {
+            // Both passes walk the `i..j` group subslice DIRECTLY (offset enumerate) —
+            // proportional to the group size, never a from-the-front restart.
+            for (offset, op) in ops[i..j].iter().enumerate() {
                 if matches!(op, ClientRuntimeOp::Event { .. }) {
-                    result.push(op.clone());
+                    result.push(i + offset);
                 }
             }
-            for op in &ops[i..j] {
+            for (offset, op) in ops[i..j].iter().enumerate() {
                 if !matches!(op, ClientRuntimeOp::Event { .. }) {
-                    result.push(op.clone());
+                    result.push(i + offset);
                 }
             }
             i = j;
@@ -389,22 +403,20 @@ impl<'a> ClientEmitter<'a> {
     }
 
     /// The AFTER-UPDATE stream ENTER rank for `node` — a regular-element MODERN
-    /// event registration's stream position (`u32::MAX` for an unranked node, the
-    /// defensive tail position).
+    /// event registration's stream position. An unranked node is a HARD error
+    /// (the fail-loud [`require_after_update_rank`] invariant — never a silent
+    /// tail position).
+    ///
+    /// [`require_after_update_rank`]: super::client_lifecycle::require_after_update_rank
     fn after_update_pre_rank(&self, node: NodeId) -> u32 {
-        self.after_update_rank
-            .get(&node)
-            .map(|r| r.pre)
-            .unwrap_or(u32::MAX)
+        super::client_lifecycle::require_after_update_rank(&self.after_update_rank, node).pre
     }
 
     /// The AFTER-UPDATE stream EXIT rank for `node` — a directive-batch item's
     /// (`$.transition` / `$.animation` / bare legacy `$.event` / bare `$.bind_*`)
-    /// stream position (`u32::MAX` for an unranked node).
+    /// stream position. An unranked node is a HARD error (fail-loud), never a
+    /// silent `u32::MAX` tail sort.
     fn after_update_post_rank(&self, node: NodeId) -> u32 {
-        self.after_update_rank
-            .get(&node)
-            .map(|r| r.post)
-            .unwrap_or(u32::MAX)
+        super::client_lifecycle::require_after_update_rank(&self.after_update_rank, node).post
     }
 }

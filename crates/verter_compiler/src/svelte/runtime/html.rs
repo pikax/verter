@@ -607,11 +607,12 @@ fn standalone_kind(node: &IrNode) -> Option<StandaloneKind> {
             });
             (!has_css_var).then_some(StandaloneKind::Component)
         }
-        // A resolved local-snippet `{@render row()}` is non-dynamic → standalone.
-        // A dynamic-callee render (`{@render getSnippet()?.()}` / a prop snippet)
-        // is dynamic → NOT standalone (it stays a block-only comment anchor).
+        // A resolved local-snippet `{@render row()}` / `{@render row?.()}` is
+        // non-dynamic → standalone. A dynamic-callee render (`{@render
+        // getSnippet()?.()}` / a prop snippet) is dynamic → NOT standalone (it stays a
+        // block-only comment anchor).
         IrNode::Tag(TagIr::Render {
-            callee: RenderCallee::Snippet(_),
+            callee: RenderCallee::Snippet { .. },
             ..
         }) => Some(StandaloneKind::Render),
         _ => None,

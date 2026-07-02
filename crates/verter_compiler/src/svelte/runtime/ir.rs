@@ -219,6 +219,16 @@ pub struct ComponentSlots {
     /// projection fails CLOSED, never silently dropping the binding — the let decomposition
     /// itself is infallible at lowering, so it carries this fact to the projection gate.
     pub has_unsupported_let: bool,
+    /// Whether two component children carried the SAME static `slot` name (including
+    /// `slot="default"` twice) — the official `slot_attribute_duplicate` compile error.
+    /// The slot decomposition is infallible at lowering, so it carries this fact to the
+    /// (fallible) component projection, which fails CLOSED rather than emitting a merged
+    /// region the official compiler refuses.
+    pub has_duplicate_slot: bool,
+    /// Whether an explicit `slot="default"` child coexists with IMPLICIT (non-whitespace)
+    /// default-slot content — the official `slot_default_duplicate` compile error. Carried
+    /// to the (fallible) component projection, which fails CLOSED.
+    pub has_default_slot_conflict: bool,
 }
 
 /// One `let:` slot-prop directive on a component — the local binding name and the
@@ -927,9 +937,18 @@ pub enum TemplateRune {
 /// The callee of a `{@render}` tag.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RenderCallee {
-    /// A static snippet name (`{@render row(n)}`) — a direct snippet call.
-    Snippet(BindingId),
-    /// A dynamic expression (`{@render expr?.()}`) — uses `$.snippet`.
+    /// A static snippet name (`{@render row(n)}` / the optional `{@render row?.(n)}`)
+    /// resolving to a local `{#snippet}` binding — a direct snippet call
+    /// (`row($$anchor, …)`), or the direct OPTIONAL call (`row?.($$anchor, …)`) when
+    /// `optional` is set (the official `b.maybe_call` form).
+    Snippet {
+        /// The resolved `{#snippet}` name binding.
+        binding: BindingId,
+        /// Whether the call is the optional `row?.(…)` form.
+        optional: bool,
+    },
+    /// A dynamic expression (`{@render getSnippet()?.()}` / a prop callee) — uses
+    /// `$.snippet`.
     Dynamic(ExprId),
 }
 
@@ -1017,6 +1036,19 @@ pub struct SvelteRuntimeIr<'a> {
     pub nodes: Vec<IrNode>,
     /// The runtime-op arena, indexed by [`OpId`].
     pub ops: Vec<RuntimeOp>,
+    /// The SOURCE-LEVEL `slot=` attribute OWNER set: the lowered node ids of exactly
+    /// the DIRECT slot-declaring INTRINSIC-element children of a component-family
+    /// node (a regular element bearing a static `slot="x"` as a direct component
+    /// child — named or explicit `slot="default"`). Recorded by the component slot
+    /// decomposition at lowering. A transparent `<svelte:fragment slot>`'s HOISTED
+    /// children and implicit default-slot content are NOT members — hoisting into a
+    /// slot region does not confer slot-placement validity, so a `slot` attribute on
+    /// them is the official `slot_attribute_invalid_placement` error. A COMPONENT /
+    /// `<svelte:*>`-special child bearing `slot=` is NOT a member either — its
+    /// `$$slots` filler routing is not emitted (ledger D-41). Both fail closed at the
+    /// classifier's unified slot choke-point, which keys on THIS set, never on
+    /// lowered region-root membership.
+    pub slot_attr_owners: rustc_hash::FxHashSet<NodeId>,
 }
 
 impl<'a> SvelteRuntimeIr<'a> {

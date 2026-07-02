@@ -183,9 +183,11 @@ impl<'a> ClientEmitter<'a> {
     }
 
     /// Collect a component's slot regions (default + named) + its `{#snippet}`-def body
-    /// regions in post-order, recording each as a render-CALLBACK scope (so a text-first
-    /// slot / children / snippet body emits the official `$.next()` prelude — like an
-    /// `{#each}` render callback).
+    /// regions in post-order. The DEFAULT-children region and a `{#snippet}` body are
+    /// render-CALLBACK scopes (a text-first body emits the official `$.next()` prelude —
+    /// like an `{#each}` render callback); a NAMED-slot region is NOT — official emits
+    /// the `$$slots` named callback body WITHOUT the leading `$.next()` cursor advance
+    /// (oracle-confirmed for both the regular-element and `<svelte:fragment>` forms).
     fn collect_component_slot_regions(
         &self,
         slots: &super::ir::ComponentSlots,
@@ -200,7 +202,6 @@ impl<'a> ClientEmitter<'a> {
             self.collect_post_order(default, out, each_scopes);
         }
         for named in &slots.named {
-            each_scopes.insert(named.region);
             self.collect_post_order(named.region, out, each_scopes);
         }
     }

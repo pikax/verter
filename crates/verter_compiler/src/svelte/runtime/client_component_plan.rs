@@ -26,7 +26,44 @@ use super::ir::{
 use super::unsupported::UnsupportedSvelteRuntimeSurface;
 use verter_span::Span;
 
-/// The per-component-call projection state: the prop-derived `$N` counter (the official
+/// The official per-call `Memoizer` (svelte@5.56.3 client `shared/utils.js`): mints the
+/// ordered `let $N = $.derived(() => <expr>);` hoist statements and hands back the
+/// `$.get($N)` read for each memoized value. The `$N` numbering restarts per memoizer
+/// instance — one per component call (`CallBuild`) and one per `{@render}` tag, exactly
+/// the official per-`build_component` / per-`RenderTag` instances. This is the SINGLE
+/// memoize engine for every template value hoist, so the numbering, the derived
+/// statement shape, and the concise-arrow body wrap can never diverge between the
+/// component-prop and render-argument surfaces.
+#[derive(Default)]
+pub(super) struct DerivedMemoizer {
+    counter: usize,
+    statements: Vec<String>,
+}
+
+impl DerivedMemoizer {
+    /// Memoize one rewritten value expression: push its `let $N = $.derived(() => …);`
+    /// hoist (the value embedded as a CONCISE ARROW BODY through the shared
+    /// [`concise_arrow_expr_body`] wrap, so an object-literal / sequence value stays a
+    /// valid expression body) and return the `$.get($N)` read.
+    ///
+    /// [`concise_arrow_expr_body`]: super::client_codegen_helpers::concise_arrow_expr_body
+    fn memoize(&mut self, value: &str) -> String {
+        let n = self.counter;
+        self.counter += 1;
+        let body = super::client_codegen_helpers::concise_arrow_expr_body(value);
+        self.statements
+            .push(format!("let ${n} = $.derived(() => {body});"));
+        format!("$.get(${n})")
+    }
+
+    /// The ordered `let $N = $.derived(…);` hoist statements (the official
+    /// `memoizer.deriveds()`), consumed into the wrapping block.
+    fn into_statements(self) -> Vec<String> {
+        self.statements
+    }
+}
+
+/// The per-component-call projection state: the prop-derived memoizer (the official
 /// per-`build_component` `Memoizer`, named `$0`, `$1`, … in order) and the hoisted
 /// pre-statements (the deriveds + function-pair bind vars emitted before the call).
 struct CallBuild {
@@ -36,10 +73,9 @@ struct CallBuild {
     /// emits them at the call's statement level (the official `state.init`), NOT inside the
     /// wrapping block.
     fn_pair_binds: Vec<ComponentFnPairBind>,
-    /// Prop deriveds (`let $N = $.derived(…)`) — emitted INSIDE the wrapping block (the
-    /// official `memoizer.deriveds()`).
-    block_statements: Vec<String>,
-    derived_counter: usize,
+    /// The prop-derived memoizer — its `let $N = $.derived(…)` statements are emitted
+    /// INSIDE the wrapping block (the official `memoizer.deriveds()`).
+    memoizer: DerivedMemoizer,
 }
 
 impl<'a> SupportedClientIr<'a> {
@@ -148,11 +184,27 @@ impl<'a> SupportedClientIr<'a> {
                 span,
             });
         }
+        // Two children carrying the SAME static `slot` name is the official
+        // `slot_attribute_duplicate` compile error — fail closed, never emit the merged
+        // region official refuses.
+        if slots.has_duplicate_slot {
+            return Err(UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
+                construct: "duplicate slot name",
+                span,
+            });
+        }
+        // An explicit `slot="default"` child alongside significant implicit default
+        // content is the official `slot_default_duplicate` compile error — fail closed.
+        if slots.has_default_slot_conflict {
+            return Err(UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
+                construct: "default slot conflict",
+                span,
+            });
+        }
 
         let mut build = CallBuild {
             fn_pair_binds: Vec::new(),
-            block_statements: Vec::new(),
-            derived_counter: 0,
+            memoizer: DerivedMemoizer::default(),
         };
 
         // The props are built as the official `props_and_spreads`: object groups + spread
@@ -269,7 +321,7 @@ impl<'a> SupportedClientIr<'a> {
             callee,
             span,
             fn_pair_binds: build.fn_pair_binds,
-            block_statements: build.block_statements,
+            block_statements: build.memoizer.into_statements(),
             props,
             snippet_defs: slots.snippet_defs.clone(),
             bind_this,
@@ -341,12 +393,7 @@ impl<'a> SupportedClientIr<'a> {
         let should_wrap = !expr_is_simple_ref(analyzed.source);
         let memoize = has_call || (should_wrap && has_state);
         let final_value = if memoize {
-            let n = build.derived_counter;
-            build.derived_counter += 1;
-            build
-                .block_statements
-                .push(format!("let ${n} = $.derived(() => {value});"));
-            format!("$.get(${n})")
+            build.memoizer.memoize(&value)
         } else {
             value
         };
@@ -630,29 +677,44 @@ impl<'a> SupportedClientIr<'a> {
     }
 
     /// Project a `{@render}` tag into its [`ClientNode::Render`].
+    ///
+    /// Each argument is thunked (`() => <expr>`); a `has_call`-bearing argument (a call,
+    /// a spread — the official `SpreadElement` analysis counts a spread as a call) is
+    /// MEMOIZED through the SHARED [`DerivedMemoizer`] (the official per-`RenderTag`
+    /// `Memoizer` with `memoize_if_state = false`: `has_state` alone never memoizes a
+    /// render argument): the hoisted `let $N = $.derived(() => …);` statements ride the
+    /// node's `memo_hoists` and the thunk reads `$.get($N)`.
     pub(super) fn project_render(
         &self,
         callee: &RenderCallee,
         args: &[ExprId],
     ) -> Result<ClientNode, UnsupportedSvelteRuntimeSurface> {
+        let mut memoizer = DerivedMemoizer::default();
         let arg_thunks = args
             .iter()
             .map(|&a| {
-                Ok(format!(
-                    "() => {}",
-                    self.rewrite_value_preserving_source(a)?
-                ))
+                let value = self.rewrite_value_preserving_source(a)?;
+                let value = if self.expr_has_call(a) {
+                    memoizer.memoize(&value)
+                } else {
+                    value
+                };
+                Ok(format!("() => {value}"))
             })
             .collect::<Result<Vec<_>, UnsupportedSvelteRuntimeSurface>>()?;
+        let memo_hoists = memoizer.into_statements();
         match callee {
             // A static snippet-name call (`{@render pair(1, 2)}`) — a DIRECT call
-            // `pair(node, () => 1, () => 2)`.
-            RenderCallee::Snippet(binding) => {
+            // `pair(node, () => 1, () => 2)`; the optional `{@render pair?.(1)}` form
+            // emits the direct OPTIONAL call `pair?.(node, () => 1)` (the official
+            // `b.maybe_call`).
+            RenderCallee::Snippet { binding, optional } => {
                 let name = self.ir.analysis.bindings.get(*binding).name.clone();
                 Ok(ClientNode::Render(ClientRender {
                     dynamic: false,
                     callee: name,
-                    maybe_call: false,
+                    maybe_call: *optional,
+                    memo_hoists,
                     args: arg_thunks,
                 }))
             }
@@ -667,6 +729,7 @@ impl<'a> SupportedClientIr<'a> {
                     dynamic: true,
                     callee: fn_body,
                     maybe_call: false,
+                    memo_hoists,
                     args: arg_thunks,
                 }))
             }

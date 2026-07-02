@@ -616,20 +616,27 @@ impl BindingImpurityScan<'_> {
             Expression::CallExpression(call) => {
                 self.visit_expr(&call.callee);
                 for arg in &call.arguments {
+                    if matches!(arg, oxc_ast::ast::Argument::SpreadElement(_)) {
+                        // Spread PRESENCE is has_state (official `SpreadElement.js`:
+                        // `has_state = true` unconditionally in expression context).
+                        self.found = true;
+                        return;
+                    }
                     if let Some(e) = arg.as_expression() {
                         self.visit_expr(e);
-                    } else if let oxc_ast::ast::Argument::SpreadElement(s) = arg {
-                        self.visit_expr(&s.argument);
                     }
                 }
             }
             Expression::NewExpression(n) => {
                 self.visit_expr(&n.callee);
                 for arg in &n.arguments {
+                    if matches!(arg, oxc_ast::ast::Argument::SpreadElement(_)) {
+                        // Spread PRESENCE is has_state (official `SpreadElement.js`).
+                        self.found = true;
+                        return;
+                    }
                     if let Some(e) = arg.as_expression() {
                         self.visit_expr(e);
-                    } else if let oxc_ast::ast::Argument::SpreadElement(s) = arg {
-                        self.visit_expr(&s.argument);
                     }
                 }
             }
@@ -667,9 +674,14 @@ impl BindingImpurityScan<'_> {
             }
             Expression::ArrayExpression(arr) => {
                 for el in &arr.elements {
-                    if let oxc_ast::ast::ArrayExpressionElement::SpreadElement(s) = el {
-                        self.visit_expr(&s.argument);
-                    } else if let Some(e) = el.as_expression() {
+                    if matches!(el, oxc_ast::ast::ArrayExpressionElement::SpreadElement(_)) {
+                        // Spread PRESENCE is has_state (official `SpreadElement.js`:
+                        // "treat e.g. `[...x]` the same as `[...x.values()]`" —
+                        // `has_state = true` regardless of the argument's purity).
+                        self.found = true;
+                        return;
+                    }
+                    if let Some(e) = el.as_expression() {
                         self.visit_expr(e);
                     }
                 }
@@ -685,8 +697,11 @@ impl BindingImpurityScan<'_> {
                             }
                             self.visit_expr(&p.value);
                         }
-                        oxc_ast::ast::ObjectPropertyKind::SpreadProperty(s) => {
-                            self.visit_expr(&s.argument);
+                        // An object spread is the same estree `SpreadElement` presence
+                        // rule — has_state unconditionally.
+                        oxc_ast::ast::ObjectPropertyKind::SpreadProperty(_) => {
+                            self.found = true;
+                            return;
                         }
                     }
                 }
@@ -735,10 +750,13 @@ impl BindingImpurityScan<'_> {
             ChainElement::CallExpression(call) => {
                 self.visit_expr(&call.callee);
                 for arg in &call.arguments {
+                    if matches!(arg, oxc_ast::ast::Argument::SpreadElement(_)) {
+                        // Spread PRESENCE is has_state (official `SpreadElement.js`).
+                        self.found = true;
+                        return;
+                    }
                     if let Some(e) = arg.as_expression() {
                         self.visit_expr(e);
-                    } else if let oxc_ast::ast::Argument::SpreadElement(s) = arg {
-                        self.visit_expr(&s.argument);
                     }
                 }
             }

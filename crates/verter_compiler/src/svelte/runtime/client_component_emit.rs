@@ -414,13 +414,22 @@ impl<'a> ClientEmitter<'a> {
         }
     }
 
-    /// Emit a projected `{@render}` tag against `anchor_var`.
+    /// Emit a projected `{@render}` tag against `anchor_var`. Memoized-argument hoists
+    /// (`let $N = $.derived(…)`) wrap the call in a `{ … }` block (the official
+    /// `b.block(statements)` when the per-`RenderTag` memoizer produced deriveds).
     pub(super) fn emit_render(&mut self, out: &mut String, node_id: NodeId, anchor_var: &str) {
         let ClientNode::Render(render) = self.client_node(node_id) else {
             return;
         };
         let render: ClientRender = render.clone();
         out.push('\t');
+        let needs_block = !render.memo_hoists.is_empty();
+        if needs_block {
+            out.push('{');
+            for stmt in &render.memo_hoists {
+                out.push_str(stmt);
+            }
+        }
         let args = render.args.join(", ");
         let arg_tail = if args.is_empty() {
             String::new()
@@ -430,12 +439,20 @@ impl<'a> ClientEmitter<'a> {
         if render.dynamic {
             // `$.snippet(node, () => <fn>, …args);`
             out.push_str(&format!(
-                "$.snippet({anchor_var}, () => {}{arg_tail});\n",
+                "$.snippet({anchor_var}, () => {}{arg_tail});",
                 render.callee
             ));
+        } else if render.maybe_call {
+            // A static-OPTIONAL snippet call (`{@render pair?.(1)}`) — the official
+            // `b.maybe_call` direct form: `pair?.(node, () => 1);`.
+            out.push_str(&format!("{}?.({anchor_var}{arg_tail});", render.callee));
         } else {
             // A static snippet call — `pair(node, () => 1, () => 2);`.
-            out.push_str(&format!("{}({anchor_var}{arg_tail});\n", render.callee));
+            out.push_str(&format!("{}({anchor_var}{arg_tail});", render.callee));
         }
+        if needs_block {
+            out.push('}');
+        }
+        out.push('\n');
     }
 }

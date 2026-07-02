@@ -2686,7 +2686,7 @@ fn render_static_snippet_callee_resolves_to_snippet_with_args() {
         })
         .expect("a render tag exists");
     assert!(
-        matches!(callee, RenderCallee::Snippet(_)),
+        matches!(callee, RenderCallee::Snippet { .. }),
         "a static snippet callee resolves to RenderCallee::Snippet (got {callee:?})"
     );
     assert_eq!(args.len(), 1, "`{{@render row(1)}}` carries one argument");
@@ -2712,7 +2712,7 @@ fn render_optional_call_stays_dynamic() {
         "an optional-call render callee stays Dynamic (got {callee:?})"
     );
     assert!(
-        !matches!(callee, RenderCallee::Snippet(_)),
+        !matches!(callee, RenderCallee::Snippet { .. }),
         "an optional-call render callee must NOT resolve to a static Snippet"
     );
 }

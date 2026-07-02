@@ -224,6 +224,17 @@ pub(super) struct AfterUpdateRank {
 /// over the NARROW node arena (the sole emission input), walking every template
 /// scope's roots left-to-right; they are only ever COMPARED within one scope,
 /// so the cross-scope numbering is irrelevant.
+///
+/// COMPLETENESS: the walk is exhaustive over every same-scope op-hosting node.
+/// EVERY template scope's roots are ranked (region bodies — an `{#each}` body, a
+/// `{#snippet}` body, a component slot region, a special's body region — are their
+/// OWN scopes, so their roots enter through the per-scope loop), and the ONLY
+/// narrow node kind carrying SAME-SCOPE children is `Element` (every other
+/// container hosts its content in a separate template scope). The descent match is
+/// EXHAUSTIVE by construction — a new `ClientNode` variant must decide its
+/// child-ranking arm here or fail to compile, so the ranking can never silently
+/// skip a same-scope subtree; an unranked after-update op target is a HARD error
+/// at emit ([`require_after_update_rank`]), never a silent tail sort.
 pub(super) fn after_update_ranks(
     plan: &ClientModulePlan<'_>,
 ) -> rustc_hash::FxHashMap<NodeId, AfterUpdateRank> {
@@ -233,14 +244,43 @@ pub(super) fn after_update_ranks(
         next: &mut u32,
         out: &mut rustc_hash::FxHashMap<NodeId, AfterUpdateRank>,
     ) {
+        use super::client_plan::ClientNode;
         let pre = *next;
         *next += 1;
-        if let Some(super::client_plan::ClientNode::Element { children, .. }) =
-            plan.nodes.get(id.0 as usize)
-        {
-            for child in children {
-                assign(plan, NodeId(child.0), next, out);
+        match plan.nodes.get(id.0 as usize) {
+            // The ONLY same-scope child carrier: an element's children live in the
+            // element's own scope and are ranked inside its enter/exit window.
+            Some(ClientNode::Element { children, .. }) => {
+                for child in children {
+                    assign(plan, NodeId(child.0), next, out);
+                }
             }
+            // Leaf nodes — no children.
+            Some(
+                ClientNode::Text { .. }
+                | ClientNode::Comment { .. }
+                | ClientNode::ReactiveText { .. }
+                | ClientNode::RawHtml { .. }
+                | ClientNode::OptionsMarker { .. }
+                | ClientNode::SpecialHost { .. }
+                | ClientNode::SnippetDecl { .. }
+                | ClientNode::Declarations { .. }
+                | ClientNode::Debug { .. },
+            ) => {}
+            // Region-hosting nodes — their content lives in SEPARATE template
+            // scopes (block bodies, slot regions, special body regions), ranked by
+            // the per-scope loop below; they carry NO same-scope children.
+            Some(
+                ClientNode::Block(_)
+                | ClientNode::Component(_)
+                | ClientNode::Render(_)
+                | ClientNode::SvelteElement(_)
+                | ClientNode::Boundary(_)
+                | ClientNode::Head(_),
+            ) => {}
+            // An out-of-arena id cannot host ops (defensive; the arena mirrors the
+            // IR node-id space).
+            None => {}
         }
         let post = *next;
         *next += 1;
@@ -254,6 +294,23 @@ pub(super) fn after_update_ranks(
         }
     }
     out
+}
+
+/// The FAIL-LOUD after-update rank lookup: an after-update op whose target node is
+/// missing from the rank map is a planner/emitter DESYNC — the op would silently
+/// tail-sort (the retired `u32::MAX` fallback) and misorder the official
+/// after-update stream. Panic with the invariant name instead.
+pub(super) fn require_after_update_rank(
+    ranks: &rustc_hash::FxHashMap<NodeId, AfterUpdateRank>,
+    node: NodeId,
+) -> AfterUpdateRank {
+    *ranks.get(&node).unwrap_or_else(|| {
+        unreachable!(
+            "after-update op target not ranked: node {} (every same-scope op-hosting \
+             node must have an Euler-tour rank)",
+            node.0
+        )
+    })
 }
 
 /// Render the single lifecycle helper statement for an [`ElementLifecycleOp`] —

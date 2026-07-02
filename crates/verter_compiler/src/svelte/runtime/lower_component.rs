@@ -10,16 +10,37 @@
 //! (lowered as `Derived` so a read emits `$.get`) shadow correctly.
 
 use super::attr_lowering::AttrHost;
+use super::entity_decode::decode_attr_entities;
 use super::expr::{parse_let_alias_identifier, BindingInfo, BindingRuntimeKind, ScopeId};
 use super::ir::{
     AttrIr, ComponentSlots, ExprId, HeadTitleIr, LetBinding, NamedSlot, NodeId, SpecialKind,
     TemplateScopeId, TitleChunkIr,
 };
-use super::{lower_children_in_scope, lower_node, span_text, LoweringCtx};
+use super::{lower_node, span_text, LoweringCtx};
 use crate::svelte::parser::{
     SvelteAttributeKind, SvelteAttributeValue, SvelteBlockKind, SvelteDirectiveKind, SvelteElement,
     SvelteElementKind, SvelteNode, SvelteSpecialKind,
 };
+
+/// One slot-region content node, tagged with whether it is the SOURCE-LEVEL
+/// `slot=`-bearing DIRECT component child itself AND a regular INTRINSIC element (the
+/// slot OWNER — the only node kind on which a static `slot` attribute is accepted).
+/// Content HOISTED out of a transparent `<svelte:fragment slot>` and implicit
+/// default-slot content are NOT owners: hoisting into a slot region does not confer
+/// slot-placement validity, so a `slot` attribute on them is the official
+/// `slot_attribute_invalid_placement` error. A COMPONENT / `<svelte:*>`-special direct
+/// child bearing `slot=` is NOT an owner either — its `$$slots` filler routing is not
+/// emitted (ledger D-41), so it fails closed. Both are refused by the surface
+/// classifier's unified slot choke-point, which keys on
+/// [`SvelteRuntimeIr::slot_attr_owners`].
+///
+/// [`SvelteRuntimeIr::slot_attr_owners`]: super::ir::SvelteRuntimeIr::slot_attr_owners
+struct SlotContentNode {
+    /// The parsed content node.
+    node: SvelteNode,
+    /// Whether this node is the direct slot-declaring component child itself.
+    is_slot_owner: bool,
+}
 
 /// Decompose a component-family node's children into SLOT regions. Returns the FULL
 /// child node-id list (the structural mirror) + the slots.
@@ -37,9 +58,19 @@ pub(super) fn lower_component_slots(
 
     let mut all_children = Vec::new();
     let mut snippet_defs = Vec::new();
-    let mut default_nodes: Vec<SvelteNode> = Vec::new();
+    let mut default_nodes: Vec<SlotContentNode> = Vec::new();
+    // The IMPLICIT default-slot nodes (children with NO `slot` attribute) tracked
+    // separately, so an explicit `slot="default"` child alongside significant implicit
+    // content is detected as the official `slot_default_duplicate` conflict.
+    let mut implicit_default_nodes: Vec<SvelteNode> = Vec::new();
     // Named-slot groups in first-seen order: (name, content nodes, the slot's own `let:`).
-    let mut named_groups: Vec<(String, Vec<SvelteNode>, Vec<LetBinding>)> = Vec::new();
+    let mut named_groups: Vec<(String, Vec<SlotContentNode>, Vec<LetBinding>)> = Vec::new();
+    // The static `slot` names seen so far (including `default`) — a REPEATED name is the
+    // official `slot_attribute_duplicate` compile error, carried as a fact for the
+    // fallible projection gate (this decomposition itself is infallible).
+    let mut seen_slot_names: Vec<String> = Vec::new();
+    let mut has_duplicate_slot = false;
+    let mut has_explicit_default_slot = false;
 
     for child in &el.children {
         // (1) A `{#snippet}` DEF declared directly inside the component — hoist it (lower
@@ -58,33 +89,77 @@ pub(super) fn lower_component_slots(
         // is a NAMED slot; group it (carrying its OWN `let:` bindings). A
         // `<svelte:fragment slot>` is TRANSPARENT — its CHILDREN are the slot content (the
         // fragment renders nothing itself); a regular `slot=`-bearing element IS the slot
-        // content.
+        // content. A `slot="default"` child is the DEFAULT slot (the official
+        // `determine_slot` maps it to the default fragment, emitting `children:` + the
+        // `default: true` marker, NOT a named callback).
         if let SvelteNode::Element(child_el) = child {
             if let Some(slot_name) = static_slot_name(child_el, source) {
                 let (child_lets, child_unsupported) = let_directive_bindings(child_el, source);
                 has_unsupported_let |= child_unsupported;
-                let content: Vec<SvelteNode> = if matches!(
+                if seen_slot_names.contains(&slot_name) {
+                    has_duplicate_slot = true;
+                }
+                seen_slot_names.push(slot_name.clone());
+                let content: Vec<SlotContentNode> = if matches!(
                     child_el.kind,
                     SvelteElementKind::Special(SvelteSpecialKind::Fragment)
                 ) {
-                    child_el.children.clone()
+                    // The transparent fragment's children are HOISTED content, never
+                    // slot OWNERS — a `slot=` on one of them must fail closed (the
+                    // fragment itself never lowers to a node, so its own `slot=` never
+                    // reaches the attribute gate).
+                    child_el
+                        .children
+                        .iter()
+                        .cloned()
+                        .map(|node| SlotContentNode {
+                            node,
+                            is_slot_owner: false,
+                        })
+                        .collect()
                 } else {
-                    vec![child.clone()]
+                    // The child IS the slot content. ONLY a regular INTRINSIC element
+                    // is additionally the source-level `slot=` OWNER (the supported
+                    // direct slot-declaring component child). A COMPONENT /
+                    // `<svelte:*>`-special child bearing `slot=` is NOT an owner: its
+                    // `$$slots` filler routing is not emitted (ledger D-41), so the
+                    // classifier's unified slot choke-point fails it closed rather
+                    // than projecting `slot` as a plain prop or folding it.
+                    vec![SlotContentNode {
+                        node: child.clone(),
+                        is_slot_owner: matches!(child_el.kind, SvelteElementKind::Intrinsic),
+                    }]
                 };
-                match named_groups.iter_mut().find(|(n, _, _)| *n == slot_name) {
-                    Some((_, nodes, _)) => nodes.extend(content),
-                    None => named_groups.push((slot_name, content, child_lets)),
+                if slot_name == "default" {
+                    // The explicit-default child's own `let:` bindings are NOT the
+                    // component-level `default_lets` — that composition is unsupported,
+                    // so a `let:`-bearing `slot="default"` child fails closed.
+                    has_unsupported_let |= !child_lets.is_empty();
+                    has_explicit_default_slot = true;
+                    default_nodes.extend(content);
+                } else {
+                    named_groups.push((slot_name, content, child_lets));
                 }
                 continue;
             }
         }
-        // (3) Everything else is DEFAULT-slot content.
-        default_nodes.push(child.clone());
+        // (3) Everything else is DEFAULT-slot content (implicit — never a `slot=` owner).
+        default_nodes.push(SlotContentNode {
+            node: child.clone(),
+            is_slot_owner: false,
+        });
+        implicit_default_nodes.push(child.clone());
     }
+
+    // An explicit `slot="default"` child alongside SIGNIFICANT implicit default content is
+    // the official `slot_default_duplicate` compile error (whitespace-only implicit runs do
+    // not conflict).
+    let has_default_slot_conflict =
+        has_explicit_default_slot && default_slot_has_content(source, &implicit_default_nodes);
 
     // The DEFAULT slot region (only when it has non-whitespace content — an
     // all-whitespace default with no `let:` produces no `children` prop).
-    let default = if default_slot_has_content(source, &default_nodes) {
+    let default = if default_slot_has_content(source, default_nodes.iter().map(|c| &c.node)) {
         let region = lower_slot_region(ctx, &default_nodes, scope, &default_lets);
         // The default region's roots are ALSO part of the structural child list.
         all_children.extend(ctx.template_scopes[region.0 as usize].roots.iter().copied());
@@ -111,6 +186,8 @@ pub(super) fn lower_component_slots(
             named,
             snippet_defs,
             has_unsupported_let,
+            has_duplicate_slot,
+            has_default_slot_conflict,
         },
     )
 }
@@ -118,9 +195,16 @@ pub(super) fn lower_component_slots(
 /// Lower a slot's content nodes into a fresh template-scope region under a NEW lexical
 /// slot scope (a child of `parent_scope`), declaring its `let:` slot props as `Derived`
 /// bindings FIRST (so a read inside the slot emits `$.get(item)`).
+///
+/// Each content node lowered from a SOURCE-LEVEL slot OWNER (the direct slot-declaring
+/// INTRINSIC-element component child itself — see [`SlotContentNode`]) records its
+/// lowered id in the lowering's `slot_attr_owners` set, the exact node set the surface
+/// classifier accepts a static `slot=` attribute on. Hoisted fragment children,
+/// implicit default content, and component / special slot-declaring children record
+/// nothing.
 fn lower_slot_region(
     ctx: &mut LoweringCtx,
-    children: &[SvelteNode],
+    children: &[SlotContentNode],
     parent_scope: ScopeId,
     lets: &[LetBinding],
 ) -> TemplateScopeId {
@@ -134,7 +218,18 @@ fn lower_slot_region(
         });
         ctx.scopes.declare(slot_scope, &binding.name, id);
     }
-    lower_children_in_scope(ctx, children, slot_scope)
+    let ts = ctx.push_template_scope(slot_scope);
+    let mut roots = Vec::new();
+    for child in children {
+        if let Some(id) = lower_node(ctx, &child.node, slot_scope) {
+            roots.push(id);
+            if child.is_slot_owner {
+                ctx.slot_attr_owners.insert(id);
+            }
+        }
+    }
+    ctx.template_scopes[ts.0 as usize].roots = roots;
+    ts
 }
 
 /// Decompose an element's `let:` slot-prop directives into [`LetBinding`]s, read directly
@@ -273,14 +368,19 @@ pub(super) fn lower_special_kind(kind: SvelteSpecialKind) -> Option<SpecialKind>
 }
 
 /// The STATIC `slot="x"` name on a parsed element, or `None` (the official
-/// `determine_slot`: a plain `slot` attribute with a text value).
+/// `determine_slot`: a plain `slot` attribute with a text value). The raw span is
+/// entity-DECODED through the shared attribute-value decoder ([`decode_attr_entities`],
+/// the official `decode_character_references(raw, true)`): a slot name is a SEMANTIC
+/// key — it drives slot routing, duplicate detection, the default-slot conflict, and
+/// the emitted `$$slots` object key — so `slot="foo&amp;bar"` names the slot `foo&bar`,
+/// exactly like official's parse-time decoded `Text.data`.
 fn static_slot_name(el: &SvelteElement, source: &str) -> Option<String> {
     el.attributes.iter().find_map(|a| match &a.kind {
         SvelteAttributeKind::Plain {
             name,
             value: Some(SvelteAttributeValue::Text(span)),
             ..
-        } if name == "slot" => Some(span_text(source, *span).to_string()),
+        } if name == "slot" => Some(decode_attr_entities(span_text(source, *span))),
         _ => None,
     })
 }
@@ -289,8 +389,11 @@ fn static_slot_name(el: &SvelteElement, source: &str) -> Option<String> {
 /// text, an element, an interpolation, a block, or a render/html tag) — an
 /// all-whitespace / comment-only run produces no `children` prop (the official
 /// `block.body.length === 0` skip).
-fn default_slot_has_content(source: &str, nodes: &[SvelteNode]) -> bool {
-    nodes.iter().any(|n| match n {
+fn default_slot_has_content<'n>(
+    source: &str,
+    nodes: impl IntoIterator<Item = &'n SvelteNode>,
+) -> bool {
+    nodes.into_iter().any(|n| match n {
         // Significant only when the text run is not pure ASCII whitespace.
         SvelteNode::Text(span) => !span_text(source, *span)
             .chars()

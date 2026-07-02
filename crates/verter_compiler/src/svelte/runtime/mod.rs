@@ -230,6 +230,10 @@ pub(super) struct LoweringCtx<'a> {
     /// lowering, tracked for the post-template `$state` finalizer (a template write flips
     /// the lowering to `$.state`) — the same write-gated pipeline as instance-script state.
     block_rune_tracking: Vec<state_prep::TrackedState>,
+    /// The SOURCE-LEVEL `slot=` attribute OWNER set (the direct slot-declaring
+    /// component children), recorded by the component slot decomposition and retained
+    /// on [`SvelteRuntimeIr::slot_attr_owners`] — see that field for the contract.
+    pub(super) slot_attr_owners: rustc_hash::FxHashSet<NodeId>,
 }
 
 /// A `{@render}` tag awaiting callee resolution: the node to finalize, the inner
@@ -537,6 +541,7 @@ pub fn lower_parsed_svelte_to_ir<'a>(
         errors,
         pending_renders: Vec::new(),
         block_rune_tracking: Vec::new(),
+        slot_attr_owners: rustc_hash::FxHashSet::default(),
     };
 
     // The root template scope owns the top-level template nodes.
@@ -598,6 +603,7 @@ pub fn lower_parsed_svelte_to_ir<'a>(
         template_scopes: ctx.template_scopes,
         nodes: ctx.nodes,
         ops: ctx.ops,
+        slot_attr_owners: ctx.slot_attr_owners,
     })
 }
 
@@ -1294,12 +1300,16 @@ fn resolve_render_callees(ctx: &mut LoweringCtx) {
             }
         };
         // Both call shapes carry the trailing call's argument spans; the callee
-        // discriminant (a `{#snippet}` NAME vs the dynamic prop/member/optional
-        // callee) is the only difference. Build the argument ExprIds ONCE so EVERY
-        // callee keeps its argument thunks (the `$.snippet(node, callee, …args)`
-        // shape) — not just the static snippet-name callee.
+        // discriminant (a `{#snippet}` NAME vs the dynamic prop/member callee) is the
+        // only difference. Build the argument ExprIds ONCE so EVERY callee keeps its
+        // argument thunks (the `$.snippet(node, callee, …args)` shape) — not just the
+        // static snippet-name callee.
         let (static_name, arg_spans) = match shape {
-            RenderCalleeShape::StaticName { name, args } => (Some(name), args),
+            RenderCalleeShape::StaticName {
+                name,
+                optional,
+                args,
+            } => (Some((name, optional)), args),
             RenderCalleeShape::Dynamic { args } => (None, args),
             // A SPREAD argument is an official HARD ERROR
             // (`render_tag_invalid_spread_argument`). Mark the node with the tag span;
@@ -1324,18 +1334,20 @@ fn resolve_render_callees(ctx: &mut LoweringCtx) {
             })
             .collect();
         // A static-name callee is a snippet call ONLY when it resolves to a
-        // `{#snippet}` NAME binding in scope; a prop / dynamic-snippet-value callee
-        // stays the provisional `Dynamic(inner)` node.
-        let snippet_binding = static_name.and_then(|name| {
+        // `{#snippet}` NAME binding in scope (the `optional` flag rides along — a
+        // resolved `row?.(…)` emits the direct optional call); a prop /
+        // dynamic-snippet-value callee stays the provisional `Dynamic(inner)` node.
+        let snippet_binding = static_name.and_then(|(name, optional)| {
             let binding = ctx.scopes.resolve(&ctx.bindings, render.scope, &name)?;
-            (ctx.bindings.get(binding).kind == BindingRuntimeKind::SnippetName).then_some(binding)
+            (ctx.bindings.get(binding).kind == BindingRuntimeKind::SnippetName)
+                .then_some((binding, optional))
         });
         if let IrNode::Tag(TagIr::Render { callee, args, .. }) = &mut ctx.nodes[node.0 as usize] {
-            if let Some(binding) = snippet_binding {
-                *callee = RenderCallee::Snippet(binding);
+            if let Some((binding, optional)) = snippet_binding {
+                *callee = RenderCallee::Snippet { binding, optional };
             }
             // Otherwise the callee stays the provisional `Dynamic(inner)` — correct
-            // for a prop / member / optional / ternary callee.
+            // for a prop / member / call-expression / ternary callee.
             *args = arg_ids;
         }
     }

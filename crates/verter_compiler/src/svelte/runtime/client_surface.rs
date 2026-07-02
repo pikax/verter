@@ -205,6 +205,17 @@ impl ClientSyntaxSurface {
             return Err(surface);
         }
         let facts = RefCell::new(SurfaceFacts::default());
+        // The VALID `slot`-attribute placements: the SOURCE-LEVEL slot-attribute OWNER
+        // set recorded at lowering — the lowered ids of exactly the DIRECT
+        // slot-declaring children of a component-family node. Accepting the static
+        // `slot` attribute EXACTLY on this set implements the official placement rule
+        // (a direct component child); every other position — including a child HOISTED
+        // into a slot region by a transparent `<svelte:fragment slot>` (a lowered
+        // region ROOT, but not a direct component child) — keeps the fail-closed
+        // refusal (official `slot_attribute_invalid_placement`). The gate must NEVER
+        // key on lowered slot-region-root membership: region roots include hoisted
+        // fragment children, which do not inherit slot-placement validity.
+        let slot_attr_owners = &ir.slot_attr_owners;
         for (idx, scope) in ir.template_scopes.iter().enumerate() {
             // A region root is the COMPONENT root or a BLOCK BODY root — the placement axis
             // the declaration-tag gate validates against. (A block body is its OWN scope, so
@@ -220,6 +231,7 @@ impl ClientSyntaxSurface {
                     root,
                     Namespace::Html,
                     &declared_root_names,
+                    slot_attr_owners,
                     &facts,
                     placement,
                 )?;
@@ -484,14 +496,81 @@ enum NodePlacement {
     Nested,
 }
 
+/// The UNIFIED `slot`-attribute choke-point — the SOLE `slot=` validation authority,
+/// applied to EVERY template node at [`classify_node`] entry, BEFORE any per-kind
+/// accept / fold / prop projection. Covering every node kind by construction means no
+/// attr-bearing host — regular element, component, or `<svelte:*>` special — can
+/// quietly route a `slot` attribute into a plain prop, an `$.attribute_effect` fold
+/// entry, or the skeleton.
+///
+/// - A DYNAMIC / MIXED `slot={x}` / `slot="a{x}"` is the official
+///   `slot_attribute_invalid` compile error ("slot attribute must be a static value")
+///   — fail closed on EVERY host, slot owners included.
+/// - A STATIC `slot="x"` is valid ONLY on a SOURCE-LEVEL slot OWNER (the node id is in
+///   the lowering's direct-slot-declaring-child set
+///   [`SvelteRuntimeIr::slot_attr_owners`] — the official
+///   `slot_attribute_invalid_placement` rule, restricted to the supported
+///   REGULAR-ELEMENT filler surface). A component / `<svelte:*>`-special filler is the
+///   deferred `$$slots` routing surface (ledger D-41): official ACCEPTS it, Verter
+///   fails it CLOSED here. Lowered slot-region-root membership is NOT the placement
+///   fact: a transparent `<svelte:fragment slot>`'s hoisted children are region roots
+///   but never valid `slot=` hosts.
+/// - A valid OWNER placement passes through: on a spread element the fold consumes it
+///   (official folds `{...p, slot: 'x'}`); otherwise the static-attr arm of
+///   [`classify_attr`] accepts it as a baked skeleton attribute.
+///
+/// A node kind with no attribute surface (text / comment / interpolation / block /
+/// tag) validates trivially.
+pub(super) fn validate_slot_placement(
+    node: &IrNode,
+    node_id: NodeId,
+    slot_attr_owners: &rustc_hash::FxHashSet<NodeId>,
+) -> Result<(), UnsupportedSvelteRuntimeSurface> {
+    let (attrs, span) = match node {
+        IrNode::Element(el) => (&el.attrs, el.span),
+        IrNode::Component(c) => (&c.attrs, c.span),
+        IrNode::Special(s) => (&s.attrs, s.span),
+        // No attribute surface — nothing can carry a `slot=`.
+        IrNode::Text { .. }
+        | IrNode::Comment { .. }
+        | IrNode::Interpolation { .. }
+        | IrNode::Block(_)
+        | IrNode::Tag(_) => return Ok(()),
+    };
+    for attr in attrs {
+        if let AttrIr::Dynamic { name, .. } | AttrIr::Mixed { name, .. } = attr {
+            if name == "slot" {
+                return Err(UnsupportedSvelteRuntimeSurface::DynamicAttribute {
+                    name: name.clone(),
+                    span,
+                });
+            }
+        }
+        if let AttrIr::Static { name, .. } = attr {
+            if name == "slot" && !slot_attr_owners.contains(&node_id) {
+                return Err(UnsupportedSvelteRuntimeSurface::DynamicAttribute {
+                    name: name.clone(),
+                    span,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 fn classify_node(
     ir: &SvelteRuntimeIr,
     node_id: NodeId,
     namespace: Namespace,
     declared_root_names: &rustc_hash::FxHashSet<String>,
+    slot_attr_owners: &rustc_hash::FxHashSet<NodeId>,
     facts: &RefCell<SurfaceFacts>,
     placement: NodePlacement,
 ) -> Result<(), UnsupportedSvelteRuntimeSurface> {
+    // The unified `slot`-attribute choke-point runs for EVERY node kind BEFORE the
+    // per-kind arms — no host arm can accept, fold, or prop-project a `slot=` the
+    // gate refuses.
+    validate_slot_placement(ir.node(node_id), node_id, slot_attr_owners)?;
     match ir.node(node_id) {
         // A text node's literal chunk must be SIMPLE ASCII (no HTML entity, no
         // tab/newline/repeated-space, no escaping need). A complex chunk needs the
@@ -660,6 +739,7 @@ fn classify_node(
                     child,
                     child_namespace,
                     declared_root_names,
+                    slot_attr_owners,
                     facts,
                     NodePlacement::Nested,
                 )?;
@@ -672,7 +752,10 @@ fn classify_node(
         // INDEPENDENTLY by the outer scope loop (they are their own template scopes).
         // Children are NOT recursed here — the slot regions own that. Component `let:` is the
         // component-context slot-prop path (NOT the element-context `let:` refusal, which
-        // stays closed).
+        // stays closed). A `slot=` on the component itself never reaches projection —
+        // the unified choke-point above already refused it (a component is never a
+        // slot owner; its `$$slots` filler routing is the deferred D-41 surface), so
+        // this accept can never quietly project `slot` as a plain prop.
         IrNode::Component(_) => Ok(()),
         // `<svelte:options>` is a compile-option carrier. The component-INVOCATION specials
         // (`<svelte:component>` / `<svelte:self>`) are ACCEPTED, projected to a component
@@ -682,6 +765,9 @@ fn classify_node(
         // standalone transparent-fragment surface stays CLOSED. Every OTHER `<svelte:*>`
         // special — the host / renderable specials (`Head` / `Window` / `Document` / `Body` /
         // `Element` / `Boundary`) — stays CLOSED (those hosts are not yet supported).
+        // A `slot=` on ANY special never reaches these arms — the unified choke-point
+        // above already refused it (a special is never a slot owner), so an accepting
+        // arm can never quietly fold or prop-project a `slot` attribute.
         IrNode::Special(s) if s.kind == SpecialKind::Options => Ok(()),
         IrNode::Special(s) if matches!(s.kind, SpecialKind::Component | SpecialKind::SelfRef) => {
             Ok(())
@@ -907,6 +993,11 @@ fn classify_attr(
     // The accepted element's tag string (for the bind classifier's `input` host
     // check). `var_stem()` is the exact lowercase tag for every allowlist element.
     let tag = element.var_stem();
+    // NOTE: `slot` attribute validity (dynamic/mixed refusal + static placement) is
+    // owned by the unified choke-point ([`validate_slot_placement`] at
+    // [`classify_node`] entry) — an attr reaching this classifier carries either no
+    // `slot` or a VALID owner-placed static `slot` (which the spread fold or the
+    // static-attr arm accepts below).
     // A SPREAD on the element switches its WHOLE attribute strategy to the single
     // `$.attribute_effect` fold: every co-located FOLDABLE attribute (static / dynamic /
     // mixed / `class:` / `style:` / a plain `class` / `style`) moves into the runtime
@@ -1004,6 +1095,15 @@ fn classify_attr(
             // accepts the mixed form, but 5c keeps the strict co-location boundary.
             if super::bind_target_names::default_attr_has_matching_bind(name, element, ir, node_id)
             {
+                return Ok(());
+            }
+            // (a5) A STATIC `slot="x"` at VALID component-child slot placement (the
+            // unified choke-point — `validate_slot_placement` at `classify_node` entry
+            // — already validated the node is a SOURCE-LEVEL slot owner: a direct
+            // slot-declaring regular-element component child) bakes into the cloned
+            // skeleton verbatim — the official output keeps the slot attribute in the
+            // template HTML (`<span slot="foo-bar"> </span>`).
+            if name == "slot" {
                 return Ok(());
             }
             // (b) The STRICT FINITE static-attr allowlist is the SOLE acceptance

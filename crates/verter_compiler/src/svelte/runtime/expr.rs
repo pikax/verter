@@ -1120,12 +1120,15 @@ pub(crate) struct DebugIdentifier {
 /// The parsed shape of a `{@render …}` call's callee.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RenderCalleeShape {
-    /// A static (non-optional) call whose callee is a plain identifier, e.g.
-    /// `row(1)`. Carries the callee identifier name and each argument's
+    /// A call whose callee is a plain identifier (after peeling transparent author
+    /// parens), e.g. `row(1)`, `(row)(1)`, or the OPTIONAL `row?.(1)`. Carries the
+    /// callee identifier name, whether the call is optional, and each argument's
     /// `(start, end)` byte span relative to the inner text.
     StaticName {
         /// The callee identifier name.
         name: String,
+        /// Whether the trailing call is the optional `?.()` form.
+        optional: bool,
         /// The argument expression spans, relative to the inner text.
         args: Vec<(u32, u32)>,
     },
@@ -1150,10 +1153,12 @@ pub enum RenderCalleeShape {
 
 /// Parse a `{@render …}` tag's inner text into its callee shape.
 ///
-/// A plain (non-optional) call with a plain-identifier callee (`row(1)`) yields
-/// [`RenderCalleeShape::StaticName`] (the static-snippet-name candidate); ANYTHING
-/// else — an optional call (`getSnippet()?.()`), a member/computed callee
-/// (`obj.snip(x)`), or a non-call expression — yields [`RenderCalleeShape::Dynamic`].
+/// A call whose callee peels (through transparent author parens) to a plain
+/// identifier — `row(1)`, `(row)(1)`, or the optional `row?.(1)` — yields
+/// [`RenderCalleeShape::StaticName`] (the static-snippet-name candidate, carrying the
+/// `optional` flag); ANYTHING else — a call-expression callee (`getSnippet()?.()`), a
+/// member/computed callee (`obj.snip(x)`), or a non-call expression — yields
+/// [`RenderCalleeShape::Dynamic`].
 /// In BOTH call shapes the trailing call's ARGUMENT spans (relative to the inner
 /// text) are carried, so a prop/member/optional callee keeps its argument thunks
 /// (the official `$.snippet(node, callee, …args)` shape). This is purely structural
@@ -1209,16 +1214,22 @@ pub(crate) fn parse_render_call(inner_text: &str) -> Result<RenderCalleeShape, (
             span.end.saturating_sub(prefix_len),
         ));
     }
-    // A plain (non-optional) call with a plain-identifier callee is the static
-    // snippet-name candidate; an optional call or a member/computed callee stays
-    // the dynamic callee, carrying the same argument thunks.
-    if !call.optional {
-        if let Expression::Identifier(callee) = &call.callee {
-            return Ok(RenderCalleeShape::StaticName {
-                name: callee.name.to_string(),
-                args,
-            });
-        }
+    // A call whose callee is a plain identifier — after peeling TRANSPARENT author
+    // parens (`(row)(1)` roots at `row`; estree/acorn has no ParenthesizedExpression
+    // node, so official sees the bare identifier) — is the static snippet-name
+    // candidate, for BOTH the plain and the optional (`row?.(…)`) call. A
+    // member/computed/call callee stays the dynamic callee, carrying the same
+    // argument thunks.
+    let mut callee = &call.callee;
+    while let Expression::ParenthesizedExpression(p) = callee {
+        callee = &p.expression;
+    }
+    if let Expression::Identifier(ident) = callee {
+        return Ok(RenderCalleeShape::StaticName {
+            name: ident.name.to_string(),
+            optional: call.optional,
+            args,
+        });
     }
     Ok(RenderCalleeShape::Dynamic { args })
 }
