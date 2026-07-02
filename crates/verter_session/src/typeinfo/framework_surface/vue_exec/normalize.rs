@@ -296,6 +296,11 @@ pub(crate) fn emits_from_typeinfo_surface(
     let context = ProjectionReductionContext::published(ProjectionMode::Navigate);
 
     let mut emits: Vec<AnalyzedEmitField> = Vec::new();
+    // Node-domain DISCOVERY fact: set at the `event_names` acceptance below —
+    // BEFORE any payload materialization — and consumed by the property-style
+    // fallback gate. Never derived from `emits` cardinality (a DTO collection
+    // carrying terminal-materialized payloads is not a decide surface).
+    let mut call_signature_emit_found = false;
 
     // (1) Call-signature emits — decided in the NODE domain.
     for sig in macro_surface.surface.call_signatures.iter() {
@@ -307,6 +312,8 @@ pub(crate) fn emits_from_typeinfo_surface(
         let Some(names) = view.event_names(context) else {
             continue;
         };
+        // `Some` means at least one event name — node-domain discovery succeeded.
+        call_signature_emit_found = true;
         // Payload = the realized signature's params AFTER the leading event-name
         // param (`[1..]`), materialized ONCE at the terminal sink. `event_names`
         // above already realized the signature (its `first_param`), so `signature`
@@ -345,10 +352,12 @@ pub(crate) fn emits_from_typeinfo_surface(
         }
     }
 
-    // (2) Property-style emits — fallback only when no call-signature emit fired.
-    // The member materialization lives in the terminal `property_style_emit_fields`
-    // sink so this normalizer mints nothing directly.
-    if emits.is_empty() {
+    // (2) Property-style emits — fallback gated on the node-domain DISCOVERY
+    // fact (`call_signature_emit_found`), NOT on `emits` cardinality: a payload
+    // materialization miss on a DISCOVERED emit does not reroute to the property
+    // rail. The member materialization lives in the terminal
+    // `property_style_emit_fields` sink so this normalizer mints nothing directly.
+    if !call_signature_emit_found {
         emits = property_style_emit_fields(ctx, resolved);
     }
 
