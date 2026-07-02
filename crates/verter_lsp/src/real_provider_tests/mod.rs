@@ -42,4 +42,5 @@ mod import_matrix;
 mod multi_fixture;
 mod references;
 mod rename;
+mod request_surface;
 mod signature_help;
