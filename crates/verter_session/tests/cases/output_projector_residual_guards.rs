@@ -12083,7 +12083,7 @@ fn authority_scopes_no_unsafe_self_test_discriminates() {
 // `docs/arch/hot-materialize-tripwire-residual-deferral.md`.
 //
 // SC-first record (structured, machine-greppable):
-//   scanner_invariant: stage9_residual_hot_materialize_syntactic_tripwire
+//   scanner_invariant: hot_materialize_syntactic_tripwire_residual_backstop
 //   scanner_justification: structural primary is OutputProjector + NoTypeExpr + node-domain facts; scanner does not prove semantic identity and is frozen after the inner-name laundering escape
 //   mechanism_ruling: codex-reconciliation-hot-materialize-sc-first-2026-06-27
 //   hardening_rounds: 3 (round 3 = receiver-taint soundness completion (collection-mutation taint for push/insert/extend), authorized by structural-decision reopen ruling codex-s9-5c-scope-consult-2026-07-02 — classified scanner hardening / false-negative soundness completion of the existing taint rail, NOT an allowlist broadening, NOT a spelling addition; further add/broaden still requires a new ruling); escape_stop: meta_resolve/registry_materialize.rs:142 inner collision; no further add/broaden
