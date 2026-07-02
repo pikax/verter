@@ -19,7 +19,7 @@
 //! normalizer) rather than duplicating its carrier walk, and OWNS the
 //! Union/Intersection callable-arm recursion so the Vue and Svelte normalizers
 //! never iterate `SemanticNodeData::Union` themselves.
-#![allow(dead_code)] // view methods are consumed by the Vue/Svelte framework-surface normalizers; the module allow covers the view methods without a production caller yet
+#![allow(dead_code)] // The view is the production decider — the Vue/Svelte framework-surface normalizers consume it. The module allow remains for the completeness methods no normalizer currently demands: `CallableNodeView::first_param_object_surface` and `SignatureNodeView::{return_type, return_type_span}`.
 
 use std::sync::Arc;
 

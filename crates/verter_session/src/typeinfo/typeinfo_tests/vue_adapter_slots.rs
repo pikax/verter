@@ -775,3 +775,62 @@ fn define_slots_nullable_slot_is_intentionally_dropped() {
         slots.iter().map(|s| s.name.as_str()).collect::<Vec<_>>()
     );
 }
+
+// ---------------------------------------------------------------------------
+// (4e) defineSlots normalizer — a slot callback with TWO parameters publishes
+//      bindings from ONLY the FIRST parameter. Vue passes a single slot-props
+//      object to a scoped slot; trailing parameters are not part of the slot
+//      contract, so their members must never surface as template bindings.
+//
+//      Discriminating (behavioral lock on the first-param rule in
+//      `combine_slot_arms`): an arm combiner that collected ALL positional
+//      params (e.g. intersecting every param's object surface) would publish
+//      `unrelated` from the second parameter — this test FAILS against such
+//      an impl. Unlike the source-text guard
+//      `vue_shared_slot_normalizer_uses_first_param_only`, this asserts the
+//      published behavior, immune to the source's syntactic form.
+// ---------------------------------------------------------------------------
+
+const VUE_SLOTS_TWO_PARAM: &str = r#"<script setup lang="ts">
+defineSlots<{
+  default(props: { item: string }, extra: { unrelated: boolean }): any;
+}>();
+</script>
+"#;
+
+#[test]
+fn define_slots_two_param_callback_binds_first_param_only() {
+    const FILE: &str = "/w/SlotsTwoParam.vue";
+    let host = make_host();
+    upsert(&host, FILE, VUE_SLOTS_TWO_PARAM);
+
+    let request = props_request(&host, FILE, AnalyzedMacroKind::DefineSlots);
+    let surface = host
+        .resolve_vue_macro_surface(&request)
+        .expect("defineSlots resolves a surface");
+    let slots =
+        slots_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+
+    let default_slot = slots
+        .iter()
+        .find(|s| s.name == "default")
+        .expect("the two-param `default` slot callback is still a published slot");
+
+    // POSITIVE: the first parameter's object members are the bindings.
+    let binding_names: Vec<&str> = default_slot
+        .bindings
+        .iter()
+        .map(|b| b.name.as_str())
+        .collect();
+    assert_eq!(
+        binding_names,
+        vec!["item"],
+        "bindings come from the FIRST parameter's object ONLY"
+    );
+    // NEGATIVE: the second parameter contributes NO binding.
+    assert!(
+        !default_slot.bindings.iter().any(|b| b.name == "unrelated"),
+        "the second parameter (`extra: {{ unrelated }}`) must NOT contribute a \
+         binding, got {binding_names:?}"
+    );
+}

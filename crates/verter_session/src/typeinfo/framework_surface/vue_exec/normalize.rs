@@ -496,7 +496,7 @@ pub(crate) fn slots_from_typeinfo_surface(
             // generic slot alias lowering to an `InstantiationRef` / alias
             // carrier) — the view realizes it BEFORE the function-like filter.
             let view = CallableNodeView::new(&dispatch, member.value);
-            // Function-like FILTER + ArmCombine determination (node-domain): a
+            // Function-like FILTER + return-combiner selection (node-domain): a
             // member that does not realize to a callable is not a slot (dropped).
             // The realized root's top-level kind selects the return combiner — a
             // `Union` of function arms unions returns; a single `Function` or an
