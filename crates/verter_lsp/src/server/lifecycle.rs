@@ -714,6 +714,15 @@ pub(super) async fn handle_did_change(
                     if let Some(ide_path) = server.eager_syncable_ide_path_for_uri(&uri) {
                         if let Err(e) = sync.sync_tsx(&ide_path, &ide.code).await {
                             tracing::warn!("did_change: eager tsx sync failed: {e}");
+                        } else {
+                            // Record a fresh generation pinning the EXACT IDE bytes
+                            // just synced (interactive queries capture this surface).
+                            server.record_carrier_ide_snapshot(
+                                &canonical_id,
+                                &ide_path,
+                                &ide.code,
+                                ide.source_map.as_deref(),
+                            );
                         }
                     }
                 }

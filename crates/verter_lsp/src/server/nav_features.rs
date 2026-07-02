@@ -174,6 +174,11 @@ pub(super) async fn handle_hover(
                 None
             };
 
+            // Post-await validation: a hover produced against a surface that no
+            // longer matches must be DROPPED (fail closed), never mapped through
+            // a superseded context.
+            let type_hover = type_hover.filter(|_| server.provider_context_still_valid(uri, &ctx));
+
             // If TSGO returned a result, merge and return.
             if type_hover.is_some() {
                 return Ok(merge::merge_hover(
@@ -216,6 +221,10 @@ pub(super) async fn handle_hover(
                                 if let Ok(redirect_hover) =
                                     tp.get_hover(&ctx.tsx_path, redirect_tsx).await
                                 {
+                                    // Post-await validation (fail closed): drop the
+                                    // provider hover on a superseded surface.
+                                    let redirect_hover = redirect_hover
+                                        .filter(|_| server.provider_context_still_valid(uri, &ctx));
                                     return Ok(merge::merge_hover(
                                         verter_result,
                                         redirect_hover,
@@ -751,6 +760,23 @@ pub(super) async fn handle_completion(
                                     type_result = retry_result;
                                 }
                             }
+                        }
+
+                        // Post-await validation: completion items produced against a
+                        // surface that no longer matches must be DROPPED (fail
+                        // closed) — VS Code re-requests after the debounced sync
+                        // lands. The verter-only items are still served.
+                        if !server.provider_context_still_valid(uri, &ctx) {
+                            tracing::debug!(
+                                "completion: dropping provider items — captured surface \
+                                 no longer valid"
+                            );
+                            return Ok(verter_items.map(|items| {
+                                CompletionResponse::List(CompletionList {
+                                    is_incomplete: verter_is_incomplete,
+                                    items,
+                                })
+                            }));
                         }
 
                         let (merged, is_incomplete) = merge::merge_completions(

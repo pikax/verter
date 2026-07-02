@@ -48,12 +48,21 @@ impl VerterLanguageServer {
         let verter_diags = self.compute_verter_diagnostics(uri);
 
         if let Some(tp) = &self.type_provider {
-            match self.ide_context(uri) {
-                Some((tsx_path, tsx_content, mapper)) => {
-                    let tsx_li = LineIndex::new(&tsx_content, self.documents.encoding());
-                    let carrier_li = self.documents.get(uri).map(|d| d.line_index.clone());
-                    match (tp.get_diagnostics(&tsx_path).await, carrier_li) {
-                        (Ok(type_diags), Some(carrier_li)) => {
+            match self.provider_projection_context(uri) {
+                Some(ctx) => {
+                    match tp.get_diagnostics(&ctx.provider_path).await {
+                        Ok(type_diags) => {
+                            // Post-await validation: diagnostics produced against a
+                            // surface that no longer matches must be DROPPED (fail
+                            // closed) — the debounced coordinator republishes after
+                            // the next sync lands.
+                            if !self.provider_request_surface_still_valid(uri, &ctx.snapshot) {
+                                tracing::debug!(
+                                    "publish_full_diagnostics: dropping provider diagnostics \
+                                     — captured surface no longer valid"
+                                );
+                                return verter_diags;
+                            }
                             tracing::debug!(
                                 "publish_full_diagnostics: type provider returned {} for {}",
                                 type_diags.len(),
@@ -69,10 +78,10 @@ impl VerterLanguageServer {
                             merge::merge_diagnostics(
                                 verter_diags,
                                 type_diags,
-                                &tsx_path,
-                                &tsx_li,
-                                &mapper,
-                                &carrier_li,
+                                &ctx.provider_path,
+                                &ctx.provider_line_index,
+                                &ctx.mapper,
+                                &ctx.source_line_index,
                                 Some(&|ide_path: &str| self.external_ide_context(ide_path)),
                                 &carrier_source_exists,
                                 negotiated_encoding,
@@ -83,14 +92,13 @@ impl VerterLanguageServer {
                                 },
                             )
                         }
-                        (Err(e), _) => {
+                        Err(e) => {
                             tracing::warn!(
                                 "publish_full_diagnostics: type provider error for {}: {e}",
                                 uri.as_str()
                             );
                             verter_diags
                         }
-                        _ => verter_diags,
                     }
                 }
                 None => verter_diags,
@@ -245,6 +253,14 @@ impl VerterLanguageServer {
                 } else {
                     committed_state.set_background_loaded(ProviderPathKind::Ide, true);
                     synced_kinds.push(ProviderPathKind::Ide);
+                    // Record a fresh generation pinning the EXACT IDE bytes just
+                    // synced (interactive queries capture this surface).
+                    self.record_carrier_ide_snapshot(
+                        &canonical_id,
+                        &ide_path,
+                        &ide.code,
+                        ide.source_map.as_deref(),
+                    );
                     tracing::info!("sync_ide: ok for {}", ide_path);
                 }
                 self.commit_and_close_after_sync(
@@ -976,6 +992,14 @@ impl VerterLanguageServer {
 
         match result {
             Ok(Ok(())) => {
+                // Record a fresh generation pinning the EXACT IDE bytes just
+                // synced (interactive queries capture this surface).
+                self.record_carrier_ide_snapshot(
+                    &canonical_id,
+                    &ide_path,
+                    &ide.code,
+                    ide.source_map.as_deref(),
+                );
                 // Commit state
                 let mut state = if unresolved {
                     crate::provider_sync::ProviderSyncState {
@@ -1075,6 +1099,14 @@ impl VerterLanguageServer {
 
         match sync.open_tsx(&ide_path, &ide.code).await {
             Ok(()) => {
+                // Record a fresh generation pinning the EXACT IDE bytes just
+                // reopened (interactive queries capture this surface).
+                self.record_carrier_ide_snapshot(
+                    &canonical_id,
+                    &ide_path,
+                    &ide.code,
+                    ide.source_map.as_deref(),
+                );
                 if let Some(mut state) = self.provider_sync_state_for_source(&canonical_id) {
                     state.ide_path = Some(ide_path);
                     self.commit_provider_sync_state(&canonical_id, state);
@@ -1416,11 +1448,135 @@ impl VerterLanguageServer {
         Some((ctx.provider_path, ctx.provider_content, ctx.mapper))
     }
 
+    /// Capture the immutable provider-surface snapshot an interactive
+    /// provider-backed query for `uri` must be built from — the request-scoped
+    /// capture half of the fail-closed request-snapshot discipline.
+    ///
+    /// ONE point resolves everything: canonical id → projection kind → the
+    /// surface's provider path → the store's CURRENT generation-stamped
+    /// [`ProviderSurfaceSnapshot`]. The snapshot is immutable and internally
+    /// consistent (content, source map, carrier source, line indexes all
+    /// recorded from the SAME sync), so no interleaving `did_change`/`did_close`
+    /// can tear the tuple the way the former independent live reads could.
+    ///
+    /// Fail-closed gates (any miss ⇒ `None`, never a partial/torn context):
+    /// - no recorded CURRENT surface at the resolved provider path;
+    /// - a surface whose kind does not match the document's projection
+    ///   (`CarrierIde` for a carrier, `Shadow` for a self-file rune module);
+    /// - a surface recorded for a DIFFERENT source canonical;
+    /// - an open-document source that no longer byte-matches the captured
+    ///   carrier source (an edit landed after the last successful sync — the
+    ///   provider still holds the old surface, so a fresh mapper/content pair
+    ///   would be torn, not merely stale).
+    pub(super) fn capture_provider_request_surface(
+        &self,
+        uri: &Uri,
+    ) -> Option<Arc<crate::provider_surface_store::ProviderSurfaceSnapshot>> {
+        let canonical_id = self.documents.get_canonical_id(uri)?;
+        self.documents.host().ensure_loaded(&canonical_id);
+
+        let projection = self.documents.get_projection(uri)?;
+        let store = self.documents.provider_surfaces();
+        let snapshot = match projection {
+            crate::documents::provider_projection::DocumentProviderProjection::CarrierIde {
+                ..
+            } => {
+                // Carrier: the surface is keyed by the committed live carrier
+                // IDE path. The committed-path read is a KEY lookup only — the
+                // snapshot it resolves to is the sole content/mapper authority,
+                // and the source/canonical gates below reject a stale key.
+                let provider_path = self.active_ide_path_for_uri(uri)?;
+                let snapshot = store.current_snapshot(&provider_path)?;
+                (snapshot.kind == crate::provider_surface_store::ProviderSurfaceKind::CarrierIde)
+                    .then_some(snapshot)?
+            }
+            crate::documents::provider_projection::DocumentProviderProjection::SelfFile {
+                ..
+            } => {
+                // Self-file rune module: the provider buffer is served from the
+                // module's OWN canonical path.
+                let snapshot = store.current_snapshot(&canonical_id)?;
+                (snapshot.kind == crate::provider_surface_store::ProviderSurfaceKind::Shadow)
+                    .then_some(snapshot)?
+            }
+        };
+        if snapshot.source_canonical.as_ref() != canonical_id.as_str() {
+            return None;
+        }
+        self.request_surface_matches_live_source(uri, &snapshot)
+            .then_some(snapshot)
+    }
+
+    /// Whether the OPEN document's live source still byte-matches the captured
+    /// surface's carrier source — the source-identity half of the request-
+    /// snapshot validation. A closed document (registry miss) does NOT match
+    /// (fail closed: a `did_close` racing the request retires the context).
+    pub(super) fn request_surface_matches_live_source(
+        &self,
+        uri: &Uri,
+        snapshot: &crate::provider_surface_store::ProviderSurfaceSnapshot,
+    ) -> bool {
+        let Some(doc) = self.documents.get(uri) else {
+            return false;
+        };
+        // Cheap same-allocation short-circuit before hashing.
+        if std::ptr::eq(doc.source.as_ptr(), snapshot.carrier_source.as_ptr())
+            && doc.source.len() == snapshot.carrier_source.len()
+        {
+            return true;
+        }
+        crate::provider_surface_store::ContentHash::of(&doc.source) == snapshot.source_hash
+    }
+
+    /// Whether a captured request surface is STILL valid — the post-await
+    /// validation gate every provider-backed handler runs before mapping or
+    /// publishing a provider response. Both halves are required:
+    /// - `captured_snapshot_still_honored`: the store's current generation for
+    ///   the path still agrees with the captured one (a mid-request re-sync
+    ///   advancing the surface, or a close retiring it, invalidates);
+    /// - the open document source still byte-matches the captured carrier
+    ///   source (a mid-request edit invalidates even while the surface
+    ///   generation is unchanged).
+    ///
+    /// `false` ⇒ the provider response was produced against a surface that no
+    /// longer matches the live state; mapping it would be WRONG (not merely
+    /// stale) — the caller must DROP the provider contribution.
+    pub(super) fn provider_request_surface_still_valid(
+        &self,
+        uri: &Uri,
+        snapshot: &crate::provider_surface_store::ProviderSurfaceSnapshot,
+    ) -> bool {
+        self.documents
+            .provider_surfaces()
+            .captured_snapshot_still_honored(snapshot)
+            && self.request_surface_matches_live_source(uri, snapshot)
+    }
+
+    /// Post-await validation for a [`TypeProviderContext`]-carrying handler:
+    /// `true` iff the context's captured surface is still honored AND the open
+    /// document still matches it. On `false` the handler drops the provider
+    /// contribution (fail closed).
+    pub(super) fn provider_context_still_valid(
+        &self,
+        uri: &Uri,
+        ctx: &super::TypeProviderContext,
+    ) -> bool {
+        self.provider_request_surface_still_valid(uri, &ctx.snapshot)
+    }
+
     /// The generalized per-document provider-projection query context, serving
     /// BOTH the carrier-IDE projection (`.vue` / `.svelte` → IDE TSX) and the
     /// self-file projection (`.svelte.ts` / `.svelte.js` rune module → own-path
     /// provider buffer). This is the SOLE query path — there is no parallel
     /// rune-only query path.
+    ///
+    /// Built EXCLUSIVELY from ONE captured immutable
+    /// [`ProviderSurfaceSnapshot`](crate::provider_surface_store::ProviderSurfaceSnapshot)
+    /// (see [`Self::capture_provider_request_surface`]): the provider path,
+    /// content, mapper, and BOTH line indexes all come from the same recorded
+    /// surface, so the tuple can never be torn by a concurrent
+    /// `did_change`/`did_close`. A surface with no usable source map fails
+    /// closed (`None`) — a provider result could not be mapped back.
     ///
     /// - `provider_path`: the path the TypeProvider opened — the carrier IDE
     ///   path for a carrier, or the module's OWN canonical id for a self-file
@@ -1429,92 +1585,29 @@ impl VerterLanguageServer {
     ///   TSX, or `<rune prelude> + <rewritten module bytes>`).
     /// - `mapper`: the unified source↔provider mapper (projection-agnostic).
     /// - `provider_line_index` / `source_line_index`: line indexes over the
-    ///   provider content and the user source.
+    ///   captured provider content and captured carrier source, in the
+    ///   session's negotiated encoding.
+    /// - `snapshot`: the captured surface itself, for the post-await
+    ///   re-validation gate ([`Self::provider_request_surface_still_valid`]).
     pub(super) fn provider_projection_context(
         &self,
         uri: &Uri,
     ) -> Option<ProviderProjectionContext> {
-        let canonical_id = self.documents.get_canonical_id(uri)?;
-        self.documents.host().ensure_loaded(&canonical_id);
-
-        let projection = self.documents.get_projection(uri)?;
-        match projection {
-            crate::documents::provider_projection::DocumentProviderProjection::CarrierIde {
-                ..
-            } => {
-                // Carrier: the provider buffer is the IDE TSX; the path is the
-                // committed live carrier IDE path.
-                let ide = self.documents.get_ide(uri)?;
-                let mapper = self.documents.get_position_mapper(uri)?;
-                let provider_path = self.active_ide_path_for_uri(uri)?;
-                let provider_content = ide.code;
-                let provider_line_index =
-                    LineIndex::new(&provider_content, self.documents.encoding());
-                let source_line_index = self.documents.get(uri)?.line_index.clone();
-                Some(ProviderProjectionContext {
-                    provider_path,
-                    provider_content,
-                    mapper,
-                    provider_line_index,
-                    source_line_index,
-                })
-            }
-            crate::documents::provider_projection::DocumentProviderProjection::SelfFile {
-                ..
-            } => {
-                // Self-file rune module: the provider buffer is served from the
-                // module's OWN canonical path (`<rune prelude> + <rewritten
-                // module bytes>`). Build the provider content from the document
-                // source through the SAME rune-module + rewrite pipeline the
-                // background sync uses, so the own-buffer query is queryable
-                // before resolver ownership is ready (empty rewrites then).
-                let doc = self.documents.get(uri)?;
-                let source = doc.source.clone();
-                let source_line_index = doc.line_index.clone();
-                let file_language = self
-                    .documents
-                    .host()
-                    .language_classifier()
-                    .classify(&canonical_id);
-                drop(doc);
-
-                let mapper = self.documents.get_position_mapper(uri)?;
-                let provider_content: Arc<str> = Arc::from(self.self_file_provider_content(
-                    &canonical_id,
-                    &file_language,
-                    &source,
-                )?);
-                let provider_line_index =
-                    LineIndex::new(&provider_content, self.documents.encoding());
-                Some(ProviderProjectionContext {
-                    provider_path: canonical_id,
-                    provider_content,
-                    mapper,
-                    provider_line_index,
-                    source_line_index,
-                })
-            }
-        }
-    }
-
-    /// Build the self-file provider content (`<rune prelude> + <rewritten
-    /// module bytes>`) for a rune module from its document source, applying the
-    /// resolver-backed import-specifier rewrites when a published resolver is
-    /// available (empty otherwise). This is the same pipeline
-    /// `prepare_non_carrier_provider_sync` uses, sourced from the OPEN buffer.
-    fn self_file_provider_content(
-        &self,
-        canonical_id: &str,
-        file_language: &verter_session::FileLanguage,
-        source: &str,
-    ) -> Option<String> {
-        super::server_utils::self_file_provider_content(
-            &self.documents,
-            self.published_resolver().as_ref(),
-            canonical_id,
-            file_language,
-            source,
-        )
+        let snapshot = self.capture_provider_request_surface(uri)?;
+        // No usable source map ⇒ the provider's offsets could not be mapped
+        // back onto the carrier ⇒ fail closed.
+        let mapper = snapshot.source_map.as_ref().map(|m| (**m).clone())?;
+        let encoding = self.documents.encoding();
+        let provider_line_index = LineIndex::new(&snapshot.provider_content, encoding.clone());
+        let source_line_index = LineIndex::new(&snapshot.carrier_source, encoding);
+        Some(ProviderProjectionContext {
+            provider_path: snapshot.stamp.provider_path.to_string(),
+            provider_content: Arc::clone(&snapshot.provider_content),
+            mapper,
+            provider_line_index,
+            source_line_index,
+            snapshot,
+        })
     }
 
     /// Sync an OPEN rune module's self-file provider buffer to the provider as
@@ -1663,6 +1756,11 @@ impl VerterLanguageServer {
 
         match result {
             Ok(()) => {
+                // Record a fresh generation pinning the EXACT IDE bytes just
+                // synced (before `ide_path` is moved). No source map in scope
+                // here → the choke attaches the live IDE artifact's map only if
+                // it still byte-matches `ide_code`.
+                self.record_carrier_ide_snapshot(canonical_id, &ide_path, ide_code, None);
                 state.ide_path = Some(ide_path);
                 state.ide_background_loaded = true;
                 self.commit_provider_sync_state(canonical_id, state);
@@ -1938,6 +2036,15 @@ impl VerterLanguageServer {
                                     committed_state
                                         .set_background_loaded(ProviderPathKind::Ide, true);
                                     synced_kinds.push(ProviderPathKind::Ide);
+                                    // Record a fresh generation pinning the EXACT IDE
+                                    // bytes just synced (interactive queries capture
+                                    // this surface).
+                                    self.record_carrier_ide_snapshot(
+                                        canonical_id,
+                                        &ide_path,
+                                        &ide.code,
+                                        ide.source_map.as_deref(),
+                                    );
                                 } else if let Err(error) = result {
                                     tracing::warn!(
                                         "sync_imported_carrier_api_lightweight: failed for {ide_path}: {error}"
@@ -2191,6 +2298,14 @@ impl VerterLanguageServer {
                     if result.is_ok() {
                         committed_state.set_background_loaded(ProviderPathKind::Ide, true);
                         synced_kinds.push(ProviderPathKind::Ide);
+                        // Record a fresh generation pinning the EXACT IDE bytes just
+                        // synced (interactive queries capture this surface).
+                        self.record_carrier_ide_snapshot(
+                            canonical_id,
+                            &tsx_path,
+                            &ide.code,
+                            ide.source_map.as_deref(),
+                        );
                     } else if let Err(e) = result {
                         tracing::warn!("resync_background: failed to sync {canonical_id}: {e}");
                     }

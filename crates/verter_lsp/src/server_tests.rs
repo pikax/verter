@@ -1159,7 +1159,15 @@ fn hover_text(hover: Option<Hover>) -> String {
     }
 }
 
+/// Build a [`TypeProviderContext`] for tests through the SAME captured-surface
+/// path production uses. Tests drive provider sync through many entry points;
+/// when a test set up its document WITHOUT completing a recorded sync, seed the
+/// committed sync state + recorded surface from the live artifacts (the exact
+/// data a successful sync would have recorded) and capture again.
 fn synced_type_provider_context(server: &VerterLanguageServer, uri: &Uri) -> TypeProviderContext {
+    if let Some(ctx) = server.type_provider_context(uri) {
+        return ctx;
+    }
     let canonical_id = server
         .documents
         .get_canonical_id(uri)
@@ -1169,28 +1177,24 @@ fn synced_type_provider_context(server: &VerterLanguageServer, uri: &Uri) -> Typ
         .documents
         .get_ide(uri)
         .expect("IDE output should exist");
-    let mapper = server
-        .documents
-        .get_position_mapper(uri)
-        .expect("position mapper should exist");
     let tsx_path = server
         .active_ide_path_for_uri(uri)
         .or_else(|| server.target_ide_path_for_uri(uri))
         .expect("type provider path should exist");
-    let tsx_line_index = LineIndex::new(&ide.code, server.documents.encoding());
-    let carrier_line_index = server
-        .documents
-        .get(uri)
-        .expect("document should exist")
-        .line_index
-        .clone();
-    TypeProviderContext {
-        tsx_path,
-        tsx_content: ide.code,
-        mapper,
-        tsx_line_index,
-        carrier_line_index,
-    }
+    // Simulate the state a completed successful IDE sync commits + records.
+    let mut state = server
+        .provider_sync_state_for_source(&canonical_id)
+        .unwrap_or_else(|| ProviderSyncState {
+            owner_binding: crate::provider_sync::ProviderOwnerBinding::Unresolved,
+            ..Default::default()
+        });
+    state.ide_path = Some(tsx_path.clone());
+    state.ide_background_loaded = true;
+    server.commit_provider_sync_state(&canonical_id, state);
+    server.record_carrier_ide_snapshot(&canonical_id, &tsx_path, &ide.code, None);
+    server
+        .type_provider_context(uri)
+        .expect("a seeded provider surface must yield a query context")
 }
 
 fn set_type_hover_at_vue_position(
@@ -11432,6 +11436,13 @@ async fn provider_projection_context_serves_both_carrier_and_self_file() {
         version: 1,
         text: "export const s = $state(0);\n".to_string(),
     });
+    // The production `did_open` handler drives the eager shadow sync; this test
+    // opens through the registry directly, so drive it here (the query context
+    // serves the RECORDED synced surface, not an on-demand rebuild).
+    assert!(
+        server.sync_self_file_shadow_unresolved(&rune_uri).await,
+        "the self-file shadow sync should succeed against the mock provider"
+    );
     let rune_ctx = server
         .provider_projection_context(&rune_uri)
         .expect("the rune module projects through the SAME generalized context");
@@ -12081,6 +12092,15 @@ async fn rune_module_queryable_before_resolver_ownership() {
         version: 1,
         text: "export const s = $state(0);\n".to_string(),
     });
+    // The production `did_open` handler drives the eager shadow sync (which
+    // does NOT depend on resolver ownership); this test opens through the
+    // registry directly, so drive it here. The query context serves the
+    // RECORDED synced surface — a buffer the provider never received is not
+    // queryable (fail closed).
+    assert!(
+        server.sync_self_file_shadow_unresolved(&rune_uri).await,
+        "the ownership-independent shadow sync should succeed against the mock provider"
+    );
 
     // The own buffer is queryable at its OWN canonical path before ownership.
     let ctx = server
@@ -12132,6 +12152,12 @@ async fn rune_module_own_buffer_resyncs_on_did_change() {
         version: 1,
         text: "export const s = $state(0);\n".to_string(),
     });
+    // The production `did_open` handler drives the eager shadow sync; this test
+    // opens through the registry directly, so drive it here.
+    assert!(
+        server.sync_self_file_shadow_unresolved(&rune_uri).await,
+        "the self-file shadow sync should succeed against the mock provider"
+    );
     let ctx0 = server.provider_projection_context(&rune_uri).unwrap();
     assert!(ctx0.provider_content.contains("$state(0)"));
 
@@ -17186,6 +17212,10 @@ async fn virtual_file_completion_routes_actionable_handle_through_envelope() {
             shadow_background_loaded: false,
         },
     );
+    // Record the surface a successful IDE sync would have recorded — the
+    // virtual-file routing context resolves the TSX path through the CAPTURED
+    // surface, not an independent committed-path read.
+    server.record_carrier_ide_snapshot("/workspace/src/App.vue", tsx_path, virtual_content, None);
 
     // Open the virtual document (`verter-virtual://...?sourceUri=<vue-uri>`).
     let virtual_uri_str = format!(
@@ -17809,4 +17839,339 @@ async fn stale_close_is_superseded_when_a_reaching_root_reopens_the_overlay() {
 
     drain.abort();
     let _ = std::fs::remove_dir_all(&temp_base);
+}
+
+// ─── Request-scoped provider-surface snapshot: fail-closed interactive queries ───
+//
+// Interactive provider-backed queries (hover/completion/definition/…) must be
+// built from ONE immutable, generation-stamped `ProviderSurfaceSnapshot` and
+// re-validated after the provider await — a concurrent re-sync or close must
+// never let a handler serve a result mapped through a torn
+// (path, content, mapper) tuple assembled from independent live reads.
+
+/// Shared carrier fixture for the request-surface tests.
+const REQUEST_SURFACE_APP: &str = r#"<script setup lang="ts">
+const msg = 'hello'
+</script>
+<template><div>{{ msg }}</div></template>
+"#;
+
+/// Build a tsgo-kind mock service with an owner-resolved, provider-synced
+/// carrier: the IDE surface has been delivered to the provider through the
+/// direct-open path, so interactive queries can route to it.
+async fn make_request_surface_carrier() -> (
+    tower_lsp_server::LspService<VerterLanguageServer>,
+    Arc<MockTypeProvider>,
+    Uri,
+) {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service_tsgo(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+    let uri = open_test_vue(server, "/workspace/src/App.vue", REQUEST_SURFACE_APP);
+    server.sync_ide_to_provider(&uri).await;
+    (service, provider, uri)
+}
+
+/// A successful direct (tsgo) IDE sync must record a `CarrierIde` surface at
+/// the IDE provider path: the exact bytes delivered to the provider, plus the
+/// carrier source they were compiled from. Without this producer, interactive
+/// queries have no consistent surface to capture.
+#[tokio::test(flavor = "multi_thread")]
+async fn successful_direct_ide_sync_records_carrier_ide_surface() {
+    let (service, _provider, uri) = make_request_surface_carrier().await;
+    let server = service.inner();
+
+    let ide_path = server
+        .active_ide_path_for_uri(&uri)
+        .expect("the direct IDE sync must commit a live IDE path");
+    let snapshot = server
+        .documents
+        .provider_surfaces()
+        .current_snapshot(&ide_path)
+        .expect("a successful direct IDE sync must record a CarrierIde surface");
+    assert_eq!(
+        snapshot.kind,
+        crate::provider_surface_store::ProviderSurfaceKind::CarrierIde,
+        "the recorded surface must carry the CarrierIde role"
+    );
+    let ide = server
+        .documents
+        .get_ide(&uri)
+        .expect("IDE output should exist");
+    assert_eq!(
+        snapshot.provider_content.as_ref(),
+        ide.code.as_ref(),
+        "the recorded surface must pin the EXACT bytes synced to the provider"
+    );
+    let doc = server.documents.get(&uri).expect("document is open");
+    assert_eq!(
+        snapshot.carrier_source.as_ref(),
+        doc.source.as_ref(),
+        "the recorded surface must pin the carrier source the bytes were compiled from"
+    );
+    assert!(
+        snapshot.source_map.is_some(),
+        "the recorded CarrierIde surface must carry its source map"
+    );
+}
+
+/// A FAILED direct IDE sync must record NOTHING: the provider never received
+/// the content, so no surface generation may pretend it did (fail closed).
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_direct_ide_sync_records_no_carrier_ide_surface() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service_tsgo(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+    let uri = open_test_vue(server, "/workspace/src/App.vue", REQUEST_SURFACE_APP);
+
+    let target_ide_path = server
+        .target_ide_path_for_uri(&uri)
+        .expect("owner-resolved carrier has a target IDE path");
+    provider.set_fail_sync_path(&target_ide_path);
+
+    server.sync_ide_to_provider(&uri).await;
+
+    assert!(
+        server
+            .documents
+            .provider_surfaces()
+            .current_snapshot(&target_ide_path)
+            .is_none(),
+        "a failed IDE sync must not record a provider surface"
+    );
+}
+
+/// A successful self-file (rune module) shadow sync records a `Shadow` surface
+/// at the module's OWN canonical path — the provider buffer bytes plus the
+/// rewrite-aware mapper; a failed shadow sync records nothing.
+#[tokio::test]
+async fn self_file_shadow_sync_records_shadow_surface_on_success_only() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+
+    let rune_uri: Uri = "file:///workspace/store.svelte.ts".parse().unwrap();
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: rune_uri.clone(),
+        language_id: "typescript".to_string(),
+        version: 1,
+        text: "export const s = $state(0);\n".to_string(),
+    });
+    assert!(
+        server.sync_self_file_shadow_unresolved(&rune_uri).await,
+        "the shadow sync should succeed against the mock provider"
+    );
+    let snapshot = server
+        .documents
+        .provider_surfaces()
+        .current_snapshot("/workspace/store.svelte.ts")
+        .expect("a successful shadow sync must record a Shadow surface");
+    assert_eq!(
+        snapshot.kind,
+        crate::provider_surface_store::ProviderSurfaceKind::Shadow,
+        "the recorded surface must carry the Shadow role"
+    );
+    assert!(
+        snapshot.provider_content.contains("$state"),
+        "the recorded surface must pin the provider buffer bytes"
+    );
+    assert!(
+        snapshot.source_map.is_some(),
+        "the recorded Shadow surface must carry the rewrite-aware mapper"
+    );
+
+    // A FAILED shadow sync records nothing.
+    let other_uri: Uri = "file:///workspace/other.svelte.ts".parse().unwrap();
+    let _ = server.documents.did_open(&TextDocumentItem {
+        uri: other_uri.clone(),
+        language_id: "typescript".to_string(),
+        version: 1,
+        text: "export const t = $state(1);\n".to_string(),
+    });
+    provider.set_fail_sync_path("/workspace/other.svelte.ts");
+    assert!(
+        !server.sync_self_file_shadow_unresolved(&other_uri).await,
+        "the shadow sync should fail for the failure-injected path"
+    );
+    assert!(
+        server
+            .documents
+            .provider_surfaces()
+            .current_snapshot("/workspace/other.svelte.ts")
+            .is_none(),
+        "a failed shadow sync must not record a provider surface"
+    );
+}
+
+/// The interactive query context must serve the RECORDED provider surface —
+/// never a torn pair of the committed provider path with fresher live-compiled
+/// content the provider has not received. After an edit that has NOT been
+/// re-synced, the context either fails closed (`None`) or still serves the
+/// recorded surface byte-exactly.
+#[tokio::test(flavor = "multi_thread")]
+async fn provider_query_context_serves_recorded_surface_never_torn_live_pair() {
+    let (service, _provider, uri) = make_request_surface_carrier().await;
+    let server = service.inner();
+    let store = server.documents.provider_surfaces().clone();
+
+    // Stable state: the context serves the recorded surface (anti-over-drop).
+    let ctx = server
+        .type_provider_context(&uri)
+        .expect("a synced, unedited carrier must yield a provider query context");
+    let recorded = store
+        .current_snapshot(&ctx.tsx_path)
+        .expect("the context's provider path must resolve to a recorded surface");
+    assert_eq!(
+        ctx.tsx_content.as_ref(),
+        recorded.provider_content.as_ref(),
+        "the stable-state context must serve the recorded surface content"
+    );
+
+    // Edit WITHOUT a re-sync: the live artifacts advance while the provider
+    // still holds the previously-synced surface.
+    let _ = server.documents.did_change(
+        &uri,
+        2,
+        r#"<script setup lang="ts">
+const msg = 'hello'
+const extra = 'drift'
+</script>
+<template><div>{{ msg }}{{ extra }}</div></template>
+"#,
+    );
+
+    match server.type_provider_context(&uri) {
+        // Fail closed: no consistent captured surface for the edited document.
+        None => {}
+        Some(ctx) => {
+            let snapshot = store
+                .current_snapshot(&ctx.tsx_path)
+                .expect("a served query context must be backed by a recorded provider surface");
+            assert_eq!(
+                ctx.tsx_content.as_ref(),
+                snapshot.provider_content.as_ref(),
+                "the query context must serve the recorded provider surface content, \
+                 never live-compiled bytes the provider has not received"
+            );
+            assert!(
+                !ctx.tsx_content.contains("extra"),
+                "the un-synced edit must not leak into the provider query context"
+            );
+        }
+    }
+}
+
+/// A provider re-sync landing a FRESH surface generation while a hover request
+/// is awaiting the provider must cause the provider contribution to be DROPPED
+/// (fail closed): the response was produced against a surface that no longer
+/// matches, and mapping it through the fresh state would be wrong, not stale.
+#[tokio::test(flavor = "multi_thread")]
+async fn hover_drops_provider_result_when_surface_regenerates_mid_request() {
+    let (service, provider, uri) = make_request_surface_carrier().await;
+    let server = service.inner();
+
+    let position = find_document_position(server, &uri, "{{ msg", 3);
+    set_type_hover_at_vue_position(server, &provider, &uri, position, "PROVIDER_HOVER_SENTINEL");
+
+    let ide_path = server.active_ide_path_for_uri(&uri).expect("live IDE path");
+    let store = server.documents.provider_surfaces().clone();
+    let raced_path = ide_path.clone();
+    provider.set_on_query(
+        &ide_path,
+        Box::new(move || {
+            // A concurrent re-sync lands a NEW generation with drifted content
+            // between the handler's capture and its merge of the response.
+            store.record(
+                crate::provider_surface_store::RecordSurface::carrier_legacy(
+                    crate::provider_surface_store::ProviderSurfaceKind::CarrierIde,
+                    raced_path,
+                    "/workspace/src/App.vue".to_string(),
+                    Arc::from("// drifted ide content"),
+                    None,
+                    Arc::from("// drifted carrier source"),
+                ),
+            );
+        }),
+    );
+
+    let text = hover_text(
+        server
+            .hover(hover_params(&uri, position))
+            .await
+            .expect("hover request should succeed"),
+    );
+    assert!(
+        !text.contains("PROVIDER_HOVER_SENTINEL"),
+        "a provider hover produced against a superseded surface generation must be \
+         DROPPED, got: {text}"
+    );
+}
+
+/// A surface retirement (the `did_close` path forgetting the provider surface)
+/// while a hover request is awaiting the provider must fail closed: no provider
+/// contribution, no panic.
+#[tokio::test(flavor = "multi_thread")]
+async fn hover_fails_closed_when_surface_retired_mid_request() {
+    let (service, provider, uri) = make_request_surface_carrier().await;
+    let server = service.inner();
+
+    let position = find_document_position(server, &uri, "{{ msg", 3);
+    set_type_hover_at_vue_position(server, &provider, &uri, position, "PROVIDER_HOVER_SENTINEL");
+
+    let ide_path = server.active_ide_path_for_uri(&uri).expect("live IDE path");
+    let store = server.documents.provider_surfaces().clone();
+    let raced_path = ide_path.clone();
+    provider.set_on_query(
+        &ide_path,
+        Box::new(move || {
+            // The surface is retired mid-request (a racing close began); the
+            // close is not yet confirmed, so the token is deliberately kept.
+            let _token = store.forget(&raced_path);
+        }),
+    );
+
+    let text = hover_text(
+        server
+            .hover(hover_params(&uri, position))
+            .await
+            .expect("hover request should succeed"),
+    );
+    assert!(
+        !text.contains("PROVIDER_HOVER_SENTINEL"),
+        "a provider hover racing a surface retirement must be DROPPED, got: {text}"
+    );
+}
+
+/// With a STABLE captured surface (no concurrent mutation) the provider
+/// contribution IS served and mapped — guards against an over-eager
+/// fail-closed gate dropping healthy results.
+#[tokio::test(flavor = "multi_thread")]
+async fn hover_serves_provider_result_from_stable_captured_surface() {
+    let (service, provider, uri) = make_request_surface_carrier().await;
+    let server = service.inner();
+
+    let position = find_document_position(server, &uri, "{{ msg", 3);
+    set_type_hover_at_vue_position(
+        server,
+        &provider,
+        &uri,
+        position,
+        "```typescript\nconst msg: string\n```",
+    );
+
+    let text = hover_text(
+        server
+            .hover(hover_params(&uri, position))
+            .await
+            .expect("hover request should succeed"),
+    );
+    assert!(
+        text.contains("const msg: string"),
+        "a stable captured surface must serve the provider hover, got: {text}"
+    );
 }

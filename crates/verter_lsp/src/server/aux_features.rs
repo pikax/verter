@@ -240,28 +240,36 @@ pub(super) async fn handle_document_highlight(
         )
     })();
 
-    // Enhance with TypeProvider if available
+    // Enhance with TypeProvider if available. The context is built from ONE
+    // captured immutable provider surface (path, content, mapper, indexes).
     if let Some(tp) = &server.type_provider {
-        if let Some((tsx_path, tsx_content, mapper)) = server.ide_context(uri) {
-            let tsx_li = LineIndex::new(&tsx_content, server.documents.encoding());
-            if let Some(doc) = server.documents.get(uri) {
-                if let Some(tsx_offset) = merge::carrier_position_to_tsx_offset_validated(
-                    position,
-                    &doc.line_index,
-                    &mapper,
-                    &tsx_li,
-                ) {
-                    if let Ok(type_highlights) =
-                        tp.get_document_highlights(&tsx_path, tsx_offset).await
-                    {
-                        return Ok(merge::merge_document_highlights(
-                            verter_result,
-                            type_highlights,
-                            &tsx_li,
-                            &mapper,
-                            &doc.line_index,
-                        ));
+        if let Some(ctx) = server.type_provider_context(uri) {
+            if let Some(tsx_offset) = merge::carrier_position_to_tsx_offset_validated(
+                position,
+                &ctx.carrier_line_index,
+                &ctx.mapper,
+                &ctx.tsx_line_index,
+            ) {
+                if let Ok(type_highlights) =
+                    tp.get_document_highlights(&ctx.tsx_path, tsx_offset).await
+                {
+                    // Post-await validation: highlights produced against a
+                    // surface that no longer matches must be DROPPED (fail
+                    // closed), never mapped through a superseded context.
+                    if !server.provider_context_still_valid(uri, &ctx) {
+                        tracing::debug!(
+                            "document_highlight: dropping provider highlights — captured \
+                             surface no longer valid"
+                        );
+                        return Ok(verter_result);
                     }
+                    return Ok(merge::merge_document_highlights(
+                        verter_result,
+                        type_highlights,
+                        &ctx.tsx_line_index,
+                        &ctx.mapper,
+                        &ctx.carrier_line_index,
+                    ));
                 }
             }
         }
@@ -300,6 +308,15 @@ pub(super) async fn handle_signature_help(
                 &ctx.tsx_line_index,
             ) {
                 if let Ok(type_sig) = tp.get_signature_help(&ctx.tsx_path, tsx_offset).await {
+                    // Post-await validation: signature help produced against a
+                    // surface that no longer matches must be DROPPED (fail closed).
+                    if !server.provider_context_still_valid(uri, &ctx) {
+                        tracing::debug!(
+                            "signature_help: dropping provider signature — captured surface \
+                             no longer valid"
+                        );
+                        return Ok(None);
+                    }
                     return Ok(merge::merge_signature_help(type_sig));
                 }
             }
@@ -483,6 +500,21 @@ pub(super) async fn handle_code_action(
                     if let Ok(type_actions) =
                         tp.get_code_actions(&ctx.tsx_path, so, eo, &diag_ctx).await
                     {
+                        // Post-await validation (STRICT for code actions: a corrupt
+                        // edit is worse than no edit): on a superseded surface drop
+                        // the WHOLE provider action set — only Verter-native actions
+                        // already in `all_actions` are served.
+                        if !server.provider_context_still_valid(uri, &ctx) {
+                            tracing::warn!(
+                                "code_action: dropping provider actions — captured surface \
+                                 no longer valid"
+                            );
+                            return Ok(if all_actions.is_empty() {
+                                None
+                            } else {
+                                Some(all_actions)
+                            });
+                        }
                         let carrier_source_exists =
                             |p: &str| server.documents.host().get_source(p).is_some();
                         let negotiated_encoding = server.position_encoding.read().clone();
@@ -682,6 +714,16 @@ pub(super) async fn handle_semantic_tokens_full(
         if let Some(tp) = &server.type_provider {
             if let Some(ctx) = server.type_provider_context(uri) {
                 if let Ok(type_tokens) = tp.get_semantic_tokens(&ctx.tsx_path).await {
+                    // Post-await validation: tokens produced against a surface
+                    // that no longer matches must be DROPPED (fail closed) — VS
+                    // Code re-requests after the next sync lands.
+                    if !server.provider_context_still_valid(uri, &ctx) {
+                        tracing::debug!(
+                            "semantic_tokens: dropping provider tokens — captured surface \
+                             no longer valid"
+                        );
+                        return Ok(None);
+                    }
                     let tokens = merge::merge_semantic_tokens(
                         type_tokens,
                         &ctx.tsx_line_index,
@@ -853,7 +895,10 @@ pub(super) async fn handle_inlay_hint(
                 .or_else(|| Some(ctx.tsx_line_index.source_len()));
                 if let (Some(so), Some(eo)) = (start_offset, end_offset) {
                     match tp.get_inlay_hints(&ctx.tsx_path, so, eo).await {
-                        Ok(type_hints) => {
+                        // Post-await validation as a match guard: hints produced
+                        // against a superseded surface are DROPPED (fail closed) —
+                        // the `Ok(_)` arm below logs the drop.
+                        Ok(type_hints) if server.provider_context_still_valid(uri, &ctx) => {
                             tracing::debug!(
                                 "inlay_hint: type provider returned {} hints for {}",
                                 type_hints.len(),
@@ -870,6 +915,12 @@ pub(super) async fn handle_inlay_hint(
                                 tsgo_hints.len()
                             );
                             hints.append(&mut tsgo_hints);
+                        }
+                        Ok(_) => {
+                            tracing::debug!(
+                                "inlay_hint: dropping provider hints — captured surface \
+                                 no longer valid"
+                            );
                         }
                         Err(e) => {
                             tracing::debug!(

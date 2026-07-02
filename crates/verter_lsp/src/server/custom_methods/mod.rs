@@ -17,7 +17,6 @@ use std::sync::Arc;
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::ls_types::*;
 
-use crate::documents::line_index::LineIndex;
 use crate::documents::sfc_scanner::scan_sfc_blocks;
 use crate::documents::uri_to_canonical_id;
 use crate::type_provider::merge;
@@ -571,34 +570,43 @@ impl VerterLanguageServer {
         let Some(tp) = &self.type_provider else {
             return Ok(serde_json::Value::Object(result));
         };
-        let Some((tsx_path, tsx_content, mapper)) = self.ide_context(&parsed_uri) else {
-            return Ok(serde_json::Value::Object(result));
-        };
-
-        let tsx_li = LineIndex::new(&tsx_content, self.documents.encoding());
-        let Some(doc) = self.documents.get(&parsed_uri) else {
+        // The context is built from ONE captured immutable provider surface.
+        let Some(ctx) = self.type_provider_context(&parsed_uri) else {
             return Ok(serde_json::Value::Object(result));
         };
 
         for binding in &analysis.bindings {
             // Convert Vue byte offset → Vue Position → TSX offset
-            let carrier_pos = doc.line_index.offset_to_position(binding.span.start);
+            let carrier_pos = ctx
+                .carrier_line_index
+                .offset_to_position(binding.span.start);
             let Some(carrier_pos) = carrier_pos else {
                 continue;
             };
 
             let tsx_offset = merge::carrier_position_to_tsx_offset_validated(
                 &carrier_pos,
-                &doc.line_index,
-                &mapper,
-                &tsx_li,
+                &ctx.carrier_line_index,
+                &ctx.mapper,
+                &ctx.tsx_line_index,
             );
             let Some(tsx_offset) = tsx_offset else {
                 continue;
             };
 
             // Query TSGO for the type at this position
-            if let Ok(Some(hover)) = tp.get_hover(&tsx_path, tsx_offset).await {
+            if let Ok(Some(hover)) = tp.get_hover(&ctx.tsx_path, tsx_offset).await {
+                // Post-await validation: a hover produced against a surface that
+                // no longer matches must be DROPPED (fail closed) — the binding
+                // reports `null` rather than a type read off a superseded surface.
+                if !self.provider_context_still_valid(&parsed_uri, &ctx) {
+                    tracing::debug!(
+                        "getBindingTypes: dropping provider hover — captured surface \
+                         no longer valid"
+                    );
+                    result.insert(binding.name.clone(), serde_json::Value::Null);
+                    continue;
+                }
                 // Extract the type from the hover contents
                 // Typical format: "```typescript\nconst x: number\n```" or "(property) x: string"
                 let type_str = extract_type_from_hover(&hover.contents, &binding.name);

@@ -216,6 +216,16 @@ pub(super) async fn handle_goto_definition(
                 );
                 match tp.get_definition(&ctx.tsx_path, tsx_offset).await {
                     Ok(type_defs) => {
+                        // Post-await validation: a response produced against a
+                        // surface that no longer matches must be DROPPED (fail
+                        // closed), never mapped through a superseded context.
+                        if !server.provider_context_still_valid(uri, &ctx) {
+                            tracing::debug!(
+                                "definition: dropping provider locations — captured surface \
+                                 no longer valid"
+                            );
+                            return Ok(verter_result);
+                        }
                         tracing::debug!(
                             "definition: type provider returned {} locations",
                             type_defs.len()
@@ -361,6 +371,16 @@ pub(super) async fn handle_goto_type_definition(
                 );
                 match tp.get_type_definition(&ctx.tsx_path, tsx_offset).await {
                     Ok(type_defs) => {
+                        // Post-await validation: a response produced against a
+                        // surface that no longer matches must be DROPPED (fail
+                        // closed), never mapped through a superseded context.
+                        if !server.provider_context_still_valid(uri, &ctx) {
+                            tracing::debug!(
+                                "type_definition: dropping provider locations — captured \
+                                 surface no longer valid"
+                            );
+                            return Ok(None);
+                        }
                         tracing::debug!(
                             "type_definition: type provider returned {} locations",
                             type_defs.len()
@@ -529,6 +549,16 @@ pub(super) async fn handle_references(
                 );
                 match tp.get_references(&ctx.tsx_path, tsx_offset).await {
                     Ok(type_refs) => {
+                        // Post-await validation: a response produced against a
+                        // surface that no longer matches must be DROPPED (fail
+                        // closed), never mapped through a superseded context.
+                        if !server.provider_context_still_valid(uri, &ctx) {
+                            tracing::debug!(
+                                "references: dropping provider locations — captured surface \
+                                 no longer valid"
+                            );
+                            return Ok(verter_result);
+                        }
                         tracing::debug!(
                             "references: type provider returned {} locations",
                             type_refs.len()
@@ -724,7 +754,10 @@ pub(super) async fn handle_rename(
                         .await;
 
                     match tp.get_rename_locations(&ctx.tsx_path, tsx_offset).await {
-                        Ok(mut type_locs) => {
+                        // Post-await validation as a match guard: the provider's
+                        // locations are consumed ONLY while the captured surface is
+                        // still honored and the open document still matches it.
+                        Ok(mut type_locs) if server.provider_context_still_valid(uri, &ctx) => {
                             // PROVIDER-AGNOSTIC inline child-declaration synthesis. A
                             // cross-file `<Child prop=…>` rename must edit BOTH the
                             // parent usage AND the prop declaration. For an INLINE
@@ -809,6 +842,18 @@ pub(super) async fn handle_rename(
                                         server.documents.host().workspace_read().read_file(p)
                                     })
                                 },
+                            );
+                        }
+                        // Post-await validation failed (STRICT for rename: a corrupt
+                        // edit is worse than no edit): drop the WHOLE provider edit
+                        // set. The verter-only result (already in `result`) still
+                        // passes through the completeness gate below, so a confirmed
+                        // child-prop rename fails closed rather than shipping a
+                        // usage-only partial.
+                        Ok(_) => {
+                            tracing::warn!(
+                                "rename: dropping provider rename locations — captured \
+                                 surface no longer valid"
                             );
                         }
                         Err(e) => {

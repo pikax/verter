@@ -93,7 +93,21 @@ pub(super) fn resolve_provider_auto_import_edits(
     // case. Fail with a structured `Err` so the caller reports it — never an
     // `Ok(None)` success, which would silently drop the provider's non-empty
     // auto-import edits ("accepted completion but no import").
-    let Some((_, tsx_content, mapper)) = server.ide_context_by_path(tsx_path) else {
+    //
+    // The translation inputs come from ONE captured immutable provider surface
+    // (content + mapper recorded by the same sync), validated against the open
+    // carrier document — a resolve racing an edit/re-sync fails with a
+    // structured error instead of placing an import through a torn mapping
+    // (STRICT: a corrupt edit is worse than no edit).
+    let Some(snapshot) = server.capture_provider_request_surface(&carrier_uri) else {
+        return Err(format!("no consistent provider surface for {tsx_path}"));
+    };
+    if snapshot.stamp.provider_path.as_ref() != tsx_path {
+        return Err(format!(
+            "provider path {tsx_path} no longer routes to the live carrier surface"
+        ));
+    }
+    let Some(mapper) = snapshot.source_map.as_ref().map(|m| (**m).clone()) else {
         return Err(format!("no IDE context for {tsx_path}"));
     };
     let doc = server
@@ -101,7 +115,7 @@ pub(super) fn resolve_provider_auto_import_edits(
         .get(&carrier_uri)
         .ok_or_else(|| format!("no open document for {}", carrier_uri.as_str()))?;
 
-    let tsx_li = LineIndex::new(&tsx_content, server.documents.encoding());
+    let tsx_li = LineIndex::new(&snapshot.provider_content, server.documents.encoding());
     // `AnalyzedImport.span` is SFC-absolute; pass the spans straight through. The anchor authority
     // consumes them in that coordinate space and filters to the selected `<script setup>` block.
     let user_import_spans: Vec<(u32, u32)> = server

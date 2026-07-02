@@ -190,6 +190,12 @@ pub(crate) struct TypeProviderContext {
     pub(crate) mapper: ProviderPositionMapper,
     pub(crate) tsx_line_index: LineIndex,
     pub(crate) carrier_line_index: LineIndex,
+    /// The captured immutable provider surface every field above was built
+    /// from. Handlers re-validate it AFTER the provider await (via
+    /// `provider_context_still_valid`) and DROP the provider contribution on a
+    /// mismatch — a response produced against a superseded surface must never
+    /// be mapped/published (fail closed).
+    pub(crate) snapshot: Arc<crate::provider_surface_store::ProviderSurfaceSnapshot>,
 }
 
 /// The generalized per-document provider-projection query context, serving BOTH
@@ -209,6 +215,9 @@ pub(crate) struct ProviderProjectionContext {
     pub(crate) provider_line_index: LineIndex,
     /// Line index over the user source.
     pub(crate) source_line_index: LineIndex,
+    /// The captured immutable provider surface every field above was built
+    /// from — the post-await re-validation identity (fail closed on mismatch).
+    pub(crate) snapshot: Arc<crate::provider_surface_store::ProviderSurfaceSnapshot>,
 }
 
 #[derive(Debug, Clone)]
@@ -795,3 +804,6 @@ impl LanguageServer for VerterLanguageServer {
 )]
 #[path = "../server_tests.rs"]
 mod server_tests;
+
+#[cfg(test)]
+mod request_surface_guard_tests;

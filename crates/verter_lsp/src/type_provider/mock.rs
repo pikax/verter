@@ -184,6 +184,18 @@ mod inner {
         /// paths, and all subsequent opens of the same path, are unaffected.
         #[allow(clippy::type_complexity)]
         on_open_file: Option<(String, Box<dyn FnOnce() + Send>)>,
+        /// Test seam: when set to `Some((path, callback))`, the FIRST interactive
+        /// query (`get_hover` / `get_completions`) whose path equals `path` RECORDS
+        /// its call, takes the callback (one-shot) and RUNS it synchronously —
+        /// after releasing the state lock and before the query's future is
+        /// returned. Lets a test deterministically interleave a mid-request event
+        /// (a re-sync recording a fresh provider-surface generation, a surface
+        /// retirement racing a `did_close`) between a feature handler's context
+        /// capture and its provider-response merge, so fail-closed torn-request
+        /// behaviour is exercised without a timing race. Other paths, and all
+        /// subsequent queries of the same path, are unaffected.
+        #[allow(clippy::type_complexity)]
+        on_query: Option<(String, Box<dyn FnOnce() + Send>)>,
     }
 
     /// A mock `TypeProvider` for testing.
@@ -347,6 +359,18 @@ mod inner {
         /// exact moment a specific overlay open fires. See [`MockState::on_open_file`].
         pub fn set_on_open_file(&self, path: &str, callback: Box<dyn FnOnce() + Send>) {
             self.state.lock().unwrap().on_open_file = Some((path.to_string(), callback));
+        }
+
+        /// Install a ONE-SHOT callback fired the first time an interactive query
+        /// (`get_hover` / `get_completions`) is issued for `path`. The callback
+        /// runs synchronously, after the state lock is released and before the
+        /// query's future is returned — i.e. between the feature handler's
+        /// context capture and its merge of the provider response. Used to
+        /// deterministically interleave a mid-request surface mutation (re-sync
+        /// generation advance, `did_close`-side surface retirement). See
+        /// [`MockState::on_query`].
+        pub fn set_on_query(&self, path: &str, callback: Box<dyn FnOnce() + Send>) {
+            self.state.lock().unwrap().on_query = Some((path.to_string(), callback));
         }
 
         /// Get all recorded calls.
@@ -739,17 +763,31 @@ mod inner {
             offset: u32,
             _trigger_character: Option<&str>,
         ) -> ProviderFuture<'_, CompletionResult> {
-            let mut state = self.state.lock().unwrap();
-            state.calls.push(MockCall::GetCompletions {
-                path: path.to_string(),
-                offset,
-            });
-            let items = state
-                .completion_responses
-                .iter()
-                .find(|(p, o, _)| p == path && *o == offset)
-                .map(|(_, _, items)| items.clone())
-                .unwrap_or_default();
+            let (items, on_query) = {
+                let mut state = self.state.lock().unwrap();
+                state.calls.push(MockCall::GetCompletions {
+                    path: path.to_string(),
+                    offset,
+                });
+                let items = state
+                    .completion_responses
+                    .iter()
+                    .find(|(p, o, _)| p == path && *o == offset)
+                    .map(|(_, _, items)| items.clone())
+                    .unwrap_or_default();
+                let on_query = match &state.on_query {
+                    Some((armed_path, _)) if armed_path == path => {
+                        state.on_query.take().map(|(_, cb)| cb)
+                    }
+                    _ => None,
+                };
+                (items, on_query)
+            };
+            // Run the one-shot mid-request seam AFTER releasing the state lock
+            // (a callback that re-enters the mock must not deadlock).
+            if let Some(callback) = on_query {
+                callback();
+            }
             Box::pin(async move {
                 Ok(CompletionResult {
                     items,
@@ -759,16 +797,30 @@ mod inner {
         }
 
         fn get_hover(&self, path: &str, offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
-            let mut state = self.state.lock().unwrap();
-            state.calls.push(MockCall::GetHover {
-                path: path.to_string(),
-                offset,
-            });
-            let result = state
-                .hover_responses
-                .iter()
-                .find(|(p, o, _)| p == path && *o == offset)
-                .and_then(|(_, _, info)| info.clone());
+            let (result, on_query) = {
+                let mut state = self.state.lock().unwrap();
+                state.calls.push(MockCall::GetHover {
+                    path: path.to_string(),
+                    offset,
+                });
+                let result = state
+                    .hover_responses
+                    .iter()
+                    .find(|(p, o, _)| p == path && *o == offset)
+                    .and_then(|(_, _, info)| info.clone());
+                let on_query = match &state.on_query {
+                    Some((armed_path, _)) if armed_path == path => {
+                        state.on_query.take().map(|(_, cb)| cb)
+                    }
+                    _ => None,
+                };
+                (result, on_query)
+            };
+            // Run the one-shot mid-request seam AFTER releasing the state lock
+            // (a callback that re-enters the mock must not deadlock).
+            if let Some(callback) = on_query {
+                callback();
+            }
             Box::pin(async move { Ok(result) })
         }
 

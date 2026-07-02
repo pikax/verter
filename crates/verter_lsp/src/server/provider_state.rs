@@ -85,13 +85,61 @@ impl VerterLanguageServer {
         }
     }
 
+    /// THE server-side record choke point for a DIRECT IDE-surface sync (the
+    /// tsgo direct-open / bootstrap-unresolved paths; the tsserver publish path
+    /// records through `record_and_version_carrier_companions` inside the
+    /// carrier-sync gateway).
+    ///
+    /// Records a fresh generation pinning the EXACT `ide_code` synced under
+    /// `ide_path`, together with the source map parsed from the SAME content.
+    /// When the caller already holds the synced content's source map it passes
+    /// it in `source_map_json`; otherwise (`None`) the live IDE artifact's map
+    /// is used ONLY when its code byte-matches `ide_code`, so a snapshot never
+    /// pairs the synced offsets with a source map produced against drifted
+    /// content. Called ONLY after a SUCCESSFUL provider sync (fail-closed:
+    /// a failed sync records nothing).
+    pub(super) fn record_carrier_ide_snapshot(
+        &self,
+        canonical_id: &str,
+        ide_path: &str,
+        ide_code: &str,
+        source_map_json: Option<&str>,
+    ) {
+        let store = self.documents.provider_surfaces();
+        let host = self.documents.host();
+        let owned_map: Option<std::sync::Arc<str>> = match source_map_json {
+            Some(_) => None,
+            // No map in scope → use the live IDE artifact's map only if its
+            // code still byte-matches the content that was actually synced.
+            None => {
+                let profile = self.documents.tsx_profile.read().clone();
+                host.get_ide(canonical_id, &profile)
+                    .filter(|ide| &*ide.code == ide_code)
+                    .and_then(|ide| ide.source_map.clone())
+            }
+        };
+        let map_json = source_map_json.or(owned_map.as_deref());
+        let _ = crate::provider_surface_store::record_carrier_companion_surface(
+            store,
+            Some(&self.documents),
+            host,
+            canonical_id,
+            ide_path,
+            crate::provider_surface_store::ProviderSurfaceKind::CarrierIde,
+            ide_code,
+            map_json,
+        );
+    }
+
     /// Pre-extracted data for type provider calls.
     /// All DashMap guards are dropped before this is returned, so it is safe
     /// to hold this across `.await` points without risking deadlock.
     pub(super) fn type_provider_context(&self, uri: &Uri) -> Option<TypeProviderContext> {
         // Route through the generalized projection context (serves BOTH the
         // carrier-IDE and self-file rune-module projections). The feature layer
-        // sees the same `tsx_*` field names regardless of projection.
+        // sees the same `tsx_*` field names regardless of projection. Every
+        // field — path, content, mapper, both line indexes — comes from the ONE
+        // captured immutable provider surface carried in `snapshot`.
         let ctx = self.provider_projection_context(uri)?;
         Some(TypeProviderContext {
             tsx_path: ctx.provider_path,
@@ -99,6 +147,7 @@ impl VerterLanguageServer {
             mapper: ctx.mapper,
             tsx_line_index: ctx.provider_line_index,
             carrier_line_index: ctx.source_line_index,
+            snapshot: ctx.snapshot,
         })
     }
 
@@ -304,7 +353,14 @@ impl VerterLanguageServer {
                 sync.open_tsx(&ide_path, ide_code).await
             };
             match result {
-                Ok(()) => ide_synced = true,
+                Ok(()) => {
+                    ide_synced = true;
+                    // Record a fresh generation pinning the EXACT IDE bytes just
+                    // synced (interactive queries capture this surface). No source
+                    // map in scope → the choke attaches the live IDE artifact's
+                    // map only if it still byte-matches `ide_code`.
+                    self.record_carrier_ide_snapshot(canonical_id, &ide_path, ide_code, None);
+                }
                 Err(error) => {
                     tracing::warn!(
                         "preserve_open_unresolved_carrier: failed to sync open unresolved IDE path \
@@ -496,8 +552,11 @@ impl VerterLanguageServer {
         let source_uri_str = self.documents.get_virtual_source_uri(uri)?;
         let source_uri: Uri = source_uri_str.parse().ok()?;
 
-        // Get the TSX path from the source .vue file
-        let tsx_path = self.active_ide_path_for_uri(&source_uri)?;
+        // Resolve the provider path through the captured request surface of the
+        // source document (fail closed when no consistent surface exists) —
+        // never an independent committed-path read.
+        let snapshot = self.capture_provider_request_surface(&source_uri)?;
+        let tsx_path = snapshot.stamp.provider_path.to_string();
 
         // Build LineIndex from the virtual file's content (for offset conversion)
         let doc = self.documents.get(uri)?;

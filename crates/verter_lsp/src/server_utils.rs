@@ -624,6 +624,25 @@ pub(crate) async fn sync_self_file_shadow_state(
 
     match result {
         Ok(()) => {
+            // Record a fresh Shadow generation pinning the EXACT provider buffer
+            // bytes just synced, paired with the rewrite-aware mapper refreshed
+            // from the SAME replacements above — the surface interactive queries
+            // capture. Recorded ONLY on a successful provider sync (fail-closed:
+            // a failed sync records nothing).
+            documents
+                .provider_surfaces()
+                .record(crate::provider_surface_store::RecordSurface {
+                    provider_path: canonical_id.to_string(),
+                    kind: crate::provider_surface_store::ProviderSurfaceKind::Shadow,
+                    source_canonical: canonical_id.to_string(),
+                    provider_content: std::sync::Arc::from(built.content.as_str()),
+                    source_map: documents.get_position_mapper(uri),
+                    carrier_source: source,
+                    map_hash: [0u8; 16],
+                    project_owner: None,
+                    regen_key: None,
+                    engine_recheck: None,
+                });
             state.shadow_path = Some(canonical_id.to_string());
             state.shadow_background_loaded = true;
             crate::provider_sync::commit_sync_transition(provider_sync_states, canonical_id, state);
