@@ -1061,6 +1061,21 @@ pub struct SvelteRuntimeIr<'a> {
     /// `owner === parent`) while accepting the same dynamic `slot` as an ordinary
     /// plain prop on a NON-direct component-family host.
     pub direct_slot_attr_child_hosts: rustc_hash::FxHashSet<NodeId>,
+    /// The DIRECT `{#snippet}`-body child set: the lowered node ids of every
+    /// SOURCE-LEVEL direct child of a `{#snippet}` block body (any node kind),
+    /// recorded at the snippet lowering call site — never inside the shared
+    /// child-lowering helper, which `{#await}` bodies also use. Official
+    /// `svelte@5.56.3` validates a snippet direct child as component-owned placement
+    /// (`is_component = true`), so the unified slot choke-point accepts a STATIC
+    /// `slot="x"` on these hosts when the host kind is filler-capable (a regular
+    /// element / component / `<svelte:component>` / `<svelte:self>` /
+    /// `<svelte:element>`): the static `slot` stays an ordinary attr/prop on the host
+    /// itself — snippet children are NOT slot fillers, never route into `$$slots`,
+    /// and never enter the duplicate/default-slot checks. A dynamic / mixed `slot` on
+    /// these hosts REJECTS (the official `slot_attribute_invalid` static-value rule),
+    /// and membership DISABLES the plain-prop acceptance a non-direct
+    /// component-family host would otherwise take.
+    pub direct_snippet_slot_attr_child_hosts: rustc_hash::FxHashSet<NodeId>,
 }
 
 impl<'a> SvelteRuntimeIr<'a> {

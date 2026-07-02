@@ -11733,18 +11733,407 @@ fn default_slot_conflict_matches_official_exemption_rule() {
     );
 }
 
+// ─── `{#snippet}`-body DIRECT-child `slot=` disposition ───────────────────────
+
+#[test]
+fn static_slot_on_element_snippet_child_bakes_into_skeleton() {
+    // `{#snippet foo()}<span slot="x">hi</span>{/snippet}` — official svelte@5.56.3
+    // validates a `{#snippet}` direct child as component-owned placement
+    // (`is_component = true` in `validate_slot_attribute`), so a STATIC `slot` on an
+    // element snippet child is ACCEPTED and bakes into the cloned skeleton verbatim.
+    let js = emit_result(
+        "<script>let { x } = $props();</script>\n{#snippet foo()}<span slot=\"x\">hi</span>{/snippet}\n{@render foo()}\n",
+    )
+    .expect("a static slot on an element snippet child must emit a module");
+    assert!(
+        js.contains("$.from_html(`<span slot=\"x\">hi</span>`)"),
+        "the slot attribute must bake into the cloned skeleton:\n{js}"
+    );
+    // NEGATIVE: a snippet child is NOT a slot filler — no `$$slots` region is minted
+    // and no runtime slot attribute write appears.
+    assert!(
+        !js.contains("$$slots"),
+        "a snippet child must not route into $$slots:\n{js}"
+    );
+    assert!(
+        !js.contains("$.set_attribute"),
+        "the baked slot must not also emit a runtime attribute write:\n{js}"
+    );
+}
+
+#[test]
+fn static_slot_on_component_snippet_child_stays_plain_prop() {
+    // CONFORMANCE / CONSISTENCY CONTROL — NOT a RED→GREEN discriminator: this shape
+    // already passed PRE-FIX through the old owner-less plain-prop shortcut
+    // (`plain_component_slot_prop_host` with no direct-child membership), with the
+    // IDENTICAL `{slot: 'x'}` emission. It pins that routing the acceptance through
+    // the `snippet_static` arm keeps the component-family emission unchanged; the
+    // DISCRIMINATING proof for the component family is
+    // `dynamic_slot_on_direct_snippet_child_fails_closed`.
+    //
+    // `<Inner slot="x"/>` as a direct snippet child — official accepts and the `slot`
+    // rides the component call as an ordinary prop (`Inner($$anchor, { slot: 'x' })`).
+    let js = emit_result(
+        "<script>import Inner from './Inner.svelte'; let { x } = $props();</script>\n{#snippet foo()}<Inner slot=\"x\"/>{/snippet}\n{@render foo()}\n",
+    )
+    .expect("a static slot on a component snippet child must emit a module");
+    assert!(
+        js.contains("Inner($$anchor, {slot: 'x'})"),
+        "the snippet-child component must keep the slot as a plain prop:\n{js}"
+    );
+    // NEGATIVE: no `$$slots` region — snippet children are not fillers.
+    assert!(
+        !js.contains("$$slots"),
+        "a snippet child must not route into $$slots:\n{js}"
+    );
+}
+
+#[test]
+fn static_slot_on_svelte_component_snippet_child_stays_plain_prop() {
+    // CONFORMANCE / CONSISTENCY CONTROL — NOT a RED→GREEN discriminator (passes
+    // pre-fix too via the plain-prop shortcut; the discriminating component-family
+    // proof is `dynamic_slot_on_direct_snippet_child_fails_closed`).
+    //
+    // `<svelte:component this={Inner} slot="x"/>` as a direct snippet child — the
+    // dynamic-component wrapper keeps the `slot` prop on the inner `$$component` call.
+    let js = emit_result(
+        "<script>import Inner from './Inner.svelte'; let { x } = $props();</script>\n{#snippet foo()}<svelte:component this={Inner} slot=\"x\"/>{/snippet}\n{@render foo()}\n",
+    )
+    .expect("a static slot on a svelte:component snippet child must emit a module");
+    assert!(
+        js.contains("$$component($$anchor, {slot: 'x'})"),
+        "the svelte:component snippet child must keep the slot as a plain prop:\n{js}"
+    );
+    assert!(
+        !js.contains("$$slots"),
+        "a snippet child must not route into $$slots:\n{js}"
+    );
+}
+
+#[test]
+fn static_slot_on_svelte_self_snippet_child_stays_plain_prop() {
+    // CONFORMANCE / CONSISTENCY CONTROL — NOT a RED→GREEN discriminator (passes
+    // pre-fix too via the plain-prop shortcut; the discriminating component-family
+    // proof is `dynamic_slot_on_direct_snippet_child_fails_closed`).
+    //
+    // `<svelte:self slot="x"/>` as a direct snippet child (a valid `<svelte:self>`
+    // placement — snippets count) — the recursive self-call keeps the plain prop.
+    let js = emit_result(
+        "<script>let { x } = $props();</script>\n{#snippet foo()}<svelte:self slot=\"x\"/>{/snippet}\n{@render foo()}\n",
+    )
+    .expect("a static slot on a svelte:self snippet child must emit a module");
+    assert!(
+        js.contains("App(node, {slot: 'x'})"),
+        "the svelte:self snippet child must keep the slot as a plain prop on the exact recursive self-call:\n{js}"
+    );
+    assert!(
+        !js.contains("$$slots"),
+        "a snippet child must not route into $$slots:\n{js}"
+    );
+}
+
+#[test]
+fn static_slot_on_svelte_element_snippet_child_folds_into_attribute_effect() {
+    // `<svelte:element this="span" slot="x">` as a direct snippet child — the dynamic
+    // element folds the static `slot` into its runtime `$.attribute_effect` object
+    // (the element has no props object; the fold is the official output shape).
+    let js = emit_result(
+        "<script>let { x } = $props();</script>\n{#snippet foo()}<svelte:element this=\"span\" slot=\"x\">hi</svelte:element>{/snippet}\n{@render foo()}\n",
+    )
+    .expect("a static slot on a svelte:element snippet child must emit a module");
+    assert!(
+        js.contains("$.element("),
+        "the snippet child must emit the dynamic-element call:\n{js}"
+    );
+    assert!(
+        js.contains("$.attribute_effect($$element, () => ({ slot: 'x' }));"),
+        "the slot attribute must fold into the attribute_effect:\n{js}"
+    );
+    assert!(
+        !js.contains("$$slots"),
+        "a snippet child must not route into $$slots:\n{js}"
+    );
+}
+
+#[test]
+fn dynamic_slot_on_direct_snippet_child_fails_closed() {
+    // THE false-accept regression: the plain-prop shortcut ACCEPTED a dynamic
+    // `slot={x}` on a component-family direct snippet child and quietly emitted
+    // `Inner($$anchor, {slot: x()})` — official svelte@5.56.3 hard-errors
+    // (`slot_attribute_invalid`: the slot attribute must be a static value; the rule
+    // fires at `owner === parent`, and a `{#snippet}` body IS the owner). The dynamic
+    // source is a snippet PARAM (an instance `let` is refused as InstanceScriptItem).
+    let src = "<script>import Inner from './Inner.svelte'; let { p } = $props();</script>\n{#snippet foo(x)}<Inner slot={x}/>{/snippet}\n{@render foo(p)}\n";
+    match emit_result(src) {
+        Ok(js) => {
+            // NEGATIVE: the false-accept shape must NEVER emit — neither a `slot:`
+            // prop on the inner call nor any module at all.
+            assert!(
+                !js.contains("slot:"),
+                "a dynamic snippet-child slot must not emit a slot prop:\n{js}"
+            );
+            panic!("a dynamic slot={{x}} on a direct snippet child must fail closed, got a module:\n{js}");
+        }
+        Err(ClientCompileError::Unsupported(surface)) => {
+            assert!(
+                matches!(
+                    &surface,
+                    UnsupportedSvelteRuntimeSurface::DynamicAttribute { name, .. } if name == "slot"
+                ),
+                "wrong fail-closed surface: {surface:?}"
+            );
+            assert_eq!(
+                surface.diagnostic_code(),
+                "svelte-runtime-unsupported-dynamic-attribute",
+                "the dynamic snippet-child slot must reject on the slot gate"
+            );
+        }
+        Err(other) => panic!("expected the typed unsupported surface, got: {other:?}"),
+    }
+    // The component-family specials close identically; the element-family rows were
+    // already rejected pre-fix and stay rejected (keep-reject controls).
+    for (label, src) in [
+        (
+            "svelte_component_dynamic",
+            "<script>import Inner from './Inner.svelte'; let { p } = $props();</script>\n{#snippet foo(x)}<svelte:component this={Inner} slot={x}/>{/snippet}\n{@render foo(p)}\n",
+        ),
+        (
+            "svelte_self_dynamic",
+            "<script>let { p } = $props();</script>\n{#snippet foo(x)}<svelte:self slot={x}/>{/snippet}\n{@render foo(p)}\n",
+        ),
+        (
+            "element_dynamic_control",
+            "<script>let { p } = $props();</script>\n{#snippet foo(x)}<span slot={x}>hi</span>{/snippet}\n{@render foo(p)}\n",
+        ),
+        (
+            "svelte_element_dynamic_control",
+            "<script>let { p } = $props();</script>\n{#snippet foo(x)}<svelte:element this=\"span\" slot={x}>hi</svelte:element>{/snippet}\n{@render foo(p)}\n",
+        ),
+    ] {
+        assert_fail_closed_labeled(label, src, |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::DynamicAttribute { name, .. } if name == "slot"
+            )
+        });
+    }
+}
+
+#[test]
+fn valueless_slot_on_element_snippet_child_fails_closed() {
+    // Official svelte@5.56.3 accepts the snippet-child `slot` ONLY as a single
+    // static TEXT-VALUED attribute (`is_text_attribute`): a valueless / boolean
+    // `slot` (`<span slot>`) is the `slot_attribute_invalid` compile error. Pre-fix
+    // Verter FALSE-ACCEPTED this shape and baked `slot=""` into the cloned skeleton;
+    // the `snippet_static` arm now requires a PRESENT text value.
+    let src = "<script>let { x } = $props();</script>\n{#snippet foo()}<span slot>hi</span>{/snippet}\n{@render foo()}\n";
+    match emit_result(src) {
+        Ok(js) => {
+            // NEGATIVE: the false-accept shape must NEVER emit — no baked empty
+            // `slot=""` and no slot attribute on the skeleton at all.
+            assert!(
+                !js.contains("slot=\"\""),
+                "a valueless snippet-child slot must not bake an empty slot attribute:\n{js}"
+            );
+            assert!(
+                !js.contains("<span slot"),
+                "a valueless snippet-child slot must not bake into the skeleton:\n{js}"
+            );
+            panic!(
+                "a valueless slot on an element snippet child must fail closed, got a module:\n{js}"
+            );
+        }
+        Err(ClientCompileError::Unsupported(surface)) => {
+            assert!(
+                matches!(
+                    &surface,
+                    UnsupportedSvelteRuntimeSurface::DynamicAttribute { name, .. } if name == "slot"
+                ),
+                "wrong fail-closed surface: {surface:?}"
+            );
+            assert_eq!(
+                surface.diagnostic_code(),
+                "svelte-runtime-unsupported-dynamic-attribute",
+                "the valueless snippet-child slot must reject on the slot gate"
+            );
+        }
+        Err(other) => panic!("expected the typed unsupported surface, got: {other:?}"),
+    }
+}
+
+#[test]
+fn valueless_slot_on_component_snippet_child_fails_closed() {
+    // `<Inner slot/>` as a direct snippet child — official rejects
+    // (`slot_attribute_invalid`: the snippet-child `slot` must be a static
+    // TEXT-VALUED attribute, `is_text_attribute`). Pre-fix Verter FALSE-ACCEPTED
+    // and emitted the boolean plain prop `{slot: true}`.
+    let src = "<script>import Inner from './Inner.svelte'; let { x } = $props();</script>\n{#snippet foo()}<Inner slot/>{/snippet}\n{@render foo()}\n";
+    match emit_result(src) {
+        Ok(js) => {
+            // NEGATIVE: the boolean-prop false-accept shape must NEVER emit.
+            assert!(
+                !js.contains("{slot: true}"),
+                "a valueless snippet-child slot must not emit a boolean slot prop:\n{js}"
+            );
+            panic!(
+                "a valueless slot on a component snippet child must fail closed, got a module:\n{js}"
+            );
+        }
+        Err(ClientCompileError::Unsupported(surface)) => {
+            assert!(
+                matches!(
+                    &surface,
+                    UnsupportedSvelteRuntimeSurface::DynamicAttribute { name, .. } if name == "slot"
+                ),
+                "wrong fail-closed surface: {surface:?}"
+            );
+            assert_eq!(
+                surface.diagnostic_code(),
+                "svelte-runtime-unsupported-dynamic-attribute",
+                "the valueless snippet-child slot must reject on the slot gate"
+            );
+        }
+        Err(other) => panic!("expected the typed unsupported surface, got: {other:?}"),
+    }
+    // The component-family specials close identically (valueless rows).
+    for (label, src) in [
+        (
+            "svelte_component_valueless",
+            "<script>import Inner from './Inner.svelte'; let { x } = $props();</script>\n{#snippet foo()}<svelte:component this={Inner} slot/>{/snippet}\n{@render foo()}\n",
+        ),
+        (
+            "svelte_self_valueless",
+            "<script>let { x } = $props();</script>\n{#snippet foo()}<svelte:self slot/>{/snippet}\n{@render foo()}\n",
+        ),
+    ] {
+        assert_fail_closed_labeled(label, src, |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::DynamicAttribute { name, .. } if name == "slot"
+            )
+        });
+    }
+}
+
+#[test]
+fn valueless_slot_on_toplevel_component_class_b_still_accepts() {
+    // POSITIVE CONTROL (scope lock): a valueless `slot` on a TOP-LEVEL component
+    // (`<Inner slot/>` — NOT a snippet child, NOT a direct component child) is a
+    // GENUINE official svelte@5.56.3 ACCEPT — the Class B plain prop,
+    // `Inner($$anchor, {slot: true})`. The valueless-reject fix is SNIPPET-ONLY;
+    // this test pins that no whole-class valueless guard leaked into the plain-prop
+    // path (it passes both PRE-fix and POST-fix — a fail here means the fix was
+    // mis-scoped into a fail-closed regression).
+    let js = emit_result(
+        "<script>import Inner from './Inner.svelte'; let { x } = $props();</script>\n<Inner slot/>\n",
+    )
+    .expect("a valueless slot on a top-level component must stay an accepted plain prop");
+    assert!(
+        js.contains("Inner($$anchor, {slot: true})"),
+        "the top-level valueless slot must ride the component call as a boolean prop:\n{js}"
+    );
+    // NEGATIVE: no `$$slots` routing — a plain prop is not a filler.
+    assert!(
+        !js.contains("$$slots"),
+        "a plain-prop slot must not route into $$slots:\n{js}"
+    );
+}
+
+#[test]
+fn static_slot_on_svelte_fragment_snippet_child_stays_fail_closed() {
+    // `<svelte:fragment slot="x">` as a direct snippet child — official rejects
+    // (`svelte_fragment_invalid_placement`); Verter fails closed on the slot gate.
+    // `SpecialKind::Fragment` is NOT a filler host — the kind gate is exactly what
+    // keeps the snippet-static acceptance off the non-host specials.
+    assert_fail_closed(
+        "<script>let { x } = $props();</script>\n{#snippet foo()}<svelte:fragment slot=\"x\">hi</svelte:fragment>{/snippet}\n{@render foo()}\n",
+        |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::DynamicAttribute { name, .. } if name == "slot"
+            )
+        },
+    );
+}
+
+#[test]
+fn static_slot_on_svelte_boundary_snippet_child_stays_fail_closed() {
+    // `<svelte:boundary slot="x">` as a direct snippet child — official rejects
+    // (`svelte_boundary_invalid_attribute`); Verter fails closed on the slot gate
+    // (`SpecialKind::Boundary` is NOT a filler host).
+    assert_fail_closed(
+        "<script>let { x } = $props();</script>\n{#snippet foo()}<svelte:boundary slot=\"x\"><p>hi</p></svelte:boundary>{/snippet}\n{@render foo()}\n",
+        |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::DynamicAttribute { name, .. } if name == "slot"
+            )
+        },
+    );
+}
+
+#[test]
+fn svelte_head_slot_snippet_child_stays_official_meta_placement_reject() {
+    // `<svelte:head slot="x">` inside a `{#snippet}` — the PARSE-phase official reject
+    // (`svelte_meta_invalid_placement`: `<svelte:head>` must be at the top level)
+    // fires before the slot gate ever runs, and must stay.
+    let err = emit_result(
+        "<script>let { x } = $props();</script>\n{#snippet foo()}<svelte:head slot=\"x\"><title>t</title></svelte:head>{/snippet}\n{@render foo()}\n",
+    )
+    .expect_err("a snippet-nested <svelte:head> must refuse");
+    let ClientCompileError::OfficialReject(rejection) = err else {
+        panic!("expected an OfficialReject refusal, got {err:?}");
+    };
+    assert_eq!(
+        rejection.official_code, "svelte_meta_invalid_placement",
+        "the rejection mirrors the official `svelte_meta_invalid_placement` code"
+    );
+}
+
+#[test]
+fn custom_element_static_slot_snippet_child_fails_closed_at_host_gate() {
+    // Official ACCEPTS `<my-el slot="x">` as a snippet child (native slotting via the
+    // `importNode` clone + `$.set_custom_element_data`); Verter's slot gate accepts
+    // the PLACEMENT and the D-43 custom-element HOST gate then fails closed — the
+    // reject identity is `host-custom-element`, NOT the slot gate's DynamicAttribute.
+    let src = "<script>let { x } = $props();</script>\n{#snippet foo()}<my-el slot=\"x\">hi</my-el>{/snippet}\n{@render foo()}\n";
+    match emit_result(src) {
+        Err(ClientCompileError::Unsupported(refusal)) => {
+            assert!(
+                matches!(
+                    &refusal,
+                    UnsupportedSvelteRuntimeSurface::HostOrCustomElement { surface, .. }
+                        if *surface == "custom element"
+                ),
+                "wrong fail-closed surface: {refusal:?}"
+            );
+            assert_eq!(
+                refusal.diagnostic_code(),
+                "svelte-runtime-unsupported-host-custom-element",
+                "the custom-element snippet child must reject on the D-43 host gate"
+            );
+        }
+        Ok(js) => panic!("a custom-element snippet child must fail closed, got a module:\n{js}"),
+        Err(other) => panic!("expected the typed unsupported surface, got: {other:?}"),
+    }
+}
+
 #[test]
 fn validate_slot_placement_disposition_is_exhaustive_per_host_kind() {
     // The per-kind EXHAUSTIVE proof for the unified slot choke-point
     // (`validate_slot_placement`, run at `classify_node` entry for EVERY node),
-    // pinning the official three-class disposition per host kind × placement:
+    // pinning the official disposition per host kind × placement:
     //
     // - FILLER hosts (regular element, component, `<svelte:component>` /
     //   `<svelte:self>` / `<svelte:element>`): a STATIC `slot` is accepted EXACTLY
-    //   when the node is a lowering-recorded direct static-slot filler.
+    //   when the node is a lowering-recorded direct static-slot filler OR a direct
+    //   `{#snippet}`-body child carrying a TEXT VALUE (the static text-valued
+    //   snippet branch — a plain attr/prop, never a filler; a valueless/boolean
+    //   `slot` on a snippet child rejects).
     // - PLAIN-PROP hosts (component, `<svelte:component>` / `<svelte:self>`): any
-    //   `slot` form is accepted at NON-direct placement; a dynamic/mixed `slot` on a
-    //   DIRECT child fails closed (official `slot_attribute_invalid`).
+    //   `slot` form is accepted at OWNER-LESS placement (neither a direct component
+    //   child nor a direct snippet child); a dynamic/mixed `slot` on a DIRECT child
+    //   of EITHER owner fails closed (official `slot_attribute_invalid`).
     // - Every OTHER kind (head / boundary / fragment / options / the global hosts)
     //   fails closed for every form — even when the placement sets claim membership.
     use crate::svelte::runtime::client_surface::{validate_slot_placement, SlotPlacementFacts};
@@ -11772,6 +12161,12 @@ fn validate_slot_placement_disposition_is_exhaustive_per_host_kind() {
             MixedAttrPart::Literal("a".to_string()),
             MixedAttrPart::Expr(ExprId(0)),
         ],
+    };
+    // A VALUELESS / boolean `slot` (official `is_text_attribute` fails: no text
+    // value) — static in form, but NOT snippet-static-acceptable.
+    let valueless_slot = || AttrIr::Static {
+        name: "slot".to_string(),
+        value: None,
     };
     let empty = rustc_hash::FxHashSet::default();
     let member: rustc_hash::FxHashSet<NodeId> = std::iter::once(NodeId(0)).collect();
@@ -11813,10 +12208,12 @@ fn validate_slot_placement_disposition_is_exhaustive_per_host_kind() {
     let rejects = |node: &IrNode,
                    fillers: &rustc_hash::FxHashSet<NodeId>,
                    direct: &rustc_hash::FxHashSet<NodeId>,
+                   snippets: &rustc_hash::FxHashSet<NodeId>,
                    label: &str| {
         let placement = SlotPlacementFacts {
             static_slot_filler_hosts: fillers,
             direct_slot_attr_child_hosts: direct,
+            direct_snippet_slot_attr_child_hosts: snippets,
         };
         let err = validate_slot_placement(node, NodeId(0), placement)
             .expect_err(&format!("{label}: the slot-bearing node must fail closed"));
@@ -11836,10 +12233,12 @@ fn validate_slot_placement_disposition_is_exhaustive_per_host_kind() {
     let accepts = |node: &IrNode,
                    fillers: &rustc_hash::FxHashSet<NodeId>,
                    direct: &rustc_hash::FxHashSet<NodeId>,
+                   snippets: &rustc_hash::FxHashSet<NodeId>,
                    label: &str| {
         let placement = SlotPlacementFacts {
             static_slot_filler_hosts: fillers,
             direct_slot_attr_child_hosts: direct,
+            direct_snippet_slot_attr_child_hosts: snippets,
         };
         assert!(
             validate_slot_placement(node, NodeId(0), placement).is_ok(),
@@ -11883,10 +12282,12 @@ fn validate_slot_placement_disposition_is_exhaustive_per_host_kind() {
                     &special(kind, vec![static_slot()]),
                     &empty,
                     &empty,
+                    &empty,
                     &format!("special {kind:?} static slot, non-direct"),
                 );
                 accepts(
                     &special(kind, vec![dynamic_slot()]),
+                    &empty,
                     &empty,
                     &empty,
                     &format!("special {kind:?} dynamic slot, non-direct"),
@@ -11895,24 +12296,28 @@ fn validate_slot_placement_disposition_is_exhaustive_per_host_kind() {
                     &special(kind, vec![mixed_slot()]),
                     &empty,
                     &empty,
+                    &empty,
                     &format!("special {kind:?} mixed slot, non-direct"),
                 );
                 accepts(
                     &special(kind, vec![static_slot()]),
                     &member,
                     &member,
+                    &empty,
                     &format!("special {kind:?} static slot, direct filler"),
                 );
                 rejects(
                     &special(kind, vec![dynamic_slot()]),
                     &empty,
                     &member,
+                    &empty,
                     &format!("special {kind:?} dynamic slot, direct child"),
                 );
                 rejects(
                     &special(kind, vec![mixed_slot()]),
                     &empty,
                     &member,
+                    &empty,
                     &format!("special {kind:?} mixed slot, direct child"),
                 );
             }
@@ -11923,10 +12328,12 @@ fn validate_slot_placement_disposition_is_exhaustive_per_host_kind() {
                     &special(kind, vec![static_slot()]),
                     &member,
                     &member,
+                    &empty,
                     "svelte:element static slot, direct filler",
                 );
                 rejects(
                     &special(kind, vec![static_slot()]),
+                    &empty,
                     &empty,
                     &empty,
                     "svelte:element static slot, non-direct",
@@ -11935,18 +12342,22 @@ fn validate_slot_placement_disposition_is_exhaustive_per_host_kind() {
                     &special(kind, vec![dynamic_slot()]),
                     &member,
                     &member,
+                    &empty,
                     "svelte:element dynamic slot, direct filler",
                 );
                 rejects(
                     &special(kind, vec![dynamic_slot()]),
                     &empty,
                     &empty,
+                    &empty,
                     "svelte:element dynamic slot, non-direct",
                 );
             }
             // Every remaining special is NEVER a slot host: static and dynamic refuse
-            // even when the placement sets claim membership (the kind gate is the
-            // no-residual-member proof).
+            // even when ALL the placement sets claim membership — component filler,
+            // direct child, AND direct snippet child (the kind gate is the
+            // no-residual-member proof; snippet membership must NOT flip a
+            // `<svelte:fragment>` / `<svelte:boundary>` / meta host to accepted).
             SpecialKind::Head
             | SpecialKind::Window
             | SpecialKind::Document
@@ -11958,10 +12369,12 @@ fn validate_slot_placement_disposition_is_exhaustive_per_host_kind() {
                     &special(kind, vec![static_slot()]),
                     &member,
                     &member,
+                    &member,
                     &format!("special {kind:?} static slot"),
                 );
                 rejects(
                     &special(kind, vec![dynamic_slot()]),
+                    &member,
                     &member,
                     &member,
                     &format!("special {kind:?} dynamic slot"),
@@ -11977,10 +12390,12 @@ fn validate_slot_placement_disposition_is_exhaustive_per_host_kind() {
         &component(vec![static_slot()]),
         &empty,
         &empty,
+        &empty,
         "component static slot, non-direct",
     );
     accepts(
         &component(vec![dynamic_slot()]),
+        &empty,
         &empty,
         &empty,
         "component dynamic slot, non-direct",
@@ -11989,30 +12404,35 @@ fn validate_slot_placement_disposition_is_exhaustive_per_host_kind() {
         &component(vec![mixed_slot()]),
         &empty,
         &empty,
+        &empty,
         "component mixed slot, non-direct",
     );
     accepts(
         &component(vec![static_slot()]),
         &member,
         &member,
+        &empty,
         "component static slot, direct filler",
     );
     rejects(
         &component(vec![static_slot()]),
         &empty,
         &member,
+        &empty,
         "component static slot, direct non-filler",
     );
     rejects(
         &component(vec![dynamic_slot()]),
         &empty,
         &member,
+        &empty,
         "component dynamic slot, direct child",
     );
     rejects(
         &component(vec![mixed_slot()]),
         &empty,
         &member,
+        &empty,
         "component mixed slot, direct child",
     );
     // A regular ELEMENT: static accepted ONLY as a direct filler (the official
@@ -12022,10 +12442,12 @@ fn validate_slot_placement_disposition_is_exhaustive_per_host_kind() {
         &element(vec![static_slot()]),
         &member,
         &member,
+        &empty,
         "element static slot, direct filler",
     );
     rejects(
         &element(vec![static_slot()]),
+        &empty,
         &empty,
         &empty,
         "element static slot, non-filler placement",
@@ -12034,13 +12456,123 @@ fn validate_slot_placement_disposition_is_exhaustive_per_host_kind() {
         &element(vec![dynamic_slot()]),
         &member,
         &member,
+        &empty,
         "element dynamic slot, direct filler",
     );
     rejects(
         &element(vec![mixed_slot()]),
         &member,
         &member,
+        &empty,
         "element mixed slot, direct filler",
+    );
+    // SNIPPET placement: a DIRECT `{#snippet}`-body child (the snippet set claims
+    // membership; the component sets stay empty). A static TEXT-VALUED `slot` is
+    // accepted on every filler-capable host kind as a plain attr/prop
+    // (snippet_static — official `is_text_attribute`); a dynamic/mixed `slot`
+    // REJECTS on every kind — snippet membership DISABLES the plain-prop path a
+    // component-family host would otherwise take (the pre-fix false-accept leak) —
+    // and a VALUELESS/boolean `slot` REJECTS too (the second false-accept leak:
+    // static in form, but not text-valued).
+    accepts(
+        &element(vec![static_slot()]),
+        &empty,
+        &empty,
+        &member,
+        "element static slot, direct snippet child",
+    );
+    rejects(
+        &element(vec![dynamic_slot()]),
+        &empty,
+        &empty,
+        &member,
+        "element dynamic slot, direct snippet child",
+    );
+    rejects(
+        &element(vec![mixed_slot()]),
+        &empty,
+        &empty,
+        &member,
+        "element mixed slot, direct snippet child",
+    );
+    rejects(
+        &element(vec![valueless_slot()]),
+        &empty,
+        &empty,
+        &member,
+        "element valueless slot, direct snippet child (the valueless false-accept closure)",
+    );
+    accepts(
+        &component(vec![static_slot()]),
+        &empty,
+        &empty,
+        &member,
+        "component static slot, direct snippet child",
+    );
+    rejects(
+        &component(vec![dynamic_slot()]),
+        &empty,
+        &empty,
+        &member,
+        "component dynamic slot, direct snippet child (the false-accept closure)",
+    );
+    rejects(
+        &component(vec![mixed_slot()]),
+        &empty,
+        &empty,
+        &member,
+        "component mixed slot, direct snippet child",
+    );
+    rejects(
+        &component(vec![valueless_slot()]),
+        &empty,
+        &empty,
+        &member,
+        "component valueless slot, direct snippet child (the valueless false-accept closure)",
+    );
+    for kind in [
+        SpecialKind::Component,
+        SpecialKind::SelfRef,
+        SpecialKind::Element,
+    ] {
+        accepts(
+            &special(kind, vec![static_slot()]),
+            &empty,
+            &empty,
+            &member,
+            &format!("special {kind:?} static slot, direct snippet child"),
+        );
+        rejects(
+            &special(kind, vec![dynamic_slot()]),
+            &empty,
+            &empty,
+            &member,
+            &format!("special {kind:?} dynamic slot, direct snippet child"),
+        );
+        rejects(
+            &special(kind, vec![mixed_slot()]),
+            &empty,
+            &empty,
+            &member,
+            &format!("special {kind:?} mixed slot, direct snippet child"),
+        );
+        rejects(
+            &special(kind, vec![valueless_slot()]),
+            &empty,
+            &empty,
+            &member,
+            &format!("special {kind:?} valueless slot, direct snippet child"),
+        );
+    }
+    // SCOPE LOCK (Class B unit control): the valueless-reject is SNIPPET-ONLY — a
+    // valueless `slot` on an OWNER-LESS component-family host stays the accepted
+    // plain prop (official accepts `<Inner slot/>` at top level as `{slot: true}`).
+    accepts(
+        &component(vec![valueless_slot()]),
+        &empty,
+        &empty,
+        &empty,
+        "component valueless slot, non-direct (Class B plain prop)",
     );
     // Negative controls: a slot-free attr inventory validates trivially on every
     // attr-bearing kind, and a node kind with no attribute surface always validates.
@@ -12053,6 +12585,7 @@ fn validate_slot_placement_disposition_is_exhaustive_per_host_kind() {
     let no_placement = SlotPlacementFacts {
         static_slot_filler_hosts: &empty,
         direct_slot_attr_child_hosts: &empty,
+        direct_snippet_slot_attr_child_hosts: &empty,
     };
     assert!(
         validate_slot_placement(&component(vec![plain_attr()]), NodeId(0), no_placement).is_ok(),

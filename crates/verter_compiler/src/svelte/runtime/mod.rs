@@ -241,6 +241,12 @@ pub(super) struct LoweringCtx<'a> {
     /// [`SvelteRuntimeIr::direct_slot_attr_child_hosts`] — see that field for the
     /// contract.
     pub(super) direct_slot_attr_child_hosts: rustc_hash::FxHashSet<NodeId>,
+    /// The DIRECT `{#snippet}`-body child set (every lowered source-level direct
+    /// child of a `{#snippet}` block body), recorded at the snippet lowering call
+    /// site and retained on
+    /// [`SvelteRuntimeIr::direct_snippet_slot_attr_child_hosts`] — see that field
+    /// for the contract.
+    pub(super) direct_snippet_slot_attr_child_hosts: rustc_hash::FxHashSet<NodeId>,
 }
 
 /// A `{@render}` tag awaiting callee resolution: the node to finalize, the inner
@@ -550,6 +556,7 @@ pub fn lower_parsed_svelte_to_ir<'a>(
         block_rune_tracking: Vec::new(),
         static_slot_filler_hosts: rustc_hash::FxHashSet::default(),
         direct_slot_attr_child_hosts: rustc_hash::FxHashSet::default(),
+        direct_snippet_slot_attr_child_hosts: rustc_hash::FxHashSet::default(),
     };
 
     // The root template scope owns the top-level template nodes.
@@ -613,6 +620,7 @@ pub fn lower_parsed_svelte_to_ir<'a>(
         ops: ctx.ops,
         static_slot_filler_hosts: ctx.static_slot_filler_hosts,
         direct_slot_attr_child_hosts: ctx.direct_slot_attr_child_hosts,
+        direct_snippet_slot_attr_child_hosts: ctx.direct_snippet_slot_attr_child_hosts,
     })
 }
 
@@ -1063,6 +1071,15 @@ fn lower_snippet_block(
         param_pats.push(p);
     }
     let ts = lower_children_in_scope(ctx, &block.children, body_scope);
+    // Record the lowered SOURCE-LEVEL DIRECT children of the snippet body: the
+    // unified slot choke-point accepts a STATIC `slot=` on these hosts (official
+    // validates a snippet direct child as component-owned placement) while rejecting
+    // the dynamic/mixed forms. Populated at the SNIPPET call site — never inside
+    // `lower_children_in_scope`, which `{#await}` bodies share (their roots are NOT
+    // snippet children).
+    let snippet_roots: Vec<NodeId> = ctx.template_scopes[ts.0 as usize].roots.clone();
+    ctx.direct_snippet_slot_attr_child_hosts
+        .extend(snippet_roots);
     ctx.push_node(IrNode::Block(BlockIr::Snippet {
         name: name_binding,
         params: param_pats,
