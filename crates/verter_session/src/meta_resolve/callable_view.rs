@@ -19,8 +19,6 @@
 //! normalizer) rather than duplicating its carrier walk, and OWNS the
 //! Union/Intersection callable-arm recursion so the Vue and Svelte normalizers
 //! never iterate `SemanticNodeData::Union` themselves.
-#![allow(dead_code)] // The view is the production decider — the Vue/Svelte framework-surface normalizers consume it. The module allow remains for the completeness methods no normalizer currently demands: `CallableNodeView::first_param_object_surface` and `SignatureNodeView::{return_type, return_type_span}`.
-
 use std::sync::Arc;
 
 use rustc_hash::FxHashSet;
@@ -577,6 +575,9 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
     /// `None` when the root is not a single callable, has no first parameter,
     /// or the first-param root is symbolic-only (an open Conditional / mapped /
     /// indexed / free `TypeParam`).
+    // Verified-unconsumed completeness method — no normalizer currently demands
+    // it; pending a delete-or-wire decision.
+    #[allow(dead_code)]
     pub(crate) fn first_param_object_surface(
         &self,
         ctx: &dyn ResolverContext,
@@ -971,6 +972,9 @@ impl SignatureNodeView<'_, '_> {
     /// `Function` node (which it is by construction); FAILS CLOSED with `None`
     /// on the unreachable non-`Function` case rather than fabricating a
     /// valid-looking node fact by returning `self.function`.
+    // Verified-unconsumed completeness method — no normalizer currently demands
+    // it; pending a delete-or-wire decision.
+    #[allow(dead_code)]
     pub(crate) fn return_type(&self) -> Option<SemanticNodeId> {
         match self.data(self.function).as_deref() {
             Some(SemanticNodeData::Function { return_type, .. }) => Some(*return_type),
@@ -982,6 +986,9 @@ impl SignatureNodeView<'_, '_> {
     }
 
     /// The return-type annotation span, if the signature carries one.
+    // Verified-unconsumed completeness method — no normalizer currently demands
+    // it; pending a delete-or-wire decision.
+    #[allow(dead_code)]
     pub(crate) fn return_type_span(&self) -> Option<Span> {
         match self.data(self.function).as_deref() {
             Some(SemanticNodeData::Function {
