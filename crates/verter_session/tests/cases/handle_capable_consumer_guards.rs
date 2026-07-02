@@ -27,8 +27,8 @@
 //!   `retired_kind_b_bridge_symbol_absent_from_production_source` in the
 //!   separate `output_projector_residual_guards` (which asserts the symbol's
 //!   ABSENCE from production source). The global fence
-//!   `hot_path_never_calls_materialize_type_expr` stays deferred to a later
-//!   block.
+//!   `hot_path_never_calls_materialize_type_expr` is enabled and green at
+//!   zero offenders.
 //!
 //! - **G-B: per-inventory ordering.** Each listed hot carrier has a
 //!   handle-native consumer present in the production tree BEFORE the

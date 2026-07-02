@@ -7,10 +7,10 @@ tripwire, not the universal authority. The universal "no hot materialize-then-de
 carried by the STRUCTURAL rail (the `NoTypeExpr` marker trait, the sealed `OutputProjector`
 capability, and the production conversions that move hot decisions onto node-domain
 `RaisedShapeFacts` / `RaisedShapeKey` by construction). This row records the named syntactic residual
-surfaces and the path that closes each. It is a **durable** debt home — it is independent of
-`docs/arch/stage9-materialize-fence-deferral.md` and SURVIVES that file's deletion at fence-GREEN,
-because one named residual (FN5's Unknown-fence typed-degradation end-state) lands in Stage 10, after
-the fence doc is gone.
+surfaces and the path that closes each. It is a **durable** debt home — the fence
+`hot_path_never_calls_materialize_type_expr` is enabled and green at zero offenders (its closed
+Stage-9 fence-deferral record is deleted), and this row outlives that closure because one named
+residual (FN5's Unknown-fence typed-degradation end-state) lands in Stage 10.
 
 **Ruling source (codex-DEFER, binding)**: `mechanism_ruling: codex-reconciliation-hot-materialize-sc-first-2026-06-27`
 — the Structural-Confinement-First reconciliation that froze the name-based tripwire after the
