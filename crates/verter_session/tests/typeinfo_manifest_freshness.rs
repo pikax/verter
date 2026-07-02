@@ -43,54 +43,114 @@ fn workspace_root() -> PathBuf {
 ///
 /// 1. Prefer an explicit `PYTHON3` / `PYTHON` env override (CI hook).
 /// 2. Fall back to `python3` / `python` on `PATH`.
-/// 3. Return `None` when none resolves — the test then skips gracefully
-///    (running on a python-free machine), mirroring how the proto
-///    freshness test skips when `buf` is absent.
-fn locate_python(workspace_root: &Path) -> Option<PathBuf> {
+/// 3. Every candidate must pass [`python_is_functional`] — existence alone
+///    is NOT enough: the Microsoft Store "App Execution Alias" ships a
+///    zero-byte `python.exe` reparse point under `WindowsApps` for which
+///    `is_file()` is true but which only prints an install hint and exits
+///    non-zero. Accepting it would make the freshness check report a bogus
+///    "manifest is STALE" instead of skipping.
+///
+/// Returns `Err(rejected)` — every probed-and-rejected candidate — when no
+/// functional interpreter resolves; the caller then skips gracefully with
+/// an informative reason, mirroring how the proto freshness test skips
+/// when `buf` is absent.
+fn locate_python(workspace_root: &Path) -> Result<PathBuf, Vec<PathBuf>> {
+    let _ = workspace_root;
+    let mut rejected: Vec<PathBuf> = Vec::new();
     for var in ["PYTHON3", "PYTHON"] {
-        if let Some(val) = std::env::var_os(var) {
-            let candidate = PathBuf::from(&val);
-            if candidate.is_file() {
-                return Some(candidate);
+        let Some(val) = std::env::var_os(var) else {
+            continue;
+        };
+        let named = PathBuf::from(&val);
+        // A direct file path is probed as-is; a bare name resolves via PATH.
+        let candidates = if named.is_file() {
+            vec![named]
+        } else {
+            which_on_path(&named)
+        };
+        for candidate in candidates {
+            if python_is_functional(&candidate) {
+                return Ok(candidate);
             }
-            // Bare name in the override → resolve via PATH below.
-            if let Some(found) = which_on_path(&candidate) {
-                return Some(found);
-            }
+            rejected.push(candidate);
         }
     }
     for name in ["python3", "python"] {
-        if let Some(found) = which_on_path(Path::new(name)) {
-            return Some(found);
+        for candidate in which_on_path(Path::new(name)) {
+            if python_is_functional(&candidate) {
+                return Ok(candidate);
+            }
+            rejected.push(candidate);
         }
     }
-    let _ = workspace_root;
-    None
+    Err(rejected)
 }
 
-/// Minimal `which`: returns the first existing entry for `name` on `PATH`
-/// (honouring Windows executable extensions). When `name` is already an
-/// absolute existing file it is returned as-is.
-fn which_on_path(name: &Path) -> Option<PathBuf> {
-    if name.is_absolute() && name.is_file() {
-        return Some(name.to_path_buf());
+/// Minimal `which`: returns EVERY existing entry for `name` on `PATH`
+/// (honouring Windows executable extensions), in `PATH` order. When `name`
+/// is already an absolute existing file it is the sole entry. Returning all
+/// matches (not the first) lets the caller probe past a non-functional
+/// front-of-`PATH` entry — e.g. the MS-Store alias stub shadowing a real
+/// install later on `PATH`.
+fn which_on_path(name: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    if name.is_absolute() {
+        if name.is_file() {
+            found.push(name.to_path_buf());
+        }
+        return found;
     }
-    let path = std::env::var_os("PATH")?;
+    let Some(path) = std::env::var_os("PATH") else {
+        return found;
+    };
     for dir in std::env::split_paths(&path) {
         let base = dir.join(name);
         if base.is_file() {
-            return Some(base);
+            found.push(base.clone());
         }
         if cfg!(windows) {
             for ext in ["exe", "bat", "cmd"] {
                 let candidate = base.with_extension(ext);
                 if candidate.is_file() {
-                    return Some(candidate);
+                    found.push(candidate);
                 }
             }
         }
     }
-    None
+    found
+}
+
+/// Functional probe — the acceptance authority for python candidates. A
+/// candidate is a usable interpreter ONLY when `<candidate> --version`
+/// spawns, exits 0, AND prints a real `Python 3.x` version banner (matched
+/// case-insensitively on the trimmed combined stdout+stderr). The MS-Store
+/// alias stub fails on both counts (prints "Python was not found ..." and
+/// exits non-zero); a broken shim that exits 0 without a banner also fails.
+fn python_is_functional(candidate: &Path) -> bool {
+    let Ok(output) = Command::new(candidate).arg("--version").output() else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let combined = format!(
+        "{} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    combined.trim().to_lowercase().contains("python 3.")
+}
+
+/// `true` when any path component is `WindowsApps` (case-insensitive) — the
+/// Microsoft Store app-execution-alias directory. Used ONLY to enrich the
+/// skip reason; [`python_is_functional`] is the acceptance authority.
+fn candidate_is_windows_apps_alias(path: &Path) -> bool {
+    path.components().any(|component| {
+        component
+            .as_os_str()
+            .to_string_lossy()
+            .eq_ignore_ascii_case("WindowsApps")
+    })
 }
 
 /// Byte-equality freshness discriminator: run the manifest generator in
@@ -111,16 +171,36 @@ fn typeinfo_manifest_files_are_byte_equal_to_regenerated_generator_output() {
         script.display(),
     );
 
-    let Some(python) = locate_python(&root) else {
-        // Skip gracefully when python3 isn't installed (e.g. running
-        // `cargo test` on a python-free machine), exactly as the proto
-        // freshness test skips when `buf` is absent. CI ships python3.
-        eprintln!(
-            "skipping manifest freshness check: no `python3`/`python` found via \
-             $PYTHON3/$PYTHON or on `PATH`. Install python3 (CI ships it) to run \
-             `python3 scripts/gen-typeinfo-ignore-manifest.py --check`."
-        );
-        return;
+    let python = match locate_python(&root) {
+        Ok(python) => python,
+        Err(rejected) => {
+            // Skip gracefully — and loudly — when no FUNCTIONAL python3
+            // resolves (e.g. running `cargo test` on a python-free machine,
+            // or one where only the MS-Store alias stub exists), exactly as
+            // the proto freshness test skips when `buf` is absent. CI ships
+            // python3, so the discrimination holds in CI.
+            let mut reason = String::from(
+                "skipping manifest freshness check: no functional `python3`/`python` \
+                 found via $PYTHON3/$PYTHON or on `PATH`.",
+            );
+            for candidate in &rejected {
+                let note = if candidate_is_windows_apps_alias(candidate) {
+                    " (Microsoft Store app-execution-alias stub, not a real interpreter)"
+                } else {
+                    ""
+                };
+                reason.push_str(&format!(
+                    "\n  probed and rejected: {}{note}",
+                    candidate.display(),
+                ));
+            }
+            reason.push_str(
+                "\nInstall python3 (CI ships it) to run \
+                 `python3 scripts/gen-typeinfo-ignore-manifest.py --check`.",
+            );
+            eprintln!("{reason}");
+            return;
+        }
     };
 
     let output = Command::new(&python)
@@ -282,5 +362,129 @@ fn manifest_block_counts_reflect_lifts() {
         count("status: IgnoreStatus::Ignored"),
         316,
         "exactly 316 IgnoredTestRows must remain `Ignored` (362 total − 46 lifted)",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// No-vacuous-skip guardrails for the functional python probe.
+//
+// `is_file()`-only acceptance regressed on Windows machines without a real
+// python install: the Microsoft Store app-execution-alias stub (a zero-byte
+// `python.exe` reparse point under `WindowsApps` for which `is_file()` is
+// true) passed the existence check, then failed at generator time, and the
+// freshness assertion panicked with a bogus "manifest is STALE". These tests
+// pin BOTH poles of the probe: a stub is rejected (the skip fires instead of
+// a false STALE) and a functional interpreter is accepted (the freshness body
+// actually runs when python is installed — the skip cannot become vacuous).
+// ---------------------------------------------------------------------------
+
+/// Temp-dir guard: removes the fixture directory (and the fakes inside)
+/// even when the owning test panics.
+struct TempDirGuard(PathBuf);
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn unique_probe_fixture_dir(tag: &str) -> (PathBuf, TempDirGuard) {
+    let dir = std::env::temp_dir().join(format!(
+        "verter_manifest_python_probe_{tag}_{pid}",
+        pid = std::process::id(),
+    ));
+    std::fs::create_dir_all(&dir).expect("create probe fixture dir");
+    let guard = TempDirGuard(dir.clone());
+    (dir, guard)
+}
+
+/// Writes a fake "python" executable that prints `banner` and exits with
+/// `exit_code`. Windows: a `.cmd` shim; elsewhere: an executable `sh`
+/// script. Hermetic — lives entirely under [`std::env::temp_dir`].
+fn write_fake_interpreter(dir: &Path, stem: &str, banner: &str, exit_code: i32) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let path = dir.join(format!("{stem}.cmd"));
+        std::fs::write(
+            &path,
+            format!("@echo off\r\necho {banner}\r\nexit /b {exit_code}\r\n"),
+        )
+        .expect("write fake interpreter");
+        path
+    }
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(stem);
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\necho \"{banner}\"\nexit {exit_code}\n"),
+        )
+        .expect("write fake interpreter");
+        let mut perms = std::fs::metadata(&path)
+            .expect("stat fake interpreter")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).expect("chmod fake interpreter");
+        path
+    }
+}
+
+/// The MS-Store-style stub — prints "Python was not found", exits non-zero —
+/// is rejected, and so is an exit-0 shim without a version banner: existence
+/// (`is_file()`) is NOT functionality.
+#[test]
+fn python_probe_rejects_non_functional_store_stub() {
+    let (dir, _guard) = unique_probe_fixture_dir("stub");
+    let stub = write_fake_interpreter(&dir, "python_stub", "Python was not found", 9009);
+    assert!(
+        stub.is_file(),
+        "fixture must reproduce the trap: the stub IS a file on disk",
+    );
+    assert!(
+        !python_is_functional(&stub),
+        "a stub that prints an install hint and exits non-zero must be \
+         rejected — accepting it turns the graceful skip into a bogus \
+         \"manifest is STALE\" failure",
+    );
+
+    let banner_less = write_fake_interpreter(&dir, "python_banner_less", "hello", 0);
+    assert!(
+        !python_is_functional(&banner_less),
+        "an exit-0 shim without a `Python 3.x` banner must be rejected — \
+         exit status alone is not a functional-interpreter proof",
+    );
+}
+
+/// Present-forces-run: a functional interpreter (real `Python 3.x.y` banner,
+/// exit 0) is ACCEPTED, so the freshness body actually runs whenever python
+/// is installed — the graceful skip can never become vacuous.
+#[test]
+fn python_probe_accepts_functional_interpreter() {
+    let (dir, _guard) = unique_probe_fixture_dir("good");
+    let good = write_fake_interpreter(&dir, "python_good", "Python 3.12.0", 0);
+    assert!(
+        python_is_functional(&good),
+        "a candidate printing a `Python 3.x.y` banner with exit 0 must be \
+         accepted, otherwise the freshness check would skip vacuously on \
+         machines WITH python",
+    );
+}
+
+/// One harness, both poles: the probe DISCRIMINATES the stub from the
+/// functional interpreter — an always-true probe fails on the stub half, an
+/// always-false probe fails on the functional half.
+#[test]
+fn python_probe_discriminates_stub_from_functional_interpreter() {
+    let (dir, _guard) = unique_probe_fixture_dir("both");
+    let stub = write_fake_interpreter(&dir, "python_stub", "Python was not found", 9009);
+    let good = write_fake_interpreter(&dir, "python_good", "Python 3.12.0", 0);
+    assert!(
+        !python_is_functional(&stub),
+        "probe must reject the non-functional stub (always-true regression)",
+    );
+    assert!(
+        python_is_functional(&good),
+        "probe must accept the functional interpreter (always-false regression)",
     );
 }
