@@ -1,17 +1,17 @@
-//! Parity / oracle tests for the shared node-domain callable/signature view.
+//! Golden tests for the shared node-domain callable/signature view.
 //!
-//! Each test is DISCRIMINATING: it asserts a SPECIFIC node fact and FAILS on a
-//! wrong projection. Where a `TypeExpr`-domain helper still exists (it does
-//! until §5a SP4), the strongest tests materialize the view's node ONCE via the
-//! test cap and assert it equals the legacy helper's output for the same
-//! fixture (`single_callable_arm` ↔ `callable_arm_from_raised`).
+//! Each test is DISCRIMINATING: it asserts a SPECIFIC node fact (an exact
+//! interned node, an exact combined shape, an exact fail-closed `None`) and
+//! FAILS on a wrong projection. Canonical-consistency tests compare the view's
+//! node result DIRECTLY against the shared resolver
+//! (`realize_callable_member`) — both node-domain.
 
 use std::sync::Arc;
 
 use verter_type_expr::{MemberVisibility, PrimitiveName, TypeExpr};
 
 use super::{ArmCombineNode, CallableNodeView};
-use crate::meta_resolve::dispatch_helpers::{callable_arm_from_raised, realize_callable_member};
+use crate::meta_resolve::dispatch_helpers::realize_callable_member;
 use crate::project_semantic_dispatch::{node_data_for, ProjectSemanticDispatch};
 use crate::resolver_core::{CanonicalCompletionOverlay, HostResolverContext, ResolverContext};
 use crate::resolver_store::CurrentHostStoreView;
@@ -317,10 +317,12 @@ fn single_callable_arm_non_callable_scalar_refuses() {
 }
 
 #[test]
-fn single_callable_arm_matches_callable_arm_from_raised() {
-    // STRONGEST parity discriminator: the view's realized node, materialized
-    // once via the test cap, equals `callable_arm_from_raised` on the
-    // materialized union value (the legacy offender path).
+fn single_callable_arm_nullish_union_is_exact_node_and_consistent_with_realizer() {
+    // DIRECT node-domain golden: `Fn | undefined` yields EXACTLY the interned
+    // Function node `f` — not the union node, not a re-interned copy. Plus
+    // canonical consistency with the shared resolver on a fixture where the
+    // composite policy is not in play: on an `Alias(Function)` root the view's
+    // arm IS `realize_callable_member`'s realized node (both node-domain).
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
@@ -335,25 +337,29 @@ fn single_callable_arm_matches_callable_arm_from_raised() {
     let arm = view
         .single_callable_arm(navigate())
         .expect("the nullish union yields a single callable arm");
-    assert_eq!(arm, f, "the view's callable arm is the Function node");
-
-    let view_mat = dispatch
-        .materialize_output_type_expr_for_test(arm)
-        .expect("the view node materializes");
-    let TypeExpr::Function(view_func) = &view_mat else {
-        panic!("the view node materializes to a Function, got {view_mat:?}");
-    };
-
-    let union_mat = dispatch
-        .materialize_output_type_expr_for_test(nullish)
-        .expect("the union value materializes");
-    let helper_func = callable_arm_from_raised(&union_mat)
-        .expect("callable_arm_from_raised extracts the single callable");
-
     assert_eq!(
-        view_func.as_ref(),
-        helper_func.as_ref(),
-        "the view's node-domain callable equals callable_arm_from_raised's materialized callable"
+        arm, f,
+        "the view's callable arm is EXACTLY the interned Function node"
+    );
+    assert_ne!(
+        arm, nullish,
+        "the view returns the stripped ARM, never the union root itself"
+    );
+
+    // CANONICAL CONSISTENCY (node-domain, direct — no materialization): the
+    // view's single_callable_arm on an `Alias(Function)` root equals the shared
+    // resolver's realized node, and both are the exact Function node.
+    let aliased = alias(&graph, f);
+    let view_arm = CallableNodeView::new(&dispatch, aliased).single_callable_arm(navigate());
+    let realized = realize_callable_member(&dispatch, aliased, navigate());
+    assert_eq!(
+        view_arm, realized,
+        "the view's callable arm equals realize_callable_member's node for an aliased callable"
+    );
+    assert_eq!(
+        view_arm,
+        Some(f),
+        "both resolve the alias to the exact interned Function node"
     );
 }
 
@@ -425,10 +431,8 @@ fn single_callable_arm_never_intersection_under_union_refuses() {
     // CANONICAL-CONSISTENCY (the adjudicated crux): the SHARED resolver
     // `realize_callable_member` ALSO returns `None` for this composite (its
     // Intersection arm `?`-fails the whole composite on the `undefined` arm). The
-    // view MATCHES the shared resolver — a view-only tri-state would break this
-    // parity. (The legacy TypeExpr helper `callable_arm_from_raised` is more
-    // lenient and would return `Some(f)`; the view deliberately follows the
-    // shared resolver, not the legacy helper.)
+    // view MATCHES the shared resolver — a view-only tri-state that elided the
+    // `never` intersection and returned `Some(f)` would break this parity.
     assert_eq!(
         realize_callable_member(&dispatch, composite, navigate()),
         None,
@@ -734,6 +738,55 @@ fn slot_param_and_return_intersection_with_nullish_fails_closed() {
         parts.first_param,
         Some(props),
         "the surviving callable supplies the first-param binding"
+    );
+}
+
+#[test]
+fn slot_param_and_return_span_present_for_single_arm_absent_for_composed() {
+    // The return-type annotation span survives ONLY for a single-arm callable
+    // (the caller slices the EXACT source text for the display `return_type`);
+    // a COMPOSED multi-arm callable has no single annotation span, so it is
+    // `None`. DISCRIMINATING both ways: an impl that dropped the single-arm
+    // span (constant `None`) fails the first assertion; one that leaked an
+    // arm's span onto the composed parts fails the second.
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let p1 = prim(&graph, PrimitiveKind::Number);
+    let r1 = prim(&graph, PrimitiveKind::Boolean);
+    let r2 = prim(&graph, PrimitiveKind::Object);
+    let span = verter_span::Span::new(7, 13);
+    let f1 = function_with_return_span(
+        &graph,
+        vec![param(Some("a"), p1, false, false)],
+        r1,
+        Some(span),
+    );
+    let f2 = function_with_return_span(
+        &graph,
+        vec![param(Some("b"), p1, false, false)],
+        r2,
+        Some(verter_span::Span::new(21, 27)),
+    );
+
+    // Single arm: the exact stored span survives.
+    let single = CallableNodeView::new(&dispatch, f1)
+        .slot_param_and_return_by_arm(ArmCombineNode::Intersection, shallow())
+        .expect("a single Function slot yields parts");
+    assert_eq!(
+        single.return_type_span,
+        Some(span),
+        "a single-arm callable keeps its exact return-type annotation span"
+    );
+
+    // Composed arms: no single span — None, even though BOTH arms carry one.
+    let composed = CallableNodeView::new(&dispatch, union(&graph, vec![f1, f2]))
+        .slot_param_and_return_by_arm(ArmCombineNode::Union, shallow())
+        .expect("a 2-arm slot yields parts");
+    assert_eq!(
+        composed.return_type_span, None,
+        "a composed multi-arm callable has NO single return-type span"
     );
 }
 
@@ -1058,8 +1111,8 @@ fn single_callable_arm_realizes_declared_and_instantiated_callbacks() {
     // Real carrier resolution: a declared alias (`FnAlias` → DeclRef) and a
     // generic instantiation (`GenFn<Row>` → InstantiationRef) BOTH realize to a
     // single callable through the composed realize_callable_member; ambiguous /
-    // non-callable members refuse. Plus the strongest parity oracle against
-    // callable_arm_from_raised on the materialized member value.
+    // non-callable members refuse. Plus direct node-domain golden facts on the
+    // nullish callback and canonical consistency with the shared resolver.
     let component = "/workspace/Callbacks.svelte";
     let source = "<script lang=\"ts\">\n\
          import type { FnAlias, GenFn, Row } from './types';\n\
@@ -1128,31 +1181,49 @@ fn single_callable_arm_realizes_declared_and_instantiated_callbacks() {
         );
     }
 
-    // PARITY ORACLE on a real nullish callback: the view's realized callable,
-    // materialized once, equals callable_arm_from_raised on the materialized
-    // (realized) member value — the exact legacy `callback_events` decision.
+    // DIRECT node-domain golden on the real nullish callback: the stripped arm
+    // is a `Function` node carrying EXACTLY the declared `(r: Row)` signature —
+    // one param named `r` — and is a DIFFERENT node from the raw member value
+    // (the nullish union was actually stripped, not echoed back).
     let nullish = member("onnullish");
     let arm = CallableNodeView::new(&dispatch, nullish)
         .single_callable_arm(navigate())
         .expect("the nullish callback yields a callable arm");
-    let view_mat = dispatch
-        .materialize_output_type_expr_for_test(arm)
-        .expect("the view node materializes");
-    let TypeExpr::Function(view_func) = &view_mat else {
-        panic!("the view node materializes to a Function, got {view_mat:?}");
-    };
-    let realized_member =
-        realize_callable_member(&dispatch, nullish, navigate()).unwrap_or(nullish);
-    let member_mat = dispatch
-        .materialize_output_type_expr_for_test(realized_member)
-        .expect("the member value materializes");
-    let helper_func = callable_arm_from_raised(&member_mat)
-        .expect("callable_arm_from_raised extracts a callable");
-    assert_eq!(
-        view_func.as_ref(),
-        helper_func.as_ref(),
-        "the view's node-domain callable matches callable_arm_from_raised's materialized callable"
+    assert_ne!(
+        arm, nullish,
+        "the view returns the stripped callable ARM, not the raw member value"
     );
+    let arm_data = node_data_for(dispatch.ctx, arm).expect("arm node data");
+    let SemanticNodeData::Function { params, .. } = arm_data.as_ref() else {
+        panic!("the stripped arm is a Function node, got {arm_data:?}");
+    };
+    assert_eq!(
+        params.len(),
+        1,
+        "the callable keeps its single declared param"
+    );
+    assert_eq!(
+        params[0].name.as_deref(),
+        Some("r"),
+        "the declared `(r: Row)` param survives the nullish strip"
+    );
+
+    // CANONICAL CONSISTENCY (node-domain, direct): for the non-composite
+    // carriers the view's single_callable_arm IS the shared resolver's realized
+    // node — the same interned `Function`.
+    for name in ["onbare", "ondeclared", "ongeneric"] {
+        let value = member(name);
+        let view_arm = CallableNodeView::new(&dispatch, value).single_callable_arm(navigate());
+        let realized = realize_callable_member(&dispatch, value, navigate());
+        assert!(
+            view_arm.is_some(),
+            "`{name}` yields a callable arm (precondition for the consistency check)"
+        );
+        assert_eq!(
+            view_arm, realized,
+            "`{name}`: the view's callable arm equals realize_callable_member's realized node"
+        );
+    }
 }
 
 // ──────────── carrier-RESOLUTION: real DeclRef / InstantiationRef ──────────
@@ -1428,25 +1499,25 @@ fn single_callable_arm_resolves_carrier_wrapped_nullish_callable() {
         "the resolved callable arm is a `Function` node"
     );
 
-    // PARITY ORACLE: the view's node-domain callable, materialized once, equals
-    // `callable_arm_from_raised` on the materialized NORMALIZED member value.
-    let arm_mat = dispatch
-        .materialize_output_type_expr_for_test(arm)
-        .expect("the view node materializes");
-    let TypeExpr::Function(view_func) = &arm_mat else {
-        panic!("the view node materializes to a Function, got {arm_mat:?}");
-    };
+    // DIRECT node-domain golden: the resolved arm is the Function CONSTITUENT
+    // of the normalized `Union(Function, undefined)` body — the exact interned
+    // node, not a re-interned copy and not the union itself.
     let normalized =
         dispatch.normalize_node_for_structural_fact_demand(member("onmaybe"), navigate());
-    let mem_mat = dispatch
-        .materialize_output_type_expr_for_test(normalized)
-        .expect("the normalized member materializes");
-    let helper_func = callable_arm_from_raised(&mem_mat)
-        .expect("callable_arm_from_raised extracts the single callable");
-    assert_eq!(
-        view_func.as_ref(),
-        helper_func.as_ref(),
-        "the view's callable matches callable_arm_from_raised on the resolved member"
+    let norm_data = node_data_for(dispatch.ctx, normalized).expect("normalized member node data");
+    let SemanticNodeData::Union(union_arms) = norm_data.as_ref() else {
+        panic!("the normalized `MaybeFn` body is a nullish Union, got {norm_data:?}");
+    };
+    assert!(
+        union_arms.contains(&arm),
+        "the view's arm IS a constituent node of the normalized union (not re-interned)"
+    );
+    assert!(
+        union_arms.iter().any(|a| matches!(
+            node_data_for(dispatch.ctx, *a).as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Undefined))
+        )),
+        "the other union constituent is the stripped `undefined` arm"
     );
 
     // A plain non-callable member still refuses.
@@ -2594,12 +2665,12 @@ fn validated_snippet_params_unresolved_carrier_arg_fails_closed() {
 
 #[test]
 fn validated_snippet_params_declref_tuple_arg_resolves_the_superset_flip() {
-    // THE FLIP: a `Snippet<Args>` whose `Params` arg is a `DeclRef`-to-tuple
-    // (`type Args = [item: Item, index: number]`) RESOLVES to `[item, index]`.
-    // The legacy TypeExpr reader (`single_tuple_type_argument`) required a LITERAL
-    // `Tuple` type-argument and DROPPED this (a binding-less slot); the node
-    // reader normalizes the `DeclRef` to its `Tuple` — the strict superset. (The
-    // legacy-drops half is proven empirically in `svelte_exec_tests`.)
+    // A `Snippet<Args>` whose `Params` arg is a `DeclRef`-to-tuple
+    // (`type Args = [item: Item, index: number]`) RESOLVES to `[item, index]`:
+    // the reader normalizes the `DeclRef` to its `Tuple` through the shared
+    // structural-fact demand primitive, so the `Params` tuple need not be
+    // written literally. A reader that required a LITERAL `Tuple` type-argument
+    // would DROP these bindings — this test FAILS against such an impl.
     let component = "/workspace/FlipSnippet.svelte";
     let source = "<script lang=\"ts\">\n\
          import type { Args } from './types';\n\
@@ -2646,12 +2717,12 @@ fn validated_snippet_params_declref_tuple_arg_resolves_the_superset_flip() {
 
     let params = CallableNodeView::new(&dispatch, snippet)
         .validated_snippet_positional_params(navigate())
-        .expect("the node reader RESOLVES the DeclRef-to-tuple `Params` (the flip)");
+        .expect("the node reader RESOLVES the DeclRef-to-tuple `Params`");
     let labels: Vec<Option<&str>> = params.iter().map(|p| p.label.as_deref()).collect();
     assert_eq!(
         labels,
         vec![Some("item"), Some("index")],
-        "the `DeclRef`-to-tuple `Params` resolves to its ordered bindings (superset over legacy)"
+        "the `DeclRef`-to-tuple `Params` resolves to its ordered bindings"
     );
 }
 

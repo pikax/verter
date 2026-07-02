@@ -264,11 +264,12 @@ fn realize_callable_member_inner(
         // (`default: SlotA | SlotB` raises to `Union(Ref(SlotA), Ref(SlotB))`;
         // `(SlotA & SlotB)['default']` to an `Intersection`). Realize EACH arm
         // to its callable Function and rebuild the composite of realized arms,
-        // so the slot normalizer's `slot_callable_param_and_return` sees
-        // `Union(Function, Function)` / `Intersection(Function, Function)`
-        // rather than a composite of unresolved alias `Ref`s. If ANY arm does
-        // not realize to a callable the whole composite is not slot-callable
-        // (`None`) — the slot normalizer then classifies the member non-slot.
+        // so the node-domain slot reader (`CallableNodeView::
+        // slot_param_and_return_by_arm`) sees `Union(Function, Function)` /
+        // `Intersection(Function, Function)` rather than a composite of
+        // unresolved alias carriers. If ANY arm does not realize to a callable
+        // the whole composite is not slot-callable (`None`) — the slot
+        // normalizer then classifies the member non-slot.
         SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
             let is_union = matches!(data.as_ref(), SemanticNodeData::Union(_));
             let arms = Arc::clone(arms);
@@ -305,88 +306,6 @@ fn realize_callable_member_inner(
         // Any other shape (Object, Primitive, Mapped, KeyOf, IndexedAccess,
         // TypeOf, TypeParam, Literal, Tuple, Array, TemplateLiteral, Opaque) —
         // not callable.
-        _ => None,
-    }
-}
-
-/// Extract the single callable [`verter_type_expr::FunctionExpr`] arm from a
-/// raised [`TypeExpr`], stripping the nullish (`undefined` / `null`) arms an
-/// EXPLICIT nullish UNION/INTERSECTION VALUE carries.
-///
-/// This handles a callback prop whose WRITTEN VALUE is an explicit composite
-/// containing a callable arm — `onselect: ((r: Row) => void) | undefined`
-/// realises (after `realize_callable_member` + `raise_node_to_type_expr`) to
-/// `Union([Function, Primitive(Undefined)])`; a bare `TypeExpr::Function` match
-/// would drop it.
-///
-/// This is NOT about member-`?` optionality: a member-OPTIONAL prop
-/// (`onselect?: (r: Row) => void`) factors the `?` into the surface `optional`
-/// flag, so its VALUE raises to a BARE `TypeExpr::Function`, not a union — that
-/// case lands on the `Function(f)` arm below, not the composite arm.
-///
-/// This helper accepts:
-///
-/// - `Function(f)` → `f` verbatim (a bare callable value — required props and
-///   member-`?`-optional props alike).
-/// - `Parenthesized(inner)` → recurse (the parser keeps `(…) => void`'s wrap).
-/// - `Union(arms)` / `Intersection(arms)` → drop every `undefined` / `null`
-///   arm of an explicit nullish composite, then if EXACTLY ONE callable arm
-///   remains (recursively), return it.
-///
-/// It is deliberately NARROW: a composite with NO callable arm returns `None`
-/// (a non-callable union like `onmode: "a" | "b"` is not an event), and a
-/// composite with MULTIPLE distinct callable arms also returns `None`
-/// (ambiguous — the caller must not fabricate a single payload from divergent
-/// signatures). It NEVER broadens to a non-callable arm and NEVER introduces
-/// `any`.
-///
-/// RETAINED as the node-domain `CallableNodeView::single_callable_arm` PARITY
-/// ORACLE: the framework normalizers now decide callable arms in the node domain,
-/// so this `TypeExpr`-domain helper has NO production caller and survives only as
-/// the `callable_view_tests` oracle (`single_callable_arm ↔ callable_arm_from_raised`).
-/// It is deleted when the last legacy `TypeExpr`-domain helper is removed; until
-/// then it is unused in a non-test build, so the dead-code lint is silenced there
-/// (the test build DOES reference it).
-#[cfg_attr(not(test), allow(dead_code))]
-#[must_use]
-pub(crate) fn callable_arm_from_raised(
-    raised: &verter_type_expr::TypeExpr,
-) -> Option<Arc<verter_type_expr::FunctionExpr>> {
-    use verter_type_expr::{PrimitiveName, TypeExpr};
-
-    match raised {
-        TypeExpr::Function(func) => Some(Arc::clone(func)),
-        TypeExpr::Parenthesized(inner) => callable_arm_from_raised(inner),
-        TypeExpr::Union(arms) | TypeExpr::Intersection(arms) => {
-            let mut callable: Option<Arc<verter_type_expr::FunctionExpr>> = None;
-            for arm in arms.iter() {
-                // Nullish arms (`undefined` / `null`) from an explicit nullish
-                // union are stripped — they are not the callable.
-                if matches!(
-                    arm,
-                    TypeExpr::Primitive(PrimitiveName::Undefined | PrimitiveName::Null)
-                ) {
-                    continue;
-                }
-                match callable_arm_from_raised(arm) {
-                    // A second, distinct callable arm makes the payload
-                    // ambiguous — refuse rather than pick one.
-                    Some(found) => {
-                        if let Some(existing) = &callable {
-                            if !Arc::ptr_eq(existing, &found) && **existing != *found {
-                                return None;
-                            }
-                        } else {
-                            callable = Some(found);
-                        }
-                    }
-                    // A non-nullish, non-callable arm means the member is not a
-                    // pure callable — do not classify it as an event.
-                    None => return None,
-                }
-            }
-            callable
-        }
         _ => None,
     }
 }

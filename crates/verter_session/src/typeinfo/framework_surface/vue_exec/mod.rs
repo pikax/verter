@@ -777,10 +777,9 @@ pub(in crate::typeinfo::framework_surface::vue_exec) fn raise_member_value(
 /// [`crate::meta_resolve::callable_view::CallableNodeView`] and mints the return
 /// `TypeExpr` at the registered `materialize_slot_return_node` sink, so this
 /// realize-then-raise verb has NO production caller. It STAYS a registered
-/// `HOT_TERMINAL_SINKS` entry (the sink allowlist is additive-only); retained
-/// caller-free, its terminal signature pinned by the
-/// `slot_normalizer_legacy_oracle` compile-only reference.
-#[cfg_attr(not(test), allow(dead_code))]
+/// `HOT_TERMINAL_SINKS` entry (the sink allowlist is additive-only) and is
+/// retained caller-free.
+#[allow(dead_code)]
 pub(in crate::typeinfo::framework_surface::vue_exec) fn raise_realized_callable_member_value(
     ctx: &dyn crate::resolver_core::ResolverContext,
     member: &TypeInfoSurfaceMember,

@@ -300,10 +300,11 @@ fn raise_member_value(
 /// The NUMERIC return-type-annotation span of a function-like slot member.
 ///
 /// This reaches the span the slot DTO discards: `slots_from_typeinfo_surface`
-/// slices `func.spans.return_type` into the display `return_type` String and
-/// then drops it (the published `AnalyzedSlotField.span` is a placeholder
-/// `Span::default()`). Mirrors `slot_callable_param_and_return`, which reads
-/// `func.spans.return_type` off the raised `TypeExpr::Function`.
+/// slices the callable's return-type annotation span (the node-domain
+/// `SlotCallableNodeParts::return_type_span`) into the display `return_type`
+/// String and then drops it (the published `AnalyzedSlotField.span` is a
+/// placeholder `Span::default()`). This helper reads the same span off the
+/// raised `TypeExpr::Function`'s `func.spans.return_type`.
 fn slot_return_type_span(host: &VerterHost, member: &TypeInfoSurfaceMember) -> verter_span::Span {
     match &raise_member_value(host, member) {
         verter_type_expr::TypeExpr::Function(func) => func

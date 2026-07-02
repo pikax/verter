@@ -248,179 +248,298 @@ fn realized_snippet_call_signature_is_this_plus_rest_tuple() {
     let [TypeExpr::Tuple { elements, .. }] = type_arguments.as_ref() else {
         panic!("the carrier's single type argument is the `Params` tuple, got {type_arguments:?}");
     };
-    let labels: Vec<Option<&str>> = elements.iter().map(|e| e.label.as_deref()).collect();
+    let element_labels: Vec<Option<&str>> = elements.iter().map(|e| e.label.as_deref()).collect();
     assert_eq!(
-        labels,
+        element_labels,
         vec![Some("item"), Some("index")],
-        "the `Params` tuple carries BOTH labelled elements, got {labels:?}"
+        "the `Params` tuple carries BOTH labelled elements, got {element_labels:?}"
     );
-    // And the normalizer over this realized value yields the two ordered
-    // bindings (the integration of shape + normalizer).
+    // And the node-domain snippet reader over the SAME member yields the two
+    // ordered positional binding NODES, which the terminal DTO sink
+    // materializes into the published bindings (the integration of shape +
+    // reader + sink).
+    let context = crate::semantic_query::ProjectionReductionContext::published(
+        crate::semantic_query::ProjectionMode::Navigate,
+    );
+    let params = CallableNodeView::new(&dispatch, row_member.value)
+        .validated_snippet_positional_params(context)
+        .expect("the snippet member yields positional params");
+    let labels: Vec<Option<&str>> = params.iter().map(|p| p.label.as_deref()).collect();
+    assert_eq!(labels, vec![Some("item"), Some("index")]);
     let scope = verter_type_expr::TypeExprScope::new(component);
-    let bindings = snippet_callable_positional_bindings(&value, &scope)
-        .expect("the realized snippet yields positional bindings");
+    let bindings = materialize_snippet_slot_bindings(&ctx, &params, &scope);
     let names: Vec<&str> = bindings.iter().map(|b| b.name.as_str()).collect();
     assert_eq!(names, vec!["item", "index"]);
 }
 
-/// Build the realized `Snippet`-callable shape the vendored
-/// `Snippet<Params>` lowers to: `(this: void, ...args: <tuple>)`. The
-/// normalizer must skip `this` and expand the rest-tuple element-wise.
-fn snippet_callable(rest_tuple_elements: Vec<verter_type_expr::TupleElement>) -> TypeExpr {
-    use verter_type_expr::{FunctionExpr, FunctionParam};
-    TypeExpr::Function(Arc::new(FunctionExpr::synthetic(
-        vec![
-            FunctionParam::synthetic(
-                Some("this".to_string()),
-                TypeExpr::Primitive(PrimitiveName::Void),
-                false,
-                false,
-            ),
-            FunctionParam::synthetic(
-                Some("args".to_string()),
-                TypeExpr::Tuple {
-                    elements: Arc::from(rest_tuple_elements.into_boxed_slice()),
-                    readonly: false,
-                },
-                false,
-                true,
-            ),
-        ],
-        None,
-        Vec::new(),
-    )))
+// ─────────── node-domain snippet reader + terminal DTO sink (golden) ───────────
+//
+// These drive the SAME production pair the snippet-slot normalizer composes:
+// `CallableNodeView::validated_snippet_positional_params` (the node-domain
+// positional reader) + `materialize_snippet_slot_bindings` (the terminal DTO
+// sink). Fixtures are interned graph nodes; every assertion is an exact node /
+// DTO fact (labels, order, exact `TypeExpr` values, `arg{index}` fallback, the
+// pairing invariant).
+
+fn snippet_graph(
+    host: &VerterHost,
+) -> std::sync::Arc<crate::semantic_query_memo::SemanticGraphStore> {
+    Arc::clone(host.project_type_store().semantic_graph())
 }
 
-fn tuple_el(label: &str, ty: TypeExpr) -> verter_type_expr::TupleElement {
-    verter_type_expr::TupleElement {
-        label: Some(label.to_string()),
-        ty,
-        optional: false,
-        rest: false,
-    }
+fn nav_context() -> crate::semantic_query::ProjectionReductionContext {
+    crate::semantic_query::ProjectionReductionContext::published(
+        crate::semantic_query::ProjectionMode::Navigate,
+    )
 }
 
-/// A `Snippet<[..]>` carrier `Ref` — the PRIMARY realized shape (the
-/// resolver keeps the structural `Snippet<Params>` interface as a Ref whose
-/// single type argument is the `Params` tuple).
-fn snippet_ref(params: Vec<verter_type_expr::TupleElement>) -> TypeExpr {
-    TypeExpr::Ref {
-        name: Arc::from("Snippet"),
-        type_arguments: Arc::from(
-            vec![TypeExpr::Tuple {
-                elements: Arc::from(params.into_boxed_slice()),
-                readonly: false,
-            }]
+fn nprim(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    kind: crate::semantic_query::PrimitiveKind,
+) -> crate::semantic_query::SemanticNodeId {
+    graph.intern_node(crate::semantic_query::SemanticNodeData::Primitive(kind))
+}
+
+fn ntuple(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    elements: Vec<(Option<&str>, crate::semantic_query::SemanticNodeId)>,
+) -> crate::semantic_query::SemanticNodeId {
+    let elements: Vec<crate::semantic_query::TupleElement> = elements
+        .into_iter()
+        .map(|(label, value)| crate::semantic_query::TupleElement {
+            label: label.map(Arc::from),
+            value,
+            optional: false,
+            rest: false,
+        })
+        .collect();
+    graph.intern_node(crate::semantic_query::SemanticNodeData::Tuple {
+        elements: Arc::from(elements.into_boxed_slice()),
+        readonly: false,
+    })
+}
+
+/// A synthetic `Snippet<args...>` `InstantiationRef` carrier (the shape a
+/// validated `Snippet<Params>` member value lowers to). The `__builtin__` base
+/// makes the carrier un-instantiable, so the carrier-preserving peel reads its
+/// `args` directly — exactly the validated-snippet read path.
+fn nsnippet(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    args: Vec<crate::semantic_query::SemanticNodeId>,
+) -> crate::semantic_query::SemanticNodeId {
+    graph.intern_node(crate::semantic_query::SemanticNodeData::InstantiationRef {
+        base: crate::semantic_query::DeclIdentity {
+            canonical_id: Arc::from("__builtin__"),
+            whole_hash: crate::semantic_query::HashValue::default(),
+            decl_name: Arc::from("Snippet"),
+        },
+        args: Arc::from(args.into_boxed_slice()),
+    })
+}
+
+/// The realized snippet call-signature shape `(this: void, ...args: <tuple>)`
+/// as a `Function` NODE — the fallback shape the reader handles when a
+/// snippet's call signature reduced.
+fn nsnippet_function(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    rest_tuple: crate::semantic_query::SemanticNodeId,
+) -> crate::semantic_query::SemanticNodeId {
+    let void = nprim(graph, crate::semantic_query::PrimitiveKind::Void);
+    graph.intern_node(crate::semantic_query::SemanticNodeData::Function {
+        params: Arc::from(
+            vec![
+                crate::semantic_query::FunctionParam::synthetic(
+                    Some(Arc::from("this")),
+                    void,
+                    false,
+                    false,
+                ),
+                crate::semantic_query::FunctionParam::synthetic(
+                    Some(Arc::from("args")),
+                    rest_tuple,
+                    false,
+                    true,
+                ),
+            ]
             .into_boxed_slice(),
         ),
-    }
+        return_type: void,
+        type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+        signature_span: None,
+        return_type_span: None,
+    })
 }
 
 #[test]
-fn snippet_ref_carrier_expands_params_tuple_in_order() {
-    // CORE (PRIMARY shape, DISCRIMINATING): a `Snippet<[item: Item,
-    // index: number]>` carrier Ref expands its single `Params` tuple type
-    // argument into TWO ordered bindings — `item` then `index`. The shared
-    // Vue normalizer would never touch the carrier's type arguments; this
-    // discriminates the Svelte-specific path.
+fn snippet_carrier_params_tuple_expands_to_ordered_dto_bindings() {
+    // CORE (PRIMARY shape): a `Snippet<[item: string, index: number]>` carrier
+    // expands its single `Params` tuple into TWO ordered positional NODES —
+    // `item` then `index` — and the terminal DTO sink publishes them with
+    // exact names, exact types, and the pairing invariant.
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    let host = VerterHost::new_standalone(crate::types::HostConfig::default());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = snippet_graph(&host);
+
+    let item_ty = nprim(&graph, crate::semantic_query::PrimitiveKind::String);
+    let index_ty = nprim(&graph, crate::semantic_query::PrimitiveKind::Number);
+    let params_tuple = ntuple(
+        &graph,
+        vec![(Some("item"), item_ty), (Some("index"), index_ty)],
+    );
+    let snippet = nsnippet(&graph, vec![params_tuple]);
+
+    let params = CallableNodeView::new(&dispatch, snippet)
+        .validated_snippet_positional_params(nav_context())
+        .expect("a Snippet carrier yields positional params");
+    let labels: Vec<Option<&str>> = params.iter().map(|p| p.label.as_deref()).collect();
+    assert_eq!(
+        labels,
+        vec![Some("item"), Some("index")],
+        "the carrier's `Params` tuple expands to ALL positions in order"
+    );
+    assert_eq!(
+        params[0].ty, item_ty,
+        "position 0 is the exact element node"
+    );
+    assert_eq!(
+        params[1].ty, index_ty,
+        "position 1 is the exact element node"
+    );
+
     let scope = verter_type_expr::TypeExprScope::new("/Owner.svelte");
-    let carrier = snippet_ref(vec![
-        tuple_el(
-            "item",
-            TypeExpr::Ref {
-                name: Arc::from("Item"),
-                type_arguments: Arc::from(Vec::new().into_boxed_slice()),
-            },
-        ),
-        tuple_el("index", TypeExpr::Primitive(PrimitiveName::Number)),
-    ]);
-    let bindings = snippet_callable_positional_bindings(&carrier, &scope)
-        .expect("a Snippet carrier yields positional bindings");
+    let bindings = materialize_snippet_slot_bindings(&host, &params, &scope);
     let names: Vec<&str> = bindings.iter().map(|b| b.name.as_str()).collect();
     assert_eq!(
         names,
         vec!["item", "index"],
-        "the carrier's `Params` tuple expands to ALL positional bindings in order, got {names:?}"
+        "the DTO bindings keep the order"
+    );
+    assert!(
+        matches!(
+            bindings[0].binding_expr,
+            Some(TypeExpr::Primitive(PrimitiveName::String))
+        ),
+        "the `item` binding materializes to `string`, got {:?}",
+        bindings[0].binding_expr
     );
     assert!(
         matches!(
             bindings[1].binding_expr,
             Some(TypeExpr::Primitive(PrimitiveName::Number))
         ),
-        "the `index` binding type is `number`, got {:?}",
+        "the `index` binding materializes to `number`, got {:?}",
         bindings[1].binding_expr
     );
-}
-
-#[test]
-fn snippet_ref_carrier_empty_params_yields_no_bindings() {
-    // DISCRIMINATING: a `Snippet<[]>` carrier yields NO bindings.
-    let scope = verter_type_expr::TypeExprScope::new("/Owner.svelte");
-    let carrier = snippet_ref(Vec::new());
-    let bindings = snippet_callable_positional_bindings(&carrier, &scope).unwrap();
+    // Pairing invariant: every binding_expr rides with the member scope.
     assert!(
-        bindings.is_empty(),
-        "a `Snippet<[]>` carrier yields no bindings"
+        bindings
+            .iter()
+            .all(|b| b.binding_expr_scope.as_ref() == Some(&scope)),
+        "each binding_expr is paired with the slot member's scope"
     );
 }
 
 #[test]
-fn snippet_ref_carrier_open_params_yields_no_bindings() {
-    // A `Snippet<Params>` whose single type argument is NOT a tuple
-    // (an open generic) carries no enumerable positional bindings.
-    let scope = verter_type_expr::TypeExprScope::new("/Owner.svelte");
-    let carrier = TypeExpr::Ref {
-        name: Arc::from("Snippet"),
-        type_arguments: Arc::from(
-            vec![TypeExpr::Ref {
-                name: Arc::from("Params"),
-                type_arguments: Arc::from(Vec::new().into_boxed_slice()),
-            }]
-            .into_boxed_slice(),
-        ),
-    };
+fn snippet_carrier_empty_params_tuple_yields_present_bindingless_slot() {
+    // A `Snippet<[]>` carrier is a PRESENT slot with NO bindings: the reader
+    // yields `Some(vec![])` (never `None` — the slot must not be dropped) and
+    // the DTO sink publishes an empty binding list.
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    let host = VerterHost::new_standalone(crate::types::HostConfig::default());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = snippet_graph(&host);
+
+    let snippet = nsnippet(&graph, vec![ntuple(&graph, Vec::new())]);
+    let params = CallableNodeView::new(&dispatch, snippet)
+        .validated_snippet_positional_params(nav_context())
+        .expect("a `Snippet<[]>` is a PRESENT slot (not dropped)");
     assert!(
-        snippet_callable_positional_bindings(&carrier, &scope).is_none_or(|b| b.is_empty()),
-        "an open-generic `Snippet<Params>` yields no positional bindings"
+        params.is_empty(),
+        "an empty `Params` tuple has no positions"
+    );
+
+    let scope = verter_type_expr::TypeExprScope::new("/Owner.svelte");
+    assert!(
+        materialize_snippet_slot_bindings(&host, &params, &scope).is_empty(),
+        "a `Snippet<[]>` publishes NO bindings"
     );
 }
 
 #[test]
-fn snippet_normalizer_expands_rest_tuple_and_skips_this() {
-    // CORE (DISCRIMINATING): the realized `Snippet<[item: Item, index:
-    // number]>` callable is `(this: void, ...args: [item: Item, index:
-    // number])`. The Svelte normalizer must SKIP `this` and EXPAND the
-    // rest-tuple into TWO ordered bindings — `item: Item` then `index:
-    // number`. The shared Vue normalizer (`func.parameters.first()`) would
-    // take only `this` (the first param), dropping every real binding — so
-    // this discriminates the Svelte-specific path.
+fn snippet_carrier_open_generic_params_is_present_bindingless() {
+    // A `Snippet<Params>` whose single arg is an OPEN generic (`TypeParam`) is
+    // a PRESENT, binding-less slot: the resolved non-tuple `Params` yields
+    // `Some(vec![])`, never `None` (dropped) and never fabricated bindings.
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    let host = VerterHost::new_standalone(crate::types::HostConfig::default());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = snippet_graph(&host);
+
+    let open = graph.intern_node(crate::semantic_query::SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("Params"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("Params"),
+    });
+    let snippet = nsnippet(&graph, vec![open]);
+    assert_eq!(
+        CallableNodeView::new(&dispatch, snippet)
+            .validated_snippet_positional_params(nav_context()),
+        Some(Vec::new()),
+        "an open-generic `Snippet<Params>` is a PRESENT, binding-less slot"
+    );
+}
+
+#[test]
+fn snippet_function_fallback_skips_this_and_expands_rest_tuple_to_dto_bindings() {
+    // The realized `Function` fallback `(this: void, ...args: [item: string,
+    // index: number])`: the reader SKIPS the leading `this` and EXPANDS the
+    // rest-tuple into TWO ordered positions; the DTO sink publishes exact
+    // names + types. A first-param-only reader (the Vue slot rule) would
+    // surface only `this` and FAIL every assertion below.
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    let host = VerterHost::new_standalone(crate::types::HostConfig::default());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = snippet_graph(&host);
+
+    let item_ty = nprim(&graph, crate::semantic_query::PrimitiveKind::String);
+    let index_ty = nprim(&graph, crate::semantic_query::PrimitiveKind::Number);
+    let rest_tuple = ntuple(
+        &graph,
+        vec![(Some("item"), item_ty), (Some("index"), index_ty)],
+    );
+    let callable = nsnippet_function(&graph, rest_tuple);
+
+    let params = CallableNodeView::new(&dispatch, callable)
+        .validated_snippet_positional_params(nav_context())
+        .expect("a realized snippet callable yields positional params");
+    let labels: Vec<Option<&str>> = params.iter().map(|p| p.label.as_deref()).collect();
+    assert_eq!(
+        labels,
+        vec![Some("item"), Some("index")],
+        "`this` is skipped and the rest-tuple expands in order"
+    );
+
     let scope = verter_type_expr::TypeExprScope::new("/Owner.svelte");
-    let callable = snippet_callable(vec![
-        tuple_el(
-            "item",
-            TypeExpr::Ref {
-                name: Arc::from("Item"),
-                type_arguments: Arc::from(Vec::new().into_boxed_slice()),
-            },
-        ),
-        tuple_el("index", TypeExpr::Primitive(PrimitiveName::Number)),
-    ]);
-    let bindings = snippet_callable_positional_bindings(&callable, &scope)
-        .expect("a snippet callable yields positional bindings");
+    let bindings = materialize_snippet_slot_bindings(&host, &params, &scope);
     let names: Vec<&str> = bindings.iter().map(|b| b.name.as_str()).collect();
     assert_eq!(
         names,
         vec!["item", "index"],
-        "ALL positional params in order; `this` skipped, got {names:?}"
+        "ALL positional params in order"
     );
     assert!(
         !names.contains(&"this"),
         "the leading `this` param must be skipped"
     );
-    // The element types are preserved precisely.
     assert!(
-        matches!(&bindings[0].binding_expr, Some(TypeExpr::Ref { name, .. }) if name.as_ref() == "Item"),
-        "binding 0 is the named ref `Item`, got {:?}",
+        matches!(
+            bindings[0].binding_expr,
+            Some(TypeExpr::Primitive(PrimitiveName::String))
+        ),
+        "binding 0 is `string`, got {:?}",
         bindings[0].binding_expr
     );
     assert!(
@@ -431,85 +550,143 @@ fn snippet_normalizer_expands_rest_tuple_and_skips_this() {
         "binding 1 is `number`, got {:?}",
         bindings[1].binding_expr
     );
-    // Each binding is paired with a scope (pairing invariant).
-    assert!(bindings.iter().all(|b| b.binding_expr_scope.is_some()));
-}
-
-#[test]
-fn snippet_normalizer_empty_tuple_yields_no_bindings() {
-    // DISCRIMINATING: a `Snippet<[]>` realizes to `(this: void,
-    // ...args: [])` — the `this` is skipped and the empty rest-tuple
-    // expands to nothing, so NO bindings.
-    let scope = verter_type_expr::TypeExprScope::new("/Owner.svelte");
-    let callable = snippet_callable(Vec::new());
-    let bindings = snippet_callable_positional_bindings(&callable, &scope)
-        .expect("an empty snippet callable still yields a (zero-length) binding list");
     assert!(
-        bindings.is_empty(),
-        "a `Snippet<[]>` must yield NO bindings, got {:?}",
-        bindings.iter().map(|b| &b.name).collect::<Vec<_>>()
+        bindings.iter().all(|b| b.binding_expr_scope.is_some()),
+        "each binding is paired with a scope (pairing invariant)"
     );
 }
 
 #[test]
-fn snippet_normalizer_unlabelled_tuple_elements_fall_back_to_arg_index() {
-    // An unlabelled tuple element (`Snippet<[Item, number]>`) falls
-    // back to `arg{index}` binding names while preserving order + types.
+fn snippet_function_empty_rest_tuple_yields_no_dto_bindings() {
+    // `(this: void, ...args: [])`: `this` is skipped and the empty rest-tuple
+    // expands to nothing — a present, binding-less slot.
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    let host = VerterHost::new_standalone(crate::types::HostConfig::default());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = snippet_graph(&host);
+
+    let callable = nsnippet_function(&graph, ntuple(&graph, Vec::new()));
+    let params = CallableNodeView::new(&dispatch, callable)
+        .validated_snippet_positional_params(nav_context())
+        .expect("an empty snippet callable still yields a (zero-length) param list");
+    assert!(
+        params.is_empty(),
+        "a `Snippet<[]>` callable has no positions"
+    );
+
     let scope = verter_type_expr::TypeExprScope::new("/Owner.svelte");
-    let mut e0 = tuple_el("", TypeExpr::Primitive(PrimitiveName::String));
-    e0.label = None;
-    let mut e1 = tuple_el("", TypeExpr::Primitive(PrimitiveName::Number));
-    e1.label = None;
-    let callable = snippet_callable(vec![e0, e1]);
-    let bindings = snippet_callable_positional_bindings(&callable, &scope).unwrap();
+    assert!(
+        materialize_snippet_slot_bindings(&host, &params, &scope).is_empty(),
+        "no positions ⇒ no published bindings"
+    );
+}
+
+#[test]
+fn snippet_unlabelled_tuple_elements_fall_back_to_arg_index_names() {
+    // Unlabelled tuple elements (`Snippet<[string, number]>`): the reader keeps
+    // `label: None` per position and the DTO sink applies the `arg{index}`
+    // name fallback while preserving order + exact types.
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    let host = VerterHost::new_standalone(crate::types::HostConfig::default());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = snippet_graph(&host);
+
+    let a = nprim(&graph, crate::semantic_query::PrimitiveKind::String);
+    let b = nprim(&graph, crate::semantic_query::PrimitiveKind::Number);
+    let snippet = nsnippet(&graph, vec![ntuple(&graph, vec![(None, a), (None, b)])]);
+
+    let params = CallableNodeView::new(&dispatch, snippet)
+        .validated_snippet_positional_params(nav_context())
+        .expect("an unlabelled `Params` tuple still yields positional params");
+    assert!(
+        params.iter().all(|p| p.label.is_none()),
+        "the reader keeps unlabelled positions label-less (no fabricated name)"
+    );
+
+    let scope = verter_type_expr::TypeExprScope::new("/Owner.svelte");
+    let bindings = materialize_snippet_slot_bindings(&host, &params, &scope);
     let names: Vec<&str> = bindings.iter().map(|b| b.name.as_str()).collect();
     assert_eq!(
         names,
         vec!["arg0", "arg1"],
-        "unlabelled tuple elements fall back to `arg{{index}}`, got {names:?}"
+        "unlabelled tuple elements fall back to `arg{{index}}` at the DTO sink"
     );
 }
 
 #[test]
-fn snippet_normalizer_union_arms_combine_by_index() {
-    // A UNION of two snippet callables combines positional bindings
-    // by index (intersecting types). `Snippet<[a: A]> | Snippet<[a: B]>`
-    // yields one binding `a: A & B`.
+fn snippet_union_arms_combine_by_index_into_intersection_binding() {
+    // A UNION of two snippet carriers combines positions by index:
+    // `Snippet<[a: string]> | Snippet<[a: number, b: boolean]>` yields ONE
+    // position (the SHORTEST arm caps the count) whose type is the EXACT
+    // interned `Intersection([string, number])` node, labelled by the FIRST
+    // arm; the DTO sink publishes the intersection binding.
+    use crate::project_semantic_dispatch::{node_data_for, ProjectSemanticDispatch};
+    let host = VerterHost::new_standalone(crate::types::HostConfig::default());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = snippet_graph(&host);
+
+    let a_ty = nprim(&graph, crate::semantic_query::PrimitiveKind::String);
+    let b_ty = nprim(&graph, crate::semantic_query::PrimitiveKind::Number);
+    let extra = nprim(&graph, crate::semantic_query::PrimitiveKind::Boolean);
+    let arm_a = nsnippet(&graph, vec![ntuple(&graph, vec![(Some("a"), a_ty)])]);
+    let arm_b = nsnippet(
+        &graph,
+        vec![ntuple(&graph, vec![(Some("x"), b_ty), (Some("b"), extra)])],
+    );
+    let union = graph.intern_node(crate::semantic_query::SemanticNodeData::Union(Arc::from(
+        vec![arm_a, arm_b].into_boxed_slice(),
+    )));
+
+    let params = CallableNodeView::new(&dispatch, union)
+        .validated_snippet_positional_params(nav_context())
+        .expect("a union of snippet carriers yields combined positional params");
+    assert_eq!(
+        params.len(),
+        1,
+        "one position across both arms (the SHORTEST arm caps the count)"
+    );
+    assert_eq!(
+        params[0].label.as_deref(),
+        Some("a"),
+        "the FIRST arm's label names the position"
+    );
+    match node_data_for(dispatch.ctx, params[0].ty).as_deref() {
+        Some(crate::semantic_query::SemanticNodeData::Intersection(arms)) => {
+            assert_eq!(
+                arms.as_ref(),
+                &[a_ty, b_ty][..],
+                "the combined position type intersects both arms' exact nodes, in arm order"
+            );
+        }
+        other => panic!("the combined position type is an `Intersection` node, got {other:?}"),
+    }
+
     let scope = verter_type_expr::TypeExprScope::new("/Owner.svelte");
-    let arm_a = snippet_callable(vec![tuple_el(
-        "a",
-        TypeExpr::Ref {
-            name: Arc::from("A"),
-            type_arguments: Arc::from(Vec::new().into_boxed_slice()),
-        },
-    )]);
-    let arm_b = snippet_callable(vec![tuple_el(
-        "a",
-        TypeExpr::Ref {
-            name: Arc::from("B"),
-            type_arguments: Arc::from(Vec::new().into_boxed_slice()),
-        },
-    )]);
-    let union = TypeExpr::Union(Arc::from(vec![arm_a, arm_b].into_boxed_slice()));
-    let bindings = snippet_callable_positional_bindings(&union, &scope).unwrap();
-    assert_eq!(bindings.len(), 1, "one positional binding across both arms");
+    let bindings = materialize_snippet_slot_bindings(&host, &params, &scope);
+    assert_eq!(bindings.len(), 1, "one published binding across both arms");
     assert_eq!(bindings[0].name, "a");
     assert!(
         matches!(&bindings[0].binding_expr, Some(TypeExpr::Intersection(arms)) if arms.len() == 2),
-        "the combined binding type is the intersection of both arms, got {:?}",
+        "the published binding type is the intersection of both arms, got {:?}",
         bindings[0].binding_expr
     );
 }
 
 #[test]
-fn snippet_normalizer_non_callable_value_yields_none() {
-    // NEGATIVE: a non-callable member value is not a snippet — the
-    // normalizer returns None (no bindings).
-    let scope = verter_type_expr::TypeExprScope::new("/Owner.svelte");
-    assert!(
-        snippet_callable_positional_bindings(&TypeExpr::Primitive(PrimitiveName::String), &scope)
-            .is_none(),
-        "a primitive value is not a snippet callable"
+fn snippet_non_callable_root_fails_closed() {
+    // NEGATIVE: a non-snippet, non-callable root is NOT a snippet — the reader
+    // fails closed (`None`, the slot is dropped), never a fabricated binding
+    // list.
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    let host = VerterHost::new_standalone(crate::types::HostConfig::default());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = snippet_graph(&host);
+
+    let scalar = nprim(&graph, crate::semantic_query::PrimitiveKind::String);
+    assert_eq!(
+        CallableNodeView::new(&dispatch, scalar).validated_snippet_positional_params(nav_context()),
+        None,
+        "a primitive root is not a snippet callable"
     );
 }
 
@@ -1011,18 +1188,18 @@ fn explicit_union_callback_prop_value_classifies_as_event_with_precise_payload()
     // P2 (COMPONENT-META surface): a prop whose WRITTEN VALUE is an EXPLICIT
     // union containing a callable arm — `onselect: ((row: Row) => void) |
     // undefined` (NOT member-`?` optionality, which is carried by the surface
-    // `optional` flag and raises to a BARE `Function`). The explicit union
-    // raises to `Union([Function, Primitive(Undefined)])`; the shared
-    // callable-arm extractor strips the nullish arm and pulls out the single
-    // callable. It MUST classify as event `select` with a PRECISE `(row: Row)`
-    // payload.
+    // `optional` flag and resolves to a BARE `Function`). The explicit union
+    // resolves to `Union(Function, undefined)`; the node-domain
+    // `CallableNodeView::single_callable_arm` strips the nullish arm and pulls
+    // out the single callable. It MUST classify as event `select` with a
+    // PRECISE `(row: Row)` payload.
     //
-    // DISCRIMINATING (the whole point): this exercises the
-    // `Union`/`Intersection` arm of `callable_arm_from_raised`. If that helper
-    // is reverted to a bare `TypeExpr::Function(func)` match, this test goes
-    // RED (no `select` event) while the member-`?` tests above stay GREEN
-    // (they raise to a bare `Function`). A non-callable explicit-union prop
-    // (`onmode: "a" | "b"`) is NOT an event (asserted negatively here too).
+    // DISCRIMINATING (the whole point): this exercises the composite arm of
+    // the callable-arm classifier. A classifier reduced to a bare
+    // `Function`-only match goes RED here (no `select` event) while the
+    // member-`?` tests above stay GREEN (they resolve to a bare `Function`).
+    // A non-callable explicit-union prop (`onmode: "a" | "b"`) is NOT an
+    // event (asserted negatively here too).
     let canonical = "/ExplicitUnionCb.svelte";
     let source = "<script lang=\"ts\">\n\
              interface Row { id: number }\n\
@@ -1094,10 +1271,10 @@ fn explicit_union_callback_prop_value_classifies_as_event_with_precise_payload()
 
 #[test]
 fn explicit_union_with_two_distinct_callable_arms_refuses() {
-    // P2 (COMPONENT-META surface): the ambiguity branch of
-    // `callable_arm_from_raised`. An `on`-prefixed prop whose explicit-union
+    // P2 (COMPONENT-META surface): the ambiguity branch of the node-domain
+    // callable-arm classifier. An `on`-prefixed prop whose explicit-union
     // VALUE has TWO DISTINCT callable arms — `onselect: ((row: Row) => void) |
-    // ((id: number) => void)` — is AMBIGUOUS: the extractor must REFUSE rather
+    // ((id: number) => void)` — is AMBIGUOUS: the classifier must REFUSE rather
     // than fabricate a single payload from divergent signatures. No `select`
     // event is mined.
     //
@@ -1283,17 +1460,15 @@ fn svelte_snippet_slots_normalizer_publishes_node_domain_bindings() {
 }
 
 #[test]
-fn snippet_declref_tuple_param_flip_node_resolves_legacy_drops() {
-    // THE FLIP, EMPIRICAL — a `Snippet<Args>` whose `Args` is a DeclRef-to-tuple
-    // (`type Args = [item: Item, index: number]`):
-    // - the NODE reader (`validated_snippet_positional_params`) RESOLVES the
-    //   `DeclRef` to its `Tuple` → the two bindings `item` + `index`;
-    // - the LEGACY `TypeExpr` reader (`snippet_callable_positional_bindings` on the
-    //   materialized member value) DROPS them (empty) — `single_tuple_type_argument`
-    //   requires a LITERAL `Tuple` type-argument, which `Ref{Snippet, [Ref{Args}]}`
-    //   is not.
-    // This directly exhibits the behavior delta the node-domain conversion adds
-    // (bindings dropped pre-fix, present post-fix).
+fn snippet_declref_tuple_params_resolve_to_ordered_dto_bindings() {
+    // EMPIRICAL, end-to-end — a `Snippet<Args>` whose `Args` is a
+    // DeclRef-to-tuple (`type Args = [item: Item, index: number]`): the node
+    // reader (`validated_snippet_positional_params`) RESOLVES the `DeclRef` to
+    // its `Tuple` through the shared structural-fact demand primitive, and the
+    // terminal DTO sink publishes the two ordered bindings `item` + `index`.
+    // DISCRIMINATING: a reader that required a LITERAL `Tuple` type-argument
+    // (never resolving the `DeclRef`) would surface NO bindings and FAIL both
+    // halves below.
     let component = "/workspace/FlipSnippetSurface.svelte";
     let source = "<script lang=\"ts\">\n\
              import type { Snippet } from './snippet';\n\
@@ -1347,24 +1522,100 @@ fn snippet_declref_tuple_param_flip_node_resolves_legacy_drops() {
     assert_eq!(
         node_labels,
         vec![Some("item"), Some("index")],
-        "the NODE reader resolves the two ordered bindings (the flip: superset over legacy)"
+        "the NODE reader resolves the two ordered positions"
     );
 
-    // LEGACY reader: DROPS them (the materialized `Snippet<Args>` is a
-    // `Ref{Snippet, [Ref{Args}]}` — a non-literal type argument).
-    let realized = crate::meta_resolve::dispatch_helpers::realize_callable_member(
-        &dispatch, row.value, context,
-    )
-    .unwrap_or(row.value);
-    let value = dispatch
-        .materialize_output_type_expr_for_test(realized)
-        .expect("the member value materializes");
+    // Terminal DTO sink: the SAME nodes publish as the two ordered Svelte slot
+    // bindings (exact names, each paired with the member scope).
     let scope = verter_type_expr::TypeExprScope::new(component);
-    let legacy = snippet_callable_positional_bindings(&value, &scope);
+    let bindings = materialize_snippet_slot_bindings(&ctx, &params, &scope);
+    let names: Vec<&str> = bindings.iter().map(|b| b.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["item", "index"],
+        "the DTO sink publishes the resolved bindings in order"
+    );
     assert!(
-        legacy.is_none_or(|bindings| bindings.is_empty()),
-        "the LEGACY `TypeExpr` reader DROPS the DeclRef-tuple `Params` bindings (the gap the node \
-         reader closes), got {:?}",
-        snippet_callable_positional_bindings(&value, &scope)
+        bindings
+            .iter()
+            .all(|b| b.binding_expr.is_some() && b.binding_expr_scope.is_some()),
+        "each published binding carries a materialized value paired with a scope"
+    );
+}
+
+#[test]
+fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
+    // FAIL-CLOSED, end-to-end — a `Snippet<Args>` whose `Args` import does NOT
+    // resolve (the `./missing-types` module is absent): the node reader fails
+    // closed (`None` — the `Params` could still be a tuple we could not reach)
+    // and the snippet-slot normalizer DROPS the slot from the published DTO
+    // surface, while a resolvable sibling snippet still publishes (positive
+    // contrast: the drop is the unresolved carrier, not a blanket drop).
+    let component = "/workspace/UnresolvedSnippet.svelte";
+    let source = "<script lang=\"ts\">\n\
+             import type { Snippet } from './snippet';\n\
+             import type { Args } from './missing-types';\n\
+             interface Props { bad: Snippet<Args>; good: Snippet<[item: number]> }\n\
+             let { bad, good }: Props = $props();\n\
+             void bad; void good;\n\
+             </script>\n\
+             <div />";
+    let (host, view) = workspace_host_with_svelte(
+        component,
+        source,
+        &[(
+            "/workspace/snippet.ts",
+            "export interface Snippet<Params extends unknown[] = []> {\n\
+                 (this: void, ...args: Params): { __brand: 'snippet' };\n\
+                 }\n",
+        )],
+    );
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
+
+    let facts = host
+        .resolve_svelte_script_facts_with_ctx(&ctx, component)
+        .expect("svelte facts");
+    let props_type = facts.props_type.as_ref().expect("props type");
+    let surface =
+        navigate_param_to_object_surface(&ctx, component, props_type).expect("props surface");
+    let dispatch = ctx.dispatch();
+    let context = crate::semantic_query::ProjectionReductionContext::published(
+        crate::semantic_query::ProjectionMode::Navigate,
+    );
+
+    // NODE reader half: the unresolved `Args` carrier fails closed.
+    let bad = surface
+        .members
+        .iter()
+        .find(|m| m.name.as_ref() == "bad")
+        .expect("the `bad` member is present");
+    assert_eq!(
+        CallableNodeView::new(&dispatch, bad.value).validated_snippet_positional_params(context),
+        None,
+        "an unresolved `Params` carrier fails closed (never a present slot \
+         presented as binding-complete)"
+    );
+
+    // DTO surface half: the normalizer DROPS `bad` and keeps `good`.
+    let filtered = retain_members(&surface, &["bad".to_string(), "good".to_string()]);
+    let resolved = macro_surface_shell(filtered, AnalyzedMacroKind::DefineSlots, component);
+    let slots = svelte_snippet_slots_from_typeinfo_surface(&ctx, &resolved);
+    let slot_names: Vec<&str> = slots.iter().map(|s| s.name.as_str()).collect();
+    assert!(
+        !slot_names.contains(&"bad"),
+        "the unresolved-`Params` snippet slot is DROPPED from the DTO surface, got {slot_names:?}"
+    );
+    let good = slots
+        .iter()
+        .find(|s| s.name == "good")
+        .expect("the resolvable sibling snippet still publishes (positive contrast)");
+    assert_eq!(
+        good.bindings
+            .iter()
+            .map(|b| b.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["item"],
+        "the resolvable snippet publishes its ordered binding"
     );
 }

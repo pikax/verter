@@ -42,10 +42,9 @@ use crate::typeinfo::surface::TypeInfoSurface;
 /// graphs without consuming the test budget.
 const CALLABLE_VIEW_DEPTH_FUSE: u32 = 32;
 
-/// How to combine the RETURN types of a multi-arm slot callable — the
-/// node-domain analogue of the `vue_exec::normalize::ArmCombine` enum. The
-/// first params are ALWAYS intersected (a binding a template can rely on must
-/// hold across every arm); only the return-type combiner differs.
+/// How to combine the RETURN types of a multi-arm slot callable. The first
+/// params are ALWAYS intersected (a binding a template can rely on must hold
+/// across every arm); only the return-type combiner differs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ArmCombineNode {
     Intersection,
@@ -63,11 +62,10 @@ pub(crate) struct PositionalParamNode {
     pub(crate) ty: SemanticNodeId,
 }
 
-/// Node-domain analogue of `slot_callable_param_and_return`'s return tuple: the
-/// first-param binding node (when every arm supplies one), the combined return
-/// node, and the return-type annotation span (only present for a single-arm
-/// callable — a composed multi-arm callable has no single span). All facts are
-/// node-domain; no `TypeExpr`.
+/// The multi-arm slot-callable facts: the first-param binding node (when every
+/// arm supplies one), the combined return node, and the return-type annotation
+/// span (only present for a single-arm callable — a composed multi-arm callable
+/// has no single span). All facts are node-domain; no `TypeExpr`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SlotCallableNodeParts {
     pub(crate) first_param: Option<SemanticNodeId>,
@@ -106,7 +104,7 @@ enum SnippetParamsArg {
 /// The `Union` / `Intersection` / `Conditional` arms are the correctness-load-
 /// bearing rows: a RESOLVED `Snippet<[a] | [b]>` / `Snippet<[a] & [b]>` /
 /// `Snippet<Cond>` `Params` is a resolved non-tuple, so the slot stays PRESENT
-/// (binding-less) — a `_ => None` catch-all dropped it (subtractive vs legacy).
+/// (binding-less) — a `_ => None` catch-all would wrongly DROP a valid slot.
 fn classify_snippet_params_arg(data: Option<&SemanticNodeData>) -> SnippetParamsArg {
     let Some(data) = data else {
         // Missing node data — the `Params` did not resolve; fail closed.
@@ -218,8 +216,7 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
 
     /// The single callable `Function` node the root denotes after stripping the
     /// nullish (`undefined` / `null`) arms an EXPLICIT nullish union/
-    /// intersection VALUE carries — the node-domain replacement for the
-    /// `TypeExpr` `callable_arm_from_raised`.
+    /// intersection VALUE carries.
     ///
     /// It layers a stricter "exactly one callable after nullish stripping"
     /// classifier ON TOP of [`realize_callable_member`] (it does not subsume
@@ -373,7 +370,7 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
     /// shared structural-fact demand primitive BEFORE extracting literals, so a
     /// `type Event = 'save' | 'cancel'` (a `DeclRef`) or a generic-instantiated
     /// event-name alias (an `InstantiationRef`) surfaces its names. This
-    /// RESOLVES MORE than the legacy `fold_node` materializer, which keeps
+    /// RESOLVES MORE than the shallow `fold_node` materializer, which keeps
     /// `DeclRef` / `InstantiationRef` shallow and would miss those names — the
     /// decided correct Vue semantics. A residual carrier the demand primitive
     /// could NOT resolve — where a string literal could still hide — fails the
@@ -639,8 +636,7 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
     ///   `Params` arg through the shared structural-fact demand primitive, then
     ///   classify it EXHAUSTIVELY ([`SnippetParamsArg`], no `_` wildcard):
     ///     - a `Tuple` → one param per element (a `DeclRef`-to-tuple `Params`
-    ///       RESOLVES here — the superset over the legacy literal-tuple-only
-    ///       reader);
+    ///       RESOLVES here — the tuple need not be written literally);
     ///     - ANY OTHER resolved non-tuple shape (`Union` / `Intersection` /
     ///       `Conditional` / `Object` / `Array` / `Primitive` / `Literal` /
     ///       `TypeParam` / `Function` / …) → `Some(vec![])` (a validated snippet
@@ -699,9 +695,8 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
                     1 => {
                         // Normalize the single `Params` arg to its structural body
                         // (a `DeclRef`-to-tuple `Params` alias RESOLVES to its
-                        // `Tuple` here — the superset over the legacy literal
-                        // reader), then classify it EXHAUSTIVELY (no `_` wildcard)
-                        // into Tuple / resolved-non-tuple / unresolved.
+                        // `Tuple` here), then classify it EXHAUSTIVELY (no `_`
+                        // wildcard) into Tuple / resolved-non-tuple / unresolved.
                         let arg_norm = self.normalized_fact_node(args[0], context);
                         let arg_data = self.data(arg_norm);
                         match classify_snippet_params_arg(arg_data.as_deref()) {
@@ -730,8 +725,7 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
                             // `Intersection` / `Conditional` `Params` (`Snippet<[a]
                             // | [b]>` etc.): a valid `Params` shape carries no
                             // enumerable positional bindings, but the slot IS
-                            // present — legacy kept it binding-less, so dropping it
-                            // here would be a subtractive delta.
+                            // present — dropping it here would lose a valid slot.
                             SnippetParamsArg::ResolvedNonTuple => Some(Vec::new()),
                             // An UNRESOLVED residual carrier / non-type artifact —
                             // the `Params` could still be a tuple we could not reach
@@ -774,9 +768,8 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
     /// Combine per-arm positional param NODES by index: position `i` is the
     /// INTERSECTION of every arm's `i`-th param type (a binding a template can
     /// rely on must hold across every arm), the SHORTEST arm caps the count, and
-    /// the FIRST arm supplies the position's label. The node-domain analogue of
-    /// the Svelte DTO `combine_positional_bindings_by_index` — the intersection
-    /// is interned as a node here, materialised ONCE at the terminal sink.
+    /// the FIRST arm supplies the position's label. The intersection is interned
+    /// as a node here and materialised ONCE at the terminal Svelte DTO sink.
     fn combine_positional_param_nodes_by_index(
         &self,
         per_arm: Vec<Vec<PositionalParamNode>>,

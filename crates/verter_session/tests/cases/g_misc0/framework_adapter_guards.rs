@@ -446,28 +446,32 @@ fn resolve_snippet_props_does_not_call_shared_slots_normalizer() {
 
 #[test]
 fn vue_shared_slot_normalizer_uses_first_param_only() {
-    // Slot-normalizer NO-REGRESSION guard: the shared Vue slot normalizer
-    // (`slot_callable_param_and_return`) stays byte-identical to its
-    // first-parameter-only behavior — a `TypeExpr::Function` arm surfaces
-    // `func.parameters.first()`, NOT every positional param. If a future edit
-    // made the SHARED fn iterate all params (the Svelte behavior), Vue slot
-    // bindings would regress; this pins the shared fn to first-param-only.
-    // The per-surface normalizers (incl. `slot_callable_param_and_return`)
-    // relocated into the `vue_exec/normalize.rs` submodule (file-size split);
-    // the shared Vue path is still this one module.
-    let src =
-        read_src("crates/verter_session/src/typeinfo/framework_surface/vue_exec/normalize.rs");
-    let body = extract_fn_body(&src, "slot_callable_param_and_return");
+    // Slot-normalizer NO-REGRESSION guard: the shared Vue slot param/return
+    // combiner (`CallableNodeView::combine_slot_arms`, the node-domain decider
+    // `slots_from_typeinfo_surface` consumes via `slot_param_and_return_by_arm`)
+    // stays first-parameter-only — each `Function` arm contributes
+    // `params.first()`, NOT every positional param. If a future edit made the
+    // SHARED combiner iterate all params (the Svelte all-positional behavior),
+    // Vue slot bindings would regress; this pins it to first-param-only.
+    let view_src = read_src("crates/verter_session/src/meta_resolve/callable_view.rs");
+    let body = strip_comments(&extract_fn_body(&view_src, "combine_slot_arms"));
     assert!(
-        body.contains("func.parameters.first()"),
-        "the shared Vue `slot_callable_param_and_return` must keep its \
-         first-parameter-only behavior (`func.parameters.first()`) — Svelte's \
-         all-positional-params normalizer is a SEPARATE fn and must not leak \
-         into the shared Vue path."
+        body.contains("params.first()"),
+        "the shared Vue slot combiner `combine_slot_arms` must keep its \
+         first-parameter-only behavior (`params.first()`) — Svelte's \
+         all-positional-params reader is a SEPARATE method and must not leak \
+         into the shared Vue slot path."
+    );
+    assert!(
+        !body.contains("params.iter()"),
+        "the shared Vue slot combiner must NOT iterate every positional param \
+         (the Svelte behavior) — only the first param feeds the slot binding."
     );
     // The Svelte-specific normalizer must NOT live in the shared Vue module.
+    let vue_src =
+        read_src("crates/verter_session/src/typeinfo/framework_surface/vue_exec/normalize.rs");
     assert!(
-        !src.contains("svelte_snippet_slots_from_typeinfo_surface"),
+        !vue_src.contains("svelte_snippet_slots_from_typeinfo_surface"),
         "the Svelte snippet normalizer must NOT live in the shared Vue module \
          (vue_exec/normalize.rs) — it belongs to svelte_exec.rs."
     );

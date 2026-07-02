@@ -570,19 +570,18 @@ fn resolve_snippet_props(
 /// EVERY positional parameter as an ordered slot binding. For each validated
 /// snippet member this:
 ///
-/// 1. realizes the member value to a callable through the SHARED
-///    callable-realization substrate (`realize_callable_member`) and
-///    materializes it through the sealed `OutputProjector` output
-///    capability (`materialize_output_type_expr` → sealed carrier) — never
-///    a second resolver, never a raw reverse-raise;
-/// 2. iterates the realized `Function`'s parameters in positional ORDER,
-///    SKIPPING the leading `this` parameter and EXPANDING a rest-tuple
-///    parameter (`...args: [item: Item, index: number]`) into one binding per
-///    tuple element (label from `TupleElement.label`, type from the element
-///    type); a non-rest, non-`this` parameter contributes one positional
-///    binding directly;
-/// 3. combines a UNION / INTERSECTION of callable arms by index (intersecting
-///    each positional binding's types), mirroring the Vue multi-arm rule.
+/// 1. reads the snippet's positional binding NODES through the shared
+///    [`CallableNodeView::validated_snippet_positional_params`] — the
+///    carrier-preserving peel reads an un-instantiated `Snippet<Params>`
+///    carrier's `Params` directly, a realized `Function` fallback skips the
+///    leading `this` parameter and expands a rest-tuple parameter
+///    (`...args: [item: Item, index: number]`) into one binding per tuple
+///    element, and a UNION / INTERSECTION of arms combines by index
+///    (intersecting each positional binding's types, the Vue multi-arm rule);
+/// 2. materializes each binding node ONCE at the terminal
+///    [`materialize_snippet_slot_bindings`] DTO sink (label from the
+///    element/param label, `arg{index}` fallback) — this normalizer makes NO
+///    decision on any materialized value.
 ///
 /// The ordered `bindings` vector IS the positional order (no explicit position
 /// field). The binding type is the typed-IR element type (typed-IR only — no
@@ -609,8 +608,8 @@ fn svelte_snippet_slots_from_typeinfo_surface(
             // The validated-snippet positional binding NODES, decided ENTIRELY in
             // the node domain through the shared `CallableNodeView` (which
             // carrier-preserving-peels the `Snippet<Params>` carrier and reads its
-            // uninstantiated `Params` — the primary shape the legacy
-            // materialize-then-decide chain reached only for a LITERAL tuple).
+            // uninstantiated `Params` — resolving a `DeclRef`-to-tuple `Params`
+            // to its ordered elements).
             // A fail-closed `None` (an unresolved `Params` carrier) drops the slot.
             let params = CallableNodeView::new(&dispatch, member.value)
                 .validated_snippet_positional_params(context)?;
@@ -689,192 +688,6 @@ pub(in crate::typeinfo::framework_surface::svelte_exec) fn materialize_snippet_s
             }
         })
         .collect()
-}
-
-/// Extract the ordered positional slot bindings from a realized snippet
-/// callable `value`, handling a single `Function`, or a `Union` / `Intersection`
-/// of callable arms (combined by positional index — intersecting types). Each
-/// `this` param is skipped and each rest-tuple param is expanded into its
-/// element bindings. Returns `None` when the value is not callable.
-///
-/// The production snippet-slot decider is the node-domain
-/// [`CallableNodeView::validated_snippet_positional_params`](crate::meta_resolve::callable_view::CallableNodeView):
-/// the snippet-slot normalizer decides in the node domain, so this
-/// `TypeExpr`-domain reader has NO production caller. Retained as a parity oracle
-/// (`svelte_exec_tests` `snippet_*` + the
-/// `realized_snippet_call_signature_is_this_plus_rest_tuple` parity assertion);
-/// unused in non-test builds.
-#[cfg_attr(not(test), allow(dead_code))]
-fn snippet_callable_positional_bindings(
-    value: &TypeExpr,
-    scope: &verter_type_expr::TypeExprScope,
-) -> Option<Vec<AnalyzedSlotFieldBinding>> {
-    match value {
-        // A realized snippet call signature: `(this: void, ...args: Params)`.
-        TypeExpr::Function(_) => Some(snippet_function_positional_bindings(value, scope)),
-        // A `Snippet<Params>` carrier the resolver kept as a Ref (the common
-        // case — the structural `Snippet<Params>` interface does not reduce to a
-        // bare `Function` under Navigate). The member is ALREADY structurally
-        // validated as snippet-typed, so its SINGLE tuple type-argument IS the
-        // `Params` tuple — expand it element-wise. Typed-IR only (no nominal
-        // name match, no source slicing): we read the carrier's first type
-        // argument, which the validated `Snippet<Params>` contract fixes as the
-        // positional-params tuple.
-        TypeExpr::Ref { type_arguments, .. } => {
-            // A validated snippet carrier is ALWAYS a slot; an open-generic /
-            // non-tuple `Params` simply yields no enumerable bindings (a
-            // present, binding-less slot — NOT a dropped slot).
-            match single_tuple_type_argument(type_arguments) {
-                Some(params) => Some(positional_bindings_from_tuple(params, scope)),
-                None => Some(Vec::new()),
-            }
-        }
-        TypeExpr::Parenthesized(inner) => snippet_callable_positional_bindings(inner, scope),
-        TypeExpr::Union(arms) | TypeExpr::Intersection(arms) => {
-            // Every arm must be a callable / snippet carrier; combine by index.
-            let mut per_arm: Vec<Vec<AnalyzedSlotFieldBinding>> = Vec::new();
-            for arm in arms.iter() {
-                let arm_bindings = snippet_callable_positional_bindings(arm, scope)?;
-                per_arm.push(arm_bindings);
-            }
-            Some(combine_positional_bindings_by_index(per_arm, scope))
-        }
-        _ => None,
-    }
-}
-
-/// The single tuple `Params` argument of a `Snippet<Params>` carrier `Ref`'s
-/// type-argument list, or `None` when the carrier has no single tuple argument
-/// (an open `Params` generic / a non-tuple arg ⇒ no enumerable positional
-/// bindings).
-#[cfg_attr(not(test), allow(dead_code))]
-fn single_tuple_type_argument(
-    type_arguments: &[TypeExpr],
-) -> Option<&[verter_type_expr::TupleElement]> {
-    let [TypeExpr::Tuple { elements, .. }] = type_arguments else {
-        return None;
-    };
-    Some(elements)
-}
-
-/// Expand a `Params` tuple into ordered positional bindings (label →
-/// `arg{index}` fallback, element type preserved).
-#[cfg_attr(not(test), allow(dead_code))]
-fn positional_bindings_from_tuple(
-    elements: &[verter_type_expr::TupleElement],
-    scope: &verter_type_expr::TypeExprScope,
-) -> Vec<AnalyzedSlotFieldBinding> {
-    elements
-        .iter()
-        .enumerate()
-        .map(|(index, element)| {
-            positional_binding(element.label.clone(), index, &element.ty, scope)
-        })
-        .collect()
-}
-
-/// The ordered positional bindings of ONE realized snippet `Function`: skip the
-/// leading `this` param, expand a rest-tuple param into element bindings, and
-/// emit each remaining positional param directly.
-#[cfg_attr(not(test), allow(dead_code))]
-fn snippet_function_positional_bindings(
-    value: &TypeExpr,
-    scope: &verter_type_expr::TypeExprScope,
-) -> Vec<AnalyzedSlotFieldBinding> {
-    let TypeExpr::Function(func) = value else {
-        return Vec::new();
-    };
-    let mut bindings = Vec::new();
-    for param in &func.parameters {
-        // Skip the leading `this` parameter (the vendored `Snippet` call
-        // signature is `(this: void, ...args: Params)`).
-        if param.name.as_deref() == Some("this") {
-            continue;
-        }
-        if param.rest {
-            // A rest-tuple param spreads the snippet's `Params` tuple — expand
-            // each tuple element into one ordered positional binding. A rest
-            // param whose type is NOT a tuple (an open `Params` generic /
-            // `unknown[]`) carries no enumerable positional bindings.
-            if let TypeExpr::Tuple { elements, .. } = &param.ty {
-                bindings.extend(positional_bindings_from_tuple(elements, scope));
-            }
-            continue;
-        }
-        let index = bindings.len();
-        bindings.push(positional_binding(
-            param.name.clone(),
-            index,
-            &param.ty,
-            scope,
-        ));
-    }
-    bindings
-}
-
-/// One positional slot binding: name from the label (fallback `arg{index}`),
-/// the typed element/param type, scoped to the slot member's value-node file.
-#[cfg_attr(not(test), allow(dead_code))]
-fn positional_binding(
-    label: Option<String>,
-    index: usize,
-    ty: &TypeExpr,
-    scope: &verter_type_expr::TypeExprScope,
-) -> AnalyzedSlotFieldBinding {
-    let name = label.unwrap_or_else(|| format!("arg{index}"));
-    let type_annotation = crate::resolver_core::surface_projector::render_type_expr_display(ty);
-    AnalyzedSlotFieldBinding {
-        name,
-        type_annotation,
-        binding_expr: Some(ty.clone()),
-        binding_expr_scope: Some(scope.clone()),
-        span: verter_span::Span::default(),
-    }
-}
-
-/// Combine per-arm positional bindings by index: a binding at index `i` is the
-/// INTERSECTION of every arm's `i`-th binding type (a template can rely on a
-/// positional binding only if EVERY arm supplies it). Bindings present in only
-/// some arms are dropped (the shortest arm caps the count).
-///
-/// The production combiner is the node-domain
-/// [`CallableNodeView::combine_positional_param_nodes_by_index`](crate::meta_resolve::callable_view::CallableNodeView),
-/// which the view owns (the normalizer never iterates `Union` itself). Retained
-/// as a parity oracle; unused in non-test builds.
-#[cfg_attr(not(test), allow(dead_code))]
-fn combine_positional_bindings_by_index(
-    per_arm: Vec<Vec<AnalyzedSlotFieldBinding>>,
-    scope: &verter_type_expr::TypeExprScope,
-) -> Vec<AnalyzedSlotFieldBinding> {
-    let Some(min_len) = per_arm.iter().map(|a| a.len()).min() else {
-        return Vec::new();
-    };
-    let mut out = Vec::with_capacity(min_len);
-    for i in 0..min_len {
-        let mut types: Vec<TypeExpr> = Vec::new();
-        // Use the first arm's binding NAME for the position.
-        let name = per_arm[0][i].name.clone();
-        for arm in &per_arm {
-            if let Some(expr) = arm[i].binding_expr.as_ref() {
-                types.push(expr.clone());
-            }
-        }
-        let combined = match types.len() {
-            0 => TypeExpr::Primitive(PrimitiveName::Unknown),
-            1 => types.into_iter().next().unwrap(),
-            _ => TypeExpr::Intersection(Arc::from(types.into_boxed_slice())),
-        };
-        let type_annotation =
-            crate::resolver_core::surface_projector::render_type_expr_display(&combined);
-        out.push(AnalyzedSlotFieldBinding {
-            name,
-            type_annotation,
-            binding_expr: Some(combined),
-            binding_expr_scope: Some(scope.clone()),
-            span: verter_span::Span::default(),
-        });
-    }
-    out
 }
 
 /// A [`TypeInfoSurface`] keeping only the members whose name is in `keep`.
@@ -1196,12 +1009,11 @@ fn callback_events_from_props_surface(
         // `single_callable_arm` (via `signature`) resolves the member's carrier(s)
         // through the shared structural-fact demand primitive, strips an EXPLICIT
         // nullish (`undefined` / `null`) arm an `onselect: ((r) => void) | undefined`
-        // value carries, and REFUSES two distinct callable arms — replacing the
-        // `realize → materialize → callable_arm_from_raised` decide. (A
+        // value carries, and REFUSES two distinct callable arms. (A
         // member-`?`-optional callback keeps its `?` on the surface `optional`
         // flag, so the value is a bare `Function` here.) `None` — a non-callable
         // prop (`onclick: string` / `label?: string`), or a union with no single
-        // callable arm — is NOT an event (matching the previous `continue`).
+        // callable arm — is NOT an event.
         let view = CallableNodeView::new(&dispatch, member.value);
         let Some(signature) = view.signature(context) else {
             continue;

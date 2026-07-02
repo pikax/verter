@@ -202,11 +202,11 @@ fn define_slots_normalizer_filters_non_function_members_and_preserves_return() {
 //      params (TS-correct contravariant merge) and the return is the UNION of
 //      the arms' returns.
 //
-//      Discriminating: pre-fix `slot_callable_param_and_return` matched only
-//      `Function` + `Intersection` (and `realize_callable_member` did not
-//      descend `Union` arms or unwrap an alias `DeclPlaceholder`), so a `Union`
-//      of function-alias slots returned `None` and the slot was DROPPED
-//      entirely. Post-fix the slot publishes and its bindings surface.
+//      Discriminating: a slot-callable reader that handled only `Function` +
+//      `Intersection` roots (never descending `Union` arms or unwrapping an
+//      alias carrier) would return `None` and DROP the slot entirely — this
+//      test FAILS against such an impl. The slot must publish and its
+//      bindings surface.
 // ---------------------------------------------------------------------------
 
 const VUE_SLOTS_UNION: &str = r#"<script setup lang="ts">
@@ -272,11 +272,11 @@ fn define_slots_normalizer_publishes_union_of_function_slots() {
 //      props. So `a` is NOT a guaranteed binding: the published `bindings` set
 //      must be EMPTY (a no-param arm guarantees nothing).
 //
-//      Discriminating: pre-fix `slot_callable_param_and_return_from_arms` pushed
-//      only the first params of arms that HAD one, then intersected the present
-//      params — so `B`'s `{ a }` became the slot param and `a` was wrongly
-//      published. Post-fix `all_arms_have_first_param` is false (the `A` arm has
-//      no param), so the param drops to `None` and no binding surfaces.
+//      Discriminating: an arm combiner that pushed only the first params of
+//      arms that HAD one, then intersected the present params, would make `B`'s
+//      `{ a }` the slot param and wrongly publish `a` — this test FAILS against
+//      such an impl. `all_arms_have_first_param` is false (the `A` arm has no
+//      param), so the param drops to `None` and no binding surfaces.
 // ---------------------------------------------------------------------------
 
 const VUE_SLOTS_UNION_NOPARAM: &str = r#"<script setup lang="ts">
@@ -511,6 +511,90 @@ fn define_slots_imported_inline_pick_publishes_symbolic_binding() {
         ),
         "the `label` binding is the symbolic `ImportedRowApi['label']` indexed access, got {:?}",
         label.binding_expr
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (4b-alias) defineSlots normalizer — a NAMED-ALIAS `Pick` first param
+//      (`type SlotProps = Pick<RowApi, 'name'>`; the slot takes `props:
+//      SlotProps`). The first-param node is a carrier that peels to the
+//      builtin-`Pick` `InstantiationRef` whose source root lowers as a
+//      NOMINAL `DeclRef`/`InstantiationRef` (a declaration-body reference,
+//      unlike the inline macro-authored `BareRef` above). The published
+//      binding must be the SAME symbolic `RowApi['name']` indexed access —
+//      the shape does not depend on inline-vs-named authorship.
+//
+//      Discriminating: against a nominal-root predicate that accepted only
+//      the `BareRef` arm (dropping `DeclRef` / `InstantiationRef`), the
+//      binding materialises the CONCRETE member value (`string`) and the
+//      symbolic `IndexedAccess` assertions FAIL.
+// ---------------------------------------------------------------------------
+
+const VUE_SLOTS_PICK_ALIAS: &str = r#"<script setup lang="ts">
+interface RowApi {
+  name: string;
+  value: number;
+  hidden: boolean;
+}
+type SlotProps = Pick<RowApi, 'name'>;
+defineSlots<{
+  row(props: SlotProps): void;
+}>();
+</script>
+"#;
+
+#[test]
+fn define_slots_named_alias_pick_publishes_symbolic_binding() {
+    const FILE: &str = "/w/SlotsPickAlias.vue";
+    let host = make_host();
+    upsert(&host, FILE, VUE_SLOTS_PICK_ALIAS);
+
+    let request = props_request(&host, FILE, AnalyzedMacroKind::DefineSlots);
+    let surface = host
+        .resolve_vue_macro_surface(&request)
+        .expect("defineSlots with a named-alias Pick first-param resolves a surface");
+    let slots =
+        slots_from_typeinfo_surface(&*host, &resolved_vue_surface_for_test(surface.clone()));
+
+    let row = slots
+        .iter()
+        .find(|s| s.name == "row")
+        .expect("the row slot surfaces");
+    let mut binding_names: Vec<&str> = row.bindings.iter().map(|b| b.name.as_str()).collect();
+    binding_names.sort_unstable();
+    assert_eq!(
+        binding_names,
+        vec!["name"],
+        "the named-alias `Pick<RowApi,'name'>` contributes exactly the picked binding"
+    );
+    // Negative: the un-picked keys are NOT bindings.
+    assert!(
+        !row.bindings
+            .iter()
+            .any(|b| b.name == "value" || b.name == "hidden"),
+        "un-picked keys must not surface as bindings (negative)"
+    );
+    let name = row
+        .bindings
+        .iter()
+        .find(|b| b.name == "name")
+        .expect("the picked `name` key surfaces as a binding");
+    assert_eq!(
+        name.type_annotation.as_deref(),
+        Some("RowApi['name']"),
+        "the `name` binding displays the symbolic indexed access"
+    );
+    assert!(
+        matches!(
+            name.binding_expr.as_ref(),
+            Some(verter_type_expr::TypeExpr::IndexedAccess { object, index })
+                if matches!(&**object, verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == "RowApi")
+                && matches!(&**index, verter_type_expr::TypeExpr::Literal(
+                    verter_type_expr::LiteralValue::String(member)
+                ) if member == "name")
+        ),
+        "the named-alias Pick binding is the symbolic `RowApi['name']` indexed access, got {:?}",
+        name.binding_expr
     );
 }
 
