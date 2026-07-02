@@ -12086,7 +12086,8 @@ fn authority_scopes_no_unsafe_self_test_discriminates() {
 //   scanner_invariant: stage9_residual_hot_materialize_syntactic_tripwire
 //   scanner_justification: structural primary is OutputProjector + NoTypeExpr + node-domain facts; scanner does not prove semantic identity and is frozen after the inner-name laundering escape
 //   mechanism_ruling: codex-reconciliation-hot-materialize-sc-first-2026-06-27
-//   hardening_rounds: 2; escape_stop: meta_resolve/registry_materialize.rs:142 inner collision; no further add/broaden
+//   hardening_rounds: 3 (round 3 = receiver-taint soundness completion (collection-mutation taint for push/insert/extend), authorized by structural-decision reopen ruling codex-s9-5c-scope-consult-2026-07-02 — classified scanner hardening / false-negative soundness completion of the existing taint rail, NOT an allowlist broadening, NOT a spelling addition; further add/broaden still requires a new ruling); escape_stop: meta_resolve/registry_materialize.rs:142 inner collision; no further add/broaden
+//   hardening_history: round 3 (codex-s9-5c-scope-consult-2026-07-02) = collection-mutation receiver taint through push/insert/extend — a materialized value moved into a collection taints the receiver, closing the collect-then-decide false negative
 // ===========================================================================
 
 /// Direct materialize PRIMITIVE idents — obtaining a bare `TypeExpr` from the
@@ -12316,6 +12317,18 @@ const HOT_TERMINAL_PASSTHROUGH_IDENTS: &[&str] = &[
     "insert",
     "extend",
 ];
+
+/// Collection-mutation method idents that PROPAGATE a materialized ARGUMENT's
+/// taint onto the RECEIVER collection (`out.push(mat)` / `map.insert(k, mat)` /
+/// `buf.extend(mats)`): after the mutation the collection owns a materialized
+/// element, so a later decide whose operand derives from the receiver (the
+/// receiver ident itself, an indexed element, an iterated element) fires.
+/// Receiving the value itself stays PUBLICATION for the unknown-helper rail —
+/// the same idents remain [`HOT_TERMINAL_PASSTHROUGH_IDENTS`] members — only
+/// the receiver's taint state changes. Without this propagation a value pushed
+/// into a collection and later decided on was invisible (the collection
+/// laundered the taint).
+const HOT_COLLECTION_MUTATION_METHODS: &[&str] = &["push", "insert", "extend"];
 
 /// The audited closed set of sanctioned TERMINAL one-shot output sinks: a
 /// `(file-suffix, enclosing-fn)` pair where a materialization source is the
@@ -14508,6 +14521,24 @@ impl<'a, 'ast> syn::visit::Visit<'ast> for HotMaterializeScanner<'a> {
         }
         let receiver_kind = self.expr_taint_kind(&mc.receiver);
         let receiver_tainted = receiver_kind.is_some();
+        // Collection-mutation receiver taint: a materialized value pushed /
+        // inserted / extended into a collection taints the RECEIVER place, so a
+        // later element read-back (indexing / iteration / a whole-collection
+        // read) cannot launder the value past the decide rail. The receiver's
+        // taint inherits the joined ARGUMENT provenance (`Output` dominates);
+        // an untainted argument taints nothing.
+        if HOT_COLLECTION_MUTATION_METHODS.contains(&m.as_str()) {
+            let arg_kind = mc
+                .args
+                .iter()
+                .map(|a| self.expr_taint_kind(a))
+                .fold(None, HotTaintKind::join);
+            if let Some(kind) = arg_kind {
+                if let Some(place) = hot_expr_place(&mc.receiver) {
+                    self.mark_tainted(place, kind);
+                }
+            }
+        }
         if receiver_tainted && HOT_CARDINALITY_METHODS.contains(&m.as_str()) {
             self.record_decide(
                 &mc.receiver,
@@ -16723,6 +16754,121 @@ fn hot_associated_reader_call_with_tainted_arg_fires() {
         "self-test (assoc-reader anti-FP): an associated reader call on a NON-tainted (un-minted) \
          arg must NOT fire — the rail requires a materialization-tainted argument; got: {:?}",
         scan(rk, assoc_reader_untainted)
+    );
+}
+
+/// Discrimination self-test for COLLECTION-MUTATION receiver taint: a
+/// materialized value passed to `recv.push(..)` / `recv.insert(..)` /
+/// `recv.extend(..)` taints the RECEIVER collection, so a later decide whose
+/// operand derives from the receiver (an indexed element, an iterated element)
+/// FIRES — parking a materialized `TypeExpr` in a collection and reading it
+/// back out cannot launder it past the decide rail. Receiving the value itself
+/// stays publication (the three idents remain terminal passthroughs for the
+/// unknown-helper rail); only the receiver's taint state changes. The anti-FP
+/// halves pin that (a) a collection holding a materialized value that only
+/// flows to PUBLICATION (returned) stays GREEN, and (b) mutating a collection
+/// with an UNTAINTED value then deciding on the collection stays GREEN — the
+/// taint enters through the materialized ARGUMENT, never through the mutation
+/// shape itself.
+#[test]
+fn hot_collection_mutation_receiver_taint_discriminates() {
+    let scan = |rel: &str, src: &str| hot_scan_snippet(rel, src);
+    let rk = "foo/route_keys.rs";
+
+    // (CM-a) POSITIVE, all three mutation idents — a direct mint fed into a
+    //        local `Vec` via push / insert / extend, then a tainted-gate read of
+    //        an element. The fn must fire as materialize+decide: the DECIDE half
+    //        is the discriminating signal (the mint alone would flag it as plain
+    //        `materialize`, so an assertion on `materialize` only would pass
+    //        even without receiver taint).
+    for mutation in [
+        "out.push(minted)",
+        "out.insert(0, minted)",
+        "out.extend(vec![minted])",
+    ] {
+        let push_then_decide = format!(
+            r#"
+            fn collect_then_decide(x: &TypeExpr) -> bool {{
+                let cap = Cap::new();
+                let minted = cap.materialize_output_type_expr(x).map(|r| r.into_type_expr(&cap)).unwrap();
+                let mut out: Vec<TypeExpr> = Vec::new();
+                {mutation};
+                type_expr_contains_semantic_miss(&out[0])
+            }}
+        "#
+        );
+        let v = scan(rk, &push_then_decide);
+        assert!(
+            v.iter()
+                .any(|m| m.contains("::collect_then_decide ") && m.contains("materialize+decide")),
+            "self-test (CM-a `{mutation}`): a materialized value moved into a local `Vec` via a \
+             collection mutation and then fed element-wise to a tainted gate MUST fire as \
+             materialize+decide (receiver taint propagates through the mutation); got: {v:?}"
+        );
+    }
+
+    // (CM-b) POSITIVE, iteration-derived operand — the mint lives in a SEPARATE
+    //        return-tainted helper (the caller performs NO direct mint), the
+    //        value is pushed, and the decide runs on an ITERATED element
+    //        (`.iter().any(|e| matches!(..))`). The caller fires purely via the
+    //        receiver-taint decide.
+    let iterate_then_decide = r#"
+        fn collect_iterate_decide(x: &TypeExpr) -> bool {
+            let mut out: Vec<TypeExpr> = Vec::new();
+            out.push(mat_step(x));
+            out.iter().any(|e| matches!(e, TypeExpr::Object(_)))
+        }
+        fn mat_step(x: &TypeExpr) -> TypeExpr {
+            let cap = Cap::new();
+            cap.materialize_output_type_expr(x).map(|r| r.into_type_expr(&cap)).unwrap_or_else(|| x.clone())
+        }
+    "#;
+    let v = scan(rk, iterate_then_decide);
+    assert!(
+        v.iter()
+            .any(|m| m.contains("::collect_iterate_decide ") && m.contains("decide")),
+        "self-test (CM-b): a decide on an ITERATED element of a collection a materialized value \
+         was pushed into MUST fire at the (mint-free) caller via receiver taint; got: {v:?}"
+    );
+
+    // (CM-c) NEGATIVE — the same push, but the collection only flows to
+    //        PUBLICATION (returned): receiving a materialized value is
+    //        publication, not a decide, so the collector stays GREEN. (`mat_step`
+    //        itself is correctly RED at its own mint site.)
+    let push_then_publish = r#"
+        fn collect_then_publish(x: &TypeExpr) -> Vec<TypeExpr> {
+            let mut out: Vec<TypeExpr> = Vec::new();
+            out.push(mat_step(x));
+            out
+        }
+        fn mat_step(x: &TypeExpr) -> TypeExpr {
+            let cap = Cap::new();
+            cap.materialize_output_type_expr(x).map(|r| r.into_type_expr(&cap)).unwrap_or_else(|| x.clone())
+        }
+    "#;
+    let v = scan(rk, push_then_publish);
+    assert!(
+        !v.iter().any(|m| m.contains("::collect_then_publish ")),
+        "self-test (CM-c): a collection holding a materialized value that only flows to \
+         publication (returned) must STAY GREEN — receiving the value is publication, not a \
+         decide; got: {v:?}"
+    );
+
+    // (CM-d) NEGATIVE — pushing an UNTAINTED value then deciding on the
+    //        collection stays GREEN (in the main fence no param is seeded, so
+    //        `plain.clone()` is untainted and the receiver never taints).
+    let untainted_push = r#"
+        fn collect_untainted_then_decide(plain: &TypeExpr) -> bool {
+            let mut out: Vec<TypeExpr> = Vec::new();
+            out.push(plain.clone());
+            type_expr_contains_semantic_miss(&out[0])
+        }
+    "#;
+    let v = scan(rk, untainted_push);
+    assert!(
+        v.is_empty(),
+        "self-test (CM-d): mutating a collection with an UNTAINTED value then deciding on the \
+         collection must NOT fire — receiver taint requires a materialized argument; got: {v:?}"
     );
 }
 
