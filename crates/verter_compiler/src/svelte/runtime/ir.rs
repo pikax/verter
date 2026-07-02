@@ -225,9 +225,12 @@ pub struct ComponentSlots {
     /// (fallible) component projection, which fails CLOSED rather than emitting a merged
     /// region the official compiler refuses.
     pub has_duplicate_slot: bool,
-    /// Whether an explicit `slot="default"` child coexists with IMPLICIT (non-whitespace)
-    /// default-slot content — the official `slot_default_duplicate` compile error. Carried
-    /// to the (fallible) component projection, which fails CLOSED.
+    /// Whether an explicit `slot="default"` child coexists with a NON-EXEMPT sibling
+    /// fragment node — the official `slot_default_duplicate` compile error. The
+    /// exemption is exactly a whitespace-only text run or a regular element /
+    /// `<svelte:fragment>` carrying a `slot` attribute; a comment, a `{#snippet}` def,
+    /// and a component-family node (even the `slot="default"` child itself) conflict.
+    /// Carried to the (fallible) component projection, which fails CLOSED.
     pub has_default_slot_conflict: bool,
 }
 
@@ -1036,19 +1039,28 @@ pub struct SvelteRuntimeIr<'a> {
     pub nodes: Vec<IrNode>,
     /// The runtime-op arena, indexed by [`OpId`].
     pub ops: Vec<RuntimeOp>,
-    /// The SOURCE-LEVEL `slot=` attribute OWNER set: the lowered node ids of exactly
-    /// the DIRECT slot-declaring INTRINSIC-element children of a component-family
-    /// node (a regular element bearing a static `slot="x"` as a direct component
-    /// child — named or explicit `slot="default"`). Recorded by the component slot
-    /// decomposition at lowering. A transparent `<svelte:fragment slot>`'s HOISTED
-    /// children and implicit default-slot content are NOT members — hoisting into a
-    /// slot region does not confer slot-placement validity, so a `slot` attribute on
-    /// them is the official `slot_attribute_invalid_placement` error. A COMPONENT /
-    /// `<svelte:*>`-special child bearing `slot=` is NOT a member either — its
-    /// `$$slots` filler routing is not emitted (ledger D-41). Both fail closed at the
-    /// classifier's unified slot choke-point, which keys on THIS set, never on
-    /// lowered region-root membership.
-    pub slot_attr_owners: rustc_hash::FxHashSet<NodeId>,
+    /// The STATIC slot-FILLER host set: the lowered node ids of exactly the DIRECT
+    /// slot-declaring children of a component-family node (a child bearing a static
+    /// `slot="x"` — named or explicit `slot="default"` — of ANY node kind: a regular
+    /// element, a component, or a `<svelte:*>` special). Recorded by the component
+    /// slot decomposition at lowering. A transparent `<svelte:fragment slot>`'s
+    /// HOISTED children and implicit default-slot content are NOT members — hoisting
+    /// into a slot region does not confer direct-child slot placement (a `slot` on a
+    /// hoisted ELEMENT is the official `slot_attribute_invalid_placement` error; a
+    /// hoisted COMPONENT-family node takes the plain-prop route instead). The
+    /// classifier's unified slot choke-point keys on THIS set (never on lowered
+    /// region-root membership) to accept the Class-A filler placements per host kind.
+    pub static_slot_filler_hosts: rustc_hash::FxHashSet<NodeId>,
+    /// The DIRECT component-child set: the lowered node ids of EVERY source-level
+    /// direct child of a component-family node (named fillers, explicit-default
+    /// fillers, AND implicit default content — everything except a transparent
+    /// `<svelte:fragment slot>`'s hoisted children, whose source parent is the
+    /// fragment). The unified slot choke-point uses this membership to REFUSE a
+    /// dynamic / mixed `slot` on a direct child (the official
+    /// `slot_attribute_invalid` "must be a static value" rule fires ONLY at
+    /// `owner === parent`) while accepting the same dynamic `slot` as an ordinary
+    /// plain prop on a NON-direct component-family host.
+    pub direct_slot_attr_child_hosts: rustc_hash::FxHashSet<NodeId>,
 }
 
 impl<'a> SvelteRuntimeIr<'a> {

@@ -205,17 +205,19 @@ impl ClientSyntaxSurface {
             return Err(surface);
         }
         let facts = RefCell::new(SurfaceFacts::default());
-        // The VALID `slot`-attribute placements: the SOURCE-LEVEL slot-attribute OWNER
-        // set recorded at lowering — the lowered ids of exactly the DIRECT
-        // slot-declaring children of a component-family node. Accepting the static
-        // `slot` attribute EXACTLY on this set implements the official placement rule
-        // (a direct component child); every other position — including a child HOISTED
-        // into a slot region by a transparent `<svelte:fragment slot>` (a lowered
-        // region ROOT, but not a direct component child) — keeps the fail-closed
-        // refusal (official `slot_attribute_invalid_placement`). The gate must NEVER
-        // key on lowered slot-region-root membership: region roots include hoisted
-        // fragment children, which do not inherit slot-placement validity.
-        let slot_attr_owners = &ir.slot_attr_owners;
+        // The `slot`-attribute placement FACTS recorded at lowering: the STATIC
+        // slot-FILLER hosts (the lowered ids of exactly the DIRECT static-slot
+        // children of a component-family node, any kind) and the DIRECT
+        // component-child set (fillers plus implicit default content). Together they
+        // drive the official three-class disposition in the unified choke-point —
+        // filler routing, plain-prop acceptance, and the fail-closed rejects. The gate
+        // must NEVER key on lowered slot-region-root membership: region roots include
+        // a transparent `<svelte:fragment slot>`'s hoisted children, which do not
+        // inherit direct-child slot placement.
+        let slot_placement = SlotPlacementFacts {
+            static_slot_filler_hosts: &ir.static_slot_filler_hosts,
+            direct_slot_attr_child_hosts: &ir.direct_slot_attr_child_hosts,
+        };
         for (idx, scope) in ir.template_scopes.iter().enumerate() {
             // A region root is the COMPONENT root or a BLOCK BODY root — the placement axis
             // the declaration-tag gate validates against. (A block body is its OWN scope, so
@@ -231,7 +233,7 @@ impl ClientSyntaxSurface {
                     root,
                     Namespace::Html,
                     &declared_root_names,
-                    slot_attr_owners,
+                    slot_placement,
                     &facts,
                     placement,
                 )?;
@@ -496,36 +498,61 @@ enum NodePlacement {
     Nested,
 }
 
+/// The two lowering-recorded `slot=` placement-fact sets the unified slot choke-point
+/// keys on, borrowed from the IR for the classification walk (see
+/// [`SvelteRuntimeIr::static_slot_filler_hosts`] /
+/// [`SvelteRuntimeIr::direct_slot_attr_child_hosts`] for the membership contracts).
+#[derive(Clone, Copy)]
+pub(super) struct SlotPlacementFacts<'a> {
+    /// The DIRECT static-slot-declaring component children (any node kind).
+    pub(super) static_slot_filler_hosts: &'a rustc_hash::FxHashSet<NodeId>,
+    /// Every source-level DIRECT child of a component-family node.
+    pub(super) direct_slot_attr_child_hosts: &'a rustc_hash::FxHashSet<NodeId>,
+}
+
 /// The UNIFIED `slot`-attribute choke-point — the SOLE `slot=` validation authority,
 /// applied to EVERY template node at [`classify_node`] entry, BEFORE any per-kind
 /// accept / fold / prop projection. Covering every node kind by construction means no
 /// attr-bearing host — regular element, component, or `<svelte:*>` special — can
-/// quietly route a `slot` attribute into a plain prop, an `$.attribute_effect` fold
-/// entry, or the skeleton.
+/// quietly route a `slot` attribute past the official disposition.
 ///
-/// - A DYNAMIC / MIXED `slot={x}` / `slot="a{x}"` is the official
-///   `slot_attribute_invalid` compile error ("slot attribute must be a static value")
-///   — fail closed on EVERY host, slot owners included.
-/// - A STATIC `slot="x"` is valid ONLY on a SOURCE-LEVEL slot OWNER (the node id is in
-///   the lowering's direct-slot-declaring-child set
-///   [`SvelteRuntimeIr::slot_attr_owners`] — the official
-///   `slot_attribute_invalid_placement` rule, restricted to the supported
-///   REGULAR-ELEMENT filler surface). A component / `<svelte:*>`-special filler is the
-///   deferred `$$slots` routing surface (ledger D-41): official ACCEPTS it, Verter
-///   fails it CLOSED here. Lowered slot-region-root membership is NOT the placement
-///   fact: a transparent `<svelte:fragment slot>`'s hoisted children are region roots
-///   but never valid `slot=` hosts.
-/// - A valid OWNER placement passes through: on a spread element the fold consumes it
-///   (official folds `{...p, slot: 'x'}`); otherwise the static-attr arm of
-///   [`classify_attr`] accepts it as a baked skeleton attribute.
+/// The official `svelte@5.56.3` disposition (`validate_slot_attribute`, driven here
+/// from the typed IR node kinds plus the two lowering-recorded placement-fact sets —
+/// never name/text sniffing):
+///
+/// - **Filler (Class A)** — a STATIC `slot="x"` on a DIRECT slot-declaring component
+///   child (the node id is in [`SvelteRuntimeIr::static_slot_filler_hosts`]) is
+///   accepted on a FILLER host kind: a regular element, a component, a
+///   `<svelte:component>` / `<svelte:self>`, or a `<svelte:element>`. The filler
+///   routes into the parent's `$$slots.NAME` region; a component-family filler ALSO
+///   keeps `slot` as an ordinary prop on its own call, and a `<svelte:element>`
+///   filler folds it into `$.attribute_effect` — both are official output shapes.
+///   Lowered slot-region-root membership is NOT the placement fact: a transparent
+///   `<svelte:fragment slot>`'s hoisted children are region roots but never fillers.
+/// - **Plain prop (Class B)** — a `slot` (static OR dynamic/mixed) on a NON-direct
+///   COMPONENT-FAMILY host (a component / `<svelte:component>` / `<svelte:self>` not
+///   in [`SvelteRuntimeIr::direct_slot_attr_child_hosts`]) is an ordinary prop —
+///   official validates a component host with `is_component = true` and accepts it
+///   at every non-direct placement, top level included.
+/// - **Reject (Class C)** — everything else fails closed with the typed slot refusal:
+///   a dynamic/mixed `slot` on a DIRECT child or on any element-family host (official
+///   `slot_attribute_invalid` — "must be a static value"), a static `slot` on an
+///   element outside direct-filler placement (official
+///   `slot_attribute_invalid_placement`), and a `slot` on a non-filler special
+///   (`<svelte:head>` / `<svelte:boundary>` / `<svelte:fragment>` / the global hosts /
+///   `<svelte:options>` — each an official per-host attribute reject).
 ///
 /// A node kind with no attribute surface (text / comment / interpolation / block /
 /// tag) validates trivially.
 pub(super) fn validate_slot_placement(
     node: &IrNode,
     node_id: NodeId,
-    slot_attr_owners: &rustc_hash::FxHashSet<NodeId>,
+    slot_placement: SlotPlacementFacts<'_>,
 ) -> Result<(), UnsupportedSvelteRuntimeSurface> {
+    let SlotPlacementFacts {
+        static_slot_filler_hosts,
+        direct_slot_attr_child_hosts,
+    } = slot_placement;
     let (attrs, span) = match node {
         IrNode::Element(el) => (&el.attrs, el.span),
         IrNode::Component(c) => (&c.attrs, c.span),
@@ -537,9 +564,22 @@ pub(super) fn validate_slot_placement(
         | IrNode::Block(_)
         | IrNode::Tag(_) => return Ok(()),
     };
+    // A PLAIN-PROP host receives a non-direct `slot` as an ordinary prop (official
+    // validates these with `is_component = true`).
+    let plain_component_slot_prop_host = matches!(node, IrNode::Component(_))
+        || matches!(node, IrNode::Special(s) if matches!(s.kind, SpecialKind::Component | SpecialKind::SelfRef));
+    // A FILLER host can be routed into the parent's `$$slots` as a DIRECT static-slot
+    // child (the plain-prop hosts plus the element family).
+    let slot_filler_host = plain_component_slot_prop_host
+        || matches!(node, IrNode::Element(_))
+        || matches!(node, IrNode::Special(s) if s.kind == SpecialKind::Element);
+    let non_direct = !direct_slot_attr_child_hosts.contains(&node_id);
     for attr in attrs {
         if let AttrIr::Dynamic { name, .. } | AttrIr::Mixed { name, .. } = attr {
-            if name == "slot" {
+            // A dynamic/mixed `slot` is accepted ONLY as a NON-direct plain prop; on a
+            // direct child (or any element-family host) it is the official
+            // `slot_attribute_invalid` compile error.
+            if name == "slot" && !(plain_component_slot_prop_host && non_direct) {
                 return Err(UnsupportedSvelteRuntimeSurface::DynamicAttribute {
                     name: name.clone(),
                     span,
@@ -547,11 +587,15 @@ pub(super) fn validate_slot_placement(
             }
         }
         if let AttrIr::Static { name, .. } = attr {
-            if name == "slot" && !slot_attr_owners.contains(&node_id) {
-                return Err(UnsupportedSvelteRuntimeSurface::DynamicAttribute {
-                    name: name.clone(),
-                    span,
-                });
+            if name == "slot" {
+                let filler = slot_filler_host && static_slot_filler_hosts.contains(&node_id);
+                let plain_prop = plain_component_slot_prop_host && non_direct;
+                if !(filler || plain_prop) {
+                    return Err(UnsupportedSvelteRuntimeSurface::DynamicAttribute {
+                        name: name.clone(),
+                        span,
+                    });
+                }
             }
         }
     }
@@ -563,14 +607,14 @@ fn classify_node(
     node_id: NodeId,
     namespace: Namespace,
     declared_root_names: &rustc_hash::FxHashSet<String>,
-    slot_attr_owners: &rustc_hash::FxHashSet<NodeId>,
+    slot_placement: SlotPlacementFacts<'_>,
     facts: &RefCell<SurfaceFacts>,
     placement: NodePlacement,
 ) -> Result<(), UnsupportedSvelteRuntimeSurface> {
     // The unified `slot`-attribute choke-point runs for EVERY node kind BEFORE the
     // per-kind arms — no host arm can accept, fold, or prop-project a `slot=` the
     // gate refuses.
-    validate_slot_placement(ir.node(node_id), node_id, slot_attr_owners)?;
+    validate_slot_placement(ir.node(node_id), node_id, slot_placement)?;
     match ir.node(node_id) {
         // A text node's literal chunk must be SIMPLE ASCII (no HTML entity, no
         // tab/newline/repeated-space, no escaping need). A complex chunk needs the
@@ -739,7 +783,7 @@ fn classify_node(
                     child,
                     child_namespace,
                     declared_root_names,
-                    slot_attr_owners,
+                    slot_placement,
                     facts,
                     NodePlacement::Nested,
                 )?;
@@ -752,10 +796,11 @@ fn classify_node(
         // INDEPENDENTLY by the outer scope loop (they are their own template scopes).
         // Children are NOT recursed here — the slot regions own that. Component `let:` is the
         // component-context slot-prop path (NOT the element-context `let:` refusal, which
-        // stays closed). A `slot=` on the component itself never reaches projection —
-        // the unified choke-point above already refused it (a component is never a
-        // slot owner; its `$$slots` filler routing is the deferred D-41 surface), so
-        // this accept can never quietly project `slot` as a plain prop.
+        // stays closed). A `slot=` on the component itself was already dispositioned by
+        // the unified choke-point above: a DIRECT-filler or non-direct placement passed
+        // through (official ACCEPTS both — the filler routes into the parent's `$$slots`
+        // AND keeps the prop; the non-direct form is an ordinary plain prop the
+        // projection emits), and a dynamic/mixed `slot` on a direct child was refused.
         IrNode::Component(_) => Ok(()),
         // `<svelte:options>` is a compile-option carrier. The component-INVOCATION specials
         // (`<svelte:component>` / `<svelte:self>`) are ACCEPTED, projected to a component
@@ -764,10 +809,9 @@ fn classify_node(
         // into its parent component's `$$slots` at lowering and never becomes a node) — the
         // standalone transparent-fragment surface stays CLOSED. Every OTHER `<svelte:*>`
         // special — the host / renderable specials (`Head` / `Window` / `Document` / `Body` /
-        // `Element` / `Boundary`) — stays CLOSED (those hosts are not yet supported).
-        // A `slot=` on ANY special never reaches these arms — the unified choke-point
-        // above already refused it (a special is never a slot owner), so an accepting
-        // arm can never quietly fold or prop-project a `slot` attribute.
+        // `Boundary`) — refuses a `slot=` at the unified choke-point above (each is an
+        // official per-host attribute reject); the component-family specials and
+        // `<svelte:element>` take the same three-class disposition as a component.
         IrNode::Special(s) if s.kind == SpecialKind::Options => Ok(()),
         IrNode::Special(s) if matches!(s.kind, SpecialKind::Component | SpecialKind::SelfRef) => {
             Ok(())
@@ -1099,10 +1143,10 @@ fn classify_attr(
             }
             // (a5) A STATIC `slot="x"` at VALID component-child slot placement (the
             // unified choke-point — `validate_slot_placement` at `classify_node` entry
-            // — already validated the node is a SOURCE-LEVEL slot owner: a direct
-            // slot-declaring regular-element component child) bakes into the cloned
-            // skeleton verbatim — the official output keeps the slot attribute in the
-            // template HTML (`<span slot="foo-bar"> </span>`).
+            // — already validated the node is a SOURCE-LEVEL static slot FILLER: a
+            // direct slot-declaring regular-element component child) bakes into the
+            // cloned skeleton verbatim — the official output keeps the slot attribute
+            // in the template HTML (`<span slot="foo-bar"> </span>`).
             if name == "slot" {
                 return Ok(());
             }

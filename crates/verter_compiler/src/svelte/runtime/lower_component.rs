@@ -22,24 +22,33 @@ use crate::svelte::parser::{
     SvelteElementKind, SvelteNode, SvelteSpecialKind,
 };
 
-/// One slot-region content node, tagged with whether it is the SOURCE-LEVEL
-/// `slot=`-bearing DIRECT component child itself AND a regular INTRINSIC element (the
-/// slot OWNER — the only node kind on which a static `slot` attribute is accepted).
-/// Content HOISTED out of a transparent `<svelte:fragment slot>` and implicit
-/// default-slot content are NOT owners: hoisting into a slot region does not confer
-/// slot-placement validity, so a `slot` attribute on them is the official
-/// `slot_attribute_invalid_placement` error. A COMPONENT / `<svelte:*>`-special direct
-/// child bearing `slot=` is NOT an owner either — its `$$slots` filler routing is not
-/// emitted (ledger D-41), so it fails closed. Both are refused by the surface
-/// classifier's unified slot choke-point, which keys on
-/// [`SvelteRuntimeIr::slot_attr_owners`].
+/// One slot-region content node, tagged with the two placement facts the surface
+/// classifier's unified slot choke-point keys on:
 ///
-/// [`SvelteRuntimeIr::slot_attr_owners`]: super::ir::SvelteRuntimeIr::slot_attr_owners
+/// - [`is_static_slot_filler`](Self::is_static_slot_filler) — the node is the
+///   SOURCE-LEVEL static-`slot=`-declaring DIRECT component child itself (any node
+///   kind: a regular element, a component, or a `<svelte:*>` special). Retained on
+///   [`SvelteRuntimeIr::static_slot_filler_hosts`].
+/// - [`is_direct_child`](Self::is_direct_child) — the node is a source-level DIRECT
+///   child of the component-family node (named / explicit-default fillers AND
+///   implicit default content). Retained on
+///   [`SvelteRuntimeIr::direct_slot_attr_child_hosts`].
+///
+/// Content HOISTED out of a transparent `<svelte:fragment slot>` carries NEITHER
+/// fact: its source parent is the fragment, so hoisting into a slot region does not
+/// confer direct-child slot placement (officially a `slot` on a hoisted ELEMENT is
+/// `slot_attribute_invalid_placement`; a hoisted COMPONENT-family node takes the
+/// plain-prop route).
+///
+/// [`SvelteRuntimeIr::static_slot_filler_hosts`]: super::ir::SvelteRuntimeIr::static_slot_filler_hosts
+/// [`SvelteRuntimeIr::direct_slot_attr_child_hosts`]: super::ir::SvelteRuntimeIr::direct_slot_attr_child_hosts
 struct SlotContentNode {
     /// The parsed content node.
     node: SvelteNode,
-    /// Whether this node is the direct slot-declaring component child itself.
-    is_slot_owner: bool,
+    /// Whether this node is the direct static-slot-declaring component child itself.
+    is_static_slot_filler: bool,
+    /// Whether this node is a source-level direct child of the component-family node.
+    is_direct_child: bool,
 }
 
 /// Decompose a component-family node's children into SLOT regions. Returns the FULL
@@ -59,10 +68,6 @@ pub(super) fn lower_component_slots(
     let mut all_children = Vec::new();
     let mut snippet_defs = Vec::new();
     let mut default_nodes: Vec<SlotContentNode> = Vec::new();
-    // The IMPLICIT default-slot nodes (children with NO `slot` attribute) tracked
-    // separately, so an explicit `slot="default"` child alongside significant implicit
-    // content is detected as the official `slot_default_duplicate` conflict.
-    let mut implicit_default_nodes: Vec<SvelteNode> = Vec::new();
     // Named-slot groups in first-seen order: (name, content nodes, the slot's own `let:`).
     let mut named_groups: Vec<(String, Vec<SlotContentNode>, Vec<LetBinding>)> = Vec::new();
     // The static `slot` names seen so far (including `default`) — a REPEATED name is the
@@ -104,30 +109,30 @@ pub(super) fn lower_component_slots(
                     child_el.kind,
                     SvelteElementKind::Special(SvelteSpecialKind::Fragment)
                 ) {
-                    // The transparent fragment's children are HOISTED content, never
-                    // slot OWNERS — a `slot=` on one of them must fail closed (the
-                    // fragment itself never lowers to a node, so its own `slot=` never
-                    // reaches the attribute gate).
+                    // The transparent fragment's children are HOISTED content — their
+                    // source parent is the fragment, so they are neither static
+                    // fillers nor direct component children (the fragment itself never
+                    // lowers to a node, so its own `slot=` never reaches the attribute
+                    // gate).
                     child_el
                         .children
                         .iter()
                         .cloned()
                         .map(|node| SlotContentNode {
                             node,
-                            is_slot_owner: false,
+                            is_static_slot_filler: false,
+                            is_direct_child: false,
                         })
                         .collect()
                 } else {
-                    // The child IS the slot content. ONLY a regular INTRINSIC element
-                    // is additionally the source-level `slot=` OWNER (the supported
-                    // direct slot-declaring component child). A COMPONENT /
-                    // `<svelte:*>`-special child bearing `slot=` is NOT an owner: its
-                    // `$$slots` filler routing is not emitted (ledger D-41), so the
-                    // classifier's unified slot choke-point fails it closed rather
-                    // than projecting `slot` as a plain prop or folding it.
+                    // The child IS the slot content — the source-level static-slot
+                    // FILLER (any node kind; the choke-point's per-kind disposition
+                    // decides whether the kind is an acceptable filler host) and a
+                    // DIRECT component child.
                     vec![SlotContentNode {
                         node: child.clone(),
-                        is_slot_owner: matches!(child_el.kind, SvelteElementKind::Intrinsic),
+                        is_static_slot_filler: true,
+                        is_direct_child: true,
                     }]
                 };
                 if slot_name == "default" {
@@ -143,19 +148,27 @@ pub(super) fn lower_component_slots(
                 continue;
             }
         }
-        // (3) Everything else is DEFAULT-slot content (implicit — never a `slot=` owner).
+        // (3) Everything else is DEFAULT-slot content (implicit — never a static
+        // filler, but still a DIRECT component child: a dynamic `slot={x}` child lands
+        // here, and the choke-point must know it is direct to refuse it).
         default_nodes.push(SlotContentNode {
             node: child.clone(),
-            is_slot_owner: false,
+            is_static_slot_filler: false,
+            is_direct_child: true,
         });
-        implicit_default_nodes.push(child.clone());
     }
 
-    // An explicit `slot="default"` child alongside SIGNIFICANT implicit default content is
-    // the official `slot_default_duplicate` compile error (whitespace-only implicit runs do
-    // not conflict).
-    let has_default_slot_conflict =
-        has_explicit_default_slot && default_slot_has_content(source, &implicit_default_nodes);
+    // The official `slot_default_duplicate` rule: an explicit `slot="default"` child
+    // conflicts with EVERY sibling fragment node that is not exempt — the exemption is
+    // EXACTLY a whitespace-only text run OR a RegularElement / `<svelte:fragment>`
+    // carrying a `slot` attribute. A comment, a `{#snippet}` def, an interpolation, a
+    // block, and a COMPONENT-family node (even the `slot="default"`-bearing child
+    // ITSELF — `<Child><Inner slot="default"/></Child>` self-conflicts) all conflict.
+    let has_default_slot_conflict = has_explicit_default_slot
+        && el
+            .children
+            .iter()
+            .any(|child| default_slot_node_conflicts(source, child));
 
     // The DEFAULT slot region (only when it has non-whitespace content — an
     // all-whitespace default with no `let:` produces no `children` prop).
@@ -196,12 +209,12 @@ pub(super) fn lower_component_slots(
 /// slot scope (a child of `parent_scope`), declaring its `let:` slot props as `Derived`
 /// bindings FIRST (so a read inside the slot emits `$.get(item)`).
 ///
-/// Each content node lowered from a SOURCE-LEVEL slot OWNER (the direct slot-declaring
-/// INTRINSIC-element component child itself — see [`SlotContentNode`]) records its
-/// lowered id in the lowering's `slot_attr_owners` set, the exact node set the surface
-/// classifier accepts a static `slot=` attribute on. Hoisted fragment children,
-/// implicit default content, and component / special slot-declaring children record
-/// nothing.
+/// Each content node records its lowered id into the placement-fact sets the surface
+/// classifier's unified slot choke-point keys on (see [`SlotContentNode`]): a
+/// SOURCE-LEVEL static-slot FILLER (the direct slot-declaring component child itself,
+/// any kind) into `static_slot_filler_hosts`, and every source-level DIRECT component
+/// child (fillers plus implicit default content) into `direct_slot_attr_child_hosts`.
+/// Hoisted fragment children record nothing.
 fn lower_slot_region(
     ctx: &mut LoweringCtx,
     children: &[SlotContentNode],
@@ -223,8 +236,11 @@ fn lower_slot_region(
     for child in children {
         if let Some(id) = lower_node(ctx, &child.node, slot_scope) {
             roots.push(id);
-            if child.is_slot_owner {
-                ctx.slot_attr_owners.insert(id);
+            if child.is_static_slot_filler {
+                ctx.static_slot_filler_hosts.insert(id);
+            }
+            if child.is_direct_child {
+                ctx.direct_slot_attr_child_hosts.insert(id);
             }
         }
     }
@@ -402,6 +418,38 @@ fn default_slot_has_content<'n>(
         // An element / interpolation / block / tag is always renderable content.
         _ => true,
     })
+}
+
+/// Whether one component child CONFLICTS with an explicit `slot="default"` sibling —
+/// the official `slot_default_duplicate` per-node walk over `owner.fragment.nodes`.
+/// The exemption is EXACT: a whitespace-only text run, or a REGULAR element /
+/// `<svelte:fragment>` carrying an attribute named `slot` (any value form — the
+/// official check is `a.type === 'Attribute' && a.name === 'slot'`). Every other node
+/// conflicts: a comment, a non-whitespace text, an interpolation, a block (including a
+/// `{#snippet}` def), a tag, and ANY component / non-fragment `<svelte:*>` special —
+/// even when that special/component itself carries the `slot` attribute (so a
+/// `slot="default"`-bearing component-family child conflicts with ITSELF).
+fn default_slot_node_conflicts(source: &str, node: &SvelteNode) -> bool {
+    match node {
+        SvelteNode::Text(span) => !span_text(source, *span)
+            .chars()
+            .all(|c| c.is_ascii_whitespace()),
+        SvelteNode::Element(el) => {
+            let exempt_kind = matches!(
+                el.kind,
+                SvelteElementKind::Intrinsic
+                    | SvelteElementKind::NestedStyle
+                    | SvelteElementKind::Special(SvelteSpecialKind::Fragment)
+            );
+            let has_slot_attribute = el.attributes.iter().any(
+                |a| matches!(&a.kind, SvelteAttributeKind::Plain { name, .. } if name == "slot"),
+            );
+            !(exempt_kind && has_slot_attribute)
+        }
+        // A comment, an interpolation, a block ({#snippet} included), and a standalone
+        // tag all conflict — official does not exempt them.
+        _ => true,
+    }
 }
 
 /// Lower a RENDERABLE-region special (`<svelte:element>` / `<svelte:boundary>`) child set into

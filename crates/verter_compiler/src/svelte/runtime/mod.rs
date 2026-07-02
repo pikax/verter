@@ -230,10 +230,17 @@ pub(super) struct LoweringCtx<'a> {
     /// lowering, tracked for the post-template `$state` finalizer (a template write flips
     /// the lowering to `$.state`) — the same write-gated pipeline as instance-script state.
     block_rune_tracking: Vec<state_prep::TrackedState>,
-    /// The SOURCE-LEVEL `slot=` attribute OWNER set (the direct slot-declaring
-    /// component children), recorded by the component slot decomposition and retained
-    /// on [`SvelteRuntimeIr::slot_attr_owners`] — see that field for the contract.
-    pub(super) slot_attr_owners: rustc_hash::FxHashSet<NodeId>,
+    /// The STATIC slot-FILLER host set (the direct static-`slot=`-declaring component
+    /// children, any node kind), recorded by the component slot decomposition and
+    /// retained on [`SvelteRuntimeIr::static_slot_filler_hosts`] — see that field for
+    /// the contract.
+    pub(super) static_slot_filler_hosts: rustc_hash::FxHashSet<NodeId>,
+    /// The DIRECT component-child set (every source-level direct child of a
+    /// component-family node, fragment-hoisted children excluded), recorded by the
+    /// component slot decomposition and retained on
+    /// [`SvelteRuntimeIr::direct_slot_attr_child_hosts`] — see that field for the
+    /// contract.
+    pub(super) direct_slot_attr_child_hosts: rustc_hash::FxHashSet<NodeId>,
 }
 
 /// A `{@render}` tag awaiting callee resolution: the node to finalize, the inner
@@ -541,7 +548,8 @@ pub fn lower_parsed_svelte_to_ir<'a>(
         errors,
         pending_renders: Vec::new(),
         block_rune_tracking: Vec::new(),
-        slot_attr_owners: rustc_hash::FxHashSet::default(),
+        static_slot_filler_hosts: rustc_hash::FxHashSet::default(),
+        direct_slot_attr_child_hosts: rustc_hash::FxHashSet::default(),
     };
 
     // The root template scope owns the top-level template nodes.
@@ -603,7 +611,8 @@ pub fn lower_parsed_svelte_to_ir<'a>(
         template_scopes: ctx.template_scopes,
         nodes: ctx.nodes,
         ops: ctx.ops,
-        slot_attr_owners: ctx.slot_attr_owners,
+        static_slot_filler_hosts: ctx.static_slot_filler_hosts,
+        direct_slot_attr_child_hosts: ctx.direct_slot_attr_child_hosts,
     })
 }
 

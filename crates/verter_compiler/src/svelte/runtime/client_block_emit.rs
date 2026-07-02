@@ -281,6 +281,15 @@ impl<'a> ClientEmitter<'a> {
         // [`Self::plan_region_factories`]; clone it out so the body emission can mutate `self`.
         match self.region_frame[&scope_id].clone() {
             RegionFrame::TextNode { seed, prelude_next } => {
+                // Official RESERVES the `fragment` name for a text+interpolation
+                // SPACE-TEMPLATE region (`Fragment.js` runs `scope.generate('fragment')`
+                // BEFORE the `$.text()` special case), so a later frame in the same
+                // component function mints `fragment_1` even though no fragment var is
+                // emitted here. A PURE static sole-text region (`seed: Some`) is the
+                // official sole-`Text` branch, which generates only `text` — no burn.
+                if seed.is_none() {
+                    let _ = self.alloc_name("fragment");
+                }
                 self.emit_text_first_region(
                     out,
                     scope_id,
@@ -325,8 +334,13 @@ impl<'a> ClientEmitter<'a> {
                 out.push_str(&format!("\t$.append({anchor}, {region_var});\n"));
             }
             // A STANDALONE component / static-`{@render}` root: NO clone frame, NO
-            // `$.append` — the call targets `anchor` directly.
+            // `$.append` — the call targets `anchor` directly. Official still RESERVES
+            // the `fragment` name for this region (`Fragment.js` runs
+            // `scope.generate('fragment')` BEFORE its `is_standalone` branch), so a
+            // later frame — e.g. a `$.comment()` anchor inside this component's
+            // `$$slots` callback — mints `fragment_1`, matching the pinned output.
             RegionFrame::Standalone { node } => {
+                let _ = self.alloc_name("fragment");
                 match self.client_node(node) {
                     ClientNode::Component(_) => self.emit_component(out, node, anchor),
                     ClientNode::Render(_) => self.emit_render(out, node, anchor),

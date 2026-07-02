@@ -193,8 +193,12 @@ impl<'a> SupportedClientIr<'a> {
                 span,
             });
         }
-        // An explicit `slot="default"` child alongside significant implicit default
-        // content is the official `slot_default_duplicate` compile error — fail closed.
+        // An explicit `slot="default"` child alongside ANY non-exempt sibling fragment
+        // node is the official `slot_default_duplicate` compile error — the per-node
+        // walk exempts EXACTLY a whitespace-only text run or a regular element /
+        // `<svelte:fragment>` carrying a `slot` attribute; a comment, a `{#snippet}`
+        // def, an interpolation, a block, and a component-family node (including the
+        // `slot="default"`-bearing child ITSELF) all conflict — fail closed.
         if slots.has_default_slot_conflict {
             return Err(UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
                 construct: "default slot conflict",
@@ -339,10 +343,21 @@ impl<'a> SupportedClientIr<'a> {
         build: &mut CallBuild,
     ) -> Result<ComponentMember, UnsupportedSvelteRuntimeSurface> {
         match attr {
+            // A STATIC prop value is the parser's RAW attribute span — entity-DECODE it
+            // through the shared attribute-value decoder (the same
+            // [`super::entity_decode::decode_attr_entities`] the `$$slots` grouping key
+            // uses), matching official's parse-time decoded `Text.data`: a retained
+            // `slot="foo&amp;bar"` prop emits `slot: 'foo&bar'`, identical to its
+            // `$$slots` key, and every other static prop (`title="foo&amp;bar"`)
+            // decodes the same way. The Mixed arm needs no decode here — its literal
+            // parts were decoded at lowering; a Dynamic value is a JS expression (no
+            // decode applies).
             AttrIr::Static { name, value } => Ok(ComponentMember::Init {
                 key: name.clone(),
                 value: match value {
-                    Some(v) => js_single_quoted(&v.value),
+                    Some(v) => {
+                        js_single_quoted(&super::entity_decode::decode_attr_entities(&v.value))
+                    }
                     None => "true".to_string(),
                 },
             }),

@@ -11165,6 +11165,29 @@ fn plain_static_slot_name_is_not_over_decoded() {
 }
 
 #[test]
+fn entity_encoded_static_component_prop_value_decodes() {
+    // The static-prop entity decode is GENERAL, not slot-specific: official decodes
+    // attribute values at parse (`decode_character_references`), so ANY static
+    // component prop carrying an entity emits its DECODED value. Verified against
+    // svelte@5.56.3: `<Child label="foo&amp;bar" />` → `Child($$anchor, { label:
+    // 'foo&bar' })`. This pins the non-slot path of the same decoder the `$$slots`
+    // key / retained `slot` prop use.
+    let js = emit_result(
+        "<script>import Child from './Child.svelte'; let c = $state(0);</script>\n<Child label=\"foo&amp;bar\" />\n<button onclick={() => c++}>{c}</button>\n",
+    )
+    .expect("a component with an entity-encoded static prop emits a module");
+    assert!(
+        js.contains("label: 'foo&bar'"),
+        "a static component prop value must be entity-decoded:\n{js}"
+    );
+    // NEGATIVE: the raw entity bytes must not survive into the prop value.
+    assert!(
+        !js.contains("foo&amp;bar"),
+        "the raw entity must not leak un-decoded into the emitted module:\n{js}"
+    );
+}
+
+#[test]
 fn entity_and_literal_slot_names_denote_the_same_slot() {
     // `slot="a&amp;b"` and `slot="a&b"` DECODE to the same semantic name (`a&b` — the
     // legacy no-`;` `&b` is not a named reference, so it stays literal), so the pair is
@@ -11231,15 +11254,500 @@ fn slot_default_named_child_routes_to_children_prop() {
     );
 }
 
+// ─── Component / `<svelte:*>`-special `slot=` disposition (official three-class rule) ───
+//
+// Official `svelte@5.56.3` (`validate_slot_attribute`, `is_component = true` for the
+// Component / SvelteComponent / SvelteSelf hosts):
+// - A STATIC `slot` on a DIRECT component-family child routes the filler into the
+//   parent's `$$slots.NAME` AND keeps the `slot` prop on the child call.
+// - A `slot` (static OR dynamic/mixed) on a NON-direct component-family host is an
+//   ordinary PLAIN PROP (`{ slot: 'x' }` / a getter).
+// - A dynamic/mixed `slot` on a DIRECT child is the `slot_attribute_invalid` reject.
+
 #[test]
-fn validate_slot_placement_fails_closed_for_every_attr_bearing_kind() {
-    // The per-kind EXHAUSTIVE no-residual-member proof for the unified slot
-    // choke-point (`validate_slot_placement`, run at `classify_node` entry for EVERY
-    // node): a `slot`-bearing node of EVERY `SpecialKind`, a COMPONENT, and a
-    // NON-OWNER element all fail closed with the slot diagnostic; the ONLY accepted
-    // route is a STATIC `slot` on an OWNER regular element (the supported filler
-    // placement), and a DYNAMIC / MIXED `slot` fails closed even there.
-    use crate::svelte::runtime::client_surface::validate_slot_placement;
+fn slot_on_direct_component_child_routes_to_named_slot_and_keeps_prop() {
+    // `<Child><Inner slot="foo"/></Child>` — official routes the component filler into
+    // `$$slots.foo` AND emits the `slot` prop on the inner call:
+    //   Child($$anchor, { $$slots: { foo: ($$anchor, $$slotProps) => {
+    //     Inner($$anchor, { slot: 'foo' }); } } });
+    let js = emit_result(
+        "<script>import Child from './Child.svelte'; import Inner from './Inner.svelte'; let { x } = $props();</script>\n<Child><Inner slot=\"foo\"/></Child>\n",
+    )
+    .expect("a slot=-bearing direct component child emits a module");
+    assert!(
+        js.contains("$$slots: {foo: ($$anchor, $$slotProps) =>"),
+        "missing the $$slots.foo filler callback:\n{js}"
+    );
+    assert!(
+        js.contains("Inner($$anchor, {slot: 'foo'})"),
+        "the inner call must keep the slot prop:\n{js}"
+    );
+    // NEGATIVE: the filler is NOT default-children content.
+    assert!(
+        !js.contains("children:"),
+        "a named component filler must not leak into the children prop:\n{js}"
+    );
+}
+
+#[test]
+fn slot_on_direct_component_child_keeps_sibling_props_in_source_order() {
+    // `<Inner slot="foo" label="L" value={v}/>` — official emits the props object in
+    // SOURCE order with `slot` a plain member among them:
+    //   Inner($$anchor, { slot: 'foo', label: 'L', get value() {…} });
+    let js = emit_result(
+        "<script>import Child from './Child.svelte'; import Inner from './Inner.svelte'; let { v } = $props();</script>\n<Child><Inner slot=\"foo\" label=\"L\" value={v}/></Child>\n",
+    )
+    .expect("a slot filler with sibling props emits a module");
+    assert!(
+        js.contains("Inner($$anchor, {slot: 'foo', label: 'L', get value() {return $$props.v;}})"),
+        "the slot prop must ride the ordinary props object in source order:\n{js}"
+    );
+}
+
+#[test]
+fn entity_slot_name_decodes_retained_prop_consistently_with_slots_key() {
+    // Class-A filler: `<Child><Inner slot="foo&amp;bar"/></Child>` — official
+    // (svelte@5.56.3) entity-decodes the slot name ONCE at parse and emits BOTH the
+    // `$$slots` grouping key AND the retained `slot:` prop as the decoded `foo&bar`:
+    //   Child($$anchor, { $$slots: { 'foo&bar': ($$anchor, $$slotProps) => {
+    //     Inner($$anchor, { slot: 'foo&bar' }); } } });
+    // The key and the prop must ride the SAME decode — a raw `foo&amp;bar` prop
+    // alongside a decoded `foo&bar` key is an observably-wrong split.
+    let js = emit_result(
+        "<script>import Child from './Child.svelte'; import Inner from './Inner.svelte'; let { x } = $props();</script>\n<Child><Inner slot=\"foo&amp;bar\"/></Child>\n",
+    )
+    .expect("an entity-named slot filler emits a module");
+    assert!(
+        js.contains("$$slots: {'foo&bar': ($$anchor, $$slotProps) =>"),
+        "the $$slots grouping key must be the decoded quoted form:\n{js}"
+    );
+    assert!(
+        js.contains("Inner($$anchor, {slot: 'foo&bar'})"),
+        "the retained slot prop must carry the SAME decoded value as the key:\n{js}"
+    );
+    // NEGATIVE: the raw entity spelling must appear NOWHERE in the module.
+    assert!(
+        !js.contains("foo&amp;bar"),
+        "the un-decoded entity spelling must not survive into the output:\n{js}"
+    );
+
+    // Class-B plain prop (non-consumed): `<Child><div><Inner slot="foo&amp;bar"/></div></Child>`
+    // — official emits the plain prop as the SAME decoded form: `Inner(node, { slot: 'foo&bar' })`.
+    let nested = emit_result(
+        "<script>import Child from './Child.svelte'; import Inner from './Inner.svelte'; let { x } = $props();</script>\n<Child><div><Inner slot=\"foo&amp;bar\"/></div></Child>\n",
+    )
+    .expect("an entity-named plain slot prop emits a module");
+    assert!(
+        nested.contains("{slot: 'foo&bar'}"),
+        "the non-consumed plain slot prop must be entity-decoded:\n{nested}"
+    );
+    assert!(
+        !nested.contains("foo&amp;bar"),
+        "the un-decoded entity spelling must not survive into the output:\n{nested}"
+    );
+    // NEGATIVE: the nested prop carrier never mints a named $$slots entry.
+    assert!(
+        !nested.contains("'foo&bar': ($$anchor"),
+        "a plain slot prop must not mint a named $$slots callback:\n{nested}"
+    );
+
+    // A second entity family (`&lt;` → `<`) proves the decode is the general shared
+    // decoder, not an `&amp;`-only special case: official emits key `'a<b'` AND prop
+    // `slot: 'a<b'` for `<Child><Inner slot="a&lt;b"/></Child>`.
+    let lt = emit_result(
+        "<script>import Child from './Child.svelte'; import Inner from './Inner.svelte'; let { x } = $props();</script>\n<Child><Inner slot=\"a&lt;b\"/></Child>\n",
+    )
+    .expect("an `&lt;`-named slot filler emits a module");
+    assert!(
+        lt.contains("$$slots: {'a<b': ($$anchor, $$slotProps) =>"),
+        "the $$slots key must decode the named `&lt;` reference:\n{lt}"
+    );
+    assert!(
+        lt.contains("Inner($$anchor, {slot: 'a<b'})"),
+        "the retained slot prop must decode the named `&lt;` reference:\n{lt}"
+    );
+    assert!(
+        !lt.contains("a&lt;b"),
+        "the un-decoded `&lt;` spelling must not survive into the output:\n{lt}"
+    );
+}
+
+#[test]
+fn slot_on_direct_svelte_component_child_routes_to_named_slot_and_keeps_prop() {
+    // `<Child><svelte:component this={C} slot="foo"/></Child>` — the dynamic-component
+    // filler: `$$slots.foo` wraps the `$.component(node, () => C, ($$anchor, $$component)
+    // => { $$component($$anchor, { slot: 'foo' }); })` call.
+    let js = emit_result(
+        "<script>import Child from './Child.svelte'; let { C } = $props();</script>\n<Child><svelte:component this={C} slot=\"foo\"/></Child>\n",
+    )
+    .expect("a slot=-bearing direct svelte:component child emits a module");
+    assert!(
+        js.contains("$$slots: {foo: ($$anchor, $$slotProps) =>"),
+        "missing the $$slots.foo filler callback:\n{js}"
+    );
+    assert!(
+        js.contains("$$component($$anchor, {slot: 'foo'})"),
+        "the dynamic-component call must keep the slot prop:\n{js}"
+    );
+    // The callback's comment-anchor frame is `fragment_1`, NOT `fragment`: official
+    // RESERVES the `fragment` name for the standalone ROOT region (its
+    // `Fragment.js` runs `scope.generate('fragment')` before the standalone branch),
+    // so the nested frame mints the bumped suffix (pinned by the
+    // `components/slot_filler_svelte_component_child` oracle golden).
+    assert!(
+        js.contains("var fragment_1 = $.comment();"),
+        "the nested filler frame must mint the reserved-bumped fragment_1:\n{js}"
+    );
+    assert!(
+        !js.contains("var fragment = $.comment();"),
+        "the standalone root's reserved `fragment` name must not be reused:\n{js}"
+    );
+}
+
+#[test]
+fn slot_on_direct_svelte_self_child_routes_to_named_slot_and_keeps_prop() {
+    // `<Child><svelte:self slot="foo"/></Child>` — a direct component child IS a slot
+    // passed to a component (a valid `<svelte:self>` placement officially), and the
+    // recursive self-call keeps the `slot` prop inside the `$$slots.foo` callback.
+    let js = emit_result(
+        "<script>import Child from './Child.svelte'; let { x } = $props();</script>\n<Child><svelte:self slot=\"foo\"/></Child>\n",
+    )
+    .expect("a slot=-bearing direct svelte:self child emits a module");
+    assert!(
+        js.contains("$$slots: {foo: ($$anchor, $$slotProps) =>"),
+        "missing the $$slots.foo filler callback:\n{js}"
+    );
+    assert!(
+        js.contains("App(node, {slot: 'foo'})"),
+        "the recursive self-call must keep the slot prop on the call itself:\n{js}"
+    );
+}
+
+#[test]
+fn slot_on_direct_svelte_element_child_folds_slot_and_routes_to_named_slot() {
+    // `<Child><svelte:element this="div" slot="foo"/></Child>` — the dynamic-element
+    // filler: `$$slots.foo` wraps the `$.element(…)` call and the `slot` attribute
+    // FOLDS into the runtime `$.attribute_effect($$element, () => ({ slot: 'foo' }))`
+    // (never a component prop — the element has no props object).
+    let js = emit_result(
+        "<script>import Child from './Child.svelte'; let { x } = $props();</script>\n<Child><svelte:element this=\"div\" slot=\"foo\"/></Child>\n",
+    )
+    .expect("a slot=-bearing direct svelte:element child emits a module");
+    assert!(
+        js.contains("$$slots: {foo: ($$anchor, $$slotProps) =>"),
+        "missing the $$slots.foo filler callback:\n{js}"
+    );
+    assert!(
+        js.contains("$.element("),
+        "the filler body must emit the dynamic-element call:\n{js}"
+    );
+    assert!(
+        js.contains("$.attribute_effect($$element, () => ({ slot: 'foo' }));"),
+        "the slot attribute must fold into the attribute_effect:\n{js}"
+    );
+}
+
+#[test]
+fn plain_slot_prop_on_top_level_component() {
+    // `<Inner slot="top"/>` at the ROOT — no component-family ancestor consumes it, so
+    // official emits the plain prop `Inner($$anchor, { slot: 'top' })`.
+    let js = emit_result(
+        "<script>import Inner from './Inner.svelte'; let { x } = $props();</script>\n<Inner slot=\"top\"/>\n",
+    )
+    .expect("a top-level component slot prop emits a module");
+    assert!(
+        js.contains("Inner($$anchor, {slot: 'top'})"),
+        "the top-level slot must be a plain prop:\n{js}"
+    );
+    // NEGATIVE: no $$slots routing — there is no consuming parent.
+    assert!(
+        !js.contains("$$slots"),
+        "a plain slot prop must not mint a $$slots object:\n{js}"
+    );
+}
+
+#[test]
+fn plain_slot_prop_on_component_nested_in_element() {
+    // `<div><Inner slot="bar"/></div>` — the component is NOT a direct component child
+    // (its parent is an element), so the slot is a plain prop: `Inner(node, { slot: 'bar' })`.
+    let js = emit_result(
+        "<script>import Inner from './Inner.svelte'; let { x } = $props();</script>\n<div><Inner slot=\"bar\"/></div>\n",
+    )
+    .expect("an element-nested component slot prop emits a module");
+    assert!(
+        js.contains("{slot: 'bar'}"),
+        "the nested component slot must be a plain prop:\n{js}"
+    );
+    assert!(
+        !js.contains("$$slots"),
+        "a plain slot prop must not mint a $$slots object:\n{js}"
+    );
+}
+
+#[test]
+fn plain_slot_prop_dynamic_and_mixed_on_nondirect_component() {
+    // A DYNAMIC `slot={x}` on a NON-direct component host is officially ACCEPTED as an
+    // ordinary reactive prop (`get slot() { return x; }`) — the `slot_attribute_invalid`
+    // static-value rule applies ONLY to a DIRECT component child.
+    let js = emit_result(
+        "<script>import Inner from './Inner.svelte'; let { x } = $props();</script>\n<Inner slot={x}/>\n",
+    )
+    .expect("a dynamic slot prop on a top-level component emits a module");
+    assert!(
+        js.contains("get slot() {return $$props.x;}"),
+        "the dynamic slot must be a reactive getter prop:\n{js}"
+    );
+    // The MIXED `slot="a{x}"` form is the same plain-prop route (a template-literal getter).
+    let mixed = emit_result(
+        "<script>import Inner from './Inner.svelte'; let { x } = $props();</script>\n<Inner slot=\"a{x}\"/>\n",
+    )
+    .expect("a mixed slot prop on a top-level component emits a module");
+    assert!(
+        mixed.contains("get slot() {return `a${"),
+        "the mixed slot must be a template-literal getter prop:\n{mixed}"
+    );
+    assert!(
+        !js.contains("$$slots") && !mixed.contains("$$slots"),
+        "a plain slot prop must not mint a $$slots object"
+    );
+}
+
+#[test]
+fn plain_slot_prop_on_top_level_svelte_component() {
+    // `<svelte:component this={C} slot="a"/>` at the root — the plain prop rides the
+    // `$$component($$anchor, { slot: 'a' })` call.
+    let js = emit_result(
+        "<script>let { C } = $props();</script>\n<svelte:component this={C} slot=\"a\"/>\n",
+    )
+    .expect("a top-level svelte:component slot prop emits a module");
+    assert!(
+        js.contains("$$component($$anchor, {slot: 'a'})"),
+        "the svelte:component slot must be a plain prop:\n{js}"
+    );
+    assert!(
+        !js.contains("$$slots"),
+        "a plain slot prop must not mint a $$slots object:\n{js}"
+    );
+}
+
+#[test]
+fn plain_slot_prop_on_nondirect_svelte_self() {
+    // `{#if depth > 0}<svelte:self slot="a"/>{/if}` — a validly-placed NON-direct
+    // `<svelte:self>`: the slot is a plain prop on the recursive self-call.
+    let js = emit_result(
+        "<script>let { depth } = $props();</script>\n{#if depth > 0}<svelte:self slot=\"a\"/>{/if}\n",
+    )
+    .expect("a non-direct svelte:self slot prop emits a module");
+    assert!(
+        js.contains("App(node_1, {slot: 'a'})"),
+        "the svelte:self slot must be a plain prop on the self-call itself:\n{js}"
+    );
+    assert!(
+        !js.contains("$$slots"),
+        "a plain slot prop must not mint a $$slots object:\n{js}"
+    );
+}
+
+#[test]
+fn plain_slot_prop_on_component_inside_block() {
+    // `{#if show}<Inner slot="c"/>{/if}` — a block body is NOT direct-child placement,
+    // so the slot is a plain prop inside the consequent callback.
+    let js = emit_result(
+        "<script>import Inner from './Inner.svelte'; let { show } = $props();</script>\n{#if show}<Inner slot=\"c\"/>{/if}\n",
+    )
+    .expect("a block-nested component slot prop emits a module");
+    assert!(
+        js.contains("Inner($$anchor, {slot: 'c'})"),
+        "the block-nested slot must be a plain prop:\n{js}"
+    );
+}
+
+#[test]
+fn plain_slot_prop_on_component_hoisted_from_slotted_fragment() {
+    // `<Child><svelte:fragment slot="head"><Inner slot="x"/></svelte:fragment></Child>`
+    // — the fragment's children are HOISTED into the `head` region, but hoisting does
+    // NOT make Inner a direct component child (officially its owner is `Child`, its
+    // PARENT is the fragment — `owner !== parent` + `is_component` ⇒ plain prop):
+    //   $$slots: { head: (…) => { Inner($$anchor, { slot: 'x' }); } }
+    let js = emit_result(
+        "<script>import Child from './Child.svelte'; import Inner from './Inner.svelte'; let { x } = $props();</script>\n<Child><svelte:fragment slot=\"head\"><Inner slot=\"x\"/></svelte:fragment></Child>\n",
+    )
+    .expect("a component slot prop inside a slotted fragment emits a module");
+    assert!(
+        js.contains("$$slots: {head: ($$anchor, $$slotProps) =>"),
+        "missing the fragment's $$slots.head callback:\n{js}"
+    );
+    assert!(
+        js.contains("Inner($$anchor, {slot: 'x'})"),
+        "the hoisted component's slot must be a plain prop:\n{js}"
+    );
+    // NEGATIVE: the inner `slot="x"` must NOT mint an `x` slot entry on Child.
+    assert!(
+        !js.contains("x: ($$anchor, $$slotProps)"),
+        "the hoisted component's slot must not mint a $$slots entry:\n{js}"
+    );
+}
+
+#[test]
+fn dynamic_or_mixed_slot_on_direct_component_child_fails_closed() {
+    // A DYNAMIC / MIXED `slot` on a DIRECT component child is the official
+    // `slot_attribute_invalid` compile error ("slot attribute must be a static value")
+    // — the plain-prop acceptance is strictly the NON-direct placement.
+    assert_fail_closed(
+        "<script>import Child from './Child.svelte'; import Inner from './Inner.svelte'; let x = $state('a');</script>\n<Child><Inner slot={x}/></Child>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::DynamicAttribute { name, .. } if name == "slot"),
+    );
+    assert_fail_closed(
+        "<script>import Child from './Child.svelte'; import Inner from './Inner.svelte'; let x = $state('a');</script>\n<Child><Inner slot=\"a{x}\"/></Child>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::DynamicAttribute { name, .. } if name == "slot"),
+    );
+}
+
+#[test]
+fn dynamic_slot_on_direct_special_children_fails_closed() {
+    // The same official `slot_attribute_invalid` reject for a dynamic `slot` on the
+    // DIRECT `<svelte:component>` / `<svelte:self>` / `<svelte:element>` children.
+    assert_fail_closed(
+        "<script>import Child from './Child.svelte'; let x = $state('a');</script>\n<Child><svelte:component this={Child} slot={x}/></Child>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::DynamicAttribute { name, .. } if name == "slot"),
+    );
+    assert_fail_closed(
+        "<script>import Child from './Child.svelte'; let x = $state('a');</script>\n<Child><svelte:self slot={x}/></Child>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::DynamicAttribute { name, .. } if name == "slot"),
+    );
+    assert_fail_closed(
+        "<script>import Child from './Child.svelte'; let x = $state('a');</script>\n<Child><svelte:element this=\"div\" slot={x}/></Child>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::DynamicAttribute { name, .. } if name == "slot"),
+    );
+}
+
+#[test]
+fn svelte_head_inside_component_child_rejects_as_meta_placement() {
+    // A `<svelte:head>` nested inside a component child (with or without `slot=`) is
+    // the official `svelte_meta_invalid_placement` compile error — Verter refuses it
+    // on the OFFICIAL-reject rail with the exact code BEFORE the slot choke-point
+    // runs, so a `slot="x"` on it can never reach filler routing.
+    let err = emit_result(
+        "<script>import Child from './Child.svelte'; let { x } = $props();</script>\n<Child><svelte:head slot=\"x\"><title>t</title></svelte:head></Child>\n",
+    )
+    .expect_err("a component-nested svelte:head must reject");
+    assert!(
+        matches!(
+            &err,
+            ClientCompileError::OfficialReject(rej)
+                if rej.official_code == "svelte_meta_invalid_placement"
+        ),
+        "expected the official svelte_meta_invalid_placement reject: {err:?}"
+    );
+}
+
+#[test]
+fn explicit_default_slot_on_component_family_child_fails_closed() {
+    // Official's `slot_default_duplicate` walk exempts ONLY a RegularElement /
+    // SvelteFragment sibling carrying a `slot` attribute — a COMPONENT-family child
+    // bearing `slot="default"` conflicts with ITSELF (it is default content that is not
+    // an exempt node), so `<Child><Inner slot="default"/></Child>` is a hard official
+    // reject even with no other content.
+    assert_fail_closed(
+        "<script>import Child from './Child.svelte'; import Inner from './Inner.svelte'; let { x } = $props();</script>\n<Child><Inner slot=\"default\"/></Child>\n",
+        |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
+                    construct: "default slot conflict",
+                    ..
+                }
+            )
+        },
+    );
+    // The `<svelte:element slot="default">` form self-conflicts identically.
+    assert_fail_closed(
+        "<script>import Child from './Child.svelte'; let { x } = $props();</script>\n<Child><svelte:element this=\"div\" slot=\"default\"/></Child>\n",
+        |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
+                    construct: "default slot conflict",
+                    ..
+                }
+            )
+        },
+    );
+}
+
+#[test]
+fn default_slot_conflict_matches_official_exemption_rule() {
+    // Official conflicts an explicit `slot="default"` with EVERY sibling fragment node
+    // that is not a whitespace-only text and not a RegularElement / SvelteFragment
+    // carrying a `slot` attribute. A COMMENT, a `{#snippet}` def, and a slot-bearing
+    // COMPONENT sibling all conflict; a slot-bearing ELEMENT sibling is exempt.
+    assert_fail_closed(
+        "<script>import Child from './Child.svelte'; let { x } = $props();</script>\n<Child><span slot=\"default\">{x}</span><!-- c --></Child>\n",
+        |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
+                    construct: "default slot conflict",
+                    ..
+                }
+            )
+        },
+    );
+    assert_fail_closed(
+        "<script>import Child from './Child.svelte'; let { x } = $props();</script>\n<Child><span slot=\"default\">{x}</span>{#snippet s()}<p>y</p>{/snippet}</Child>\n",
+        |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
+                    construct: "default slot conflict",
+                    ..
+                }
+            )
+        },
+    );
+    assert_fail_closed(
+        "<script>import Child from './Child.svelte'; import Inner from './Inner.svelte'; let { x } = $props();</script>\n<Child><span slot=\"default\">{x}</span><Inner slot=\"foo\"/></Child>\n",
+        |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
+                    construct: "default slot conflict",
+                    ..
+                }
+            )
+        },
+    );
+    // POSITIVE control: a slot-bearing regular-element sibling is exempt — the pair
+    // compiles to `children:` + the named `foo` entry.
+    let js = emit_result(
+        "<script>import Child from './Child.svelte'; let { x } = $props();</script>\n<Child><span slot=\"default\">{x}</span><p slot=\"foo\">y</p></Child>\n",
+    )
+    .expect("an exempt slot-bearing element sibling must not conflict");
+    assert!(
+        js.contains("children: ($$anchor, $$slotProps) =>"),
+        "the explicit default content must become the children prop:\n{js}"
+    );
+    assert!(
+        js.contains("foo: ($$anchor, $$slotProps) =>"),
+        "the named element filler must keep its $$slots entry:\n{js}"
+    );
+}
+
+#[test]
+fn validate_slot_placement_disposition_is_exhaustive_per_host_kind() {
+    // The per-kind EXHAUSTIVE proof for the unified slot choke-point
+    // (`validate_slot_placement`, run at `classify_node` entry for EVERY node),
+    // pinning the official three-class disposition per host kind × placement:
+    //
+    // - FILLER hosts (regular element, component, `<svelte:component>` /
+    //   `<svelte:self>` / `<svelte:element>`): a STATIC `slot` is accepted EXACTLY
+    //   when the node is a lowering-recorded direct static-slot filler.
+    // - PLAIN-PROP hosts (component, `<svelte:component>` / `<svelte:self>`): any
+    //   `slot` form is accepted at NON-direct placement; a dynamic/mixed `slot` on a
+    //   DIRECT child fails closed (official `slot_attribute_invalid`).
+    // - Every OTHER kind (head / boundary / fragment / options / the global hosts)
+    //   fails closed for every form — even when the placement sets claim membership.
+    use crate::svelte::runtime::client_surface::{validate_slot_placement, SlotPlacementFacts};
     use crate::svelte::runtime::expr::ScopeId;
     use crate::svelte::runtime::ir::{
         AttrIr, ComponentIrNode, ComponentSlots, ElementIr, ExprId, IrNode, MixedAttrPart, NodeId,
@@ -11265,8 +11773,8 @@ fn validate_slot_placement_fails_closed_for_every_attr_bearing_kind() {
             MixedAttrPart::Expr(ExprId(0)),
         ],
     };
-    let no_owners = rustc_hash::FxHashSet::default();
-    let owner: rustc_hash::FxHashSet<NodeId> = std::iter::once(NodeId(0)).collect();
+    let empty = rustc_hash::FxHashSet::default();
+    let member: rustc_hash::FxHashSet<NodeId> = std::iter::once(NodeId(0)).collect();
 
     let special = |kind: SpecialKind, attrs: Vec<AttrIr>| {
         IrNode::Special(SpecialElementIr {
@@ -11302,9 +11810,16 @@ fn validate_slot_placement_fails_closed_for_every_attr_bearing_kind() {
         })
     };
 
-    let rejects = |node: &IrNode, owners: &rustc_hash::FxHashSet<NodeId>, label: &str| {
-        let err = validate_slot_placement(node, NodeId(0), owners)
-            .expect_err(&format!("{label}: a slot-bearing node must fail closed"));
+    let rejects = |node: &IrNode,
+                   fillers: &rustc_hash::FxHashSet<NodeId>,
+                   direct: &rustc_hash::FxHashSet<NodeId>,
+                   label: &str| {
+        let placement = SlotPlacementFacts {
+            static_slot_filler_hosts: fillers,
+            direct_slot_attr_child_hosts: direct,
+        };
+        let err = validate_slot_placement(node, NodeId(0), placement)
+            .expect_err(&format!("{label}: the slot-bearing node must fail closed"));
         assert!(
             matches!(
                 &err,
@@ -11316,6 +11831,19 @@ fn validate_slot_placement_fails_closed_for_every_attr_bearing_kind() {
             err.diagnostic_code(),
             "svelte-runtime-unsupported-dynamic-attribute",
             "{label}: wrong diagnostic id"
+        );
+    };
+    let accepts = |node: &IrNode,
+                   fillers: &rustc_hash::FxHashSet<NodeId>,
+                   direct: &rustc_hash::FxHashSet<NodeId>,
+                   label: &str| {
+        let placement = SlotPlacementFacts {
+            static_slot_filler_hosts: fillers,
+            direct_slot_attr_child_hosts: direct,
+        };
+        assert!(
+            validate_slot_placement(node, NodeId(0), placement).is_ok(),
+            "{label}: the slot placement must be accepted"
         );
     };
 
@@ -11346,55 +11874,173 @@ fn validate_slot_placement_fails_closed_for_every_attr_bearing_kind() {
             | SpecialKind::SelfRef
             | SpecialKind::Fragment => {}
         }
-        rejects(
-            &special(kind, vec![static_slot()]),
-            &no_owners,
-            &format!("special {kind:?} static slot"),
-        );
-        rejects(
-            &special(kind, vec![dynamic_slot()]),
-            &no_owners,
-            &format!("special {kind:?} dynamic slot"),
-        );
+        match kind {
+            // The component-family PLAIN-PROP specials: static/dynamic/mixed accepted
+            // at NON-direct placement; static accepted as a direct FILLER; dynamic and
+            // mixed refused on a direct child.
+            SpecialKind::Component | SpecialKind::SelfRef => {
+                accepts(
+                    &special(kind, vec![static_slot()]),
+                    &empty,
+                    &empty,
+                    &format!("special {kind:?} static slot, non-direct"),
+                );
+                accepts(
+                    &special(kind, vec![dynamic_slot()]),
+                    &empty,
+                    &empty,
+                    &format!("special {kind:?} dynamic slot, non-direct"),
+                );
+                accepts(
+                    &special(kind, vec![mixed_slot()]),
+                    &empty,
+                    &empty,
+                    &format!("special {kind:?} mixed slot, non-direct"),
+                );
+                accepts(
+                    &special(kind, vec![static_slot()]),
+                    &member,
+                    &member,
+                    &format!("special {kind:?} static slot, direct filler"),
+                );
+                rejects(
+                    &special(kind, vec![dynamic_slot()]),
+                    &empty,
+                    &member,
+                    &format!("special {kind:?} dynamic slot, direct child"),
+                );
+                rejects(
+                    &special(kind, vec![mixed_slot()]),
+                    &empty,
+                    &member,
+                    &format!("special {kind:?} mixed slot, direct child"),
+                );
+            }
+            // `<svelte:element>` is a FILLER host but NOT a plain-prop host: static
+            // accepted ONLY as a direct filler; dynamic refused everywhere.
+            SpecialKind::Element => {
+                accepts(
+                    &special(kind, vec![static_slot()]),
+                    &member,
+                    &member,
+                    "svelte:element static slot, direct filler",
+                );
+                rejects(
+                    &special(kind, vec![static_slot()]),
+                    &empty,
+                    &empty,
+                    "svelte:element static slot, non-direct",
+                );
+                rejects(
+                    &special(kind, vec![dynamic_slot()]),
+                    &member,
+                    &member,
+                    "svelte:element dynamic slot, direct filler",
+                );
+                rejects(
+                    &special(kind, vec![dynamic_slot()]),
+                    &empty,
+                    &empty,
+                    "svelte:element dynamic slot, non-direct",
+                );
+            }
+            // Every remaining special is NEVER a slot host: static and dynamic refuse
+            // even when the placement sets claim membership (the kind gate is the
+            // no-residual-member proof).
+            SpecialKind::Head
+            | SpecialKind::Window
+            | SpecialKind::Document
+            | SpecialKind::Body
+            | SpecialKind::Boundary
+            | SpecialKind::Options
+            | SpecialKind::Fragment => {
+                rejects(
+                    &special(kind, vec![static_slot()]),
+                    &member,
+                    &member,
+                    &format!("special {kind:?} static slot"),
+                );
+                rejects(
+                    &special(kind, vec![dynamic_slot()]),
+                    &member,
+                    &member,
+                    &format!("special {kind:?} dynamic slot"),
+                );
+            }
+        }
     }
-    // A COMPONENT bearing `slot` (the headline former fail-open member) — every form.
+    // A COMPONENT: plain-prop accepted at non-direct placement (every form), the
+    // static direct FILLER accepted, and dynamic/mixed refused on a direct child. A
+    // direct child whose static slot was NOT recorded as a filler (the defensive
+    // set-desync posture, e.g. a valueless `slot`) stays refused.
+    accepts(
+        &component(vec![static_slot()]),
+        &empty,
+        &empty,
+        "component static slot, non-direct",
+    );
+    accepts(
+        &component(vec![dynamic_slot()]),
+        &empty,
+        &empty,
+        "component dynamic slot, non-direct",
+    );
+    accepts(
+        &component(vec![mixed_slot()]),
+        &empty,
+        &empty,
+        "component mixed slot, non-direct",
+    );
+    accepts(
+        &component(vec![static_slot()]),
+        &member,
+        &member,
+        "component static slot, direct filler",
+    );
     rejects(
         &component(vec![static_slot()]),
-        &no_owners,
-        "component static slot",
+        &empty,
+        &member,
+        "component static slot, direct non-filler",
     );
     rejects(
         &component(vec![dynamic_slot()]),
-        &no_owners,
-        "component dynamic slot",
+        &empty,
+        &member,
+        "component dynamic slot, direct child",
     );
     rejects(
         &component(vec![mixed_slot()]),
-        &no_owners,
-        "component mixed slot",
+        &empty,
+        &member,
+        "component mixed slot, direct child",
     );
-    // A NON-OWNER regular element — the official `slot_attribute_invalid_placement`.
+    // A regular ELEMENT: static accepted ONLY as a direct filler (the official
+    // `slot_attribute_invalid_placement` otherwise); dynamic/mixed refused even there
+    // (the official `slot_attribute_invalid`); never a plain-prop host.
+    accepts(
+        &element(vec![static_slot()]),
+        &member,
+        &member,
+        "element static slot, direct filler",
+    );
     rejects(
         &element(vec![static_slot()]),
-        &no_owners,
-        "non-owner element static slot",
+        &empty,
+        &empty,
+        "element static slot, non-filler placement",
     );
-    // A DYNAMIC / MIXED `slot` fails closed EVEN ON AN OWNER (the official
-    // `slot_attribute_invalid` — "slot attribute must be a static value").
     rejects(
         &element(vec![dynamic_slot()]),
-        &owner,
-        "owner element dynamic slot",
+        &member,
+        &member,
+        "element dynamic slot, direct filler",
     );
     rejects(
         &element(vec![mixed_slot()]),
-        &owner,
-        "owner element mixed slot",
-    );
-    // The ONLY accepted route: a STATIC `slot` on an OWNER regular element.
-    assert!(
-        validate_slot_placement(&element(vec![static_slot()]), NodeId(0), &owner).is_ok(),
-        "an owner element's static slot is the accepted filler route"
+        &member,
+        &member,
+        "element mixed slot, direct filler",
     );
     // Negative controls: a slot-free attr inventory validates trivially on every
     // attr-bearing kind, and a node kind with no attribute surface always validates.
@@ -11404,19 +12050,23 @@ fn validate_slot_placement_fails_closed_for_every_attr_bearing_kind() {
             value: "c".to_string(),
         }),
     };
+    let no_placement = SlotPlacementFacts {
+        static_slot_filler_hosts: &empty,
+        direct_slot_attr_child_hosts: &empty,
+    };
     assert!(
-        validate_slot_placement(&component(vec![plain_attr()]), NodeId(0), &no_owners).is_ok(),
+        validate_slot_placement(&component(vec![plain_attr()]), NodeId(0), no_placement).is_ok(),
         "a slot-free component attr inventory must validate"
     );
     assert!(
-        validate_slot_placement(&element(vec![plain_attr()]), NodeId(0), &no_owners).is_ok(),
+        validate_slot_placement(&element(vec![plain_attr()]), NodeId(0), no_placement).is_ok(),
         "a slot-free element attr inventory must validate"
     );
     assert!(
         validate_slot_placement(
             &special(SpecialKind::Element, vec![plain_attr()]),
             NodeId(0),
-            &no_owners
+            no_placement
         )
         .is_ok(),
         "a slot-free special attr inventory must validate"
@@ -11426,7 +12076,7 @@ fn validate_slot_placement_fails_closed_for_every_attr_bearing_kind() {
         text: "hi".to_string(),
     };
     assert!(
-        validate_slot_placement(&text, NodeId(0), &no_owners).is_ok(),
+        validate_slot_placement(&text, NodeId(0), no_placement).is_ok(),
         "a text node has no attribute surface"
     );
 }
