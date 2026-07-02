@@ -62,41 +62,68 @@ fn locate_python(workspace_root: &Path) -> Result<PathBuf, Vec<PathBuf>> {
             continue;
         };
         let named = PathBuf::from(&val);
-        // A direct file path is probed as-is; a bare name resolves via PATH.
-        let candidates = if named.is_file() {
+        // An ABSOLUTE override always resolves through `which_on_path`, so
+        // Windows executable-extension variants are probed alongside the
+        // bare path (`PYTHON3=C:\Python312\python` → `python.exe`) even when
+        // the extension-less name itself is not a file. A relative existing
+        // file is probed as-is; a bare name resolves via `PATH`.
+        let candidates = if !named.is_absolute() && named.is_file() {
             vec![named]
         } else {
             which_on_path(&named)
         };
-        for candidate in candidates {
-            if python_is_functional(&candidate) {
-                return Ok(candidate);
-            }
-            rejected.push(candidate);
+        match locate_first_functional(candidates) {
+            Ok(python) => return Ok(python),
+            Err(mut probed) => rejected.append(&mut probed),
         }
     }
     for name in ["python3", "python"] {
-        for candidate in which_on_path(Path::new(name)) {
-            if python_is_functional(&candidate) {
-                return Ok(candidate);
-            }
-            rejected.push(candidate);
+        match locate_first_functional(which_on_path(Path::new(name))) {
+            Ok(python) => return Ok(python),
+            Err(mut probed) => rejected.append(&mut probed),
         }
     }
     Err(rejected)
 }
 
+/// Probe `candidates` in order with [`python_is_functional`] and return the
+/// FIRST functional interpreter; `Err` carries every probed-and-rejected
+/// candidate. Iterating past rejected entries (instead of stopping at the
+/// first candidate) is what lets the locator skip a non-functional
+/// front-of-`PATH` stub — e.g. the MS-Store alias shadowing a real install
+/// later on `PATH` — instead of skipping vacuously.
+fn locate_first_functional(candidates: Vec<PathBuf>) -> Result<PathBuf, Vec<PathBuf>> {
+    let mut rejected = Vec::new();
+    for candidate in candidates {
+        if python_is_functional(&candidate) {
+            return Ok(candidate);
+        }
+        rejected.push(candidate);
+    }
+    Err(rejected)
+}
+
 /// Minimal `which`: returns EVERY existing entry for `name` on `PATH`
-/// (honouring Windows executable extensions), in `PATH` order. When `name`
-/// is already an absolute existing file it is the sole entry. Returning all
-/// matches (not the first) lets the caller probe past a non-functional
-/// front-of-`PATH` entry — e.g. the MS-Store alias stub shadowing a real
-/// install later on `PATH`.
+/// (honouring Windows executable extensions), in `PATH` order. An ABSOLUTE
+/// `name` skips `PATH` but gets the SAME Windows extension expansion (bare
+/// name first, then `.exe`/`.bat`/`.cmd` variants), so an extension-less
+/// absolute override (`PYTHON3=C:\Python312\python`) still resolves the
+/// `python.exe` beside it. Returning all matches (not the first) lets the
+/// caller probe past a non-functional front-of-`PATH` entry — e.g. the
+/// MS-Store alias stub shadowing a real install later on `PATH`.
 fn which_on_path(name: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     if name.is_absolute() {
         if name.is_file() {
             found.push(name.to_path_buf());
+        }
+        if cfg!(windows) {
+            for ext in ["exe", "bat", "cmd"] {
+                let candidate = name.with_extension(ext);
+                if candidate.is_file() {
+                    found.push(candidate);
+                }
+            }
         }
         return found;
     }
@@ -486,5 +513,65 @@ fn python_probe_discriminates_stub_from_functional_interpreter() {
     assert!(
         python_is_functional(&good),
         "probe must accept the functional interpreter (always-false regression)",
+    );
+}
+
+/// Probe-past-a-shadowing-stub: with a non-functional stub FIRST and a
+/// functional interpreter SECOND, the locator must select the FUNCTIONAL
+/// candidate and record the stub as rejected. A first-match-only locator
+/// (probing only the front-of-`PATH` entry) stops at the stub and skips
+/// vacuously even though a real interpreter is available — this test is
+/// RED against that regression. The stub-only half pins the `Err` shape:
+/// every probed-and-rejected candidate is reported so the caller can skip
+/// loudly with the full probe trail.
+#[test]
+fn locate_probes_past_shadowing_stub_to_functional_candidate() {
+    let (dir, _guard) = unique_probe_fixture_dir("shadow");
+    let stub = write_fake_interpreter(&dir, "python_stub", "Python was not found", 9009);
+    let good = write_fake_interpreter(&dir, "python_good", "Python 3.12.0", 0);
+
+    assert_eq!(
+        locate_first_functional(vec![stub.clone(), good.clone()]),
+        Ok(good),
+        "the locator must probe PAST the non-functional front stub and \
+         select the functional candidate shadowed behind it — stopping at \
+         the first candidate re-introduces the vacuous skip",
+    );
+
+    assert_eq!(
+        locate_first_functional(vec![stub.clone()]),
+        Err(vec![stub]),
+        "with only the stub available the locator must reject it AND report \
+         it in the rejected trail, so the caller skips loudly instead of \
+         accepting a non-functional interpreter",
+    );
+}
+
+/// Windows absolute-override extension resolution: an explicit
+/// `PYTHON3=C:\Python312\python` (no extension) is a usable command when an
+/// executable variant (`python.exe` / `.bat` / `.cmd`) exists at that path —
+/// `which_on_path` must expand the same executable extensions for an
+/// ABSOLUTE name as it does for `PATH` lookups (bare name first, extension
+/// variants after), instead of returning empty and losing the freshness
+/// assertion to a vacuous skip.
+#[cfg(windows)]
+#[test]
+fn absolute_override_without_extension_resolves_windows_executable_variants() {
+    let (dir, _guard) = unique_probe_fixture_dir("abs_ext");
+    // `write_fake_interpreter` emits a `.cmd` shim on Windows — one of the
+    // executable extensions the PATH branch already expands.
+    let shim = write_fake_interpreter(&dir, "python_abs", "Python 3.12.0", 0);
+    let bare = dir.join("python_abs");
+    assert!(
+        bare.is_absolute() && !bare.is_file(),
+        "fixture must reproduce the trap: the extension-less absolute \
+         override is NOT itself a file",
+    );
+
+    assert_eq!(
+        which_on_path(&bare),
+        vec![shim],
+        "an absolute extension-less override must resolve its Windows \
+         executable-extension variant, exactly as a `PATH` lookup would",
     );
 }
