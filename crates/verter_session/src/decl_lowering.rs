@@ -209,6 +209,19 @@ impl SnapshotShard {
             crate::ParsedEvalProgram::parse(Arc::clone(source), source_type).map(std::rc::Rc::new);
         (parsed, true)
     }
+
+    /// Snapshot for a LEASE-ONLY run: the retained snapshot for `key` when a
+    /// live lease pins it, or `None` on a lease MISS. This method NEVER parses —
+    /// it takes no `source` — so a caller that routes through it (span recovery)
+    /// is structurally incapable of triggering a transient re-parse. The outer
+    /// `Option` distinguishes a lease miss (`None`) from a retained-but-fatal
+    /// parse (`Some(None)`).
+    fn snapshot_leased(
+        &self,
+        key: &SnapshotKey,
+    ) -> Option<Option<std::rc::Rc<crate::ParsedEvalProgram>>> {
+        self.entries.get(key).map(|entry| entry.parsed.clone())
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -421,6 +434,59 @@ impl DeclLoweringService {
             })
         }
     }
+
+    /// Run `job` against the LEASE-RETAINED eval program for `key`, WITHOUT ever
+    /// parsing. On a lease MISS (no retained snapshot) returns `None` and `job`
+    /// does NOT run — this path is structurally incapable of a transient parse,
+    /// so a caller on it (span recovery) can never violate the retained-parse
+    /// invariant. When a retained snapshot exists, `job` runs with `Some(&program)`
+    /// (or `None` for a fatal parse) and the result is `Some(job_result)`.
+    ///
+    /// Unlike [`Self::run`], this takes NO `source` — a lease miss cannot be
+    /// papered over by re-parsing. `job` MUST still be a PURE lowering closure
+    /// (no host / service re-entry), per the same worker-purity contract.
+    pub(crate) fn run_leased<R, F>(&self, key: &SnapshotKey, job: F) -> Option<R>
+    where
+        F: FnOnce(Option<&crate::ParsedEvalProgram>) -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use std::panic::AssertUnwindSafe;
+
+            let shard_index = shard_index(key, self.workers.len());
+            let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+            let key = key.clone();
+            let worker_job: WorkerJob = Box::new(move |shard| {
+                // `None` = lease miss (job does not run, nothing is parsed);
+                // `Some(catch_unwind(..))` = the retained snapshot ran the job.
+                let result = shard.snapshot_leased(&key).map(|parsed| {
+                    std::panic::catch_unwind(AssertUnwindSafe(|| job(parsed.as_deref())))
+                });
+                let _ = result_tx.send(result);
+            });
+            self.workers[shard_index]
+                .send(worker_job)
+                .expect("decl-lowering worker channel must outlive the service");
+            match result_rx
+                .recv()
+                .expect("decl-lowering worker must answer every job")
+            {
+                None => None,
+                Some(Ok(value)) => Some(value),
+                Some(Err(panic_payload)) => std::panic::resume_unwind(panic_payload),
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            WASM_DECL_LOWERING_SHARD.with(|cell| {
+                let shard = cell.borrow();
+                shard
+                    .snapshot_leased(key)
+                    .map(|parsed| job(parsed.as_deref()))
+            })
+        }
+    }
 }
 
 #[cfg(test)]
@@ -476,6 +542,50 @@ mod tests {
         assert_eq!(second.value, 2);
 
         drop(lease.lease);
+    }
+
+    /// `run_leased` NEVER parses: on a lease miss it returns `None` (the job
+    /// does not run), under a live lease it runs against the retained snapshot,
+    /// and after the lease drops it misses again. A regressed implementation
+    /// that re-parsed on a miss would return `Some(true)` on the first/last
+    /// probe and fail this test.
+    #[test]
+    fn run_leased_never_parses_and_misses_without_a_live_lease() {
+        let service = Arc::new(DeclLoweringService::new());
+        let source: Arc<str> = Arc::from("type A = { a: 1 };\n");
+        let k = key("/ws/leased-only.ts", 1);
+        let st = oxc_span::SourceType::ts();
+
+        // No live lease → miss (NOT a transient parse).
+        let miss = service.run_leased(&k, |program| program.is_some());
+        assert!(
+            miss.is_none(),
+            "run_leased must MISS (never parse) with no live lease"
+        );
+
+        // A live lease pins the snapshot → run_leased runs the job against it.
+        let lease = service.acquire_lease(&k, &source, st);
+        assert!(lease.parsed_now, "acquiring the lease parses once");
+        let hit = service.run_leased(&k, |program| {
+            program
+                .expect("the retained snapshot must be present under a live lease")
+                .borrow_dependent()
+                .body
+                .len()
+        });
+        assert_eq!(
+            hit,
+            Some(1),
+            "run_leased runs against the retained snapshot"
+        );
+
+        // After the lease drops, retention is released → miss again, no reparse.
+        drop(lease.lease);
+        let after = service.run_leased(&k, |program| program.is_some());
+        assert!(
+            after.is_none(),
+            "run_leased misses after the lease drops — it never re-parses"
+        );
     }
 
     /// An UN-LEASED run parses transiently and retains nothing: a second
