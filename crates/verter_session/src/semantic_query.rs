@@ -47,6 +47,7 @@ pub use verter_type_expr::LiteralValue;
 
 // Reuse the existing structured failure shape from the resolver — there is no
 // second failure-domain type in this rewrite.
+pub use crate::locator_identity::SlotEnvIdentity;
 pub use crate::resolver_core::shallow_file_state::BudgetExceededFailure;
 
 /// The `ProjectionDemand × EvalPolicy` lattice algebra (Deliverable #3 of
@@ -548,7 +549,7 @@ pub struct DeclPartId(pub u32);
 /// validation oracle (slot-level facts are).
 pub type DeclPartFingerprint = HashValue;
 
-/// Cache-identity key for the resolved declaration slot. Six
+/// Cache-identity key for the resolved declaration slot. Four
 /// fields (R7):
 ///
 /// - `defining_canonical`: canonical id of the declaring file.
@@ -556,11 +557,12 @@ pub type DeclPartFingerprint = HashValue;
 ///   survives declaration reordering and TS declaration merging.
 /// - `symbol_space`: type vs value disambiguator
 ///   ([`SemanticSymbolSpace`]).
-/// - `project_identity`: workspace + tsconfig + provider-root
-///   discriminator.
-/// - `type_env_hash`: TS compiler-options dimension.
-/// - `lib_env_hash`: TS lib selection + typeRoots + ambient corpus
-///   fingerprint.
+/// - `env`: the typed slot env tail
+///   ([`SlotEnvIdentity`](crate::locator_identity::SlotEnvIdentity) —
+///   the sealed type-env / lib-env / project-identity dimensions,
+///   `T` / `L` / `J`). Because these dimensions ride INSIDE the slot,
+///   any key that embeds the slot carries them transitively and never
+///   as standalone fields.
 ///
 /// **Cache invariant (R7 + multi-candidate substrate):** the slot
 /// identity is **content-free**. Two file versions of "same decl"
@@ -580,12 +582,11 @@ pub struct ResolvedDeclSlotIdentity {
     pub merged_symbol_name: Arc<str>,
     /// Type-space vs value-space discriminator.
     pub symbol_space: SemanticSymbolSpace,
-    /// Project identity dimension (workspace + tsconfig + provider).
-    pub project_identity: u32,
-    /// Type-env dimension (strict, noImplicitAny, target, …).
-    pub type_env_hash: HashValue,
-    /// Lib-env dimension (lib selection + typeRoots + ambient corpus).
-    pub lib_env_hash: HashValue,
+    /// The typed slot env tail: sealed `T` / `L` / `J` dimensions
+    /// (workspace + tsconfig + provider project identity; TS
+    /// compiler-options env; lib selection + typeRoots + ambient
+    /// corpus env).
+    pub env: SlotEnvIdentity,
 }
 
 impl ResolvedDeclSlotIdentity {
@@ -602,9 +603,7 @@ impl ResolvedDeclSlotIdentity {
             defining_canonical,
             merged_symbol_name,
             symbol_space: SemanticSymbolSpace::Type,
-            project_identity,
-            type_env_hash,
-            lib_env_hash,
+            env: SlotEnvIdentity::from_raw(project_identity, type_env_hash, lib_env_hash),
         }
     }
 
@@ -621,9 +620,7 @@ impl ResolvedDeclSlotIdentity {
             defining_canonical,
             merged_symbol_name,
             symbol_space: SemanticSymbolSpace::Value,
-            project_identity,
-            type_env_hash,
-            lib_env_hash,
+            env: SlotEnvIdentity::from_raw(project_identity, type_env_hash, lib_env_hash),
         }
     }
 
@@ -690,9 +687,7 @@ impl ResolvedDeclSlotIdentity {
             defining_canonical: Arc::clone(&identity.canonical_id),
             merged_symbol_name: Arc::clone(&identity.decl_name),
             symbol_space,
-            project_identity,
-            type_env_hash,
-            lib_env_hash,
+            env: SlotEnvIdentity::from_raw(project_identity, type_env_hash, lib_env_hash),
         }
     }
 
@@ -715,9 +710,7 @@ impl ResolvedDeclSlotIdentity {
             defining_canonical: Arc::clone(&self.defining_canonical),
             merged_symbol_name: Arc::clone(&self.merged_symbol_name),
             symbol_space,
-            project_identity: self.project_identity,
-            type_env_hash: self.type_env_hash,
-            lib_env_hash: self.lib_env_hash,
+            env: self.env,
         }
     }
 }

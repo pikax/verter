@@ -1,11 +1,29 @@
 //! Session-side key identities for locator-backed body lowering.
 //!
 //! [`LocatorLoweringKey`] is the session warm-memo key for a lowered authored
-//! body: the decl slot identity + the content-free [`AuthoredBodyLocator`] + the
-//! full live graph-lowering env dimensions + the projection-reduction axis + the
-//! substitution axis. [`SessionDemandIdentity`] is the session-only replay
-//! identity for a graph-raised adapter payload; it is NEVER stored in a lower
-//! crate and does NOT lower via [`LocatorLoweringKey`].
+//! body: exactly the decl slot identity + the content-free
+//! [`AuthoredBodyLocator`] + the live `parse_env_hash` (`P`) and
+//! `resolve_env_hash` (`R`) dimensions. The `type_env_hash` / `lib_env_hash` /
+//! `project_identity` dimensions (`T` / `L` / `J`) participate TRANSITIVELY
+//! through the slot's own typed env tail ([`SlotEnvIdentity`]) — never as
+//! standalone key fields or constructor parameters — so a mixed-env key
+//! ("slot from env A, dims from env B") is UNCONSTRUCTIBLE BY SHAPE.
+//! `LowerLocator` is strictly unsubstituted and carries no caller projection
+//! axis: substituted demands route through `Instantiate { args }`, which owns
+//! substitution plus all demand-sensitive reduction. [`SessionDemandIdentity`]
+//! is the session-only replay identity for a graph-raised adapter payload; it
+//! is NEVER stored in a lower crate and does NOT lower via
+//! [`LocatorLoweringKey`].
+//!
+//! # Fail-closed sealed construction
+//!
+//! [`LocatorLoweringKey`]'s fields are PRIVATE; the sole constructor
+//! [`LocatorLoweringKey::new_unsubstituted`] performs the slot/locator
+//! anchor-match gate BEFORE the key exists and rejects a mismatch with the
+//! typed [`LocatorKeyError`] — a malformed identity is unconstructible, never
+//! a silent lower under the wrong slot and never deferred to a dispatch-time
+//! `ReturnOnly`. Outside readers use the accessors; the exhaustive-destructure
+//! R6 witness stays inside this defining module.
 //!
 //! # R6 type-level key witnesses
 //!
@@ -13,43 +31,33 @@
 //! `DeclIdentity` in a content-free query-identity key. Two complementary
 //! compile-time witnesses enforce this:
 //!
-//! - [`R6KeyDimension`] — a SEALED trait over the allowed env/substitution
-//!   dimension types. A forbidden dimension has no impl and cannot be given one
-//!   (the private supertrait closes the set), so it can never occupy a standalone
-//!   dimension position. [`assert_r6_key_dimension`] drives the compile-fail
-//!   fixture.
+//! - [`R6KeyDimension`] — a SEALED trait over the allowed env dimension types.
+//!   A forbidden dimension has no impl and cannot be given one (the private
+//!   supertrait closes the set), so it can never occupy a standalone dimension
+//!   position. [`assert_r6_key_dimension`] drives the compile-fail fixture.
 //! - [`R6KeySafe`] — a SEALED trait over every type that may occupy ANY key
 //!   position, built recursively from allowed dimensions + content-free
 //!   structural components (`Arc<str>`, small ordinals, closed enums, and the
-//!   content-free locator/projection composites). Each composite's [`R6KeySafe`]
+//!   content-free locator/slot composites). Each composite's [`R6KeySafe`]
 //!   membership is backed by an EXHAUSTIVE-destructure witness (no `..`, no `_`
 //!   composite field), so a NEW field or arm fails compilation until it is
 //!   classified as key-safe. A forbidden dimension nested inside a composite key
 //!   field (e.g. `Option<SemanticNodeId>`) also fails, because the container
 //!   forwards the [`R6KeySafe`] bound.
 //!
-//! The one exception is [`ResolvedDeclSlotIdentity`], a widely-used legacy query
-//! identity whose raw `[u8; 16]` / `u32` env fields cannot yet be typed as
-//! dimensions (restructuring it requires a consumer flip — out of additive-B1
-//! scope; see the carried obligation in
-//! `docs/arch/stage10-typeexpr-terminal-removal-design.md` §9). Its witness is
-//! still EXHAUSTIVE, classifying those three fields through the NAMED
-//! [`LegacyEnvDim`] path rather than an unchecked `_`, so a new field on the slot
-//! still fails compilation until classified.
+//! [`ResolvedDeclSlotIdentity`]'s env tail is the typed [`SlotEnvIdentity`]
+//! composite (sealed [`TypeEnvHash`] / [`LibEnvHash`] / [`ProjectIdentityDim`]
+//! dimensions), proven through its own exhaustive-destructure witness like
+//! every other composite — this is how `T` / `L` / `J` prove through the slot
+//! on the [`LocatorLoweringKey`] witness.
 //!
-//! These identities are additive substrate: defined and witnessed here, with no
-//! production caller yet — the consumers that read them are wired separately.
+//! The lowering consumers that read these identities are wired separately.
 
 #![allow(dead_code)]
 
 use std::sync::Arc;
 
-use crate::file_artifact_store::ProjectIdentity;
-use crate::semantic_query::{
-    HashValue, MemberMergeRole, ProjectionMode, ProjectionReductionContext, ReductionDemand,
-    ResolvedDeclSlotIdentity, SemanticSymbolSpace, SubstitutionCanonicalHash,
-    SurfaceProvenanceContext,
-};
+use crate::semantic_query::{HashValue, ResolvedDeclSlotIdentity, SemanticSymbolSpace};
 use verter_type_expr::locators::{
     AuthoredAnchor, AuthoredBodyLocator, LocatorSymbolSpace, MacroPayloadLocator,
     MacroPayloadPosition, SymbolBodyLocator, TypeArgLocator, TypeBodyPathStep, TypeBodySlot,
@@ -132,28 +140,77 @@ impl LibEnvHash {
 impl sealed::Sealed for LibEnvHash {}
 impl R6KeyDimension for LibEnvHash {}
 
-// The project-identity dimension REUSES the existing full 16-byte
-// `file_artifact_store::ProjectIdentity` (workspace + tsconfig + provider-root
-// discriminator) rather than a duplicate local newtype — it is a project/env
-// dimension, never a file content hash by intent. Its inner `Hash16` field is
-// PUBLIC (`pub struct ProjectIdentity(pub Hash16)`), so — unlike the B1-owned
-// newtypes above — a raw content hash COULD be wrapped as a `ProjectIdentity`
-// by construction. That is a GRANDFATHERED, disclosed carried obligation (design
-// §9.1); the slot-identity / env-hash migration seals it.
-impl sealed::Sealed for ProjectIdentity {}
-impl R6KeyDimension for ProjectIdentity {}
+/// The slot project-identity dimension (`J`): a sealed newtype over the
+/// folded `u32` project identity carried by [`ResolvedDeclSlotIdentity`]
+/// (workspace + tsconfig + provider-root discriminator, folded via
+/// `ProjectIdentity::fold_u32`). Inner value PRIVATE — constructed only
+/// in-crate via [`ProjectIdentityDim::from_project_identity`], so a raw
+/// ordinal/content value cannot occupy the slot's project position without an
+/// explicit in-crate wrap. Deliberately NOT the 16-byte
+/// `file_artifact_store::ProjectIdentity` (whose public `Hash16` inner still
+/// admits arbitrary bytes by construction): the slot's project dimension is
+/// the u32-derived one, and no full `ProjectIdentity` shadow field exists on
+/// the slot or on [`LocatorLoweringKey`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ProjectIdentityDim(u32);
+impl ProjectIdentityDim {
+    /// Wrap the folded `u32` project-identity dimension.
+    #[must_use]
+    pub(crate) const fn from_project_identity(project_identity: u32) -> Self {
+        Self(project_identity)
+    }
+}
+impl sealed::Sealed for ProjectIdentityDim {}
+impl R6KeyDimension for ProjectIdentityDim {}
 
-// The substitution axis REUSES the existing content-free
-// `semantic_query::SubstitutionCanonicalHash` (a canonical hash of the
-// substitution MAPPING). Its inner field is private; production constructs it
-// only via `empty()`, and the test helper `distinct_for_test(seed: u32)` takes a
-// `u32` seed — NOT raw bytes — so no file content/whole hash can be poured in.
-// Content-free BY TYPE; the underlying `HashValue` byte provenance is
-// non-self-distinguishing (design §9.1). Distinguishing it as its own dimension
-// prevents a `{locator + resolve_env_hash}`-only key from aliasing distinct
-// lowered nodes.
-impl sealed::Sealed for SubstitutionCanonicalHash {}
-impl R6KeyDimension for SubstitutionCanonicalHash {}
+/// The typed env tail of [`ResolvedDeclSlotIdentity`]: the slot-intrinsic
+/// `type_env_hash` (`T`) / `lib_env_hash` (`L`) / `project_identity` (`J`)
+/// dimensions as ONE sealed composite. This is what makes `T` / `L` / `J`
+/// SLOT-CARRIED key identity: a key that embeds the slot proves those
+/// dimensions through this composite's exhaustive-destructure witness and
+/// never carries them as standalone fields, so a mixed-env key cannot be
+/// formed by shape. Fields are private; construction is in-crate only
+/// ([`SlotEnvIdentity::new`] / [`SlotEnvIdentity::from_raw`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SlotEnvIdentity {
+    /// Type-env dimension (`T`).
+    type_env: TypeEnvHash,
+    /// Lib-env dimension (`L`).
+    lib_env: LibEnvHash,
+    /// Project-identity dimension (`J`).
+    project: ProjectIdentityDim,
+}
+
+impl SlotEnvIdentity {
+    /// Compose the typed slot env tail from its sealed dimensions.
+    #[must_use]
+    pub(crate) const fn new(
+        type_env: TypeEnvHash,
+        lib_env: LibEnvHash,
+        project: ProjectIdentityDim,
+    ) -> Self {
+        Self {
+            type_env,
+            lib_env,
+            project,
+        }
+    }
+
+    /// Wrap the raw env values read from the live host env (never file
+    /// content/whole hashes) into the sealed slot env tail.
+    #[must_use]
+    pub(crate) const fn from_raw(
+        project_identity: u32,
+        type_env_hash: HashValue,
+        lib_env_hash: HashValue,
+    ) -> Self {
+        Self::new(
+            TypeEnvHash::from_env_hash(type_env_hash),
+            LibEnvHash::from_env_hash(lib_env_hash),
+            ProjectIdentityDim::from_project_identity(project_identity),
+        )
+    }
+}
 
 // ===========================================================================
 // R6KeySafe — the recursive "safe to occupy ANY key position" witness.
@@ -256,19 +313,18 @@ impl<T: R6KeySafe> R6KeySafe for Option<T> {}
 impl<T: R6KeySafe> key_safe_sealed::Sealed for Vec<T> {}
 impl<T: R6KeySafe> R6KeySafe for Vec<T> {}
 
-// The sealed env/substitution dimensions are key-safe LEAVES (no fields).
+// The sealed env dimensions are key-safe LEAVES (no fields).
 impl_r6_key_safe_leaf!(
     ParseEnvHash,
     ResolveEnvHash,
     TypeEnvHash,
     LibEnvHash,
-    ProjectIdentity,
-    SubstitutionCanonicalHash,
+    ProjectIdentityDim,
 );
 
-// The content-free locator composites + projection axes + slot identity are
-// key-safe; each stamp is BOUND to its exhaustive-destructure witness below (a
-// stamp without its `w_*` witness fails to compile).
+// The content-free locator composites + slot identity (with its typed env
+// tail) are key-safe; each stamp is BOUND to its exhaustive-destructure
+// witness below (a stamp without its `w_*` witness fails to compile).
 impl_r6_key_safe!(
     LocatorSymbolSpace => w_locator_symbol_space,
     AuthoredAnchor => w_authored_anchor,
@@ -280,38 +336,9 @@ impl_r6_key_safe!(
     MacroPayloadLocator => w_macro_payload_locator,
     AuthoredBodyLocator => w_authored_body_locator,
     SemanticSymbolSpace => w_semantic_symbol_space,
-    ProjectionMode => w_projection_mode,
-    ReductionDemand => w_reduction_demand,
-    SurfaceProvenanceContext => w_surface_provenance,
-    MemberMergeRole => w_member_merge_role,
-    ProjectionReductionContext => w_projection_reduction_context,
+    SlotEnvIdentity => w_slot_env_identity,
     ResolvedDeclSlotIdentity => w_resolved_decl_slot_identity,
 );
-
-// ---------------------------------------------------------------------------
-// LEGACY env-dimension classifier for `ResolvedDeclSlotIdentity`'s raw fields.
-// ---------------------------------------------------------------------------
-
-mod legacy_env_sealed {
-    pub trait Sealed {}
-}
-
-/// The legacy raw env-hash dimension shapes carried on the pre-migration
-/// [`ResolvedDeclSlotIdentity`] slot (a NAMED carried obligation — see design
-/// §9). A raw `[u8; 16]` / `u32` cannot distinguish an env hash from a content
-/// hash, so it is deliberately NOT [`R6KeySafe`]; this trait is the documented
-/// legacy classification for exactly those three slot fields, never an unchecked
-/// `_`. The full typed-newtype restructuring lands with the slot-identity
-/// migration.
-pub trait LegacyEnvDim: legacy_env_sealed::Sealed {}
-
-/// Per-field classifier for the legacy raw env dimensions of the slot identity.
-fn legacy_env_dimension<T: LegacyEnvDim>(_: &T) {}
-
-impl legacy_env_sealed::Sealed for HashValue {}
-impl LegacyEnvDim for HashValue {}
-impl legacy_env_sealed::Sealed for u32 {}
-impl LegacyEnvDim for u32 {}
 
 // ---------------------------------------------------------------------------
 // Exhaustive-destructure witnesses (no `..`, no `_` composite field). A new
@@ -400,47 +427,15 @@ fn w_semantic_symbol_space(s: &SemanticSymbolSpace) {
     }
 }
 
-fn w_projection_mode(m: &ProjectionMode) {
-    match m {
-        ProjectionMode::Identity
-        | ProjectionMode::Navigate
-        | ProjectionMode::Shallow
-        | ProjectionMode::Expanded
-        | ProjectionMode::Skeleton => {}
-    }
-}
-
-fn w_reduction_demand(d: &ReductionDemand) {
-    match d {
-        ReductionDemand::Published
-        | ReductionDemand::StructuralTransit
-        | ReductionDemand::MacroObjectSurface => {}
-    }
-}
-
-fn w_surface_provenance(p: &SurfaceProvenanceContext) {
-    match p {
-        SurfaceProvenanceContext::Structural | SurfaceProvenanceContext::MacroTypeArgOwnBody => {}
-    }
-}
-
-fn w_member_merge_role(r: &MemberMergeRole) {
-    match r {
-        MemberMergeRole::Authored | MemberMergeRole::OwnBody | MemberMergeRole::Heritage => {}
-    }
-}
-
-fn w_projection_reduction_context(c: &ProjectionReductionContext) {
-    let ProjectionReductionContext {
-        mode,
-        demand,
-        provenance,
-        merge_role,
-    } = c;
-    key_safe(mode);
-    key_safe(demand);
-    key_safe(provenance);
-    key_safe(merge_role);
+fn w_slot_env_identity(e: &SlotEnvIdentity) {
+    let SlotEnvIdentity {
+        type_env,
+        lib_env,
+        project,
+    } = e;
+    key_safe(type_env);
+    key_safe(lib_env);
+    key_safe(project);
 }
 
 fn w_resolved_decl_slot_identity(s: &ResolvedDeclSlotIdentity) {
@@ -448,50 +443,153 @@ fn w_resolved_decl_slot_identity(s: &ResolvedDeclSlotIdentity) {
         defining_canonical,
         merged_symbol_name,
         symbol_space,
-        project_identity,
-        type_env_hash,
-        lib_env_hash,
+        env,
     } = s;
     key_safe(defining_canonical);
     key_safe(merged_symbol_name);
     key_safe(symbol_space);
-    // LEGACY carried obligation (design §9): these three are raw env fields the
-    // slot-identity migration will type as dimensions. Classified through the
-    // NAMED legacy path, never an unchecked `_`.
-    legacy_env_dimension(project_identity);
-    legacy_env_dimension(type_env_hash);
-    legacy_env_dimension(lib_env_hash);
+    key_safe(env);
 }
 
-/// The session warm-memo key for a lowered authored body.
+/// Typed rejection of a malformed [`LocatorLoweringKey`] identity: the
+/// locator's anchor does not name the slot's declaration. Each variant is one
+/// mismatch axis of the anchor-match gate. A mismatch means the wrong
+/// family/lane must never come into existence — construction fails; nothing
+/// lowers under the wrong slot and nothing defers to a dispatch-time
+/// `ReturnOnly`.
+// The shared `Mismatch` postfix is the semantic content of every variant (the
+// gate has exactly three mismatch axes), not naming noise.
+#[allow(clippy::enum_variant_names)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LocatorKeyError {
+    /// `locator.anchor.canonical_id` ≠ `slot.defining_canonical`.
+    CanonicalMismatch {
+        /// The slot's defining canonical.
+        slot_canonical: Arc<str>,
+        /// The locator anchor's canonical.
+        locator_canonical: Arc<str>,
+    },
+    /// `locator.anchor.symbol` ≠ `slot.merged_symbol_name`.
+    SymbolMismatch {
+        /// The slot's merged symbol name.
+        slot_symbol: Arc<str>,
+        /// The locator anchor's symbol.
+        locator_symbol: Arc<str>,
+    },
+    /// `locator.anchor.space` does not map onto `slot.symbol_space`.
+    SpaceMismatch {
+        /// The slot's symbol space.
+        slot_space: SemanticSymbolSpace,
+        /// The locator anchor's symbol space.
+        locator_space: LocatorSymbolSpace,
+    },
+}
+
+/// Map a locator anchor space onto the session symbol space it names.
+/// Exhaustive: both are closed three-arm spaces.
+const fn semantic_space_for_locator_space(space: LocatorSymbolSpace) -> SemanticSymbolSpace {
+    match space {
+        LocatorSymbolSpace::Type => SemanticSymbolSpace::Type,
+        LocatorSymbolSpace::Value => SemanticSymbolSpace::Value,
+        LocatorSymbolSpace::Namespace => SemanticSymbolSpace::Namespace,
+    }
+}
+
+/// The session warm-memo key for a lowered authored body: exactly
+/// `slot + locator + P + R`.
 ///
 /// Content-free (R6): NO content/whole hash, NO `FileWholeHash`, NO
-/// `SemanticNodeId`, NO `HotTypeRef`, NO versioned `DeclIdentity`. The
-/// `defining_canonical` env carried by `slot` is the DECL's defining env; the
-/// standalone env-dimension wrappers are the LIVE graph-lowering env, which can
-/// differ. The live whole-hash is re-sourced at value-compute time and recorded
-/// in the caller's read-set, never carried here.
+/// `SemanticNodeId`, NO `HotTypeRef`, NO versioned `DeclIdentity`. The live
+/// whole-hash is re-sourced at value-compute time and recorded in the caller's
+/// read-set, never carried here. `T` / `L` / `J` are SLOT-CARRIED (the slot's
+/// [`SlotEnvIdentity`] env tail is the sole carrier) — there are no standalone
+/// type-env / lib-env / project fields, so a mixed-env key cannot be formed by
+/// shape. The key is strictly UNSUBSTITUTED and carries NO caller projection
+/// axis: the body lowers under the fixed locator-shape context, and
+/// substituted / demand-sensitive reduction lives on `Instantiate { args }`.
+///
+/// Fields are PRIVATE (fail-closed sealed construction): the sole constructor
+/// is [`Self::new_unsubstituted`], which gates on the slot/locator anchor
+/// match before creation.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct LocatorLoweringKey {
-    /// The env-bearing content-free decl slot identity.
-    pub slot: ResolvedDeclSlotIdentity,
+    /// The env-bearing content-free decl slot identity (carries `T`/`L`/`J`).
+    slot: ResolvedDeclSlotIdentity,
     /// The authored body being lowered.
-    pub locator: AuthoredBodyLocator,
-    /// Live parse-env dimension.
-    pub parse_env_hash: ParseEnvHash,
-    /// Live resolve-env dimension.
-    pub resolve_env_hash: ResolveEnvHash,
-    /// Live type-env dimension.
-    pub type_env_hash: TypeEnvHash,
-    /// Live lib-env dimension.
-    pub lib_env_hash: LibEnvHash,
-    /// Live project-identity dimension.
-    pub project_identity: ProjectIdentity,
-    /// The full projection-reduction axis (mode / demand / provenance /
-    /// merge-role).
-    pub projection: ProjectionReductionContext,
-    /// The substitution axis, when lowering under an instantiated body.
-    pub substitution: SubstitutionCanonicalHash,
+    locator: AuthoredBodyLocator,
+    /// Live parse-env dimension (`P`).
+    parse_env_hash: ParseEnvHash,
+    /// Live resolve-env dimension (`R`).
+    resolve_env_hash: ResolveEnvHash,
+}
+
+impl LocatorLoweringKey {
+    /// The SOLE constructor: build the strictly-unsubstituted lowering key
+    /// after the slot/locator anchor-match gate. REJECTS with a typed
+    /// [`LocatorKeyError`] unless the locator anchor names the slot's
+    /// declaration exactly (`anchor.canonical_id == slot.defining_canonical`,
+    /// `anchor.symbol == slot.merged_symbol_name`, and `anchor.space` maps to
+    /// `slot.symbol_space`). There are NO standalone `T`/`L`/`J` parameters to
+    /// cross-check — env coherence is by construction (slot-carried).
+    pub(crate) fn new_unsubstituted(
+        slot: ResolvedDeclSlotIdentity,
+        locator: AuthoredBodyLocator,
+        parse_env_hash: ParseEnvHash,
+        resolve_env_hash: ResolveEnvHash,
+    ) -> Result<Self, LocatorKeyError> {
+        let anchor = match &locator {
+            AuthoredBodyLocator::DeclBody(slot_locator) => &slot_locator.anchor,
+            AuthoredBodyLocator::MacroPayload(payload) => &payload.anchor,
+        };
+        if anchor.canonical_id != slot.defining_canonical {
+            return Err(LocatorKeyError::CanonicalMismatch {
+                slot_canonical: Arc::clone(&slot.defining_canonical),
+                locator_canonical: Arc::clone(&anchor.canonical_id),
+            });
+        }
+        if anchor.symbol != slot.merged_symbol_name {
+            return Err(LocatorKeyError::SymbolMismatch {
+                slot_symbol: Arc::clone(&slot.merged_symbol_name),
+                locator_symbol: Arc::clone(&anchor.symbol),
+            });
+        }
+        if semantic_space_for_locator_space(anchor.space) != slot.symbol_space {
+            return Err(LocatorKeyError::SpaceMismatch {
+                slot_space: slot.symbol_space,
+                locator_space: anchor.space,
+            });
+        }
+        Ok(Self {
+            slot,
+            locator,
+            parse_env_hash,
+            resolve_env_hash,
+        })
+    }
+
+    /// The env-bearing content-free decl slot identity.
+    #[must_use]
+    pub(crate) fn slot(&self) -> &ResolvedDeclSlotIdentity {
+        &self.slot
+    }
+
+    /// The authored body being lowered.
+    #[must_use]
+    pub(crate) fn locator(&self) -> &AuthoredBodyLocator {
+        &self.locator
+    }
+
+    /// Live parse-env dimension (`P`).
+    #[must_use]
+    pub(crate) fn parse_env_hash(&self) -> ParseEnvHash {
+        self.parse_env_hash
+    }
+
+    /// Live resolve-env dimension (`R`).
+    #[must_use]
+    pub(crate) fn resolve_env_hash(&self) -> ResolveEnvHash {
+        self.resolve_env_hash
+    }
 }
 
 // Bound to its whole-key exhaustive-destructure witness below.
@@ -499,32 +597,24 @@ impl_r6_key_safe!(LocatorLoweringKey => w_locator_lowering_key);
 
 /// R6 type-level key witness for the WHOLE key. The EXHAUSTIVE destructure (no
 /// `..`, no `_` composite field) calls `key_safe` on EVERY field — `slot`,
-/// `locator`, `projection`, and every dimension — so a forbidden dimension
-/// (content/whole hash, `SemanticNodeId`, `HotTypeRef`, versioned `DeclIdentity`)
-/// cannot occupy ANY position, including nested inside a composite field, and a
-/// NEW key field fails compilation until it is classified `R6KeySafe`. The
-/// composites are proven key-safe by their own destructure witnesses above.
+/// `locator`, `P`, `R` — so a forbidden dimension (content/whole hash,
+/// `SemanticNodeId`, `HotTypeRef`, versioned `DeclIdentity`) cannot occupy ANY
+/// position, including nested inside a composite field, and a NEW key field
+/// fails compilation until it is classified `R6KeySafe`. `T` / `L` / `J` prove
+/// through the slot's witness (its [`SlotEnvIdentity`] env tail). The witness
+/// destructures inside this defining module, so private fields stay sealed to
+/// outside readers.
 fn w_locator_lowering_key(k: &LocatorLoweringKey) {
     let LocatorLoweringKey {
         slot,
         locator,
         parse_env_hash,
         resolve_env_hash,
-        type_env_hash,
-        lib_env_hash,
-        project_identity,
-        projection,
-        substitution,
     } = k;
     key_safe(slot);
     key_safe(locator);
     key_safe(parse_env_hash);
     key_safe(resolve_env_hash);
-    key_safe(type_env_hash);
-    key_safe(lib_env_hash);
-    key_safe(project_identity);
-    key_safe(projection);
-    key_safe(substitution);
 }
 
 /// The OWNER anchor of a session demand: the component/surface canonical + a
@@ -614,8 +704,7 @@ mod tests {
         assert_r6_key_dimension::<ResolveEnvHash>();
         assert_r6_key_dimension::<TypeEnvHash>();
         assert_r6_key_dimension::<LibEnvHash>();
-        assert_r6_key_dimension::<ProjectIdentity>();
-        assert_r6_key_dimension::<SubstitutionCanonicalHash>();
+        assert_r6_key_dimension::<ProjectIdentityDim>();
 
         // The whole key + its composites + a forbidden-dim-free container are
         // key-safe. (A forbidden dimension — standalone or nested — fails these
@@ -623,9 +712,190 @@ mod tests {
         assert_r6_key_safe::<LocatorLoweringKey>();
         assert_r6_key_safe::<AuthoredBodyLocator>();
         assert_r6_key_safe::<ResolvedDeclSlotIdentity>();
-        assert_r6_key_safe::<ProjectionReductionContext>();
+        assert_r6_key_safe::<SlotEnvIdentity>();
         assert_r6_key_safe::<SessionDemandIdentity>();
         assert_r6_key_safe::<Option<ParseEnvHash>>();
         assert_r6_key_safe::<Arc<[TypeArgLocator]>>();
+    }
+
+    /// A coherent slot/locator pair for the anchor-match gate fixtures: the
+    /// locator's anchor names exactly the slot's defining canonical, merged
+    /// symbol name, and (mapped) symbol space.
+    fn matching_slot_and_locator() -> (ResolvedDeclSlotIdentity, AuthoredBodyLocator) {
+        let slot = ResolvedDeclSlotIdentity::type_slot(
+            Arc::from("/env/a.ts"),
+            Arc::from("Foo"),
+            7,
+            [3u8; 16],
+            [4u8; 16],
+        );
+        let locator = AuthoredBodyLocator::DeclBody(TypeBodySlot {
+            anchor: AuthoredAnchor {
+                canonical_id: Arc::from("/env/a.ts"),
+                symbol: Arc::from("Foo"),
+                space: LocatorSymbolSpace::Type,
+            },
+            path: Arc::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
+        });
+        (slot, locator)
+    }
+
+    /// The anchor-match gate ACCEPTS a coherent slot/locator pair, and the
+    /// accessors echo exactly the four constructor inputs.
+    #[test]
+    fn locator_key_new_unsubstituted_accepts_matching_anchor() {
+        let (slot, locator) = matching_slot_and_locator();
+        let parse = ParseEnvHash::from_env_hash([1u8; 16]);
+        let resolve = ResolveEnvHash::from_env_hash([2u8; 16]);
+        let key =
+            LocatorLoweringKey::new_unsubstituted(slot.clone(), locator.clone(), parse, resolve)
+                .expect("a coherent slot/locator anchor pair must construct");
+        assert_eq!(key.slot(), &slot);
+        assert_eq!(key.locator(), &locator);
+        assert_eq!(key.parse_env_hash(), parse);
+        assert_eq!(key.resolve_env_hash(), resolve);
+    }
+
+    /// A locator anchored in a DIFFERENT canonical than the slot's defining
+    /// canonical is a malformed identity: construction REJECTS with the typed
+    /// canonical-mismatch error — the wrong-slot key never exists.
+    #[test]
+    fn locator_key_rejects_anchor_canonical_mismatch() {
+        let (slot, _) = matching_slot_and_locator();
+        let locator = AuthoredBodyLocator::DeclBody(TypeBodySlot {
+            anchor: AuthoredAnchor {
+                canonical_id: Arc::from("/env/other.ts"),
+                symbol: Arc::from("Foo"),
+                space: LocatorSymbolSpace::Type,
+            },
+            path: Arc::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
+        });
+        let err = LocatorLoweringKey::new_unsubstituted(
+            slot,
+            locator,
+            ParseEnvHash::from_env_hash([1u8; 16]),
+            ResolveEnvHash::from_env_hash([2u8; 16]),
+        )
+        .expect_err("a canonical-mismatched anchor must be rejected");
+        assert!(
+            matches!(err, LocatorKeyError::CanonicalMismatch { .. }),
+            "expected CanonicalMismatch, got {err:?}"
+        );
+    }
+
+    /// A locator anchored on a DIFFERENT symbol than the slot's merged symbol
+    /// name REJECTS with the typed symbol-mismatch error.
+    #[test]
+    fn locator_key_rejects_anchor_symbol_mismatch() {
+        let (slot, _) = matching_slot_and_locator();
+        let locator = AuthoredBodyLocator::DeclBody(TypeBodySlot {
+            anchor: AuthoredAnchor {
+                canonical_id: Arc::from("/env/a.ts"),
+                symbol: Arc::from("Bar"),
+                space: LocatorSymbolSpace::Type,
+            },
+            path: Arc::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
+        });
+        let err = LocatorLoweringKey::new_unsubstituted(
+            slot,
+            locator,
+            ParseEnvHash::from_env_hash([1u8; 16]),
+            ResolveEnvHash::from_env_hash([2u8; 16]),
+        )
+        .expect_err("a symbol-mismatched anchor must be rejected");
+        assert!(
+            matches!(err, LocatorKeyError::SymbolMismatch { .. }),
+            "expected SymbolMismatch, got {err:?}"
+        );
+    }
+
+    /// A locator whose anchor SPACE does not map onto the slot's symbol space
+    /// REJECTS with the typed space-mismatch error.
+    #[test]
+    fn locator_key_rejects_anchor_space_mismatch() {
+        let (slot, _) = matching_slot_and_locator();
+        let locator = AuthoredBodyLocator::DeclBody(TypeBodySlot {
+            anchor: AuthoredAnchor {
+                canonical_id: Arc::from("/env/a.ts"),
+                symbol: Arc::from("Foo"),
+                space: LocatorSymbolSpace::Value,
+            },
+            path: Arc::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
+        });
+        let err = LocatorLoweringKey::new_unsubstituted(
+            slot,
+            locator,
+            ParseEnvHash::from_env_hash([1u8; 16]),
+            ResolveEnvHash::from_env_hash([2u8; 16]),
+        )
+        .expect_err("a space-mismatched anchor must be rejected");
+        assert!(
+            matches!(err, LocatorKeyError::SpaceMismatch { .. }),
+            "expected SpaceMismatch, got {err:?}"
+        );
+    }
+
+    /// Mixed-env keys are unrepresentable BY SHAPE: the sole constructor takes
+    /// exactly `(slot, locator, P, R)` — there are NO standalone
+    /// type-env / lib-env / project-identity / substitution / projection
+    /// parameters to mix, so "slot from env A, dims from env B" cannot be
+    /// formed. This fn-pointer coercion pins that signature at compile time.
+    #[test]
+    fn locator_key_constructor_carries_no_standalone_env_or_substitution_axis() {
+        let _pinned: fn(
+            ResolvedDeclSlotIdentity,
+            AuthoredBodyLocator,
+            ParseEnvHash,
+            ResolveEnvHash,
+        ) -> Result<LocatorLoweringKey, LocatorKeyError> = LocatorLoweringKey::new_unsubstituted;
+    }
+
+    /// Key identity spans all four components: two keys equal iff slot,
+    /// locator, `P`, and `R` all agree; each env dim independently separates.
+    #[test]
+    fn locator_key_identity_distinct_by_parse_and_resolve_env() {
+        let (slot, locator) = matching_slot_and_locator();
+        let p0 = ParseEnvHash::from_env_hash([1u8; 16]);
+        let p1 = ParseEnvHash::from_env_hash([9u8; 16]);
+        let r0 = ResolveEnvHash::from_env_hash([2u8; 16]);
+        let r1 = ResolveEnvHash::from_env_hash([8u8; 16]);
+        let base = LocatorLoweringKey::new_unsubstituted(slot.clone(), locator.clone(), p0, r0)
+            .expect("coherent");
+        let same = LocatorLoweringKey::new_unsubstituted(slot.clone(), locator.clone(), p0, r0)
+            .expect("coherent");
+        let parse_differs =
+            LocatorLoweringKey::new_unsubstituted(slot.clone(), locator.clone(), p1, r0)
+                .expect("coherent");
+        let resolve_differs =
+            LocatorLoweringKey::new_unsubstituted(slot, locator, p0, r1).expect("coherent");
+        assert_eq!(base, same);
+        assert_ne!(base, parse_differs);
+        assert_ne!(base, resolve_differs);
+    }
+
+    /// The typed slot env tail: `SlotEnvIdentity` is R6-key-safe, the sealed
+    /// `ProjectIdentityDim` is an allowed dimension, and each of the three env
+    /// dimensions independently separates slot identity (T/L/J participate in
+    /// a key TRANSITIVELY through the slot — never as standalone fields).
+    #[test]
+    fn slot_env_identity_types_the_slot_env_tail() {
+        assert_r6_key_dimension::<ProjectIdentityDim>();
+        assert_r6_key_safe::<SlotEnvIdentity>();
+        assert_r6_key_safe::<ResolvedDeclSlotIdentity>();
+
+        let slot = |project: u32, type_env: u8, lib_env: u8| {
+            ResolvedDeclSlotIdentity::type_slot(
+                Arc::from("/env/a.ts"),
+                Arc::from("T"),
+                project,
+                [type_env; 16],
+                [lib_env; 16],
+            )
+        };
+        let base = slot(1, 1, 2);
+        assert_eq!(base, slot(1, 1, 2));
+        assert_ne!(base, slot(2, 1, 2), "project dim must separate");
+        assert_ne!(base, slot(1, 9, 2), "type-env dim must separate");
+        assert_ne!(base, slot(1, 1, 9), "lib-env dim must separate");
     }
 }

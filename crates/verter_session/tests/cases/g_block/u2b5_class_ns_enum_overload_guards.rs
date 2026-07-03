@@ -49,14 +49,10 @@ fn hash16(byte: u8) -> [u8; 16] {
 }
 
 fn slot(canonical: &str, name: &str, space: SemanticSymbolSpace) -> ResolvedDeclSlotIdentity {
-    ResolvedDeclSlotIdentity {
-        defining_canonical: Arc::from(canonical),
-        merged_symbol_name: Arc::from(name),
-        symbol_space: space,
-        project_identity: 0,
-        type_env_hash: Default::default(),
-        lib_env_hash: Default::default(),
-    }
+    // Zero-env slot via the fixture constructor (the typed env tail is
+    // in-crate sealed), re-spaced to the requested symbol space.
+    ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from(canonical), Arc::from(name))
+        .with_symbol_space(space)
 }
 
 fn dummy_node() -> SemanticNodeId {
