@@ -181,27 +181,41 @@ pub fn assert_r6_key_safe<T: R6KeySafe>() {}
 /// Internal per-field witness call used by the exhaustive-destructure witnesses.
 fn key_safe<T: R6KeySafe>(_: &T) {}
 
-/// Stamp the sealed [`R6KeySafe`] witness for a content-free LEAF type — a
-/// primitive, an owned/borrowed string, or a sealed env/substitution dimension
-/// newtype. A leaf has NO key-bearing fields to destructure, so (unlike a
-/// composite) it carries no `w_*` witness. Kept DISTINCT from
-/// [`impl_r6_key_safe`] precisely so a COMPOSITE can never be stamped without its
-/// exhaustive-destructure witness.
+/// Stamp the sealed [`R6KeySafe`] witness for a sealed env/substitution DIMENSION
+/// leaf. A dimension has NO key-bearing fields to destructure, so (unlike a
+/// composite) it carries no `w_*` witness. BOUND to [`R6KeyDimension`]: the
+/// `const _` anchor fails to compile unless `$ty` is a member of the sealed
+/// dimension set, so a COMPOSITE (which is not an `R6KeyDimension`) can NEVER be
+/// leaf-stamped through this macro — it must go through [`impl_r6_key_safe`] with
+/// its exhaustive-destructure witness. This is the structural close for the
+/// "composite routed through the leaf macro to skip its witness" bypass. The
+/// language-primitive leaves (`bool` / `u32` / `String` / `str`) are NOT
+/// dimensions and are instead hand-written below — so this macro's ONLY members
+/// are sealed dimensions.
 macro_rules! impl_r6_key_safe_leaf {
     ($($ty:ty),+ $(,)?) => {
         $(
             impl key_safe_sealed::Sealed for $ty {}
             impl R6KeySafe for $ty {}
+            // A composite (not a sealed `R6KeyDimension`) cannot be leaf-stamped:
+            // this assertion fails to compile unless `$ty: R6KeyDimension`.
+            const _: fn() = || {
+                fn assert_dim<T: R6KeyDimension>() {}
+                assert_dim::<$ty>();
+            };
         )+
     };
 }
 
 /// Stamp the sealed [`R6KeySafe`] witness for a content-free COMPOSITE, BOUND to
 /// its exhaustive-destructure witness fn. The `const _: fn(&$ty) = $witness;`
-/// anchor makes a stamp WITHOUT a matching `w_*` witness fail to compile — a new
-/// composite can never be declared key-safe without the exhaustive field check
-/// that forces every new field/arm to be classified key-safe (the `$witness` fn
-/// must exist AND have signature `fn(&$ty)`).
+/// anchor guarantees a signature-matching `w_*` witness fn EXISTS — it must be
+/// declared AND have signature `fn(&$ty)`, so a stamp without a matching witness
+/// fails to compile. The anchor does NOT by itself prove the witness body is
+/// exhaustive; that is enforced SEPARATELY by each `w_*`'s no-`..`,
+/// no-`_`-composite-field destructure, which forces every new field/arm to be
+/// classified key-safe. Together they mean a new composite cannot be declared
+/// key-safe without an exhaustive field check.
 macro_rules! impl_r6_key_safe {
     ($($ty:ty => $witness:path),+ $(,)?) => {
         $(
@@ -214,10 +228,21 @@ macro_rules! impl_r6_key_safe {
     };
 }
 
-// Foundational content-free leaves: small ordinals/flags, owned/borrowed strings.
-// Deliberately NOT `[u8; 16]` (a raw hash) — a raw hash is never key-safe on its
-// own; only the sealed env-dimension newtypes are.
-impl_r6_key_safe_leaf!(bool, u32, String, str);
+// Foundational content-free PRIMITIVE leaves — small ordinals/flags and
+// owned/borrowed strings. Hand-written (NOT macro-stamped) so there is no
+// unguarded leaf-stamping macro a composite could be routed through: a composite
+// is never one of these fixed language primitives, and the dimension leaf macro
+// below rejects any non-dimension. Deliberately NOT `[u8; 16]` (a raw hash) — a
+// raw hash is never key-safe on its own; only the sealed env-dimension newtypes
+// are.
+impl key_safe_sealed::Sealed for bool {}
+impl R6KeySafe for bool {}
+impl key_safe_sealed::Sealed for u32 {}
+impl R6KeySafe for u32 {}
+impl key_safe_sealed::Sealed for String {}
+impl R6KeySafe for String {}
+impl key_safe_sealed::Sealed for str {}
+impl R6KeySafe for str {}
 
 // Container forwarding: a container is key-safe iff its element is. This is what
 // makes a forbidden dimension nested in a container (e.g. `Option<SemanticNodeId>`)
