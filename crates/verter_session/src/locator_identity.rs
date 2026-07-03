@@ -73,9 +73,14 @@ pub trait R6KeyDimension: sealed::Sealed {}
 /// this — a forbidden dimension fails the `R6KeyDimension` bound here.
 pub fn assert_r6_key_dimension<T: R6KeyDimension>() {}
 
-/// The parse-env-hash dimension. Inner hash is PRIVATE — construct only via
-/// [`ParseEnvHash::from_env_hash`], so a raw content/whole hash cannot be
-/// trivially wrapped into an env dimension.
+/// The parse-env-hash dimension. Inner hash is PRIVATE — constructed only
+/// in-crate via the `pub(crate)` [`ParseEnvHash::from_env_hash`], so this is a
+/// DISTINCT nominal type from a content/whole hash (content-free BY TYPE): a
+/// content hash value cannot occupy an env-dimension position without an
+/// explicit in-crate wrap. This is NOT an absolute-impossibility claim —
+/// `HashValue` cannot itself type-distinguish env bytes from content bytes at
+/// the constructor boundary; the TYPE distinction, not the bytes, is the guard
+/// (the byte-provenance carried obligation, design §9.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ParseEnvHash(HashValue);
 impl ParseEnvHash {
@@ -130,16 +135,23 @@ impl R6KeyDimension for LibEnvHash {}
 // The project-identity dimension REUSES the existing full 16-byte
 // `file_artifact_store::ProjectIdentity` (workspace + tsconfig + provider-root
 // discriminator) rather than a duplicate local newtype — it is a project/env
-// dimension, never a file content hash.
+// dimension, never a file content hash by intent. Its inner `Hash16` field is
+// PUBLIC (`pub struct ProjectIdentity(pub Hash16)`), so — unlike the B1-owned
+// newtypes above — a raw content hash COULD be wrapped as a `ProjectIdentity`
+// by construction. That is a GRANDFATHERED, disclosed carried obligation (design
+// §9.1); the slot-identity / env-hash migration seals it.
 impl sealed::Sealed for ProjectIdentity {}
 impl R6KeyDimension for ProjectIdentity {}
 
 // The substitution axis REUSES the existing content-free
 // `semantic_query::SubstitutionCanonicalHash` (a canonical hash of the
-// substitution MAPPING, never a file content/whole hash — its inner field is
-// private, constructed only via `empty()` / the typed test constructor).
-// Distinguishing it as its own dimension prevents a `{locator + resolve_env_hash}`
-// -only key from aliasing distinct lowered nodes.
+// substitution MAPPING). Its inner field is private; production constructs it
+// only via `empty()`, and the test helper `distinct_for_test(seed: u32)` takes a
+// `u32` seed — NOT raw bytes — so no file content/whole hash can be poured in.
+// Content-free BY TYPE; the underlying `HashValue` byte provenance is
+// non-self-distinguishing (design §9.1). Distinguishing it as its own dimension
+// prevents a `{locator + resolve_env_hash}`-only key from aliasing distinct
+// lowered nodes.
 impl sealed::Sealed for SubstitutionCanonicalHash {}
 impl R6KeyDimension for SubstitutionCanonicalHash {}
 
