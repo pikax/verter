@@ -5130,6 +5130,18 @@ mod foundations_guards {
         "pub(crate) mod host_test_audit",
         "pub(crate) mod instant",
         "pub(crate) mod intrinsic_registry",
+        // B1 locator substrate — session-side key identities for
+        // locator-backed body lowering (`LocatorLoweringKey` + the sealed
+        // R6 key-dimension witness + `SessionDemandIdentity`). Crate-private:
+        // the substrate is B1-internal; only the two narrow R6-witness
+        // helpers (`pub use crate::locator_identity::{...}` below) enter the
+        // public surface for the `r6_key_*` trybuild fixtures.
+        "pub(crate) mod locator_identity",
+        // B1 locator substrate — snapshot-backed span-recovery helpers
+        // (recover authored spans from a retained parse via a
+        // producer-emitted origin locator, before identity). Crate-private:
+        // no downstream consumer; reached only within the crate.
+        "pub(crate) mod locator_span_recovery",
         // Phase G — host-owned mapped-binder ordinal registry
         // for stable `MapperKey` cache identity across dispatcher
         // instances. Internal substrate; consumed only by
@@ -5196,6 +5208,15 @@ mod foundations_guards {
         // needs to enter the public surface so external callers can
         // name it.
         "pub use crate::fact_signature_helpers::ReadSetSignature",
+        // B1 R6-witness compile-fail test surface. `assert_r6_key_dimension`
+        // / `assert_r6_key_safe` are the ONLY items re-exported from the
+        // otherwise `pub(crate)` `locator_identity` module; they are consumed
+        // exclusively by the out-of-crate `r6_key_*` trybuild fixtures
+        // (`tests/cases/compile-fail/`), which prove a forbidden dimension
+        // cannot occupy a session query-identity key position. The whole
+        // substrate module stays `pub(crate)`; only these two witnesses need
+        // to be nameable across the crate boundary.
+        "pub use crate::locator_identity::{assert_r6_key_dimension, assert_r6_key_safe}",
         // Block 6.e per-call-site instrumentation: bench example
         // (crates/verter_bench/examples/audit_real_component_meta.rs)
         // dumps the `HostStoreView::from_host` attribution table at the

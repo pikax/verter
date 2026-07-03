@@ -6,7 +6,7 @@
 //! fails the bound — a compile-time proof that a forbidden dimension cannot
 //! occupy a `LocatorLoweringKey` env-dimension position.
 
-use verter_session::locator_identity::assert_r6_key_dimension;
+use verter_session::assert_r6_key_dimension;
 use verter_session::semantic_query::SemanticNodeId;
 
 fn main() {

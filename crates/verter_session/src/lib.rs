@@ -171,8 +171,16 @@ mod hash;
 pub(crate) mod instant;
 /// Session-side key identities for locator-backed body lowering
 /// (`LocatorLoweringKey` + the sealed R6 key-dimension witness +
-/// `SessionDemandIdentity`).
-pub mod locator_identity;
+/// `SessionDemandIdentity`). Crate-private: the substrate is B1-internal;
+/// only the two R6-witness compile-fail helpers below are re-exported.
+pub(crate) mod locator_identity;
+/// R6-witness compile-fail test surface. `assert_r6_key_dimension` /
+/// `assert_r6_key_safe` are consumed ONLY by the out-of-crate `r6_key_*`
+/// trybuild fixtures (`tests/cases/compile-fail/`), which prove a forbidden
+/// dimension cannot occupy a session query-identity key position. Nothing
+/// else external names `locator_identity`, so the module itself stays
+/// `pub(crate)` and only these two witnesses enter the public surface.
+pub use crate::locator_identity::{assert_r6_key_dimension, assert_r6_key_safe};
 /// Snapshot-backed span-recovery helpers (recover authored spans from a
 /// retained parse via a producer-emitted origin locator, before identity).
 pub(crate) mod locator_span_recovery;
