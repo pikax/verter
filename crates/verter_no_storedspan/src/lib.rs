@@ -80,28 +80,55 @@ pub mod __private {
     /// trusted foundational types — deliberately NOT for `verter_span::Span`.
     pub trait NoStoredSpanWitness {}
 
+    /// The PRIVATE seal for [`RecursiveSelfArc`]. It lives in a genuinely private
+    /// module, so it is UNREACHABLE downstream — no first-party or downstream
+    /// crate can name it, and therefore none can hand-write the `RecursiveSelfArc`
+    /// impl it gates. It is implemented ONLY for the genuine
+    /// `::std::sync::Arc<[Owner]>`, so that (and only that) type can satisfy
+    /// `RecursiveSelfArc`. This is what turns `RecursiveSelfArc` from a
+    /// documentation-only `__private` trait into a compiler SEAL: unlike the
+    /// downstream-forgeable witness supertrait (which the derive impls downstream,
+    /// so it cannot be sealed), `RecursiveSelfArc` is impl'd ONLY here, so it can
+    /// be — and is — truly sealed with zero downside.
+    mod recursive_self_sealed {
+        pub trait Sealed<Owner: ?Sized> {}
+        // `Owner` is `Sized` (a slice element must be `Sized`); the supertrait
+        // parameter stays `?Sized` for generality.
+        impl<Owner> Sealed<Owner> for ::std::sync::Arc<[Owner]> {}
+    }
+
     /// The COMPILER-RESOLVED proof-bound for the `#[no_storedspan(recursive_self)]`
-    /// escape's approved fixed-point self-container field. Implemented ONLY for
-    /// the genuine `::std::sync::Arc<[Owner]>` (a single blanket impl over the
-    /// real std Arc-of-self-slice), so the derive can PROVE a field is truly
-    /// `std::sync::Arc<[Self]>` — regardless of how it is spelled — instead of
-    /// trusting a syntactic `Arc<[Self]>` pick.
+    /// escape's approved fixed-point self-container field. The plain per-field
+    /// witness bound on that recursive field is REPLACED by this proof-bound (it
+    /// is NOT merely dropped): the derive emits `#field_ty: RecursiveSelfArc<Self>`
+    /// for the field the `recursive_self` heuristic identifies, and the compiler
+    /// resolves `#field_ty` so that only the genuine `::std::sync::Arc<[Owner]>`
+    /// satisfies it — PROVING a field is truly `std::sync::Arc<[Self]>` regardless
+    /// of how it is spelled, instead of trusting a syntactic `Arc<[Self]>` pick.
     ///
-    /// The derive emits `#field_ty: RecursiveSelfArc<Self>` for the field the
-    /// `recursive_self` heuristic identifies. The compiler resolves `#field_ty`
-    /// and only the real `std::sync::Arc<[Self]>` satisfies the bound: a bare
-    /// re-import / local shadow / custom `Arc` that could OWN a `Span` FAILS to
-    /// compile (closing the bare/shadowed-`Arc` hole a spelling check leaves
-    /// open). The bound resolves NON-recursively — it does NOT require
-    /// `Owner: NoStoredSpanWitness` — so it proves the shape WITHOUT reintroducing
-    /// the `Arc<[Self]>: NoStoredSpan` overflow (E0275) the omitted-bound escape
-    /// was avoiding.
-    pub trait RecursiveSelfArc<Owner: ?Sized> {}
+    /// SEALED: this trait carries the private [`recursive_self_sealed::Sealed`]
+    /// supertrait, impl'd only for `::std::sync::Arc<[Owner]>` in a private,
+    /// downstream-unreachable module. A shadow/downstream crate therefore CANNOT
+    /// hand-write `impl RecursiveSelfArc<..> for shadow::Arc<..>` to forge the
+    /// proof-bound (the `Sealed` supertrait is unsatisfiable and unnameable) —
+    /// closing the orphan-rule hole that an unsealed `__private` trait leaves
+    /// open. `RecursiveSelfArc` is impl'd ONLY inside this crate (the derive
+    /// merely EMITS it as a bound, never impls it downstream), so sealing it has
+    /// zero downside.
+    ///
+    /// The compiler resolves `#field_ty` and only the real
+    /// `std::sync::Arc<[Self]>` satisfies the bound: a bare re-import / local
+    /// shadow / custom `Arc` that could OWN a `Span` FAILS to compile (closing the
+    /// bare/shadowed-`Arc` hole a spelling check leaves open). The bound resolves
+    /// NON-recursively — it does NOT require `Owner: NoStoredSpanWitness` — so it
+    /// proves the shape WITHOUT reintroducing the `Arc<[Self]>: NoStoredSpan`
+    /// overflow (E0275) that a plain recursive witness bound would trigger.
+    pub trait RecursiveSelfArc<Owner: ?Sized>: recursive_self_sealed::Sealed<Owner> {}
 
     // The sole impl: the genuine std Arc-of-self-slice. `Owner` is `Sized` (a
     // slice element must be `Sized`); the trait parameter stays `?Sized` for
     // generality. Anything that is not literally `::std::sync::Arc<[Owner]>`
-    // fails this bound.
+    // fails this bound (and cannot satisfy the private `Sealed` supertrait).
     impl<Owner> RecursiveSelfArc<Owner> for ::std::sync::Arc<[Owner]> {}
 }
 
