@@ -72,6 +72,30 @@ pub mod __private {
     /// emits this impl field-recursively; this crate hand-writes it for the
     /// trusted foundational types.
     pub trait NoTypeExprWitness {}
+
+    /// The COMPILER-RESOLVED proof-bound for the `#[no_typeexpr(recursive_self)]`
+    /// escape's approved fixed-point self-container field. Implemented ONLY for
+    /// the genuine `::std::sync::Arc<[Owner]>` (a single blanket impl over the
+    /// real std Arc-of-self-slice), so the derive can PROVE a field is truly
+    /// `std::sync::Arc<[Self]>` — regardless of how it is spelled — instead of
+    /// trusting a syntactic `Arc<[Self]>` pick.
+    ///
+    /// The derive emits `#field_ty: RecursiveSelfArc<Self>` for the field the
+    /// `recursive_self` heuristic identifies. The compiler resolves `#field_ty`
+    /// and only the real `std::sync::Arc<[Self]>` satisfies the bound: a bare
+    /// re-import / local shadow / custom `Arc` that could OWN a `TypeExpr` FAILS
+    /// to compile (closing the bare/shadowed-`Arc` hole a spelling check leaves
+    /// open). The bound resolves NON-recursively — it does NOT require
+    /// `Owner: NoTypeExprWitness` — so it proves the shape WITHOUT reintroducing
+    /// the `Arc<[Self]>: NoTypeExpr` overflow (E0275) the omitted-bound escape
+    /// was avoiding.
+    pub trait RecursiveSelfArc<Owner: ?Sized> {}
+
+    // The sole impl: the genuine std Arc-of-self-slice. `Owner` is `Sized` (a
+    // slice element must be `Sized`); the trait parameter stays `?Sized` for
+    // generality. Anything that is not literally `::std::sync::Arc<[Owner]>`
+    // fails this bound.
+    impl<Owner> RecursiveSelfArc<Owner> for ::std::sync::Arc<[Owner]> {}
 }
 
 use __private::NoTypeExprWitness;

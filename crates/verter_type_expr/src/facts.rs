@@ -126,15 +126,17 @@ pub struct FollowLocatorPayload {
 /// [`ClosednessRecipe::IntersectionAllArms`].
 ///
 /// The marker witnesses are DERIVED with the opt-in recursive-self escape
-/// (`#[no_typeexpr(recursive_self)]` / `#[no_storedspan(recursive_self)]`): the
-/// derive omits ONLY the self-bound on the fixed-point
-/// `IntersectionAllArms(Arc<[ClosednessRecipe]>)` arm (which would otherwise ask
-/// the trait solver to prove `Arc<[Self]>: Marker` while proving `Self: Marker`,
-/// an overflow — E0275) while still emitting the per-field witness bound on
-/// EVERY non-recursive arm payload. This is sound because the recursive arm
-/// reintroduces only the same fixed-point type, and it closes the future-arm
-/// gap: a NEW non-recursive arm carrying a `TypeExpr` / `Span` would fail the
-/// derive (a compile-fail fixture proves this).
+/// (`#[no_typeexpr(recursive_self)]` / `#[no_storedspan(recursive_self)]`): for
+/// the fixed-point `IntersectionAllArms(Arc<[ClosednessRecipe]>)` arm the derive
+/// emits a compiler-resolved `RecursiveSelfArc<Self>` PROOF-BOUND instead of the
+/// plain witness bound (which would otherwise ask the trait solver to prove
+/// `Arc<[Self]>: Marker` while proving `Self: Marker`, an overflow — E0275),
+/// while still emitting the per-field witness bound on EVERY non-recursive arm
+/// payload. Only the genuine `std::sync::Arc<[ClosednessRecipe]>` satisfies the
+/// proof-bound, so a bare/shadowed/custom `Arc` cannot masquerade as the approved
+/// self-container; and the future-arm gap stays closed: a NEW non-recursive arm
+/// carrying a `TypeExpr` / `Span` would fail the derive (a compile-fail fixture
+/// proves this).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
 #[no_typeexpr(recursive_self)]
 #[no_storedspan(recursive_self)]

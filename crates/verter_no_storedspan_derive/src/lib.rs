@@ -59,13 +59,22 @@ pub fn derive_no_stored_span(item: TokenStream) -> TokenStream {
 /// A container annotated `#[no_storedspan(recursive_self)]` may own the ONE
 /// approved fixed-point self-container shape `Arc<[Self]>` (a named closed
 /// composition arm — e.g. `ClosednessRecipe::IntersectionAllArms(Arc<[Self]>)`).
-/// For such a field the derive OMITS only that self-bound (a bound would ask the
-/// trait solver to prove `Arc<[Self]>: NoStoredSpan` while proving
-/// `Self: NoStoredSpan` — an overflow, E0275). EVERY non-recursive field/arm
-/// payload still gets its per-field witness bound, so a NEW non-recursive arm
-/// carrying a `Span` still FAILS the derive. The attribute is REJECTED unless at
-/// least one `Arc<[Self]>` field exists, so it can never be abused to skip a
-/// non-recursive bound.
+/// A plain per-field `Arc<[Self]>: NoStoredSpan` bound would ask the trait solver
+/// to prove `Arc<[Self]>: NoStoredSpan` while proving `Self: NoStoredSpan` — an
+/// overflow (E0275). Rather than merely OMITTING the bound (a syntactic pick the
+/// compiler never verifies, launderable by a bare re-import / local shadow /
+/// custom `Arc` that owns a `Span`), the derive emits a COMPILER-RESOLVED
+/// PROOF-BOUND `#field_ty: __private::RecursiveSelfArc<Self>`. That trait is
+/// implemented ONLY for the genuine `::std::sync::Arc<[Self]>`, so the compiler
+/// RESOLVES the field type and rejects any wrapper that is not the real std
+/// `Arc` — while resolving NON-recursively (it does not require
+/// `Self: NoStoredSpan`, so no E0275). EVERY non-recursive field/arm payload
+/// still gets its per-field witness bound, so a NEW non-recursive arm carrying a
+/// `Span` still FAILS the derive. The syntactic heuristic only PICKS candidate
+/// fields; the proof-bound VERIFIES them — a wrong pick fails `RecursiveSelfArc`,
+/// and a missed real `Arc<[Self]>` field keeps the recursive witness bound and
+/// fails with E0275. The attribute is REJECTED unless at least one `Arc<[Self]>`
+/// field exists, so it can never be abused to skip a non-recursive bound.
 fn expand_witness(input: &DeriveInput) -> proc_macro2::TokenStream {
     let ident = &input.ident;
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
@@ -90,18 +99,19 @@ fn expand_witness(input: &DeriveInput) -> proc_macro2::TokenStream {
     };
 
     // Partition the fields: `Arc<[Self]>` fields are the approved recursive-self
-    // fields whose bound is OMITTED (only under the opt-in attribute); every
-    // other field keeps its per-field witness bound.
+    // candidates (only under the opt-in attribute) that get the compiler-resolved
+    // `RecursiveSelfArc<Self>` PROOF-BOUND instead of the recursive witness bound;
+    // every other field keeps its per-field witness bound.
     let mut bounded: Vec<Type> = Vec::new();
-    let mut self_recursive_fields = 0usize;
+    let mut recursive_fields: Vec<Type> = Vec::new();
     for ty in field_types {
         if recursive_self && is_arc_slice_of_self(&ty, ident) {
-            self_recursive_fields += 1;
+            recursive_fields.push(ty);
             continue;
         }
         bounded.push(ty);
     }
-    if recursive_self && self_recursive_fields == 0 {
+    if recursive_self && recursive_fields.is_empty() {
         return quote! {
             ::core::compile_error!(
                 "#[no_storedspan(recursive_self)] requires at least one `Arc<[Self]>` field; \
@@ -126,6 +136,17 @@ fn expand_witness(input: &DeriveInput) -> proc_macro2::TokenStream {
     }
     for ty in &bounded {
         predicates.push(parse_quote! { #ty: ::verter_no_storedspan::NoStoredSpan });
+    }
+    // The recursive-self field(s): emit the COMPILER-RESOLVED proof-bound instead
+    // of omitting the bound. Only the genuine `::std::sync::Arc<[Self]>` satisfies
+    // `RecursiveSelfArc<Self>`, so a bare re-import / local shadow / custom `Arc`
+    // that could own a `Span` FAILS here. The bound resolves NON-recursively (it
+    // does not require `Self: NoStoredSpan`), so it proves the shape WITHOUT the
+    // `Arc<[Self]>: NoStoredSpan` overflow (E0275) the plain witness bound
+    // triggers. `Self` in the emitted `where` clause is the impl's own target type.
+    for ty in &recursive_fields {
+        predicates
+            .push(parse_quote! { #ty: ::verter_no_storedspan::__private::RecursiveSelfArc<Self> });
     }
 
     quote! {
@@ -163,23 +184,27 @@ fn parse_recursive_self(attrs: &[syn::Attribute]) -> Result<bool, proc_macro2::T
     Ok(found)
 }
 
-/// Whether `ty` is exactly `Arc<[Self]>` — the container's OWN type wrapped in
-/// the standard `Arc<[..]>` (the approved fixed-point self-container).
+/// Whether `ty` is a CANDIDATE `Arc<[Self]>` — the container's OWN type wrapped
+/// in the standard `Arc<[..]>` (the approved fixed-point self-container).
 ///
-/// TIGHTENED (both the wrapper and the slice element must be exact), so the
-/// escape omits the bound ONLY for the genuine fixed-point shape and stays
-/// FAIL-CLOSED (bound KEPT) for anything that merely resembles it:
+/// This is a candidate PICK only. Soundness rests on the compiler-resolved
+/// `__private::RecursiveSelfArc<Self>` proof-bound the derive emits for the
+/// picked field, NOT on this syntactic match: a wrong pick (a non-`Arc<[Self]>`
+/// field) fails the proof-bound, and a bare re-import / local shadow / custom
+/// `Arc` this check happens to accept ALSO fails it, because the resolved field
+/// type is not `::std::sync::Arc<[Self]>`. The match stays TIGHT anyway (fewer
+/// false picks, clearer errors):
 ///
 /// - The wrapper must be [`is_std_arc_path`] — bare `Arc`, `std::sync::Arc`, or
-///   `alloc::sync::Arc`. A shadowed/custom `foo::Arc` (which could OWN a `Span`)
-///   is rejected, so its bound is kept.
+///   `alloc::sync::Arc`. A multi-segment custom `foo::Arc` (which could OWN a
+///   `Span`) is rejected, so its witness bound is kept.
 /// - The slice element must be the container's own type: a bare SINGLE-SEGMENT
 ///   path (no qualified `<X as Y>::T`, no `::`-anchored, no `foo::T`) whose sole
 ///   segment ident is the container ident or the literal `Self`, with NO generic
 ///   args. This rejects `Arc<[some_mod::Recipe]>` — a DIFFERENT type sharing the
 ///   container's LAST-segment name that owns a `Span` — whose bound is then KEPT.
-///   A same-module single-segment name cannot be a foreign shadow (E0428
-///   name-collision prevents it), so the ident-equality check is sound.
+///   A same-module single-segment name cannot be a foreign shadow (a
+///   name-collision error prevents it), so the ident-equality check is sound.
 fn is_arc_slice_of_self(ty: &Type, self_ident: &syn::Ident) -> bool {
     // The wrapper must be a bare `Arc<..>` path — reject a qualified `<X as
     // Y>::Arc` and any shadowed/custom `foo::Arc`.
@@ -221,9 +246,12 @@ fn is_arc_slice_of_self(ty: &Type, self_ident: &syn::Ident) -> bool {
 
 /// Whether `path` names the standard `Arc` wrapper: bare single-segment `Arc`,
 /// or the full `std::sync::Arc` / `alloc::sync::Arc` path (a leading `::` on the
-/// full path is fine). A DIFFERENT `Arc` — a shadowed `::Arc` crate root or a
-/// custom `foo::Arc` that could OWN a `Span` — is NOT matched, so the
-/// recursive-self bound is KEPT for it (fail-closed).
+/// full path is fine). A multi-segment custom `foo::Arc` (which could OWN a
+/// `Span`) is NOT matched, so its witness bound is KEPT. A BARE single-segment
+/// `Arc` IS matched even when it is a local re-import of a custom `Arc`
+/// (`use shadow::Arc;`) — that residual case is closed downstream by the
+/// `RecursiveSelfArc` proof-bound, which resolves the field type and rejects any
+/// wrapper that is not the real `::std::sync::Arc`.
 fn is_std_arc_path(path: &syn::Path) -> bool {
     let segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
     match segs.len() {
@@ -386,10 +414,13 @@ mod tests {
     }
 
     #[test]
-    fn recursive_self_omits_arc_slice_self_bound_but_keeps_other_fields() {
-        // Discriminating: `#[no_storedspan(recursive_self)]` OMITS the `Arc<[R]>`
-        // self-bound (which would overflow the solver) but STILL bounds the
-        // non-recursive `u32` arm — so a future `Span` arm would still fail.
+    fn recursive_self_emits_proof_bound_for_self_arc_and_keeps_other_fields() {
+        // Discriminating: `#[no_storedspan(recursive_self)]` emits the compiler-
+        // resolved `RecursiveSelfArc<Self>` PROOF-BOUND on the `Arc<[R]>` self
+        // field (NOT a plain `NoStoredSpan` witness bound, which would overflow the
+        // solver — E0275) and STILL bounds the non-recursive `u32` arm on the
+        // witness — so a future `Span` arm would still fail. The pre-fix escape
+        // OMITTED the recursive field entirely, so `RecursiveSelfArc` was ABSENT.
         let out = expand_str(
             "#[no_storedspan(recursive_self)] enum R { Leaf(u32), Rec(std::sync::Arc<[R]>) }",
         );
@@ -398,8 +429,8 @@ mod tests {
             "the non-recursive arm must keep its witness bound: {out}"
         );
         assert!(
-            !out.contains("Arc"),
-            "the `Arc<[Self]>` self-bound must be OMITTED (no Arc bound emitted): {out}"
+            out.contains(":: verter_no_storedspan :: __private :: RecursiveSelfArc < Self >"),
+            "the `Arc<[Self]>` field must gain the RecursiveSelfArc proof-bound: {out}"
         );
         assert!(
             out.contains("NoStoredSpanWitness"),
@@ -409,11 +440,13 @@ mod tests {
 
     #[test]
     fn recursive_self_matches_literal_self_element() {
+        // The slice element may be spelled `Self` rather than the container name;
+        // it still gains the `RecursiveSelfArc<Self>` proof-bound.
         let out =
             expand_str("#[no_storedspan(recursive_self)] enum R { Rec(std::sync::Arc<[Self]>) }");
         assert!(
-            !out.contains("Arc"),
-            "the `Arc<[Self]>` bound must be omitted: {out}"
+            out.contains(":: verter_no_storedspan :: __private :: RecursiveSelfArc < Self >"),
+            "the `Arc<[Self]>` field must gain the RecursiveSelfArc proof-bound: {out}"
         );
         assert!(out.contains("NoStoredSpanWitness"), "{out}");
     }

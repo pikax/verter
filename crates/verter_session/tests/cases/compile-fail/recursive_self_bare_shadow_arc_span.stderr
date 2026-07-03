@@ -1,0 +1,14 @@
+error[E0277]: the trait bound `shadow::Arc<[Recipe]>: RecursiveSelfArc<Recipe>` is not satisfied
+  --> tests/cases/compile-fail/recursive_self_bare_shadow_arc_span.rs:33:10
+   |
+33 | #[derive(verter_no_storedspan::NoStoredSpan)]
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `RecursiveSelfArc<Recipe>` is not implemented for `shadow::Arc<[Recipe]>`
+  --> tests/cases/compile-fail/recursive_self_bare_shadow_arc_span.rs:24:5
+   |
+24 |     pub struct Arc<T: ?Sized> {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+   = help: the trait `RecursiveSelfArc<Owner>` is implemented for `std::sync::Arc<[Owner]>`
+   = help: see issue #48214
+   = note: this error originates in the derive macro `verter_no_storedspan::NoStoredSpan` (in Nightly builds, run with -Z macro-backtrace for more info)
