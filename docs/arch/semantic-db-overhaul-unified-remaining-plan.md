@@ -1615,8 +1615,9 @@ not relitigate them block-by-block, and do not silently treat them as defects:
 These extend the LOCKED `TypeExpr`-removal design lineage — `parselower-design.md`
 Stages 1–9 plus the RATIFIED `stage10-typeexpr-terminal-removal-design.md`
 (the STAGE-10 locked-designs row above; the original parselower sequence had no
-Stage 10) — at the **roadmap level only**; neither design doc is modified by
-this record; Stages 11–12 are master-plan roadmap extensions beyond that locked
+Stage 10) — at the **roadmap level only**; the 2026-06-22 Stage-11/12 roadmap
+record did not itself modify those design docs; Stages 11–12 are master-plan
+roadmap extensions beyond that locked
 lineage. Owner-directed, recorded 2026-06-22.
 
 1. **Stage 11 — CANDIDATE (deferred question, NOT yet adopted).** The `TypeExpr`
