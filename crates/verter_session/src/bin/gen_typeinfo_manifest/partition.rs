@@ -153,9 +153,18 @@ fn parse_partition_row(line: &str) -> Option<(String, String, String)> {
     Some((file, func, cap))
 }
 
-/// Parse the §10.4.1 BEGIN/END coverage table region. Returns
-/// `(file, function) -> (block_text, capability)`.
-pub(crate) fn parse_partition(doc_text: &str) -> BTreeMap<(String, String), (String, String)> {
+/// The parsed §10.4.1 coverage table: the `(file, function) ->
+/// (block_text, capability)` rows plus every `(file, function)` key that
+/// appeared MORE THAN ONCE in the table (a duplicate row silently
+/// overwrites its earlier occurrence in `rows`, so `run()` must reject a
+/// non-empty `duplicate_keys`).
+pub(crate) struct ParsedPartition {
+    pub(crate) rows: BTreeMap<(String, String), (String, String)>,
+    pub(crate) duplicate_keys: Vec<(String, String)>,
+}
+
+/// Parse the §10.4.1 BEGIN/END coverage table region.
+pub(crate) fn parse_partition(doc_text: &str) -> ParsedPartition {
     let begin = "<!-- BEGIN U0 row→block coverage table";
     let end = "<!-- END U0 row→block coverage table";
     let (Some(bi), Some(ei)) = (doc_text.find(begin), doc_text.find(end)) else {
@@ -163,6 +172,7 @@ pub(crate) fn parse_partition(doc_text: &str) -> BTreeMap<(String, String), (Str
     };
     let region = &doc_text[bi..ei];
     let mut out = BTreeMap::new();
+    let mut duplicate_keys: Vec<(String, String)> = Vec::new();
     let mut current_block: Option<String> = None;
     for line in region.lines() {
         let line = line.trim();
@@ -173,8 +183,16 @@ pub(crate) fn parse_partition(doc_text: &str) -> BTreeMap<(String, String), (Str
         if let (Some((file, func, cap)), Some(block)) =
             (parse_partition_row(line), current_block.as_ref())
         {
-            out.insert((file, func), (block.clone(), cap));
+            let key = (file, func);
+            if out.insert(key.clone(), (block.clone(), cap)).is_some()
+                && !duplicate_keys.contains(&key)
+            {
+                duplicate_keys.push(key);
+            }
         }
     }
-    out
+    ParsedPartition {
+        rows: out,
+        duplicate_keys,
+    }
 }

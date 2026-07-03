@@ -44,6 +44,22 @@
 //! # or via pnpm:
 //! pnpm gen:typeinfo-manifest:check
 //! ```
+//!
+//! Exit codes:
+//!
+//! - 0 — success (files written, or `--check` found no drift).
+//! - 1 — `fail()` self-consistency violation (mechanism/block disagreement,
+//!   unknown key/capability, I/O error).
+//! - 2 — unknown CLI argument, or the typeinfo_tests source dir is missing.
+//! - 3 — a typeinfo-test file has no `FILE_TO_SUBSTRATE` mapping.
+//! - 4 — the §10.4.1 partition does not match the live ignore set (or a
+//!   lifted row still carries a live `#[ignore]`).
+//! - 5 — the built row count is not 362.
+//! - 6 — `--check` drift (a committed generated file is stale).
+//! - 7 — data-table self-validation failure (`validate` module): duplicate
+//!   keys/values/elements in the static tables, a duplicate §10.4.1
+//!   `(file, func)` partition row, or a stale/conflicting override entry.
+//!   Runs in BOTH generate and `--check` mode, before any write/compare.
 
 mod args;
 mod data;
@@ -52,6 +68,7 @@ mod emit;
 mod model;
 mod partition;
 mod run;
+mod validate;
 
 use std::process::exit;
 

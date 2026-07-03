@@ -1,6 +1,6 @@
 //! Row-level static ledger maps: per-row mechanism overrides,
 //! mechanism->key sets, proof mappings, and the additional-proof row
-//! constants.
+//! spec table.
 
 pub(crate) const ROW_MECHANISM_OVERRIDE: &[(&str, &str, &str)] = &[
     (
@@ -12,21 +12,6 @@ pub(crate) const ROW_MECHANISM_OVERRIDE: &[(&str, &str, &str)] = &[
         "typescript_rules.rs",
         "typescript_rules_distributive_conditional_expands_each_union_arm",
         "RelateCoinductiveScc",
-    ),
-    (
-        "typescript_rules.rs",
-        "typescript_rules_awaited_recursively_unwraps_promises",
-        "UtilityGraphReduction",
-    ),
-    (
-        "typescript_rules.rs",
-        "typescript_rules_indexed_access_reduces_terminal_property",
-        "IndexedAccessUnionDistribution",
-    ),
-    (
-        "typescript_rules.rs",
-        "typescript_rules_keyof_materializes_literal_key_union",
-        "IndexedAccessUnionDistribution",
     ),
     (
         "typescript_rules.rs",
@@ -49,51 +34,6 @@ pub(crate) const ROW_MECHANISM_OVERRIDE: &[(&str, &str, &str)] = &[
         "ClassSurfaceProjection",
     ),
     (
-        "function_advanced.rs",
-        "function_advanced_call_construct_hybrid_constructor_parameters_uses_construct_signature",
-        "ClassSurfaceProjection",
-    ),
-    (
-        "function_advanced.rs",
-        "function_advanced_call_construct_hybrid_instance_type_uses_construct_signature",
-        "ClassSurfaceProjection",
-    ),
-    (
-        "function_advanced.rs",
-        "function_advanced_call_construct_hybrid_parameters_uses_call_signature",
-        "ClassSurfaceProjection",
-    ),
-    (
-        "function_advanced.rs",
-        "function_advanced_call_construct_hybrid_return_type_uses_call_signature",
-        "ClassSurfaceProjection",
-    ),
-    (
-        "function_advanced.rs",
-        "function_advanced_class_method_prototype_extraction_projects_parameters",
-        "ClassSurfaceProjection",
-    ),
-    (
-        "function_advanced.rs",
-        "function_advanced_class_method_prototype_extraction_projects_return",
-        "ClassSurfaceProjection",
-    ),
-    (
-        "function_advanced.rs",
-        "function_advanced_constructor_parameters_publishes_constructor_arg_tuple",
-        "ClassSurfaceProjection",
-    ),
-    (
-        "function_advanced.rs",
-        "function_advanced_instance_type_publishes_constructor_return_shape",
-        "ClassSurfaceProjection",
-    ),
-    (
-        "function_advanced.rs",
-        "function_advanced_return_type_of_overloaded_function_uses_last_overload",
-        "ClassSurfaceProjection",
-    ),
-    (
         "modern_ts_features.rs",
         "variance_annotation_in_substitution_through_consumer_consume_parameters",
         "ClassSurfaceProjection",
@@ -104,23 +44,8 @@ pub(crate) const ROW_MECHANISM_OVERRIDE: &[(&str, &str, &str)] = &[
         "ClassSurfaceProjection",
     ),
     (
-        "substitution_types.rs",
-        "substitution_types_sb15_recursive_generic_substitution",
-        "ClassSurfaceProjection",
-    ),
-    (
         "typescript_rules.rs",
         "typescript_rules_class_instance_type_includes_fields_and_methods",
-        "ClassSurfaceProjection",
-    ),
-    (
-        "typescript_rules.rs",
-        "typescript_rules_constructor_parameters_resolve_tuple",
-        "ClassSurfaceProjection",
-    ),
-    (
-        "typescript_rules.rs",
-        "typescript_rules_instance_type_resolves_constructed_object",
         "ClassSurfaceProjection",
     ),
     (
@@ -131,11 +56,6 @@ pub(crate) const ROW_MECHANISM_OVERRIDE: &[(&str, &str, &str)] = &[
     (
         "modern_ts_features.rs",
         "import_attribute_simulated_resolves_imported_json_shape",
-        "ResolveDeclarationAugmentation",
-    ),
-    (
-        "modern_ts_features.rs",
-        "import_attribute_simulated_string_literal_indexed_member",
         "ResolveDeclarationAugmentation",
     ),
     (
@@ -999,14 +919,59 @@ pub(crate) const PROOF_GUARD: &[(&str, &str)] = &[
     ("AuditFootprint", "AuditFootprintAttachment"),
 ];
 
-pub(crate) const JSX_NO_NEW_KEY_ROWS: &[&str] = &[
-    "jsx_library_managed_attributes_via_ambient_namespace_and_indexed_access",
-    "jsx_element_attributes_property_via_ambient_namespace_keyof",
-    "jsx_element_children_attribute_via_ambient_namespace_keyof",
-    "jsx_intrinsic_attributes_via_ambient_namespace_intersection",
-    "jsx_element_class_check_via_resolve_class_surface_and_relate",
-    "jsx_import_source_module_namespace_via_existing_resolution",
-];
+/// One §8 / §10.1 AdditionalProofRow spec — the single shared table BOTH
+/// `emit::build_additional_rows` (the emitted rows) and
+/// `validate::additional_proof_mechanism_consumers` (the mechanism-consumer
+/// model) project from. Every row is a FORWARD-DECLARATION coverage contract
+/// emitting a `ProofRequirement::RowTestGuard { file, function }`.
+pub(crate) struct AdditionalProofSpec {
+    pub(crate) capability: &'static str,
+    pub(crate) file: &'static str,
+    pub(crate) func: &'static str,
+    pub(crate) block: &'static str,
+}
 
-pub(crate) const MAPPED_COMPANION_FN: &str =
-    "mapped_modifier_minus_optional_preserves_explicit_undefined_on_required_property";
+pub(crate) const ADDITIONAL_PROOF_SPECS: &[AdditionalProofSpec] = &[
+    AdditionalProofSpec {
+        capability: "JsxResolution",
+        file: "jsx.rs",
+        func: "jsx_library_managed_attributes_via_ambient_namespace_and_indexed_access",
+        block: "U2JsxFoundations",
+    },
+    AdditionalProofSpec {
+        capability: "JsxResolution",
+        file: "jsx.rs",
+        func: "jsx_element_attributes_property_via_ambient_namespace_keyof",
+        block: "U2JsxFoundations",
+    },
+    AdditionalProofSpec {
+        capability: "JsxResolution",
+        file: "jsx.rs",
+        func: "jsx_element_children_attribute_via_ambient_namespace_keyof",
+        block: "U2JsxFoundations",
+    },
+    AdditionalProofSpec {
+        capability: "JsxResolution",
+        file: "jsx.rs",
+        func: "jsx_intrinsic_attributes_via_ambient_namespace_intersection",
+        block: "U2JsxFoundations",
+    },
+    AdditionalProofSpec {
+        capability: "JsxResolution",
+        file: "jsx.rs",
+        func: "jsx_element_class_check_via_resolve_class_surface_and_relate",
+        block: "U2JsxFoundations",
+    },
+    AdditionalProofSpec {
+        capability: "JsxResolution",
+        file: "jsx.rs",
+        func: "jsx_import_source_module_namespace_via_existing_resolution",
+        block: "U2JsxFoundations",
+    },
+    AdditionalProofSpec {
+        capability: "MappedTypes",
+        file: "mapped_modifiers.rs",
+        func: "mapped_modifier_minus_optional_preserves_explicit_undefined_on_required_property",
+        block: "U2MappedTemplate",
+    },
+];

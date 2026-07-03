@@ -462,6 +462,15 @@ The SHARED optimization (§2.10) — attaching to the editor's already-running t
 
 *Guards (moved here from Block 5 — they belong to this phase):* `tsgo_shared_mode_carrier_injection` (an LSP-overlay companion is a member of the attached session's Program and types flow, or the closure fails over to OWNED mode); `shared_mode_failover_is_per_reference_closure` (B1 — fail-over selects per redirect-ON reference closure, never per-file or per-single-tsconfig; no cross-project redirect-ON edge is split across two engines); `shared_mode_requires_full_ts_lsp_proxy` (SHARED is selected only when Verter proxies the editor's entire TS LSP connection; otherwise OWNED); `shared_mode_no_unmapped_carrier_path_leak` (under the proxy, no companion-path span/edit/diagnostic — on any enumerated channel — reaches the editor UI un-mapped). *(The precise guard scopes follow the spike's scoping; their final assertions are pinned when the phase is scoped.)*
 
+#### Repo-toolchain & perf-lane follow-on deferrals (tracked)
+
+The remaining codex-DEFER'd follow-ons from the repo-toolchain Python→Rust port (the rmpy block) and the PERF-A render-lane block that are NOT closed by the rmpy follow-up cleanup — that cleanup CLOSED rmpy FF1 (generator data-table self-validation) and FF2 (dropping `--release` from the terminology-checker wrapper), which therefore carry no row; a plan-end zero-deferral gate tracks the rows below:
+
+- **ROW 1 — CLAUDE.md no-Python WORDING tightening (FF3).** Tighten the CLAUDE.md `## Dependencies Policy` "no committed Python" wording to ban repo-owned Python regardless of file extension / shebang (not just `*.py`), and reconsider the breadth of the wholesale `.claude` exemption. WORDING ONLY — a keyword-scanning / static guard is OUT by explicit user directive; the exact strictness is PENDING USER STEER. The CLAUDE.md rule text is deliberately NOT changed by the cleanup that recorded this row (out of its scope). Codex-DEFER'd in the rmpy confirm FEED-FORWARD ledger (`confirm-codex-adjudicate-out.txt`, FF3).
+- **ROW 2 — `compile_entry` shared-substrate extraction (PERF-A Q1).** Extract the shared compile substrate behind `compile_entry` so the RuntimeRender render-only lane and the HostBacked path share one substrate. Codex-DEFER'd (perf-a decider ruling, Q1 = LAND-NOW-WITH-GUARD+DEFER).
+- **ROW 3 — unplugin double-upsert cleanup (PERF-A Q2a).** Remove the unplugin double-upsert (verified a gated no-op at deferral time). Codex-DEFER'd (perf-a decider ruling, Q2a = LAND-NOW+DEFER).
+- **ROW 4 — RuntimeRender warm-cache / warm-state (PERF-A Q2b).** Add warm-state caching to the RuntimeRender lane. Codex-DEFER'd (perf-a decider ruling, Q2b = LAND-NOW+DEFER).
+
 ---
 
 ## 4. Rejected alternatives

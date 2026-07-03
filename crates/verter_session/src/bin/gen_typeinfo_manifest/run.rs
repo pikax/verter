@@ -23,6 +23,7 @@ use crate::emit::{
 };
 use crate::model::Row;
 use crate::partition::{extract_sites, parse_partition};
+use crate::validate;
 
 pub(crate) fn run(check_only: bool) -> i32 {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -44,7 +45,25 @@ pub(crate) fn run(check_only: bool) -> i32 {
     let doc_path = repo_root.join("docs/arch/native-typeinfo-parity.md");
     let doc = fs::read_to_string(&doc_path)
         .unwrap_or_else(|e| fail(&format!("read {}: {e}", doc_path.display())));
-    let partition = parse_partition(&doc);
+    let parsed = parse_partition(&doc);
+
+    // Structural self-validation over the static data tables, the §10.4.1
+    // partition, and the override tables — duplicate keys/values/elements,
+    // duplicate partition rows, stale/conflicting overrides. Runs in BOTH
+    // generate and `--check` mode; any finding exits 7 (distinct from the
+    // `fail()` status-1 self-consistency path). Fix the offending data
+    // entry, do NOT silence the check.
+    let mut findings = validate::validate_data_tables();
+    findings.extend(validate::validate_partition(&parsed.duplicate_keys));
+    findings.extend(validate::validate_overrides(&parsed.rows));
+    if !findings.is_empty() {
+        eprintln!("error: generator data-table self-validation failed:");
+        for finding in &findings {
+            eprintln!("  - {finding}");
+        }
+        return 7;
+    }
+    let partition = parsed.rows;
 
     // Discover live ignore sites + reasons.
     let mut discovered: BTreeMap<(String, String), String> = BTreeMap::new();
@@ -84,27 +103,20 @@ pub(crate) fn run(check_only: bool) -> i32 {
     }
 
     // Cross-check discovery vs §10.4.1 partition. A LIFTED row is no longer a
-    // live `#[ignore]` site (its body is `oracle::run_row`), so it is expected
-    // to be in the partition but NOT in the discovered set; every OTHER row
-    // must agree row-for-row.
+    // live `#[ignore]` site (its body is `oracle::run_row`), so it must NOT be
+    // in the discovered set; its partition membership is already enforced by
+    // `validate_overrides` above (a stale LIFTED_ROW_OVERRIDES entry exits 7
+    // before this point). Every OTHER row must agree row-for-row.
     let disc_keys: BTreeSet<(String, String)> = discovered.keys().cloned().collect();
     let part_keys: BTreeSet<(String, String)> = partition.keys().cloned().collect();
     let lifted_keys: BTreeSet<(String, String)> = LIFTED_ROW_OVERRIDES
         .iter()
         .map(|o| (o.file.to_string(), o.func.to_string()))
         .collect();
-    let lifted_not_in_partition: Vec<&(String, String)> =
-        lifted_keys.difference(&part_keys).collect();
     let lifted_still_ignored: Vec<&(String, String)> =
         lifted_keys.intersection(&disc_keys).collect();
-    if !lifted_not_in_partition.is_empty() || !lifted_still_ignored.is_empty() {
+    if !lifted_still_ignored.is_empty() {
         eprintln!("error: lifted-row override set is inconsistent:");
-        for k in &lifted_not_in_partition {
-            eprintln!(
-                "  lifted row absent from §10.4.1 partition: {} :: {}",
-                k.0, k.1
-            );
-        }
         for k in &lifted_still_ignored {
             eprintln!(
                 "  lifted row still carries a live `#[ignore]`: {} :: {}",
@@ -319,4 +331,42 @@ pub(crate) fn run(check_only: bool) -> i32 {
         BLOCK_TO_MECHANISM.len()
     );
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("CARGO_MANIFEST_DIR must be `<workspace>/crates/verter_session`")
+            .to_path_buf()
+    }
+
+    // Lives here (not in `validate.rs`) because it READS the committed
+    // partition doc from disk — `run.rs` is the generator's sole
+    // I/O-orchestration module; `validate` stays a PURE validator module.
+    #[test]
+    fn committed_partition_and_override_tables_are_clean() {
+        let doc_path = repo_root().join("docs/arch/native-typeinfo-parity.md");
+        let doc = fs::read_to_string(&doc_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", doc_path.display()));
+        let parsed = parse_partition(&doc);
+        assert_eq!(
+            validate::validate_partition(&parsed.duplicate_keys),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            validate::validate_overrides(&parsed.rows),
+            Vec::<String>::new()
+        );
+        // The lifted-staleness class specifically: every committed
+        // LIFTED_ROW_OVERRIDES key is a §10.4.1 partition row.
+        assert_eq!(
+            validate::stale_lifted_overrides(LIFTED_ROW_OVERRIDES, &parsed.rows),
+            Vec::<(&str, &str)>::new()
+        );
+    }
 }

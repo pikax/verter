@@ -11,4 +11,4 @@ set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
-exec cargo run -q --release -p xtask --bin check-four-mode-terminology -- "$@"
+exec cargo run -q -p xtask --bin check-four-mode-terminology -- "$@"

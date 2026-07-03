@@ -27,7 +27,7 @@
 //! `AdditionalProofRow` table and the `TYPEINFO_PARITY_BLOCKS` DAG (each
 //! block's `required_guards`/`verification_labels`/prereqs/mechanisms) are
 //! authored in the generator's own static Rust maps (`build_additional_rows` /
-//! `JSX_NO_NEW_KEY_ROWS`; `emit_block_rows`, `BLOCK_TO_REQUIRED_GUARDS`,
+//! `ADDITIONAL_PROOF_SPECS`; `emit_block_rows`, `BLOCK_TO_REQUIRED_GUARDS`,
 //! `BLOCK_VERIFICATION_LABELS`, the prereq/mechanism maps), NOT from the
 //! partition. The guards below only diff/fail — they never write the
 //! generated source (repo rule: generators are scripts, not tests).

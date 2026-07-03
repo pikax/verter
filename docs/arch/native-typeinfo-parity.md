@@ -2648,7 +2648,7 @@ is created. Both tables live in this one module.
 > the manifest generator's `parse_partition` READS it (it does not emit it) to derive
 > each `IgnoredTestRow`'s `block_id`. The OTHER two manifest-data files are NOT derived from
 > §10.4.1: the `AdditionalProofRow` table (`typeinfo_additional_proof_rows.rs`) is built from
-> the generator's own static Rust maps (`build_additional_rows`, e.g. `JSX_NO_NEW_KEY_ROWS`), and
+> the generator's own static Rust maps (`build_additional_rows`, e.g. `ADDITIONAL_PROOF_SPECS`), and
 > the `TYPEINFO_PARITY_BLOCKS` DAG (`typeinfo_parity_blocks.rs`) — including each block's
 > `required_guards`/`verification_labels`/prereqs/mechanisms — is authored in the generator's
 > own block maps (`emit_block_rows`, `BLOCK_TO_REQUIRED_GUARDS`, `BLOCK_VERIFICATION_LABELS`,
@@ -2887,7 +2887,7 @@ row (file::function)
   `AdditionalProofRow` table (`typeinfo_additional_proof_rows.rs`) and the block DAG
   (`typeinfo_parity_blocks.rs`) — each block's `required_guards`/`verification_labels`/
   prereqs/mechanisms — are NOT derived from §10.4.1; they are authored in the generator's own
-  static Rust maps (`build_additional_rows` / `JSX_NO_NEW_KEY_ROWS`; `emit_block_rows`,
+  static Rust maps (`build_additional_rows` / `ADDITIONAL_PROOF_SPECS`; `emit_block_rows`,
   `BLOCK_TO_REQUIRED_GUARDS`, `BLOCK_VERIFICATION_LABELS`, the prereq/mechanism maps). The
   Rust guard tests only diff/fail and never write tracked source. The authoritative
   `row → block_id` projection over all 362 `IgnoredTestRow`s is enumerated in full in
@@ -2976,7 +2976,7 @@ emit this partition; it parses it (`parse_partition`) and uses it ONLY to assign
 other two checked-in manifest-data files are NOT derived from this partition: the
 `AdditionalProofRow` table (`typeinfo_additional_proof_rows.rs`) and the
 `TYPEINFO_PARITY_BLOCKS` DAG (`typeinfo_parity_blocks.rs`) are authored in the generator's
-own static Rust maps (`build_additional_rows` / `JSX_NO_NEW_KEY_ROWS`; `emit_block_rows`,
+own static Rust maps (`build_additional_rows` / `ADDITIONAL_PROOF_SPECS`; `emit_block_rows`,
 `BLOCK_TO_REQUIRED_GUARDS`, `BLOCK_VERIFICATION_LABELS`, the prereq/mechanism maps). This
 partition is a total function over the 362 `IgnoredTestRow`s: **every** row appears exactly
 once under exactly one owning `block_id`, no row is owned by two blocks, and the union is

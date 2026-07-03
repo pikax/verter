@@ -2,8 +2,8 @@
 //! additional-proof row builder.
 
 use crate::data::{
-    BLOCK_TO_MECHANISM, BLOCK_TO_ORGAN, BLOCK_TO_UBLOCK, BLOCK_VERIFICATION_LABELS,
-    JSX_NO_NEW_KEY_ROWS, MAPPED_COMPANION_FN,
+    ADDITIONAL_PROOF_SPECS, BLOCK_TO_MECHANISM, BLOCK_TO_ORGAN, BLOCK_TO_UBLOCK,
+    BLOCK_VERIFICATION_LABELS, FILE_TO_SUBSTRATE,
 };
 use crate::derive::{
     block_prereqs, block_required_guards, consumed_mechs_for_block, keys_for_row,
@@ -169,54 +169,39 @@ pub(crate) fn emit_block_rows() -> String {
     out.join("\n") + "\n"
 }
 
-/// The CLOSED set of 7 `AdditionalProofRow`s (§8 + §10.1). All 7 rows are
-/// FORWARD-DECLARATION coverage contracts emitting a RowTestGuard: the 6 JSX
-/// no-new-key submatrix rows point at the U2.JSX_FOUNDATIONS test functions,
-/// and the 1 mapped companion points at the U2.MAPPED_TEMPLATE test function.
+/// The CLOSED set of 7 `AdditionalProofRow`s (§8 + §10.1), projected from
+/// the shared `ADDITIONAL_PROOF_SPECS` table (the same table
+/// `validate::additional_proof_mechanism_consumers` models from). All 7
+/// rows are FORWARD-DECLARATION coverage contracts emitting a RowTestGuard:
+/// the 6 JSX no-new-key submatrix rows point at the U2.JSX_FOUNDATIONS test
+/// functions, and the 1 mapped companion points at the U2.MAPPED_TEMPLATE
+/// test function.
 pub(crate) fn build_additional_rows() -> Vec<Row> {
-    let mut rows: Vec<Row> = Vec::new();
-    for &func in JSX_NO_NEW_KEY_ROWS {
-        let block = "U2JsxFoundations";
-        let mech = mechanism_for_row("JsxResolution", "jsx.rs", func);
-        rows.push(Row {
-            file: "jsx.rs".to_string(),
-            func: func.to_string(),
-            substrate: "JsxResolution",
-            cap: "JsxResolution".to_string(),
-            organ: lookup_pair_or_fail(BLOCK_TO_ORGAN, block, "BLOCK_TO_ORGAN"),
-            ublock: lookup_pair_or_fail(BLOCK_TO_UBLOCK, block, "BLOCK_TO_UBLOCK"),
-            block,
-            keys: keys_for_row(mech).to_vec(),
-            proof: format!(
-                "ProofRequirement::RowTestGuard {{ file: \"jsx.rs\", function: \"{func}\" }}"
-            ),
-            mech,
-            consumed: consumed_mechs_for_block(block),
-            status: String::new(),
-            oracle_query_ordinals: 0,
-            unblocker: String::new(),
-        });
-    }
-    let block = "U2MappedTemplate";
-    let mech = mechanism_for_row("MappedTypes", "mapped_modifiers.rs", MAPPED_COMPANION_FN);
-    rows.push(Row {
-        file: "mapped_modifiers.rs".to_string(),
-        func: MAPPED_COMPANION_FN.to_string(),
-        substrate: "MappedTypes",
-        cap: "MappedTypes".to_string(),
-        organ: lookup_pair_or_fail(BLOCK_TO_ORGAN, block, "BLOCK_TO_ORGAN"),
-        ublock: lookup_pair_or_fail(BLOCK_TO_UBLOCK, block, "BLOCK_TO_UBLOCK"),
-        block,
-        keys: keys_for_row(mech).to_vec(),
-        proof: format!(
-            "ProofRequirement::RowTestGuard {{ file: \"mapped_modifiers.rs\", \
-             function: \"{MAPPED_COMPANION_FN}\" }}"
-        ),
-        mech,
-        consumed: consumed_mechs_for_block(block),
-        status: String::new(),
-        oracle_query_ordinals: 0,
-        unblocker: String::new(),
-    });
-    rows
+    ADDITIONAL_PROOF_SPECS
+        .iter()
+        .map(|spec| {
+            let mech = mechanism_for_row(spec.capability, spec.file, spec.func);
+            Row {
+                file: spec.file.to_string(),
+                func: spec.func.to_string(),
+                substrate: lookup_pair_or_fail(FILE_TO_SUBSTRATE, spec.file, "FILE_TO_SUBSTRATE"),
+                cap: spec.capability.to_string(),
+                organ: lookup_pair_or_fail(BLOCK_TO_ORGAN, spec.block, "BLOCK_TO_ORGAN"),
+                ublock: lookup_pair_or_fail(BLOCK_TO_UBLOCK, spec.block, "BLOCK_TO_UBLOCK"),
+                block: spec.block,
+                keys: keys_for_row(mech).to_vec(),
+                proof: format!(
+                    "ProofRequirement::RowTestGuard {{ file: \"{file}\", \
+                     function: \"{func}\" }}",
+                    file = spec.file,
+                    func = spec.func,
+                ),
+                mech,
+                consumed: consumed_mechs_for_block(spec.block),
+                status: String::new(),
+                oracle_query_ordinals: 0,
+                unblocker: String::new(),
+            }
+        })
+        .collect()
 }
