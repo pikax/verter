@@ -25,7 +25,12 @@
 //!
 //! [`NoTypeExpr`]: verter_no_storedspan  (see the sibling `verter_no_typeexpr` crate)
 //!
-//! # How non-hand-implementability is enforced
+//! # What the marker is (and is not)
+//!
+//! `NoStoredSpan` is a FIRST-PARTY STRUCTURAL WITNESS — a compiler-enforced
+//! check that a first-party type derived with `#[derive(NoStoredSpan)]` owns no
+//! transitive `Span`. It is NOT an adversarial, downstream-proof security
+//! boundary.
 //!
 //! [`NoStoredSpan`] is a thin public façade over the hidden witness supertrait
 //! [`__private::NoStoredSpanWitness`], plus a blanket bridge:
@@ -36,12 +41,21 @@
 //! ```
 //!
 //! Because `NoStoredSpan` is blanket-impl'd for everything that is the witness,
-//! a downstream crate CANNOT write `impl NoStoredSpan for X` — it would overlap
-//! the blanket (`E0119`). The ONLY way to make a downstream type `NoStoredSpan`
-//! is to make it the witness, and the only sanctioned downstream route to the
-//! witness is [`#[derive(NoStoredSpan)]`](NoStoredSpan), which emits the witness
-//! impl field-recursively. So a carrier with a span-owning field cannot be made
-//! `NoStoredSpan`, by alias or otherwise.
+//! no crate — first-party or downstream — can hand-write
+//! `impl NoStoredSpan for X`: it would overlap the blanket (`E0119`). For a
+//! first-party carrier the only sanctioned route to the witness is
+//! [`#[derive(NoStoredSpan)]`](NoStoredSpan), which emits the witness
+//! field-recursively, so a derived carrier with a span-owning field (by alias
+//! or nesting) fails to compile.
+//!
+//! What this does NOT prevent: the witness supertrait
+//! [`__private::NoStoredSpanWitness`] is `pub` (it must be, so the derive's
+//! generated `::verter_no_storedspan::__private::…` path resolves downstream).
+//! A downstream crate could therefore DELIBERATELY FORGE the marker by
+//! hand-writing `impl __private::NoStoredSpanWitness for SpanOwner {}`. That is a
+//! hostile act, not accidental drift, and the marker does not defend against it
+//! — the guard is the first-party `#[derive]` discipline, not a cross-crate
+//! seal.
 
 #![forbid(unsafe_code)]
 
@@ -51,11 +65,13 @@
 // cannot otherwise name itself. (Standard idiom, as used by serde.)
 extern crate self as verter_no_storedspan;
 
-/// Hidden witness machinery. NOT a public API: do not name, import, or
+/// Hidden witness machinery. By CONVENTION, do not name, import, or
 /// hand-implement [`__private::NoStoredSpanWitness`] outside the sanctioned
-/// `#[derive(NoStoredSpan)]` route. It exists only so the public
-/// [`NoStoredSpan`] trait can be blanket-bridged and therefore stays
-/// non-hand-implementable downstream.
+/// `#[derive(NoStoredSpan)]` route. It is `pub` only so the derive's generated
+/// absolute paths resolve downstream — it is NOT a sealed boundary, so a
+/// downstream crate CAN deliberately forge this witness; the marker is a
+/// first-party structural witness, not a security boundary. The blanket bridge
+/// still makes the PUBLIC [`NoStoredSpan`] trait non-hand-implementable (E0119).
 #[doc(hidden)]
 pub mod __private {
     /// The hidden supertrait of [`NoStoredSpan`](crate::NoStoredSpan). A type

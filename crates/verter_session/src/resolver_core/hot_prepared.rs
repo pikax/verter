@@ -18,26 +18,29 @@
 //! prepared-forward-payload owner of one). Every type body is a [`HotTypeRef`]
 //! handle or scalar metadata.
 //!
-//! This invariant is COMPILER-ENFORCED. Every carrier
-//! `#[derive(verter_no_typeexpr::NoTypeExpr)]`s — the derive emits the hidden
-//! witness field-recursively, with a `: NoTypeExpr` bound on every field — and
-//! the [`assert_impl_all!`](static_assertions::assert_impl_all) block below
-//! asserts each carrier (and the [`HotTypeRef`] handle) implements `NoTypeExpr`.
-//! A field that owns a `TypeExpr` — directly, through an aliased `use TypeExpr
-//! as Body`, or via a nested owner like `ValueRef` — makes that bound
-//! unsatisfiable, so the BUILD FAILS. Because the compiler resolves the actual
-//! field type (not its written spelling), there is no alias / re-export /
-//! module-shadow escape. Two NARROW source guards in
+//! This invariant is COMPILER-ENFORCED for these FIRST-PARTY derived carriers:
+//! `NoTypeExpr` is a first-party structural witness, not an adversarial
+//! downstream-proof boundary (see the `verter_no_typeexpr` crate docs). Every
+//! carrier `#[derive(verter_no_typeexpr::NoTypeExpr)]`s — the derive emits the
+//! hidden witness field-recursively, with a `: NoTypeExpr` bound on every
+//! field — and the [`assert_impl_all!`](static_assertions::assert_impl_all)
+//! block below asserts each carrier (and the [`HotTypeRef`] handle) implements
+//! `NoTypeExpr`. A field that owns a `TypeExpr` — directly, through an aliased
+//! `use TypeExpr as Body`, or via a nested owner like `ValueRef` — makes that
+//! bound unsatisfiable, so the BUILD FAILS. Because the compiler resolves the
+//! actual field type (not its written spelling), there is no accidental alias /
+//! re-export / module-shadow escape. Two NARROW source guards in
 //! `tests/cases/handle_capable_consumer_guards.rs` back this up without
 //! re-proving type meaning: a COVERAGE guard forces every `Hot*` carrier to opt
 //! into both the derive and the assert set, and a HAND-IMPL ban forbids any
 //! hand-written `NoTypeExpr`/`NoTypeExprWitness` impl save the single audited
-//! [`HotTypeRef`] witness. The `HotTypeRef` handle additionally stays non-keyable
-//! (R6: no `Hash`/`Ord`/`PartialOrd`) via the compiler `assert_not_impl_any!`
-//! next to its definition. The only remaining residual is deliberate witness
-//! forgery (a `use …NoTypeExprWitness as Alias; impl Alias for X`), which is a
-//! hostile act rather than drift and still cannot hide a `TypeExpr` in a derived
-//! carrier's field.
+//! [`HotTypeRef`] witness (that ONE audited first-party hand-written witness is
+//! the deliberate exception; it is not generalized). The `HotTypeRef` handle
+//! additionally stays non-keyable (R6: no `Hash`/`Ord`/`PartialOrd`) via the
+//! compiler `assert_not_impl_any!` next to its definition. The only remaining
+//! residual is deliberate witness forgery (a `use …NoTypeExprWitness as Alias;
+//! impl Alias for X`), which is a hostile act rather than drift and still cannot
+//! hide a `TypeExpr` in a first-party derived carrier's field.
 //!
 //! These carriers are a FAITHFUL handle-native mirror of the lower-crate
 //! shapes: every scalar field present on the lower-crate `Prepared*` shape is

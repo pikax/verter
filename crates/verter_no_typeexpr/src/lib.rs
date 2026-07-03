@@ -11,7 +11,12 @@
 //! the compiler resolves the ACTUAL field type, so an aliased `TypeExpr`-owner
 //! — or a nested owner such as `ValueRef` / `TupleElement` — fails the bound.
 //!
-//! # How non-hand-implementability is enforced
+//! # What the marker is (and is not)
+//!
+//! `NoTypeExpr` is a FIRST-PARTY STRUCTURAL WITNESS — a compiler-enforced check
+//! that a first-party type derived with `#[derive(NoTypeExpr)]` owns no
+//! transitive `TypeExpr`. It is NOT an adversarial, downstream-proof security
+//! boundary.
 //!
 //! [`NoTypeExpr`] is a thin public façade over the hidden witness supertrait
 //! [`__private::NoTypeExprWitness`], plus a blanket bridge:
@@ -21,13 +26,21 @@
 //! impl<T: __private::NoTypeExprWitness + ?Sized> NoTypeExpr for T {}
 //! ```
 //!
-//! Because `NoTypeExpr` is blanket-impl'd for everything that is the witness, a
-//! downstream crate CANNOT write `impl NoTypeExpr for X` — it would overlap the
-//! blanket (`E0119`). The ONLY way to make a downstream type `NoTypeExpr` is to
-//! make it the witness, and the only sanctioned downstream route to the witness
-//! is [`#[derive(NoTypeExpr)]`](NoTypeExpr), which emits the witness impl
-//! field-recursively. So a carrier with a `TypeExpr`-owning field cannot be made
-//! `NoTypeExpr`, by alias or otherwise.
+//! Because `NoTypeExpr` is blanket-impl'd for everything that is the witness, no
+//! crate — first-party or downstream — can hand-write `impl NoTypeExpr for X`:
+//! it would overlap the blanket (`E0119`). For a first-party carrier the only
+//! sanctioned route to the witness is [`#[derive(NoTypeExpr)]`](NoTypeExpr),
+//! which emits the witness field-recursively, so a derived carrier with a
+//! `TypeExpr`-owning field (by alias or nesting) fails to compile.
+//!
+//! What this does NOT prevent: the witness supertrait
+//! [`__private::NoTypeExprWitness`] is `pub` (it must be, so the derive's
+//! generated `::verter_no_typeexpr::__private::…` path resolves in downstream
+//! crates). A downstream crate could therefore DELIBERATELY FORGE the marker by
+//! hand-writing `impl __private::NoTypeExprWitness for SpanOwner {}`. That is a
+//! hostile act, not accidental drift, and the marker does not defend against it
+//! — the guard is the first-party `#[derive]` discipline plus the narrow
+//! in-crate hand-impl bans, not a cross-crate seal.
 //!
 //! The hand-written witness impls in this crate ARE the trusted foundational set
 //! — the primitives, owned containers (each forwarding the bound), small tuples,
@@ -44,11 +57,14 @@
 // cannot otherwise name itself. (Standard idiom, as used by serde.)
 extern crate self as verter_no_typeexpr;
 
-/// Hidden witness machinery. NOT a public API: do not name, import, or
+/// Hidden witness machinery. By CONVENTION, do not name, import, or
 /// hand-implement [`__private::NoTypeExprWitness`] outside the sanctioned
 /// `#[derive(NoTypeExpr)]` route (and the single audited carrier exception in
-/// `verter_session`). It exists only so the public [`NoTypeExpr`] trait can be
-/// blanket-bridged and therefore stays non-hand-implementable downstream.
+/// `verter_session`). It is `pub` only so the derive's generated absolute paths
+/// resolve downstream — it is NOT a sealed boundary, so a downstream crate CAN
+/// deliberately forge this witness; the marker is a first-party structural
+/// witness, not a security boundary. The blanket bridge still makes the PUBLIC
+/// [`NoTypeExpr`] trait non-hand-implementable (E0119).
 #[doc(hidden)]
 pub mod __private {
     /// The hidden supertrait of [`NoTypeExpr`](crate::NoTypeExpr). A type is
