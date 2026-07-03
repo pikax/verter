@@ -8866,3 +8866,27 @@ mod instantiate_body_source_family_identity {
         }
     }
 }
+
+/// `invalidate_canonical`'s fact-rail drain discriminates entries via
+/// `carrier_facts_reference_canonical`; a `FileSourceEnv` contributor
+/// fact must make the contributor canonical a reverse-index member so
+/// evicting the contributor reaches the entry.
+#[test]
+fn carrier_facts_reference_canonical_matches_file_source_env_contributor() {
+    let facts = [crate::resolver_core::FactVersionRef::FileSourceEnv {
+        canonical_id: "/contrib.d.ts".to_string(),
+        parse_env_hash: crate::locator_identity::ParseEnvHash::from_env_hash([3u8; 16]),
+        parser_version: 2,
+        file_language_id: crate::file_artifact_store::FileArtifactKey::derived_file_language_id(
+            "/contrib.d.ts",
+        ),
+    }];
+    assert!(
+        carrier_facts_reference_canonical(&facts, "/contrib.d.ts"),
+        "a FileSourceEnv fact must register its contributor canonical for the drain"
+    );
+    assert!(
+        !carrier_facts_reference_canonical(&facts, "/other.d.ts"),
+        "an unrelated canonical must not match the contributor fact"
+    );
+}

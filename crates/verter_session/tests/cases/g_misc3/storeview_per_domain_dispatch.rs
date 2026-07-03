@@ -57,6 +57,23 @@ impl StoreView for TestView {
             FactVersionRef::Parse(p) => self.validates_parse_domain(p),
             FactVersionRef::ResolveImports(r) => self.validates_resolve_imports_domain(r),
             FactVersionRef::RouteSurface(r) => self.validates_route_surface_domain(r),
+            // Contributor source-env identity — routes to the
+            // dedicated strict per-arm validator. This external view
+            // does not override it, so the trait default (`false`,
+            // fail closed) applies; the identity fields' types are
+            // crate-internal (sealed construction), so an off-crate
+            // view can route the arm without naming them.
+            FactVersionRef::FileSourceEnv {
+                canonical_id,
+                parse_env_hash,
+                parser_version,
+                file_language_id,
+            } => self.validates_file_source_env(
+                canonical_id,
+                *parse_env_hash,
+                *parser_version,
+                file_language_id,
+            ),
             FactVersionRef::FileWholeHash { .. }
             | FactVersionRef::DerivedFactHash { .. }
             | FactVersionRef::ProjectGeneration { .. } => false,

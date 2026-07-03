@@ -314,7 +314,7 @@ impl FactReadSetCell {
 ///
 /// Order: enum discriminant first, then per-variant field order.
 /// `FileWholeHash` < `DerivedFactHash` < `Parse` < `ResolveImports` <
-/// `RouteSurface` < `ProjectGeneration`.
+/// `RouteSurface` < `FileSourceEnv` < `ProjectGeneration`.
 fn compare_fact_refs(a: &FactVersionRef, b: &FactVersionRef) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     let da = discriminant_rank(a);
@@ -357,6 +357,27 @@ fn compare_fact_refs(a: &FactVersionRef, b: &FactVersionRef) -> std::cmp::Orderi
             compare_route_surface_fact(a, b)
         }
         (
+            FactVersionRef::FileSourceEnv {
+                canonical_id: ca,
+                parse_env_hash: pa,
+                parser_version: va,
+                file_language_id: la,
+            },
+            FactVersionRef::FileSourceEnv {
+                canonical_id: cb,
+                parse_env_hash: pb,
+                parser_version: vb,
+                file_language_id: lb,
+            },
+        ) => ca
+            .cmp(cb)
+            .then_with(|| pa.cmp(pb))
+            .then_with(|| va.cmp(vb))
+            // `FileLanguage` carries open-set ids without a total
+            // order; compare the stable Debug form (same convention as
+            // the per-domain `FactKey` comparisons below).
+            .then_with(|| format!("{la:?}").cmp(&format!("{lb:?}"))),
+        (
             FactVersionRef::ProjectGeneration { generation: ga },
             FactVersionRef::ProjectGeneration { generation: gb },
         ) => ga.cmp(gb),
@@ -373,7 +394,8 @@ fn discriminant_rank(fact: &FactVersionRef) -> u8 {
         FactVersionRef::Parse(_) => 2,
         FactVersionRef::ResolveImports(_) => 3,
         FactVersionRef::RouteSurface(_) => 4,
-        FactVersionRef::ProjectGeneration { .. } => 5,
+        FactVersionRef::FileSourceEnv { .. } => 5,
+        FactVersionRef::ProjectGeneration { .. } => 6,
     }
 }
 

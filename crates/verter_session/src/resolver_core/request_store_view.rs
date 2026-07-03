@@ -771,6 +771,17 @@ impl<'a> StoreView for RequestStoreView<'a> {
             FactVersionRef::Parse(p) => self.validates_parse_domain(p),
             FactVersionRef::ResolveImports(r) => self.validates_resolve_imports_domain(r),
             FactVersionRef::RouteSurface(r) => self.validates_route_surface_domain(r),
+            FactVersionRef::FileSourceEnv {
+                canonical_id,
+                parse_env_hash,
+                parser_version,
+                file_language_id,
+            } => self.validates_file_source_env(
+                canonical_id,
+                *parse_env_hash,
+                *parser_version,
+                file_language_id,
+            ),
             FactVersionRef::ProjectGeneration { .. } => {
                 // ProjectGeneration validation is rooted on the base
                 // view's snapshot; the overlay never alters project-wide
@@ -818,6 +829,31 @@ impl<'a> StoreView for RequestStoreView<'a> {
             return &overlay_hash == hash;
         }
         self.base.validates_self_root_whole_hash(canonical_id, hash)
+    }
+
+    /// Strict contributor source-env identity validation on the
+    /// request-bound view: cold-seed fail-closed first, then the base
+    /// view's snapshot comparison. The per-request completion overlay
+    /// carries no source-env identities (`complete_canonical` promotes
+    /// whole-hash / route facts only), so the base snapshot stays the
+    /// sole identity authority here; an overlay-completed canonical
+    /// with no base identity rejects strictly and recomputes.
+    fn validates_file_source_env(
+        &self,
+        canonical_id: &str,
+        parse_env_hash: crate::locator_identity::ParseEnvHash,
+        parser_version: u32,
+        file_language_id: &verter_language::FileLanguage,
+    ) -> bool {
+        if !self.base_is_current {
+            return false;
+        }
+        self.base.validates_file_source_env(
+            canonical_id,
+            parse_env_hash,
+            parser_version,
+            file_language_id,
+        )
     }
 
     fn validates_parse_domain(&self, fact: &ParseFactRef) -> bool {

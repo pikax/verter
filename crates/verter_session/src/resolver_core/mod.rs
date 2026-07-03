@@ -234,6 +234,33 @@ pub trait StoreView {
         false
     }
 
+    /// Validate a recorded contributor source-env identity
+    /// ([`FactVersionRef::FileSourceEnv`]) STRICTLY against the
+    /// view-current artifact identity.
+    ///
+    /// Returns `true` only when the view tracks a current artifact
+    /// identity for `canonical_id` whose `parse_env_hash`,
+    /// `parser_version`, and `file_language_id` all equal the recorded
+    /// values. A differing, missing, tombstoned, or untracked
+    /// contributor identity rejects — there is deliberately NO
+    /// untracked-file optimistic accept here (unlike the lazy
+    /// `FileWholeHash` arm): a contributor whose source-env identity
+    /// the view cannot confirm must miss and recompute. Content
+    /// validity stays on the separate `FileWholeHash` fact.
+    ///
+    /// Default impl returns `false` (fail closed); the production
+    /// [`crate::resolver_store::HostStoreView`] overrides with the
+    /// snapshot comparison.
+    fn validates_file_source_env(
+        &self,
+        _canonical_id: &str,
+        _parse_env_hash: crate::locator_identity::ParseEnvHash,
+        _parser_version: u32,
+        _file_language_id: &verter_language::FileLanguage,
+    ) -> bool {
+        false
+    }
+
     /// Validate a **self-root** `FileWholeHash` fact strictly.
     ///
     /// A self-root is the whole-hash fact for a query-identity cache
@@ -386,6 +413,21 @@ impl<T: StoreView + ?Sized> StoreView for &T {
         (**self).validates_route_surface_domain(fact)
     }
     #[inline]
+    fn validates_file_source_env(
+        &self,
+        canonical_id: &str,
+        parse_env_hash: crate::locator_identity::ParseEnvHash,
+        parser_version: u32,
+        file_language_id: &verter_language::FileLanguage,
+    ) -> bool {
+        (**self).validates_file_source_env(
+            canonical_id,
+            parse_env_hash,
+            parser_version,
+            file_language_id,
+        )
+    }
+    #[inline]
     fn validates_self_root_whole_hash(&self, canonical_id: &str, hash: &ResolverHash16) -> bool {
         (**self).validates_self_root_whole_hash(canonical_id, hash)
     }
@@ -502,6 +544,29 @@ pub enum FactVersionRef {
     /// effective-export-set / augmentation-index fingerprint. The
     /// `RouteDb` producer populates the underlying store.
     RouteSurface(RouteSurfaceFactRef),
+    /// Contributor source-env identity reference: the exact artifact
+    /// identity — minus content — a cross-file contributor read was
+    /// served under. Recorded per folded contributor via
+    /// [`crate::fact_signature_helpers::observe_file_source_env_from_artifact_key`]
+    /// from the artifact key the read actually used, never re-derived
+    /// at the recording site.
+    ///
+    /// Validates STRICTLY against the view-current artifact identity
+    /// through [`StoreView::validates_file_source_env`]: a differing,
+    /// missing, tombstoned, or untracked contributor identity rejects
+    /// — even while the contributor's `FileWholeHash` still validates
+    /// (content validity stays on the separate `FileWholeHash` fact;
+    /// this fact is source-env identity only). Closes the warm-parent
+    /// gap where a contributor's `parse_env_hash` / `parser_version` /
+    /// `file_language_id` moves under unchanged content: the
+    /// content-rooted facts keep validating, so only this fact makes
+    /// the env move observable to the parent's warm hit.
+    FileSourceEnv {
+        canonical_id: String,
+        parse_env_hash: crate::locator_identity::ParseEnvHash,
+        parser_version: u32,
+        file_language_id: verter_language::FileLanguage,
+    },
     /// Project-generation reference: the observed monotonic project
     /// generation a cached value depended on. Validates iff the
     /// host's current project generation equals `generation`.
@@ -536,6 +601,7 @@ impl FactVersionRef {
             FactVersionRef::Parse(p) => Some(p.canonical_id.as_str()),
             FactVersionRef::ResolveImports(r) => Some(r.canonical_id.as_str()),
             FactVersionRef::RouteSurface(r) => Some(r.canonical_id.as_str()),
+            FactVersionRef::FileSourceEnv { canonical_id, .. } => Some(canonical_id.as_str()),
             FactVersionRef::ProjectGeneration { .. } => None,
         }
     }
@@ -1249,10 +1315,14 @@ fn compute_signature_fingerprint(facts: &[FactVersionRef]) -> [u8; 16] {
             FactVersionRef::Parse(_)
             | FactVersionRef::ResolveImports(_)
             | FactVersionRef::RouteSurface(_)
+            | FactVersionRef::FileSourceEnv { .. }
             | FactVersionRef::ProjectGeneration { .. } => {
-                // Per-domain refs and the project-generation ref
-                // serialise to their Debug form; the fingerprint is
-                // approximate but stable.
+                // Per-domain refs, the contributor source-env ref, and
+                // the project-generation ref serialise to their Debug
+                // form; the fingerprint is approximate but stable. The
+                // derived `Debug` prints every field, so a change to
+                // any source-env identity field changes the
+                // fingerprint.
                 let s = format!("{f:?}");
                 h_lo.write(s.as_bytes());
                 h_hi.write(s.as_bytes());
@@ -4460,6 +4530,121 @@ mod tests {
             snap,
             ResolverCountersSnapshot::default(),
             "snapshot should differ from default after recording"
+        );
+    }
+}
+
+#[cfg(test)]
+mod file_source_env_fact_rail_tests {
+    use super::*;
+    use crate::file_artifact_store::FileArtifactKey;
+    use crate::locator_identity::ParseEnvHash;
+
+    fn source_env_fact(
+        canonical: &str,
+        env_byte: u8,
+        parser_version: u32,
+        language_of: &str,
+    ) -> FactVersionRef {
+        FactVersionRef::FileSourceEnv {
+            canonical_id: canonical.to_string(),
+            parse_env_hash: ParseEnvHash::from_env_hash([env_byte; 16]),
+            parser_version,
+            file_language_id: FileArtifactKey::derived_file_language_id(language_of),
+        }
+    }
+
+    /// Fingerprint a read-set holding one sibling whole-hash fact plus
+    /// `fact` — so the discrimination below proves the source-env
+    /// fields feed the fingerprint even inside a larger signature.
+    fn fingerprint_with_sibling(fact: &FactVersionRef) -> [u8; 16] {
+        let sibling = FactVersionRef::FileWholeHash {
+            canonical_id: "/owner.vue".to_string(),
+            hash: [9u8; 16],
+        };
+        compute_signature_fingerprint(&[sibling, fact.clone()])
+    }
+
+    #[test]
+    fn fingerprint_discriminates_file_source_env_canonical_id() {
+        let a = source_env_fact("/dep-a.ts", 3, 2, "/dep-a.ts");
+        let b = source_env_fact("/dep-b.ts", 3, 2, "/dep-a.ts");
+        assert_ne!(
+            fingerprint_with_sibling(&a),
+            fingerprint_with_sibling(&b),
+            "a contributor canonical_id change must change the fact-signature fingerprint"
+        );
+    }
+
+    #[test]
+    fn fingerprint_discriminates_file_source_env_parse_env_hash() {
+        let a = source_env_fact("/dep.ts", 3, 2, "/dep.ts");
+        let b = source_env_fact("/dep.ts", 4, 2, "/dep.ts");
+        assert_ne!(
+            fingerprint_with_sibling(&a),
+            fingerprint_with_sibling(&b),
+            "a contributor parse_env_hash change must change the fact-signature fingerprint"
+        );
+    }
+
+    #[test]
+    fn fingerprint_discriminates_file_source_env_parser_version() {
+        let a = source_env_fact("/dep.ts", 3, 2, "/dep.ts");
+        let b = source_env_fact("/dep.ts", 3, 7, "/dep.ts");
+        assert_ne!(
+            fingerprint_with_sibling(&a),
+            fingerprint_with_sibling(&b),
+            "a contributor parser_version change must change the fact-signature fingerprint"
+        );
+    }
+
+    #[test]
+    fn fingerprint_discriminates_file_source_env_file_language_id() {
+        // Same canonical in the fact; the language row differs (a
+        // script row vs a framework-carrier row), modelling a
+        // capability flip on the contributor.
+        let a = source_env_fact("/dep.ts", 3, 2, "/dep.ts");
+        let b = source_env_fact("/dep.ts", 3, 2, "/dep.vue");
+        assert_ne!(
+            fingerprint_with_sibling(&a),
+            fingerprint_with_sibling(&b),
+            "a contributor file_language_id change must change the fact-signature fingerprint"
+        );
+    }
+
+    /// Two tracers observing the same source-env facts in opposite
+    /// orders must finalise byte-identical signatures — the canonical
+    /// fact ordering has a same-variant comparison for the arm (two
+    /// distinct source-env facts must NOT compare equal).
+    #[test]
+    fn finalise_orders_file_source_env_facts_canonically() {
+        let a = source_env_fact("/dep.ts", 1, 2, "/dep.ts");
+        let b = source_env_fact("/dep.ts", 2, 2, "/dep.ts");
+
+        let mut forward = FactReadSet::new();
+        forward.observe(a.clone());
+        forward.observe(b.clone());
+        let mut reverse = FactReadSet::new();
+        reverse.observe(b.clone());
+        reverse.observe(a.clone());
+
+        let forward_sig = match forward.finalise() {
+            FactReadSetFinalise::Ok(sig) => sig,
+            FactReadSetFinalise::Overflow => panic!("two facts cannot overflow the signature cap"),
+        };
+        let reverse_sig = match reverse.finalise() {
+            FactReadSetFinalise::Ok(sig) => sig,
+            FactReadSetFinalise::Overflow => panic!("two facts cannot overflow the signature cap"),
+        };
+        assert_eq!(
+            forward_sig.as_ref(),
+            reverse_sig.as_ref(),
+            "observation order must not change the finalised signature"
+        );
+        assert_eq!(
+            forward_sig.len(),
+            2,
+            "two DISTINCT source-env facts must both survive dedup"
         );
     }
 }

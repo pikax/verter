@@ -131,6 +131,46 @@ pub(crate) fn observe_fact_signature(sig: &[FactVersionRef]) {
     crate::resolver_core::resolver_context::observe_fan_out_borrowed(sig);
 }
 
+/// Record a contributor SOURCE-ENV identity observation
+/// ([`FactVersionRef::FileSourceEnv`]) from the EXACT artifact key the
+/// contributor read actually used.
+///
+/// All four identity fields — `canonical_id`, `parse_env_hash`,
+/// `parser_version`, `file_language_id` — are sourced from
+/// `artifact_key` itself, never re-derived from a canonical/path/env
+/// at the recording site and never read back from an index entry that
+/// could be stale. The fact is recorded onto the active fact tracer
+/// (via [`ResolverContext::observe`]) and returned so the caller can
+/// fold it into a producer-built signature.
+///
+/// `artifact_key = None` — the read could not supply the exact key it
+/// served from — means the contributor's coherent 4-field identity is
+/// UNOBSERVABLE: the API returns `None` and records NOTHING (never a
+/// fabricated default). The caller must route the surrounding result
+/// through `ReturnOnly` (no warm admission), matching the
+/// unobservable-fact convention of the sibling
+/// [`parse_fact_ref_for_observed_current_content`] builder.
+///
+/// No production emitter records this fact yet — the cross-file
+/// contributor stitch that folds contributor bodies into a parent
+/// value is the recording site; until it lands only the validation /
+/// fingerprint / reverse-index rails consume the arm.
+#[allow(dead_code)]
+pub(crate) fn observe_file_source_env_from_artifact_key(
+    ctx: &dyn ResolverContext,
+    artifact_key: Option<&crate::file_artifact_store::FileArtifactKey>,
+) -> Option<FactVersionRef> {
+    let key = artifact_key?;
+    let fact = FactVersionRef::FileSourceEnv {
+        canonical_id: key.canonical.as_ref().to_owned(),
+        parse_env_hash: crate::locator_identity::ParseEnvHash::from_env_hash(key.parse_env_hash),
+        parser_version: key.parser_version,
+        file_language_id: key.file_language_id.clone(),
+    };
+    ctx.observe(fact.clone());
+    Some(fact)
+}
+
 /// Convert a [`DepSignature`] into a [`Vec<FactVersionRef>`] — the
 /// bridge that fans a dispatch sub-query's recorded dependency set
 /// into the active fact tracer.
@@ -1156,5 +1196,91 @@ mod read_set_signature_unit_tests {
         let canons = sig.canonical_ids();
         assert_eq!(canons.len(), 1);
         assert_eq!(canons[0].as_ref(), "/a.ts");
+    }
+}
+
+#[cfg(test)]
+mod file_source_env_observation_tests {
+    use super::*;
+    use crate::file_artifact_store::FileArtifactKey;
+    use crate::locator_identity::ParseEnvHash;
+    use crate::resolver_core::FactReadSetFinalise;
+    use crate::{HostConfig, VerterHost};
+    use std::sync::Arc as StdArc;
+
+    /// The reverse index registers a `(canonical → entry)` mapping for
+    /// every canonical the fact rail names — a `FileSourceEnv`
+    /// contributor fact must contribute its contributor canonical.
+    #[test]
+    fn canonical_ids_includes_file_source_env_contributor() {
+        let fact = FactVersionRef::FileSourceEnv {
+            canonical_id: "/contrib.d.ts".to_string(),
+            parse_env_hash: ParseEnvHash::from_env_hash([3u8; 16]),
+            parser_version: 2,
+            file_language_id: FileArtifactKey::derived_file_language_id("/contrib.d.ts"),
+        };
+        let sig = ReadSetSignature::new(StdArc::from(vec![fact]));
+        let canons = sig.canonical_ids();
+        assert_eq!(canons.len(), 1, "one contributor canonical expected");
+        assert_eq!(canons[0].as_ref(), "/contrib.d.ts");
+    }
+
+    /// The observation API sources all four identity fields from the
+    /// exact artifact key the read used — never re-derived from the
+    /// canonical/path/env at the call site. The planted key carries a
+    /// non-current parser version and a language row derived from a
+    /// DIFFERENT path than the key's canonical, so any re-derivation
+    /// would produce different field values and fail the assertions.
+    #[test]
+    fn observe_file_source_env_from_artifact_key_builds_fact_from_key_identity() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let key = FileArtifactKey {
+            canonical: StdArc::from("/dep.ts"),
+            content_hash: [7u8; 16],
+            parse_env_hash: [3u8; 16],
+            parser_version: 9,
+            file_language_id: FileArtifactKey::derived_file_language_id("/dep.vue"),
+        };
+        let (returned, read_set) =
+            host.with_fact_tracer(|| observe_file_source_env_from_artifact_key(&host, Some(&key)));
+        let expected = FactVersionRef::FileSourceEnv {
+            canonical_id: "/dep.ts".to_string(),
+            parse_env_hash: ParseEnvHash::from_env_hash([3u8; 16]),
+            parser_version: 9,
+            file_language_id: FileArtifactKey::derived_file_language_id("/dep.vue"),
+        };
+        assert_eq!(
+            returned.as_ref(),
+            Some(&expected),
+            "the returned fact must carry exactly the key's four identity fields"
+        );
+        let facts = match read_set.finalise() {
+            FactReadSetFinalise::Ok(facts) => facts,
+            FactReadSetFinalise::Overflow => panic!("one fact cannot overflow the signature cap"),
+        };
+        assert_eq!(
+            facts.as_ref(),
+            &[expected],
+            "the observation must land on the active tracer"
+        );
+    }
+
+    /// A read that cannot supply the exact artifact key it used has no
+    /// coherent source-env identity to observe: the API returns `None`
+    /// (so the caller routes the result through `ReturnOnly`) and
+    /// records nothing — never a fabricated default.
+    #[test]
+    fn observe_file_source_env_without_exact_key_returns_none_and_records_nothing() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let (returned, read_set) =
+            host.with_fact_tracer(|| observe_file_source_env_from_artifact_key(&host, None));
+        assert!(
+            returned.is_none(),
+            "an unobservable source-env identity must surface as None, never a default"
+        );
+        assert!(
+            read_set.is_empty(),
+            "no observation may be recorded for an unobservable identity"
+        );
     }
 }

@@ -55,9 +55,9 @@ use dashmap::DashMap;
 use crate::resolver_core::FactVersionRef;
 
 /// Returns `true` if `fact` references `canonical_id` (as a
-/// `FileWholeHash`, `DerivedFactHash`, or one of the domain-scoped
-/// `Parse` / `ResolveImports` / `RouteSurface` variants whose
-/// observed file matches).
+/// `FileWholeHash`, `DerivedFactHash`, `FileSourceEnv`, or one of the
+/// domain-scoped `Parse` / `ResolveImports` / `RouteSurface` variants
+/// whose observed file matches).
 ///
 /// `FactVersionRef::ProjectGeneration` is not file-scoped — it
 /// references no canonical — so it never matches.
@@ -76,6 +76,9 @@ fn fact_references_canonical(fact: &FactVersionRef, canonical_id: &str) -> bool 
         FactVersionRef::RouteSurface(route_fact) => {
             route_fact.canonical_id.as_str() == canonical_id
         }
+        FactVersionRef::FileSourceEnv {
+            canonical_id: c, ..
+        } => c.as_str() == canonical_id,
         FactVersionRef::ProjectGeneration { .. } => false,
     }
 }

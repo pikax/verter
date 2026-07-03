@@ -1324,6 +1324,30 @@ pub(crate) struct StoreViewSnapshot {
     /// validator arms reject a tombstoned canonical before the lazy
     /// untracked-accept rule.
     tombstoned_canonicals: std::collections::HashSet<String>,
+    /// Per-canonical view-current SOURCE-ENV artifact identity —
+    /// `(parse_env_hash, parser_version, file_language_id)` of the
+    /// base artifact serving the canonical's live content. Captured in
+    /// [`HostStoreView::snapshot_file_facts_into`] from the artifact
+    /// KEY itself. The strict
+    /// [`crate::resolver_core::StoreView::validates_file_source_env`]
+    /// branch compares a recorded
+    /// [`crate::resolver_core::FactVersionRef::FileSourceEnv`] fact
+    /// against this map: an absent entry REJECTS (no untracked
+    /// optimistic accept — a contributor identity the view cannot
+    /// confirm must miss).
+    source_envs: FxHashMap<String, SourceEnvIdentity>,
+}
+
+/// The view-current source-env identity of one canonical's artifact:
+/// every [`crate::file_artifact_store::FileArtifactKey`] dimension
+/// except the canonical itself and the content hash (content validity
+/// stays on the `FileWholeHash` rail). Snapshot value backing the
+/// strict `FileSourceEnv` validation branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SourceEnvIdentity {
+    pub(crate) parse_env_hash: crate::locator_identity::ParseEnvHash,
+    pub(crate) parser_version: u32,
+    pub(crate) file_language_id: verter_language::FileLanguage,
 }
 
 impl Default for StoreViewSnapshot {
@@ -1341,6 +1365,7 @@ impl Default for StoreViewSnapshot {
             project_identity: crate::file_artifact_store::ProjectIdentity([0u8; 16]),
             project_generation: 0,
             tombstoned_canonicals: std::collections::HashSet::new(),
+            source_envs: FxHashMap::default(),
         }
     }
 }
@@ -1887,6 +1912,7 @@ impl HostStoreView {
     fn drop_tombstoned_canonical_snapshots(snapshot: &mut StoreViewSnapshot, canonical: &str) {
         snapshot.whole_hashes.remove(canonical);
         snapshot.file_facts.remove(canonical);
+        snapshot.source_envs.remove(canonical);
         for kind in [
             crate::resolver_core::DerivedFactKind::Route,
             crate::resolver_core::DerivedFactKind::ImportRoute,
@@ -2130,6 +2156,15 @@ impl HostStoreView {
             snapshot
                 .whole_hashes
                 .insert(canonical.clone(), overlay_hash);
+
+            // The base source-env identity no longer describes the
+            // artifact this session serves for the canonical; drop it
+            // so a recorded `FileSourceEnv` fact REJECTS strictly
+            // (miss + recompute) instead of validating against the
+            // base identity. The session-scoped identity re-root lands
+            // with the producer that records session-scoped source-env
+            // observations.
+            snapshot.source_envs.remove(canonical);
 
             // Refresh the per-domain parse-fact + derived-fact
             // snapshots from the overlay artifact. `canonical` is the
@@ -2501,6 +2536,24 @@ impl HostStoreView {
                 None => false,
             };
             if matches_live {
+                // View-current SOURCE-ENV identity for the canonical,
+                // taken from the artifact KEY itself (never re-derived
+                // from the path). Base keys only: an overlay-scoped
+                // key carries a session discriminator in its
+                // `parse_env_hash` dimension and must never seed the
+                // base view's identity map.
+                if key.is_base() {
+                    snapshot.source_envs.insert(
+                        canonical_str.clone(),
+                        SourceEnvIdentity {
+                            parse_env_hash: crate::locator_identity::ParseEnvHash::from_env_hash(
+                                key.parse_env_hash,
+                            ),
+                            parser_version: key.parser_version,
+                            file_language_id: key.file_language_id.clone(),
+                        },
+                    );
+                }
                 snapshot
                     .file_facts
                     .insert(canonical_str, std::sync::Arc::clone(&artifacts.facts));
@@ -2659,6 +2712,35 @@ impl HostStoreView {
                 "RouteSurfaceFactRef canonical={} key={:?} lane={:?} expected={:?}",
                 r.canonical_id, r.key, r.lane, r.expected_hash
             )),
+            crate::resolver_core::FactVersionRef::FileSourceEnv {
+                canonical_id,
+                parse_env_hash,
+                parser_version,
+                file_language_id,
+            } => {
+                if self.snapshot.tombstoned_canonicals.contains(canonical_id) {
+                    return Some(format!("FileSourceEnv tombstoned canonical={canonical_id}"));
+                }
+                match self.snapshot.source_envs.get(canonical_id) {
+                    Some(live)
+                        if live.parse_env_hash == *parse_env_hash
+                            && live.parser_version == *parser_version
+                            && live.file_language_id == *file_language_id =>
+                    {
+                        None
+                    }
+                    Some(live) => Some(format!(
+                        "FileSourceEnv mismatch canonical={canonical_id} \
+                         expected=({parse_env_hash:?}, v{parser_version}, {file_language_id:?}) \
+                         actual=({:?}, v{}, {:?})",
+                        live.parse_env_hash, live.parser_version, live.file_language_id
+                    )),
+                    None => Some(format!(
+                        "FileSourceEnv missing canonical={canonical_id} \
+                         expected=({parse_env_hash:?}, v{parser_version}, {file_language_id:?})"
+                    )),
+                }
+            }
             crate::resolver_core::FactVersionRef::ProjectGeneration { generation } => {
                 if self.snapshot.project_generation == *generation {
                     None
@@ -3029,6 +3111,22 @@ impl crate::resolver_core::StoreView for HostStoreView {
             crate::resolver_core::FactVersionRef::RouteSurface(r) => {
                 crate::resolver_core::StoreView::validates_route_surface_domain(self, r)
             }
+            // Contributor source-env identity fact — routes to the
+            // strict per-arm validator (differing / missing /
+            // tombstoned / untracked identities all reject; no
+            // untracked optimistic accept).
+            crate::resolver_core::FactVersionRef::FileSourceEnv {
+                canonical_id,
+                parse_env_hash,
+                parser_version,
+                file_language_id,
+            } => crate::resolver_core::StoreView::validates_file_source_env(
+                self,
+                canonical_id,
+                *parse_env_hash,
+                *parser_version,
+                file_language_id,
+            ),
             // Project-generation fact: the cached value observed the
             // project-wide generation `generation`. It validates iff
             // the generation snapshotted at this view's build time
@@ -3082,6 +3180,38 @@ impl crate::resolver_core::StoreView for HostStoreView {
             // Untracked self-root canonical — the entry's own file is
             // not in this view. Reject: the warm read misses and
             // recomputes against current content.
+            None => false,
+        }
+    }
+
+    /// Strict contributor source-env identity validation.
+    ///
+    /// Compares the recorded `(parse_env_hash, parser_version,
+    /// file_language_id)` against the view-current artifact identity
+    /// snapshotted for `canonical_id` (captured from the artifact KEY
+    /// in `snapshot_file_facts_into`). A tombstoned canonical rejects
+    /// first; a canonical with NO snapshotted identity — untracked,
+    /// artifact not yet materialised, or session-overlay-rewritten —
+    /// rejects strictly (no untracked optimistic accept: a contributor
+    /// identity this view cannot confirm must miss and recompute).
+    /// Content validity stays on the separate `FileWholeHash` fact —
+    /// this branch never reads `whole_hashes`.
+    fn validates_file_source_env(
+        &self,
+        canonical_id: &str,
+        parse_env_hash: crate::locator_identity::ParseEnvHash,
+        parser_version: u32,
+        file_language_id: &verter_language::FileLanguage,
+    ) -> bool {
+        if self.snapshot.tombstoned_canonicals.contains(canonical_id) {
+            return false;
+        }
+        match self.snapshot.source_envs.get(canonical_id) {
+            Some(live) => {
+                live.parse_env_hash == parse_env_hash
+                    && live.parser_version == parser_version
+                    && live.file_language_id == *file_language_id
+            }
             None => false,
         }
     }
@@ -4264,6 +4394,27 @@ impl HostStoreView {
         Self {
             snapshot: Arc::new(StoreViewSnapshot {
                 whole_hashes,
+                ..StoreViewSnapshot::default()
+            }),
+            ..Self::default()
+        }
+    }
+
+    /// Test-only constructor: a view tracking the supplied
+    /// `whole_hashes`, per-canonical source-env identities, and
+    /// tombstone set — the three snapshot dimensions the strict
+    /// `FileSourceEnv` validation branch consults. Otherwise
+    /// [`HostStoreView::default`].
+    pub(crate) fn with_source_env_snapshot_for_tests(
+        whole_hashes: FxHashMap<String, Hash16>,
+        source_envs: FxHashMap<String, SourceEnvIdentity>,
+        tombstoned_canonicals: std::collections::HashSet<String>,
+    ) -> Self {
+        Self {
+            snapshot: Arc::new(StoreViewSnapshot {
+                whole_hashes,
+                source_envs,
+                tombstoned_canonicals,
                 ..StoreViewSnapshot::default()
             }),
             ..Self::default()

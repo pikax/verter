@@ -89,7 +89,13 @@ pub fn assert_r6_key_dimension<T: R6KeyDimension>() {}
 /// `HashValue` cannot itself type-distinguish env bytes from content bytes at
 /// the constructor boundary; the TYPE distinction, not the bytes, is the guard
 /// (the byte-provenance carried obligation, design §9.1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// Also orders (`Ord`): the resolver-core fact rail sorts
+/// [`crate::resolver_core::FactVersionRef`] observations canonically,
+/// and the `FileSourceEnv` arm carries this dimension. Ordering is the
+/// derived byte order of the private inner hash — opaque, stable, and
+/// exposes no constructor surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ParseEnvHash(HashValue);
 impl ParseEnvHash {
     /// Wrap the LIVE parse-env-hash dimension (never a file content/whole hash).

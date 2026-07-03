@@ -1343,26 +1343,13 @@ defineProps<Pick<HelperProps, 'size'>>()
     // (Card.vue) AND the helper (Helper.ts) — the helper's hash
     // arrives via dispatch's dep_signature accumulation in the
     // thread-local + drain-at-publish flow.
-    let helper_referenced = resolved.fact_versions.iter().any(|fact| match fact {
-        crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, .. } => {
-            canonical_id == "/src/Helper.ts"
-        }
-        crate::resolver_core::FactVersionRef::DerivedFactHash { canonical_id, .. } => {
-            canonical_id == "/src/Helper.ts"
-        }
-        // R26 per-domain variants — not emitted on this code
-        // path today; producers that populate them are not yet
-        // wired here. This test characterises the whole-hash flow
-        // and asserts the helper canonical participates regardless
-        // of which `FactVersionRef` variant carries it.
-        crate::resolver_core::FactVersionRef::Parse(p) => p.canonical_id == "/src/Helper.ts",
-        crate::resolver_core::FactVersionRef::ResolveImports(r) => {
-            r.canonical_id == "/src/Helper.ts"
-        }
-        crate::resolver_core::FactVersionRef::RouteSurface(r) => r.canonical_id == "/src/Helper.ts",
-        // Not file-scoped — references no canonical.
-        crate::resolver_core::FactVersionRef::ProjectGeneration { .. } => false,
-    });
+    // Membership rides the shared file-scoped extraction
+    // (`FactVersionRef::canonical_id`) so the assertion holds
+    // regardless of which fact variant carries the helper canonical.
+    let helper_referenced = resolved
+        .fact_versions
+        .iter()
+        .any(|fact| fact.canonical_id() == Some("/src/Helper.ts"));
 
     assert!(
         helper_referenced,
