@@ -1,5 +1,15 @@
-import path from "node:path";
-import { VIRTUAL_FILE_NAMING, type VirtualPathPolicy } from "../generated/virtual-file-naming";
+import {
+  VIRTUAL_FILE_NAMING,
+  type DeclarationSurface,
+  type VirtualPathPolicy,
+} from "../virtual-file-naming.generated";
+
+// The carrier-serving naming CORE. This module is BROWSER-SAFE: it must not
+// import any Node builtin (the playground aliases `@verter/language-shared`
+// to source and ships it to the browser, and the WASM in-context
+// LanguageService consumes the same single implementation as the Node
+// tsserver plugin). Path handling is POSIX-string based via the tiny internal
+// helpers below — never Node's `path` module.
 
 /**
  * The fixed suffix a `VirtualPathPolicy` appends to form a DISTINCT virtual
@@ -12,11 +22,12 @@ function policySuffix(policy: VirtualPathPolicy): string | null {
 }
 
 // The carrier virtual-file naming is DERIVED from the generated, byte-pinned
-// `virtual-file-naming.ts` mirror of the Rust framework-adapter descriptor
-// column (the single authority). The four former Vue-only regex literals
-// (`/\.vue$/`, `/\.vue\.ts$/`, `/\.vue\.d\.ts$/`, `/\.vue\.__verter_test\.ts$/`)
-// are RETIRED — every carrier's extension + virtual suffixes come from the
-// column, so adding a carrier (e.g. `.svelte`) needs no edit here.
+// `virtual-file-naming.generated.ts` mirror of the Rust framework-adapter
+// descriptor column (the single authority). The four former Vue-only regex
+// literals (`/\.vue$/`, `/\.vue\.ts$/`, `/\.vue\.d\.ts$/`,
+// `/\.vue\.__verter_test\.ts$/`) are RETIRED — every carrier's extension +
+// virtual suffixes come from the column, so adding a carrier (e.g. `.svelte`)
+// needs no edit here.
 
 const RELATIVE_REGEXP = /^\.\.?($|[\\/])/;
 
@@ -170,6 +181,50 @@ export function toIdeCarrierFileName(fileName: string): string | null {
     }
   }
   return null;
+}
+
+/**
+ * The DECLARATION-carrier path for a component-carrier source — the
+ * extension-MIDDLE `{stem}.d.{ext}.ts` file (`Comp.vue` → `Comp.d.vue.ts`,
+ * `Comp.svelte` → `Comp.d.svelte.ts`) a bare framework-carrier import resolves
+ * to under tsgo's basename-append probe, or `null` when `source` projects no
+ * declaration carrier.
+ *
+ * This is the TS spelling of the Rust descriptor authority
+ * `FrameworkAdapterDescriptor::declaration_carrier_identity`
+ * (`crates/verter_session/src/framework/descriptor.rs`), driven off the
+ * generated `declarationSurface` column — never a hardcoded framework literal:
+ *   - the carrier extension is PRESERVED in extension-MIDDLE form
+ *     (`Comp.d.vue.ts`, never the extension-LAST `Comp.vue.d.ts` tsgo would
+ *     not bare-resolve);
+ *   - NO `.verter.` infix is inserted (that reserved infix lives only on the
+ *     redirect-reached import surface);
+ *   - a row with `declarationSurface: { kind: "none" }` (the Svelte
+ *     rune module) and any non-carrier source return `null` — longest-suffix
+ *     row matching keeps a rune module (`store.svelte.ts`) from
+ *     mis-classifying as a `.svelte` component;
+ *   - the carrier extension must sit on a non-empty BASENAME stem (a bare
+ *     `.vue` / `/x/.vue` is not a carrier path).
+ */
+export function toDeclarationCarrierFileName(source: string): string | null {
+  const normalized = normalizePath(source);
+  let match: { extension: string; surface: DeclarationSurface } | null = null;
+  for (const row of Object.values(VIRTUAL_FILE_NAMING)) {
+    const ext = row.carrierExtension;
+    if (ext === null || !normalized.endsWith(ext)) continue;
+    if (match === null || ext.length > match.extension.length) {
+      match = { extension: ext, surface: row.declarationSurface };
+    }
+  }
+  if (match === null || match.surface.kind !== "extensionMiddleTs") {
+    return null;
+  }
+  const stem = normalized.slice(0, normalized.length - match.extension.length);
+  const last = stem.length > 0 ? stem[stem.length - 1] : undefined;
+  if (last === undefined || last === "/") {
+    return null;
+  }
+  return `${stem}.d${match.extension}.ts`;
 }
 
 /**
@@ -395,8 +450,54 @@ function stripAmbiguousSuffixInToken(
 }
 
 /**
+ * POSIX `dirname` over a forward-slash-normalised path — the browser-safe
+ * replacement for Node's `path.posix.dirname` (this package must stay
+ * free of Node builtin imports). Trailing slashes are ignored; a path with no
+ * directory component yields `"."`; the root yields `"/"`.
+ */
+function posixDirname(p: string): string {
+  let end = p.length;
+  while (end > 1 && p[end - 1] === "/") {
+    end -= 1;
+  }
+  const trimmed = p.slice(0, end);
+  const idx = trimmed.lastIndexOf("/");
+  if (idx === -1) return ".";
+  if (idx === 0) return "/";
+  return trimmed.slice(0, idx);
+}
+
+/**
+ * Resolve `relativePath` against the directory `baseDir` with pure POSIX
+ * string semantics — the browser-safe replacement for `path.posix.resolve`.
+ * `.` segments are dropped and `..` segments pop; a POSIX-absolute
+ * `relativePath` wins outright. Unlike `path.posix.resolve` there is NO
+ * process-cwd fallback (a browser has none): a non-absolute `baseDir` (e.g.
+ * the Windows-drive `D:/proj`) simply prefixes the joined result, which is
+ * exactly the forward-slash-normalised form the carrier store operates on.
+ */
+function posixResolveFrom(baseDir: string, relativePath: string): string {
+  const joined = relativePath.startsWith("/") ? relativePath : `${baseDir}/${relativePath}`;
+  const absolute = joined.startsWith("/");
+  const segments: string[] = [];
+  for (const segment of joined.split("/")) {
+    if (segment === "" || segment === ".") continue;
+    if (segment === "..") {
+      if (segments.length > 0 && segments[segments.length - 1] !== "..") {
+        segments.pop();
+      } else if (!absolute) {
+        segments.push("..");
+      }
+      continue;
+    }
+    segments.push(segment);
+  }
+  return (absolute ? "/" : "") + segments.join("/");
+}
+
+/**
  * Wrap a host existence predicate so a NON-ABSOLUTE backing candidate is
- * resolved against `path.dirname(containingFile)` before the underlying check.
+ * resolved against the containing file's directory before the underlying check.
  *
  * The backing-aware strippers ([`cleanupCarrierVirtualImportPath`],
  * [`stripVueVirtualSuffixBackingAware`]) reconstruct a backing carrier path
@@ -419,17 +520,17 @@ export function containingFileAwareExists(
   fileExists: (candidate: string) => boolean,
   containingFile: string,
 ): (candidate: string) => boolean {
-  const base = path.posix.dirname(normalizePath(containingFile));
+  const base = posixDirname(normalizePath(containingFile));
   return (candidate: string): boolean => {
     const normalizedCandidate = normalizePath(candidate);
     // Resolve a RELATIVE backing candidate against the containing dir with the
-    // POSIX resolver — `path.resolve` on Windows would emit backslashes + a
+    // POSIX resolver — a Windows-native resolve would emit backslashes + a
     // drive letter, which never matches the POSIX-normalised paths the rest of
     // this module (and the carrier store) operates on. An already-absolute
     // candidate (POSIX `/x` OR Windows `X:/x`) is passed through unchanged.
     const resolved = isNormalizedAbsolute(normalizedCandidate)
       ? normalizedCandidate
-      : normalizePath(path.posix.resolve(base, normalizedCandidate));
+      : normalizePath(posixResolveFrom(base, normalizedCandidate));
     return fileExists(resolved);
   };
 }

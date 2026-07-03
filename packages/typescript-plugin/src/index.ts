@@ -3,29 +3,27 @@ import path from "node:path";
 import {
   cleanupCarrierVirtualImportPath,
   containingFileAwareExists,
+  isCarrierCompanionPath,
+  isModuleLevelDefinition,
   isRelativeVue,
   isRelativeVueTs,
   isVue,
   normalizePath,
-  toIdeCarrierFileName,
-} from "./helpers/utils";
-import {
-  CarrierStoreReader,
-  resolveCarrierStoreDir,
-  resolveResponseRemap,
-  type ManifestScriptKind,
-} from "./helpers/carrierStore";
-import { coldResolveCompanion } from "./helpers/coldRead";
-import {
-  isCarrierCompanionPath,
-  isModuleLevelDefinition,
   remapAllFileTextChanges,
   remapCarrierSpan,
   remapDocumentSpans,
   remapModuleLevelCompanionToSource,
   remapReferencedSymbol,
+  toIdeCarrierFileName,
   type CarrierRemapContext,
-} from "./helpers/carrierRemap";
+  type ManifestScriptKind,
+} from "@verter/language-shared";
+import {
+  DiskCarrierStoreReader,
+  resolveCarrierStoreDir,
+  resolveResponseRemap,
+} from "./helpers/carrierStore";
+import { coldResolveCompanion } from "./helpers/coldRead";
 import {
   getAliasedNavigationResult,
   getAliasedQuickInfo,
@@ -45,7 +43,7 @@ import { VERTER_TYPES_STUB } from "./helpers/verterTypesStub";
  *
  * Every carrier-content host hook (`getScriptSnapshot`/`getScriptVersion`/
  * `getScriptKind`/`readFile`/`fileExists`/`resolveModuleNameLiterals`/
- * `getExternalFiles`) reads from the store via `CarrierStoreReader`. A path the
+ * `getExternalFiles`) reads from the store via `DiskCarrierStoreReader`. A path the
  * store knows nothing about falls through to real disk; a known-but-not-yet-ready
  * companion bounded-blocks (the C10 sticky-`TS2307` defense). When the store dir
  * is unavailable the plugin serves nothing for carriers and falls through for
@@ -94,7 +92,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     // carrier the host hooks serve comes ONLY from this project's manifest entry
     // — a sibling tsconfig's carrier (compiled under different `paths`/`types`/
     // `lib`) is never served here.
-    const store = new CarrierStoreReader(storeDir, projectKey);
+    const store = new DiskCarrierStoreReader(storeDir, projectKey);
     if (store.isAvailable()) {
       logger.info(`[Verter] carrier store: ${storeDir}`);
     } else {
@@ -1079,7 +1077,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     // The reader is scoped to THIS project's identity, so `readyIdeCompanions`
     // returns only this project's ready IDE companions (intersected with its
     // owned set) — never a sibling tsconfig's.
-    const store = new CarrierStoreReader(storeDir, projectKey);
+    const store = new DiskCarrierStoreReader(storeDir, projectKey);
     if (!store.isAvailable()) {
       return [];
     }

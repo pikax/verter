@@ -36,7 +36,13 @@ function createMockHost(opts?: { virtualFileCode?: string; ideCode?: string }) {
       code: opts?.ideCode ?? "// svelte tsx\nexport function $props() {}\n",
       sourceMap: '{"version":3,"mappings":""}',
     }));
-    getPublicApi = vi.fn(() => ({ code: "export {};", sourceMap: "" }));
+    // Mode-aware: the DECLARATION surface is a distinct output from the
+    // public API surface (mirrors the WASM host's getPublicApi(id, mode)).
+    getPublicApi = vi.fn((_id: string, mode?: string) =>
+      mode === "declaration"
+        ? { code: "declare const App: unknown;\nexport default App;", sourceMap: "" }
+        : { code: "export {};", sourceMap: "" },
+    );
     lint = vi.fn(() => []);
   }
 
@@ -71,6 +77,10 @@ describe("compileFile — descriptor-driven framework dispatch", () => {
       expect(file.compiled.js).toBe("export default class App {}");
       expect(file.compiled.types).toBe("// generated svelte tsx");
       expect(file.compiled.tscCode).toBe("export {};");
+      // The DECLARATION carrier surface is produced alongside the API surface
+      // (getPublicApi(id, "declaration")) — and is NOT the API code relabeled.
+      expect(file.compiled.declCode).toBe("declare const App: unknown;\nexport default App;");
+      expect(file.compiled.declCode).not.toBe(file.compiled.tscCode);
     } finally {
       teardown();
     }
@@ -122,6 +132,8 @@ describe("compileFile — descriptor-driven framework dispatch", () => {
       );
       // Vue render assembly still runs mergeRenderIntoComponent (main path → __sfc__).
       expect(file.compiled.js).toContain("__sfc__");
+      // The Vue compile path produces the declaration surface too.
+      expect(file.compiled.declCode).toBe("declare const App: unknown;\nexport default App;");
     } finally {
       teardown();
     }

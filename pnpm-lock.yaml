@@ -294,7 +294,14 @@ importers:
         version: 3.5.34(typescript@6.0.3)
 
   packages/language-shared:
+    dependencies:
+      '@jridgewell/trace-mapping':
+        specifier: ^0.3.31
+        version: 0.3.31
     devDependencies:
+      '@jridgewell/sourcemap-codec':
+        specifier: ^1.5.5
+        version: 1.5.5
       typescript:
         specifier: ^6.0.3
         version: 6.0.3
@@ -304,6 +311,9 @@ importers:
       vite-plugin-dts:
         specifier: ^5.0.1
         version: 5.0.1(@microsoft/api-extractor@7.57.7(@types/node@25.9.1))(@rspack/core@1.7.8(@swc/helpers@0.5.22))(esbuild@0.28.0)(rolldown@1.0.2)(rollup@4.60.4)(typescript@6.0.3)(vite@8.0.14(@types/node@25.9.1)(esbuild@0.28.0)(jiti@2.7.0)(less@4.6.4)(sass-embedded@1.100.0)(sass@1.100.0)(terser@5.48.0)(tsx@4.22.3)(yaml@2.8.2))(webpack@5.107.2(esbuild@0.28.0))
+      vitest:
+        specifier: ^4.1.7
+        version: 4.1.7(@types/node@25.9.1)(@vitest/coverage-v8@4.1.7)(happy-dom@20.9.0)(vite@8.0.14(@types/node@25.9.1)(esbuild@0.28.0)(jiti@2.7.0)(less@4.6.4)(sass-embedded@1.100.0)(sass@1.100.0)(terser@5.48.0)(tsx@4.22.3)(yaml@2.8.2))
 
   packages/lsp-test-client:
     devDependencies:
@@ -385,7 +395,7 @@ importers:
     devDependencies:
       tsdown:
         specifier: ^0.22.0
-        version: 0.22.0(@typescript/native-preview@7.0.0-dev.20260526.1)(tsx@4.22.3)(typescript@6.0.3)(unrun@0.2.31(@emnapi/core@1.10.0)(@emnapi/runtime@1.10.0))
+        version: 0.22.0(@typescript/native-preview@7.0.0-dev.20260526.1)(tsx@4.22.3)(typescript@6.0.3)(unrun@0.2.31)
       typescript:
         specifier: ^6.0.3
         version: 6.0.3
@@ -432,6 +442,21 @@ importers:
       '@vitejs/plugin-vue':
         specifier: ^6.0.7
         version: 6.0.7(vite@8.0.14(@types/node@25.9.1)(esbuild@0.28.0)(jiti@2.7.0)(less@4.6.4)(sass-embedded@1.100.0)(sass@1.100.0)(terser@5.48.0)(tsx@4.22.3)(yaml@2.8.2))(vue@3.5.34(typescript@6.0.3))
+      '@vue/reactivity':
+        specifier: ^3.5.34
+        version: 3.5.34
+      '@vue/runtime-core':
+        specifier: ^3.5.34
+        version: 3.5.34
+      '@vue/runtime-dom':
+        specifier: ^3.5.34
+        version: 3.5.34
+      '@vue/shared':
+        specifier: ^3.5.34
+        version: 3.5.34
+      csstype:
+        specifier: ^3.1.3
+        version: 3.2.3
       happy-dom:
         specifier: ^20.9.0
         version: 20.9.0
@@ -530,6 +555,9 @@ importers:
 
   packages/typescript-plugin:
     dependencies:
+      '@verter/language-shared':
+        specifier: workspace:*
+        version: link:../language-shared
       '@verter/native':
         specifier: workspace:^
         version: link:../native
@@ -633,7 +661,7 @@ importers:
         version: 4.3.0
       tsdown:
         specifier: ^0.22.0
-        version: 0.22.0(@typescript/native-preview@7.0.0-dev.20260526.1)(tsx@4.22.3)(typescript@6.0.3)(unrun@0.2.31(@emnapi/core@1.10.0)(@emnapi/runtime@1.10.0))
+        version: 0.22.0(@typescript/native-preview@7.0.0-dev.20260526.1)(tsx@4.22.3)(typescript@6.0.3)(unrun@0.2.31)
       tsx:
         specifier: ^4.22.3
         version: 4.22.3
@@ -777,7 +805,7 @@ importers:
         version: 130.0.0
       tsdown:
         specifier: ^0.22.0
-        version: 0.22.0(@typescript/native-preview@7.0.0-dev.20260526.1)(tsx@4.22.3)(typescript@6.0.3)(unrun@0.2.31(@emnapi/core@1.10.0)(@emnapi/runtime@1.10.0))
+        version: 0.22.0(@typescript/native-preview@7.0.0-dev.20260526.1)(tsx@4.22.3)(typescript@6.0.3)(unrun@0.2.31)
       typescript:
         specifier: ^6.0.3
         version: 6.0.3
@@ -13700,7 +13728,7 @@ snapshots:
       '@nuxt/devalue': 2.0.2
       '@nuxt/kit': 4.3.1(magicast@0.5.2)
       '@unhead/vue': 2.1.9(vue@3.5.30(typescript@6.0.3))
-      '@vue/shared': 3.5.27
+      '@vue/shared': 3.5.34
       consola: 3.4.2
       defu: 6.1.4
       destr: 2.0.5
@@ -13762,7 +13790,7 @@ snapshots:
 
   '@nuxt/schema@4.3.1':
     dependencies:
-      '@vue/shared': 3.5.27
+      '@vue/shared': 3.5.34
       defu: 6.1.4
       pathe: 2.0.3
       pkg-types: 2.3.0
@@ -15924,7 +15952,7 @@ snapshots:
       '@babel/types': 7.29.0
       '@vue/babel-helper-vue-transform-on': 2.0.1
       '@vue/babel-plugin-resolve-type': 2.0.1(@babel/core@7.29.0)
-      '@vue/shared': 3.5.27
+      '@vue/shared': 3.5.34
     optionalDependencies:
       '@babel/core': 7.29.0
     transitivePeerDependencies:
@@ -16103,7 +16131,7 @@ snapshots:
     dependencies:
       '@volar/language-core': 2.4.28
       '@vue/compiler-dom': 3.5.27
-      '@vue/shared': 3.5.27
+      '@vue/shared': 3.5.34
       alien-signals: 3.1.2
       muggle-string: 0.4.1
       path-browserify: 1.0.1
@@ -19774,7 +19802,7 @@ snapshots:
       '@nuxt/telemetry': 2.7.0(@nuxt/kit@4.3.1(magicast@0.5.2))
       '@nuxt/vite-builder': 4.3.1(@types/node@25.9.1)(less@4.6.4)(lightningcss@1.32.0)(magicast@0.5.2)(nuxt@4.3.1(@azure/identity@4.13.1)(@parcel/watcher@2.5.6)(@types/node@25.9.1)(@vue/compiler-sfc@3.5.34)(cac@6.7.14)(db0@0.3.4)(ioredis@5.9.3)(less@4.6.4)(lightningcss@1.32.0)(magicast@0.5.2)(rolldown@1.0.2)(rollup@4.57.1)(sass-embedded@1.100.0)(sass@1.100.0)(terser@5.48.0)(tsx@4.22.3)(typescript@6.0.3)(vite@8.0.14(@types/node@25.9.1)(esbuild@0.28.0)(jiti@2.6.1)(less@4.6.4)(sass-embedded@1.100.0)(sass@1.100.0)(terser@5.48.0)(tsx@4.22.3)(yaml@2.8.2))(yaml@2.8.2))(rolldown@1.0.2)(rollup@4.57.1)(sass-embedded@1.100.0)(sass@1.100.0)(terser@5.48.0)(tsx@4.22.3)(typescript@6.0.3)(vue@3.5.30(typescript@6.0.3))(yaml@2.8.2)
       '@unhead/vue': 2.1.9(vue@3.5.30(typescript@6.0.3))
-      '@vue/shared': 3.5.27
+      '@vue/shared': 3.5.34
       c12: 3.3.3(magicast@0.5.2)
       chokidar: 5.0.0
       compatx: 0.2.0
@@ -22008,7 +22036,7 @@ snapshots:
 
   ts-expose-internals@5.6.3: {}
 
-  tsdown@0.22.0(@typescript/native-preview@7.0.0-dev.20260526.1)(tsx@4.22.3)(typescript@6.0.3)(unrun@0.2.31(@emnapi/core@1.10.0)(@emnapi/runtime@1.10.0)):
+  tsdown@0.22.0(@typescript/native-preview@7.0.0-dev.20260526.1)(tsx@4.22.3)(typescript@6.0.3)(unrun@0.2.31):
     dependencies:
       ansis: 4.3.0
       cac: 7.0.0

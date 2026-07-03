@@ -4,7 +4,7 @@
 //! column in `crates/verter_session/src/framework/descriptor.rs`) is the
 //! SINGLE authority for an adapter's IDE / API / testing-API / sidecar
 //! virtual-file suffixes. The committed TypeScript module
-//! `packages/typescript-plugin/src/generated/virtual-file-naming.ts` is a
+//! `packages/language-shared/src/virtual-file-naming.generated.ts` is a
 //! GENERATED, BYTE-PINNED mirror of that column.
 //!
 //! This pin renders the canonical TS module from the descriptor rows

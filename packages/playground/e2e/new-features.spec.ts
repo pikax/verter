@@ -7,7 +7,6 @@
  * Phase 5: Lint rule browser
  * Phase 6: Virtual files panel
  * Phase 7: CSS selector matching panel
- * Phase 0: tsc/tsgo toggle in header
  * Phase 8: TypeScript service (debounce, no crash)
  */
 import { test, expect } from "@playwright/test";
@@ -298,55 +297,6 @@ test.describe("New playground features", () => {
         (e) => e.includes("Cannot read") || e.includes("is not a function"),
       );
       expect(criticalErrors).toEqual([]);
-    });
-  });
-
-  // ── Phase 0: tsc/tsgo Toggle ──
-
-  test.describe("Phase 0: Type Checker Toggle", () => {
-    test("tsc/tsgo toggle is visible in header", async ({ page }) => {
-      const toggle = page.locator(".type-checker-toggle");
-      await expect(toggle).toBeVisible({ timeout: 5000 });
-    });
-
-    test("tsc button is active by default", async ({ page }) => {
-      const tscBtn = page.locator(".tc-btn", { hasText: "tsc" });
-      await expect(tscBtn).toBeVisible({ timeout: 5000 });
-      await expect(tscBtn).toHaveClass(/active/);
-    });
-
-    test("clicking tsgo button switches type checker", async ({ page }) => {
-      const errors: string[] = [];
-      page.on("pageerror", (err) => errors.push(err.message));
-
-      const tsgoBtn = page.locator(".tc-btn", { hasText: "tsgo" });
-      await tsgoBtn.click();
-      await page.waitForTimeout(2000);
-
-      // tsgo may fail gracefully (WASM load failure is expected in CI)
-      // The important thing is no crash
-      await expect(tsgoBtn).toHaveClass(/active/);
-
-      const editorVisible = await page.locator(".monaco-editor").isVisible();
-      expect(editorVisible).toBe(true);
-    });
-
-    test("switching back to tsc works", async ({ page }) => {
-      // Switch to tsgo
-      const tsgoBtn = page.locator(".tc-btn", { hasText: "tsgo" });
-      await tsgoBtn.click();
-      await page.waitForTimeout(1000);
-
-      // Switch back to tsc
-      const tscBtn = page.locator(".tc-btn", { hasText: "tsc" });
-      await tscBtn.click();
-      await page.waitForTimeout(2000);
-
-      await expect(tscBtn).toHaveClass(/active/);
-
-      // Editor should still work
-      const editorVisible = await page.locator(".monaco-editor").isVisible();
-      expect(editorVisible).toBe(true);
     });
   });
 

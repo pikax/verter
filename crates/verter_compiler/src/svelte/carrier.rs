@@ -19,6 +19,11 @@
 use std::any::Any;
 use std::sync::Arc;
 
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
+
 use verter_language::{
     CarrierParse, ExternalLink, ExternalLinkKind, FrameworkAdapterId, FrameworkParseArtifact,
     FrameworkParseCommon, JsModuleKind, LanguageId, ScriptRegion, ScriptRegionKind,
@@ -227,7 +232,10 @@ impl SvelteCarrierCompiler {
         source: &str,
         opts: &IdeCompileOptions,
     ) -> (IdeOutput, Vec<RuntimeDiagnostic>) {
-        let start = std::time::Instant::now();
+        // wasm-safe clock: the `Instant` import is `web_time` on wasm32
+        // (`std::time::Instant::now()` traps on wasm32-unknown-unknown) and
+        // `std::time` on native.
+        let start = Instant::now();
         let projection = crate::svelte::ide::project_svelte_ide(
             source,
             parsed,

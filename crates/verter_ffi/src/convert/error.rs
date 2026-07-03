@@ -33,6 +33,8 @@ pub enum FfiConversionError {
     InvalidNamedImportKind(String),
     /// Invalid `requestedMode` compile-cache-mode string.
     InvalidCompileCacheMode(String),
+    /// Invalid `getPublicApi` mode string.
+    InvalidPublicApiMode(String),
 }
 
 impl std::fmt::Display for FfiConversionError {
@@ -86,6 +88,10 @@ impl std::fmt::Display for FfiConversionError {
             Self::InvalidCompileCacheMode(v) => write!(
                 f,
                 "invalid requestedMode '{v}' (expected 'stateless', 'content', or 'session')"
+            ),
+            Self::InvalidPublicApiMode(v) => write!(
+                f,
+                "invalid public api mode '{v}' (expected 'public', 'testing', or 'declaration')"
             ),
         }
     }

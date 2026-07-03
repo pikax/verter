@@ -2,8 +2,9 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { CarrierStoreReader, type Manifest } from "./carrierStore";
+import { DiskCarrierStoreReader } from "./carrierStore";
 import {
+  type Manifest,
   clearCarrierMapCache,
   isCarrierCompanionPath,
   isModuleLevelDefinition,
@@ -16,7 +17,7 @@ import {
   rewriteInsertedSpecifier,
   sourceForCarrierCompanion,
   type CarrierRemapContext,
-} from "./carrierRemap";
+} from "@verter/language-shared";
 
 /**
  * Discriminating tests for the companion→source RESPONSE mappers. Each asserts
@@ -51,12 +52,18 @@ const UNMAPPABLE_AT_LINE1_V3 = {
   mappings: ";AAAA",
 };
 
-/** The same Svelte-shaped pair (a `.svelte.tsx` companion → `.svelte` source). */
+/**
+ * The Svelte-shaped pair (a `.svelte.tsx` companion → `.svelte` source):
+ * gen (1,0) → src (W.svelte 2,0) — `AACA` = VLQ[0,0,1,0] — the companion's
+ * script statement maps onto the source's `const bar = 1;` line (line 2, after
+ * the `<script>` opener), so a token span maps end-to-end within one source
+ * line under strict BOTH-endpoint span mapping.
+ */
 const SVELTE_MAPPABLE_V3 = {
   version: 3,
   sources: ["W.svelte"],
   names: [],
-  mappings: "AAAA",
+  mappings: "AACA",
 };
 
 function writeStore(manifest: Manifest, files: Record<string, string>): string {
@@ -171,7 +178,7 @@ function track(d: string): string {
  * source is a longer text so the source-side line/column→offset succeeds.
  */
 function ctxFor(dir: string, extraSources: Record<string, string> = {}): CarrierRemapContext {
-  const reader = new CarrierStoreReader(dir);
+  const reader = new DiskCarrierStoreReader(dir);
   const companions: Record<string, string> = {
     "d:/ws/src/A.vue.tsx": "const foo = 1;\n",
     "d:/ws/src/U.vue.tsx": "/* gen helper */\nconst real = 1;\n",
@@ -256,6 +263,8 @@ describe("remapDocumentSpan (definition / reference / rename location)", () => {
     expect(mapped).toBeDefined();
     expect(mapped!.fileName).toBe("W.svelte");
     expect(mapped!.fileName).not.toContain(".svelte.tsx");
+    // The span lands EXACTLY on `bar` inside the source's script line.
+    expect(mapped!.textSpan).toEqual({ start: 15, length: 3 });
   });
 
   it("FAILS CLOSED (undefined) for an unmappable companion span (generated-only region)", () => {
@@ -525,15 +534,14 @@ describe("remapReferencedSymbol (findReferences grouping)", () => {
 });
 
 describe("remapFileTextChanges (code-action / refactor / rename edits)", () => {
-  it("rewrites a companion file edit to the SOURCE path, keeping only mappable changes", () => {
+  it("rewrites a companion file edit to the SOURCE path when EVERY change maps", () => {
     const ctx = ctxFor(track(writeStore(manifest(), blobs())));
     const change = {
       fileName: "d:/ws/src/A.vue.tsx",
       textChanges: [
         // mappable (companion line 1) → source span
         { span: { start: 6, length: 3 }, newText: "renamed" },
-        // unmappable would be a line-1 span on the U companion; here both target A,
-        // so add a second mappable to assert ordering is preserved.
+        // a second mappable change asserts ordering is preserved.
         { span: { start: 0, length: 5 }, newText: "const " },
       ],
     };
@@ -542,6 +550,23 @@ describe("remapFileTextChanges (code-action / refactor / rename edits)", () => {
     expect(out!.fileName).toBe("A.vue");
     expect(out!.fileName).not.toContain(".vue.tsx");
     expect(out!.textChanges.length).toBe(2);
+  });
+
+  it("DROPS the WHOLE file edit when ANY change is unmappable (no partial source edit)", () => {
+    const ctx = ctxFor(track(writeStore(manifest(), blobs())));
+    const change = {
+      fileName: "d:/ws/src/U.vue.tsx",
+      textChanges: [
+        // Mappable: companion line 2 (`const real = 1;`) maps to the source.
+        { span: { start: 17, length: 4 }, newText: "renamed" },
+        // Unmappable: companion line 1 is a generated-only helper region.
+        { span: { start: 0, length: 3 }, newText: "gen" },
+      ],
+    };
+    // A half-applied rename/refactor is a correctness hazard: one unmappable
+    // change poisons the file's ENTIRE change set (fail closed at file
+    // granularity), never a partial edit.
+    expect(remapFileTextChanges(ctx, change)).toBeUndefined();
   });
 
   it("DROPS an unmappable change and the whole edit when ALL changes are unmappable", () => {
@@ -873,7 +898,7 @@ describe("source-text from map sourcesContent (in-memory carrier, no disk source
 
   /** A context whose host `readSource` ALWAYS returns undefined (no disk copy). */
   function ctxNoDiskSource(dir: string): CarrierRemapContext {
-    const reader = new CarrierStoreReader(dir);
+    const reader = new DiskCarrierStoreReader(dir);
     return {
       reader,
       readCompanion: (p) => (p.endsWith("Mem.vue.tsx") ? "const memBinding = 1;\n" : undefined),

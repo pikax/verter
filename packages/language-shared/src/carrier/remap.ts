@@ -1,9 +1,17 @@
-import { SourceMap } from "node:module";
-import type { CarrierStoreReader } from "./carrierStore";
-import { cleanupCarrierVirtualImportPath, containingFileAwareExists, normalizePath } from "./utils";
+import { TraceMap, type SourceMapInput } from "@jridgewell/trace-mapping";
+import type { CarrierStoreReader } from "./store";
+import { CarrierMapper } from "./mapper";
+import {
+  cleanupCarrierVirtualImportPath,
+  containingFileAwareExists,
+  normalizePath,
+} from "./naming";
 
 /**
  * Navigation-span remapping over the store-published carrier source maps.
+ * BROWSER-SAFE: reads maps through the [`CarrierStoreReader`] interface and
+ * maps positions through the strict [`CarrierMapper`] — no Node builtins, no
+ * per-host mapping fork.
  *
  * A carrier companion (`Comp.vue.tsx`) is generated TypeScript whose offsets do
  * not line up with the `.vue`/`.svelte` source. A definition / hover / completion
@@ -11,9 +19,9 @@ import { cleanupCarrierVirtualImportPath, containingFileAwareExists, normalizePa
  * the user actually sees. The map is the V3 source map the Rust LSP publishes to
  * the store (`maps/blake3-<map_hash>.json`, the serialized `CodeTransform`
  * source-map / `ProviderPositionMapper`); this module reads it through the store
- * reader (NOT a NAPI compile) and applies the same offset→origin remapping.
+ * reader (NOT a NAPI compile) and applies the strict offset-to-origin mapping.
  *
- * The parsed `SourceMap` objects are cached by `map_hash` (content-addressed, so
+ * The parsed `TraceMap` objects are cached by `map_hash` (content-addressed, so
  * a hash hit is always the same map) and only re-read when the carrier's
  * `map_hash` changes.
  */
@@ -30,31 +38,7 @@ export interface RemappedSpan {
   textSpan: OffsetSpan;
 }
 
-const parsedMapCache = new Map<string, SourceMap | null>();
-
-function offsetToLineColumn(text: string, offset: number): { line: number; column: number } {
-  const prefix = text.slice(0, offset);
-  const lines = prefix.split("\n");
-  const lastLine = lines.length > 0 ? lines[lines.length - 1] : "";
-  return {
-    line: lines.length,
-    column: lastLine.length + 1,
-  };
-}
-
-function lineColumnToOffset(text: string, line: number, column: number): number | null {
-  if (line < 1 || column < 1) return null;
-  const lines = text.split("\n");
-  if (line > lines.length) return null;
-
-  let offset = 0;
-  for (let i = 0; i < line - 1; i += 1) {
-    offset += lines[i].length + 1;
-  }
-  const lineText = lines[line - 1];
-  if (column - 1 > lineText.length) return null;
-  return offset + column - 1;
-}
+const parsedMapCache = new Map<string, TraceMap | null>();
 
 /**
  * Parse (and cache by `map_hash`) the V3 source map for a ready carrier. A
@@ -64,49 +48,22 @@ function parsedMapFor(
   reader: CarrierStoreReader,
   mapHash: string,
   mapRel: string,
-): SourceMap | null {
+): TraceMap | null {
   const cached = parsedMapCache.get(mapHash);
   if (cached !== undefined) {
     return cached;
   }
   const raw = reader.readMapSync(mapRel);
-  let map: SourceMap | null = null;
+  let map: TraceMap | null = null;
   if (raw !== undefined && raw !== null) {
     try {
-      map = new SourceMap(raw as ConstructorParameters<typeof SourceMap>[0]);
+      map = new TraceMap(raw as SourceMapInput);
     } catch {
       map = null;
     }
   }
   parsedMapCache.set(mapHash, map);
   return map;
-}
-
-/**
- * The original source text the published V3 map carries in `sourcesContent` for
- * `sourceFileName` (matched against the map's `sources`, forward-slash
- * normalized), or `undefined` when the map carries no content for it. This is
- * the EXACT source the map's mappings were produced against — the authority for
- * the inverse line/column→offset conversion when the host has no readable copy
- * of the carrier source (an in-memory `.vue`/`.svelte` not on disk).
- */
-function sourceContentFor(map: SourceMap, sourceFileName: string): string | undefined {
-  const payload = map.payload as
-    | { sources?: readonly string[]; sourcesContent?: readonly (string | null)[] }
-    | undefined;
-  const sources = payload?.sources;
-  const sourcesContent = payload?.sourcesContent;
-  if (!sources || !sourcesContent) {
-    return undefined;
-  }
-  const want = normalizePath(sourceFileName);
-  for (let i = 0; i < sources.length; i += 1) {
-    if (normalizePath(sources[i]) === want) {
-      const content = sourcesContent[i];
-      return typeof content === "string" ? content : undefined;
-    }
-  }
-  return undefined;
 }
 
 /**
@@ -117,9 +74,18 @@ function sourceContentFor(map: SourceMap, sourceFileName: string): string | unde
  * mis-mapped span).
  *
  * `readCompanionText` reads the companion's generated text (the blob) — the
- * offset→line/column conversion is over the generated text the offsets index;
- * `readSourceText` reads the original `.vue`/`.svelte` source for the inverse
- * line/column→offset conversion.
+ * offset-to-line/column conversion is over the generated text the offsets
+ * index; `readSourceText` reads the original `.vue`/`.svelte` source for the
+ * inverse line/column-to-offset conversion. When the host has no readable copy
+ * of the carrier source (an in-memory `.vue`/`.svelte` not on disk) the
+ * published map's `sourcesContent` — the EXACT source bytes the mappings were
+ * produced against — is the fallback authority; without it every carrier-edit
+ * remap fails closed and the whole response (rename / remove-unused /
+ * references) is dropped.
+ *
+ * The position math is the strict [`CarrierMapper`]: greatest-lower-bound
+ * segment lookup, anti-extrapolation extent bound, fail closed on unmapped
+ * regions — never a snap.
  */
 export function remapCarrierSpan(
   reader: CarrierStoreReader,
@@ -141,95 +107,34 @@ export function remapCarrierSpan(
     return null;
   }
 
-  const { line, column } = offsetToLineColumn(companionText, span.start);
-  const origin = map.findOrigin(line, column);
-  if (!("fileName" in origin) || !origin.fileName) {
-    return null;
-  }
-
-  const originalFileName = normalizePath(origin.fileName);
-  // The carrier SOURCE text for the inverse line/column→offset conversion. Read
-  // it from the host first (the on-disk / in-memory `.vue`/`.svelte`), then fall
-  // back to the published map's `sourcesContent` — the EXACT source bytes the
-  // map's mappings were produced against. The fallback is load-bearing for a
-  // carrier opened in-memory whose source is not on disk in the tsserver process
-  // (the LSP holds it): without it every carrier-edit remap fails closed and the
-  // whole response (rename / remove-unused / references) is dropped.
-  const originalText = readSourceText(originalFileName) ?? sourceContentFor(map, originalFileName);
-  if (originalText === undefined) {
-    return null;
-  }
-
-  const originalStart = lineColumnToOffset(originalText, origin.lineNumber, origin.columnNumber);
-  if (originalStart === null) {
-    return null;
-  }
-
-  // Map the span END through the same source map so a multi-character carrier
-  // span (a rename target, a reference highlight) maps to its FAITHFUL source
-  // length — a hardcoded length-1 collapsed every span to a single character,
-  // so a rename/highlight on a `.vue` identifier always under-selected. The end
-  // is the offset one-past the span's last code unit (`span.start + span.length`).
-  const mappedLength = mapSpanLength(
+  const mapper = new CarrierMapper({
     map,
-    companionText,
-    originalText,
-    span,
-    originalStart,
-    originalFileName,
-  );
+    generatedText: companionText,
+    // The carrier SOURCE text for the inverse line/column-to-offset
+    // conversion: the host first (the on-disk / in-memory `.vue`/`.svelte`);
+    // the mapper itself falls back to the published map's `sourcesContent`.
+    readSourceText: (source) => readSourceText(normalizePath(source)),
+  });
+
+  // BOTH endpoints go through the mapper's strict span primitive: each must
+  // map, into the SAME source, without inverting — otherwise the whole span
+  // DROPS (fail closed). A span whose end lands in a synthetic region or a
+  // different source has no faithful source length; falling back to the
+  // carrier span's own length would over-/under-select adjacent source (the
+  // carrier interleaves synthetic characters), corrupting renames/highlights/
+  // edits. A multi-character identifier keeps its faithful width: the end
+  // offset (`span.start + span.length`, one-past the last code unit) resolves
+  // through its containing mapping segment's extent, and a zero-length caret
+  // maps to a zero-length source span.
+  const mapped = mapper.mapGeneratedSpanToSource(span.start, span.start + span.length);
+  if (mapped === null) {
+    return null;
+  }
 
   return {
-    fileName: originalFileName,
-    textSpan: { start: originalStart, length: mappedLength },
+    fileName: normalizePath(mapped.source),
+    textSpan: { start: mapped.start, length: mapped.end - mapped.start },
   };
-}
-
-/**
- * The faithful SOURCE length for a carrier span whose start maps to
- * `originalStart` in `originalFileName`.
- *
- * The span END (`span.start + span.length`) is mapped through the SAME map:
- * - When it maps to a LATER offset in the SAME source file, that delta is the
- *   faithful source length (the multi-character identifier / expression case —
- *   the codegen emits a distinct mapping segment at the chunk boundary).
- * - Otherwise (the end maps to the same-or-earlier source offset because the
- *   map lacks a finer end segment, or maps into a DIFFERENT source region) the
- *   carrier span's OWN length is the best faithful approximation: a preserved
- *   identifier/expression chunk is byte-identical in carrier and source, so its
- *   length carries over. This is never the old hardcoded `1`; a real
- *   multi-character token keeps its width either way.
- *
- * A zero-length input span maps to a zero-length source span (a caret position).
- */
-function mapSpanLength(
-  map: SourceMap,
-  companionText: string,
-  originalText: string,
-  span: OffsetSpan,
-  originalStart: number,
-  originalFileName: string,
-): number {
-  if (span.length === 0) {
-    return 0;
-  }
-  const endPos = offsetToLineColumn(companionText, span.start + span.length);
-  const endOrigin = map.findOrigin(endPos.line, endPos.column);
-  if (
-    "fileName" in endOrigin &&
-    endOrigin.fileName &&
-    normalizePath(endOrigin.fileName) === originalFileName
-  ) {
-    const originalEnd = lineColumnToOffset(
-      originalText,
-      endOrigin.lineNumber,
-      endOrigin.columnNumber,
-    );
-    if (originalEnd !== null && originalEnd > originalStart) {
-      return originalEnd - originalStart;
-    }
-  }
-  return span.length;
 }
 
 /** Test/maintenance hook: drop the parsed-map cache. */
@@ -257,7 +162,7 @@ export function clearCarrierMapCache(): void {
  * span back to source through the published carrier source map. `readCompanion`
  * reads the GENERATED companion text the response offsets index;
  * `readSource` reads the original `.vue`/`.svelte` text for the inverse
- * line/column→offset conversion. `fileExists` is the host existence predicate
+ * line/column-to-offset conversion. `fileExists` is the host existence predicate
  * the inserted-import-specifier rewrite uses to disambiguate a Svelte rune path
  * from a carrier companion (Vue strips by shape, never needing it).
  */
@@ -607,15 +512,15 @@ export function remapReferencedSymbol<
  *   still gets the inserted-specifier rewrite (a companion specifier inside an
  *   added import in a real `.ts` → bare `.vue`/`.svelte`).
  * - `fileName` IS a companion → `fileName` is rewritten to the source path and
- *   EACH `TextChange.span` is remapped through the source map. A change whose
- *   span cannot be mapped is DROPPED (fail closed — a generated-region edit is
- *   never applied to the source). If EVERY change is dropped the whole
- *   `FileTextChanges` is dropped (`undefined`) so no empty source edit is
- *   emitted.
+ *   EACH `TextChange.span` is remapped through the source map. The remap is
+ *   ATOMIC at file granularity: if ANY change's span cannot be mapped, the
+ *   file's ENTIRE `FileTextChanges` is dropped (`undefined`) — a half-applied
+ *   rename/refactor is a correctness hazard, so a partial source edit is never
+ *   emitted (fail closed).
  *
- * The single shared source path that backs the companion is resolved ONCE via
- * the source map (the first mappable change), so every retained change lands in
- * the same source file.
+ * The single shared source path that backs the companion is resolved via the
+ * source map (the first mapped change), so every change lands in the same
+ * source file.
  */
 export function remapFileTextChanges<
   C extends { span: OffsetSpan; newText: string },
@@ -643,8 +548,10 @@ export function remapFileTextChanges<
       ctx.readSource,
     );
     if (!remapped) {
-      // Generated-only edit region → DROP (never apply to the source).
-      continue;
+      // A generated-only edit region poisons the WHOLE file edit: a partially
+      // applied change set (a half-done rename) is a correctness hazard, so
+      // the entire `FileTextChanges` drops (fail closed at file granularity).
+      return undefined;
     }
     sourceFileName ??= remapped.fileName;
     remappedChanges.push({
@@ -654,15 +561,15 @@ export function remapFileTextChanges<
     });
   }
   if (sourceFileName === undefined || remappedChanges.length === 0) {
-    // No change mapped → drop the whole file edit (fail closed).
+    // An empty change set carries nothing to apply → drop (fail closed).
     return undefined;
   }
   return { ...change, fileName: sourceFileName, textChanges: remappedChanges };
 }
 
 /**
- * Remap an array of `FileTextChanges`, dropping any companion file edit whose
- * changes are all unmappable (fail closed). Returns a NEW array.
+ * Remap an array of `FileTextChanges`, dropping any companion file edit with
+ * ANY unmappable change (fail closed, file-level atomic). Returns a NEW array.
  */
 export function remapAllFileTextChanges<
   C extends { span: OffsetSpan; newText: string },

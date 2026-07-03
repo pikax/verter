@@ -2,8 +2,8 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { CarrierStoreReader, type Manifest } from "./carrierStore";
-import { remapCarrierSpan, clearCarrierMapCache } from "./carrierRemap";
+import { remapCarrierSpan, clearCarrierMapCache, type Manifest } from "@verter/language-shared";
+import { DiskCarrierStoreReader } from "./carrierStore";
 
 /**
  * A V3 source map with a single mapping: generated (line 1, col 0) → source
@@ -81,7 +81,7 @@ describe("remapCarrierSpan", () => {
         "maps/A.vue.json": JSON.stringify(SINGLE_MAPPING_V3),
       }),
     );
-    const reader = new CarrierStoreReader(dir);
+    const reader = new DiskCarrierStoreReader(dir);
 
     const remapped = remapCarrierSpan(
       reader,
@@ -94,9 +94,10 @@ describe("remapCarrierSpan", () => {
     expect(remapped).not.toBeNull();
     expect(remapped!.fileName).toBe("A.vue");
     expect(remapped!.textSpan.start).toBe(0);
-    // The single-mapping fixture has no finer END segment, so the carrier span's
-    // OWN length (5) carries over — NOT the old hardcoded `1`, which under-sized
-    // every span (a 5-char selection collapsed to 1).
+    // The end offset (5) resolves within the single mapping segment's extent
+    // (strict end mapping, no snap), so the source span keeps the faithful
+    // length 5 — NOT a hardcoded `1`, which under-sized every span (a 5-char
+    // selection collapsed to 1).
     expect(remapped!.textSpan.length).toBe(5);
   });
 
@@ -118,7 +119,7 @@ describe("remapCarrierSpan", () => {
         "maps/A.vue.json": JSON.stringify(TWO_SEGMENT_V3),
       }),
     );
-    const reader = new CarrierStoreReader(dir);
+    const reader = new DiskCarrierStoreReader(dir);
 
     const remapped = remapCarrierSpan(
       reader,
@@ -141,7 +142,7 @@ describe("remapCarrierSpan", () => {
         "maps/A.vue.json": JSON.stringify(SINGLE_MAPPING_V3),
       }),
     );
-    const reader = new CarrierStoreReader(dir);
+    const reader = new DiskCarrierStoreReader(dir);
     const remapped = remapCarrierSpan(
       reader,
       "d:/ws/src/A.vue.tsx",
@@ -155,7 +156,7 @@ describe("remapCarrierSpan", () => {
 
   it("returns null when the companion is not ready (fail closed)", () => {
     const dir = track(writeStore(manifestWithMap(), {}));
-    const reader = new CarrierStoreReader(dir);
+    const reader = new DiskCarrierStoreReader(dir);
     const remapped = remapCarrierSpan(
       reader,
       "d:/ws/src/NotReady.vue.tsx",
@@ -170,7 +171,7 @@ describe("remapCarrierSpan", () => {
     const m = manifestWithMap();
     delete m.projects["d:/ws/tsconfig.json"].ready_files["d:/ws/src/A.vue.tsx"].map_rel;
     const dir = track(writeStore(m, { "blobs/A.vue.tsx": "x" }));
-    const reader = new CarrierStoreReader(dir);
+    const reader = new DiskCarrierStoreReader(dir);
     const remapped = remapCarrierSpan(
       reader,
       "d:/ws/src/A.vue.tsx",
@@ -188,7 +189,7 @@ describe("remapCarrierSpan", () => {
         "maps/A.vue.json": JSON.stringify(SINGLE_MAPPING_V3),
       }),
     );
-    const reader = new CarrierStoreReader(dir);
+    const reader = new DiskCarrierStoreReader(dir);
     const remapped = remapCarrierSpan(
       reader,
       "d:/ws/src/A.vue.tsx",

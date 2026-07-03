@@ -1,3 +1,8 @@
+// Consumer-side contract suite for the carrier naming/classification CORE this
+// plugin consumes from `@verter/language-shared` (the single browser-safe
+// implementation shared with the WASM in-context LanguageService). These
+// assertions pin the exact behavior the plugin's routing depends on, exercised
+// through the real package boundary.
 import { describe, it, expect } from "vitest";
 import {
   cleanupCarrierVirtualImportPath,
@@ -12,7 +17,7 @@ import {
   resolveVuePublicApiMode,
   stripVueVirtualSuffixBackingAware,
   toIdeCarrierFileName,
-} from "./utils";
+} from "@verter/language-shared";
 
 describe("isVue", () => {
   it("matches .vue suffix", () => {

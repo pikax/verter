@@ -2,11 +2,11 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import type { CarrierStoreReader, Manifest } from "@verter/language-shared";
 import {
-  CarrierStoreReader,
+  DiskCarrierStoreReader,
   resolveCarrierStoreDir,
   resolveResponseRemap,
-  type Manifest,
 } from "./carrierStore";
 
 /** Write a manifest + the named blob/map files into a fresh store dir. */
@@ -181,19 +181,19 @@ describe("resolveResponseRemap", () => {
   });
 });
 
-describe("CarrierStoreReader.isAvailable", () => {
+describe("DiskCarrierStoreReader.isAvailable", () => {
   it("is false with no store dir", () => {
-    expect(new CarrierStoreReader(undefined).isAvailable()).toBe(false);
+    expect(new DiskCarrierStoreReader(undefined).isAvailable()).toBe(false);
   });
   it("is true with a store dir", () => {
-    expect(new CarrierStoreReader("/anything").isAvailable()).toBe(true);
+    expect(new DiskCarrierStoreReader("/anything").isAvailable()).toBe(true);
   });
 });
 
-describe("CarrierStoreReader.readManifest", () => {
+describe("DiskCarrierStoreReader.readManifest", () => {
   it("reads and parses the manifest", () => {
     const dir = track(makeStore(baseManifest()));
-    const reader = new CarrierStoreReader(dir);
+    const reader = new DiskCarrierStoreReader(dir);
     const m = reader.readManifest();
     expect(m?.epoch).toBe(7);
     expect(m?.host_version).toBe("test-host");
@@ -202,27 +202,27 @@ describe("CarrierStoreReader.readManifest", () => {
 
   it("returns undefined for a missing manifest (store not warmed)", () => {
     const dir = track(mkdtempSync(join(tmpdir(), "verter-empty-store-")));
-    const reader = new CarrierStoreReader(dir);
+    const reader = new DiskCarrierStoreReader(dir);
     expect(reader.readManifest()).toBeUndefined();
     expect(reader.currentEpoch()).toBeUndefined();
   });
 
   it("returns undefined when no store dir is configured", () => {
-    expect(new CarrierStoreReader(undefined).readManifest()).toBeUndefined();
+    expect(new DiskCarrierStoreReader(undefined).readManifest()).toBeUndefined();
   });
 
   it("tolerates a torn (unparseable) manifest without throwing", () => {
     const dir = track(makeStore(baseManifest()));
     // Overwrite with a half-written JSON.
     writeFileSync(join(dir, "manifest.json"), '{ "epoch": 7, "projects":', "utf8");
-    const reader = new CarrierStoreReader(dir);
+    const reader = new DiskCarrierStoreReader(dir);
     expect(() => reader.readManifest()).not.toThrow();
     expect(reader.readManifest()).toBeUndefined();
   });
 
   it("caches by mtime/size and re-reads only when the file changes", () => {
     const dir = track(makeStore(baseManifest()));
-    const reader = new CarrierStoreReader(dir);
+    const reader = new DiskCarrierStoreReader(dir);
     expect(reader.readManifest()?.epoch).toBe(7);
 
     // Rewrite with a new epoch + a bumped mtime so the change is detected.
@@ -236,143 +236,143 @@ describe("CarrierStoreReader.readManifest", () => {
   });
 });
 
-describe("CarrierStoreReader.ownedSources", () => {
+describe("DiskCarrierStoreReader.ownedSources", () => {
   it("returns all owned sources across projects", () => {
-    const reader = new CarrierStoreReader(track(makeStore(baseManifest())));
+    const reader = new DiskCarrierStoreReader(track(makeStore(baseManifest())));
     const owned = reader.ownedSources();
     expect(owned.map((o) => o.source_uri).sort()).toEqual(["d:/ws/src/A.vue", "d:/ws/src/B.vue"]);
   });
   it("restricts to one project", () => {
-    const reader = new CarrierStoreReader(track(makeStore(baseManifest())));
+    const reader = new DiskCarrierStoreReader(track(makeStore(baseManifest())));
     expect(reader.ownedSources("d:/ws/tsconfig.json")).toHaveLength(2);
     expect(reader.ownedSources("d:/other/tsconfig.json")).toHaveLength(0);
   });
   it("is empty when the store is unavailable", () => {
-    expect(new CarrierStoreReader(undefined).ownedSources()).toHaveLength(0);
+    expect(new DiskCarrierStoreReader(undefined).ownedSources()).toHaveLength(0);
   });
 });
 
-describe("CarrierStoreReader.readyFile", () => {
+describe("DiskCarrierStoreReader.readyFile", () => {
   it("finds a ready file by provider path", () => {
-    const reader = new CarrierStoreReader(track(makeStore(baseManifest())));
+    const reader = new DiskCarrierStoreReader(track(makeStore(baseManifest())));
     const rf = reader.readyFile("d:/ws/src/A.vue.tsx");
     expect(rf?.content_hash).toBe("aaaa");
     expect(rf?.version).toBe(3);
     expect(rf?.blob_rel).toBe("blobs/blake3-aaaa.tsx");
   });
   it("normalizes backslash paths", () => {
-    const reader = new CarrierStoreReader(track(makeStore(baseManifest())));
+    const reader = new DiskCarrierStoreReader(track(makeStore(baseManifest())));
     expect(reader.readyFile("d:\\ws\\src\\A.vue.tsx")?.version).toBe(3);
   });
   it("returns undefined for an owned-but-not-ready provider", () => {
-    const reader = new CarrierStoreReader(track(makeStore(baseManifest())));
+    const reader = new DiskCarrierStoreReader(track(makeStore(baseManifest())));
     // B is owned but not in ready_files.
     expect(reader.readyFile("d:/ws/src/B.vue.tsx")).toBeUndefined();
   });
   it("returns undefined for an unknown provider", () => {
-    const reader = new CarrierStoreReader(track(makeStore(baseManifest())));
+    const reader = new DiskCarrierStoreReader(track(makeStore(baseManifest())));
     expect(reader.readyFile("d:/ws/src/Unknown.vue.tsx")).toBeUndefined();
   });
 });
 
-describe("CarrierStoreReader.readyFileForSource", () => {
+describe("DiskCarrierStoreReader.readyFileForSource", () => {
   // `getExternalFiles` advertises the SOURCE path (`A.vue`) to tsserver, which
   // then queries the host for the SOURCE path's snapshot/kind/version. The reader
   // maps the source path to its IDE companion's (`A.vue.tsx`) ready entry — the
   // membership-identity reconciliation.
   it("maps a carrier SOURCE path to its IDE companion's ready entry", () => {
-    const reader = new CarrierStoreReader(track(makeStore(baseManifest())));
+    const reader = new DiskCarrierStoreReader(track(makeStore(baseManifest())));
     const rf = reader.readyFileForSource("d:/ws/src/A.vue");
     expect(rf?.content_hash).toBe("aaaa");
     expect(rf?.version).toBe(3);
     expect(rf?.blob_rel).toBe("blobs/blake3-aaaa.tsx");
   });
   it("returns undefined for a source whose companion is owned-but-not-ready", () => {
-    const reader = new CarrierStoreReader(track(makeStore(baseManifest())));
+    const reader = new DiskCarrierStoreReader(track(makeStore(baseManifest())));
     // B.vue is owned but its B.vue.tsx companion is not in ready_files.
     expect(reader.readyFileForSource("d:/ws/src/B.vue")).toBeUndefined();
   });
   it("returns undefined for a non-carrier path (a plain .ts source)", () => {
-    const reader = new CarrierStoreReader(track(makeStore(baseManifest())));
+    const reader = new DiskCarrierStoreReader(track(makeStore(baseManifest())));
     // A plain `.ts` is not a carrier source — it must not map to a companion.
     expect(reader.readyFileForSource("d:/ws/src/util.ts")).toBeUndefined();
   });
   it("does NOT treat a companion path as a source (no double-mapping)", () => {
-    const reader = new CarrierStoreReader(track(makeStore(baseManifest())));
+    const reader = new DiskCarrierStoreReader(track(makeStore(baseManifest())));
     // A `.vue.tsx` companion path is not a SOURCE path; readyFileForSource maps
     // only bare carrier sources, so it must not resolve the companion here.
     expect(reader.readyFileForSource("d:/ws/src/A.vue.tsx")).toBeUndefined();
   });
   it("companionForSource derives the IDE companion for a carrier source", () => {
-    const reader = new CarrierStoreReader(track(makeStore(baseManifest())));
+    const reader = new DiskCarrierStoreReader(track(makeStore(baseManifest())));
     expect(reader.companionForSource("d:/ws/src/A.vue")).toBe("d:/ws/src/A.vue.tsx");
     expect(reader.companionForSource("d:/ws/src/util.ts")).toBeUndefined();
   });
 });
 
-describe("CarrierStoreReader.ownedSourceFor", () => {
+describe("DiskCarrierStoreReader.ownedSourceFor", () => {
   it("matches by provider path", () => {
-    const reader = new CarrierStoreReader(track(makeStore(baseManifest())));
+    const reader = new DiskCarrierStoreReader(track(makeStore(baseManifest())));
     expect(reader.ownedSourceFor("d:/ws/src/B.vue.tsx")?.source_uri).toBe("d:/ws/src/B.vue");
   });
   it("matches by source path", () => {
-    const reader = new CarrierStoreReader(track(makeStore(baseManifest())));
+    const reader = new DiskCarrierStoreReader(track(makeStore(baseManifest())));
     expect(reader.ownedSourceFor("d:/ws/src/B.vue")?.provider_uri).toBe("d:/ws/src/B.vue.tsx");
   });
   it("returns undefined for an unknown path", () => {
-    const reader = new CarrierStoreReader(track(makeStore(baseManifest())));
+    const reader = new DiskCarrierStoreReader(track(makeStore(baseManifest())));
     expect(reader.ownedSourceFor("d:/ws/src/Nope.vue")).toBeUndefined();
   });
 });
 
-describe("CarrierStoreReader.readBlobSync", () => {
+describe("DiskCarrierStoreReader.readBlobSync", () => {
   it("reads a blob's content", () => {
     const dir = track(
       makeStore(baseManifest(), { "blobs/blake3-aaaa.tsx": "export const A = 1;" }),
     );
-    const reader = new CarrierStoreReader(dir);
+    const reader = new DiskCarrierStoreReader(dir);
     expect(reader.readBlobSync("blobs/blake3-aaaa.tsx")).toBe("export const A = 1;");
   });
   it("returns undefined for a missing blob", () => {
-    const reader = new CarrierStoreReader(track(makeStore(baseManifest())));
+    const reader = new DiskCarrierStoreReader(track(makeStore(baseManifest())));
     expect(reader.readBlobSync("blobs/blake3-missing.tsx")).toBeUndefined();
   });
   it("retains last-good when a provider path is given", () => {
     const dir = track(
       makeStore(baseManifest(), { "blobs/blake3-aaaa.tsx": "export const A = 1;" }),
     );
-    const reader = new CarrierStoreReader(dir);
+    const reader = new DiskCarrierStoreReader(dir);
     reader.readBlobSync("blobs/blake3-aaaa.tsx", "d:/ws/src/A.vue.tsx");
     expect(reader.lastGoodBlobFor("d:/ws/src/A.vue.tsx")).toBe("export const A = 1;");
   });
 });
 
-describe("CarrierStoreReader.readMapSync", () => {
+describe("DiskCarrierStoreReader.readMapSync", () => {
   it("reads and parses the map JSON", () => {
     const mapJson = '{"version":3,"sources":["A.vue"],"names":[],"mappings":"AAAA"}';
     const dir = track(makeStore(baseManifest(), { "maps/blake3-bbbb.json": mapJson }));
-    const reader = new CarrierStoreReader(dir);
+    const reader = new DiskCarrierStoreReader(dir);
     const map = reader.readMapSync("maps/blake3-bbbb.json") as { version: number };
     expect(map.version).toBe(3);
   });
   it("returns undefined for a missing map", () => {
-    const reader = new CarrierStoreReader(track(makeStore(baseManifest())));
+    const reader = new DiskCarrierStoreReader(track(makeStore(baseManifest())));
     expect(reader.readMapSync("maps/blake3-missing.json")).toBeUndefined();
   });
 });
 
-describe("CarrierStoreReader.currentEpoch", () => {
+describe("DiskCarrierStoreReader.currentEpoch", () => {
   it("returns the manifest epoch", () => {
-    const reader = new CarrierStoreReader(track(makeStore(baseManifest())));
+    const reader = new DiskCarrierStoreReader(track(makeStore(baseManifest())));
     expect(reader.currentEpoch()).toBe(7);
   });
 });
 
-describe("CarrierStoreReader project scoping (no cross-tsconfig leak)", () => {
+describe("DiskCarrierStoreReader project scoping (no cross-tsconfig leak)", () => {
   it("a project-scoped reader only sees its OWN project's ready files", () => {
     const dir = track(makeStore(twoProjectManifest()));
-    const readerA = new CarrierStoreReader(dir, "d:/ws/a/tsconfig.json");
-    const readerB = new CarrierStoreReader(dir, "d:/ws/b/tsconfig.json");
+    const readerA = new DiskCarrierStoreReader(dir, "d:/ws/a/tsconfig.json");
+    const readerB = new DiskCarrierStoreReader(dir, "d:/ws/b/tsconfig.json");
 
     // Each reader resolves ITS OWN carrier…
     expect(readerA.readyFile("d:/ws/a/src/A.vue.tsx")?.content_hash).toBe("a1");
@@ -384,8 +384,8 @@ describe("CarrierStoreReader project scoping (no cross-tsconfig leak)", () => {
 
   it("readyIdeCompanions is project-scoped — only the OWN project's companions", () => {
     const dir = track(makeStore(twoProjectManifest()));
-    const readerA = new CarrierStoreReader(dir, "d:/ws/a/tsconfig.json");
-    const readerB = new CarrierStoreReader(dir, "d:/ws/b/tsconfig.json");
+    const readerA = new DiskCarrierStoreReader(dir, "d:/ws/a/tsconfig.json");
+    const readerB = new DiskCarrierStoreReader(dir, "d:/ws/b/tsconfig.json");
 
     expect(readerA.readyIdeCompanions()).toEqual(["d:/ws/a/src/A.vue.tsx"]);
     expect(readerB.readyIdeCompanions()).toEqual(["d:/ws/b/src/B.svelte.tsx"]);
@@ -393,7 +393,7 @@ describe("CarrierStoreReader project scoping (no cross-tsconfig leak)", () => {
 
   it("ownedSourceFor is project-scoped — a sibling project's owned source is invisible", () => {
     const dir = track(makeStore(twoProjectManifest()));
-    const readerA = new CarrierStoreReader(dir, "d:/ws/a/tsconfig.json");
+    const readerA = new DiskCarrierStoreReader(dir, "d:/ws/a/tsconfig.json");
     expect(readerA.ownedSourceFor("d:/ws/a/src/A.vue")?.provider_uri).toBe("d:/ws/a/src/A.vue.tsx");
     // The Svelte carrier belongs to project B — reader A must not see it.
     expect(readerA.ownedSourceFor("d:/ws/b/src/B.svelte")).toBeUndefined();
@@ -402,7 +402,7 @@ describe("CarrierStoreReader project scoping (no cross-tsconfig leak)", () => {
 
   it("an UNSCOPED reader still spans every project (legitimate cross-project use)", () => {
     const dir = track(makeStore(twoProjectManifest()));
-    const reader = new CarrierStoreReader(dir);
+    const reader = new DiskCarrierStoreReader(dir);
     expect(reader.readyFile("d:/ws/a/src/A.vue.tsx")?.content_hash).toBe("a1");
     expect(reader.readyFile("d:/ws/b/src/B.svelte.tsx")?.content_hash).toBe("b1");
     expect(reader.readyIdeCompanions().sort()).toEqual([
@@ -415,9 +415,9 @@ describe("CarrierStoreReader project scoping (no cross-tsconfig leak)", () => {
     const dir = track(makeStore(twoProjectManifest()));
     // tsserver may hand `getProjectName()` back with backslashes or a different
     // drive-letter case than the Rust-written manifest key — both still resolve.
-    const readerBackslash = new CarrierStoreReader(dir, "d:\\ws\\a\\tsconfig.json");
+    const readerBackslash = new DiskCarrierStoreReader(dir, "d:\\ws\\a\\tsconfig.json");
     expect(readerBackslash.readyFile("d:/ws/a/src/A.vue.tsx")?.content_hash).toBe("a1");
-    const readerUpperDrive = new CarrierStoreReader(dir, "D:/ws/a/tsconfig.json");
+    const readerUpperDrive = new DiskCarrierStoreReader(dir, "D:/ws/a/tsconfig.json");
     expect(readerUpperDrive.readyFile("d:/ws/a/src/A.vue.tsx")?.content_hash).toBe("a1");
     // The case-fold must NOT collapse distinct projects: project A's reader
     // still cannot see project B's carrier.
@@ -426,7 +426,7 @@ describe("CarrierStoreReader project scoping (no cross-tsconfig leak)", () => {
 
   it("an unknown project key resolves to an EMPTY scope (fail closed)", () => {
     const dir = track(makeStore(twoProjectManifest()));
-    const reader = new CarrierStoreReader(dir, "d:/ws/unknown/tsconfig.json");
+    const reader = new DiskCarrierStoreReader(dir, "d:/ws/unknown/tsconfig.json");
     expect(reader.readyIdeCompanions()).toEqual([]);
     expect(reader.readyFile("d:/ws/a/src/A.vue.tsx")).toBeUndefined();
   });

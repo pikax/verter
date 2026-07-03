@@ -1,12 +1,22 @@
 import fs from "node:fs";
 import path from "node:path";
-import { carrierSourceToCompanion, normalizePath } from "./utils";
+import {
+  carrierSourceToCompanion,
+  normalizePath,
+  type CarrierStoreReader,
+  type Manifest,
+  type OwnedSource,
+  type ProjectEntry,
+  type ReadyFile,
+} from "@verter/language-shared";
 
 /**
- * The synchronous reader over the Rust-published on-disk content-addressed
- * carrier-snapshot store + atomic manifest. This is the SOLE module in the
- * plugin that touches the store filesystem; every host hook reads carriers
- * through it.
+ * The NODE ADAPTER of the shared [`CarrierStoreReader`] interface: a
+ * synchronous `node:fs` reader over the Rust-published on-disk
+ * content-addressed carrier-snapshot store + atomic manifest. The interface
+ * (and the manifest value types) live in `@verter/language-shared`; this is
+ * the SOLE module in the plugin that touches the store filesystem — every
+ * host hook reads carriers through it.
  *
  * The Rust `verter_lsp` is the sole carrier authority — it compiles every
  * framework carrier (`.vue`/`.svelte`) and publishes the result to this store
@@ -64,57 +74,6 @@ import { carrierSourceToCompanion, normalizePath } from "./utils";
  * manifest names has its blob present on disk, so a blob read for a ready file
  * never observes a half-written file.
  */
-
-/** The carrier role as serialized in the manifest. */
-export type ManifestRole = "CarrierIde" | "CarrierApi" | "Shadow" | "Real";
-
-/** The TypeScript script kind as serialized in the manifest. */
-export type ManifestScriptKind = "TSX" | "TS" | "JSX" | "JS";
-
-/**
- * One entry in a project's `owned_sources`: the full project-owned carrier set,
- * known the moment ownership resolves (BEFORE any content is published). A
- * source is advertised to tsserver only once it appears in `ready_files`.
- */
-export interface OwnedSource {
-  source_uri: string;
-  provider_uri: string;
-  role: ManifestRole;
-  script_kind: ManifestScriptKind;
-}
-
-/**
- * One entry in a project's `ready_files`: a `provider_uri` whose content blob
- * write has SUCCEEDED. Carries the content-addressed blob/map relative paths so
- * the reader reads the exact bytes the carrier's offsets/maps were produced
- * against.
- */
-export interface ReadyFile {
-  content_hash: string;
-  version: number;
-  script_kind: ManifestScriptKind;
-  role: ManifestRole;
-  map_hash: string;
-  /** `blobs/blake3-<content_hash_hex>.<ext>` — relative to the store dir. */
-  blob_rel: string;
-  /** `maps/blake3-<map_hash_hex>.json` — relative to the store dir; absent when no map. */
-  map_rel?: string;
-}
-
-/** One project's manifest entry: its owned carrier set plus the ready subset. */
-export interface ProjectEntry {
-  owned_sources: OwnedSource[];
-  /** Keyed by `provider_uri`. */
-  ready_files: Record<string, ReadyFile>;
-}
-
-/** The atomic manifest. `epoch` is monotonic across every publish to this store. */
-export interface Manifest {
-  epoch: number;
-  host_version: string;
-  /** Keyed by `project_uri` (the owning tsconfig URI). */
-  projects: Record<string, ProjectEntry>;
-}
 
 /** The plugin-config / environment keys carrying the resolved store dir. */
 export const CARRIER_STORE_DIR_CONFIG_KEY = "carrierStoreDir";
@@ -196,8 +155,9 @@ interface ManifestStat {
 }
 
 /**
- * The synchronous store reader. Constructed once per plugin `create` with the
- * resolved store dir; an `undefined` dir means the store is unavailable and
+ * The synchronous DISK store reader — the node adapter implementing the shared
+ * [`CarrierStoreReader`] interface. Constructed once per plugin `create` with
+ * the resolved store dir; an `undefined` dir means the store is unavailable and
  * every accessor is a no-op (fail closed).
  *
  * The reader is PROJECT-SCOPED. The plugin's `create(info)` is per configured
@@ -210,7 +170,7 @@ interface ManifestStat {
  * tsconfig. An UNSCOPED reader (`projectKey` omitted) consults every project —
  * used only by call sites that legitimately span projects.
  */
-export class CarrierStoreReader {
+export class DiskCarrierStoreReader implements CarrierStoreReader {
   private readonly storeDir: string | undefined;
   private readonly manifestPath: string | undefined;
   /**

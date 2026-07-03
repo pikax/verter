@@ -144,7 +144,7 @@ interface HostBinding {
   listVirtualFiles(canonicalId: string): HostVirtualNodeKind[];
   getAnalysis?(canonicalOrAlias: string): FileAnalysis | null;
   getIde?(canonicalId: string, profile?: HostCompileProfile): HostIdeResponse | null;
-  getPublicApi?(canonicalId: string): HostIdeResponse | null;
+  getPublicApi?(canonicalId: string, mode?: "public" | "declaration"): HostIdeResponse | null;
   lint?(canonicalOrAlias: string, config?: unknown): LintDiagnostic[];
   getCodeActions?(canonicalOrAlias: string, offset: number): HostCodeAction[];
   getLintRuleMetadata?(): HostLintRuleMetadata[];
@@ -725,19 +725,27 @@ function compileVueRenderAssembly(
     applyTsxOutput(file, null);
   }
 
-  // Retrieve public API output (minimal .d.ts declarations)
+  // Retrieve public API output (minimal .d.ts declarations) + the
+  // declaration-carrier surface (getPublicApi(id, "declaration")).
   let tscMs: number | null = null;
   if (typeof wasmHost!.getPublicApi === "function") {
     try {
       const t0 = performance.now();
       const tsc = wasmHost!.getPublicApi(file.filename);
+      const decl = wasmHost!.getPublicApi(file.filename, "declaration");
       tscMs = performance.now() - t0;
       file.compiled.tscCode = tsc?.code ?? "";
+      file.compiled.declCode = decl?.code ?? "";
+      file.compiled.declSourceMap = decl?.sourceMap ?? "";
     } catch {
       file.compiled.tscCode = "";
+      file.compiled.declCode = "";
+      file.compiled.declSourceMap = "";
     }
   } else {
     file.compiled.tscCode = "";
+    file.compiled.declCode = "";
+    file.compiled.declSourceMap = "";
   }
 
   // SSR compilation pass: when SSR is toggled on, compile again with ssr: true
@@ -887,13 +895,20 @@ function compileGenericFrameworkSurfaces(
     try {
       const t0 = performance.now();
       const tsc = wasmHost!.getPublicApi(file.filename);
+      const decl = wasmHost!.getPublicApi(file.filename, "declaration");
       tscMs = performance.now() - t0;
       file.compiled.tscCode = tsc?.code ?? "";
+      file.compiled.declCode = decl?.code ?? "";
+      file.compiled.declSourceMap = decl?.sourceMap ?? "";
     } catch {
       file.compiled.tscCode = "";
+      file.compiled.declCode = "";
+      file.compiled.declSourceMap = "";
     }
   } else {
     file.compiled.tscCode = "";
+    file.compiled.declCode = "";
+    file.compiled.declSourceMap = "";
   }
 
   return {
@@ -982,16 +997,23 @@ function compileTsWithHost(
     applyTsxOutput(file, null);
   }
 
-  // Public API output for TS-only mode
+  // Public API output for TS-only mode (+ the declaration surface)
   if (typeof wasmHost!.getPublicApi === "function") {
     try {
       const tsc = wasmHost!.getPublicApi(vueFilename);
+      const decl = wasmHost!.getPublicApi(vueFilename, "declaration");
       file.compiled.tscCode = tsc?.code ?? "";
+      file.compiled.declCode = decl?.code ?? "";
+      file.compiled.declSourceMap = decl?.sourceMap ?? "";
     } catch {
       file.compiled.tscCode = "";
+      file.compiled.declCode = "";
+      file.compiled.declSourceMap = "";
     }
   } else {
     file.compiled.tscCode = "";
+    file.compiled.declCode = "";
+    file.compiled.declSourceMap = "";
   }
 
   return {

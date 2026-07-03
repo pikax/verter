@@ -302,9 +302,6 @@ export function useStore(): Store {
         verterVersion.value = savedState.verterVersion;
         // Version switch will happen after init compilers are ready
       }
-      if (savedState.typeChecker) {
-        typeChecker.value = savedState.typeChecker;
-      }
       // Restore the framework pin only if it names a registered framework;
       // an invalid / stale id is ignored (falls back to Auto).
       if (savedState.language && frameworkById(savedState.language)) {
@@ -389,7 +386,6 @@ export function useStore(): Store {
         },
         vueVersion: extractVueVersion(importMap),
         verterVersion: verterVersion.value,
-        typeChecker: typeChecker.value,
         language: languagePin.value ?? undefined,
       }),
       (state) => {
@@ -561,7 +557,6 @@ export function useStore(): Store {
       },
       vueVersion: extractVueVersion(importMap) ?? undefined,
       verterVersion: verterVersion.value,
-      typeChecker: typeChecker.value,
       language: languagePin.value ?? undefined,
     };
   }
@@ -609,7 +604,6 @@ export function useStore(): Store {
     }
     if (state.importMap?.imports) Object.assign(importMap.imports, state.importMap.imports);
     if (state.importMap?.scopes) importMap.scopes = state.importMap.scopes;
-    if (state.typeChecker) typeChecker.value = state.typeChecker;
 
     currentProjectName.value = name;
     clearTsxOverride();

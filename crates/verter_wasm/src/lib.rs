@@ -255,6 +255,31 @@ pub struct WasmVerterHost {
     inner: std::sync::Arc<host::VerterHost>,
 }
 
+impl WasmVerterHost {
+    /// The JsValue-free core of [`Self::get_public_api`]: parses the
+    /// optional mode string through the shared FFI seam
+    /// (`ffi_public_api_mode_to_host` — the same allow-list the NAPI
+    /// binding uses) and routes it into the host's
+    /// `get_public_api_with_mode`. Split out so host-target unit tests
+    /// exercise the export's mode plumbing without a WASM runtime.
+    fn public_api_with_mode(
+        &self,
+        canonical_id: &str,
+        mode: Option<&str>,
+    ) -> Result<Option<FfiIdeResponse>, FfiConversionError> {
+        let mode = ffi_public_api_mode_to_host(mode)?;
+        Ok(self
+            .inner
+            .get_public_api_with_mode(canonical_id, mode, None)
+            .map(|r| FfiIdeResponse {
+                code: r.code.to_string(),
+                source_map: r.source_map.map(|s| s.to_string()),
+                is_jsx: false,
+                destructured_block: None,
+            }))
+    }
+}
+
 #[wasm_bindgen(js_class = VerterHost)]
 impl WasmVerterHost {
     /// Creates a new `VerterHost` with the given configuration.
@@ -487,16 +512,23 @@ impl WasmVerterHost {
     /// Generates a minimal TypeScript declaration file for a Vue SFC.
     /// Unlike `getIde`, this does NOT require a prior compilation pass.
     ///
+    /// `mode` selects the served surface: `"public"` (default when absent /
+    /// `undefined`) — the application-facing instance shape; `"testing"` —
+    /// the Vue Test Utils-like debug surface exposing `<script setup>`
+    /// bindings; `"declaration"` — the declaration-only (`.d.<ext>.ts`)
+    /// public surface (a valid `.d.ts` with no runtime/value code). An
+    /// unknown mode string throws.
+    ///
     /// Returns `{ code: string, sourceMap?: string, isJsx: boolean }` or `null`.
     #[wasm_bindgen(js_name = getPublicApi)]
-    pub fn get_public_api(&self, canonical_id: &str) -> Result<JsValue, JsValue> {
-        let result = catch_panic(|| self.inner.get_public_api(canonical_id))?;
-        to_wasm_value(&result.map(|r| FfiIdeResponse {
-            code: r.code.to_string(),
-            source_map: r.source_map.map(|s| s.to_string()),
-            is_jsx: false,
-            destructured_block: None,
-        }))
+    pub fn get_public_api(
+        &self,
+        canonical_id: &str,
+        mode: Option<String>,
+    ) -> Result<JsValue, JsValue> {
+        let result = catch_panic(|| self.public_api_with_mode(canonical_id, mode.as_deref()))?
+            .map_err(ffi_err)?;
+        to_wasm_value(&result)
     }
 
     /// Runs cross-file analysis and returns prop constness optimizations.
@@ -1383,6 +1415,135 @@ fn build_selector_match_results(
 #[cfg(test)]
 mod tests {
     use super::lint_diagnostics_to_utf16;
+    use super::{host, FfiConversionError, WasmVerterHost};
+
+    /// A WASM host preloaded with a Vue SFC whose props type lives in a
+    /// sibling `.ts` file — the same fixture shape the verter_session
+    /// public-API mode pins use, exercised here through the WASM binding's
+    /// JsValue-free plumbing core.
+    fn public_api_mode_fixture_host() -> WasmVerterHost {
+        let wasm_host = WasmVerterHost {
+            inner: std::sync::Arc::new(host::VerterHost::new_standalone(
+                host::HostConfig::default(),
+            )),
+        };
+        let _ = wasm_host
+            .inner
+            .upsert(host::UpsertRequest {
+                canonical_id: None,
+                input_id: "/src/Cap.vue".to_string(),
+                source: std::sync::Arc::from(
+                    "<script setup lang=\"ts\">\nimport type { CapProps } from './cap-types';\nconst count = 1;\ndefineProps<CapProps>();\n</script>\n<template><div>{{ count }}</div></template>",
+                ),
+                file_language: host::FileLanguage::vue(),
+                aliases: Vec::new(),
+            })
+            .expect("upsert Cap.vue");
+        let _ = wasm_host
+            .inner
+            .upsert(host::UpsertRequest {
+                canonical_id: None,
+                input_id: "/src/cap-types.ts".to_string(),
+                source: std::sync::Arc::from(
+                    "export interface CapProps { label: string; n: number }\n",
+                ),
+                file_language: host::FileLanguage::script_ts(),
+                aliases: Vec::new(),
+            })
+            .expect("upsert cap-types.ts");
+        wasm_host
+    }
+
+    /// The `getPublicApi` WASM export's mode plumbing routes
+    /// `"declaration"` to `PublicApiMode::Declaration` (the
+    /// declaration-only `.d.<ext>.ts` surface), keeps `"public"` /
+    /// absent on the runtime-instance surface, and rejects an unknown
+    /// mode with a typed error. Runs on the host target through
+    /// [`WasmVerterHost::public_api_with_mode`] — the JsValue-free core
+    /// the `#[wasm_bindgen]` export delegates to. DISCRIMINATING: the
+    /// pre-change export took no mode argument and hardcoded Public, so
+    /// this test does not compile against the old binding.
+    #[test]
+    fn public_api_mode_plumbing_routes_declaration_distinct_from_public() {
+        let wasm_host = public_api_mode_fixture_host();
+
+        let decl = wasm_host
+            .public_api_with_mode("/src/Cap.vue", Some("declaration"))
+            .expect("the WASM plumbing must accept mode 'declaration'")
+            .expect("declaration-mode output for a Vue SFC");
+        let public = wasm_host
+            .public_api_with_mode("/src/Cap.vue", Some("public"))
+            .expect("mode 'public' stays accepted")
+            .expect("public-mode output for a Vue SFC");
+        let absent = wasm_host
+            .public_api_with_mode("/src/Cap.vue", None)
+            .expect("absent mode stays accepted")
+            .expect("default-mode output for a Vue SFC");
+
+        // Declaration-specific shape: a valid `.d.ts` — declares the
+        // component value, carries NO runtime/value code.
+        assert!(
+            decl.code.contains("declare const Cap"),
+            "declaration output declares the component value, got:\n{}",
+            decl.code
+        );
+        assert!(
+            decl.code.contains("export default Cap"),
+            "declaration output default-exports the component, got:\n{}",
+            decl.code
+        );
+        assert!(
+            !decl.code.contains("const __comp"),
+            "declaration output must not carry the runtime __comp const, got:\n{}",
+            decl.code
+        );
+        assert!(
+            !decl.code.contains("defineComponent("),
+            "declaration output must not call defineComponent, got:\n{}",
+            decl.code
+        );
+        // Control: the public surface DOES carry the runtime const, so the
+        // negative assertions above discriminate mode routing (plumbing
+        // that silently served Public for "declaration" fails here).
+        assert!(
+            public.code.contains("const __comp = defineComponent"),
+            "public output keeps the runtime __comp const (control), got:\n{}",
+            public.code
+        );
+        assert_ne!(
+            decl.code, public.code,
+            "declaration-mode output must differ from public-mode output"
+        );
+        // Backward compat: the modeless call (existing zero-mode JS
+        // callers -> `undefined` -> `None`) still serves Public.
+        assert_eq!(
+            absent.code, public.code,
+            "absent mode must serve the Public surface (backward-compatible)"
+        );
+
+        // An unknown mode is a typed rejection, never a silent default.
+        let err = match wasm_host.public_api_with_mode("/src/Cap.vue", Some("bogus")) {
+            Err(e) => e,
+            Ok(_) => panic!("an unknown mode must be rejected, not silently defaulted"),
+        };
+        assert!(
+            matches!(err, FfiConversionError::InvalidPublicApiMode(ref s) if s == "bogus"),
+            "an unknown mode must produce InvalidPublicApiMode, got {err:?}"
+        );
+    }
+
+    /// Compile-time pin: the `#[wasm_bindgen]` `getPublicApi` export
+    /// itself carries the OPTIONAL mode argument (the generated JS glue
+    /// gets `mode?: string`, and an absent JS arg arrives as `None`).
+    /// Fails to compile against the old one-argument export.
+    #[test]
+    fn wasm_get_public_api_export_accepts_optional_mode_argument() {
+        let _pin: fn(
+            &WasmVerterHost,
+            &str,
+            Option<String>,
+        ) -> Result<wasm_bindgen::JsValue, wasm_bindgen::JsValue> = WasmVerterHost::get_public_api;
+    }
 
     #[test]
     fn lint_utf16_conversion_uses_shared_ffi_helper() {

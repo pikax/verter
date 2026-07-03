@@ -6,20 +6,21 @@
 // Verter is one shared, carrier-generic substrate. A `.vue` SFC and a `.svelte`
 // component are both framework CARRIERS. The carrier-generic predicates ALREADY
 // EXIST and are the SANCTIONED replacement:
-//   - `isVue(fileName)` / `carrierFor(...)` (manifest-derived, in
-//     `helpers/utils.ts` — backed by the generated virtual-file-naming column),
+//   - `isVue(fileName)` / `carrierFor(...)` (manifest-derived, in the
+//     `@verter/language-shared` carrier naming CORE — backed by the generated
+//     byte-pinned virtual-file-naming column mirror),
 //   - the suffix helpers (`stripVueVirtualSuffix`, `getVueVirtualFileInfo`,
 //     `cleanupCarrierVirtualImportPath`) which generalise over every carrier.
 // A Vue-only `.endsWith(".vue")` path classifier or a `.vue.ts`/`.vue.d.ts`
 // virtual-suffix literal used as a GATE silently strands `.svelte` below parity.
 //
-// This guard reads every `src/**/*.ts` in this package (skipping `*.spec.ts`,
-// `*.test.ts`, and `generated/**`), strips comments, and FAILS on any literal
-// carrier GATE outside a NARROW allowlist of files that legitimately carry
-// carrier/Vue string data (the helper that DEFINES the carrier table, and the
-// `verterTypesStub.ts` Vue-runtime type import). Calling `isVue(...)` /
-// `carrierFor(...)` is NEVER flagged — the guard targets literal `.vue`/`"vue"`
-// GATES, not the helper identifiers.
+// This guard reads every `src/**/*.ts` in this package (skipping `*.spec.ts`
+// and `*.test.ts`), strips comments, and FAILS on any literal carrier GATE
+// outside a NARROW allowlist of files that legitimately carry carrier/Vue
+// string data (the `verterTypesStub.ts` Vue-runtime type import; the carrier
+// table itself lives in `@verter/language-shared`, outside this package).
+// Calling `isVue(...)` / `carrierFor(...)` is NEVER flagged — the guard
+// targets literal `.vue`/`"vue"` GATES, not the helper identifiers.
 
 import { describe, expect, it } from "vitest";
 import { readdirSync, readFileSync, statSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
@@ -32,18 +33,17 @@ const SRC_ROOT = join(__dirname);
 /**
  * Files that legitimately carry carrier/Vue string data and are excluded WHOLE
  * (relative to `src`, POSIX-normalised). These are NOT routing gates:
- *   - `helpers/utils.ts` DEFINES `isVue`/`carrierFor`/the carrier suffix table
- *     and the manifest-derived virtual-suffix regexes.
  *   - `helpers/verterTypesStub.ts` holds `import ... from "vue"` (the Vue
  *     runtime package type import).
- * (`generated/**` — the byte-pinned manifest mirror — is excluded by prefix.)
+ * The carrier suffix table (`isVue`/`carrierFor`/the manifest-derived
+ * virtual-suffix regexes) and the byte-pinned naming-column mirror live in
+ * `@verter/language-shared`, outside this package's scan root.
  */
-const ALLOWLISTED_FILES = new Set<string>(["helpers/utils.ts", "helpers/verterTypesStub.ts"]);
+const ALLOWLISTED_FILES = new Set<string>(["helpers/verterTypesStub.ts"]);
 
 /** Whether a `src`-relative POSIX path is excluded from the scan. */
 function isExcludedFile(relPosix: string): boolean {
   if (relPosix.endsWith(".spec.ts") || relPosix.endsWith(".test.ts")) return true;
-  if (relPosix === "generated" || relPosix.startsWith("generated/")) return true;
   if (ALLOWLISTED_FILES.has(relPosix)) return true;
   return false;
 }
@@ -56,8 +56,6 @@ function collectTsFiles(dir: string): string[] {
       const abs = join(current, name);
       const relPosix = relative(SRC_ROOT, abs).split(sep).join("/");
       if (statSync(abs).isDirectory()) {
-        // Skip an excluded directory prefix (e.g. `generated/`) entirely.
-        if (relPosix === "generated" || relPosix.startsWith("generated/")) continue;
         walk(abs);
         continue;
       }
@@ -290,7 +288,7 @@ describe("carrier-routing guard: no hardcoded Vue gate in @verter/typescript-plu
     expect(files.some((f) => f.endsWith(join("src", "index.ts")))).toBe(true);
   });
 
-  it("contains no hardcoded `.vue`/`\"vue\"` routing gate in carrier-neutral code", () => {
+  it('contains no hardcoded `.vue`/`"vue"` routing gate in carrier-neutral code', () => {
     const files = collectTsFiles(SRC_ROOT);
     const violations = files.flatMap(fileViolations);
     const rendered = violations.map((v) => `${v.file}:${v.line}: ${v.text}`).join("\n  ");
@@ -300,12 +298,14 @@ describe("carrier-routing guard: no hardcoded Vue gate in @verter/typescript-plu
         `Vue-only \`.vue\`/\`"vue"\` gate over carrier-NEUTRAL data. A \`.vue\` SFC and a\n` +
         `\`.svelte\` component are both framework CARRIERS — route through the\n` +
         `carrier-generic helpers instead:\n` +
-        `  - \`isVue(fileName)\` / \`carrierFor(...)\` (manifest-derived, helpers/utils.ts),\n` +
+        `  - \`isVue(fileName)\` / \`carrierFor(...)\` (manifest-derived, from\n` +
+        `    \`@verter/language-shared\`),\n` +
         `  - \`stripVueVirtualSuffix\` / \`getVueVirtualFileInfo\` /\n` +
         `    \`cleanupCarrierVirtualImportPath\` for the carrier virtual suffixes.\n` +
-        `Allowlisted ONLY: helpers/utils.ts (defines the table), generated/** (the\n` +
-        `manifest mirror), helpers/verterTypesStub.ts (the Vue-runtime import), and\n` +
-        `the Vue-runtime npm import filter (\`!== "vue" && startsWith("vue/")\`).\n\n` +
+        `Allowlisted ONLY: helpers/verterTypesStub.ts (the Vue-runtime import) and\n` +
+        `the Vue-runtime npm import filter (\`!== "vue" && startsWith("vue/")\`).\n` +
+        `(The carrier table + byte-pinned naming mirror live in\n` +
+        `\`@verter/language-shared\`, outside this package.)\n\n` +
         `Violations:\n  ${rendered}`,
     ).toHaveLength(0);
   });
@@ -350,7 +350,9 @@ describe("carrier-routing guard: no hardcoded Vue gate in @verter/typescript-plu
 
   it("does not flag comments, the Vue-runtime import, the npm import filter, or a display label", () => {
     // Comments mentioning `.vue` / `"vue"` are stripped.
-    expect(lineGateKind(stripComment('// only .vue files count, e.g. languageId === "vue"'))).toBeNull();
+    expect(
+      lineGateKind(stripComment('// only .vue files count, e.g. languageId === "vue"')),
+    ).toBeNull();
     expect(
       lineGateKind(stripComment("/** Matches the testing-API virtual file (`*.vue.ts`). */")),
     ).toBeNull();
@@ -360,11 +362,17 @@ describe("carrier-routing guard: no hardcoded Vue gate in @verter/typescript-plu
     // The Vue-runtime npm-package import filter (`!== "vue" && startsWith("vue/")`)
     // is intrinsic and allowlisted.
     expect(
-      lineGateKind(stripComment('if (imp.source !== "vue" && !imp.source.startsWith("vue/")) continue;')),
+      lineGateKind(
+        stripComment('if (imp.source !== "vue" && !imp.source.startsWith("vue/")) continue;'),
+      ),
     ).toBeNull();
     // A bare display-label string carrying `.vue.ts` (a tree-item label) is NOT
     // a classifier/gate — it must not flag.
-    expect(lineGateKind(stripComment('const label = element.kind === "api" ? "API (d.vue.ts)" : element.kind;'))).toBeNull();
+    expect(
+      lineGateKind(
+        stripComment('const label = element.kind === "api" ? "API (d.vue.ts)" : element.kind;'),
+      ),
+    ).toBeNull();
     expect(lineGateKind(stripComment('return "API (d.vue.ts)";'))).toBeNull();
   });
 

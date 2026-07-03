@@ -327,7 +327,7 @@ export interface NativeBlockOverrideRequest {
   overrides: NativeBlockOverrideEntry[];
 }
 
-export type HostPublicApiMode = "public" | "testing";
+export type HostPublicApiMode = "public" | "testing" | "declaration";
 
 // =============================================================================
 // Workspace (filesystem-backed VFS)

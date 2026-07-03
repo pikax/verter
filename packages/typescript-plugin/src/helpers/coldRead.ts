@@ -1,4 +1,4 @@
-import type { CarrierStoreReader, ReadyFile } from "./carrierStore";
+import type { CarrierStoreReader, ReadyFile } from "@verter/language-shared";
 
 /**
  * The hard cap on a cold-read bounded-block, in milliseconds. A path the plugin

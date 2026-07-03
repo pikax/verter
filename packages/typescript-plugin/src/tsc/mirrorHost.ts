@@ -70,7 +70,7 @@ import path from "node:path";
 import { SourceMap } from "node:module";
 import type * as TS from "typescript";
 
-import { VIRTUAL_FILE_NAMING, type VirtualPathPolicy } from "../generated/virtual-file-naming";
+import { VIRTUAL_FILE_NAMING, type VirtualPathPolicy } from "@verter/language-shared";
 
 /**
  * The component-carrier source extensions (`.vue`, `.svelte`), derived from the
@@ -118,10 +118,15 @@ export interface CarrierCodegenHost {
     canonicalId: string,
     profile?: { target?: "bundler" | "ide" | "analysis"; sourceMap?: boolean },
   ): { code: string; sourceMap?: string; isJsx: boolean } | null;
-  /** The API/declaration carrier (`.verter.ts`) content + map for referenced projects. */
+  /**
+   * The API (`.verter.ts`) / declaration (`.d.<ext>.ts`) carrier content + map
+   * for referenced projects. Mirrors `@verter/native`'s `HostPublicApiMode`
+   * (`"public" | "testing" | "declaration"`) so the mirror host can express
+   * the declaration-carrier mode.
+   */
   getPublicApi(
     canonicalId: string,
-    mode?: "public" | "testing",
+    mode?: "public" | "testing" | "declaration",
   ): { code: string; sourceMap?: string } | null;
   /** Release host resources before the process exits (prevents hangs). */
   close?(): void;

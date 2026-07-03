@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { coldResolveCompanion, COLD_READ_BLOCK_CAP_MS } from "./coldRead";
-import type { CarrierStoreReader, ReadyFile } from "./carrierStore";
+import type { CarrierStoreReader, ReadyFile } from "@verter/language-shared";
 
 /**
  * A minimal in-memory stand-in for `CarrierStoreReader` exposing only the two

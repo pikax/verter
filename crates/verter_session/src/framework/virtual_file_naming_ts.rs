@@ -4,10 +4,10 @@
 //! The Rust [`FrameworkAdapterDescriptor`] table (the
 //! [`VirtualFileNaming`] column) is the SINGLE authority for an adapter's
 //! IDE / API / testing-API / sidecar virtual-file suffixes. The committed
-//! TypeScript module `packages/typescript-plugin/src/generated/virtual-file-naming.ts`
-//! is a GENERATED, BYTE-PINNED mirror of that column — the LSP / ts-plugin
-//! naming derivations consume it (the consumer rewiring is a later
-//! vertical; this lands the column + the mirror + the freshness pin).
+//! TypeScript module `packages/language-shared/src/virtual-file-naming.generated.ts`
+//! is a GENERATED, BYTE-PINNED mirror of that column — the browser-safe
+//! `@verter/language-shared` carrier-naming CORE derives from it, and the
+//! Node ts-plugin / LSP naming derivations consume that one CORE.
 //!
 //! [`render_virtual_file_naming_ts`] renders the canonical TS module text
 //! from the descriptor rows; the freshness test
@@ -23,7 +23,7 @@ use crate::framework::descriptor::{
 /// The committed path of the generated mirror, relative to the workspace
 /// root. The freshness test and any regen path reference this one place.
 pub const VIRTUAL_FILE_NAMING_TS_PATH: &str =
-    "packages/typescript-plugin/src/generated/virtual-file-naming.ts";
+    "packages/language-shared/src/virtual-file-naming.generated.ts";
 
 /// Every adapter descriptor that carries a virtual-file naming column, in
 /// a deterministic order. Adding an adapter row here (and regenerating)

@@ -48,13 +48,17 @@ adapter's virtual-file suffixes (`IdeSuffixPolicy` is the closed
 `Fixed` / `JsxConditional` pair). The structural rule
 `testing_api_suffix.is_some() ⇒ api_suffix.is_some()` holds (a testing-API
 file is a mode of the API file). The committed TS mirror
-`packages/typescript-plugin/src/generated/virtual-file-naming.ts` is
+`packages/language-shared/src/virtual-file-naming.generated.ts` is
 RENDERED from this column (`render_virtual_file_naming_ts`) and BYTE-PINNED
 by `virtual_file_naming_ts_freshness` (regen path under
-`VERTER_UPDATE_VIRTUAL_FILE_NAMING_TS`). The LSP / ts-plugin naming
-derivations are CONSUMERS of the column; consumer rewiring is a later
-vertical, but the column + mirror + freshness pin land here so the two
-cannot drift.
+`VERTER_UPDATE_VIRTUAL_FILE_NAMING_TS`). The mirror lives in the
+browser-safe `@verter/language-shared` package, whose carrier naming CORE
+(`packages/language-shared/src/carrier/naming.ts` — `isVue`, `carrierFor`,
+`toIdeCarrierFileName`, `toDeclarationCarrierFileName`, the virtual-suffix
+strip/cleanup helpers) derives every naming rule from it; the Node
+tsserver plugin and the WASM in-context LanguageService both consume that
+ONE implementation, so the column, the mirror, and the consumers cannot
+drift.
 
 ### Client framework manifest (de-Vue-forked client wiring)
 

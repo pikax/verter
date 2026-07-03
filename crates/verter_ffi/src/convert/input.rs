@@ -146,6 +146,26 @@ pub fn ffi_compile_cache_mode_to_host(
     }
 }
 
+/// Parse a `getPublicApi` mode string to the host [`host::PublicApiMode`].
+/// An absent mode defaults to `Public` (backward-compatible with the
+/// existing modeless callers); an unknown string is a typed error, never a
+/// silent default. Exposed for the NAPI / WASM `getPublicApi` bindings —
+/// the ONE shared allow-list, so the two bindings cannot diverge on which
+/// mode strings they accept.
+pub fn ffi_public_api_mode_to_host(
+    mode: Option<&str>,
+) -> Result<host::PublicApiMode, FfiConversionError> {
+    let Some(mode) = mode else {
+        return Ok(host::PublicApiMode::Public);
+    };
+    match mode.to_ascii_lowercase().as_str() {
+        "public" => Ok(host::PublicApiMode::Public),
+        "testing" => Ok(host::PublicApiMode::Testing),
+        "declaration" => Ok(host::PublicApiMode::Declaration),
+        other => Err(FfiConversionError::InvalidPublicApiMode(other.to_string())),
+    }
+}
+
 /// Convert a target string to `CompileTarget` bitflags.
 pub(super) fn ffi_target_to_compile_target(
     target: &str,

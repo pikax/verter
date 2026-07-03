@@ -1755,6 +1755,13 @@ impl NapiVerterHost {
     /// defineOptions) and generates a `ComponentPublicInstance`-based declaration
     /// with inline source map. This is the fast path for IDE type checking.
     ///
+    /// `mode` selects the served surface: `"public"` (default when absent) —
+    /// the application-facing instance shape; `"testing"` — the Vue Test
+    /// Utils-like debug surface exposing `<script setup>` bindings;
+    /// `"declaration"` — the declaration-only (`.d.<ext>.ts`) public surface
+    /// (a valid `.d.ts` with no runtime/value code). An unknown mode string
+    /// is rejected with `InvalidArg`.
+    ///
     /// Returns `{ code, sourceMap? }` or `null` if no TSC output is available.
     #[napi(js_name = "getPublicApi")]
     pub fn get_public_api(
@@ -1762,15 +1769,7 @@ impl NapiVerterHost {
         canonical_id: String,
         mode: Option<String>,
     ) -> Result<Option<NapiTscResponse>> {
-        let mode = match mode.as_deref() {
-            None | Some("public") => host::PublicApiMode::Public,
-            Some("testing") => host::PublicApiMode::Testing,
-            Some(other) => {
-                return Err(ffi_err(format!(
-                    "invalid public api mode '{other}', expected 'public' or 'testing'"
-                )));
-            }
-        };
+        let mode = ffi_public_api_mode_to_host(mode.as_deref()).map_err(ffi_err)?;
         let result = catch_panic(std::panic::AssertUnwindSafe(|| {
             self.inner
                 .get_public_api_with_mode(&canonical_id, mode, None)
@@ -3201,4 +3200,140 @@ mod tests {
     // host-backed batch path is fully exercised by the host_compile
     // tests in verter_session and the JS-side E2E tests in
     // packages/native/index.spec.ts.
+
+    /// A NAPI host preloaded with a Vue SFC whose props type lives in a
+    /// sibling `.ts` file — the same fixture shape the verter_session
+    /// public-API mode pins use, exercised here THROUGH the NAPI binding.
+    fn public_api_mode_fixture_host() -> NapiVerterHost {
+        let napi_host = NapiVerterHost {
+            inner: std::sync::Arc::new(host::VerterHost::new_standalone(
+                host::HostConfig::default(),
+            )),
+        };
+        let _ = napi_host
+            .inner
+            .upsert(host::UpsertRequest {
+                canonical_id: None,
+                input_id: "/src/Cap.vue".to_string(),
+                source: std::sync::Arc::from(
+                    "<script setup lang=\"ts\">\nimport type { CapProps } from './cap-types';\nconst count = 1;\ndefineProps<CapProps>();\n</script>\n<template><div>{{ count }}</div></template>",
+                ),
+                file_language: host::FileLanguage::vue(),
+                aliases: Vec::new(),
+            })
+            .expect("upsert Cap.vue");
+        let _ = napi_host
+            .inner
+            .upsert(host::UpsertRequest {
+                canonical_id: None,
+                input_id: "/src/cap-types.ts".to_string(),
+                source: std::sync::Arc::from(
+                    "export interface CapProps { label: string; n: number }\n",
+                ),
+                file_language: host::FileLanguage::script_ts(),
+                aliases: Vec::new(),
+            })
+            .expect("upsert cap-types.ts");
+        napi_host
+    }
+
+    /// The `getPublicApi` NAPI binding accepts `"declaration"` and routes
+    /// it to `PublicApiMode::Declaration` — the declaration-only
+    /// `.d.<ext>.ts` surface — while `"public"` keeps the runtime-instance
+    /// surface. DISCRIMINATING: the pre-change allow-list rejected
+    /// `"declaration"` at the binding boundary (InvalidArg), so this test
+    /// fails RED on the old binding even though the host already serves
+    /// `PublicApiMode::Declaration`.
+    #[test]
+    fn get_public_api_declaration_mode_is_accepted_and_distinct_from_public() {
+        let napi_host = public_api_mode_fixture_host();
+
+        let decl = napi_host
+            .get_public_api("/src/Cap.vue".to_string(), Some("declaration".to_string()))
+            .expect("the NAPI binding must accept mode 'declaration'")
+            .expect("declaration-mode output for a Vue SFC");
+        let public = napi_host
+            .get_public_api("/src/Cap.vue".to_string(), Some("public".to_string()))
+            .expect("mode 'public' stays accepted")
+            .expect("public-mode output for a Vue SFC");
+
+        // Declaration-specific shape: a valid `.d.ts` — declares the
+        // component value, carries NO runtime/value code.
+        assert!(
+            decl.code.contains("declare const Cap"),
+            "declaration output declares the component value, got:\n{}",
+            decl.code
+        );
+        assert!(
+            decl.code.contains("export default Cap"),
+            "declaration output default-exports the component, got:\n{}",
+            decl.code
+        );
+        assert!(
+            !decl.code.contains("const __comp"),
+            "declaration output must not carry the runtime __comp const, got:\n{}",
+            decl.code
+        );
+        assert!(
+            !decl.code.contains("defineComponent("),
+            "declaration output must not call defineComponent, got:\n{}",
+            decl.code
+        );
+        // Control: the public surface DOES carry the runtime const, so the
+        // negative assertions above discriminate mode routing (a binding
+        // that silently served Public for "declaration" fails here).
+        assert!(
+            public.code.contains("const __comp = defineComponent"),
+            "public output keeps the runtime __comp const (control), got:\n{}",
+            public.code
+        );
+        assert_ne!(
+            decl.code, public.code,
+            "declaration-mode output must differ from public-mode output"
+        );
+    }
+
+    /// Absent mode stays the Public surface (backward-compatible with the
+    /// existing modeless callers) and an unknown mode string is still a
+    /// typed `InvalidArg` rejection — never a silent default.
+    #[test]
+    fn get_public_api_mode_defaults_to_public_and_rejects_unknown() {
+        let napi_host = public_api_mode_fixture_host();
+
+        let absent = napi_host
+            .get_public_api("/src/Cap.vue".to_string(), None)
+            .expect("absent mode stays accepted")
+            .expect("default-mode output for a Vue SFC");
+        let public = napi_host
+            .get_public_api("/src/Cap.vue".to_string(), Some("public".to_string()))
+            .expect("mode 'public' stays accepted")
+            .expect("public-mode output for a Vue SFC");
+        assert_eq!(
+            absent.code, public.code,
+            "absent mode must serve the Public surface (backward-compatible)"
+        );
+
+        let err =
+            match napi_host.get_public_api("/src/Cap.vue".to_string(), Some("bogus".to_string())) {
+                Err(e) => e,
+                Ok(_) => panic!("an unknown mode must be rejected, not silently defaulted"),
+            };
+        assert_eq!(
+            err.status,
+            Status::InvalidArg,
+            "unknown mode maps to InvalidArg, got {:?}: {}",
+            err.status,
+            err.reason
+        );
+        assert!(
+            err.reason.contains("bogus"),
+            "the rejection names the offending mode string: {}",
+            err.reason
+        );
+        assert!(
+            err.reason.contains("declaration"),
+            "the rejection lists 'declaration' among the accepted modes: {}",
+            err.reason
+        );
+    }
 }

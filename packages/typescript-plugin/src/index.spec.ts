@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import ts from "typescript";
 import init from "./index";
-import type { Manifest } from "./helpers/carrierStore";
+import type { Manifest } from "@verter/language-shared";
 
 // ── fixture store ───────────────────────────────────────────────────────────
 
@@ -568,11 +568,15 @@ const MAPPABLE_MAP = JSON.stringify({
   names: [],
   mappings: "AAAA",
 });
+// gen (1,0) → src (W.svelte 2,0) — `AACA` = VLQ[0,0,1,0]: the companion's
+// script statement maps onto the source's `const bar = 1;` line (after the
+// `<script>` opener), so a token span maps end-to-end within one source line
+// under strict BOTH-endpoint span mapping.
 const SVELTE_MAP = JSON.stringify({
   version: 3,
   sources: ["d:/ws/src/W.svelte"],
   names: [],
-  mappings: "AAAA",
+  mappings: "AACA",
 });
 
 /**
@@ -678,6 +682,8 @@ describe("companion→source RESPONSE remap wiring (the new nav hooks)", () => {
     expect(locs).toHaveLength(1);
     expect(locs[0].fileName).toBe("d:/ws/src/W.svelte");
     expect(locs[0].fileName).not.toContain(".svelte.tsx");
+    // The rename span lands EXACTLY on `bar` inside the source's script line.
+    expect(locs[0].textSpan).toEqual({ start: 15, length: 3 });
   });
 
   it("getCodeFixesAtPosition: a companion file edit → source path; companion specifier → bare .vue", () => {

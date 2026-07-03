@@ -2058,6 +2058,48 @@ fn ffi_seam_invalid_requested_mode_is_rejected() {
     );
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// PublicApiMode parses through the ONE FFI seam BOTH the NAPI and WASM
+// `getPublicApi` bindings funnel through (a single shared allow-list, so
+// the two bindings can never diverge on which mode strings they accept).
+//
+// Discrimination: before the shared seam existed, `"declaration"` was
+// rejected at the NAPI boundary and the WASM export hardcoded Public —
+// `ffi_public_api_mode_to_host` and
+// `FfiConversionError::InvalidPublicApiMode` did not exist.
+// ─────────────────────────────────────────────────────────────────────
+
+#[test]
+fn ffi_seam_public_api_mode_parses_each_variant() {
+    for (s, expected) in [
+        (None, host::PublicApiMode::Public),
+        (Some("public"), host::PublicApiMode::Public),
+        (Some("testing"), host::PublicApiMode::Testing),
+        (Some("declaration"), host::PublicApiMode::Declaration),
+        // case-insensitive, matching the sibling FFI string parsers
+        (Some("Declaration"), host::PublicApiMode::Declaration),
+    ] {
+        let mode = ffi_public_api_mode_to_host(s).expect("parse public api mode");
+        assert_eq!(mode, expected, "mode {s:?} must parse to {expected:?}");
+    }
+}
+
+#[test]
+fn ffi_seam_invalid_public_api_mode_is_rejected() {
+    let err =
+        ffi_public_api_mode_to_host(Some("bogus")).expect_err("unknown mode must be rejected");
+    assert!(
+        matches!(err, FfiConversionError::InvalidPublicApiMode(ref s) if s == "bogus"),
+        "an unknown public api mode must produce InvalidPublicApiMode, got {err:?}"
+    );
+    let message = err.to_string();
+    assert!(
+        message.contains("bogus") && message.contains("declaration"),
+        "the error names the offending string and lists 'declaration' among \
+         the accepted modes: {message}"
+    );
+}
+
 #[test]
 fn ffi_seam_response_serialises_mode_fields() {
     // Build a host response carrying a Content->Stateless downgrade on a

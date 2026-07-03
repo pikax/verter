@@ -30,6 +30,10 @@ export interface CompiledFile {
   verterSourceMap: string;
   /** TSC declaration output (minimal .d.ts). */
   tscCode: string;
+  /** Declaration-carrier surface (`getPublicApi(id, "declaration")` — `X.d.vue.ts`). */
+  declCode: string;
+  /** V3 source map JSON for {@link declCode} (empty when the host emits none). */
+  declSourceMap: string;
   /** SSR-compiled JS output (when SSR mode is enabled). */
   ssrCode: string;
   errors: string[];
@@ -50,6 +54,8 @@ export class File {
     templateCode: "",
     verterSourceMap: "",
     tscCode: "",
+    declCode: "",
+    declSourceMap: "",
     ssrCode: "",
     errors: [],
     compilerDiagnostics: [],
@@ -131,7 +137,14 @@ export interface CompileTiming {
   lintMs: number | null; // ms for lint execution
 }
 
-export type TypeCheckerMode = "tsc" | "tsgo";
+/**
+ * The single browser type-checking capability: the in-context TypeScript
+ * LanguageService over Verter carriers. There is no external-TS engine in the
+ * WASM surface; when the capability gate is closed (TS>=7) the playground is
+ * carrier-gen + Verter-native only and `TypeCheckerStatus` reports the
+ * fail-closed posture.
+ */
+export type TypeCheckerMode = "tsc";
 export type TypeCheckerStatus = "active" | "unavailable" | "initializing";
 
 export interface StoreState {
