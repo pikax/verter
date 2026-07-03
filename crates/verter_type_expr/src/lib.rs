@@ -39,6 +39,23 @@ mod recursive_traversal;
 mod type_expr_json;
 pub use type_expr_json::type_expr_from_json;
 
+/// Content-free authored-body locators — the keyable inverse of a session
+/// `HotTypeRef` (the cross-boundary escape a closed fact routes through).
+pub mod locators;
+
+/// Producer-emitted span-recovery origin locators (one per identity-participating
+/// span class) + the `SourceSynthetic` marker.
+pub mod span_origins;
+
+/// Closed semantic fact families — the graph-free, content-free replacement for
+/// query-time `TypeExpr` walking.
+pub mod facts;
+
+/// Compile-time marker witnesses + [P2] discrimination fixtures for the closed
+/// fact / locator / span-origin families.
+#[cfg(test)]
+mod fact_witnesses;
+
 // ---------------------------------------------------------------------------
 // Send + Sync invariant
 // ---------------------------------------------------------------------------
@@ -58,7 +75,17 @@ const _: fn() = || {
 /// walking nested `TypeExpr::Ref` nodes resolve them in the file where
 /// the annotation was written — which differs from the SFC owner for
 /// cross-file pre-resolved props.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_no_typeexpr::NoTypeExpr,
+    verter_no_storedspan::NoStoredSpan,
+)]
 #[serde(transparent)]
 pub struct TypeExprScope(pub String);
 
@@ -317,7 +344,18 @@ pub enum RecursiveConditionalBranch {
 // ---------------------------------------------------------------------------
 
 /// Primitive type names recognized by the evaluator.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_no_typeexpr::NoTypeExpr,
+    verter_no_storedspan::NoStoredSpan,
+)]
 #[serde(rename_all = "camelCase")]
 pub enum PrimitiveName {
     String,
@@ -562,6 +600,7 @@ pub struct IndexSignatureSpans {
     serde::Serialize,
     serde::Deserialize,
     verter_no_typeexpr::NoTypeExpr,
+    verter_no_storedspan::NoStoredSpan,
 )]
 #[serde(rename_all = "lowercase")]
 pub enum MemberVisibility {
