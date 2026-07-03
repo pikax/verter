@@ -289,7 +289,8 @@ pub fn record_outer_call_type_expr(expr: &verter_type_expr::TypeExpr) {
 ///  19 = TemplateLiteralReduce
 ///  20 = FlowNarrowingAt
 ///  21 = ContextualTypeAt
-pub const DISPATCH_OPERATOR_KIND_COUNT: usize = 22;
+///  22 = LowerLocator
+pub const DISPATCH_OPERATOR_KIND_COUNT: usize = 23;
 
 /// Human-readable labels for each operator-kind index. Kept in sync
 /// with the comment on `DISPATCH_OPERATOR_KIND_COUNT` and with the
@@ -317,6 +318,7 @@ pub const DISPATCH_OPERATOR_KIND_LABELS: [&str; DISPATCH_OPERATOR_KIND_COUNT] = 
     "TemplateLiteralReduce",
     "FlowNarrowingAt",
     "ContextualTypeAt",
+    "LowerLocator",
 ];
 
 /// Per-kind call counts. `dispatch_operator_with_recurse` increments
@@ -326,6 +328,7 @@ pub static DISPATCH_OPERATOR_KIND_CALLS: [AtomicU64; DISPATCH_OPERATOR_KIND_COUN
     // 18 = ApparentType, 19 = TemplateLiteralReduce, 20 = FlowNarrowingAt,
     // 21 = ContextualTypeAt (all zero-initialised; order within the array is
     // immaterial — `kind_index_for_key` keys it).
+    AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
@@ -359,6 +362,7 @@ pub static DISPATCH_OPERATOR_KIND_NS: [AtomicU64; DISPATCH_OPERATOR_KIND_COUNT] 
     // 18 = ApparentType, 19 = TemplateLiteralReduce, 20 = FlowNarrowingAt,
     // 21 = ContextualTypeAt (all zero-initialised; order within the array is
     // immaterial — `kind_index_for_key` keys it).
+    AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
@@ -534,6 +538,7 @@ pub fn kind_index_for_key(key: &crate::semantic_query::SemanticQueryKey) -> usiz
         SemanticQueryKey::TemplateLiteralReduce { .. } => 19,
         SemanticQueryKey::FlowNarrowingAt { .. } => 20,
         SemanticQueryKey::ContextualTypeAt { .. } => 21,
+        SemanticQueryKey::LowerLocator { .. } => 22,
     }
 }
 

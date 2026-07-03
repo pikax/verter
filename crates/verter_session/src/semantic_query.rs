@@ -4281,6 +4281,40 @@ pub enum SemanticQueryKey {
         contextual: ContextualTypingKey,
         context: ProgramAnalysisContext,
     },
+    /// Lower the FIXED authored SHAPE of a locator-addressed body — the
+    /// strictly-unsubstituted, carrier-only, role-free lowering of the
+    /// authored position named by the key's
+    /// [`AuthoredBodyLocator`](verter_type_expr::locators::AuthoredBodyLocator).
+    ///
+    /// `key` is the sealed
+    /// [`LocatorLoweringKey`](crate::locator_identity::LocatorLoweringKey) —
+    /// exactly `slot + locator + P + R` (the `T` / `L` / `J` env dims are
+    /// SLOT-CARRIED through the slot's typed env tail, never standalone
+    /// fields), constructed only through the anchor-match-gated
+    /// `new_unsubstituted`. The key carries NO substitution axis and NO
+    /// caller projection axis: the body lowers under the fixed locator-shape
+    /// context ([`LocatorShapeCtx`](crate::project_semantic_dispatch::locator_shape::LocatorShapeCtx));
+    /// substituted / demand-sensitive reduction lives on
+    /// [`Instantiate`](Self::Instantiate), which owns args-substitution plus
+    /// the full projection axis.
+    ///
+    /// **LIVE producer** (`build_lower_locator`,
+    /// [`AdmissionSpec::Singleflight`]). The build is a two-phase
+    /// worker-purity split: the WORKER phase derefs the locator through the
+    /// owning artifact's `DeclBodyMemo` retained snapshot (lease-only —
+    /// never a transient parse) and returns transient OWNED typed IR; the
+    /// SESSION phase graph-lowers that IR into ROLE-FREE shape nodes via the
+    /// carrier-only locator entry — operator positions intern DEFERRED
+    /// carriers, reference heads carrier-resolve to `DeclRef` /
+    /// `InstantiationRef` identity, declared type parameters stay
+    /// `TypeParam` shells. The live `whole_hash` is re-sourced at
+    /// value-compute time and recorded on the read-set (never carried in the
+    /// key, R6). Value domain: [`SemanticQueryValueTag::TypeNode`].
+    ///
+    /// [`AdmissionSpec::Singleflight`]: crate::semantic_query::query_key_spec::AdmissionSpec::Singleflight
+    LowerLocator {
+        key: crate::locator_identity::LocatorLoweringKey,
+    },
 }
 
 /// Content-free discriminant for [`SemanticQueryKey`] — the variant identity
@@ -4320,6 +4354,7 @@ pub enum SemanticQueryKeyTag {
     TemplateLiteralReduce,
     FlowNarrowingAt,
     ContextualTypeAt,
+    LowerLocator,
 }
 
 impl SemanticQueryKeyTag {
@@ -4349,6 +4384,7 @@ impl SemanticQueryKeyTag {
         SemanticQueryKeyTag::TemplateLiteralReduce,
         SemanticQueryKeyTag::FlowNarrowingAt,
         SemanticQueryKeyTag::ContextualTypeAt,
+        SemanticQueryKeyTag::LowerLocator,
     ];
 
     /// The EXACT `SemanticQueryKey` variant identifier this tag names. The
@@ -4380,6 +4416,7 @@ impl SemanticQueryKeyTag {
             SemanticQueryKeyTag::TemplateLiteralReduce => "TemplateLiteralReduce",
             SemanticQueryKeyTag::FlowNarrowingAt => "FlowNarrowingAt",
             SemanticQueryKeyTag::ContextualTypeAt => "ContextualTypeAt",
+            SemanticQueryKeyTag::LowerLocator => "LowerLocator",
         }
     }
 
@@ -4391,7 +4428,7 @@ impl SemanticQueryKeyTag {
     /// nested `execute_read` sub-dispatches are recorded too) ORs
     /// `1 << bit_index()` into a `u32` mask surfaced on
     /// [`verter_audit::TypeResolutionPayload::semantic_query_dispatch_mask`];
-    /// `ALL.len()` is 22 (≤ 32) so the mask never overflows `u32`.
+    /// `ALL.len()` is 23 (≤ 32) so the mask never overflows `u32`.
     #[must_use]
     pub fn bit_index(self) -> u32 {
         Self::ALL
@@ -4460,6 +4497,7 @@ impl SemanticQueryKey {
             }
             SemanticQueryKey::FlowNarrowingAt { .. } => SemanticQueryKeyTag::FlowNarrowingAt,
             SemanticQueryKey::ContextualTypeAt { .. } => SemanticQueryKeyTag::ContextualTypeAt,
+            SemanticQueryKey::LowerLocator { .. } => SemanticQueryKeyTag::LowerLocator,
         }
     }
 }

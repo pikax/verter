@@ -91,6 +91,7 @@ pub(crate) mod build;
 pub(crate) mod carrier;
 pub(crate) mod enumerate;
 pub(crate) mod evaluate;
+pub(crate) mod locator_shape;
 pub(crate) mod lower;
 pub(crate) mod output_materialization;
 // Private adjacent module: crate-wide compile-time `assert_not_impl_any!`
@@ -1531,6 +1532,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     let fence = self.project_generation_signature();
                     (QueryResult::Error(QueryError::Miss), fence).into()
                 }
+                // LowerLocator — LIVE producer. The two-phase locator-shape
+                // build: worker-side lease-only deref of the authored body,
+                // then the carrier-only role-free graph lowering.
+                SemanticQueryKey::LowerLocator { key } => self.build_lower_locator(key),
             }
         };
         // Wrap the raw cold-build closure with the fact tracer, then

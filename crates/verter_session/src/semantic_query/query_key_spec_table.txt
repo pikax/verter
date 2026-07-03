@@ -23,3 +23,4 @@ ApparentType | Live | TypeNode | T L J | Facets,MemberBody,AliasPreservation,Nor
 TemplateLiteralReduce | Live | TypeNode | R T L J | — | TemplateLiteralReduceContext | template_literal_reduce_do_not_warm_hit | Singleflight
 FlowNarrowingAt | Live | ProgramAnalysis | P R T L J | — | ProgramAnalysisContext | flow_narrowing_at_do_not_warm_hit | NonProducingPendingReducer
 ContextualTypeAt | Live | ProgramAnalysis | P R T L J | — | ProgramAnalysisContext | contextual_type_at_do_not_warm_hit | NonProducingPendingReducer
+LowerLocator | Live | TypeNode | P R T L J | — | LocatorLoweringKey | lower_locator_family_distinct_by_parse_env_and_locator | Singleflight

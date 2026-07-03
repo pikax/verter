@@ -83,6 +83,8 @@ mod host_lifecycle_cascade_tests;
 #[cfg(test)]
 mod lazy_decl_body_tests;
 #[cfg(test)]
+mod lower_locator_tests;
+#[cfg(test)]
 mod narrowed_scope_snapshot_generation_tests;
 #[cfg(test)]
 mod overlay_promotion_isolation_tests;
@@ -181,6 +183,11 @@ pub(crate) mod locator_identity;
 /// else external names `locator_identity`, so the module itself stays
 /// `pub(crate)` and only these two witnesses enter the public surface.
 pub use crate::locator_identity::{assert_r6_key_dimension, assert_r6_key_safe};
+/// Sealed locator-shape lowering context. Public NAME only (private fields,
+/// in-crate construction): the out-of-crate trybuild fixtures prove it
+/// neither contains nor converts to a `ProjectionReductionContext`, so the
+/// reducing lowering entry is unreachable from the locator path by type.
+pub use crate::project_semantic_dispatch::locator_shape::LocatorShapeCtx;
 /// Snapshot-backed span-recovery helpers (recover authored spans from a
 /// retained parse via a producer-emitted origin locator, before identity).
 pub(crate) mod locator_span_recovery;

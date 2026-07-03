@@ -246,6 +246,7 @@ fn query_key_discriminant(key: &SemanticQueryKey) -> &'static str {
         SemanticQueryKey::TemplateLiteralReduce { .. } => "TemplateLiteralReduce",
         SemanticQueryKey::FlowNarrowingAt { .. } => "FlowNarrowingAt",
         SemanticQueryKey::ContextualTypeAt { .. } => "ContextualTypeAt",
+        SemanticQueryKey::LowerLocator { .. } => "LowerLocator",
     }
 }
 

@@ -1,0 +1,36 @@
+error[E0277]: the trait bound `ProjectionReductionContext: From<LocatorShapeCtx<'static>>` is not satisfied
+  --> tests/cases/compile-fail/locator_shape_ctx_no_prc_conversion.rs:17:25
+   |
+17 |     requires_into_prc::<LocatorShapeCtx<'static>>();
+   |                         ^^^^^^^^^^^^^^^^^^^^^^^^ the trait `From<LocatorShapeCtx<'static>>` is not implemented for `ProjectionReductionContext`
+   |
+   = note: required for `LocatorShapeCtx<'static>` to implement `Into<ProjectionReductionContext>`
+note: required by a bound in `requires_into_prc`
+  --> tests/cases/compile-fail/locator_shape_ctx_no_prc_conversion.rs:12:25
+   |
+12 | fn requires_into_prc<T: Into<ProjectionReductionContext>>() {}
+   |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `requires_into_prc`
+
+error[E0277]: the trait bound `LocatorShapeCtx<'static>: AsRef<ProjectionReductionContext>` is not satisfied
+  --> tests/cases/compile-fail/locator_shape_ctx_no_prc_conversion.rs:18:26
+   |
+18 |     requires_asref_prc::<LocatorShapeCtx<'static>>();
+   |                          ^^^^^^^^^^^^^^^^^^^^^^^^ the trait `AsRef<ProjectionReductionContext>` is not implemented for `LocatorShapeCtx<'static>`
+   |
+note: required by a bound in `requires_asref_prc`
+  --> tests/cases/compile-fail/locator_shape_ctx_no_prc_conversion.rs:13:26
+   |
+13 | fn requires_asref_prc<T: AsRef<ProjectionReductionContext>>() {}
+   |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `requires_asref_prc`
+
+error[E0277]: the trait bound `LocatorShapeCtx<'static>: Deref` is not satisfied
+  --> tests/cases/compile-fail/locator_shape_ctx_no_prc_conversion.rs:19:26
+   |
+19 |     requires_deref_prc::<LocatorShapeCtx<'static>>();
+   |                          ^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Deref` is not implemented for `LocatorShapeCtx<'static>`
+   |
+note: required by a bound in `requires_deref_prc`
+  --> tests/cases/compile-fail/locator_shape_ctx_no_prc_conversion.rs:14:26
+   |
+14 | fn requires_deref_prc<T: std::ops::Deref<Target = ProjectionReductionContext>>() {}
+   |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `requires_deref_prc`

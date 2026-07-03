@@ -445,6 +445,29 @@ pub(super) enum FamilyKey {
         project_identity: u32,
         substitution: crate::semantic_query::SubstitutionCanonicalHash,
     },
+    /// Mode-erased `LowerLocator` identity. The family fields are EXACTLY
+    /// the sealed [`crate::locator_identity::LocatorLoweringKey`] — `slot`
+    /// (whose typed env tail carries `T` / `L` / `J`) + `locator` +
+    /// `parse_env_hash` (`P`) + `resolve_env_hash` (`R`) — and NOTHING
+    /// else: the key is strictly unsubstituted and carries no caller
+    /// projection axis, so the whole family is mode-free and lives in the
+    /// `Single` slot. Carrying the sealed key verbatim keeps the family
+    /// identity anchor-match-gated by construction (a mismatched
+    /// slot/locator family cannot be fabricated). A parse-env-only move on
+    /// the same locator is a DISTINCT family — a parse-env change with
+    /// unchanged content is not caught by the `FileWholeHash` self-root
+    /// rail, so it must be caught by the key (mirrors
+    /// [`Self::Instantiate`]'s `body_source` rule).
+    ///
+    /// The payload is BOXED (mirroring [`Self::Relate`]'s
+    /// `Box<RelateMemoKey>`): a Rust enum is sized to its largest variant,
+    /// and the locator key's slot + locator composites would inflate EVERY
+    /// entry of the hot single-node `FamilyKey → FamilySlots` keyspace.
+    /// `Box` delegates `Hash`/`Eq`/`Clone` to the inner key, so the family
+    /// IDENTITY (and `variant_label`) is unchanged.
+    LowerLocator {
+        key: Box<crate::locator_identity::LocatorLoweringKey>,
+    },
 }
 
 impl FamilyKey {
@@ -477,6 +500,7 @@ impl FamilyKey {
             FamilyKey::TemplateLiteralReduce { .. } => "TemplateLiteralReduce",
             FamilyKey::FlowNarrowingAt { .. } => "FlowNarrowingAt",
             FamilyKey::ContextualTypeAt { .. } => "ContextualTypeAt",
+            FamilyKey::LowerLocator { .. } => "LowerLocator",
         }
     }
 }
@@ -1411,6 +1435,17 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
                 lib_env_hash: context.lib_env_hash,
                 project_identity: context.project_identity,
                 substitution: context.substitution,
+            },
+            ModeSlot::Single,
+        ),
+        // LowerLocator — LIVE producer with a mode-erased key: the sealed
+        // `LocatorLoweringKey` IS the family identity (slot + locator + P +
+        // R, nothing else; T/L/J slot-carried), and the fixed locator-shape
+        // lowering has no mode/demand axis, so the family uses the `Single`
+        // slot.
+        SemanticQueryKey::LowerLocator { key } => (
+            FamilyKey::LowerLocator {
+                key: Box::new(key.clone()),
             },
             ModeSlot::Single,
         ),

@@ -917,6 +917,30 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             cross_context_guard: "contextual_type_at_do_not_warm_hit",
             admission: AdmissionSpec::NonProducingPendingReducer,
         },
+        // LowerLocator { key: LocatorLoweringKey } — lowers the FIXED
+        // authored SHAPE of a locator-addressed body through the retained
+        // decl-body snapshot. `P R T L J` — with `T` / `L` / `J`
+        // SLOT-TRANSITIVE, not standalone key fields: the sealed
+        // `LocatorLoweringKey` carries exactly `slot + locator + P + R`, and
+        // the type-env / lib-env / project dims participate through the
+        // slot's own typed env tail (`SlotEnvIdentity`), so a mixed-env key
+        // is unconstructible by shape. `P` is real family identity (the
+        // worker phase re-borrows the retained parse snapshot, keyed
+        // `(canonical, whole_hash, parse_env_hash)` — a parse-env-only move
+        // must miss). LIVE producer; strictly unsubstituted, carrier-only,
+        // role-free — no mode / demand / substitution / projection axis, so
+        // `allowed_demand` is empty and the family lives in the `Single`
+        // slot. Substituted demands route through `Instantiate { args }`.
+        SemanticQueryKeySpec {
+            variant: SemanticQueryKeyTag::LowerLocator,
+            lifecycle: KeyLifecycle::Live,
+            context_shape: "LocatorLoweringKey",
+            value_domain: SemanticQueryValueTag::TypeNode,
+            env_dims: EnvDimSpec::Static(env_full()),
+            allowed_demand: AxisMask::empty(),
+            cross_context_guard: "lower_locator_family_distinct_by_parse_env_and_locator",
+            admission: AdmissionSpec::Singleflight,
+        },
     ]
 }
 

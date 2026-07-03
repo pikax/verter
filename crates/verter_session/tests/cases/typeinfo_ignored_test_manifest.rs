@@ -411,6 +411,7 @@ semantic_query_names! {
     TemplateLiteralReduce,
     FlowNarrowingAt,
     ContextualTypeAt,
+    LowerLocator,
 }
 
 /// Deterministic identifier for a generated TS7 oracle snapshot. Closed
@@ -649,7 +650,11 @@ struct BlockContractRow {
 ///   every narrowing mechanism composes on);
 /// - contextual typing at `U6.CONTEXTUAL_CALLBACK` (owns the published
 ///   `ContextualTypeAt` query);
-/// - macro payload at `U14.MACRO_ADAPTER`.
+/// - macro payload at `U14.MACRO_ADAPTER`;
+/// - the locator-shape body lowering (`LowerLocator`) at
+///   `U2.QUERY_VALUE_DOMAIN` — it extends the foundational decl/value key
+///   surface that block owns (the strictly-unsubstituted authored-body
+///   shape `Instantiate` composes; no manifest row consumes it).
 fn key_owning_block(key: SemanticQueryName) -> TypeInfoParityBlockId {
     use SemanticQueryName::*;
     use TypeInfoParityBlockId::*;
@@ -659,7 +664,8 @@ fn key_owning_block(key: SemanticQueryName) -> TypeInfoParityBlockId {
         | NormalizeUnion
         | NormalizeIntersection
         | ResolvedNamedType
-        | Instantiate => U2QueryValueDomain,
+        | Instantiate
+        | LowerLocator => U2QueryValueDomain,
         Relate | Conditional => U2RelationInfer,
         IndexedAccess | KeyOf | ProjectMember | ProjectPath => U2IndexedAccess,
         MappedType | TemplateLiteralReduce => U2MappedTemplate,
@@ -1906,6 +1912,11 @@ fn key_owning_block_owner_mapping_is_pinned_closed_set() {
         (ContextualTypeAt, U6ContextualCallback),
         // Macro payload at U14.MACRO_ADAPTER.
         (ResolveMacroPayload, U14MacroAdapter),
+        // Locator-shape body lowering at U2.QUERY_VALUE_DOMAIN — it extends
+        // the foundational decl/value key surface (the
+        // strictly-unsubstituted authored-body shape `Instantiate`
+        // composes; no manifest row consumes it).
+        (LowerLocator, U2QueryValueDomain),
     ];
 
     // DISCRIMINATING per-key pin: a wrong `key_owning_block` arm FAILS here.

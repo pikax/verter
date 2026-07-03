@@ -5217,6 +5217,14 @@ mod foundations_guards {
         // substrate module stays `pub(crate)`; only these two witnesses need
         // to be nameable across the crate boundary.
         "pub use crate::locator_identity::{assert_r6_key_dimension, assert_r6_key_safe}",
+        // Sealed locator-shape lowering context — public NAME only (private
+        // fields, in-crate construction). Consumed exclusively by the
+        // out-of-crate sealed-context trybuild fixture
+        // (`tests/cases/compile-fail/locator_shape_ctx_no_prc_conversion.rs`),
+        // which proves the type neither contains nor converts to a
+        // `ProjectionReductionContext`, so the reducing lowering entry is
+        // unreachable from the locator path by type.
+        "pub use crate::project_semantic_dispatch::locator_shape::LocatorShapeCtx",
         // Block 6.e per-call-site instrumentation: bench example
         // (crates/verter_bench/examples/audit_real_component_meta.rs)
         // dumps the `HostStoreView::from_host` attribution table at the

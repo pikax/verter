@@ -8867,6 +8867,93 @@ mod instantiate_body_source_family_identity {
     }
 }
 
+/// `FamilyKey::LowerLocator` identity — exactly the strictly-unsubstituted
+/// `(slot, locator, P, R)` key, nothing else: `T`/`L`/`J` prove through the
+/// slot's env tail; there is no substitution / caller-projection / mode axis,
+/// so the family lives in the `Single` slot.
+mod lower_locator_family_identity {
+    use super::super::family::{family_and_slot, FamilyKey, ModeSlot};
+    use crate::locator_identity::{LocatorLoweringKey, ParseEnvHash, ResolveEnvHash};
+    use crate::semantic_query::{ResolvedDeclSlotIdentity, SemanticQueryKey};
+    use std::sync::Arc;
+    use verter_type_expr::locators::{
+        AuthoredAnchor, AuthoredBodyLocator, LocatorSymbolSpace, TypeBodyPathStep, TypeBodySlot,
+    };
+
+    fn slot() -> ResolvedDeclSlotIdentity {
+        ResolvedDeclSlotIdentity::type_slot(
+            Arc::from("/w/a.ts"),
+            Arc::from("Foo"),
+            7,
+            [3u8; 16],
+            [4u8; 16],
+        )
+    }
+
+    fn locator(path: &[TypeBodyPathStep]) -> AuthoredBodyLocator {
+        AuthoredBodyLocator::DeclBody(TypeBodySlot {
+            anchor: AuthoredAnchor {
+                canonical_id: Arc::from("/w/a.ts"),
+                symbol: Arc::from("Foo"),
+                space: LocatorSymbolSpace::Type,
+            },
+            path: Arc::from(path.to_vec().into_boxed_slice()),
+        })
+    }
+
+    fn key(
+        path: &[TypeBodyPathStep],
+        parse: ParseEnvHash,
+        resolve: ResolveEnvHash,
+    ) -> SemanticQueryKey {
+        SemanticQueryKey::LowerLocator {
+            key: LocatorLoweringKey::new_unsubstituted(slot(), locator(path), parse, resolve)
+                .expect("a coherent slot/locator anchor pair must construct"),
+        }
+    }
+
+    fn fam(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
+        family_and_slot(key)
+    }
+
+    /// Two demands differing ONLY in the parse-env dimension are DISTINCT
+    /// families (a parse-env-only move is never a warm collision), the same
+    /// key maps to ONE family, and two demands differing only in the locator
+    /// path are DISTINCT families. The family lives in the `Single` slot.
+    #[test]
+    fn lower_locator_family_distinct_by_parse_env_and_locator() {
+        let p0 = ParseEnvHash::from_env_hash([1u8; 16]);
+        let p1 = ParseEnvHash::from_env_hash([9u8; 16]);
+        let r = ResolveEnvHash::from_env_hash([2u8; 16]);
+        let member_path = [TypeBodyPathStep::Member { ordinal: 0 }];
+
+        let (base_family, base_slot) = fam(&key(&[], p0, r));
+        let (same_family, _) = fam(&key(&[], p0, r));
+        let (parse_moved_family, _) = fam(&key(&[], p1, r));
+        let (locator_moved_family, _) = fam(&key(&member_path, p0, r));
+
+        assert_eq!(
+            base_family.variant_label(),
+            "LowerLocator",
+            "a LowerLocator key must map to the dedicated LowerLocator family"
+        );
+        assert_eq!(
+            base_slot,
+            ModeSlot::Single,
+            "LowerLocator is mode-free (the fixed locator shape) — Single slot"
+        );
+        assert_eq!(base_family, same_family, "same key ⇒ one family");
+        assert_ne!(
+            base_family, parse_moved_family,
+            "a parse-env-only move must be a DISTINCT LowerLocator family"
+        );
+        assert_ne!(
+            base_family, locator_moved_family,
+            "distinct locators must be DISTINCT LowerLocator families"
+        );
+    }
+}
+
 /// `invalidate_canonical`'s fact-rail drain discriminates entries via
 /// `carrier_facts_reference_canonical`; a `FileSourceEnv` contributor
 /// fact must make the contributor canonical a reverse-index member so

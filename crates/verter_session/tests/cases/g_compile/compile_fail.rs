@@ -189,6 +189,26 @@ fn output_projector_non_owner_impl_is_compiler_sealed() {
     t.compile_fail("tests/cases/compile-fail/output_projector_not_impl_outside_crate.rs");
 }
 
+/// The sealed-context negative for the locator lowering path:
+/// `LocatorShapeCtx` neither contains nor converts to a
+/// `ProjectionReductionContext` (no `From`/`Into`, no `AsRef`, no `Deref` —
+/// each bound fails E0277), and the reducing lowering entry
+/// (`shallow_lower_type_expr_with_context`, which REQUIRES a
+/// `ProjectionReductionContext`) lives on a crate-private dispatch module an
+/// external unit cannot even name (E0603). Together they prove BY TYPE that
+/// the locator path cannot reach the reducing lowerer — capability, not
+/// convention.
+#[test]
+#[cfg_attr(
+    not(feature = "compile-fail"),
+    ignore = "run with --features compile-fail (CI)"
+)]
+fn locator_shape_ctx_is_sealed_against_the_reducing_lowerer() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/cases/compile-fail/locator_shape_ctx_no_prc_conversion.rs");
+    t.compile_fail("tests/cases/compile-fail/locator_reducing_lowerer_not_nameable.rs");
+}
+
 /// ALWAYS-ON structural-rail smoke — the load-bearing proof that the
 /// hot-materialize STRUCTURAL rails reject their regression shapes in the
 /// DEFAULT gate (no feature flag; the full compile-fail suite above stays

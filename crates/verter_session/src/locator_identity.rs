@@ -492,8 +492,12 @@ pub enum LocatorKeyError {
 }
 
 /// Map a locator anchor space onto the session symbol space it names.
-/// Exhaustive: both are closed three-arm spaces.
-const fn semantic_space_for_locator_space(space: LocatorSymbolSpace) -> SemanticSymbolSpace {
+/// Exhaustive: both are closed three-arm spaces. Shared by the
+/// [`LocatorLoweringKey::new_unsubstituted`] anchor-match gate and the
+/// `lower_locator` provider's slot derivation, so the two cannot drift.
+pub(crate) const fn semantic_space_for_locator_space(
+    space: LocatorSymbolSpace,
+) -> SemanticSymbolSpace {
     match space {
         LocatorSymbolSpace::Type => SemanticSymbolSpace::Type,
         LocatorSymbolSpace::Value => SemanticSymbolSpace::Value,
