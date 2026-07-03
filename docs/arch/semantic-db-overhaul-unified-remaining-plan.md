@@ -1626,11 +1626,12 @@ that locked design. Owner-directed, recorded 2026-06-22.
    bodies. Goal = ZERO `TypeExpr` as semantic AUTHORITY, not zero syntax
    representation. This end-state question is DEFERRED and is codex-architect-ruled
    ONLY AFTER STAGE 10 LANDS — the surviving-`TypeExpr` census is only real once
-   Stage 10 has actually landed. Owner-pinned sequence: Stage 9 lands cleanly →
-   Stage 10 DESIGN finalised (the deferred codex-architect pass closing the 2 open
-   re-confirm findings [P1]/[P2] + owner ratification, just before Stage-10
-   implementation) → Stage 10 IMPLEMENTED + LANDS → THEN the Stage-11 end-state
-   question is looked at + finalised. When opened, the codex-architect ruling
+   Stage 10 has actually landed. Owner-pinned sequence: Stage 9 lands cleanly
+   (DONE) → Stage 10 DESIGN finalised (DONE — the design is RATIFIED — BINDING
+   with [P1]/[P2] closed and the §6.4/§6.5 memo identity settled; see the
+   STAGE-10 locked-designs row; implementation/landing PENDING) → Stage 10
+   IMPLEMENTED + LANDS → THEN the Stage-11 end-state question is looked at +
+   finalised. When opened, the codex-architect ruling
    tests as HYPOTHESES (neutral / best-on-merits) that the GOOD Stage 11 is the
    structural quarantine/rename/guard, and the BAD Stage 11 is total `TypeExpr`
    eradication / "`HotTypeRef` everywhere" forced into lower graph-free crates /
