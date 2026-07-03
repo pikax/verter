@@ -169,8 +169,13 @@ pub fn assert_r6_key_safe<T: R6KeySafe>() {}
 /// Internal per-field witness call used by the exhaustive-destructure witnesses.
 fn key_safe<T: R6KeySafe>(_: &T) {}
 
-/// Implement the sealed [`R6KeySafe`] witness for a list of content-free types.
-macro_rules! impl_r6_key_safe {
+/// Stamp the sealed [`R6KeySafe`] witness for a content-free LEAF type — a
+/// primitive, an owned/borrowed string, or a sealed env/substitution dimension
+/// newtype. A leaf has NO key-bearing fields to destructure, so (unlike a
+/// composite) it carries no `w_*` witness. Kept DISTINCT from
+/// [`impl_r6_key_safe`] precisely so a COMPOSITE can never be stamped without its
+/// exhaustive-destructure witness.
+macro_rules! impl_r6_key_safe_leaf {
     ($($ty:ty),+ $(,)?) => {
         $(
             impl key_safe_sealed::Sealed for $ty {}
@@ -179,10 +184,28 @@ macro_rules! impl_r6_key_safe {
     };
 }
 
+/// Stamp the sealed [`R6KeySafe`] witness for a content-free COMPOSITE, BOUND to
+/// its exhaustive-destructure witness fn. The `const _: fn(&$ty) = $witness;`
+/// anchor makes a stamp WITHOUT a matching `w_*` witness fail to compile — a new
+/// composite can never be declared key-safe without the exhaustive field check
+/// that forces every new field/arm to be classified key-safe (the `$witness` fn
+/// must exist AND have signature `fn(&$ty)`).
+macro_rules! impl_r6_key_safe {
+    ($($ty:ty => $witness:path),+ $(,)?) => {
+        $(
+            impl key_safe_sealed::Sealed for $ty {}
+            impl R6KeySafe for $ty {}
+            // Bind the stamp to its exhaustive witness: an `impl_r6_key_safe!`
+            // stamp WITHOUT its `w_*` destructure witness fails to compile here.
+            const _: fn(&$ty) = $witness;
+        )+
+    };
+}
+
 // Foundational content-free leaves: small ordinals/flags, owned/borrowed strings.
 // Deliberately NOT `[u8; 16]` (a raw hash) — a raw hash is never key-safe on its
 // own; only the sealed env-dimension newtypes are.
-impl_r6_key_safe!(bool, u32, String, str);
+impl_r6_key_safe_leaf!(bool, u32, String, str);
 
 // Container forwarding: a container is key-safe iff its element is. This is what
 // makes a forbidden dimension nested in a container (e.g. `Option<SemanticNodeId>`)
@@ -196,8 +219,8 @@ impl<T: R6KeySafe> R6KeySafe for Option<T> {}
 impl<T: R6KeySafe> key_safe_sealed::Sealed for Vec<T> {}
 impl<T: R6KeySafe> R6KeySafe for Vec<T> {}
 
-// The sealed env/substitution dimensions are key-safe.
-impl_r6_key_safe!(
+// The sealed env/substitution dimensions are key-safe LEAVES (no fields).
+impl_r6_key_safe_leaf!(
     ParseEnvHash,
     ResolveEnvHash,
     TypeEnvHash,
@@ -207,24 +230,25 @@ impl_r6_key_safe!(
 );
 
 // The content-free locator composites + projection axes + slot identity are
-// key-safe; each is backed by an exhaustive-destructure witness below.
+// key-safe; each stamp is BOUND to its exhaustive-destructure witness below (a
+// stamp without its `w_*` witness fails to compile).
 impl_r6_key_safe!(
-    LocatorSymbolSpace,
-    AuthoredAnchor,
-    TypeBodyPathStep,
-    TypeBodySlot,
-    SymbolBodyLocator,
-    TypeArgLocator,
-    MacroPayloadPosition,
-    MacroPayloadLocator,
-    AuthoredBodyLocator,
-    SemanticSymbolSpace,
-    ProjectionMode,
-    ReductionDemand,
-    SurfaceProvenanceContext,
-    MemberMergeRole,
-    ProjectionReductionContext,
-    ResolvedDeclSlotIdentity,
+    LocatorSymbolSpace => w_locator_symbol_space,
+    AuthoredAnchor => w_authored_anchor,
+    TypeBodyPathStep => w_type_body_path_step,
+    TypeBodySlot => w_type_body_slot,
+    SymbolBodyLocator => w_symbol_body_locator,
+    TypeArgLocator => w_type_arg_locator,
+    MacroPayloadPosition => w_macro_payload_position,
+    MacroPayloadLocator => w_macro_payload_locator,
+    AuthoredBodyLocator => w_authored_body_locator,
+    SemanticSymbolSpace => w_semantic_symbol_space,
+    ProjectionMode => w_projection_mode,
+    ReductionDemand => w_reduction_demand,
+    SurfaceProvenanceContext => w_surface_provenance,
+    MemberMergeRole => w_member_merge_role,
+    ProjectionReductionContext => w_projection_reduction_context,
+    ResolvedDeclSlotIdentity => w_resolved_decl_slot_identity,
 );
 
 // ---------------------------------------------------------------------------
@@ -433,8 +457,8 @@ pub struct LocatorLoweringKey {
     pub substitution: SubstitutionCanonicalHash,
 }
 
-impl key_safe_sealed::Sealed for LocatorLoweringKey {}
-impl R6KeySafe for LocatorLoweringKey {}
+// Bound to its whole-key exhaustive-destructure witness below.
+impl_r6_key_safe!(LocatorLoweringKey => w_locator_lowering_key);
 
 /// R6 type-level key witness for the WHOLE key. The EXHAUSTIVE destructure (no
 /// `..`, no `_` composite field) calls `key_safe` on EVERY field — `slot`,
@@ -506,11 +530,12 @@ pub struct SessionDemandIdentity {
 
 // `SessionDemandIdentity` is content-free / env-free / session-only. It does NOT
 // lower via `LocatorLoweringKey`, but it IS still a keyable identity, so it gets
-// the same exhaustive-destructure R6-key-safe witnesses.
+// the same exhaustive-destructure R6-key-safe witnesses (each stamp bound to its
+// witness).
 impl_r6_key_safe!(
-    SessionDemandOwner,
-    SessionDemandRoute,
-    SessionDemandIdentity
+    SessionDemandOwner => w_session_demand_owner,
+    SessionDemandRoute => w_session_demand_route,
+    SessionDemandIdentity => w_session_demand_identity,
 );
 
 fn w_session_demand_owner(o: &SessionDemandOwner) {
