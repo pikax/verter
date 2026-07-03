@@ -169,6 +169,15 @@ mod error_propagation_lattice_tests;
 pub mod file_artifact_store;
 mod hash;
 pub(crate) mod instant;
+/// Session-side key identities for locator-backed body lowering
+/// (`LocatorLoweringKey` + the sealed R6 key-dimension witness +
+/// `SessionDemandIdentity`).
+pub mod locator_identity;
+/// Snapshot-backed span-recovery helpers (recover authored spans from a
+/// retained parse via a producer-emitted origin locator, before identity).
+pub(crate) mod locator_span_recovery;
+#[cfg(test)]
+mod locator_span_recovery_tests;
 pub mod member_display_fact_store;
 pub mod member_semantic_fact_store;
 pub mod parse_stable_hash;

@@ -64,6 +64,47 @@ fn no_typeexpr_compile_fail() {
     t.pass("tests/cases/compile-fail/no_typeexpr_good_carrier.rs");
 }
 
+/// The compiler enforcement of the no-stored-`Span` fact invariant — the
+/// deliberate inverse of [`no_typeexpr_compile_fail`]. A field that owns a
+/// `verter_span::Span` — directly, wrapped in an `Option`, or through a nested
+/// owner like `verter_type_expr::MemberSpans` — makes `#[derive(NoStoredSpan)]`
+/// fail to compile, because the marker provides no `Span` leaf witness. The
+/// direct-span fixture is THE proof that `NoStoredSpan` catches what
+/// `NoTypeExpr` cannot: the same `Span` field passes `NoTypeExpr` and fails
+/// `NoStoredSpan`. The good fixture proves the marker does not over-reject a
+/// sound content-free fact carrier.
+#[test]
+#[cfg_attr(
+    not(feature = "compile-fail"),
+    ignore = "run with --features compile-fail (CI)"
+)]
+fn no_storedspan_compile_fail() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/cases/compile-fail/no_storedspan_direct_span_field.rs");
+    t.compile_fail("tests/cases/compile-fail/no_storedspan_option_span_field.rs");
+    t.compile_fail("tests/cases/compile-fail/no_storedspan_nested_owner_field.rs");
+    t.pass("tests/cases/compile-fail/no_storedspan_good_carrier.rs");
+}
+
+/// The remaining substrate structural negatives: (a) a closed-fact carrier with
+/// a `TypeExpr` field fails `NoTypeExpr`; (c) an R6-forbidden dimension
+/// (`SemanticNodeId`) cannot satisfy the sealed `R6KeyDimension` bound, so it
+/// cannot be a session key dimension; (d) a `#[derive(Hash)]` DTO naming the
+/// session hot handle `HotTypeRef` fails (the handle deliberately is not `Hash`).
+/// The sealed trait + the not-`Hash` handle + the marker derive are the landed
+/// enforcement; these fixtures are the discriminating supplement.
+#[test]
+#[cfg_attr(
+    not(feature = "compile-fail"),
+    ignore = "run with --features compile-fail (CI)"
+)]
+fn fact_and_key_substrate_compile_fail() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/cases/compile-fail/fact_carrier_with_typeexpr_field.rs");
+    t.compile_fail("tests/cases/compile-fail/r6_key_forbidden_dimension.rs");
+    t.compile_fail("tests/cases/compile-fail/dto_names_session_hot_handle.rs");
+}
+
 /// Out-of-crate half of the output-materialization fence: the sealed
 /// `OutputProjector` capability is `pub(crate)` (and sealed against its private
 /// `sealed::Sealed` supertrait), so an external crate cannot NAME the trait to
