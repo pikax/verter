@@ -2935,6 +2935,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> SemanticNodeId {
+        // Dual-leg parity seam (test builds only): while the oracle's
+        // legacy-leg RAII guard is active on this thread, the retained
+        // prepared-body implementation serves the body so the parity
+        // harness can compare both body sources over live published
+        // surfaces. Never compiled into production or plain debug builds.
+        #[cfg(test)]
+        if super::stage10_parity_oracle::legacy_prepared_body_leg_active() {
+            return self.legacy_lower_decl_body_from_prepared(
+                prepared,
+                env,
+                scope,
+                scope_payload,
+                shadowing,
+                substitutions,
+                context,
+            );
+        }
+
         use verter_type_expr::TypeExpr;
 
         // Whether an intersection arm is an own-body member-bearing arm

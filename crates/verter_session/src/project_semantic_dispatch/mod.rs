@@ -2659,6 +2659,9 @@ impl<'a> DispatchHost for SessionDispatchHost<'a> {
 mod tests;
 
 #[cfg(test)]
+mod stage10_parity_oracle;
+
+#[cfg(test)]
 mod carrier_materialize_tests;
 
 #[cfg(test)]
