@@ -55,7 +55,7 @@ fn warm_read_validates_outside_entries_mutex() {
             Arc::from("Foo"),
         ),
         args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        context: verter_session::semantic_query::InstantiateContext::new(
+        context: verter_session::semantic_query::InstantiateContext::non_file(
             ProjectionReductionContext::published(ProjectionMode::Expanded),
             Default::default(),
         ),

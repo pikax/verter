@@ -1917,7 +1917,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // unchanged; `resolve_env_hash` is threaded onto any nested
         // `Instantiate` sub-key this build re-emits via
         // `instantiate_context_for`.
-        let context = instantiate_context.projection_reduction;
+        let context = instantiate_context.projection_reduction();
         // demand-driven reducer spec: the call-site provides
         // the publication / structural-transit context. `body_mode` is
         // shorthand for `context.mode` everywhere the existing lowering
@@ -1974,9 +1974,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // stale key — the build cannot publish a cacheable result and
         // returns `cache_suppress` below.
         let decl_canonical_str = decl_canonical.as_ref();
-        let is_non_file_base = decl_canonical_str.is_empty()
-            || decl_canonical_str == "__builtin__"
-            || decl_canonical_str == "<synthetic>";
+        let is_non_file_base = crate::semantic_query::is_non_file_base(decl_canonical_str);
         let live_indexed: Option<Arc<crate::project_type_store::IndexedReady>> = if is_non_file_base
         {
             None
@@ -7623,9 +7621,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // a result self-rooted on the sentinel hash `0`, which could
         // later serve stale.
         let owner_canonical_str = owner.defining_canonical.as_ref();
-        let is_non_file_owner = owner_canonical_str.is_empty()
-            || owner_canonical_str == "__builtin__"
-            || owner_canonical_str == "<synthetic>";
+        let is_non_file_owner = crate::semantic_query::is_non_file_base(owner_canonical_str);
         let owner_indexed: Option<Arc<crate::project_type_store::IndexedReady>> =
             if is_non_file_owner {
                 None

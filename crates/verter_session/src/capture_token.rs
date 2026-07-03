@@ -256,13 +256,13 @@ pub enum KeyFamily {
     /// projection rooted at any base.
     NavigateForAlias(&'static str, Vec<&'static str>),
     /// Match `Instantiate { base.merged_symbol_name == name,
-    /// context.projection_reduction.mode == Shallow }`.
+    /// context.mode() == Shallow }`.
     ShallowForResolvedName(&'static str),
     /// Match `Instantiate { base.merged_symbol_name == name,
-    /// context.projection_reduction.mode == Skeleton }`.
+    /// context.mode() == Skeleton }`.
     SkeletonForResolvedName(&'static str),
     /// Match `Instantiate { base.merged_symbol_name == name,
-    /// context.projection_reduction.mode == Expanded }`.
+    /// context.mode() == Expanded }`.
     ///
     /// Used by the field-level fast path counterfixtures
     /// to assert that, for a fast-path-eligible field, the macro
@@ -297,7 +297,7 @@ impl KeyFamily {
             ) => {
                 base.merged_symbol_name.as_ref() == *name
                     && matches!(
-                        context.projection_reduction.mode,
+                        context.mode(),
                         crate::semantic_query::ProjectionMode::Shallow
                     )
             }
@@ -307,7 +307,7 @@ impl KeyFamily {
             ) => {
                 base.merged_symbol_name.as_ref() == *name
                     && matches!(
-                        context.projection_reduction.mode,
+                        context.mode(),
                         crate::semantic_query::ProjectionMode::Skeleton
                     )
             }
@@ -317,7 +317,7 @@ impl KeyFamily {
             ) => {
                 base.merged_symbol_name.as_ref() == *name
                     && matches!(
-                        context.projection_reduction.mode,
+                        context.mode(),
                         crate::semantic_query::ProjectionMode::Expanded
                     )
             }

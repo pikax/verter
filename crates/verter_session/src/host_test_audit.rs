@@ -200,7 +200,7 @@ impl DispatchTrace {
                         ..
                     } => context.mode,
                     crate::semantic_query::SemanticQueryKey::Instantiate { context, .. } => {
-                        context.projection_reduction.mode
+                        context.mode()
                     }
                     _ => crate::semantic_query::ProjectionMode::Expanded,
                 };

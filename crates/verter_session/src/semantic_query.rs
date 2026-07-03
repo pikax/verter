@@ -47,7 +47,7 @@ pub use verter_type_expr::LiteralValue;
 
 // Reuse the existing structured failure shape from the resolver — there is no
 // second failure-domain type in this rewrite.
-pub use crate::locator_identity::SlotEnvIdentity;
+pub use crate::locator_identity::{ParseEnvHash, SlotEnvIdentity};
 pub use crate::resolver_core::shallow_file_state::BudgetExceededFailure;
 
 /// The `ProjectionDemand × EvalPolicy` lattice algebra (Deliverable #3 of
@@ -1377,31 +1377,84 @@ impl ProjectionReductionContext {
     }
 }
 
+/// The SOURCE KIND of an `Instantiate` base body — a sealed two-state
+/// key axis folded into `FamilyKey::Instantiate` (deliberately NOT a bare
+/// `Option`: an `Option` hides meaning and is too easy to forge).
+///
+/// - [`FileBacked`](Self::FileBacked)`(P)` — the compute may read ANY
+///   real-file parse-derived input (shallow state, prepared declarations,
+///   the lazy decl-body memo, synthesized component default state), so the
+///   live `parse_env_hash` is family identity: two lowerings differing only
+///   in the FileBacked `P` are DISTINCT FAMILIES — a parse-env-only change
+///   (file content unchanged) is not caught by the `FileWholeHash`
+///   self-root rail, so it must be caught by the key.
+/// - [`NonFile`](Self::NonFile) — ONLY the true non-file bases (`""` /
+///   `"__builtin__"` / `"<synthetic>"`) whose values genuinely do not
+///   depend on the parse env; per R21 an unconditional `P` would
+///   false-miss every parse-env-insensitive instantiation.
+///
+/// The dim type is the sealed [`ParseEnvHash`] newtype (in-crate
+/// construction only), and [`InstantiateContext`]'s fields are private with
+/// [`InstantiateContext::file_backed`] / [`InstantiateContext::non_file`]
+/// as the ONLY source-kind constructors — call sites never choose freely;
+/// the production mapping is owned by the
+/// `ProjectSemanticDispatch::instantiate_context_for` choke point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum InstantiateBodySource {
+    /// The base body may read real-file parse-derived input; carries the
+    /// live `parse_env_hash` as family identity.
+    FileBacked(ParseEnvHash),
+    /// A true non-file base (`""` / `"__builtin__"` / `"<synthetic>"`);
+    /// folds no parse-env dimension.
+    NonFile,
+}
+
+/// Whether `canonical` is one of the true non-file instantiation bases —
+/// the deterministic predicate behind the `instantiate_context_for`
+/// body-source mapping (a `FileBacked` context is constructible iff the
+/// compute may read real-file parse-derived input; these sentinels never
+/// do). Also the self-rooting classification the dispatch uses for bases
+/// with no `FileWholeHash` to root on.
+#[must_use]
+pub(crate) fn is_non_file_base(canonical: &str) -> bool {
+    canonical.is_empty() || canonical == "__builtin__" || canonical == "<synthetic>"
+}
+
 /// Per-key env+reduction context for [`SemanticQueryKey::Instantiate`].
 ///
 /// `Instantiate`'s slot-intrinsic env dims (`type_env_hash` = `T`,
 /// `lib_env_hash` = `L`, `project_identity` = `J`) come from its
 /// `base: `[`ResolvedDeclSlotIdentity`]; this dedicated context adds the
-/// one extra env dim the instantiation depends on — `resolve_env_hash`
+/// extra env identity the instantiation depends on — `resolve_env_hash`
 /// (`R`), because substituting type arguments into the base body can
-/// resolve imported type-argument references — alongside the embedded
-/// [`ProjectionReductionContext`] (the `mode` / `demand` / `provenance` /
-/// `merge_role` projection-demand identity).
+/// resolve imported type-argument references, and the
+/// [`InstantiateBodySource`] source-kind axis (`FileBacked(P)` /
+/// `NonFile`) — alongside the embedded [`ProjectionReductionContext`]
+/// (the `mode` / `demand` / `provenance` / `merge_role`
+/// projection-demand identity).
 ///
-/// **Per-key context, not shared global (parity §2.6):** the env dim
-/// rides on this dedicated `Instantiate` context — NOT on the shared
+/// **Per-key context, not shared global (parity §2.6):** the env dims
+/// ride on this dedicated `Instantiate` context — NOT on the shared
 /// [`ProjectionReductionContext`] (which stays a pure projection-demand
 /// identity, carried unchanged by `KeyOf` / `MappedType` / `ProjectPath`).
 /// This mirrors the way [`RelationContext`] / `CallResolutionContext`
 /// embed a `ProjectionReductionContext` as a field rather than mutating
-/// it. `family_and_slot` folds `resolve_env_hash` onto
+/// it. `family_and_slot` folds `resolve_env_hash` AND `body_source` onto
 /// [`crate::semantic_query_memo::FamilyKey::Instantiate`] (so two
-/// instantiations differing only in `R` never warm-hit) and strips the
-/// embedded projection mode into the `ModeSlot`.
+/// instantiations differing only in `R`, or only in the FileBacked `P`,
+/// never warm-hit) and strips the embedded projection mode into the
+/// `ModeSlot`.
 ///
-/// **R6-clean:** `resolve_env_hash` is an ENV dimension, NOT a
-/// content/version hash; the slot stays content-free and the file
-/// content version is re-sourced at value-compute time from
+/// **Sealed construction:** fields are PRIVATE; the ONLY source-kind
+/// constructors are [`Self::file_backed`] / [`Self::non_file`], and the
+/// sole production builder is the
+/// `ProjectSemanticDispatch::instantiate_context_for` choke point.
+/// Outside readers use the accessors.
+///
+/// **R6-clean:** `resolve_env_hash` and the FileBacked `parse_env_hash`
+/// are ENV dimensions, NOT content/version hashes; the slot stays
+/// content-free and the file content version is re-sourced at
+/// value-compute time from
 /// [`ResolverContext::ensure_indexed_ready_serve`]. No `parse_stable_hash`,
 /// content hash, or `fact_dep_signature` enters this context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1409,32 +1462,71 @@ pub struct InstantiateContext {
     /// Embedded projection-demand identity (`mode` / `demand` /
     /// `provenance` / `merge_role`). The shared
     /// [`ProjectionReductionContext`] stays a pure projection identity;
-    /// the env dim lives on this wrapper, never inside it.
-    pub projection_reduction: ProjectionReductionContext,
+    /// the env dims live on this wrapper, never inside it.
+    projection_reduction: ProjectionReductionContext,
     /// `resolve_env_hash` (`R`) — instantiation can resolve imported
     /// type-argument references, so two instantiations of the same
     /// `(base, args, projection)` under different module-resolution envs
     /// are distinct. Folded onto `FamilyKey::Instantiate`. ENV hash, NOT
     /// a content/version hash (R6-clean).
-    pub resolve_env_hash: HashValue,
+    resolve_env_hash: HashValue,
+    /// The base body's source kind (`FileBacked(P)` / `NonFile`). Folded
+    /// onto `FamilyKey::Instantiate`.
+    body_source: InstantiateBodySource,
 }
 
 impl InstantiateContext {
-    /// Build an `Instantiate` context from an embedded
-    /// [`ProjectionReductionContext`] plus the resolve-env dim.
+    /// Build the context for a FILE-BACKED base: the compute may read
+    /// real-file parse-derived input, so the live `parse_env_hash` is
+    /// part of the family identity.
     #[must_use]
-    pub const fn new(
+    pub const fn file_backed(
+        projection_reduction: ProjectionReductionContext,
+        resolve_env_hash: HashValue,
+        parse_env_hash: ParseEnvHash,
+    ) -> Self {
+        Self {
+            projection_reduction,
+            resolve_env_hash,
+            body_source: InstantiateBodySource::FileBacked(parse_env_hash),
+        }
+    }
+
+    /// Build the context for a TRUE NON-FILE base (`""` / `"__builtin__"`
+    /// / `"<synthetic>"`): the value does not depend on the parse env, so
+    /// no `P` folds into the family (R21).
+    #[must_use]
+    pub const fn non_file(
         projection_reduction: ProjectionReductionContext,
         resolve_env_hash: HashValue,
     ) -> Self {
         Self {
             projection_reduction,
             resolve_env_hash,
+            body_source: InstantiateBodySource::NonFile,
         }
     }
 
+    /// The embedded projection-demand identity.
+    #[must_use]
+    pub const fn projection_reduction(self) -> ProjectionReductionContext {
+        self.projection_reduction
+    }
+
+    /// The `resolve_env_hash` (`R`) env dimension.
+    #[must_use]
+    pub const fn resolve_env_hash(self) -> HashValue {
+        self.resolve_env_hash
+    }
+
+    /// The base body's source kind (`FileBacked(P)` / `NonFile`).
+    #[must_use]
+    pub const fn body_source(self) -> InstantiateBodySource {
+        self.body_source
+    }
+
     /// The embedded projection mode — shorthand for
-    /// `self.projection_reduction.mode`, consulted by the audit / mode
+    /// `self.projection_reduction().mode`, consulted by the audit / mode
     /// accessors that previously read the bare context's `mode`.
     #[must_use]
     pub const fn mode(self) -> ProjectionMode {
@@ -5367,22 +5459,12 @@ pub trait SemanticQueryApi {
     fn resolve_decl(&self, key: ResolveDeclKey) -> QueryResult<SemanticNodeId> {
         strip_output_provenance(self.execute_type_node(SemanticQueryKey::ResolveDecl(key)))
     }
-    fn instantiate(
-        &self,
-        base: ResolvedDeclSlotIdentity,
-        args: Arc<[SemanticNodeId]>,
-        resolve_env_hash: HashValue,
-        body_mode: ProjectionMode,
-    ) -> QueryResult<SemanticNodeId> {
-        strip_output_provenance(self.execute_type_node(SemanticQueryKey::Instantiate {
-            base,
-            args,
-            context: InstantiateContext::new(
-                ProjectionReductionContext::published(body_mode),
-                resolve_env_hash,
-            ),
-        }))
-    }
+    // NOTE: there is deliberately NO `instantiate` convenience method: an
+    // `Instantiate` key's context must come from the sealed
+    // `InstantiateContext` constructors via the
+    // `ProjectSemanticDispatch::instantiate_context_for` choke point (the
+    // body-source mapping is not free-choice), so callers build the full
+    // key explicitly and pass it to `execute_type_node`.
     fn project_member(
         &self,
         base: SemanticNodeId,
@@ -5536,7 +5618,7 @@ mod tests {
         let a = SemanticQueryKey::Instantiate {
             base: base.clone(),
             args: Arc::from(vec![string_id].into_boxed_slice()),
-            context: crate::semantic_query::InstantiateContext::new(
+            context: crate::semantic_query::InstantiateContext::non_file(
                 ProjectionReductionContext::published(ProjectionMode::Expanded),
                 Default::default(),
             ),
@@ -5544,7 +5626,7 @@ mod tests {
         let b = SemanticQueryKey::Instantiate {
             base,
             args: Arc::from(vec![number_id].into_boxed_slice()),
-            context: crate::semantic_query::InstantiateContext::new(
+            context: crate::semantic_query::InstantiateContext::non_file(
                 ProjectionReductionContext::published(ProjectionMode::Expanded),
                 Default::default(),
             ),
@@ -5711,7 +5793,7 @@ mod tests {
         let key = SemanticQueryKey::Instantiate {
             base: base.clone(),
             args: Arc::clone(&args),
-            context: crate::semantic_query::InstantiateContext::new(
+            context: crate::semantic_query::InstantiateContext::non_file(
                 ProjectionReductionContext::published(ProjectionMode::Expanded),
                 Default::default(),
             ),
@@ -5721,7 +5803,7 @@ mod tests {
         let key2 = SemanticQueryKey::Instantiate {
             base,
             args,
-            context: crate::semantic_query::InstantiateContext::new(
+            context: crate::semantic_query::InstantiateContext::non_file(
                 ProjectionReductionContext::published(ProjectionMode::Expanded),
                 Default::default(),
             ),

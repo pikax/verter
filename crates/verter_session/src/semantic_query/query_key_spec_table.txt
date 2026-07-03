@@ -2,7 +2,7 @@
 # DO NOT EDIT BY HAND. Regenerate via `pnpm gen:query-key-spec`, then commit this file.
 # Columns: variant | lifecycle | value_domain | env_dims | allowed_demand | context_shape | cross_context_guard | admission
 ResolveDecl | Live | TypeNode | R T L J | — | ResolveDeclKey | — | Singleflight
-Instantiate | Live | TypeNode | R T L J | Facets,MemberBody,AliasPreservation,NormalizationDepth,GenericOpen,OperatorReduction,CarrierStop,Provenance,MergeRole | InstantiateContext | instantiate_same_base_different_env_or_context_do_not_warm_hit, decl_self_type_or_lib_env_change_produces_distinct_instantiate_key | Singleflight
+Instantiate | Live | TypeNode | FileBacked(P) ⇒ P R T L J; NonFile ⇒ R T L J | Facets,MemberBody,AliasPreservation,NormalizationDepth,GenericOpen,OperatorReduction,CarrierStop,Provenance,MergeRole | InstantiateContext | instantiate_same_base_different_env_or_context_do_not_warm_hit, decl_self_type_or_lib_env_change_produces_distinct_instantiate_key | Singleflight
 ProjectMember | Live | TypeNode | T L J | Facets,MemberBody,AliasPreservation,NormalizationDepth,GenericOpen,OperatorReduction,CarrierStop | ProjectionMode | — | Singleflight
 IndexedAccess | Live | TypeNode | T L J | Facets,MemberBody,AliasPreservation,NormalizationDepth,GenericOpen,OperatorReduction,CarrierStop | ProjectionMode | — | Singleflight
 KeyOf | Live | TypeNode | T L J | Facets,MemberBody,AliasPreservation,NormalizationDepth,GenericOpen,OperatorReduction,CarrierStop,Provenance,MergeRole | ProjectionReductionContext | keyof_queries_differing_only_by_provenance_do_not_warm_hit, keyof_and_mapped_type_context_axes_do_not_alias_family_identity | Singleflight

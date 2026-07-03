@@ -80,19 +80,25 @@
 //! - `env_dims` is a current-tree classification per the design's §2.1
 //!   two-tier env model: `parse_env` (`P`) enters a key when the value reads
 //!   the parsed body skeleton (class-surface decorator lowering, namespace-
-//!   member body analysis, flow/contextual body analysis). The rows that carry
-//!   `P` are the body-/decorator-reading surface keys `ResolveClassSurface`
-//!   (§419) and `ResolveAmbientNamespace` (§414) and the program-analysis keys
+//!   member body analysis, flow/contextual body analysis) or real-file
+//!   parse-derived input. The rows that carry a static `P` are the body-/
+//!   decorator-reading surface keys `ResolveClassSurface` (§419) and
+//!   `ResolveAmbientNamespace` (§414) and the program-analysis keys
 //!   `FlowNarrowingAt` / `ContextualTypeAt` (`env_full`). On the surface keys
 //!   `P` is FORWARD-DECLARED for their deferred reducers (decorator-reading /
 //!   namespace-member) — the value carries its FULL planned identity now so the
 //!   reducer needs no breaking re-key and no false warm-hit can cross a missing
-//!   `P` axis in the interim. The remaining rows that operate over already-
-//!   lowered interned nodes (re-sourcing a file's `whole_hash` / reading an
-//!   `IndexedReady` `TypeExpr` is content-version rooting through
-//!   `ReadSetSignature`, NOT a `parse_env` dependency) do not carry `P`. The
-//!   per-row minimal dimension set remains pending the design's §3.6 benched-
-//!   minimality pass (U3/U15).
+//!   `P` axis in the interim. The `Instantiate` row is CONDITIONAL by the
+//!   key's `InstantiateBodySource` ([`EnvDimSpec::Conditional`] — one query
+//!   tag, no variant split): `FileBacked(P)` ⇒ `P R T L J` (the compute may
+//!   read real-file parse-derived input, so the live `parse_env_hash` is
+//!   family identity); `NonFile` ⇒ `R T L J` (per R21 an unconditional `P`
+//!   would false-miss every parse-env-insensitive instantiation). The
+//!   remaining rows that operate over already-lowered interned nodes
+//!   (re-sourcing a file's `whole_hash` / reading an `IndexedReady`
+//!   `TypeExpr` is content-version rooting through `ReadSetSignature`, NOT a
+//!   `parse_env` dependency) do not carry `P`. The per-row minimal dimension
+//!   set remains pending the design's §3.6 benched-minimality pass (U3/U15).
 //! - `cross_context_guard` names the per-key `*_do_not_warm_hit` guard that
 //!   pins the row's cross-context warm-hit isolation, or is empty (`""`) for a
 //!   row that does not yet have one. Several rows name their guards
@@ -255,6 +261,47 @@ impl EnvDimMask {
     }
 }
 
+/// The env-dimension specification of one spec row: either a single STATIC
+/// mask, or — for `Instantiate` only — a mask CONDITIONAL on the key's
+/// [`InstantiateBodySource`](crate::semantic_query::InstantiateBodySource)
+/// (one `Instantiate` query tag, no variant split): `FileBacked(P)` ⇒
+/// `P R T L J`; `NonFile` ⇒ `R T L J`. A single static mask is wrong in both
+/// directions — `P R T L J` over-claims for `NonFile` (per R21 an
+/// unconditional `P` would false-miss every parse-env-insensitive
+/// instantiation) and `R T L J` hides the file-backed parse-env dependency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EnvDimSpec {
+    /// One static mask for every instance of the key.
+    Static(EnvDimMask),
+    /// Conditional by the key's `InstantiateBodySource`.
+    Conditional {
+        /// The mask when the base is `FileBacked(P)`.
+        file_backed: EnvDimMask,
+        /// The mask when the base is `NonFile`.
+        non_file: EnvDimMask,
+    },
+}
+
+impl EnvDimSpec {
+    /// Stable textual render. A static spec renders its mask; a conditional
+    /// spec renders BOTH cases, labelled by the body-source arm that selects
+    /// each.
+    #[must_use]
+    pub fn render(self) -> String {
+        match self {
+            EnvDimSpec::Static(mask) => mask.render(),
+            EnvDimSpec::Conditional {
+                file_backed,
+                non_file,
+            } => format!(
+                "FileBacked(P) ⇒ {}; NonFile ⇒ {}",
+                file_backed.render(),
+                non_file.render()
+            ),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Lifecycle + admission discriminants (design §2.5)
 // ---------------------------------------------------------------------------
@@ -353,8 +400,10 @@ pub struct SemanticQueryKeySpec {
     pub context_shape: &'static str,
     /// The single value domain the variant resolves to.
     pub value_domain: SemanticQueryValueTag,
-    /// The R21 env-hash dimensions the cached value depends on.
-    pub env_dims: EnvDimMask,
+    /// The R21 env-hash dimensions the cached value depends on — static for
+    /// every row except `Instantiate`, whose mask is conditional by the
+    /// key's `InstantiateBodySource`.
+    pub env_dims: EnvDimSpec,
     /// Which [`DemandAxis`] this family branches on.
     pub allowed_demand: AxisMask,
     /// The per-key `*_do_not_warm_hit` cross-context guard name — populated for
@@ -486,24 +535,35 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             lifecycle: KeyLifecycle::Live,
             context_shape: "ResolveDeclKey",
             value_domain: SemanticQueryValueTag::TypeNode,
-            env_dims: env_resolve(),
+            env_dims: EnvDimSpec::Static(env_resolve()),
             allowed_demand: AxisMask::empty(),
             cross_context_guard: "",
             admission: AdmissionSpec::Singleflight,
         },
         // Instantiate { base, args, context: InstantiateContext {
-        // projection_reduction, resolve_env_hash } } — instantiates a generic
-        // decl body after substitution; resolves imported type-argument
-        // references (§2.1 tier-2: `R T L J`, no parsed-body-skeleton read at
-        // query time) and branches on the reduction context. The `base` is the
-        // env-bearing content-free `ResolvedDeclSlotIdentity` slot (J/T/L); the
-        // `R` dim rides the dedicated `InstantiateContext`.
+        // projection_reduction, resolve_env_hash, body_source } } —
+        // instantiates a generic decl body after substitution; resolves
+        // imported type-argument references and branches on the reduction
+        // context. The `base` is the env-bearing content-free
+        // `ResolvedDeclSlotIdentity` slot (J/T/L); the `R` dim and the
+        // `body_source` source-kind axis ride the dedicated
+        // `InstantiateContext`. The env row is CONDITIONAL by
+        // `InstantiateBodySource`: a `FileBacked(P)` base may read real-file
+        // parse-derived input (shallow state, prepared declarations, the lazy
+        // decl-body memo), so the live `parse_env_hash` is family identity —
+        // `P R T L J`; a true `NonFile` base (`""` / `"__builtin__"` /
+        // `"<synthetic>"`) genuinely does not depend on the parse env, so
+        // `R T L J` (an unconditional `P` would false-miss every
+        // parse-env-insensitive instantiation, R21).
         SemanticQueryKeySpec {
             variant: SemanticQueryKeyTag::Instantiate,
             lifecycle: KeyLifecycle::Live,
             context_shape: "InstantiateContext",
             value_domain: SemanticQueryValueTag::TypeNode,
-            env_dims: env_resolve(),
+            env_dims: EnvDimSpec::Conditional {
+                file_backed: env_full(),
+                non_file: env_resolve(),
+            },
             allowed_demand: reduction_axes,
             cross_context_guard: "instantiate_same_base_different_env_or_context_do_not_warm_hit, decl_self_type_or_lib_env_change_produces_distinct_instantiate_key",
             admission: AdmissionSpec::Singleflight,
@@ -516,7 +576,7 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             lifecycle: KeyLifecycle::Live,
             context_shape: "ProjectionMode",
             value_domain: SemanticQueryValueTag::TypeNode,
-            env_dims: env_structural(),
+            env_dims: EnvDimSpec::Static(env_structural()),
             allowed_demand: mode_axes,
             cross_context_guard: "",
             admission: AdmissionSpec::Singleflight,
@@ -528,7 +588,7 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             lifecycle: KeyLifecycle::Live,
             context_shape: "ProjectionMode",
             value_domain: SemanticQueryValueTag::TypeNode,
-            env_dims: env_structural(),
+            env_dims: EnvDimSpec::Static(env_structural()),
             allowed_demand: mode_axes,
             cross_context_guard: "",
             admission: AdmissionSpec::Singleflight,
@@ -542,7 +602,7 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             lifecycle: KeyLifecycle::Live,
             context_shape: "ProjectionReductionContext",
             value_domain: SemanticQueryValueTag::TypeNode,
-            env_dims: env_structural(),
+            env_dims: EnvDimSpec::Static(env_structural()),
             allowed_demand: reduction_axes,
             cross_context_guard: "keyof_queries_differing_only_by_provenance_do_not_warm_hit, keyof_and_mapped_type_context_axes_do_not_alias_family_identity",
             admission: AdmissionSpec::Singleflight,
@@ -556,7 +616,7 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             lifecycle: KeyLifecycle::Live,
             context_shape: "ProjectionReductionContext",
             value_domain: SemanticQueryValueTag::TypeNode,
-            env_dims: env_structural(),
+            env_dims: EnvDimSpec::Static(env_structural()),
             allowed_demand: reduction_axes,
             cross_context_guard: "mapped_type_queries_differing_only_by_merge_role_do_not_warm_hit, keyof_and_mapped_type_context_axes_do_not_alias_family_identity",
             admission: AdmissionSpec::Singleflight,
@@ -569,7 +629,7 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             lifecycle: KeyLifecycle::Live,
             context_shape: "(check,extends,true_branch,false_branch,distributive)",
             value_domain: SemanticQueryValueTag::TypeNode,
-            env_dims: env_structural(),
+            env_dims: EnvDimSpec::Static(env_structural()),
             allowed_demand: AxisMask::empty(),
             cross_context_guard: "",
             admission: AdmissionSpec::Singleflight,
@@ -590,7 +650,7 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             lifecycle: KeyLifecycle::Live,
             context_shape: "TypeOfContext",
             value_domain: SemanticQueryValueTag::TypeNode,
-            env_dims: env_resolve(),
+            env_dims: EnvDimSpec::Static(env_resolve()),
             allowed_demand: reduction_axes,
             cross_context_guard: "typeof_same_root_different_env_or_context_do_not_warm_hit, typeof_queries_differing_only_by_provenance_do_not_warm_hit, typeof_published_and_transit_contexts_do_not_warm_hit",
             admission: AdmissionSpec::Singleflight,
@@ -602,7 +662,7 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             lifecycle: KeyLifecycle::Live,
             context_shape: "(members)",
             value_domain: SemanticQueryValueTag::TypeNode,
-            env_dims: env_structural(),
+            env_dims: EnvDimSpec::Static(env_structural()),
             allowed_demand: AxisMask::empty(),
             cross_context_guard: "",
             admission: AdmissionSpec::Singleflight,
@@ -614,7 +674,7 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             lifecycle: KeyLifecycle::Live,
             context_shape: "(members)",
             value_domain: SemanticQueryValueTag::TypeNode,
-            env_dims: env_structural(),
+            env_dims: EnvDimSpec::Static(env_structural()),
             allowed_demand: AxisMask::empty(),
             cross_context_guard: "",
             admission: AdmissionSpec::Singleflight,
@@ -627,7 +687,7 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             lifecycle: KeyLifecycle::Live,
             context_shape: "ProjectionReductionContext",
             value_domain: SemanticQueryValueTag::TypeNode,
-            env_dims: env_structural(),
+            env_dims: EnvDimSpec::Static(env_structural()),
             allowed_demand: project_path_axes,
             cross_context_guard: "",
             admission: AdmissionSpec::Singleflight,
@@ -642,7 +702,7 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             lifecycle: KeyLifecycle::Live,
             context_shape: "HostResolvedNamedTypeKey",
             value_domain: SemanticQueryValueTag::TypeNode,
-            env_dims: env_resolve(),
+            env_dims: EnvDimSpec::Static(env_resolve()),
             allowed_demand: AxisMask::empty(),
             cross_context_guard: "",
             admission: AdmissionSpec::ReadDominantNoExecute,
@@ -669,7 +729,7 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             context_shape:
                 "(source,target,relation,policy,source_freshness,inference_context,context)",
             value_domain: SemanticQueryValueTag::Relation,
-            env_dims: env_resolve(),
+            env_dims: EnvDimSpec::Static(env_resolve()),
             allowed_demand: AxisMask::empty(),
             cross_context_guard: "",
             admission: AdmissionSpec::RelationMemo,
@@ -688,7 +748,7 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             lifecycle: KeyLifecycle::Live,
             context_shape: "MacroPayloadContext",
             value_domain: SemanticQueryValueTag::TypeNode,
-            env_dims: env_resolve(),
+            env_dims: EnvDimSpec::Static(env_resolve()),
             allowed_demand: mode_axes,
             cross_context_guard: "resolve_macro_payload_same_owner_different_env_or_context_do_not_warm_hit",
             admission: AdmissionSpec::Singleflight,
@@ -708,7 +768,7 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             lifecycle: KeyLifecycle::Live,
             context_shape: "ClassSurfaceContext",
             value_domain: SemanticQueryValueTag::TypeNode,
-            env_dims: env_full(),
+            env_dims: EnvDimSpec::Static(env_full()),
             allowed_demand: mode_axes,
             cross_context_guard: "resolve_class_surface_do_not_warm_hit",
             admission: AdmissionSpec::Singleflight,
@@ -726,7 +786,7 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             lifecycle: KeyLifecycle::Live,
             context_shape: "AmbientNamespaceContext",
             value_domain: SemanticQueryValueTag::TypeNode,
-            env_dims: env_full(),
+            env_dims: EnvDimSpec::Static(env_full()),
             allowed_demand: mode_axes,
             cross_context_guard: "resolve_ambient_namespace_do_not_warm_hit",
             admission: AdmissionSpec::NonProducingPendingReducer,
@@ -741,7 +801,7 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             lifecycle: KeyLifecycle::Live,
             context_shape: "EnumContext",
             value_domain: SemanticQueryValueTag::TypeNode,
-            env_dims: env_resolve(),
+            env_dims: EnvDimSpec::Static(env_resolve()),
             allowed_demand: AxisMask::empty(),
             cross_context_guard: "resolve_enum_do_not_warm_hit",
             admission: AdmissionSpec::NonProducingPendingReducer,
@@ -763,7 +823,7 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             lifecycle: KeyLifecycle::Live,
             context_shape: "OverloadSetContext",
             value_domain: SemanticQueryValueTag::OverloadSet,
-            env_dims: env_resolve(),
+            env_dims: EnvDimSpec::Static(env_resolve()),
             allowed_demand: AxisMask::empty(),
             cross_context_guard: "resolve_overload_set_do_not_warm_hit",
             admission: AdmissionSpec::Singleflight,
@@ -785,7 +845,7 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             lifecycle: KeyLifecycle::Live,
             context_shape: "ApparentTypeContext",
             value_domain: SemanticQueryValueTag::TypeNode,
-            env_dims: env_structural(),
+            env_dims: EnvDimSpec::Static(env_structural()),
             allowed_demand: mode_axes,
             cross_context_guard: "apparent_type_do_not_warm_hit",
             admission: AdmissionSpec::NonProducingPendingReducer,
@@ -806,7 +866,7 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             lifecycle: KeyLifecycle::Live,
             context_shape: "TemplateLiteralReduceContext",
             value_domain: SemanticQueryValueTag::TypeNode,
-            env_dims: env_resolve(),
+            env_dims: EnvDimSpec::Static(env_resolve()),
             allowed_demand: AxisMask::empty(),
             cross_context_guard: "template_literal_reduce_do_not_warm_hit",
             admission: AdmissionSpec::Singleflight,
@@ -833,7 +893,7 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             lifecycle: KeyLifecycle::Live,
             context_shape: "ProgramAnalysisContext",
             value_domain: SemanticQueryValueTag::ProgramAnalysis,
-            env_dims: env_full(),
+            env_dims: EnvDimSpec::Static(env_full()),
             allowed_demand: AxisMask::empty(),
             cross_context_guard: "flow_narrowing_at_do_not_warm_hit",
             admission: AdmissionSpec::NonProducingPendingReducer,
@@ -852,7 +912,7 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
             lifecycle: KeyLifecycle::Live,
             context_shape: "ProgramAnalysisContext",
             value_domain: SemanticQueryValueTag::ProgramAnalysis,
-            env_dims: env_full(),
+            env_dims: EnvDimSpec::Static(env_full()),
             allowed_demand: AxisMask::empty(),
             cross_context_guard: "contextual_type_at_do_not_warm_hit",
             admission: AdmissionSpec::NonProducingPendingReducer,
@@ -973,6 +1033,51 @@ mod tests {
             specs.len(),
             "rendered table must have exactly one non-comment line per spec row"
         );
+    }
+
+    /// The `Instantiate` env-dim row is CONDITIONAL by `InstantiateBodySource`
+    /// (one `Instantiate` query tag — no variant split): `FileBacked(P)` ⇒
+    /// `P R T L J`; `NonFile` ⇒ `R T L J`. A single static mask is wrong in
+    /// both directions — `P R T L J` over-claims for `NonFile` (R21
+    /// false-miss on every parse-env-insensitive instantiation) and
+    /// `R T L J` hides the file-backed parse-env dependency. Every OTHER row
+    /// stays static, and the rendered table shows BOTH cases on the
+    /// Instantiate row.
+    #[test]
+    fn instantiate_env_dims_row_is_conditional_by_body_source() {
+        let specs = semantic_query_key_specs();
+        let row = specs
+            .iter()
+            .find(|s| s.variant == SemanticQueryKeyTag::Instantiate)
+            .expect("missing spec row for Instantiate");
+        match row.env_dims {
+            EnvDimSpec::Conditional {
+                file_backed,
+                non_file,
+            } => {
+                assert_eq!(file_backed.render(), "P R T L J");
+                assert_eq!(non_file.render(), "R T L J");
+            }
+            EnvDimSpec::Static(_) => {
+                panic!("Instantiate env-dim row must be conditional by body_source")
+            }
+        }
+        let rendered = row.env_dims.render();
+        assert!(
+            rendered.contains("P R T L J") && rendered.contains("R T L J"),
+            "the rendered Instantiate row must show both body_source cases, got `{rendered}`"
+        );
+        for other in specs
+            .iter()
+            .filter(|s| s.variant != SemanticQueryKeyTag::Instantiate)
+        {
+            assert!(
+                matches!(other.env_dims, EnvDimSpec::Static(_)),
+                "{:?} env-dim row must stay static — only Instantiate is \
+                 conditional by body_source",
+                other.variant
+            );
+        }
     }
 
     /// `EnvDimMask::render` is canonical-order and uses `—` for empty.

@@ -676,7 +676,7 @@ fn typeof_resolution_stays_within_instantiate_window() {
                 args: std::sync::Arc::from(
                     Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice(),
                 ),
-                context: InstantiateContext::new(
+                context: InstantiateContext::non_file(
                     ProjectionReductionContext::published(ProjectionMode::Expanded),
                     Default::default(),
                 ),

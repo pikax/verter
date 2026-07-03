@@ -135,7 +135,7 @@ fn lower_mapped(host: &Arc<VerterHost>) -> SemanticNodeId {
             let key = SemanticQueryKey::Instantiate {
                 base: identity.to_type_slot_unscoped(),
                 args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                context: verter_session::semantic_query::InstantiateContext::new(
+                context: verter_session::semantic_query::InstantiateContext::non_file(
                     ProjectionReductionContext::structural_transit_with_mode(
                         ProjectionMode::Navigate,
                     ),
@@ -174,7 +174,7 @@ fn extract_mapper_inputs(
                 let key = SemanticQueryKey::Instantiate {
                     base: identity.to_type_slot_unscoped(),
                     args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                    context: verter_session::semantic_query::InstantiateContext::new(
+                    context: verter_session::semantic_query::InstantiateContext::non_file(
                         ProjectionReductionContext::structural_transit_with_mode(
                             ProjectionMode::Navigate,
                         ),
@@ -192,7 +192,7 @@ fn extract_mapper_inputs(
                 let key = SemanticQueryKey::Instantiate {
                     base: base.to_type_slot_unscoped(),
                     args: Arc::clone(args),
-                    context: verter_session::semantic_query::InstantiateContext::new(
+                    context: verter_session::semantic_query::InstantiateContext::non_file(
                         ProjectionReductionContext::structural_transit_with_mode(
                             ProjectionMode::Navigate,
                         ),

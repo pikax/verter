@@ -658,6 +658,25 @@ impl VerterHost {
         self.apply_parse_env_override(env_hashes_from_array(arr))
     }
 
+    /// TEST-ONLY: the live `parse_env_hash` dimension for `canonical`, as
+    /// the sealed [`ParseEnvHash`](crate::semantic_query::ParseEnvHash)
+    /// newtype. Lets external test fixtures mirror the
+    /// `instantiate_context_for` choke point's `file_backed(P)` keying
+    /// WITHOUT opening the newtype's byte constructor — the wrapped value
+    /// comes from the live host env, never from caller-supplied bytes, so
+    /// the content-free-by-type seal holds. It is `pub` (not
+    /// `#[cfg(test)]`-gated) only because external `tests/` integration
+    /// crates consume it.
+    #[must_use]
+    pub fn live_parse_env_dim_for_tests(
+        &self,
+        canonical: &str,
+    ) -> crate::semantic_query::ParseEnvHash {
+        crate::semantic_query::ParseEnvHash::from_env_hash(
+            self.host_view_env_hashes_for(canonical).parse_env_hash,
+        )
+    }
+
     /// Per-canonical project identity.
     ///
     /// Maps `canonical` to its owning project via the published

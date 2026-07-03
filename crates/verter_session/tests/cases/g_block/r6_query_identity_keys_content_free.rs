@@ -70,7 +70,7 @@ fn r6_semantic_query_key_instantiate_base_is_content_free_decl_key() {
     let key = SemanticQueryKey::Instantiate {
         base: base.clone(),
         args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        context: InstantiateContext::new(
+        context: InstantiateContext::non_file(
             ProjectionReductionContext::published(ProjectionMode::Expanded),
             Default::default(),
         ),
@@ -85,15 +85,22 @@ fn r6_semantic_query_key_instantiate_base_is_content_free_decl_key() {
                     env: _,
                 },
             args: _,
-            // `InstantiateContext` carries the embedded projection-reduction
-            // identity + the `resolve_env_hash` ENV dim — no content/version
-            // hash. Destructuring proves the field set is exactly these two.
-            context:
-                InstantiateContext {
-                    projection_reduction: _,
-                    resolve_env_hash: _,
-                },
+            // `InstantiateContext` is SEALED (private fields; the only
+            // constructors are `file_backed` / `non_file`), so an external
+            // destructure cannot enumerate its fields. The accessors expose
+            // the embedded projection-reduction identity, the
+            // `resolve_env_hash` ENV dim, and the `body_source` source-kind
+            // axis — no content/version hash; the exhaustive in-module R6
+            // field proof lives with the sealed definition.
+            context,
         } => {
+            let _ = context.projection_reduction();
+            let _: verter_session::semantic_query::HashValue = context.resolve_env_hash();
+            assert_eq!(
+                context.body_source(),
+                verter_session::semantic_query::InstantiateBodySource::NonFile,
+                "the sealed constructor used above is `non_file`"
+            );
             // The slot exposes a fixed field set with NO `whole_hash` /
             // `content_hash` / `fact_dep_signature`. Any future addition
             // of such a content/version field breaks this exhaustive

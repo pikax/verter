@@ -1018,7 +1018,7 @@ fn invalidate_canonical_evicts_instantiate_entries_that_read_that_canonical_body
     let key = SemanticQueryKey::Instantiate {
         base,
         args: Arc::from(vec![arg].into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::new(
+        context: crate::semantic_query::InstantiateContext::non_file(
             crate::semantic_query::ProjectionReductionContext::published(
                 crate::semantic_query::ProjectionMode::Expanded,
             ),
@@ -1068,7 +1068,7 @@ fn invalidate_canonical_keeps_instantiate_entries_whose_bases_are_unrelated() {
     let key = SemanticQueryKey::Instantiate {
         base,
         args: Arc::from(vec![arg].into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::new(
+        context: crate::semantic_query::InstantiateContext::non_file(
             crate::semantic_query::ProjectionReductionContext::published(
                 crate::semantic_query::ProjectionMode::Expanded,
             ),
@@ -8015,7 +8015,7 @@ mod env_scoped_key_identity_guards {
         SemanticQueryKey::Instantiate {
             base: slot,
             args: empty_args(),
-            context: InstantiateContext::new(
+            context: InstantiateContext::non_file(
                 ProjectionReductionContext::published(ProjectionMode::Expanded),
                 resolve_env,
             ),
@@ -8707,5 +8707,162 @@ mod env_scoped_key_identity_guards {
             store.get_resolved_named_type(&other_env).is_none(),
             "different-type_env lookup must MISS — the key is env-scoped, not env-blind"
         );
+    }
+}
+
+/// `InstantiateBodySource` family-identity guards.
+///
+/// The `Instantiate` family folds the base body's SOURCE KIND: a file-backed
+/// base folds the live `parse_env_hash` (`P`) into the family identity (two
+/// lowerings differing only in the FileBacked `P` are DISTINCT FAMILIES —
+/// never competing candidates under one slot), while a true non-file base
+/// (`""` / `"__builtin__"` / `"<synthetic>"`) folds NO `P` at all — an
+/// unconditional `P` would false-miss every parse-env-insensitive
+/// instantiation (R21).
+mod instantiate_body_source_family_identity {
+    use super::super::family::{family_and_slot, FamilyKey};
+    use crate::locator_identity::ParseEnvHash;
+    use crate::semantic_query::{
+        InstantiateBodySource, InstantiateContext, ProjectionMode, ProjectionReductionContext,
+        ResolvedDeclSlotIdentity, SemanticNodeId, SemanticQueryKey,
+    };
+    use std::sync::Arc;
+
+    fn empty_args() -> Arc<[SemanticNodeId]> {
+        Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice())
+    }
+
+    fn slot() -> ResolvedDeclSlotIdentity {
+        ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from("/w/a.ts"), Arc::from("Foo"))
+    }
+
+    fn inst_key(context: InstantiateContext) -> SemanticQueryKey {
+        SemanticQueryKey::Instantiate {
+            base: slot(),
+            args: empty_args(),
+            context,
+        }
+    }
+
+    fn fam(key: &SemanticQueryKey) -> FamilyKey {
+        family_and_slot(key).0
+    }
+
+    fn prc() -> ProjectionReductionContext {
+        ProjectionReductionContext::published(ProjectionMode::Expanded)
+    }
+
+    /// Two contexts identical EXCEPT the FileBacked `P` (P0 vs P1) produce
+    /// DIFFERENT `FamilyKey::Instantiate` values — a parse-env-only change on
+    /// a file-backed base is a distinct family, never a warm collision.
+    #[test]
+    fn file_backed_parse_env_change_is_a_distinct_instantiate_family() {
+        let p0 = ParseEnvHash::from_env_hash([1u8; 16]);
+        let p1 = ParseEnvHash::from_env_hash([2u8; 16]);
+        let f0 = fam(&inst_key(InstantiateContext::file_backed(
+            prc(),
+            Default::default(),
+            p0,
+        )));
+        let f0_again = fam(&inst_key(InstantiateContext::file_backed(
+            prc(),
+            Default::default(),
+            p0,
+        )));
+        let f1 = fam(&inst_key(InstantiateContext::file_backed(
+            prc(),
+            Default::default(),
+            p1,
+        )));
+        assert_eq!(f0, f0_again, "same FileBacked P must be ONE family");
+        assert_ne!(
+            f0, f1,
+            "FileBacked P0 vs P1 must be DISTINCT Instantiate families"
+        );
+    }
+
+    /// A NonFile context folds NO `P`: the constructor takes no parse-env
+    /// input, so the family is identical regardless of the live parse env,
+    /// and its folded `body_source` carries no `ParseEnvHash`.
+    #[test]
+    fn non_file_context_folds_no_parse_env() {
+        let a = fam(&inst_key(InstantiateContext::non_file(
+            prc(),
+            Default::default(),
+        )));
+        let b = fam(&inst_key(InstantiateContext::non_file(
+            prc(),
+            Default::default(),
+        )));
+        assert_eq!(
+            a, b,
+            "NonFile contexts have no P axis — one family regardless of the live parse env"
+        );
+        match a {
+            FamilyKey::Instantiate { body_source, .. } => {
+                assert_eq!(body_source, InstantiateBodySource::NonFile);
+            }
+            other => panic!("expected FamilyKey::Instantiate, got {other:?}"),
+        }
+    }
+
+    /// FileBacked and NonFile are DISTINCT source kinds: same slot / args /
+    /// projection / resolve env, different `body_source` ⇒ different family.
+    #[test]
+    fn file_backed_and_non_file_are_distinct_instantiate_families() {
+        let file_backed = fam(&inst_key(InstantiateContext::file_backed(
+            prc(),
+            Default::default(),
+            ParseEnvHash::from_env_hash([1u8; 16]),
+        )));
+        let non_file = fam(&inst_key(InstantiateContext::non_file(
+            prc(),
+            Default::default(),
+        )));
+        assert_ne!(
+            file_backed, non_file,
+            "FileBacked vs NonFile must be distinct Instantiate families"
+        );
+    }
+
+    /// STRUCTURAL guard: `FamilyKey::Instantiate` folds `P` for EXACTLY the
+    /// `FileBacked` arm. The match over `InstantiateBodySource` is EXHAUSTIVE
+    /// (no wildcard), so adding a source-kind variant fails compilation here
+    /// until its `P`-folding disposition is classified.
+    #[test]
+    fn family_key_instantiate_folds_parse_env_only_for_file_backed() {
+        fn folded_parse_env(source: InstantiateBodySource) -> Option<ParseEnvHash> {
+            match source {
+                InstantiateBodySource::FileBacked(parse_env) => Some(parse_env),
+                InstantiateBodySource::NonFile => None,
+            }
+        }
+
+        let p = ParseEnvHash::from_env_hash([7u8; 16]);
+        let contexts = [
+            InstantiateContext::file_backed(prc(), Default::default(), p),
+            InstantiateContext::non_file(prc(), Default::default()),
+        ];
+        for context in contexts {
+            let family = fam(&inst_key(context));
+            let FamilyKey::Instantiate { body_source, .. } = family else {
+                panic!("expected FamilyKey::Instantiate");
+            };
+            // The family folds the context's body_source verbatim…
+            assert_eq!(body_source, context.body_source());
+            // …and its P content is exactly the exhaustive-match disposition.
+            match folded_parse_env(body_source) {
+                Some(parse_env) => assert_eq!(
+                    body_source,
+                    InstantiateBodySource::FileBacked(parse_env),
+                    "FileBacked folds its ParseEnvHash into the family"
+                ),
+                None => assert_eq!(
+                    body_source,
+                    InstantiateBodySource::NonFile,
+                    "NonFile folds no ParseEnvHash"
+                ),
+            }
+        }
     }
 }

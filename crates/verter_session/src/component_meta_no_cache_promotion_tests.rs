@@ -1592,7 +1592,7 @@ fn lower_indexed_access_chain_budget_trip_folds_partial_through_chokepoint_and_r
     let instantiate_key = SemanticQueryKey::Instantiate {
         base: deep_slot,
         args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::new(
+        context: crate::semantic_query::InstantiateContext::non_file(
             ProjectionReductionContext::published(ProjectionMode::Expanded),
             resolve_env,
         ),

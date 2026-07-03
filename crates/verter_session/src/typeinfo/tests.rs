@@ -955,7 +955,7 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
         match dispatch.execute_type_node(crate::semantic_query::SemanticQueryKey::Instantiate {
             base: key,
             args: Arc::from(Vec::new().into_boxed_slice()),
-            context: crate::semantic_query::InstantiateContext::new(
+            context: crate::semantic_query::InstantiateContext::non_file(
                 crate::semantic_query::ProjectionReductionContext::published(
                     ProjectionMode::Expanded,
                 ),

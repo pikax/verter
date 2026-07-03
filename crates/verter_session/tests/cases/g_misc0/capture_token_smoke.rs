@@ -185,7 +185,7 @@ fn key_family_matches_instantiate_for_resolved_name() {
     let key = SemanticQueryKey::Instantiate {
         base: DeclIdentity::synthetic("UIMessage").to_type_slot_unscoped(),
         args: Arc::new([]),
-        context: verter_session::semantic_query::InstantiateContext::new(
+        context: verter_session::semantic_query::InstantiateContext::non_file(
             verter_session::semantic_query::ProjectionReductionContext::published(
                 verter_session::semantic_query::ProjectionMode::Skeleton,
             ),
@@ -227,7 +227,7 @@ fn dispatch_log_records_under_active_token() {
     let key = SemanticQueryKey::Instantiate {
         base: DeclIdentity::synthetic("UIMessage").to_type_slot_unscoped(),
         args: Arc::new([]),
-        context: verter_session::semantic_query::InstantiateContext::new(
+        context: verter_session::semantic_query::InstantiateContext::non_file(
             verter_session::semantic_query::ProjectionReductionContext::published(
                 verter_session::semantic_query::ProjectionMode::Skeleton,
             ),
@@ -262,7 +262,7 @@ fn key_family_matches_instantiate_expanded_for_resolved_name() {
     let key_expanded = SemanticQueryKey::Instantiate {
         base: DeclIdentity::synthetic("UIMessage").to_type_slot_unscoped(),
         args: Arc::new([]),
-        context: verter_session::semantic_query::InstantiateContext::new(
+        context: verter_session::semantic_query::InstantiateContext::non_file(
             verter_session::semantic_query::ProjectionReductionContext::published(
                 ProjectionMode::Expanded,
             ),
@@ -280,7 +280,7 @@ fn key_family_matches_instantiate_expanded_for_resolved_name() {
     let key_skeleton = SemanticQueryKey::Instantiate {
         base: DeclIdentity::synthetic("UIMessage").to_type_slot_unscoped(),
         args: Arc::new([]),
-        context: verter_session::semantic_query::InstantiateContext::new(
+        context: verter_session::semantic_query::InstantiateContext::non_file(
             verter_session::semantic_query::ProjectionReductionContext::published(
                 ProjectionMode::Skeleton,
             ),
@@ -295,7 +295,7 @@ fn key_family_matches_instantiate_expanded_for_resolved_name() {
     let key_shallow = SemanticQueryKey::Instantiate {
         base: DeclIdentity::synthetic("UIMessage").to_type_slot_unscoped(),
         args: Arc::new([]),
-        context: verter_session::semantic_query::InstantiateContext::new(
+        context: verter_session::semantic_query::InstantiateContext::non_file(
             verter_session::semantic_query::ProjectionReductionContext::published(
                 ProjectionMode::Shallow,
             ),

@@ -633,8 +633,10 @@ fn class_dual_space_routes_instance_and_static_through_distinct_shared_paths() {
     // themselves warm in the shared memo: Instance warmed the
     // Instantiate(type slot) slot. The composed key matches
     // `build_class_surface` exactly — the class slot canonicalized to the
-    // TYPE symbol space, and an `InstantiateContext` whose `resolve_env_hash`
-    // is derived from the defining canonical's live host env.
+    // TYPE symbol space, and an `InstantiateContext` built the way the
+    // `instantiate_context_for` choke point builds it for a real canonical:
+    // `file_backed(P)` with the defining canonical's LIVE `parse_env_hash`,
+    // plus its live `resolve_env_hash`.
     let inner_resolve_env = host
         .host_view_env_hashes_for(&decl_slot.defining_canonical)
         .resolve_env_hash;
@@ -642,9 +644,10 @@ fn class_dual_space_routes_instance_and_static_through_distinct_shared_paths() {
         base: decl_slot
             .with_symbol_space(verter_session::semantic_query::SemanticSymbolSpace::Type),
         args: Arc::from(Vec::new().into_boxed_slice()),
-        context: verter_session::semantic_query::InstantiateContext::new(
+        context: verter_session::semantic_query::InstantiateContext::file_backed(
             ProjectionReductionContext::published(ProjectionMode::Shallow),
             inner_resolve_env,
+            host.live_parse_env_dim_for_tests(&decl_slot.defining_canonical),
         ),
     };
     assert!(

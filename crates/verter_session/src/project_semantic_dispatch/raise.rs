@@ -1883,7 +1883,7 @@ fn observe_closedness_walk_consult(
     ctx: &dyn crate::resolver_core::ResolverContext,
     canonical_id: &str,
 ) {
-    if canonical_id.is_empty() || canonical_id == "__builtin__" || canonical_id == "<synthetic>" {
+    if crate::semantic_query::is_non_file_base(canonical_id) {
         return;
     }
     // Structurally read-only: observes the consulted file's whole hash

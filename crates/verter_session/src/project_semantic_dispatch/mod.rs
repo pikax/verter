@@ -350,7 +350,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 ctx.bump_type_resolution_projection_op();
             }
             SemanticQueryKey::Instantiate { context, .. } => {
-                ctx.bump_type_resolution_hop(context.projection_reduction.mode);
+                ctx.bump_type_resolution_hop(context.mode());
             }
             SemanticQueryKey::Conditional { .. } => {
                 ctx.bump_type_resolution_conditional_decision();
@@ -427,14 +427,38 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
     /// Build the [`InstantiateContext`](crate::semantic_query::InstantiateContext)
     /// for a base defined in `canonical` from the projection-reduction
-    /// context `prc` plus the base canonical's `resolve_env_hash`.
+    /// context `prc` plus the base canonical's env.
+    ///
+    /// This is the SOLE production builder of an `InstantiateContext`,
+    /// and it owns the deterministic body-source mapping: a true
+    /// non-file base (`""` / `"__builtin__"` / `"<synthetic>"`, per
+    /// [`is_non_file_base`](crate::semantic_query::is_non_file_base))
+    /// maps to `non_file` — its value genuinely does not depend on the
+    /// parse env, and an unconditional `P` would false-miss every
+    /// parse-env-insensitive instantiation (R21) — while EVERY real
+    /// canonical maps to `file_backed(P)` with the canonical's LIVE
+    /// `parse_env_hash` (the compute may read real-file parse-derived
+    /// input, so the parse env is family identity). Call sites never
+    /// choose the source kind freely.
     #[must_use]
     pub(crate) fn instantiate_context_for(
         &self,
         canonical: &str,
         prc: crate::semantic_query::ProjectionReductionContext,
     ) -> crate::semantic_query::InstantiateContext {
-        crate::semantic_query::InstantiateContext::new(prc, self.resolve_env_hash_for(canonical))
+        let env = self
+            .ctx
+            .host_for_fact_tracer_install()
+            .host_view_env_hashes_for(canonical);
+        if crate::semantic_query::is_non_file_base(canonical) {
+            crate::semantic_query::InstantiateContext::non_file(prc, env.resolve_env_hash)
+        } else {
+            crate::semantic_query::InstantiateContext::file_backed(
+                prc,
+                env.resolve_env_hash,
+                crate::locator_identity::ParseEnvHash::from_env_hash(env.parse_env_hash),
+            )
+        }
     }
 
     /// Build the [`MacroPayloadContext`](crate::semantic_query::MacroPayloadContext)

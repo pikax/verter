@@ -148,6 +148,17 @@ pub(super) enum FamilyKey {
         base: crate::semantic_query::ResolvedDeclSlotIdentity,
         args: Arc<[SemanticNodeId]>,
         resolve_env_hash: crate::semantic_query::HashValue,
+        /// The base body's SOURCE KIND (`FileBacked(P)` / `NonFile`),
+        /// folded from the key's
+        /// [`crate::semantic_query::InstantiateContext`]. A file-backed
+        /// base folds the live `parse_env_hash` here, so two lowerings
+        /// differing only in the FileBacked `P` are DISTINCT FAMILIES —
+        /// a parse-env-only change (content unchanged) is not caught by
+        /// the `FileWholeHash` self-root rail and must be caught by the
+        /// key. A true non-file base folds NO `P` (an unconditional `P`
+        /// would false-miss every parse-env-insensitive instantiation,
+        /// R21).
+        body_source: crate::semantic_query::InstantiateBodySource,
         /// Surface-provenance dimension. A
         /// macro-type-argument own-body instantiation and a plain
         /// structural instantiation of the SAME decl + args produce
@@ -1098,12 +1109,13 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
             args,
             context,
         } => {
-            let prc = context.projection_reduction;
+            let prc = context.projection_reduction();
             (
                 FamilyKey::Instantiate {
                     base: base.clone(),
                     args: Arc::clone(args),
-                    resolve_env_hash: context.resolve_env_hash,
+                    resolve_env_hash: context.resolve_env_hash(),
+                    body_source: context.body_source(),
                     provenance: prc.provenance,
                     merge_role: prc.merge_role,
                 },
