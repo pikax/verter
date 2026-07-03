@@ -20,8 +20,9 @@ mod some_mod {
 #[derive(verter_no_typeexpr::NoTypeExpr)]
 #[no_typeexpr(recursive_self)]
 enum Recipe {
-    // The genuine fixed-point self-container — its self-bound is omitted (so the
-    // escape's at-least-one-`Arc<[Self]>` requirement is satisfied).
+    // The genuine fixed-point self-container — the escape replaces its plain
+    // witness bound with the `RecursiveSelfArc<Self>` proof-bound (so the escape's
+    // at-least-one-`Arc<[Self]>` requirement is satisfied).
     Rec(Arc<[Recipe]>),
     // NOT the container's own type: a foreign `some_mod::Recipe` (multi-segment)
     // that owns a `TypeExpr`. Its `NoTypeExpr` bound is KEPT and unsatisfiable.

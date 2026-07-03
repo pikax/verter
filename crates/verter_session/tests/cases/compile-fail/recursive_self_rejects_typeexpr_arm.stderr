@@ -1,7 +1,7 @@
 error[E0277]: the trait bound `TypeExpr: NoTypeExprWitness` is not satisfied
-  --> tests/cases/compile-fail/recursive_self_rejects_typeexpr_arm.rs:12:10
+  --> tests/cases/compile-fail/recursive_self_rejects_typeexpr_arm.rs:13:10
    |
-12 | #[derive(verter_no_typeexpr::NoTypeExpr)]
+13 | #[derive(verter_no_typeexpr::NoTypeExpr)]
    |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `NoTypeExprWitness` is not implemented for `TypeExpr`
    |
    = help: the following other types implement trait `NoTypeExprWitness`:

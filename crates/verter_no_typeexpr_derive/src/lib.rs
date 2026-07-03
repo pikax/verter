@@ -504,7 +504,8 @@ mod tests {
     #[test]
     fn without_attr_arc_slice_self_still_gets_bound() {
         // WITHOUT the opt-in attribute, an `Arc<[Self]>` field is bounded like any
-        // other (the escape is opt-in only). This proves the omission is gated.
+        // other (the escape is opt-in only). This proves the proof-bound
+        // substitution is gated.
         let out = expand_str("enum R { Rec(std::sync::Arc<[R]>) }");
         assert!(
             out.contains("Arc"),

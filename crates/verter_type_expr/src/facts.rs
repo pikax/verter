@@ -144,8 +144,10 @@ pub enum ClosednessRecipe {
     /// A closed-named-members object (`{ a; b }`) ⇒ closed.
     ObjectClosed,
     /// An intersection is closed iff every arm's recipe is closed. The ONLY
-    /// composition arm (parentheses are normalized away). The recursive-self
-    /// escape omits the self-bound on this arm only.
+    /// composition arm (parentheses are normalized away). On this arm only, the
+    /// recursive-self escape REPLACES the plain marker witness bound with a
+    /// compiler-resolved `RecursiveSelfArc<Self>` proof-bound (only the genuine
+    /// `std::sync::Arc<[Self]>` satisfies it).
     IntersectionAllArms(Arc<[ClosednessRecipe]>),
     /// A mapped type with an open key parameter ⇒ open.
     MappedOpenParam,

@@ -1,7 +1,7 @@
 error[E0277]: the trait bound `Span: NoStoredSpanWitness` is not satisfied
-  --> tests/cases/compile-fail/recursive_self_rejects_span_arm.rs:10:10
+  --> tests/cases/compile-fail/recursive_self_rejects_span_arm.rs:11:10
    |
-10 | #[derive(verter_no_storedspan::NoStoredSpan)]
+11 | #[derive(verter_no_storedspan::NoStoredSpan)]
    |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `NoStoredSpanWitness` is not implemented for `Span`
    |
    = help: the following other types implement trait `NoStoredSpanWitness`:

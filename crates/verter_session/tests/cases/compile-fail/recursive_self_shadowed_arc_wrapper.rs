@@ -25,8 +25,9 @@ mod shadow {
 #[derive(verter_no_typeexpr::NoTypeExpr)]
 #[no_typeexpr(recursive_self)]
 enum Recipe {
-    // The genuine fixed-point self-container via the standard `Arc` — bound
-    // omitted (so the escape's at-least-one-`Arc<[Self]>` requirement holds).
+    // The genuine fixed-point self-container via the standard `Arc` — its plain
+    // witness bound is replaced by the `RecursiveSelfArc<Self>` proof-bound (so
+    // the escape's at-least-one-`Arc<[Self]>` requirement holds).
     Rec(std::sync::Arc<[Recipe]>),
     // A custom `shadow::Arc<[Recipe]>` wrapper owning a `TypeExpr`. It is NOT the
     // standard `Arc`, so its `NoTypeExpr` bound is KEPT and unsatisfiable.
