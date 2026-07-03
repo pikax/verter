@@ -145,22 +145,17 @@ impl ClientSyntaxSurface {
             });
         }
 
-        // (2) Binding kinds: an advanced `$state.raw` / `$bindable` binding is 5g.
+        // (2) Binding kinds: an advanced `$bindable` binding is 5g. A `$state.raw`
+        // signal (`StateSignal { raw: true }`) is SUPPORTED — it lowers to a bare
+        // `$.state(<init>)` (no `$.proxy`), and the raw-aware reassignment flag
+        // suppresses the trailing `, true`; the object/array `BareProxy` / `StateProxy`
+        // forms are likewise supported and fall through.
         for binding in ir.analysis.bindings.all() {
-            match binding.kind {
-                BindingRuntimeKind::StateSignal { raw: true } => {
-                    return Err(UnsupportedSvelteRuntimeSurface::AdvancedRune {
-                        rune: "$state.raw",
-                        span: Span::new(0, 0),
-                    });
-                }
-                BindingRuntimeKind::BindableProp => {
-                    return Err(UnsupportedSvelteRuntimeSurface::AdvancedRune {
-                        rune: "$bindable",
-                        span: Span::new(0, 0),
-                    });
-                }
-                _ => {}
+            if binding.kind == BindingRuntimeKind::BindableProp {
+                return Err(UnsupportedSvelteRuntimeSurface::AdvancedRune {
+                    rune: "$bindable",
+                    span: Span::new(0, 0),
+                });
             }
         }
 

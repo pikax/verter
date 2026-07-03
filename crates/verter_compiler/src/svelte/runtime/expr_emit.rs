@@ -19,24 +19,25 @@ use super::expr::{
 use super::expr_rewrite::{PropRead, PropReads};
 
 /// The structural shape of a `$state` / `$state.raw` declarator — the fail-closed
-/// gate that distinguishes a SUPPORTED primitive-literal plain-identifier state
-/// declarator (`let c = $state(0)`) from the ADVANCED forms the Svelte client
-/// emitter refuses (5g) rather than partially lowering: a destructured one
-/// (`let { a } = $state(...)` / `let [x] = $state(...)`), OR a NON-primitive-literal
-/// initializer (an object / array / call / identifier — `let o = $state({})` /
-/// `$state([])` — which official lowers via the `$.proxy` deep-reactive form). Only
-/// a string / number / boolean / null / undefined / bigint LITERAL init is the
-/// §1.2-class primitive `$.state(<literal>)` form; object/array proxy state is a
-/// deferral-ledger item.
+/// gate that distinguishes a SUPPORTED plain-identifier state declarator (a
+/// primitive `let c = $state(0)` OR a proxiable object/array/identifier/call
+/// `let o = $state({})` — the deep-reactive `$.proxy` form) from the ADVANCED forms
+/// the Svelte client emitter refuses rather than partially lowering: a destructured
+/// one (`let { a } = $state(...)` / `let [x] = $state(...)`), an over-arity call, a
+/// spread argument, or the narrowed form Verter's `should_proxy` predicate mis-decides
+/// (a REACTIVE-shadowed bare `undefined` init). A plain-identifier declarator whose init is a
+/// primitive OR a proxiable value is SUPPORTED — the declarator emitter lowers it per
+/// the resolved [`StateLowering`], routing a proxiable init through the shared
+/// expression rewriter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StateDeclShape {
     /// No `$state` declarator (the common case).
     None,
-    /// A primitive-literal plain-identifier `$state` declarator (`let c = $state(0)`)
-    /// — supported.
+    /// A plain-identifier `$state` / `$state.raw` declarator (primitive OR proxiable
+    /// init) — supported.
     Identifier,
-    /// A destructured `$state` declarator, or a non-primitive-literal init (an
-    /// object / array / call / identifier argument) — ADVANCED (5g), fails closed.
+    /// A destructured `$state` declarator, an over-arity call, a spread argument, or a
+    /// reactive-shadowed-`undefined` init — ADVANCED, fails closed.
     Advanced {
         /// A short label for the diagnostic.
         rune: &'static str,
@@ -45,12 +46,13 @@ pub enum StateDeclShape {
 
 /// Classify EVERY `$state` / `$state.raw` declarator's shape in an instance-script
 /// source. Returns [`StateDeclShape::Advanced`] if ANY `$state` declarator (not just
-/// the first) has a non-plain-identifier pattern (an object/array destructure) OR a
-/// NON-primitive-literal initializer (an object / array / call / identifier),
-/// [`StateDeclShape::Identifier`] when at least one `$state` declarator exists and
-/// ALL are primitive-literal plain identifiers, and [`StateDeclShape::None`] when
-/// there is no `$state` declarator. Drives the fail-closed gate BEFORE lowering, so
-/// a destructured / object / array `$state` never reaches `lower_state_declarator`.
+/// the first) has a non-plain-identifier pattern (an object/array destructure), an
+/// over-arity call, a spread argument, or the narrowed reactive-shadowed-`undefined`
+/// init; [`StateDeclShape::Identifier`]
+/// when at least one plain-identifier `$state` declarator exists and ALL are supported
+/// (a primitive OR proxiable init); and [`StateDeclShape::None`] when there is no
+/// `$state` declarator. Drives the fail-closed gate BEFORE lowering, so a
+/// destructured `$state` never reaches the declarator emitter.
 ///
 /// Scanning ALL declarators (across all statements AND all declarators within a
 /// single multi-declarator statement) is load-bearing: `let ok = $state(0); let {
@@ -63,12 +65,15 @@ pub fn state_decl_shape(instance_source: &str) -> StateDeclShape {
     let Some(program) = reparse_module(&alloc, instance_source) else {
         return StateDeclShape::None;
     };
-    // Whether the instance script DECLARES a local named `undefined` (a `let undefined
-    // = …`). The `$state(undefined)` primitive-literal classification is valid ONLY
-    // when `undefined` is the global void-0 reference; a SHADOWED `undefined` is a
-    // non-literal reference init (official reads the shadow — `$.state($.proxy($.get(
-    // undefined)))` for a signal shadow) which is breadth, so it must fail closed.
-    let undefined_shadowed = top_level_declares_undefined(&program);
+    // Whether the instance script shadows `undefined` with a REACTIVE-RUNE binding (a
+    // top-level `let undefined = $state(…)` / `$state.raw(…)` / `$derived(…)` /
+    // `$derived.by(…)`). This gate is PRE-LOWERING and INSTANCE-ONLY, so it
+    // CONSERVATIVELY fails closed over the WHOLE reactive-rune-`undefined`-shadow class —
+    // see `state_init_is_shadowed_undefined` for the honest rationale (the LIVE-signal
+    // subcase is unsupportable and this gate cannot tell demoted from live here). A
+    // PLAIN-local `undefined` shadow (`let undefined = 5`) is NOT reactive: it reads plain
+    // and lowers to `$.state(undefined)` matching official — supported.
+    let undefined_reactive_shadow = top_level_undefined_shadow_is_reactive_rune(&program);
     let mut saw_state = false;
     for stmt in &program.body {
         let Statement::VariableDeclaration(decl) = stmt else {
@@ -85,7 +90,7 @@ pub fn state_decl_shape(instance_source: &str) -> StateDeclShape {
             // `$state` / `$state.raw` accept ZERO or ONE argument; a SECOND argument is
             // the official `rune_invalid_arguments_length` compile error ("$state must
             // be called with zero or one arguments", CallExpression.js). Fail closed
-            // (5g) rather than silently dropping the extra argument (`$state(0, 1)` →
+            // rather than silently dropping the extra argument (`$state(0, 1)` →
             // `$.state(0)`). The check precedes the destructure / init-shape gates so an
             // over-arity call fails on arity regardless of its pattern.
             if call.arguments.len() > 1 {
@@ -93,28 +98,84 @@ pub fn state_decl_shape(instance_source: &str) -> StateDeclShape {
                     rune: "$state() invalid arguments",
                 };
             }
-            // An object / array destructure of `$state(...)` is the advanced form
-            // (5g) — return immediately so a later identifier declarator cannot mask
-            // it. The identifier-only lowering never sees a destructure pattern.
+            // A SPREAD argument (`$state(...x)` / `$state.raw(...x)`) is the official
+            // `rune_invalid_spread` compile error ("`$state` cannot be called with a
+            // spread argument"). A single spread arg is `arguments.len() == 1` and its
+            // `as_expression()` is `None`, so it slips past BOTH the arity gate above
+            // and the init-shape gates below (`state_primitive_init_text` would emit
+            // `void 0` for the missing expression) — fail closed instead. Checked over
+            // EVERY argument (`.any(as_expression().is_none())`) so no non-expression
+            // argument form reaches the `void 0` init fallback.
+            if call.arguments.iter().any(|a| a.as_expression().is_none()) {
+                return StateDeclShape::Advanced {
+                    rune: "$state() spread argument",
+                };
+            }
+            // An object / array destructure of `$state(...)` is the advanced form — the
+            // official compiler lowers it through a destructure closure; that lowering
+            // is a distinct surface, so it fails closed (returned immediately so a later
+            // identifier declarator cannot mask it).
             if !matches!(&d.id, BindingPattern::BindingIdentifier(_)) {
                 return StateDeclShape::Advanced {
                     rune: "$state() destructure",
                 };
             }
-            // A NON-primitive-literal `$state` initializer (an object / array / call /
-            // identifier — `$state({})` / `$state([])` / `$state(makeIt())`) is the
-            // deep-reactive `$.proxy` form (a BareProxy / StateProxy). Only a
-            // primitive literal is the §1.2-class `$.state(<literal>)` signal — fail
-            // closed for everything else (5g).
-            // TODO(follow-up): lower object/array `$state` to the deep-reactive
-            // `$.state($.proxy(init))` BareProxy / StateProxy form (with the proxied
-            // member read/write rewrite) instead of failing closed. Owned by the
-            // runes-completion block (5g).
-            if !state_init_is_primitive_literal(call, undefined_shadowed) {
+            // CONSERVATIVE fail-close: a `$state(undefined)` init whose `undefined` is
+            // shadowed by a REACTIVE-RUNE binding (`$state` / `$state.raw` / `$derived`).
+            // The correct output depends on how that shadow LOWERS (oracle-verified
+            // against `svelte@5.56.3`):
+            //   - a LIVE-signal shadow (reassigned as a whole variable → lowers to
+            //     `$.state(…)`, read via `$.get`) makes the init read `$.get(undefined)`,
+            //     which official proxies → `$.state($.proxy($.get(undefined)))`. Verter
+            //     CANNOT reproduce this (its `expr_is_proxiable` hardcodes the `undefined`
+            //     identifier non-proxiable and would omit the `$.proxy`), so the LIVE
+            //     subcase is genuinely UNSUPPORTABLE.
+            //   - a DEMOTED shadow (never reassigned → lowers to a plain `let undefined =
+            //     …` / `$.proxy(…)`, read BARE) makes the init read a bare `undefined` →
+            //     official emits `$.state(undefined)`, which Verter CAN reproduce.
+            // This gate is PRE-LOWERING and INSTANCE-ONLY: it cannot know whether the
+            // shadow will be demoted or live, because a whole-variable reassignment that
+            // promotes the shadow to a live signal can happen in a TEMPLATE handler this
+            // gate never sees (`onclick={() => undefined = 1}` — oracle-verified to promote
+            // the shadow to `$.state(…)`). Distinguishing demoted-vs-live SAFELY requires
+            // the whole-component resolved binding lowering, computed downstream in
+            // `state_prep` AFTER template writes are attributed — which inverts this gate's
+            // pre-lowering ordering. So Verter CONSERVATIVELY refuses the WHOLE
+            // reactive-rune-`undefined`-shadow class (fail-closed-safe). This OVER-REFUSES
+            // the demoted subcase; a PLAIN-local shadow (`let undefined = 5`) is NOT
+            // reactive and stays SUPPORTED (`$.state(undefined)`).
+            // TODO(follow-up): make this gate LOWERING-AWARE — consult the whole-component
+            // resolved `StateLowering` of the `undefined` shadow (demoted `PlainLet` /
+            // `BareProxy` → support `$.state(undefined)`; live `StateSignal` / `StateProxy`
+            // / `RawStateSignal` → fail closed). Requires running the shared write analysis
+            // (instance + template) BEFORE this pre-lowering gate; the current over-refusal
+            // is fail-closed-safe until then.
+            if state_init_is_shadowed_undefined(call, undefined_reactive_shadow) {
                 return StateDeclShape::Advanced {
-                    rune: "$state() non-primitive init",
+                    rune: "$state() shadowed undefined init",
                 };
             }
+            // NARROWED fail-close: a TS-WRAPPED init (`$state(0 as number)` /
+            // `$state(x satisfies T)` / `$state(x!)` / `$state(<T>x)`) is a distinct
+            // surface — official's plain-JS parse REJECTS the cast, and Verter's
+            // proxiability predicate would mis-decide the wrapped node (a `0 as number`
+            // is `$.state(0)` non-proxiable in official, but the wrapper reads proxiable
+            // here). Fail closed rather than mis-lower (a `lang="ts"` widening is a
+            // separate surface).
+            // TODO(follow-up): strip the TS wrapper spine to its inner expression and
+            // run the proxy decision over that, so a `lang="ts"` `$state(0 as number)`
+            // lowers to `$.state(0)` instead of failing closed (the `lang="ts"` script
+            // widening is the owning surface).
+            if state_init_has_ts_wrapper(call) {
+                return StateDeclShape::Advanced {
+                    rune: "$state() ts-wrapped init",
+                };
+            }
+            // Everything else — a primitive literal OR a proxiable object / array /
+            // identifier / call / member / `NaN` / `Infinity` / unshadowed `undefined`
+            // init — is SUPPORTED: the declarator emitter lowers it per the resolved
+            // `StateLowering`, routing a proxiable init through the shared rewriter so a
+            // signal read inside it becomes `$.get`.
         }
     }
     if saw_state {
@@ -124,70 +185,83 @@ pub fn state_decl_shape(instance_source: &str) -> StateDeclShape {
     }
 }
 
-/// Whether a `$state(...)` call's argument is a PRIMITIVE LITERAL — a string /
-/// number / boolean / null / bigint literal, or an empty `$state()` (the
-/// `undefined` form). A `-1` (a `UnaryExpression` over a numeric literal) counts as
-/// a primitive literal init. An object / array / call / identifier / template /
-/// member argument is NOT a primitive literal (it is the deep-reactive proxy form).
-///
-/// `undefined_shadowed` is whether a top-level local named `undefined` is declared:
-/// when so, a bare `undefined` argument is a SHADOW REFERENCE, NOT the void-0 literal,
-/// so it is not a primitive literal (official reads the shadow).
-fn state_init_is_primitive_literal(call: &CallExpression<'_>, undefined_shadowed: bool) -> bool {
+/// Whether a `$state(...)` call's argument is a bare `undefined` identifier that is
+/// shadowed by a REACTIVE-RUNE binding (`undefined_reactive_shadow`). Verter
+/// CONSERVATIVELY fails this closed — see the call site for the full rationale: the
+/// LIVE-signal subcase official emits as `$.state($.proxy($.get(undefined)))` is
+/// unsupportable (Verter's `expr_is_proxiable` hardcodes the `undefined` identifier
+/// non-proxiable and would omit the `$.proxy`), and this PRE-LOWERING / INSTANCE-ONLY
+/// gate cannot distinguish it from the DEMOTED subcase (which official supports as
+/// `$.state(undefined)`) without the whole-component resolved binding lowering. A
+/// PLAIN-local `undefined` shadow (`let undefined = 5`) reads plain and lowers to
+/// `$.state(undefined)` matching official — supported. An unshadowed `undefined` (the
+/// void-0 global) and a no-arg `$state()` are likewise supported (`$.state(undefined)` /
+/// `$.state(void 0)`).
+fn state_init_is_shadowed_undefined(
+    call: &CallExpression<'_>,
+    undefined_reactive_shadow: bool,
+) -> bool {
     let Some(arg) = call.arguments.first() else {
-        // `$state()` — the `undefined` init, a primitive.
-        return true;
-    };
-    let Some(expr) = arg.as_expression() else {
-        // A spread argument — not a primitive literal.
+        // `$state()` — the void-0 primitive form, never shadowed-undefined.
         return false;
     };
-    expr_is_primitive_literal(expr, undefined_shadowed)
+    let Some(Expression::Identifier(id)) = arg.as_expression() else {
+        return false;
+    };
+    id.name.as_str() == "undefined" && undefined_reactive_shadow
 }
 
-/// Whether an expression is a primitive literal — a string / number / boolean /
-/// null / bigint literal, or a unary `+` / `-` over a numeric / bigint literal
-/// (`-1`). A template literal, an object / array / call / identifier / member is
-/// NOT a primitive literal.
-///
-/// A bare `undefined` identifier is the void-0 primitive ONLY when it is NOT shadowed
-/// by a local binding (`undefined_shadowed`); a shadowed `undefined` is an ordinary
-/// reference (the deep-reactive non-literal form). `NaN` / `Infinity` are NOT treated
-/// as primitive literals (official wraps them in `$.proxy(…)`), so they never reach
-/// the literal arm.
-fn expr_is_primitive_literal(expr: &Expression<'_>, undefined_shadowed: bool) -> bool {
-    match expr {
-        Expression::StringLiteral(_)
-        | Expression::NumericLiteral(_)
-        | Expression::BooleanLiteral(_)
-        | Expression::NullLiteral(_)
-        | Expression::BigIntLiteral(_) => true,
-        // `undefined` is a bare identifier reference: the void-0 primitive ONLY when
-        // unshadowed. A shadowed `undefined` (`let undefined = …`) is a real reference
-        // — official reads the shadow — so it is NOT a primitive literal.
-        Expression::Identifier(id) => id.name.as_str() == "undefined" && !undefined_shadowed,
-        // A unary `-1` / `+1` over a numeric/bigint literal.
-        Expression::UnaryExpression(u) => matches!(
-            &u.argument,
-            Expression::NumericLiteral(_) | Expression::BigIntLiteral(_)
-        ),
-        _ => false,
+/// Whether a `$state(...)` init's argument is a TOP-LEVEL TypeScript wrapper — an
+/// `as` / `satisfies` / non-null `!` / type-assertion expression (paren-transparent).
+/// Such an init is a distinct surface (official's plain-JS parse rejects the cast, and
+/// the proxiability predicate mis-reads the wrapped node), so it fails closed.
+fn state_init_has_ts_wrapper(call: &CallExpression<'_>) -> bool {
+    let Some(arg) = call.arguments.first() else {
+        return false;
+    };
+    let Some(mut expr) = arg.as_expression() else {
+        return false;
+    };
+    while let Expression::ParenthesizedExpression(p) = expr {
+        expr = &p.expression;
     }
+    matches!(
+        expr,
+        Expression::TSAsExpression(_)
+            | Expression::TSSatisfiesExpression(_)
+            | Expression::TSNonNullExpression(_)
+            | Expression::TSTypeAssertion(_)
+    )
 }
 
-/// Whether the program's TOP-LEVEL declarators include a binding named `undefined`
-/// (a `let undefined = …` / `const undefined = …` / `var undefined`). Used to detect
-/// a SHADOWED `undefined` so a `$state(undefined)` over the shadow is not mistaken for
-/// the void-0 primitive literal.
-fn top_level_declares_undefined(program: &oxc_ast::ast::Program<'_>) -> bool {
+/// Whether the program's TOP-LEVEL declarators shadow `undefined` with a
+/// REACTIVE-RUNE binding — a `let undefined = $state(…)` / `$state.raw(…)` /
+/// `$derived(…)` / `$derived.by(…)`. Such a shadow MAY lower to a live signal (read via
+/// `$.get`), in which case official proxies the init (`$.state($.proxy($.get(undefined)))`)
+/// — a form Verter cannot reproduce. This PRE-LOWERING / INSTANCE-ONLY gate cannot tell
+/// the live subcase from the DEMOTED subcase (a shadow reassigned only in a template
+/// handler still becomes a live signal, and this gate never sees the handler), so Verter
+/// CONSERVATIVELY flags the WHOLE class — see `state_init_is_shadowed_undefined` and its
+/// call site. A PLAIN-local `undefined` shadow (`let undefined = 5`) is NOT reactive: it
+/// reads plain and lowers to `$.state(undefined)` matching official, so it is not flagged.
+fn top_level_undefined_shadow_is_reactive_rune(program: &oxc_ast::ast::Program<'_>) -> bool {
     program.body.iter().any(|stmt| {
         let Statement::VariableDeclaration(decl) = stmt else {
             return false;
         };
         decl.declarations.iter().any(|d| {
+            // The declarator must BIND `undefined`.
             let mut names = Vec::new();
             super::expr::collect_pattern_names(&d.id, &mut names);
-            names.iter().any(|n| n == "undefined")
+            if !names.iter().any(|n| n == "undefined") {
+                return false;
+            }
+            // …with a REACTIVE-RUNE initializer (`$state` / `$state.raw` / `$derived`
+            // / `$derived.by`). A plain / non-rune init is a non-reactive shadow.
+            let Some(Expression::CallExpression(call)) = &d.init else {
+                return false;
+            };
+            state_rune_call(call).is_some() || super::expr::is_derived_callee(&call.callee)
         })
     })
 }
@@ -427,15 +501,18 @@ pub fn script_uses_effect(alloc: &Allocator, instance_source: &str) -> bool {
 /// The lowering of ONE supported instance-script item that needs NO expression
 /// rewriter — the simple declaration variants. Returns the emitted client-body
 /// statement, [`SimpleItemLowering::None`] for a variant that emits nothing (a
-/// no-default `$props()` destructure), or [`SimpleItemLowering::NeedsRewriter`] for the
-/// [`FunctionDecl`](super::instance_items::SupportedInstanceScriptItem::FunctionDecl)
-/// variant (whose body lowers through the FALLIBLE expression rewriter, owned by the
-/// caller that holds the rewriter — [`SupportedClientIr::build_script_items`](super::client_plan::SupportedClientIr)).
+/// no-default `$props()` destructure), or [`SimpleItemLowering::NeedsRewriter`] for a
+/// variant whose payload lowers through the FALLIBLE expression rewriter (the
+/// [`StatePrimitive`](super::instance_items::SupportedInstanceScriptItem::StatePrimitive)
+/// init and the [`FunctionDecl`](super::instance_items::SupportedInstanceScriptItem::FunctionDecl)
+/// body), owned by the caller that holds the rewriter —
+/// [`SupportedClientIr::build_script_items`](super::client_plan::SupportedClientIr).
 ///
 /// The simple variants are a thin per-variant transform:
 /// - [`StatePrimitive`](super::instance_items::SupportedInstanceScriptItem::StatePrimitive)
-///   → `let name = $.state(<init>);` (signal) / `let name = <init>;` (never-reassigned
-///   `PlainLet`) — the wrapper choice reads the binding's resolved `StateLowering`;
+///   → `NeedsRewriter`: the init routes through `rewrite_source` (a signal read inside a
+///   proxiable object init → `$.get`, TS stripped) before the `StateLowering` wrapper
+///   (`$.state` / `$.proxy` / `$.state($.proxy(…))`) is applied;
 /// - [`PropsDestructure`](super::instance_items::SupportedInstanceScriptItem::PropsDestructure)
 ///   → NOTHING (a no-default props destructure reads off `$$props`, emitting no decl);
 /// - [`BindThisLocal`](super::instance_items::SupportedInstanceScriptItem::BindThisLocal)
@@ -446,20 +523,17 @@ pub fn script_uses_effect(alloc: &Allocator, instance_source: &str) -> bool {
 /// - [`InspectElided`](super::instance_items::SupportedInstanceScriptItem::InspectElided)
 ///   → NOTHING (a production-elided `$inspect(...)` / `$inspect(...).with(...)`
 ///   statement).
-///
-/// A primitive-literal init carries no signal read and no TS syntax, so it is emitted
-/// verbatim (the over-arity / non-primitive / destructured / `$state.raw` forms were
-/// refused upstream).
 #[must_use]
 pub(super) fn lower_simple_instance_item(
     item: &super::instance_items::SupportedInstanceScriptItem,
-    bindings: &BindingTable,
 ) -> SimpleItemLowering {
     use super::instance_items::SupportedInstanceScriptItem as Item;
     match item {
-        Item::StatePrimitive { name, init } => SimpleItemLowering::Statement(
-            lower_state_primitive_item(name, init.as_deref(), bindings),
-        ),
+        // A `$state` / `$state.raw` declarator lowers through the FALLIBLE rewriter: its
+        // init routes through `rewrite_source` (a signal read inside a proxiable object
+        // init becomes `$.get`, TS is stripped) BEFORE the `StateLowering` wrapper is
+        // applied — the caller (which holds the rewriter) handles it.
+        Item::StatePrimitive { .. } => SimpleItemLowering::NeedsRewriter,
         // A no-default `$props()` destructure emits no component-body declaration
         // (the props are read directly off `$$props`).
         Item::PropsDestructure => SimpleItemLowering::None,
@@ -493,18 +567,20 @@ pub(super) enum SimpleItemLowering {
     /// The item emits no component-body declaration (a no-default props
     /// destructure, a production-elided `$inspect` statement).
     None,
-    /// The item is a `FunctionDecl` whose body lowers through the FALLIBLE expression
-    /// rewriter — the caller (which holds the rewriter) handles it.
+    /// The item is a `StatePrimitive` or `FunctionDecl` whose payload lowers through
+    /// the FALLIBLE expression rewriter — the caller (which holds the rewriter) handles
+    /// it.
     NeedsRewriter,
 }
 
-/// Lower a supported `$state(<primitive literal>)` item to its emitted declaration.
+/// Lower a supported `$state` / `$state.raw` instance item to its emitted declaration.
 ///
-/// The wrapper choice comes from the binding's resolved write-gated
-/// [`StateLowering`] (a never-reassigned signal lowers to `PlainLet`, a reassigned
-/// one to `StateSignal`), so the emission matches official. A no-arg `$state()` is
-/// the SHADOW-ROBUST `void 0` form (never the bare identifier `undefined`); an
-/// explicit primitive init is emitted verbatim.
+/// The wrapper choice comes from the binding's resolved write-gated [`StateLowering`]
+/// (`PlainLet` / `StateSignal` / `RawStateSignal` / `BareProxy` / `StateProxy`), so the
+/// emission matches official. `init` is the ALREADY-REWRITTEN init text (a signal read
+/// inside a proxiable object init became `$.get`, TS stripped) supplied by the caller; a
+/// no-arg `$state()` is the SHADOW-ROBUST `void 0` form (never the bare identifier
+/// `undefined`).
 pub(super) fn lower_state_primitive_item(
     name: &str,
     init: Option<&str>,
@@ -521,12 +597,21 @@ pub(super) fn lower_state_primitive_item(
     state_primitive_decl(name, init, lowering)
 }
 
-/// The emitted `$state` primitive declaration for an already-RESOLVED write-gated
-/// [`StateLowering`] — `let {name} = {init}` for a never-reassigned `PlainLet`,
-/// `let {name} = $.state({init})` for a reassigned signal. The caller resolves `lowering`
-/// from the binding it OWNS (by binding id for a block declarator, by root-scope name for
-/// an instance item), so a SHADOWING same-name binding can never select the wrong wrapper.
-/// A no-arg `$state()` is the SHADOW-ROBUST `void 0` form (never the bare `undefined`).
+/// The emitted `$state` / `$state.raw` declaration for an already-RESOLVED write-gated
+/// [`StateLowering`], matching pinned `svelte@5.56.3`:
+///
+/// - `PlainLet`       → `let o = <init>;`                     (never reactively read)
+/// - `StateSignal`    → `let o = $.state(<init>);`            (primitive, reassigned)
+/// - `RawStateSignal` → `let o = $.state(<init>);`            (`$state.raw`, reassigned — NO `$.proxy`)
+/// - `BareProxy`      → `let o = $.proxy(<init>);`            (proxiable, never reassigned)
+/// - `StateProxy`     → `let o = $.state($.proxy(<init>));`   (proxiable, reassigned)
+///
+/// `init` is the FINAL init text — a primitive-literal slice for a block declarator, or
+/// the FULLY-REWRITTEN init (signal reads → `$.get`, TS stripped) for an instance-script
+/// declarator. The caller resolves `lowering` from the binding it OWNS (by binding id for
+/// a block declarator, by root-scope name for an instance item), so a SHADOWING same-name
+/// binding can never select the wrong wrapper. A no-arg `$state()` is the SHADOW-ROBUST
+/// `void 0` form (never the bare `undefined`).
 pub(super) fn state_primitive_decl(
     name: &str,
     init: Option<&str>,
@@ -535,16 +620,21 @@ pub(super) fn state_primitive_decl(
     let arg = init.unwrap_or("void 0");
     match lowering {
         Some(StateLowering::PlainLet) => format!("let {name} = {arg};"),
+        // A primitive signal AND a reassigned `$state.raw` are both a bare
+        // `$.state(<init>)` (raw NEVER proxies).
         Some(StateLowering::StateSignal) | Some(StateLowering::RawStateSignal) => {
             format!("let {name} = $.state({arg});")
         }
-        // A primitive `$state` never resolves to a proxy lowering (proxy is the
-        // object/array deep-reactive form, refused upstream). An unclassified state
-        // (no binding row) is a compiler-invariant violation — emit the signal form
-        // (the never-live defensive arm; the allowlist is the authority).
-        Some(StateLowering::BareProxy) | Some(StateLowering::StateProxy) | None => {
-            format!("let {name} = $.state({arg});")
-        }
+        // A proxiable object/array `$state` never reassigned is a bare `$.proxy(<init>)`
+        // (deep-reactive, NOT a signal).
+        Some(StateLowering::BareProxy) => format!("let {name} = $.proxy({arg});"),
+        // A proxiable object/array `$state` that is reassigned wraps the proxy in a
+        // signal box.
+        Some(StateLowering::StateProxy) => format!("let {name} = $.state($.proxy({arg}));"),
+        // An unclassified state (no binding row) is a compiler-invariant violation —
+        // emit the bare signal form (the never-live defensive arm; the classifier is the
+        // authority).
+        None => format!("let {name} = $.state({arg});"),
     }
 }
 

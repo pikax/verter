@@ -4565,47 +4565,68 @@ fn unused_uninitialized_bare_local_still_fails_closed() {
 }
 
 #[test]
-fn bind_value_object_state_member_fails_closed_at_the_object_state_decl_gate() {
-    // SCOPE BOUNDARY: a member rooted at an OBJECT `$state` (`let o = $state({...})` —
-    // the deep-reactive `BareProxy` / `StateProxy` form) is NOT a DOM-bind-target gap.
-    // It fails closed UPSTREAM of the bind classifier at the object/array `$state`
-    // declaration gate (`state_decl_shape` accepts ONLY a primitive-literal `$state`;
-    // an object/array init is the deep-reactive `$.proxy(...)` declaration surface owned
-    // by the runes-completion vertical, not the bindings-breadth vertical). The bind
-    // target-lvalue widening covers PLAIN-local roots (which need no `$state` decl
-    // support); the object-`$state` member becomes bind-reachable only when the
-    // object/array `$state` declaration form is opened by its owning vertical, at which
-    // point the member rewrite (`() => o.x` for a `BareProxy`, `() => $.get(o).x` for a
-    // reassigned `StateProxy`) is already correct in the planner. Discriminating: it
-    // fails at the `$state()` non-primitive-init gate, NOT the bind gate.
-    assert_fail_closed(
+fn bind_value_object_state_member_emits_proxy_member_setter() {
+    // INVERTED (was `bind_value_object_state_member_fails_closed_at_the_object_state_decl_gate`):
+    // once the object/array `$state` declarator gate opens, a member bind rooted at an
+    // object `$state` IS representable — the bind planner consumes the member read/write
+    // forms (empirically confirmed). A NEVER-reassigned root is a `BareProxy`: the
+    // getter/setter stay PLAIN (`() => o.x` / `o.x = $$value`).
+    let bare = emit(
         "<script>let o = $state({ x: '' });</script>\n<input bind:value={o.x} />\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$state() non-primitive init"),
+        "App.svelte",
     );
-    // The REASSIGNED object `$state` (a `StateProxy`) fails at the same upstream gate.
-    assert_fail_closed(
+    assert!(
+        bare.contains("let o = $.proxy({ x: '' });"),
+        "a never-reassigned object `$state` is a bare `$.proxy`:\n{bare}"
+    );
+    assert!(
+        bare.contains("$.bind_value(input, () => o.x, ($$value) => o.x = $$value)"),
+        "a BareProxy member bind stays PLAIN (`o.x`):\n{bare}"
+    );
+    // NEGATIVE: a BareProxy is not a signal — its member bind never `$.get`s.
+    assert!(
+        !bare.contains("$.get(o)"),
+        "a BareProxy member bind must not `$.get`:\n{bare}"
+    );
+    // The REASSIGNED object `$state` (a `StateProxy`) reads/writes through the signal
+    // (`() => $.get(o).x`), and the reassign carries the proxy flag.
+    let proxy = emit(
         "<script>let o = $state({ x: '' });</script>\n<input bind:value={o.x} />\n<button onclick={() => o = { x: 'y' }}>r</button>\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$state() non-primitive init"),
+        "App.svelte",
+    );
+    assert!(
+        proxy.contains("let o = $.state($.proxy({ x: '' }));"),
+        "a reassigned object `$state` is `$.state($.proxy(…))`:\n{proxy}"
+    );
+    assert!(
+        proxy.contains("$.bind_value(input, () => $.get(o).x, ($$value) => $.get(o).x = $$value)"),
+        "a StateProxy member bind reads/writes via `$.get(o).x`:\n{proxy}"
+    );
+    assert!(
+        proxy.contains("$.set(o, { x: 'y' }, true)"),
+        "the StateProxy reassign carries the proxy flag:\n{proxy}"
     );
 }
 
 #[test]
-fn bind_select_value_with_array_state_fails_closed_at_the_array_state_decl_gate() {
-    // SCOPE BOUNDARY: the canonical official `<select multiple>` shape binds an ARRAY
-    // `$state([])` target, emitting `let v = $.state($.proxy([]))` +
-    // `$.bind_select_value(...)` (verified against svelte@5.56.3). The
-    // `$.bind_select_value` 3-arg helper wiring + the static-`multiple` host gate ARE
-    // delivered (the PRIMITIVE `$state` form emits identically — see
-    // `bind_select_value_with_static_multiple_still_emits`). But the array `$state([])`
-    // DECLARATION is a non-primitive `$.proxy([])` init: it fails closed UPSTREAM of the
-    // bind classifier at the `$state()` non-primitive-init gate (the deep-reactive
-    // declaration surface owned by the runes-completion vertical, not the
-    // bindings-breadth vertical). Discriminating: it fails at the `$state()`
-    // non-primitive-init gate, NOT the bind gate — so the array-state multiple-select is
-    // gated by the pre-existing non-primitive-`$state` boundary, NOT delivered here.
-    assert_fail_closed(
+fn bind_select_value_with_array_state_emits_proxy_signal() {
+    // INVERTED (was `bind_select_value_with_array_state_fails_closed_at_the_array_state_decl_gate`):
+    // the canonical official `<select multiple>` shape binds an ARRAY `$state([])`
+    // target. Once the object/array `$state` gate opens, the array `$state([])` is a
+    // reassigned `StateProxy` (the two-way bind writes back the bare identifier), so it
+    // emits `let v = $.state($.proxy([]))` + `$.bind_select_value(select, () => $.get(v),
+    // ($$value) => $.set(v, $$value))` — verified against svelte@5.56.3.
+    let js = emit(
         "<script>let v = $state([]);</script>\n<select multiple bind:value={v}><option>a</option></select>\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$state() non-primitive init"),
+        "App.svelte",
+    );
+    assert!(
+        js.contains("let v = $.state($.proxy([]));"),
+        "an array `$state([])` bind target is `$.state($.proxy([]))`:\n{js}"
+    );
+    assert!(
+        js.contains("$.bind_select_value(select, () => $.get(v), ($$value) => $.set(v, $$value))"),
+        "the bare-identifier select bind reads/writes the signal:\n{js}"
     );
 }
 
@@ -7688,10 +7709,23 @@ fn props_bindable_fails_closed() {
 }
 
 #[test]
-fn state_raw_fails_closed() {
-    assert_fail_closed(
+fn state_raw_emits_signal_no_proxy() {
+    // INVERTED (was `state_raw_fails_closed`): `$state.raw` is no longer an advanced
+    // rune — a reassigned `$state.raw(0)` lowers to a bare `$.state(0)` signal
+    // (`$.set(c, 1)`, `$.get(c)`), with NO `$.proxy` anywhere (raw is the deep-reactive
+    // opt-out).
+    let js = emit(
         "<script>let c = $state.raw(0);</script>\n<button onclick={() => c = 1}>{c}</button>\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$state.raw"),
+        "App.svelte",
+    );
+    assert!(
+        js.contains("let c = $.state(0);") && js.contains("$.set(c, 1)") && js.contains("$.get(c)"),
+        "a reassigned `$state.raw(0)` is a bare `$.state` signal:\n{js}"
+    );
+    // NEGATIVE: raw never proxies, and the advanced-rune refusal is gone.
+    assert!(
+        !js.contains("$.proxy"),
+        "a `$state.raw` binding must never proxy:\n{js}"
     );
 }
 
@@ -8215,14 +8249,23 @@ fn effect_pre_fails_closed() {
 }
 
 #[test]
-fn state_snapshot_in_expression_fails_closed() {
-    // `$state.snapshot(x)` INSIDE an interpolation fails closed — the
-    // unsupported-rune-inside-an-expression case. A primitive `$state` keeps the
-    // component out of the object-state gate, so the `$state.snapshot` rune form is
-    // the surface under test.
-    assert_fail_closed(
-        "<script>let c = $state(0);</script>\n<button onclick={() => c++}>{$state.snapshot(c)}</button>\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$state.snapshot"),
+fn state_snapshot_in_handler_expression_rewrites_to_dollar_snapshot() {
+    // INVERTED (was `state_snapshot_in_expression_fails_closed`): `$state.snapshot(x)`
+    // in an expression is no longer refused as an advanced rune — the client
+    // expression rewriter rewrites the callee to `$.snapshot`. Here a primitive
+    // `$state` target write carries the snapshot RHS in a delegated handler.
+    let js = emit(
+        "<script>let c = $state(0);\nlet snap = $state(null);</script>\n<button onclick={() => { c++; snap = $state.snapshot(c); }}>{c}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.snapshot($.get(c))"),
+        "`$state.snapshot(c)` rewrites to `$.snapshot(<c read>)`:\n{js}"
+    );
+    // NEGATIVE: the advanced-rune refusal is gone; no raw `$state.snapshot` remains.
+    assert!(
+        !js.contains("$state.snapshot"),
+        "the raw `$state.snapshot` rune member must be gone:\n{js}"
     );
 }
 
@@ -13019,26 +13062,30 @@ fn render_arg_simple_prop_read_stays_inline_thunk() {
 }
 
 #[test]
-fn nonprimitive_state_array_init_fails_closed_at_rune_gate() {
-    // A RUNE-BOUNDARY regression guard (the D-31 `$state()` non-primitive-init
-    // boundary): a `$state([1])` ARRAY init fails closed at the `$state` shape gate
-    // (`AdvancedRune`) — the refusal fires BEFORE template render projection is ever
-    // reached, so this test guards the rune boundary, NOT the render-arg memoizer
-    // (which would be unreachable here regardless). The `$props`-spread render-arg
-    // memoizer has its own discriminating golden — `render_arg_spread_hoists_local_derived`
-    // above plus the `components/render_spread_arg` corpus oracle — asserting the
-    // `$.derived` hoist positively.
-    assert_fail_closed(
+fn nonprimitive_state_array_init_emits_proxy_and_hoists_render_spread() {
+    // INVERTED (was `nonprimitive_state_array_init_fails_closed_at_rune_gate`): a
+    // `$state([1])` ARRAY init now compiles as a deep-reactive `$.proxy([1])` (a
+    // never-reassigned `BareProxy`), and the `{@render row([...xs])}` spread arg hoists
+    // into a local `$.derived` memo read via `$.get` — matching svelte@5.56.3 (modulo a
+    // cosmetic paren around the spread).
+    let js = emit(
         "<script>let xs = $state([1]);</script>\n{#snippet row(items)}<p>{items}</p>{/snippet}\n{@render row([...xs])}\n",
-        |s| {
-            matches!(
-                s,
-                UnsupportedSvelteRuntimeSurface::AdvancedRune {
-                    rune: "$state() non-primitive init",
-                    ..
-                }
-            )
-        },
+        "App.svelte",
+    );
+    assert!(
+        js.contains("let xs = $.proxy([1]);"),
+        "a never-reassigned array `$state` is a bare `$.proxy`:\n{js}"
+    );
+    // NEGATIVE: no `$.state` signal box for a never-reassigned BareProxy.
+    assert!(
+        !js.contains("$.state("),
+        "a BareProxy must not be a `$.state` signal:\n{js}"
+    );
+    // The spread render arg hoists into a local `$.derived` memo (paren-tolerant).
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("$.derived(() => [...xs])")),
+        "the spread render arg hoists into a `$.derived` memo:\n{js}"
     );
 }
 
@@ -13367,5 +13414,547 @@ fn directive_batch_emit_panics_loudly_when_its_target_rank_is_missing() {
     // `.unwrap_or(u32::MAX)` makes this test fail (no panic).
     let _ = emit_with_after_update_ranks_cleared(
         "<script>let c = $state(0);</script>\n<div on:click={() => c++}>{c}</div>\n",
+    );
+}
+
+// ─── Block 5g-b: `$state.raw` + proxied object-`$state` + `$state.snapshot` ───
+//
+// The STATE FAMILY: the deep-reactive object/array `$state` declarator (BareProxy /
+// StateProxy), the `$state.raw` opt-out (RawStateSignal / PlainLet), the raw-aware
+// reassignment flag (Q6), and the `$state.snapshot(x)` → `$.snapshot(x)` expression
+// rewrite. Every emitted shape verified against pinned `svelte@5.56.3`.
+
+#[test]
+fn state_raw_object_reassign_emits_state_no_proxy_no_flag() {
+    // MANDATORY object discriminator + Q6 trap: a `$state.raw({ a: 1 })` that is
+    // REASSIGNED lowers to `let o = $.state({ a: 1 })` — NO `$.proxy` wrapper — and
+    // the reassign is `$.set(o, { a: 2 })` with NO trailing `, true` (raw NEVER
+    // proxies its RHS). Verified against svelte@5.56.3.
+    let js = emit(
+        "<script>let o = $state.raw({ a: 1 });</script>\n<button onclick={() => o = { a: 2 }}>x</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("let o = $.state({ a: 1 });"),
+        "raw object reassign is a bare `$.state(<init>)` signal:\n{js}"
+    );
+    // NEGATIVE: never a `$.proxy` wrapper on a raw binding.
+    assert!(
+        !js.contains("$.proxy"),
+        "a `$state.raw` object must NOT proxy:\n{js}"
+    );
+    assert!(
+        js.contains("$.set(o, { a: 2 })"),
+        "raw reassign lowers to a bare `$.set(o, rhs)`:\n{js}"
+    );
+    // NEGATIVE (Q6): a raw binding NEVER gets the trailing proxy flag, even for an
+    // object RHS.
+    assert!(
+        !js.contains("$.set(o, { a: 2 }, true)"),
+        "a raw object reassign must NOT carry the trailing `, true`:\n{js}"
+    );
+}
+
+#[test]
+fn state_raw_array_reassign_emits_state_no_proxy() {
+    // The array variant of the raw discriminator: `$state.raw([1])` reassigned →
+    // `let o = $.state([1])`, `$.set(o, [2])` (no proxy, no flag).
+    let js = emit(
+        "<script>let o = $state.raw([1]);</script>\n<button onclick={() => o = [2]}>x</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("let o = $.state([1]);"),
+        "raw array reassign is a bare `$.state([1])`:\n{js}"
+    );
+    assert!(
+        !js.contains("$.proxy") && !js.contains("$.set(o, [2], true)"),
+        "a raw array must NOT proxy and NOT carry the flag:\n{js}"
+    );
+    assert!(
+        js.contains("$.set(o, [2])"),
+        "raw array reassign lowers to `$.set(o, [2])`:\n{js}"
+    );
+}
+
+#[test]
+fn state_proxy_object_reassign_emits_state_proxy_with_flag() {
+    // MANDATORY object discriminator (proxied side): a plain `$state({ a: 1 })` that
+    // is REASSIGNED lowers to `let o = $.state($.proxy({ a: 1 }))` and the reassign
+    // is `$.set(o, { a: 2 }, true)` — WITH the trailing proxy flag.
+    let js = emit(
+        "<script>let o = $state({ a: 1 });</script>\n<button onclick={() => o = { a: 2 }}>x</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("let o = $.state($.proxy({ a: 1 }));"),
+        "proxied object reassign is `$.state($.proxy(<init>))`:\n{js}"
+    );
+    assert!(
+        js.contains("$.set(o, { a: 2 }, true)"),
+        "a proxied object reassign carries the trailing `, true`:\n{js}"
+    );
+}
+
+#[test]
+fn state_bare_proxy_no_reassign_emits_proxy_with_plain_reads() {
+    // A proxiable `$state({ a: 1 })` that is DEEP-MUTATED but never REASSIGNED is a
+    // BareProxy: `let o = $.proxy({ a: 1 })` (no `$.state` signal box), and the
+    // member mutation stays PLAIN (`o.a++`) — a proxy is not a signal, reads never
+    // `$.get`.
+    let js = emit(
+        "<script>let o = $state({ a: 1 });</script>\n<button onclick={() => o.a++}>x</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("let o = $.proxy({ a: 1 });"),
+        "a never-reassigned object `$state` is a bare `$.proxy(<init>)`:\n{js}"
+    );
+    // NEGATIVES: a BareProxy is not a signal — no `$.state(` box for `o`, no `$.get`
+    // read, no `$.set` write.
+    assert!(
+        !js.contains("$.state(") && !js.contains("$.get(o)") && !js.contains("$.set(o"),
+        "a BareProxy must never be a signal (no $.state/$.get/$.set):\n{js}"
+    );
+    assert!(
+        js.contains("o.a++"),
+        "a BareProxy member mutation stays plain `o.a++`:\n{js}"
+    );
+}
+
+#[test]
+fn state_raw_primitive_is_byte_identical_to_plain_state() {
+    // Primitive equivalence: `$state.raw(0)` and `$state(0)` emit BYTE-IDENTICAL
+    // client output (both `let c = $.state(0)`, `$.set(c, 1)`, `$.get(c)`) — a raw
+    // primitive is just a signal (proxy never applies to a primitive).
+    let raw = emit(
+        "<script>let c = $state.raw(0);</script>\n<button onclick={() => c = 1}>{c}</button>\n",
+        "App.svelte",
+    );
+    let plain = emit(
+        "<script>let c = $state(0);</script>\n<button onclick={() => c = 1}>{c}</button>\n",
+        "App.svelte",
+    );
+    assert_eq!(
+        raw, plain,
+        "a raw primitive `$state.raw(0)` must be byte-identical to `$state(0)`:\nraw:\n{raw}\nplain:\n{plain}"
+    );
+    assert!(
+        raw.contains("let c = $.state(0);") && raw.contains("$.set(c, 1)"),
+        "raw primitive is a plain `$.state(0)` signal:\n{raw}"
+    );
+    assert!(
+        !raw.contains("$.proxy"),
+        "a raw primitive must never proxy:\n{raw}"
+    );
+}
+
+#[test]
+fn state_mixed_raw_and_proxy_bindings_are_per_binding_correct() {
+    // Per-binding decision: a raw and a proxied object `$state` COEXIST in one
+    // component — the raw one gets no proxy + no flag; the proxied one gets both.
+    let js = emit(
+        "<script>let r = $state.raw({ a: 1 });\nlet p = $state({ b: 2 });</script>\n<button onclick={() => { r = { a: 9 }; p = { b: 9 }; }}>x</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("let r = $.state({ a: 1 });"),
+        "the raw binding is a bare `$.state(<init>)`:\n{js}"
+    );
+    assert!(
+        js.contains("let p = $.state($.proxy({ b: 2 }));"),
+        "the proxied binding is `$.state($.proxy(<init>))`:\n{js}"
+    );
+    assert!(
+        js.contains("$.set(r, { a: 9 })") && !js.contains("$.set(r, { a: 9 }, true)"),
+        "the raw reassign carries NO flag:\n{js}"
+    );
+    assert!(
+        js.contains("$.set(p, { b: 9 }, true)"),
+        "the proxied reassign carries the flag:\n{js}"
+    );
+}
+
+#[test]
+fn state_proxy_object_init_reads_signal_via_get() {
+    // The object `$state` init routes through the shared expression rewriter, so a
+    // signal read INSIDE the init is `$.get`-rewritten (matching official
+    // `$.proxy({ x: $.get(a) })`). Discriminating: proves the init is not emitted
+    // verbatim.
+    let js = emit(
+        "<script>let a = $state(0);\nlet o = $state({ x: a });</script>\n<button onclick={() => { a = 1; o.x = 2; }}>x</button>\n",
+        "App.svelte",
+    );
+    // `a` is reassigned → a StateSignal; `o` is deep-mutated only → a BareProxy whose
+    // init reads `a` reactively.
+    assert!(
+        js.contains("let o = $.proxy({ x: $.get(a) });"),
+        "an object `$state` init `$.get`-rewrites a signal read:\n{js}"
+    );
+    // NEGATIVE: the init must NOT be emitted verbatim (`{ x: a }`).
+    assert!(
+        !js.contains("$.proxy({ x: a })"),
+        "the init must not read the signal verbatim:\n{js}"
+    );
+}
+
+#[test]
+fn state_snapshot_in_event_handler_rewrites_to_dollar_snapshot() {
+    // `$state.snapshot(x)` in an event-handler body rewrites its callee to
+    // `$.snapshot(x)`; the argument passes through (a BareProxy `o` reads plain).
+    // The handler is a `$state` write (`snap = …`) so the delegated narrow path
+    // admits it.
+    let js = emit(
+        "<script>let o = $state({ a: 1 });\nlet snap = $state(null);</script>\n<button onclick={() => snap = $state.snapshot(o)}>x</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.snapshot(o)"),
+        "`$state.snapshot(o)` rewrites to `$.snapshot(o)`:\n{js}"
+    );
+    // NEGATIVE: never the raw rune member (a runtime ReferenceError).
+    assert!(
+        !js.contains("$state.snapshot"),
+        "the raw `$state.snapshot` rune member must be gone:\n{js}"
+    );
+}
+
+#[test]
+fn state_snapshot_in_instance_script_expression_rewrites() {
+    // `$state.snapshot(x)` in an INSTANCE-SCRIPT expression (a `$state.raw` init) is
+    // rewritten too: `let snap = $state.raw($state.snapshot(o))` → `let snap =
+    // $.snapshot(o);` (a never-reassigned raw init is a `PlainLet`, and its init
+    // routes through the rewriter).
+    let js = emit(
+        "<script>let o = $state({ a: 1 });\nlet snap = $state.raw($state.snapshot(o));</script>\n<button onclick={() => o.a++}>x</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("let snap = $.snapshot(o);"),
+        "a `$state.snapshot` inside an instance-script init rewrites:\n{js}"
+    );
+    assert!(
+        !js.contains("$state.snapshot"),
+        "no raw `$state.snapshot` may remain:\n{js}"
+    );
+}
+
+#[test]
+fn state_snapshot_nested_rewrites_every_occurrence() {
+    // Nested `$state.snapshot($state.snapshot(o))` rewrites BOTH callees. `o` is a
+    // reassigned StateProxy, so the innermost argument reads `$.get(o)`.
+    let js = emit(
+        "<script>let o = $state({ a: 1 });</script>\n<button onclick={() => o = $state.snapshot($state.snapshot(o))}>x</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.snapshot($.snapshot($.get(o)))"),
+        "a nested snapshot rewrites both occurrences:\n{js}"
+    );
+    assert!(
+        !js.contains("$state.snapshot"),
+        "no raw `$state.snapshot` may remain:\n{js}"
+    );
+}
+
+#[test]
+fn state_snapshot_argument_signal_read_still_rewrites() {
+    // The snapshot argument is recursed: a signal read inside it still lowers to
+    // `$.get`. Here `o` is reassigned → a StateProxy, so `$state.snapshot(o)` →
+    // `$.snapshot($.get(o))`.
+    let js = emit(
+        "<script>let o = $state({ a: 1 });</script>\n<button onclick={() => o = $state.snapshot(o)}>x</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.snapshot($.get(o))"),
+        "a signal read inside the snapshot arg still rewrites:\n{js}"
+    );
+}
+
+#[test]
+fn state_snapshot_in_template_interpolation_fails_closed_as_complex_not_rune() {
+    // `{$state.snapshot(o)}` as a BARE template interpolation is a COMPLEX
+    // interpolation (the interpolation surface admits only bare identifiers, and
+    // official emits the deferred `template_effect` form Verter does not produce). It
+    // fails closed as `ComplexInterpolation` — NOT the old `AdvancedRune`
+    // "$state.snapshot" refusal (the snapshot rune member is no longer refused; the
+    // interpolation CARRIER is the limit). Discriminating: the disposition CHANGED.
+    assert_fail_closed(
+        "<script>let o = $state({ a: 1 });</script>\n<button onclick={() => o.a++}>{$state.snapshot(o)}</button>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::ComplexInterpolation { .. }),
+    );
+}
+
+#[test]
+fn uncalled_state_snapshot_value_position_fails_closed_as_rune() {
+    // F1 (fail-open fix): an UNCALLED `$state.snapshot` in a VALUE position
+    // (`x = $state.snapshot`) is NOT the supported call form — only `$state.snapshot(x)`
+    // rewrites to `$.snapshot`. Official errors on the parenthesis-less rune
+    // (`rune_missing_parentheses`). Before F1 the rune scan blanket-exempted ANY
+    // `$state.snapshot` member (call or not), so this slipped past and emitted a raw
+    // `$state.snapshot` (a runtime ReferenceError). It MUST fail closed as an advanced
+    // rune.
+    assert_fail_closed(
+        "<script>let x = $state(0);</script>\n<button onclick={() => x = $state.snapshot}>b</button>\n",
+        |s| matches!(
+            s,
+            UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$state.snapshot"
+        ),
+    );
+    // A bare-identifier call-argument value position also refuses.
+    assert_fail_closed(
+        "<script>let x = $state(0); function foo(_v){}</script>\n<button onclick={() => { foo($state.snapshot); x++; }}>b</button>\n",
+        |s| matches!(
+            s,
+            UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$state.snapshot"
+        ),
+    );
+}
+
+#[test]
+fn called_state_snapshot_still_rewrites_after_uncalled_gate() {
+    // F1 negative half: the SUPPORTED called form `$state.snapshot(x)` in a handler
+    // must STILL rewrite to `$.snapshot(x)` (the uncalled-gate must not regress it).
+    let js = emit(
+        "<script>let o = $state({ a: 1 });\nlet snap = $state(null);</script>\n<button onclick={() => snap = $state.snapshot(o)}>x</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.snapshot(o)"),
+        "the called `$state.snapshot(o)` still rewrites to `$.snapshot(o)`:\n{js}"
+    );
+    assert!(
+        !js.contains("$state.snapshot"),
+        "no raw `$state.snapshot` may remain:\n{js}"
+    );
+}
+
+#[test]
+fn state_snapshot_zero_args_fails_closed_as_rune() {
+    // G1 (fail-open fix): `$state.snapshot()` with ZERO arguments is the official
+    // `rune_invalid_arguments_length` compile error ("`$state.snapshot` must be called
+    // with exactly one argument" — oracle-verified against `svelte@5.56.3`). Only the
+    // WELL-FORMED single-non-spread-arg form rewrites to `$.snapshot(<expr>)`. Before G1
+    // the rune scan exempted EVERY called `$state.snapshot(...)` form and the rewriter
+    // rewrote the callee unconditionally, so this emitted a raw `$.snapshot()`
+    // (a fail-open miscompile). It MUST fail closed as an advanced rune.
+    assert_fail_closed(
+        "<script>let o = $state({ a: 1 });\nlet snap = $state(null);</script>\n<button onclick={() => snap = $state.snapshot()}>x</button>\n",
+        |s| matches!(
+            s,
+            UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$state.snapshot"
+        ),
+    );
+}
+
+#[test]
+fn state_snapshot_two_args_fails_closed_as_rune() {
+    // G1 (fail-open fix): `$state.snapshot(a, b)` with TWO arguments is the official
+    // `rune_invalid_arguments_length` compile error (oracle-verified). Before G1 this
+    // emitted a raw `$.snapshot(a, b)` (a fail-open miscompile). It MUST fail closed as
+    // an advanced rune.
+    assert_fail_closed(
+        "<script>let o = $state({ a: 1 });\nlet snap = $state(null);</script>\n<button onclick={() => snap = $state.snapshot(o, o)}>x</button>\n",
+        |s| matches!(
+            s,
+            UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$state.snapshot"
+        ),
+    );
+}
+
+#[test]
+fn state_snapshot_spread_arg_fails_closed_as_rune() {
+    // G1 (fail-open fix): `$state.snapshot(...o)` with a SPREAD argument is the official
+    // `rune_invalid_spread` compile error ("`$state.snapshot` cannot be called with a
+    // spread argument" — oracle-verified against `svelte@5.56.3`). Before G1 this emitted
+    // a raw `$.snapshot(...o)` (a fail-open miscompile). It MUST fail closed as an
+    // advanced rune.
+    assert_fail_closed(
+        "<script>let arr = $state([1]);\nlet snap = $state(null);</script>\n<button onclick={() => snap = $state.snapshot(...arr)}>x</button>\n",
+        |s| matches!(
+            s,
+            UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$state.snapshot"
+        ),
+    );
+}
+
+#[test]
+fn state_snapshot_single_non_spread_arg_still_rewrites_after_arity_gate() {
+    // G1 negative half (DISCRIMINATING): the WELL-FORMED single-non-spread-arg form
+    // `$state.snapshot(o)` must STILL rewrite to `$.snapshot(o)` (the arity/spread gate
+    // must NOT regress the valid form). Official emits `$.snapshot(o)` (oracle-verified).
+    let js = emit(
+        "<script>let o = $state({ a: 1 });\nlet snap = $state(null);</script>\n<button onclick={() => snap = $state.snapshot(o)}>x</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.snapshot(o)"),
+        "the well-formed `$state.snapshot(o)` still rewrites to `$.snapshot(o)`:\n{js}"
+    );
+    // NEGATIVE: no raw rune member, and the arity gate did not turn the valid form into
+    // a bogus zero/multi-arg `$.snapshot`.
+    assert!(
+        !js.contains("$state.snapshot"),
+        "no raw `$state.snapshot` may remain:\n{js}"
+    );
+    assert!(
+        !js.contains("$.snapshot()") && !js.contains("$.snapshot(o, o)"),
+        "the well-formed rewrite must be exactly `$.snapshot(o)`:\n{js}"
+    );
+}
+
+#[test]
+fn state_snapshot_in_instance_script_call_initializer_fails_closed_as_carrier() {
+    // F6 (documented deferral): `let s = $state.snapshot(c)` as a plain-CALL instance
+    // -script initializer fails closed at the plain-call-initializer CARRIER gate
+    // (`InstanceScriptItem { construct: "plain let with call init" }`), NOT as a rune
+    // refusal. Official emits it via `let s = $.snapshot($.get(c))`, but any `let s =
+    // foo()` instance-script call initializer rides the same pre-existing carrier — a
+    // separate deferred surface. Discriminating: the disposition is the CARRIER, not
+    // `AdvancedRune`.
+    // TODO(follow-up): support snapshot (and any plain-call) instance-script call
+    // initializers — owned by the instance-script-call-init carrier surface.
+    assert_fail_closed(
+        "<script>let c = $state({ a: 1 });\nlet s = $state.snapshot(c);</script>\n<button onclick={() => c.a++}>x</button>\n",
+        |s| matches!(
+            s,
+            UnsupportedSvelteRuntimeSurface::InstanceScriptItem { construct, .. }
+                if *construct == "plain let with call init"
+        ),
+    );
+}
+
+#[test]
+fn raw_state_object_member_write_in_handler_emits_get_member_mutation() {
+    // F4: a `$state.raw({ x: 0 })` reassigned is a raw SIGNAL. A delegated handler
+    // mutating a MEMBER (`o.x++`) AND reassigning the root (`o = { x: 2 }`) must be
+    // ADMITTED: the member mutation lowers to `$.get(o).x++` (the raw signal read),
+    // and the reassign lowers to `$.set(o, { x: 2 })` with NO trailing `, true` (raw
+    // never proxies — Q6). Before F4 the member write refused at the handler shape
+    // gate.
+    let js = emit(
+        "<script>let o = $state.raw({ x: 0 });</script>\n<button onclick={() => { o.x++; o = { x: 2 }; }}>b</button>\n",
+        "App.svelte",
+    );
+    // The declaration: a raw signal box, NO `$.proxy`.
+    assert!(
+        js.contains("let o = $.state({ x: 0 });"),
+        "raw object $state reassigned is a `$.state(...)` box with no proxy:\n{js}"
+    );
+    // The member mutation reads the signal via `$.get(o).x++`.
+    assert!(
+        js.contains("$.get(o).x++"),
+        "the raw signal member mutation lowers to `$.get(o).x++`:\n{js}"
+    );
+    // The reassign is `$.set(o, { x: 2 })` with NO trailing `, true` (raw never
+    // proxies — Q6).
+    assert!(
+        js.contains("$.set(o, { x: 2 })"),
+        "the raw signal reassign lowers to a bare `$.set(o, ...)`:\n{js}"
+    );
+    assert!(
+        !js.contains("$.set(o, { x: 2 }, true)"),
+        "a raw signal reassign must NOT carry the proxy `, true` flag (Q6):\n{js}"
+    );
+    // NEGATIVE: the raw object init must not be wrapped in `$.proxy`.
+    assert!(
+        !js.contains("$.proxy"),
+        "a `$state.raw` object must never emit `$.proxy`:\n{js}"
+    );
+}
+
+#[test]
+fn state_nan_proxies_but_raw_nan_does_not() {
+    // F3: `$state(NaN)` is a bare global-identifier init official PROXIES →
+    // `$.state($.proxy(NaN))`. `$state.raw(NaN)` NEVER proxies → `$.state(NaN)`. The
+    // discriminating emission (the fail-matrix retag only checked the shape, not the
+    // output): assert the proxy wrap IS present for proxied NaN and ABSENT for raw NaN.
+    let proxied = emit(
+        "<script>let x = $state(NaN);</script>\n<button onclick={() => x = 1}>{x}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        proxied.contains("let x = $.state($.proxy(NaN));"),
+        "$state(NaN) reassigned proxies to `$.state($.proxy(NaN))`:\n{proxied}"
+    );
+    // NEGATIVE: the reassign to a primitive `1` carries NO proxy `, true` flag.
+    assert!(
+        proxied.contains("$.set(x, 1)") && !proxied.contains("$.set(x, 1, true)"),
+        "the primitive reassign is a bare `$.set(x, 1)`:\n{proxied}"
+    );
+
+    let raw = emit(
+        "<script>let x = $state.raw(NaN);</script>\n<button onclick={() => x = 1}>{x}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        raw.contains("let x = $.state(NaN);"),
+        "$state.raw(NaN) reassigned is a bare `$.state(NaN)`:\n{raw}"
+    );
+    // NEGATIVE: a raw NaN must never proxy.
+    assert!(
+        !raw.contains("$.proxy"),
+        "$state.raw(NaN) must never emit `$.proxy`:\n{raw}"
+    );
+}
+
+#[test]
+fn state_raw_no_arg_reassigned_emits_state_void_0() {
+    // F8: a no-arg `$state.raw()` reassigned emits `$.state(void 0)` — byte-identical to
+    // the no-arg `$state()` form (official emits `$.state(void 0)` for both, verified
+    // against the oracle). NO proxy, and the shadow-robust `void 0` (never the bare
+    // identifier `undefined`).
+    let raw = emit(
+        "<script>let x = $state.raw();</script>\n<button onclick={() => x = 1}>{x}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        raw.contains("let x = $.state(void 0);"),
+        "no-arg $state.raw() reassigned emits `$.state(void 0)`:\n{raw}"
+    );
+    assert!(
+        !raw.contains("$.proxy") && !raw.contains("$.state(undefined)"),
+        "no-arg $state.raw() must not proxy nor use the bare `undefined` identifier:\n{raw}"
+    );
+    // The plain `$state()` no-arg form matches byte-for-byte.
+    let plain = emit(
+        "<script>let x = $state();</script>\n<button onclick={() => x = 1}>{x}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        plain.contains("let x = $.state(void 0);"),
+        "no-arg $state() reassigned emits `$.state(void 0)`:\n{plain}"
+    );
+}
+
+#[test]
+fn state_over_plain_local_undefined_shadow_no_longer_fails_at_state_gate() {
+    // F5: a `$state(undefined)` over a PLAIN-local `undefined` shadow (`let undefined =
+    // 5`) is non-reactive — it reads plain and would lower to `$.state(undefined)`, so
+    // the `$state`-shape gate no longer over-refuses it (proven at the unit level by
+    // `state_init_reactive_shadowed_undefined_conservative_failclose_discriminates_subcases`).
+    //
+    // DISCRIMINATING at the full-module level: before F5 this component failed closed
+    // as an `AdvancedRune` ("$state() shadowed undefined init") at the state gate;
+    // after F5 the state gate PASSES and the disposition MOVES to the ORTHOGONAL
+    // plain-let carrier (`InstanceScriptItem { construct: "plain let" }` for the bare
+    // `let undefined = 5;`, a pre-existing unsupported instance-script item unrelated
+    // to `$state`). So the failure is no longer a rune refusal.
+    assert_fail_closed(
+        "<script>let undefined = 5;\nlet x = $state(undefined);</script>\n<button onclick={() => x = 1}>{x}</button>\n",
+        |s| {
+            // The disposition changed OFF the rune gate (the F5 signal): NOT an
+            // AdvancedRune shadowed-undefined refusal.
+            !matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. }
+                    if *rune == "$state() shadowed undefined init"
+            ) && matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::InstanceScriptItem { construct, .. }
+                    if *construct == "plain let"
+            )
+        },
     );
 }

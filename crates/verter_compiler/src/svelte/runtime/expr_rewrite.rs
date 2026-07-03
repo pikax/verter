@@ -27,9 +27,9 @@
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
     ArrowFunctionExpression, AssignmentExpression, AssignmentOperator, AssignmentTarget,
-    BlockStatement, CatchClause, Expression, ForInStatement, ForOfStatement, ForStatement,
-    Function, IdentifierReference, Program, SimpleAssignmentTarget, Statement, UpdateExpression,
-    UpdateOperator, VariableDeclarationKind,
+    BlockStatement, CallExpression, CatchClause, Expression, ForInStatement, ForOfStatement,
+    ForStatement, Function, IdentifierReference, Program, SimpleAssignmentTarget, Statement,
+    UpdateExpression, UpdateOperator, VariableDeclarationKind,
 };
 use oxc_ast_visit::{walk, Visit};
 use oxc_span::{GetSpan, SourceType};
@@ -929,6 +929,24 @@ impl<'a> Visit<'a> for BindingOccurrenceCollector<'_> {
         walk::walk_object_property(self, it);
     }
 
+    fn visit_call_expression(&mut self, it: &CallExpression<'a>) {
+        // A `$state.snapshot(x)` call rewrites its CALLEE member to the `$.snapshot`
+        // helper (a SPAN-replacement over the `$state.snapshot` callee). The argument
+        // is recursed by the generic walk below, so a nested `$state.snapshot(...)`
+        // and a signal read inside the argument still rewrite. A SHADOWED `$state` (a
+        // local of that name) is an ordinary member call — not the rune — and is left
+        // untouched. Driven from the typed OXC AST only.
+        if !self.is_local("$state") {
+            if let Some(callee_span) = state_snapshot_callee_span(it) {
+                self.occurrences.push(Occurrence::ReadRewrite {
+                    span: callee_span,
+                    text: "$.snapshot".to_string(),
+                });
+            }
+        }
+        walk::walk_call_expression(self, it);
+    }
+
     fn visit_expression_statement(&mut self, it: &oxc_ast::ast::ExpressionStatement<'a>) {
         // A production-ELIDED `$inspect.trace(...)` expression STATEMENT inside a
         // lowered function / arrow body is DROPPED IN PLACE (official `dev:false`
@@ -1045,6 +1063,41 @@ impl RewritePlanner {
                 }
             }
         }
+    }
+}
+
+/// Whether a call expression's callee is the `$state.snapshot` rune member — a
+/// CallExpression whose callee is the static `.snapshot` member on the bare `$state`
+/// identifier (paren-transparent on the `$state` receiver). Returns the callee
+/// member's span so the rewriter can replace `$state.snapshot` with the `$.snapshot`
+/// helper. Shadowing (`$state` a local) is the CALLER's check (the collector consults
+/// its own local shadow frames). Driven from the typed OXC AST only.
+fn state_snapshot_callee_span(call: &CallExpression<'_>) -> Option<oxc_span::Span> {
+    let Expression::StaticMemberExpression(member) = &call.callee else {
+        return None;
+    };
+    if member.property.name.as_str() != "snapshot" {
+        return None;
+    }
+    // The member OBJECT is paren-transparent (`($state).snapshot()`).
+    let mut object = &member.object;
+    while let Expression::ParenthesizedExpression(paren) = object {
+        object = &paren.expression;
+    }
+    if matches!(object, Expression::Identifier(id) if id.name.as_str() == "$state") {
+        // Only the WELL-FORMED single-non-spread-arg form is the supported
+        // `$.snapshot(<expr>)` rewrite. Official rejects a zero-arg / >=2-arg call
+        // (`rune_invalid_arguments_length`) and a spread arg (`rune_invalid_spread`) —
+        // oracle-verified against `svelte@5.56.3`. The rune-scan gate fails those closed
+        // upstream so this rewriter never runs on them; this arity/spread guard is
+        // defense-in-depth so the rewriter can NEVER emit a raw `$.snapshot()` /
+        // `$.snapshot(a, b)` / `$.snapshot(...o)` even if reached.
+        if call.arguments.len() != 1 || call.arguments[0].as_expression().is_none() {
+            return None;
+        }
+        Some(member.span)
+    } else {
+        None
     }
 }
 

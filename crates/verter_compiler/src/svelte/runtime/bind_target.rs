@@ -290,11 +290,12 @@ fn expression_contains_non_plain_svelte_js(expr: &Expression) -> bool {
     scan.found
 }
 
-/// The ROOT identifier name of a parsed `bind:` target expression — the leftmost
+/// The ROOT identifier name of a parsed target expression — the leftmost
 /// identifier reached by walking down a member / computed-member chain — or `None` when the
 /// chain bottoms out at a non-identifier. The structural core shared by [`BindTargetFact`]
-/// and [`bind_target_root_ident`].
-fn target_expr_root_ident(expr: &Expression) -> Option<String> {
+/// and [`bind_target_root_ident`], and reused by the event-handler state-write gate for a
+/// proxy DEEP MUTATION root (`o.a` → `o`).
+pub(super) fn target_expr_root_ident(expr: &Expression) -> Option<String> {
     let mut node = expr;
     loop {
         match node {

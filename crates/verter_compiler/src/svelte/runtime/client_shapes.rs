@@ -187,47 +187,101 @@ fn arrow_body_is_state_writes(
     state_writes > 0
 }
 
-/// Whether an expression is a `$state` assignment / update: an `AssignmentExpression`
-/// or `UpdateExpression` whose TARGET is a bare identifier resolving to a reactive
-/// `$state` signal binding (a primitive `StateSignal`). A member target, a target
-/// resolving to a plain local / prop / derived, or any other expression is NOT a
-/// supported `$state` write.
+/// Whether an expression is a `$state` assignment / update — the DELEGATED narrow
+/// handler surface. An `AssignmentExpression` / `UpdateExpression` counts when its
+/// target is EITHER:
+///
+/// - a BARE identifier resolving to a writable signal (`StateSignal { .. }` — a
+///   primitive OR a `$state.raw` signal — or a `StateProxy`): a REASSIGNMENT
+///   (`c = 1`, `o = { a: 2 }`); OR
+/// - a MEMBER whose ROOT resolves to a proxy (`BareProxy` / `StateProxy`) OR a
+///   `$state.raw` SIGNAL (`StateSignal { raw: true }`): a DEEP MUTATION (`o.a = 2`,
+///   `o.a++`). A raw signal holds a plain object, so official emits the member
+///   mutation via `$.get(o).a` (the signal read) — the same handler shape as a proxy
+///   member mutation.
+///
+/// A target resolving to a plain local / prop / derived / primitive signal member, or
+/// any other expression, is NOT a supported `$state` write. The handler body lowers
+/// through the shared rewriter, which emits the correct per-lowering read/write form
+/// (`$.set` / `$.get(o).a = …` / plain `o.a`).
 fn expr_is_state_write(
     expr: &Expression<'_>,
     scope: ScopeId,
     bindings: &BindingTable,
     scopes: &ScopeGraph,
 ) -> bool {
-    let target_name = match expr {
-        Expression::AssignmentExpression(assign) => assignment_target_ident(&assign.left),
-        Expression::UpdateExpression(update) => simple_target_ident(&update.argument),
+    let target = match expr {
+        Expression::AssignmentExpression(assign) => assignment_write_target(&assign.left),
+        Expression::UpdateExpression(update) => update_write_target(&update.argument),
         _ => return false,
     };
-    let Some(name) = target_name else {
+    let Some((name, is_member)) = target else {
         return false;
     };
-    matches!(
-        bindings.resolve_kind(scopes, scope, &name),
-        Some(BindingRuntimeKind::StateSignal { raw: false })
-    )
+    let kind = bindings.resolve_kind(scopes, scope, &name);
+    if is_member {
+        // A deep MUTATION whose ROOT is a proxy object/array (`BareProxy` /
+        // `StateProxy` — `o.a = 2` / `o.a++`, plain member access) OR a `$state.raw`
+        // SIGNAL (`StateSignal { raw: true }` — a raw signal holds a plain object, so
+        // `o.x++` reads the signal via `$.get(o).x++`; official emits exactly that).
+        // A primitive signal (`StateSignal { raw: false }`) is NOT admitted here: a
+        // member of a primitive is not a supported mutation shape.
+        matches!(
+            kind,
+            Some(
+                BindingRuntimeKind::BareProxy
+                    | BindingRuntimeKind::StateProxy
+                    | BindingRuntimeKind::StateSignal { raw: true }
+            )
+        )
+    } else {
+        // A bare-identifier REASSIGNMENT of a signal (`c = 1`, `o = { a: 2 }`).
+        matches!(
+            kind,
+            Some(BindingRuntimeKind::StateSignal { .. } | BindingRuntimeKind::StateProxy)
+        )
+    }
 }
 
-/// The bare-identifier name of an assignment target (`count = …` → `count`), or
-/// `None` for a member / destructure / TS-wrapped target.
-fn assignment_target_ident(target: &oxc_ast::ast::AssignmentTarget<'_>) -> Option<String> {
+/// The write target of an assignment: `(root_name, is_member)` — a bare-identifier
+/// target (`is_member == false`) or a member target (`is_member == true`, root walked
+/// down the member chain). `None` for a destructure / TS-wrapped target.
+fn assignment_write_target(target: &oxc_ast::ast::AssignmentTarget<'_>) -> Option<(String, bool)> {
     use oxc_ast::ast::AssignmentTarget;
     match target {
-        AssignmentTarget::AssignmentTargetIdentifier(id) => Some(id.name.to_string()),
+        AssignmentTarget::AssignmentTargetIdentifier(id) => Some((id.name.to_string(), false)),
+        AssignmentTarget::StaticMemberExpression(m) => {
+            super::bind_target::target_expr_root_ident(&m.object).map(|r| (r, true))
+        }
+        AssignmentTarget::ComputedMemberExpression(m) => {
+            super::bind_target::target_expr_root_ident(&m.object).map(|r| (r, true))
+        }
+        AssignmentTarget::PrivateFieldExpression(m) => {
+            super::bind_target::target_expr_root_ident(&m.object).map(|r| (r, true))
+        }
         _ => None,
     }
 }
 
-/// The bare-identifier name of an update target (`count++` → `count`), or `None`
-/// for a member / TS-wrapped target.
-fn simple_target_ident(target: &oxc_ast::ast::SimpleAssignmentTarget<'_>) -> Option<String> {
+/// The write target of an update (`count++` → `(count, false)`, `o.a++` → `(o, true)`),
+/// or `None` for a TS-wrapped target.
+fn update_write_target(
+    target: &oxc_ast::ast::SimpleAssignmentTarget<'_>,
+) -> Option<(String, bool)> {
     use oxc_ast::ast::SimpleAssignmentTarget;
     match target {
-        SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => Some(id.name.to_string()),
+        SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => {
+            Some((id.name.to_string(), false))
+        }
+        SimpleAssignmentTarget::StaticMemberExpression(m) => {
+            super::bind_target::target_expr_root_ident(&m.object).map(|r| (r, true))
+        }
+        SimpleAssignmentTarget::ComputedMemberExpression(m) => {
+            super::bind_target::target_expr_root_ident(&m.object).map(|r| (r, true))
+        }
+        SimpleAssignmentTarget::PrivateFieldExpression(m) => {
+            super::bind_target::target_expr_root_ident(&m.object).map(|r| (r, true))
+        }
         _ => None,
     }
 }
@@ -838,11 +892,19 @@ pub(super) fn bind_root_is_writable_target(
     )
 }
 
-/// Whether a binding kind is an ASSIGNMENT-VALID bind root — the ONLY kinds a two-way
-/// `bind:` may legally REASSIGN: a `$state` SIGNAL (`$.set(name, $$value)`), a
-/// `$.state($.proxy)` reassignable proxy, or a PLAIN local (`name = $$value`). The
-/// read-oriented signal kinds — `$derived`, an `{#each}` item, an `{#await}` binding, and a
-/// `{@const}` derived — are READABLE but are NOT assignment targets, so they are EXCLUDED.
+/// Whether a binding kind is an ASSIGNMENT-VALID bind root — the kinds a two-way `bind:`
+/// may legally write: a `$state` SIGNAL (`$.set(name, $$value)`), a `$.state($.proxy)`
+/// reassignable proxy (`$.get(o).x = $$value`), a bare `$.proxy` (a `BareProxy` member
+/// deep-mutation `o.x = $$value` — plain, never a reassignment of the proxy itself), or a
+/// PLAIN local (`name = $$value`). The read-oriented signal kinds — `$derived`, an
+/// `{#each}` item, an `{#await}` binding, and a `{@const}` derived — are READABLE but are
+/// NOT assignment targets, so they are EXCLUDED.
+///
+/// A `BareProxy` reaches this predicate ONLY at a MEMBER bind target (`bind:value={o.x}`) —
+/// a bare-identifier bind (`bind:value={o}`) REASSIGNS its root, which reclassifies a
+/// proxiable `$state` to `StateProxy` before this runs — so admitting `BareProxy` here
+/// enables the plain-member setter (`o.x = $$value`) official emits for a never-reassigned
+/// object `$state`, without ever emitting a plain reassignment of a bare proxy.
 ///
 /// This is deliberately NARROWER than the read-shape classifier [`is_signal_binding`]
 /// (which admits `Derived` / `EachSignal` / `AwaitSignal` / `LegacyConstDerived` for
@@ -854,6 +916,7 @@ fn is_writable_bind_root(kind: BindingRuntimeKind) -> bool {
         kind,
         BindingRuntimeKind::StateSignal { .. }
             | BindingRuntimeKind::StateProxy
+            | BindingRuntimeKind::BareProxy
             | BindingRuntimeKind::PlainLocal
     )
 }
@@ -1353,6 +1416,8 @@ mod tests {
             raw: true
         }));
         assert!(is_writable_bind_root(BindingRuntimeKind::StateProxy));
+        // A `BareProxy` is writable at a MEMBER bind target (`o.x = $$value` plain).
+        assert!(is_writable_bind_root(BindingRuntimeKind::BareProxy));
         assert!(is_writable_bind_root(BindingRuntimeKind::PlainLocal));
         assert!(!is_writable_bind_root(BindingRuntimeKind::Derived));
         assert!(!is_writable_bind_root(BindingRuntimeKind::EachSignal));

@@ -336,23 +336,42 @@ impl<'a> SupportedClientIr<'a> {
         let root_scope = self.ir.root_scope().scope;
         let mut items = Vec::new();
         for item in &self.script_items {
-            match expr_emit::lower_simple_instance_item(item, &self.ir.analysis.bindings) {
+            match expr_emit::lower_simple_instance_item(item) {
                 SimpleItemLowering::Statement(code) => {
                     items.push(ClientScriptItem::BodyStatement { code });
                 }
                 SimpleItemLowering::None => {}
                 SimpleItemLowering::NeedsRewriter => {
-                    let Item::FunctionDecl { source, .. } = item else {
-                        // `NeedsRewriter` is produced ONLY for `FunctionDecl`; any other
-                        // item reaching here is a classifier/lowering divergence.
-                        unreachable!("only FunctionDecl needs the rewriter")
+                    let code = match item {
+                        // A `$state` / `$state.raw` declarator: its INIT routes through the
+                        // shared rewriter FIRST (a signal read inside a proxiable object init
+                        // becomes `$.get`, TS is stripped), THEN the resolved `StateLowering`
+                        // wrapper (`$.state` / `$.proxy` / `$.state($.proxy(…))`) is applied.
+                        // A no-arg `$state()` has no init to rewrite (the `void 0` form).
+                        Item::StatePrimitive { name, init } => {
+                            let rewritten = match init {
+                                Some(src) => Some(self.rewrite_source(src, root_scope)?),
+                                None => None,
+                            };
+                            expr_emit::lower_state_primitive_item(
+                                name,
+                                rewritten.as_deref(),
+                                &self.ir.analysis.bindings,
+                            )
+                        }
+                        // A named function-pair function: its body lowers through the shared
+                        // rewriter (signal reads/writes rewrite; the `function name(...) {}`
+                        // structure is preserved). The rewriter wraps the source as an
+                        // expression internally, so a declaration's source round-trips as a
+                        // function expression with the body edits applied.
+                        Item::FunctionDecl { source, .. } => {
+                            self.rewrite_source(source, root_scope)?
+                        }
+                        // `NeedsRewriter` is produced ONLY for `StatePrimitive` /
+                        // `FunctionDecl`; any other item reaching here is a
+                        // classifier/lowering divergence.
+                        _ => unreachable!("only StatePrimitive and FunctionDecl need the rewriter"),
                     };
-                    // The function declaration lowers through the shared rewriter (its
-                    // body's signal reads/writes rewrite; the `function name(...) {}`
-                    // structure is preserved). The rewriter wraps the source as an
-                    // expression internally, so a declaration's source round-trips as a
-                    // function expression with the body edits applied.
-                    let code = self.rewrite_source(source, root_scope)?;
                     items.push(ClientScriptItem::BodyStatement { code });
                 }
             }

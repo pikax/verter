@@ -1,0 +1,84 @@
+{
+  "slug": "runes/bind_value_computed_member.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "bind_value_computed_member",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "proxy",
+    "state",
+    "first_child",
+    "remove_input_defaults",
+    "sibling",
+    "bind_value",
+    "get",
+    "get",
+    "delegated",
+    "update",
+    "append",
+    "delegate"
+  ],
+  "helperSet": [
+    "append",
+    "bind_value",
+    "delegate",
+    "delegated",
+    "first_child",
+    "from_html",
+    "get",
+    "proxy",
+    "remove_input_defaults",
+    "sibling",
+    "state",
+    "update"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "proxy": 1,
+    "state": 1,
+    "first_child": 1,
+    "remove_input_defaults": 1,
+    "sibling": 1,
+    "bind_value": 1,
+    "get": 2,
+    "delegated": 1,
+    "update": 1,
+    "append": 1,
+    "delegate": 1
+  },
+  "delegatedEvents": [
+    "click"
+  ],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<input/> <button>next</button>",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<input/> <button>next</button>`, 1); export default function bind_value_computed_member($$anchor) {let arr = $.proxy(['']); let i = $.state(0); var fragment = root(); var input = $.first_child(fragment); $.remove_input_defaults(input); var button = $.sibling(input, 2); $.bind_value(input, () => arr[$.get(i)], ($$value) => arr[$.get(i)] = $$value); $.delegated('click', button, () => $.update(i)); $.append($$anchor, fragment);} $.delegate(['click']);",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

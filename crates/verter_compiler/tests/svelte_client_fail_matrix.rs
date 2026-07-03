@@ -46,18 +46,8 @@ fn compile(source: &str) -> Result<String, ClientCompileError> {
 const FAIL_MATRIX: &[FailRow] = &[
     // ── $state advanced forms ───────────────────────────────────────────
     FailRow {
-        name: "state_raw",
-        source: "<script>let c = $state.raw(0);</script>\n<button onclick={() => c = 1}>{c}</button>\n",
-        code: "svelte-runtime-unsupported-advanced-rune",
-    },
-    FailRow {
         name: "state_destructure",
         source: "<script>let { a } = $state({ a: 1 });</script>\n<button onclick={() => a}>{a}</button>\n",
-        code: "svelte-runtime-unsupported-advanced-rune",
-    },
-    FailRow {
-        name: "state_snapshot",
-        source: "<script>let c = $state(0); let s = $state.snapshot(c);</script>\n<button onclick={() => c++}>{s}</button>\n",
         code: "svelte-runtime-unsupported-advanced-rune",
     },
     FailRow {
@@ -1149,17 +1139,7 @@ const FAIL_MATRIX: &[FailRow] = &[
         source: "<script>let count = $state(0);</script>\n<button onclick={() => count++}>{count ? count : 0}</button>\n",
         code: "svelte-runtime-unsupported-complex-interpolation",
     },
-    // ── CONVERGENCE: $state primitive-only + $props default ─────────────────
-    FailRow {
-        name: "state_object_init",
-        source: "<script>let o = $state({}); let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n",
-        code: "svelte-runtime-unsupported-advanced-rune",
-    },
-    FailRow {
-        name: "state_array_init",
-        source: "<script>let a = $state([]); let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n",
-        code: "svelte-runtime-unsupported-advanced-rune",
-    },
+    // ── CONVERGENCE: $props default ─────────────────────────────────────────
     FailRow {
         name: "props_literal_default",
         source: "<script>let { a = 1 } = $props();</script>\n<p>{a}</p>\n",
@@ -1243,18 +1223,31 @@ const FAIL_MATRIX: &[FailRow] = &[
         source: "<script>let c = $state(0);</script>\n<div bind:this={missing}></div>\n<button onclick={() => c++}>{c}</button>\n",
         code: "svelte-runtime-unsupported-binding",
     },
-    // ── $state over a SHADOWED `undefined` ──────────────────────────────────
-    // `let undefined = $state(0); let x = $state(undefined)` — the shadowed `undefined`
-    // is a non-literal reference init (official reads the shadow), so it fails closed as
-    // an advanced rune rather than emitting the divergent `$.state(undefined)`.
+    // ── $state over a REACTIVE-shadowed `undefined` ─────────────────────────
+    // `let undefined = $state(0); let x = $state(undefined)` — `undefined` is shadowed
+    // by a REACTIVE $state SIGNAL, so its read at the init site is `$.get(undefined)`
+    // (a CallExpression) which official PROXIES (`$.state($.proxy($.get(undefined)))`).
+    // Verter's `expr_is_proxiable` hardcodes the `undefined` identifier non-proxiable
+    // and would omit the `$.proxy`, so it fails closed. (A PLAIN-local `undefined`
+    // shadow reads plain and is NOT refused at the state gate — see the F5 tests.)
     FailRow {
-        name: "state_shadowed_undefined_init",
+        name: "state_reactive_shadowed_undefined_init",
         source: "<script>let undefined = $state(0); let x = $state(undefined);</script>\n<button onclick={() => { undefined++; x++; }}>{x}{undefined}</button>\n",
         code: "svelte-runtime-unsupported-advanced-rune",
     },
+    // ── $state / $state.raw with a SPREAD argument ──────────────────────────
+    // `$state(...x)` / `$state.raw(...x)` is the official `rune_invalid_spread` compile
+    // error ("`$state` cannot be called with a spread argument"). A single spread arg is
+    // `arguments.len() == 1` with no `as_expression`, so it slips past the arity /
+    // init-shape gates and would emit `void 0` — it MUST fail closed instead (F2).
     FailRow {
-        name: "state_nan_init",
-        source: "<script>let c = $state(NaN);</script>\n<button onclick={() => c++}>{c}</button>\n",
+        name: "state_spread_argument",
+        source: "<script>let a = [1]; let x = $state(...a);</script>\n<button onclick={() => x = 2}>{x}</button>\n",
+        code: "svelte-runtime-unsupported-advanced-rune",
+    },
+    FailRow {
+        name: "state_raw_spread_argument",
+        source: "<script>let a = [1]; let x = $state.raw(...a);</script>\n<button onclick={() => x = 2}>{x}</button>\n",
         code: "svelte-runtime-unsupported-advanced-rune",
     },
     // ── implicit `<p>` autoclose ────────────────────────────────────────────
@@ -1789,20 +1782,20 @@ fn generated_bind_target_shapes_land_on_boundary() {
             "<input bind:value={() => c, (v) => c = v, c} />",
             Expected::FailClosed,
         ),
-        // ── object/array `$state` MEMBER: fails closed UPSTREAM at the object-$state
-        //    declaration gate (the `$state()` non-primitive-init surface is owned by the
-        //    runes-completion vertical), so the member never reaches the bind gate ─────
+        // ── supported: object/array `$state` MEMBER bind (the deep-reactive proxy
+        //    declarator is now lowered; a never-reassigned root is a `BareProxy` whose
+        //    member setter is a PLAIN assignment `o.x = $$value`) ────────────────────
         (
             "value_object_state_member",
             "let o = $state({ x: '' });",
             "<input bind:value={o.x} />",
-            Expected::FailClosed,
+            Expected::Supported,
         ),
         (
             "value_object_state_computed_member",
             "let arr = $state(['']); let i = $state(0);",
             "<input bind:value={arr[i]} />",
-            Expected::FailClosed,
+            Expected::Supported,
         ),
         // ── out-of-boundary: a $props() / $bindable / $derived / import MEMBER root
         //    (a divergent official accessor protocol — NOT a plain assignment) ─────────
@@ -2144,11 +2137,13 @@ fn generated_interpolation_expression_kinds_land_on_boundary() {
 
 #[test]
 fn generated_state_init_shapes_land_on_boundary() {
-    // The finite grammar of a `$state(init)` INITIALIZER shape. ONLY a primitive
-    // literal init (string / number / boolean / null / undefined / bigint / `-1`) is
-    // supported (the §1.2-class `$.state(<literal>)` signal); an object / array /
-    // call / identifier init is the deep-reactive `$.proxy` form and fails closed
-    //. (Object/array proxy state was supported; demoted.)
+    // The finite grammar of a `$state(init)` INITIALIZER shape. A primitive literal
+    // init (string / number / boolean / null / undefined / bigint / `-1` / a
+    // no-substitution template) is the `$.state(<literal>)` signal; a proxiable object /
+    // array / call / `NaN` / `Infinity` init is the deep-reactive `$.proxy` form. BOTH
+    // are SUPPORTED — the declarator emitter lowers each per its resolved `StateLowering`.
+    // Only a destructure, an over-arity call, and the narrowed shadowed-`undefined` init
+    // fail closed (covered by the fail matrix).
     let variants: &[(&str, &str, Expected)] = &[
         // ── supported: primitive-literal inits ───────────────────────────────────
         ("number", "let s = $state(0);", Expected::Supported),
@@ -2157,28 +2152,22 @@ fn generated_state_init_shapes_land_on_boundary() {
         ("null", "let s = $state(null);", Expected::Supported),
         ("undefined_empty", "let s = $state();", Expected::Supported),
         ("negative", "let s = $state(-1);", Expected::Supported),
-        // ── demoted: non-primitive (deep-reactive proxy) inits ──────────────
-        ("object", "let s = $state({});", Expected::FailClosed),
-        ("array", "let s = $state([]);", Expected::FailClosed),
+        ("template_init", "let s = $state(`x`);", Expected::Supported),
+        // ── supported: proxiable (deep-reactive `$.proxy`) inits ─────────────────
+        ("object", "let s = $state({});", Expected::Supported),
+        ("array", "let s = $state([]);", Expected::Supported),
         (
             "object_props",
             "let s = $state({ a: 1 });",
-            Expected::FailClosed,
+            Expected::Supported,
         ),
-        ("call_init", "let s = $state(make());", Expected::FailClosed),
-        (
-            "template_init",
-            "let s = $state(`x`);",
-            Expected::FailClosed,
-        ),
+        ("call_init", "let s = $state(make());", Expected::Supported),
     ];
     for (label, decl, expected) in variants {
-        // The head declares ONLY the supported `$state` signal (a `function make`
-        // helper would itself fail closed at the instance-script-item gate). The
-        // `$state` declarator under test is the surface — its SHAPE gate (primitive vs
-        // proxy) fires at declaration. The `call_init` variant's `make()` need not
-        // resolve: a CALL init is a non-primitive shape refused at the state-shape gate
-        // regardless of whether `make` is declared.
+        // The head declares the supported `$state` signal. A proxiable init is lowered
+        // to `$.proxy(...)` (never reassigned → `BareProxy`); its init routes through the
+        // shared rewriter. The `call_init` variant's `make()` need not resolve — the
+        // rewriter passes an unresolved identifier through, so the declarator still emits.
         let source = format!(
             "<script>let c = $state(0); {decl}</script>\n<button onclick={{() => c++}}>{{c}}</button>\n"
         );
@@ -2361,10 +2350,17 @@ fn fail_matrix_covers_every_documented_sub_shape() {
     // `component_filler_under_custom_element_owner`; rail 2, the unified slot
     // choke-point (`dynamic-attribute`) — `slot_attr_under_svelte_element_owner`,
     // `svelte_element_slot_under_svelte_element_owner` — +6 rows, 168 → 174.
+    // The 5g-b state-family vertical REMOVED FIVE rows (now accepted-positive with
+    // emission goldens): `state_raw` (a `$state.raw` opt-out signal), `state_object_init`
+    // + `state_array_init` (the deep-reactive `$.proxy` object/array declarator),
+    // `state_nan_init` (a `NaN` proxiable init), and `state_snapshot` (now a supported
+    // expression rune rewritten to `$.snapshot`) — net −5 rows, 174 → 169. The 5g-b
+    // fix-cycle then ADDED TWO rows (`state_spread_argument` + `state_raw_spread_argument`
+    // — the `rune_invalid_spread` fail-close) — net +2 rows, 169 → 171.
     assert_eq!(
         FAIL_MATRIX.len(),
-        174,
-        "the fail matrix pins 174 fail-closed rows — one documented \
+        171,
+        "the fail matrix pins 171 fail-closed rows — one documented \
          unsupported-feature sub-shape per row, EXCEPT the D-43 custom-element-host / \
          native-slotting rows, which are REPRESENTATIVE smoke probes for that \
          root-scoped over-refusal class (protected by the generic host-gate rows plus \

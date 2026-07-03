@@ -256,9 +256,12 @@ fn negative_every_top_level_statement_family_fails_closed() {
 #[test]
 fn negative_variable_declaration_sub_shapes_fail_closed() {
     // The within-`let`-declaration boundary: a `const`/`var` rune, a multi-declarator,
-    // a TS-annotated declarator, a non-primitive `$state` init, a `$state.raw`, a
-    // default-bearing / rest / whole-object / computed `$props()`, and a `$`-prefixed
-    // binding all fail closed.
+    // a TS-annotated declarator, the narrowed non-lowerable `$state` inits (a TS-wrapped
+    // init and a shadowed-`undefined` init), a default-bearing / rest / whole-object /
+    // computed `$props()`, and a `$`-prefixed binding all fail closed. (The proxiable
+    // object / array / call / member / template `$state` inits and `$state.raw` are now
+    // SUPPORTED — see `svelte_client_fail_matrix::generated_state_init_shapes_land_on_boundary`
+    // and the `runes/*` emission goldens.)
     let rows: &[(&str, &str)] = &[
         // Decl kind on a rune.
         ("const_state", "const k = $state(0);"),
@@ -270,14 +273,12 @@ fn negative_variable_declaration_sub_shapes_fail_closed() {
         // TS-annotated declarator (the tsx-leniency fix).
         ("ts_annotated_state", "let c: number = $state(0);"),
         ("ts_definite_state", "let c!: number = $state(0);"),
-        // State init shape (non-primitive).
-        ("state_object_init", "let o = $state({});"),
-        ("state_array_init", "let a = $state([]);"),
-        ("state_call_init", "let s = $state(make());"),
-        ("state_template_init", "let s = $state(`x`);"),
-        ("state_member_init", "let s = $state(x.y);"),
+        // State init shape — the narrowed non-lowerable forms.
         ("state_as_init", "let s = $state(0 as number);"),
-        ("state_raw", "let s = $state.raw(0);"),
+        (
+            "state_shadowed_undefined_init",
+            "let undefined = $state(0); let s = $state(undefined);",
+        ),
         // Props pattern / default shape.
         ("props_default", "let { a = 1 } = $props();"),
         ("props_rest", "let { a, ...rest } = $props();"),

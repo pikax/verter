@@ -76,6 +76,31 @@ const SUPPORTED_FIXTURES: &[&str] = &[
     // arrow — the trace call is dropped in place, the rest of the body lowers
     // (`$.update(c)`), and no frame is added.
     "runes/inspect_trace_handler",
+    // ── 5g-b state family ($state.raw + proxied object-$state + $state.snapshot) ──
+    // A `$state.raw({...})` reassigned → `$.state({...})` (NO `$.proxy`) + `$.set(o,
+    // rhs)` with NO trailing `, true` (the raw-aware reassignment flag).
+    "runes/state_raw_object",
+    // A `$state.raw(0)` reassigned → byte-identical to `$state(0)` (`$.state(0)`).
+    "runes/state_raw_primitive",
+    // A proxied `$state({...})` reassigned → `$.state($.proxy({...}))` + `$.set(o,
+    // rhs, true)` (the proxy-RHS flag).
+    "runes/state_proxy_reassign",
+    // A raw + a proxied object `$state` in ONE component — per-binding correct: the
+    // raw one is `$.state({...})` (no flag on reassign), the proxied one
+    // `$.state($.proxy({...}))` (flag on reassign).
+    "runes/state_mixed_raw_proxy",
+    // `$state.snapshot(o)` in a `$state`-write handler → `$.snapshot(o)`.
+    "runes/state_snapshot",
+    // A `$state(NaN)` reassigned → `$.state($.proxy(NaN))` (a bare global-identifier
+    // init IS proxiable) — the discriminating positive for the NaN/Infinity proxiable
+    // init class (F3): the proxy wrap must be present, the reassign `$.set(x, 1)` with
+    // NO `, true` (a primitive RHS).
+    "runes/state_nan",
+    // A computed-member `bind:value={arr[i]}` where the INDEX `i` is a reactive signal
+    // (reassigned) and `arr` is a never-reassigned proxy: pins the get/set thunk shape
+    // `() => arr[$.get(i)]` / `($$value) => arr[$.get(i)] = $$value` (F9 — the
+    // computed-index signal read `$.get(i)` is rewritten, the proxy root reads plain).
+    "runes/bind_value_computed_member",
 ];
 
 /// The SUPPORTED MATRIX — the exhaustive enumeration of supported client

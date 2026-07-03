@@ -915,41 +915,133 @@ fn state_init_unshadowed_undefined_is_a_primitive_literal() {
 }
 
 #[test]
-fn state_init_shadowed_undefined_is_not_a_primitive_literal() {
-    // `let undefined = $state(0); let x = $state(undefined)` — `undefined` is SHADOWED
-    // by a local, so the `$state(undefined)` init is a real reference (official reads
-    // the shadow), NOT the void-0 primitive. It must fail closed as ADVANCED (5g) so
-    // Verter never emits the divergent `$.state(undefined)` (raw signal box) where
-    // official emits `$.state($.proxy($.get(undefined)))`.
+fn state_init_reactive_shadowed_undefined_conservative_failclose_discriminates_subcases() {
+    // The reactive-rune `undefined` shadow gate is CONSERVATIVE (fallback path): it fails
+    // the WHOLE class closed because it is PRE-LOWERING and INSTANCE-ONLY and cannot tell
+    // the demoted subcase from the live one (a template-handler reassignment — invisible
+    // here — promotes the shadow to a live signal). This test DISCRIMINATES the three
+    // subcases and honestly labels the one that is a known conservative OVER-refusal. All
+    // dispositions oracle-verified against `svelte@5.56.3`.
+
+    // (1) LIVE-signal shadow (reassigned as a whole IN THE INSTANCE SCRIPT → `$.state(…)`,
+    //     read via `$.get`): official emits `let x = $.state($.proxy($.get(undefined)))`
+    //     — GENUINELY UNSUPPORTABLE (Verter's `expr_is_proxiable` hardcodes `undefined`
+    //     non-proxiable). Fail-closed is CORRECT here.
+    assert!(
+        matches!(
+            state_decl_shape(
+                "let undefined = $state(0); undefined = 1; let x = $state(undefined);"
+            ),
+            StateDeclShape::Advanced {
+                rune: "$state() shadowed undefined init"
+            }
+        ),
+        "a LIVE ($state, reassigned) `undefined` shadow is genuinely unsupportable → advanced"
+    );
+    // A `$derived` shadow is ALWAYS a live signal (a derived is always `$.derived(…)`,
+    // read via `$.get`), so its fail-close is also PRECISE (not an over-refusal).
+    assert!(
+        matches!(
+            state_decl_shape(
+                "let z = $state(0); let undefined = $derived(z); let x = $state(undefined);"
+            ),
+            StateDeclShape::Advanced {
+                rune: "$state() shadowed undefined init"
+            }
+        ),
+        "a $state over a `$derived` (always-signal) `undefined` shadow is advanced (fail-closed)"
+    );
+
+    // (2) DEMOTED shadow (never reassigned → lowers to plain `let undefined = 0`, read
+    //     BARE): official ACTUALLY emits the SUPPORTED `let x = $.state(undefined)`. Verter
+    //     still refuses it — a KNOWN CONSERVATIVE OVER-REFUSAL (the gate cannot prove the
+    //     shadow stays demoted without the whole-component lowering; a template-handler
+    //     reassignment would promote it). Tracked as [debt] + a TODO(follow-up) at the
+    //     gate. Fail-closed-safe.
     assert!(
         matches!(
             state_decl_shape("let undefined = $state(0); let x = $state(undefined);"),
-            StateDeclShape::Advanced { .. }
+            StateDeclShape::Advanced {
+                rune: "$state() shadowed undefined init"
+            }
         ),
-        "a $state over a SHADOWED `undefined` is advanced (fail-closed)"
+        "a DEMOTED ($state, never-reassigned) `undefined` shadow is a KNOWN conservative \
+         over-refusal (official supports it as `$.state(undefined)`)"
     );
-    // Even a plain non-state `undefined` shadow makes the reference non-literal.
+
+    // (3) DISCRIMINATING POSITIVE: a PLAIN-local `undefined` shadow (`let undefined = 5`)
+    //     is NOT a rune at all — it reads plain and lowers to `$.state(undefined)` matching
+    //     official, so it is SUPPORTED (never fail-closed). This separates the reactive
+    //     class (over-broad refusal) from the plain class (supported).
     assert!(
         matches!(
             state_decl_shape("let undefined = 5; let x = $state(undefined);"),
-            StateDeclShape::Advanced { .. }
+            StateDeclShape::Identifier
         ),
-        "a $state over a plain-local `undefined` shadow is advanced (fail-closed)"
+        "a $state over a PLAIN-local `undefined` shadow is supported (not fail-closed)"
     );
 }
 
 #[test]
-fn state_init_nan_and_infinity_are_not_primitive_literals() {
-    // NaN / Infinity are bare global identifier references — official wraps them in
-    // `$.proxy(…)` (the deep-reactive non-literal form), so they are NOT primitive
-    // literals and fail closed as advanced (never the bare `$.state(NaN)` literal form).
+fn state_init_spread_argument_fails_closed() {
+    // F2: `$state(...x)` / `$state.raw(...x)` is the official `rune_invalid_spread`
+    // compile error. A single spread arg is `arguments.len() == 1` with no
+    // `as_expression`, so it slips past the arity and init-shape gates and would emit
+    // `void 0`. It MUST fail closed instead.
+    assert!(
+        matches!(
+            state_decl_shape("let a = [1]; let x = $state(...a);"),
+            StateDeclShape::Advanced {
+                rune: "$state() spread argument"
+            }
+        ),
+        "$state(...x) fails closed as a spread argument (F2)"
+    );
+    assert!(
+        matches!(
+            state_decl_shape("let a = [1]; let x = $state.raw(...a);"),
+            StateDeclShape::Advanced {
+                rune: "$state() spread argument"
+            }
+        ),
+        "$state.raw(...x) fails closed as a spread argument (F2)"
+    );
+    // NEGATIVE: a plain single-expression arg is still supported (not mistaken for a
+    // spread).
+    assert!(
+        matches!(
+            state_decl_shape("let x = $state(0);"),
+            StateDeclShape::Identifier
+        ),
+        "a plain single-arg $state stays supported"
+    );
+}
+
+#[test]
+fn state_init_nan_and_infinity_are_supported_proxiable_inits() {
+    // INVERTED: NaN / Infinity are bare global identifier references — official wraps
+    // them in `$.proxy(…)` (the deep-reactive form). Since the declarator emitter now
+    // lowers a proxiable init, they are SUPPORTED (`StateDeclShape::Identifier`), NOT
+    // failed closed. (The `$.state($.proxy(NaN))` emission is asserted at the
+    // integration level.)
     assert!(matches!(
         state_decl_shape("let x = $state(NaN);"),
-        StateDeclShape::Advanced { .. }
+        StateDeclShape::Identifier
     ));
     assert!(matches!(
         state_decl_shape("let x = $state(Infinity);"),
-        StateDeclShape::Advanced { .. }
+        StateDeclShape::Identifier
+    ));
+    // NEGATIVE: a REACTIVE-rune `undefined` shadow still fails closed under the
+    // CONSERVATIVE gate (the whole class is refused because this pre-lowering /
+    // instance-only gate cannot prove the shadow stays demoted vs. becomes a live signal).
+    // The demoted-vs-live discrimination + the known over-refusal are characterized in
+    // `state_init_reactive_shadowed_undefined_conservative_failclose_discriminates_subcases`.
+    assert!(matches!(
+        state_decl_shape("let undefined = $state(0); let x = $state(undefined);"),
+        StateDeclShape::Advanced {
+            rune: "$state() shadowed undefined init"
+        }
     ));
 }
 

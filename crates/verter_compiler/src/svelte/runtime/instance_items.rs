@@ -429,7 +429,15 @@ fn classify_identifier_declarator(
             if is_props_callee(&call.callee) {
                 return Err(refuse("$props() whole-object"));
             }
-            // A plain non-rune call init (`let x = makeIt()`) is not core.
+            // A plain non-rune call init (`let x = makeIt()`) is not core. This is
+            // also the CARRIER a `let s = $state.snapshot(c)` instance-script
+            // initializer rides — it fails closed here as the plain-call-init carrier,
+            // NOT a rune refusal (the snapshot rune member is rewritten in every
+            // supported position; only its plain-call-INIT carrier is deferred).
+            // TODO(follow-up): support instance-script CALL initializers (`let s =
+            // foo()` / `let s = $state.snapshot(c)` → `let s = $.snapshot($.get(c))`)
+            // — owned by the instance-script-call-init carrier surface (a separate
+            // future block); closes when that carrier lands.
             Err(refuse("plain let with call init"))
         }
         // Shape 4: a plain non-rune `let v = <literal-only init>` used SOLELY as a DOM

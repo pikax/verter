@@ -341,19 +341,46 @@ impl UnsupportedRuneScan {
     }
 
     /// Classify a member expression whose object is an unshadowed rune root
-    /// (`$state.raw`, `$effect.pre`, `$props.id`, …). The supported member form is
-    /// `$derived.by` (handled by the binding classifier); everything else is an
-    /// unsupported rune surface.
-    fn classify_rune_member(&mut self, root: &str, member: &str, span: Span) {
+    /// (`$state.raw`, `$effect.pre`, `$props.id`, …). Returns `true` ONLY for
+    /// `$state.snapshot` — the one supported member form whose rune-root receiver
+    /// (`$state`) has NO declarator position of its own, so the caller must NOT descend
+    /// into it (the position scan would otherwise refuse the bare `$state` in an
+    /// expression context). Every OTHER form returns `false` (the caller descends): a
+    /// supported form (`$derived.by`, `$state.raw`, `$inspect.*`) records nothing and
+    /// lets the object be position-scanned (a `$state.raw` declarator's `$state` is in
+    /// the supported-position set; a bare `$derived` is refused there, unchanged); an
+    /// unsupported form records the refusal.
+    fn classify_rune_member(&mut self, root: &str, member: &str, span: Span) -> bool {
         let surface = match (root, member) {
-            // `$derived.by` is the supported member form (a Derived binding).
-            ("$derived", "by") => return,
-            // `$inspect.<member>` (incl. `.trace`) is never refused here: the
-            // `$inspect` family is SUPPORTED as production ELISION. A
-            // statement-position `$inspect.trace()` is dropped in place by the
-            // shared body rewriter; a non-statement-position reference fails
-            // closed at the rewriter (never emitted raw).
-            ("$inspect", _) => return,
+            // `$state.snapshot` reaches this MEMBER handler ONLY in an UNCALLED
+            // value position (`x = $state.snapshot`, `foo($state.snapshot)`): the
+            // supported CALLED form `$state.snapshot(x)` is exempted upstream by
+            // `visit_call_expression` (which never descends into the callee member).
+            // Only the called form is supported (the client expression rewriter
+            // rewrites the callee to `$.snapshot`); an uncalled `$state.snapshot` is
+            // an advanced rune the client backend does NOT emit — official errors on
+            // it (`rune_missing_parentheses`: "Cannot use rune without parentheses").
+            // Record the refusal (do NOT stop the descent) so it fails closed rather
+            // than slipping past the scan and emitting a raw `$state.snapshot`
+            // ReferenceError.
+            ("$state", "snapshot") => UnsupportedSvelteRuntimeSurface::AdvancedRune {
+                rune: "$state.snapshot",
+                span,
+            },
+            // `$derived.by` is the supported member form (a Derived binding); descend so
+            // a bare `$derived` in a non-declarator position is still refused.
+            ("$derived", "by") => return false,
+            // `$inspect.<member>` (incl. `.trace`) is never refused here: the `$inspect`
+            // family is SUPPORTED as production ELISION. A statement-position
+            // `$inspect.trace()` is dropped in place by the shared body rewriter; a
+            // non-statement-position reference fails closed at the rewriter. `$inspect`
+            // is not position-sensitive, so the descent is harmless.
+            ("$inspect", _) => return false,
+            // `$state.raw(...)` is a SUPPORTED state declarator flavour (the raw opt-out):
+            // the binding classifier reads the flavour via `state_rune_call` and lowers it
+            // to a `$.state(<init>)` signal (no `$.proxy`). The `$state` receiver IS a
+            // declarator position (in the supported-position set), so the descent is safe.
+            ("$state", "raw") => return false,
             // Experimental-async rune members (5j).
             ("$state", "eager") => UnsupportedSvelteRuntimeSurface::ExperimentalAsync {
                 surface: "$state.eager",
@@ -363,15 +390,7 @@ impl UnsupportedRuneScan {
                 surface: "$effect.pending",
                 span,
             },
-            // Advanced `$state` / `$effect` / `$props` members (5g).
-            ("$state", "raw") => UnsupportedSvelteRuntimeSurface::AdvancedRune {
-                rune: "$state.raw",
-                span,
-            },
-            ("$state", "snapshot") => UnsupportedSvelteRuntimeSurface::AdvancedRune {
-                rune: "$state.snapshot",
-                span,
-            },
+            // Advanced `$effect` / `$props` members (5g).
             ("$effect", "pre") => UnsupportedSvelteRuntimeSurface::AdvancedRune {
                 rune: "$effect.pre",
                 span,
@@ -402,6 +421,7 @@ impl UnsupportedRuneScan {
             }
         };
         self.record(surface);
+        false
     }
 
     /// Classify a bare-rune-root reference used in a non-supported position (a
@@ -498,15 +518,21 @@ impl<'a> Visit<'a> for UnsupportedRuneScan {
 
     fn visit_member_expression(&mut self, it: &MemberExpression<'a>) {
         // A member access on an unshadowed rune root (`$state.raw`, `$effect.pre`,
-        // `$props.id`, …) — classify the unsupported FORM (recorded BEFORE the walk
-        // descends into the object identifier, so the form-specific diagnostic wins
-        // over the per-identifier position diagnostic). `$derived.by` is the single
-        // supported member form (skipped in `classify_rune_member`).
+        // `$props.id`, …) — classify the FORM (recorded BEFORE the walk descends into
+        // the object identifier, so the form-specific diagnostic wins over the
+        // per-identifier position diagnostic). An UNCALLED `$state.snapshot` reaching
+        // here (a value position — the CALLED form is exempted at
+        // `visit_call_expression`) records the `$state.snapshot` refusal and descends
+        // normally (its `$state` receiver would ALSO refuse as an unsupported position,
+        // but the earlier `$state.snapshot` form diagnostic wins). Every other form
+        // descends normally.
         if let MemberExpression::StaticMemberExpression(m) = it {
             if let Expression::Identifier(obj) = &m.object {
                 let root = obj.name.as_str();
-                if self.is_unshadowed_rune(root) {
-                    self.classify_rune_member(root, m.property.name.as_str(), to_span(m.span));
+                if self.is_unshadowed_rune(root)
+                    && self.classify_rune_member(root, m.property.name.as_str(), to_span(m.span))
+                {
+                    return;
                 }
             }
         }
@@ -514,6 +540,49 @@ impl<'a> Visit<'a> for UnsupportedRuneScan {
     }
 
     fn visit_call_expression(&mut self, it: &oxc_ast::ast::CallExpression<'a>) {
+        // A `$state.snapshot(...)` CALL. Only the WELL-FORMED single-non-spread-arg
+        // form is SUPPORTED (the client expression rewriter rewrites the callee to
+        // `$.snapshot`): EXEMPT its callee member — do NOT let the walk descend into it
+        // (which would refuse the `$state.snapshot` FORM as an uncalled advanced rune) —
+        // but DO scan the ARGUMENT for a nested unsupported rune
+        // (`$state.snapshot($host())` still refuses). Only the CALLED form reaches here;
+        // an UNCALLED `$state.snapshot` (value position) has no enclosing call, so it
+        // reaches `visit_member_expression` and fails closed.
+        //
+        // A MALFORMED call — ZERO args / >=2 args (official `rune_invalid_arguments_length`)
+        // or a SPREAD arg (official `rune_invalid_spread`), both oracle-verified against
+        // `svelte@5.56.3` — must FAIL CLOSED as an advanced rune rather than slip past
+        // the exemption into a raw `$.snapshot()` / `$.snapshot(a, b)` / `$.snapshot(...o)`
+        // miscompile: record the `$state.snapshot` refusal (first-found wins, so it is
+        // the reported surface) and STILL scan the arguments for nested runes.
+        if let Expression::StaticMemberExpression(m) = &it.callee {
+            if let Expression::Identifier(obj) = &m.object {
+                if self.is_unshadowed_rune(obj.name.as_str())
+                    && obj.name.as_str() == "$state"
+                    && m.property.name.as_str() == "snapshot"
+                {
+                    let well_formed =
+                        it.arguments.len() == 1 && it.arguments[0].as_expression().is_some();
+                    if !well_formed {
+                        self.record(UnsupportedSvelteRuntimeSurface::AdvancedRune {
+                            rune: "$state.snapshot",
+                            span: to_span(it.span),
+                        });
+                    }
+                    for arg in &it.arguments {
+                        match arg.as_expression() {
+                            Some(expr) => self.visit_expression(expr),
+                            None => {
+                                if let oxc_ast::ast::Argument::SpreadElement(s) = arg {
+                                    self.visit_expression(&s.argument);
+                                }
+                            }
+                        }
+                    }
+                    return;
+                }
+            }
+        }
         // A BARE rune call to an ADVANCED-only rune (`$host(...)`, a standalone
         // `$bindable(...)`) has no supported bare position at all — classify it
         // here (`$inspect(...)` is production-elided, never refused here). The
