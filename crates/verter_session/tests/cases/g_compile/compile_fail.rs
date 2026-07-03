@@ -124,6 +124,26 @@ fn recursive_self_derive_escape_compile_fail() {
     t.pass("tests/cases/compile-fail/recursive_self_good_recursive_carrier.rs");
 }
 
+/// The `RecursiveSelfArc<Owner>` proof-trait is SEALED: it is impl'd ONLY inside
+/// the marker crate (the derive merely EMITS it as a bound, never impls it
+/// downstream), so it carries a PRIVATE `recursive_self_sealed::Sealed` supertrait
+/// that is unreachable downstream. A hostile downstream/shadow crate therefore
+/// CANNOT hand-write `impl RecursiveSelfArc<Recipe> for shadow::Arc<[Recipe]>` to
+/// FORGE the proof-bound and re-open the bare-shadow hole — the private `Sealed`
+/// supertrait is unsatisfiable and unnameable, so the hand-impl fails (E0277).
+/// DISCRIMINATING: the same hand-impl COMPILES against the unsealed trait and
+/// FAILS against the sealed one; both markers are covered.
+#[test]
+#[cfg_attr(
+    not(feature = "compile-fail"),
+    ignore = "run with --features compile-fail (CI)"
+)]
+fn recursive_self_proof_trait_is_sealed_against_hand_impl() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/cases/compile-fail/recursive_self_hand_impl_sealed_typeexpr.rs");
+    t.compile_fail("tests/cases/compile-fail/recursive_self_hand_impl_sealed_span.rs");
+}
+
 /// The remaining substrate structural negatives: (a) a closed-fact carrier with
 /// a `TypeExpr` field fails `NoTypeExpr`; (c) an R6-forbidden dimension
 /// (`SemanticNodeId`) cannot satisfy the sealed `R6KeyDimension` bound, so it
