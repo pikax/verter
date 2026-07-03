@@ -53,7 +53,8 @@ pub struct ValueDeclIdentityPart {
 }
 
 // ===========================================================================
-// Surface A facts — authored-shape → prep-time graph-native facts (REMOVE)
+// Surface A facts — authored-shape closed facts (heritage / closedness /
+// key-domain), consumed at dispatch time in place of query-time TypeExpr walking.
 // ===========================================================================
 
 /// One authored heritage base (an `extends` / `implements` clause). Carries ONLY
@@ -124,18 +125,25 @@ pub struct FollowLocatorPayload {
 /// content), so there is NO `Parenthesized` arm; the ONLY composition arm is
 /// [`ClosednessRecipe::IntersectionAllArms`].
 ///
-/// The marker witnesses are hand-written below rather than derived: the
-/// self-referential `IntersectionAllArms(Arc<[ClosednessRecipe]>)` arm would make
-/// the derive emit an `Arc<[Self]>: NoTypeExpr` bound the trait solver cannot
-/// resolve without overflow (E0275). The recursion is sound — the ONLY recursive
-/// arm is the intersection composition, which introduces no new type, and every
-/// other arm's payload is an independently-witnessed fact (asserted below).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// The marker witnesses are DERIVED with the opt-in recursive-self escape
+/// (`#[no_typeexpr(recursive_self)]` / `#[no_storedspan(recursive_self)]`): the
+/// derive omits ONLY the self-bound on the fixed-point
+/// `IntersectionAllArms(Arc<[ClosednessRecipe]>)` arm (which would otherwise ask
+/// the trait solver to prove `Arc<[Self]>: Marker` while proving `Self: Marker`,
+/// an overflow — E0275) while still emitting the per-field witness bound on
+/// EVERY non-recursive arm payload. This is sound because the recursive arm
+/// reintroduces only the same fixed-point type, and it closes the future-arm
+/// gap: a NEW non-recursive arm carrying a `TypeExpr` / `Span` would fail the
+/// derive (a compile-fail fixture proves this).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+#[no_typeexpr(recursive_self)]
+#[no_storedspan(recursive_self)]
 pub enum ClosednessRecipe {
     /// A closed-named-members object (`{ a; b }`) ⇒ closed.
     ObjectClosed,
     /// An intersection is closed iff every arm's recipe is closed. The ONLY
-    /// composition arm (parentheses are normalized away).
+    /// composition arm (parentheses are normalized away). The recursive-self
+    /// escape omits the self-bound on this arm only.
     IntersectionAllArms(Arc<[ClosednessRecipe]>),
     /// A mapped type with an open key parameter ⇒ open.
     MappedOpenParam,
@@ -144,31 +152,6 @@ pub enum ClosednessRecipe {
     /// The general escape for any complex/undecided subject.
     FollowLocator(FollowLocatorPayload),
 }
-
-// Hand-written marker witnesses for the ONE self-referential fact. The derive
-// cannot express the coinductive `Arc<[Self]>: Marker` bound without overflow;
-// the impls below assert the fixpoint directly. Soundness (no arm owns a
-// `TypeExpr` / `Span`) is preserved because the recursive arm introduces no new
-// type and every non-recursive arm payload is independently witnessed — proven
-// by the compile-time assertions that follow.
-impl verter_no_typeexpr::__private::NoTypeExprWitness for ClosednessRecipe {}
-impl verter_no_storedspan::__private::NoStoredSpanWitness for ClosednessRecipe {}
-
-const _: () = {
-    // The non-recursive `ClosednessRecipe` arm payloads must themselves be
-    // witnesses, so the hand-written impls above stay transitively sound. If a
-    // future arm payload gained a `TypeExpr` / `Span`, one of these bounds would
-    // fail to satisfy and this assertion would stop compiling.
-    fn assert_no_type_expr<T: NoTypeExpr>() {}
-    fn assert_no_stored_span<T: NoStoredSpan>() {}
-    fn witness() {
-        assert_no_type_expr::<SymbolBodyLocator>();
-        assert_no_type_expr::<FollowLocatorPayload>();
-        assert_no_stored_span::<SymbolBodyLocator>();
-        assert_no_stored_span::<FollowLocatorPayload>();
-    }
-    let _ = witness;
-};
 
 /// The owned prep fact for a key domain — recipe-only arms. The live borrowed
 /// `KeyDomainBinding` arms (`ClosedExpr` / `ClosedNode`) are NEVER stored; they
@@ -186,7 +169,8 @@ pub enum KeyDomainFact {
 }
 
 // ===========================================================================
-// Surface B facts — graph-free frontier / shallow / eval-env (NARROW)
+// Surface B facts — graph-free frontier / shallow / eval-env locators + finite
+// facts (the graph-free boundary that precedes the graph, never a HotTypeRef).
 // ===========================================================================
 
 /// A CLOSED frontier body — ONLY unresolved-symbolic arms plus the locator
@@ -286,7 +270,8 @@ pub struct TypeParamDeclFact {
 }
 
 // ===========================================================================
-// Surface C facts — lower-crate Prepared* / Analyzed* / Projected* (NARROW)
+// Surface C facts — lower-crate Prepared* / Analyzed* / Projected* facts +
+// locators, held in place inside verter_semantic (never a HotTypeRef).
 // ===========================================================================
 
 /// Structural classification of a prepared type-decl body.
@@ -570,6 +555,68 @@ pub struct PreparedForwardPayloadFact {
     pub forwarding_kind: PreparedForwardingKind,
     /// The forwarded type arguments as locators.
     pub target_args: Arc<[TypeArgLocator]>,
+}
+
+/// The structural wrapper classification discriminant (`PreparedWrapperKind`) —
+/// a 1:1 lower-neutral copy (no `TypeExpr`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+pub enum PreparedWrapperKindFact {
+    /// Not a wrapper.
+    None,
+    /// The identity wrapper (`{ [K in keyof T]: T[K] }`).
+    Identity,
+    /// A pure modifier overlay (`Partial`/`Required`/`Readonly`/`Mutable`).
+    PureOverlay,
+    /// A key-filtering wrapper (`Pick`/`Omit`).
+    KeyFilter,
+    /// A key-remapping wrapper (`as`-clause mapped type).
+    KeyRemap,
+}
+
+/// The narrowed surface modifiers (`PreparedSurfaceModifiers`) — `+`/`-` optional
+/// and readonly overlays. A `None` field means "unchanged".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+pub struct PreparedSurfaceModifiersFact {
+    /// Optionality overlay (`Some(true)` add `?`, `Some(false)` remove, `None`
+    /// unchanged).
+    pub optional: Option<bool>,
+    /// Readonly overlay (same tri-state semantics).
+    pub readonly: Option<bool>,
+}
+
+/// The narrowed `PreparedWrapperShape` — the full structural wrapper
+/// classification. Every `TypeExpr`-bearing sub-shape (`key_filter` / `key_remap`
+/// / `value_rule`) is already narrowed to its `*Fact` (opaque payloads become
+/// locators); no field is left as vague bundle prose.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+pub struct PreparedWrapperShapeFact {
+    /// The wrapper kind discriminant.
+    pub kind: PreparedWrapperKindFact,
+    /// The mapped/source type-parameter index this wrapper keys off, if any.
+    pub source_param_index: Option<u16>,
+    /// The key-filter shape (`Pick`/`Omit` domain; opaque → locator).
+    pub key_filter: PreparedKeyFilterShapeFact,
+    /// The key-remap shape (`as`-clause remap; opaque → locator).
+    pub key_remap: PreparedKeyRemapShapeFact,
+    /// The value-transform rule (opaque transform → locator).
+    pub value_rule: PreparedValueRuleShapeFact,
+    /// The optional/readonly modifier overlays.
+    pub modifiers: PreparedSurfaceModifiersFact,
+}
+
+/// The narrowed `PreparedProjectionClass` — the top-level projection strategy.
+/// The `Wrapper` details live on the owning decl's `PreparedWrapperShapeFact`;
+/// `ForwardSubject` carries the forward payload fact.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+pub enum PreparedProjectionClassFact {
+    /// The decl projects its own directly-declared members.
+    DirectMembers,
+    /// The decl is a structural wrapper (details on `PreparedWrapperShapeFact`).
+    Wrapper,
+    /// The decl forwards to another target (payload carried here).
+    ForwardSubject(PreparedForwardPayloadFact),
+    /// An opaque projection (no cheap structural classification).
+    Opaque,
 }
 
 // ===========================================================================

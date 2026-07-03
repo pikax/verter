@@ -112,6 +112,10 @@ assert_fact_carriers!(
     PreparedValueRuleShapeFact,
     PreparedForwardingKind,
     PreparedForwardPayloadFact,
+    PreparedWrapperKindFact,
+    PreparedSurfaceModifiersFact,
+    PreparedWrapperShapeFact,
+    PreparedProjectionClassFact,
 );
 
 // --- Analyzed* / Projected* / synthesized / Svelte ---
