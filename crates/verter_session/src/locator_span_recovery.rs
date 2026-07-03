@@ -10,7 +10,7 @@
 //! [`IndexSignatureSpansOrigin`] / [`FunctionSpansOrigin`] /
 //! [`FunctionParamSpanOrigin`] and recovers the exact spans here.
 //!
-//! Two-phase worker-purity split (§6.5): the PURE core
+//! Worker-purity split: the PURE core
 //! ([`recover_member_spans_from_program`] & siblings) walks a re-borrowed
 //! `&Program` sub-position named by the origin path and reads the authored
 //! spans — no host / dispatch / service re-entry. The outer helpers compose that

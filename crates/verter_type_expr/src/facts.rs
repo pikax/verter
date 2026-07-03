@@ -24,7 +24,7 @@ use crate::span_origins::{
 use crate::{MemberVisibility, PrimitiveName, TypeExprScope};
 
 // ===========================================================================
-// Supporting new types (absent from the pre-Stage-10 tree)
+// Supporting typed replacements introduced with the fact substrate
 // ===========================================================================
 
 /// Typed replacement for the untyped `declaration_origin: Option<Arc<str>>` /
@@ -35,7 +35,7 @@ pub enum DeclarationOrigin {
     /// The member's declaration lives in this canonical file.
     Declared(Arc<str>),
     /// Genuinely synthetic or multi-origin — no single declaring file (the
-    /// `None`/empty case in the pre-Stage-10 carriers).
+    /// `None`/empty case in the untyped `declaration_origin` carriers).
     Synthetic,
 }
 
@@ -158,7 +158,7 @@ const _: () = {
     // The non-recursive `ClosednessRecipe` arm payloads must themselves be
     // witnesses, so the hand-written impls above stay transitively sound. If a
     // future arm payload gained a `TypeExpr` / `Span`, one of these bounds would
-    // fail to satisfy and this block would stop compiling.
+    // fail to satisfy and this assertion would stop compiling.
     fn assert_no_type_expr<T: NoTypeExpr>() {}
     fn assert_no_stored_span<T: NoStoredSpan>() {}
     fn witness() {

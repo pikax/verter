@@ -7,10 +7,10 @@
 //! obligation is what keeps the metadata-loss class closed — the structural
 //! replacement for the removed name-keyed field-preservation scanner.
 //!
-//! This is the synthesized-(d) [`ResolvedLocalType`] path — the family this
-//! layer can genuinely produce without analyzer origin-path emission (which is a
-//! downstream producer block). Producing a fact MAY read an internal
-//! `TypeExpr`-shaped value (the §5.3 allowlist); the produced fact carries none.
+//! This is the synthesized [`ResolvedLocalType`] path — the family this layer can
+//! genuinely produce without analyzer origin-path emission (which is a later
+//! producer). Producing a fact MAY read an internal `TypeExpr`-shaped value; the
+//! produced fact carries none.
 
 #![allow(dead_code)]
 
@@ -25,7 +25,7 @@ use crate::analysis::types::ResolvedLocalType;
 /// Project a synthesized [`ResolvedLocalType`] into the closed
 /// [`ResolvedLocalTypeFact`]. The source is destructured EXHAUSTIVELY: adding a
 /// field to `ResolvedLocalType` fails compilation until it is mapped here. Real
-/// object-member origin-path emission is a downstream producer block; this demo
+/// object-member origin-path emission is handled by a later producer; this demo
 /// produces a shallow-by-default shape.
 pub(crate) fn build_resolved_local_type_fact(
     src: &ResolvedLocalType,

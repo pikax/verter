@@ -19,8 +19,8 @@
 //! [`LocatorLoweringKey`] witness below destructures the key exhaustively and
 //! asserts every env dimension is sealed.
 //!
-//! These identities are the B1 substrate: defined and witnessed here, wired by
-//! later blocks. They have no production caller yet.
+//! These identities are additive substrate: defined and witnessed here, with no
+//! production caller yet — the consumers that read them are wired separately.
 
 #![allow(dead_code)]
 
@@ -78,12 +78,12 @@ impl sealed::Sealed for ProjectIdentity {}
 impl R6KeyDimension for ProjectIdentity {}
 
 /// The content-free canonical identity of the instantiation substitution
-/// environment lowered under (the `Instantiate.args` axis, §6.4). It is NOT a
-/// file content/whole hash and NOT a raw `SemanticNodeId`: it is the stable
-/// canonical hash of the resolved substitution, computed at value-compute time
-/// (its production computation is a downstream block's concern). Distinguishing
-/// it as its own dimension type prevents a `{locator + resolve_env_hash}`-only
-/// key from aliasing distinct lowered nodes.
+/// environment lowered under (mirroring the existing `Instantiate.args` axis).
+/// It is NOT a file content/whole hash and NOT a raw `SemanticNodeId`: it is the
+/// stable canonical hash of the resolved substitution, computed at value-compute
+/// time (its production computation is the concern of the consumer that lowers
+/// under it). Distinguishing it as its own dimension type prevents a
+/// `{locator + resolve_env_hash}`-only key from aliasing distinct lowered nodes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SubstitutionCanonicalHash(pub HashValue);
 impl sealed::Sealed for SubstitutionCanonicalHash {}
