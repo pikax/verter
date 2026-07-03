@@ -34,7 +34,10 @@ use syn::{parse_quote, Data, DeriveInput, Fields, Type, WherePredicate};
 
 /// Derive the hidden `NoTypeExpr` witness for a `struct` or `enum`, bounding
 /// every field's type on the public `NoTypeExpr` trait. Rejects `union`.
-#[proc_macro_derive(NoTypeExpr)]
+///
+/// Accepts an opt-in container attribute `#[no_typeexpr(recursive_self)]` — see
+/// [`expand_witness`] — for an approved owned self-container.
+#[proc_macro_derive(NoTypeExpr, attributes(no_typeexpr))]
 pub fn derive_no_type_expr(item: TokenStream) -> TokenStream {
     match syn::parse::<DeriveInput>(item) {
         Ok(input) => expand_witness(&input).into(),
@@ -46,9 +49,28 @@ pub fn derive_no_type_expr(item: TokenStream) -> TokenStream {
 /// unit-testable directly on a parsed `DeriveInput`). Emits the hidden-witness
 /// impl with a per-field `: ::verter_no_typeexpr::NoTypeExpr` bound, or a
 /// `compile_error!` for a `union`.
+///
+/// # Recursive-self escape
+///
+/// A container annotated `#[no_typeexpr(recursive_self)]` may own the ONE
+/// approved fixed-point self-container shape `Arc<[Self]>` (a named closed
+/// composition arm — e.g. `ClosednessRecipe::IntersectionAllArms(Arc<[Self]>)`).
+/// For such a field the derive OMITS only that self-bound: the recursive arm
+/// reintroduces nothing but the same fixed-point type, so bounding it would ask
+/// the trait solver to prove `Arc<[Self]>: NoTypeExpr` while proving
+/// `Self: NoTypeExpr` — an overflow (E0275). EVERY non-recursive field/arm
+/// payload still gets its per-field witness bound, so a NEW non-recursive arm
+/// carrying a `TypeExpr` still FAILS the derive. The attribute is REJECTED
+/// unless at least one `Arc<[Self]>` field exists, so it can never be abused to
+/// skip a non-recursive bound.
 fn expand_witness(input: &DeriveInput) -> proc_macro2::TokenStream {
     let ident = &input.ident;
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+
+    let recursive_self = match parse_recursive_self(&input.attrs) {
+        Ok(flag) => flag,
+        Err(err) => return err,
+    };
 
     let field_types = match &input.data {
         Data::Struct(data) => fields_types(&data.fields),
@@ -64,12 +86,33 @@ fn expand_witness(input: &DeriveInput) -> proc_macro2::TokenStream {
         }
     };
 
+    // Partition the fields: `Arc<[Self]>` fields are the approved recursive-self
+    // fields whose bound is OMITTED (only under the opt-in attribute); every
+    // other field keeps its per-field witness bound.
+    let mut bounded: Vec<Type> = Vec::new();
+    let mut self_recursive_fields = 0usize;
+    for ty in field_types {
+        if recursive_self && is_arc_slice_of_self(&ty, ident) {
+            self_recursive_fields += 1;
+            continue;
+        }
+        bounded.push(ty);
+    }
+    if recursive_self && self_recursive_fields == 0 {
+        return quote! {
+            ::core::compile_error!(
+                "#[no_typeexpr(recursive_self)] requires at least one `Arc<[Self]>` field; \
+                 it must not be used to skip a non-recursive bound"
+            );
+        };
+    }
+
     // Build ONE combined predicate list: the input's existing where-predicates
     // (if any) ANDed with one `<field-ty>: ::verter_no_typeexpr::NoTypeExpr`
-    // bound per field. Folding both into a single `Punctuated<_, Comma>` makes
-    // the separators the punctuation's responsibility, so the concatenation is
-    // always well-formed regardless of whether the source where-clause carried a
-    // trailing comma — re-emitting `#predicates` followed directly by the field
+    // bound per bounded field. Folding both into a single `Punctuated<_, Comma>`
+    // makes the separators the punctuation's responsibility, so the concatenation
+    // is always well-formed regardless of whether the source where-clause carried
+    // a trailing comma — re-emitting `#predicates` followed directly by the field
     // bounds would otherwise splice the last existing predicate into the first
     // field bound (`where T: Clone t: NoTypeExpr`, an unparsable token stream).
     //
@@ -80,7 +123,7 @@ fn expand_witness(input: &DeriveInput) -> proc_macro2::TokenStream {
     if let Some(w) = where_clause {
         predicates.extend(w.predicates.iter().cloned());
     }
-    for ty in &field_types {
+    for ty in &bounded {
         predicates.push(parse_quote! { #ty: ::verter_no_typeexpr::NoTypeExpr });
     }
 
@@ -91,6 +134,63 @@ fn expand_witness(input: &DeriveInput) -> proc_macro2::TokenStream {
         where
             #predicates
         {}
+    }
+}
+
+/// Parse an optional container-level `#[no_typeexpr(recursive_self)]`. Returns
+/// `Ok(true)` when present, `Ok(false)` when absent, or `Err(compile_error)` for
+/// any other `no_typeexpr(...)` option (the only supported option is
+/// `recursive_self`).
+fn parse_recursive_self(attrs: &[syn::Attribute]) -> Result<bool, proc_macro2::TokenStream> {
+    let mut found = false;
+    for attr in attrs {
+        if !attr.path().is_ident("no_typeexpr") {
+            continue;
+        }
+        if let Err(err) = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("recursive_self") {
+                found = true;
+                Ok(())
+            } else {
+                Err(meta.error("unknown `no_typeexpr` option; only `recursive_self` is supported"))
+            }
+        }) {
+            return Err(err.to_compile_error());
+        }
+    }
+    Ok(found)
+}
+
+/// Whether `ty` is exactly `Arc<[Self]>` — the container's own type wrapped in
+/// `Arc<[..]>` (the approved fixed-point self-container). Matches on the LAST
+/// path segment being `Arc` (so `std::sync::Arc<[..]>` and `Arc<[..]>` both
+/// match) whose single argument is a slice of a path whose last segment is the
+/// container ident or the literal `Self`.
+fn is_arc_slice_of_self(ty: &Type, self_ident: &syn::Ident) -> bool {
+    let Type::Path(type_path) = ty else {
+        return false;
+    };
+    let Some(seg) = type_path.path.segments.last() else {
+        return false;
+    };
+    if seg.ident != "Arc" {
+        return false;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+        return false;
+    };
+    if args.args.len() != 1 {
+        return false;
+    }
+    let syn::GenericArgument::Type(Type::Slice(slice)) = &args.args[0] else {
+        return false;
+    };
+    let Type::Path(elem_path) = slice.elem.as_ref() else {
+        return false;
+    };
+    match elem_path.path.segments.last() {
+        Some(elem_seg) => elem_seg.ident == *self_ident || elem_seg.ident == "Self",
+        None => false,
     }
 }
 
@@ -258,6 +358,88 @@ mod tests {
         assert!(
             !out.contains("NoTypeExprWitness"),
             "a union must NOT receive a witness impl: {out}"
+        );
+    }
+
+    #[test]
+    fn recursive_self_omits_arc_slice_self_bound_but_keeps_other_fields() {
+        // Discriminating: `#[no_typeexpr(recursive_self)]` OMITS the `Arc<[R]>`
+        // self-bound (which would overflow the solver) but STILL bounds the
+        // non-recursive `u32` arm — so a future `TypeExpr` arm would still fail.
+        let out = expand_str(
+            "#[no_typeexpr(recursive_self)] enum R { Leaf(u32), Rec(std::sync::Arc<[R]>) }",
+        );
+        assert!(
+            out.contains("u32 : :: verter_no_typeexpr :: NoTypeExpr"),
+            "the non-recursive arm must keep its witness bound: {out}"
+        );
+        assert!(
+            !out.contains("Arc"),
+            "the `Arc<[Self]>` self-bound must be OMITTED (no Arc bound emitted): {out}"
+        );
+        assert!(
+            out.contains("NoTypeExprWitness"),
+            "the recursive carrier must still receive a witness impl: {out}"
+        );
+    }
+
+    #[test]
+    fn recursive_self_matches_literal_self_element() {
+        // The slice element may be spelled `Self` rather than the container name.
+        let out =
+            expand_str("#[no_typeexpr(recursive_self)] enum R { Rec(std::sync::Arc<[Self]>) }");
+        assert!(
+            !out.contains("Arc"),
+            "the `Arc<[Self]>` bound must be omitted: {out}"
+        );
+        assert!(out.contains("NoTypeExprWitness"), "{out}");
+    }
+
+    #[test]
+    fn recursive_self_rejected_without_self_container_field() {
+        // Abuse guard: the attribute on a type with NO `Arc<[Self]>` field is a
+        // compile_error — it must not be usable to skip a non-recursive bound.
+        let out = expand_str("#[no_typeexpr(recursive_self)] struct S { a: u32 }");
+        assert!(
+            out.contains("compile_error"),
+            "the attr on a non-self-recursive shape must be rejected: {out}"
+        );
+        assert!(
+            !out.contains("NoTypeExprWitness"),
+            "a rejected attr must NOT emit a witness impl: {out}"
+        );
+    }
+
+    #[test]
+    fn recursive_self_rejects_non_self_arc_slice() {
+        // `Arc<[Other]>` is NOT the container's own type, so it is NOT a
+        // recursive-self field: its bound is kept, and with no real `Arc<[Self]>`
+        // field the attr is rejected.
+        let out =
+            expand_str("#[no_typeexpr(recursive_self)] enum R { Rec(std::sync::Arc<[Other]>) }");
+        assert!(
+            out.contains("compile_error"),
+            "`Arc<[Other]>` must not satisfy the recursive-self requirement: {out}"
+        );
+    }
+
+    #[test]
+    fn unknown_no_typeexpr_option_is_compile_error() {
+        let out = expand_str("#[no_typeexpr(bogus)] struct S { a: u32 }");
+        assert!(
+            out.contains("compile_error"),
+            "an unknown `no_typeexpr` option must be rejected: {out}"
+        );
+    }
+
+    #[test]
+    fn without_attr_arc_slice_self_still_gets_bound() {
+        // WITHOUT the opt-in attribute, an `Arc<[Self]>` field is bounded like any
+        // other (the escape is opt-in only). This proves the omission is gated.
+        let out = expand_str("enum R { Rec(std::sync::Arc<[R]>) }");
+        assert!(
+            out.contains("Arc"),
+            "without the attr, `Arc<[Self]>` keeps its bound: {out}"
         );
     }
 }
