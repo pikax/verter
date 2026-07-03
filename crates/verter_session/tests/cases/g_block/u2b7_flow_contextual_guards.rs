@@ -296,7 +296,11 @@ fn flow_narrowing_at_identity_covers_flow_axis() {
 fn flow_narrowing_at_identity_covers_substitution_axis() {
     // Differ ONLY in the shared `substitution` axis (env all 0, flow empty).
     let base = flow_narrowing_key_with_subst("a.ts", 0, SubstitutionCanonicalHash::empty());
-    let other = flow_narrowing_key_with_subst("a.ts", 0, SubstitutionCanonicalHash(hash16(9)));
+    let other = flow_narrowing_key_with_subst(
+        "a.ts",
+        0,
+        SubstitutionCanonicalHash::from_canonical_hash_for_tests(hash16(9)),
+    );
     assert_distinct_identity(&base, &other);
 }
 
@@ -312,7 +316,11 @@ fn contextual_type_at_identity_covers_contextual_axis() {
 #[test]
 fn contextual_type_at_identity_covers_substitution_axis() {
     let base = contextual_type_key_with_subst("a.ts", 0, SubstitutionCanonicalHash::empty());
-    let other = contextual_type_key_with_subst("a.ts", 0, SubstitutionCanonicalHash(hash16(9)));
+    let other = contextual_type_key_with_subst(
+        "a.ts",
+        0,
+        SubstitutionCanonicalHash::from_canonical_hash_for_tests(hash16(9)),
+    );
     assert_distinct_identity(&base, &other);
 }
 

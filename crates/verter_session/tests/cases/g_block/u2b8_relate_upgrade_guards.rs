@@ -224,7 +224,7 @@ fn relate_key_covers_relation_kind_policy_freshness_and_context() {
             FreshnessKey::Regular,
             None,
             RelationContext {
-                substitution: SubstitutionCanonicalHash(hash16(9)),
+                substitution: SubstitutionCanonicalHash::from_canonical_hash_for_tests(hash16(9)),
                 ..relation_context(0, 0, 0, 0)
             },
         ),
@@ -454,7 +454,7 @@ fn relate_same_nodes_different_relation_kind_policy_or_env_do_not_warm_hit() {
     // Different SUBSTITUTION (context axis) over the SAME nodes → distinct slot.
     publish(RelateMemoKey {
         context: RelationContext {
-            substitution: SubstitutionCanonicalHash(hash16(9)),
+            substitution: SubstitutionCanonicalHash::from_canonical_hash_for_tests(hash16(9)),
             ..relation_context(0, 0, 0, 0)
         },
         ..base.clone()

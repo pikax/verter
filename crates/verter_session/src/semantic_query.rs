@@ -3640,13 +3640,25 @@ impl Default for RelationContext {
 /// SHAPE only: the substitution-canonicalisation substrate is the
 /// relation-inference reducer (not yet implemented).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct SubstitutionCanonicalHash(pub HashValue);
+pub struct SubstitutionCanonicalHash(HashValue);
 
 impl SubstitutionCanonicalHash {
     /// The canonical hash of the empty substitution environment.
     #[must_use]
     pub const fn empty() -> Self {
         Self([0u8; 16])
+    }
+
+    /// TEST/FIXTURE-ONLY typed constructor over a raw canonical-substitution
+    /// hash. The inner field is otherwise PRIVATE, so a raw file content/whole
+    /// hash cannot be trivially wrapped as a substitution identity (R6). PRODUCTION
+    /// constructs this only via [`Self::empty`]; the real canonical-substitution
+    /// producer (routing substituted lowering through `Instantiate { args, .. }`)
+    /// lands in B2. `pub` (not `#[cfg(test)]`-gated) only because external
+    /// `tests/` integration crates consume it.
+    #[must_use]
+    pub const fn from_canonical_hash_for_tests(hash: HashValue) -> Self {
+        Self(hash)
     }
 }
 
