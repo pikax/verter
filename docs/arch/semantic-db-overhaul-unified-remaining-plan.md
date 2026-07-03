@@ -1612,10 +1612,12 @@ not relitigate them block-by-block, and do not silently treat them as defects:
 
 ### 2.4 Post-Stage-10 roadmap extension (PARSELOWER Stages 11 candidate + 12 adopted)
 
-These extend the LOCKED `parselower-design.md` Stage-1–10 `TypeExpr`-removal
-design at the **roadmap level only** — `parselower-design.md` itself is NOT
-modified by this record; Stages 11–12 are master-plan roadmap extensions beyond
-that locked design. Owner-directed, recorded 2026-06-22.
+These extend the LOCKED `TypeExpr`-removal design lineage — `parselower-design.md`
+Stages 1–9 plus the RATIFIED `stage10-typeexpr-terminal-removal-design.md`
+(the STAGE-10 locked-designs row above; the original parselower sequence had no
+Stage 10) — at the **roadmap level only**; neither design doc is modified by
+this record; Stages 11–12 are master-plan roadmap extensions beyond that locked
+lineage. Owner-directed, recorded 2026-06-22.
 
 1. **Stage 11 — CANDIDATE (deferred question, NOT yet adopted).** The `TypeExpr`
    end-state question: stop at Stage 10, or add a QUARANTINE stage that renames
