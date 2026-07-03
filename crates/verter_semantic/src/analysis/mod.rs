@@ -25,6 +25,7 @@ mod classify;
 pub mod component_meta;
 pub mod decl_headers;
 mod exports;
+mod fact_projection;
 pub mod file_usage;
 pub mod framework_facts;
 pub mod html_intrinsics;
