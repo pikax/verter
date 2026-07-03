@@ -3649,16 +3649,27 @@ impl SubstitutionCanonicalHash {
         Self([0u8; 16])
     }
 
-    /// TEST/FIXTURE-ONLY typed constructor over a raw canonical-substitution
-    /// hash. The inner field is otherwise PRIVATE, so a raw file content/whole
-    /// hash cannot be trivially wrapped as a substitution identity (R6). PRODUCTION
-    /// constructs this only via [`Self::empty`]; the real canonical-substitution
-    /// producer (routing substituted lowering through `Instantiate { args, .. }`)
-    /// lands in B2. `pub` (not `#[cfg(test)]`-gated) only because external
-    /// `tests/` integration crates consume it.
+    /// TEST/FIXTURE-ONLY constructor of a DISTINCT canonical-substitution value
+    /// from a small `seed`.
+    ///
+    /// Deliberately takes a `u32` seed — NOT a [`HashValue`] — so NO raw file
+    /// content/whole hash can be wrapped as a substitution identity: production
+    /// has no path to pour arbitrary bytes into this newtype (it constructs the
+    /// type only via [`Self::empty`]). The mapping is injective (distinct seeds ⇒
+    /// distinct values) and never equals [`Self::empty`] (a test-domain marker
+    /// byte keeps it out of the all-zero canonical slot), so distinctness-only
+    /// fixtures can mint separable substitution axes without a content-hash
+    /// escape. The real canonical-substitution producer (routing substituted
+    /// lowering through `Instantiate { args, .. }`) lands in B2.
     #[must_use]
-    pub const fn from_canonical_hash_for_tests(hash: HashValue) -> Self {
-        Self(hash)
+    pub const fn distinct_for_test(seed: u32) -> Self {
+        // Low four bytes carry the seed injectively; the high marker byte keeps
+        // the value distinct from `empty()` (all-zero) and out of any raw
+        // content-hash the fixtures would otherwise reach for.
+        let s = seed.to_le_bytes();
+        Self([
+            s[0], s[1], s[2], s[3], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x5B,
+        ])
     }
 }
 
