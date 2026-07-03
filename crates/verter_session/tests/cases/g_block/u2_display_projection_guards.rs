@@ -285,8 +285,8 @@ fn member(name: &str, value: SemanticNodeId, is_method: bool) -> SurfaceMember {
         optional: false,
         readonly: false,
         is_method,
-        declared_in_macro_type_arg: false,
-        merge_role: MemberMergeRole::Authored,
+        declared_in_macro_type_arg: verter_session::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+        merge_role: verter_session::semantic_query::MergeRoleStamp::NEUTRAL,
         spans: Default::default(),
         declaration_origin: None,
     }
@@ -299,7 +299,10 @@ fn member_with_role(
     merge_role: MemberMergeRole,
 ) -> SurfaceMember {
     SurfaceMember {
-        merge_role,
+        merge_role: verter_session::semantic_query::ProjectionReductionContext::published(
+            verter_session::semantic_query::ProjectionMode::Shallow,
+        )
+        .stamp_role(merge_role),
         ..member(name, value, is_method)
     }
 }

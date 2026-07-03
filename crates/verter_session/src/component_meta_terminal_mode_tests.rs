@@ -56,8 +56,8 @@ fn intern_four_hop_object(host: &VerterHost) -> SemanticNodeId {
             optional: false,
             readonly: false,
             is_method: false,
-            declared_in_macro_type_arg: false,
-            merge_role: crate::semantic_query::MemberMergeRole::Authored,
+            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
             spans: Default::default(),
             declaration_origin: None,
         };

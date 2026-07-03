@@ -1,0 +1,33 @@
+error[E0423]: cannot initialize a tuple struct which contains private fields
+  --> tests/cases/compile-fail/member_role_stamps_not_mintable_without_witness.rs:14:13
+   |
+14 |     let _ = MacroOwnBodyStamp(true);
+   |             ^^^^^^^^^^^^^^^^^
+   |
+note: constructor is not visible here due to private fields
+  --> src/semantic_query.rs
+   |
+   | pub struct MacroOwnBodyStamp(bool);
+   |                              ^^^^ private field
+help: you might have meant to use the `from_macro_kind` associated function
+   |
+14 |     let _ = MacroOwnBodyStamp::from_macro_kind(true);
+   |                              +++++++++++++++++
+
+error[E0423]: cannot initialize a tuple struct which contains private fields
+  --> tests/cases/compile-fail/member_role_stamps_not_mintable_without_witness.rs:15:13
+   |
+15 |     let _ = MergeRoleStamp(MemberMergeRole::OwnBody);
+   |             ^^^^^^^^^^^^^^
+   |
+note: constructor is not visible here due to private fields
+  --> src/semantic_query.rs
+   |
+   | pub struct MergeRoleStamp(MemberMergeRole);
+   |                           ^^^^^^^^^^^^^^^ private field
+
+error[E0616]: field `0` of struct `MacroOwnBodyStamp` is private
+  --> tests/cases/compile-fail/member_role_stamps_not_mintable_without_witness.rs:17:21
+   |
+17 |     let _ = neutral.0;
+   |                     ^ private field

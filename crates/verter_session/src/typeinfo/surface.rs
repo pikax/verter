@@ -460,7 +460,7 @@ fn build_member(graph: &SemanticGraphStore, member: &SurfaceMember) -> TypeInfoS
         // Carry the graph member's declared accessibility onto the typeinfo
         // surface (Public for every non-class origin).
         visibility: member.visibility,
-        declared_in_macro_type_arg: member.declared_in_macro_type_arg,
+        declared_in_macro_type_arg: member.declared_in_macro_type_arg.get(),
         // JSDoc spans require the declaring file's source to locate the leading
         // comment block, which the pure graph projection does NOT hold. The host
         // accessor (`resolve_shallow_surface`) enriches these after `build` via
@@ -471,7 +471,7 @@ fn build_member(graph: &SemanticGraphStore, member: &SurfaceMember) -> TypeInfoS
         origin: SurfaceMemberOrigin {
             canonical_file: canonical,
             declaration_span,
-            merge_role: member.merge_role,
+            merge_role: member.merge_role.role(),
         },
     }
 }

@@ -420,3 +420,124 @@ fn warm_parent_rejects_contributor_source_env_move_with_unchanged_content() {
         "the recorded read-set must reject as a whole on the contributor source-env move"
     );
 }
+
+/// Contributor version-root ⇒ source-env coupling: EVERY augmentation
+/// contributor the stitch version-roots on the parent (its `FileWholeHash`
+/// self-root fact) ALSO records its `FileSourceEnv` identity on the parent
+/// read-set, taken from the contributor's own exact artifact key. A
+/// contributor that is version-rooted WITHOUT its source-env observation is
+/// the torn state this test rejects: the warm parent would survive a
+/// contributor parse-env/parser-version/file-language move with unchanged
+/// content and serve a stale fold.
+///
+/// TWO augmenter files fold into the same base so the coupling is asserted
+/// per contributor — a break that skips the source-env observation for any
+/// one folded contributor (not just "all of them") loses that contributor's
+/// `FileSourceEnv` fact here and fails.
+#[test]
+fn every_version_rooted_augmentation_contributor_records_source_env_identity() {
+    use crate::file_artifact_store::FileArtifactKey;
+    use crate::resolver_core::{FactReadSetFinalise, FactVersionRef};
+
+    let host = make_host();
+    upsert_ts(
+        host.as_ref(),
+        "/types.ts",
+        "export interface Foo { base: string }\n",
+    );
+    upsert_ts(
+        host.as_ref(),
+        "/east.ts",
+        "import type { Foo } from './types'\n\
+         declare module './types' { interface Foo { fromEast: number } }\n",
+    );
+    upsert_ts(
+        host.as_ref(),
+        "/west.ts",
+        "import type { Foo } from './types'\n\
+         declare module './types' { interface Foo { fromWest: boolean } }\n",
+    );
+
+    let (resolved, read_set) = host.with_fact_tracer(|| {
+        host.resolve_named_symbol("/types.ts", "Foo", &[], Some(ProjectionMode::Expanded))
+    });
+    let node = resolved.expect("the doubly-augmented Foo must resolve");
+
+    // Both augmenters genuinely CONTRIBUTED (so both were version-rooted by
+    // the stitch): the merged carrier folds base + 2 augmenter bodies, and
+    // the projected surface carries each contributor's member.
+    match node_data(&host, node).as_ref() {
+        SemanticNodeData::MergedDecl { contributors } => assert_eq!(
+            contributors.len(),
+            3,
+            "base + two augmenter contributors must fold into one MergedDecl"
+        ),
+        other => panic!("the augmented Foo must be a MergedDecl carrier, got {other:?}"),
+    }
+    let projected = host
+        .project_node_to_type_expr_for_test(node)
+        .expect("the merged Foo must project");
+    let surface = object_member_surface(&projected);
+    assert_eq!(
+        surface,
+        vec![
+            ("base".to_string(), "Primitive(String)".to_string()),
+            ("fromEast".to_string(), "Primitive(Number)".to_string()),
+            ("fromWest".to_string(), "Primitive(Boolean)".to_string()),
+        ],
+        "each augmenter's member must survive the fold; got {surface:?}"
+    );
+
+    let FactReadSetFinalise::Ok(signature) = read_set.finalise() else {
+        panic!("the traced resolve must seal a fact signature (no overflow)");
+    };
+
+    for augmenter in ["/east.ts", "/west.ts"] {
+        // Version-root rail: the contributor's whole-hash fact is on the
+        // parent read-set at the LIVE content version it was folded from.
+        let live_hash = host
+            .current_or_read_whole_hash(augmenter)
+            .unwrap_or_else(|| panic!("live whole hash for {augmenter}"));
+        assert!(
+            signature.iter().any(|fact| matches!(
+                fact,
+                FactVersionRef::FileWholeHash { canonical_id, hash }
+                    if canonical_id == augmenter && *hash == live_hash
+            )),
+            "the folded contributor {augmenter} must be version-rooted on the parent \
+             read-set (FileWholeHash at its live content version)"
+        );
+
+        // The COUPLING under test: the same contributor also records its
+        // source-env identity, from its own artifact key (the language
+        // column equals the contributor's registry row).
+        let source_env = signature
+            .iter()
+            .find(|fact| {
+                matches!(
+                    fact,
+                    FactVersionRef::FileSourceEnv { canonical_id, .. } if canonical_id == augmenter
+                )
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "the version-rooted contributor {augmenter} must ALSO record its \
+                     FileSourceEnv identity on the parent read-set — a rooted contributor \
+                     without the source-env fact survives a contributor parse-env move \
+                     with unchanged content and serves a stale fold"
+                )
+            });
+        let FactVersionRef::FileSourceEnv {
+            file_language_id, ..
+        } = source_env
+        else {
+            unreachable!("matched FileSourceEnv above");
+        };
+        assert_eq!(
+            *file_language_id,
+            FileArtifactKey::derived_file_language_id(augmenter),
+            "the {augmenter} source-env identity must be recorded from the contributor's \
+             own artifact key, never re-derived from another canonical"
+        );
+    }
+}

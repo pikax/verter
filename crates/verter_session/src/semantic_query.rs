@@ -1154,6 +1154,103 @@ pub enum MemberMergeRole {
     Heritage,
 }
 
+/// Witness-gated macro own-body stamp — the value stored in
+/// [`SurfaceMember::declared_in_macro_type_arg`] /
+/// `ShallowSurfaceMember::declared_in_macro_type_arg`.
+///
+/// The inner bit is PRIVATE and there are exactly two producers: the
+/// caller-invariant [`Self::NEUTRAL`] (the only value a role-free lowering
+/// path can construct) and the reduction-context-derived
+/// [`ProjectionReductionContext::own_body_stamp`]. A non-neutral stamp
+/// therefore requires a `ProjectionReductionContext` in hand — the
+/// caller-relative witness. The locator-shape lowering entry
+/// (`lower_type_expr_for_locator_shape`) receives no such context and its
+/// sealed `LocatorShapeCtx` neither contains nor converts to one (the
+/// compile-fail fixtures pin that), so cached locator shape nodes carry
+/// caller-relative provenance NOWHERE — by capability, not convention.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, verter_no_typeexpr::NoTypeExpr)]
+pub struct MacroOwnBodyStamp(bool);
+
+impl MacroOwnBodyStamp {
+    /// The role-free stamp: the member is NOT the macro type argument's
+    /// own-body member. The only value constructible without a
+    /// [`ProjectionReductionContext`] witness.
+    pub const NEUTRAL: Self = Self(false);
+
+    /// Whether the member was declared in the macro type argument's own
+    /// body.
+    #[must_use]
+    pub const fn get(self) -> bool {
+        self.0
+    }
+
+    /// Surface-merge PROPAGATION (never a mint): the merged member carries
+    /// the bit iff any contributor did. The output is non-neutral only when
+    /// a non-neutral input existed — which itself required the
+    /// [`ProjectionReductionContext`] witness upstream.
+    #[must_use]
+    pub const fn merged_with(self, other: Self) -> Self {
+        Self(self.0 || other.0)
+    }
+
+    /// Derive the macro own-body stamp for a macro PAYLOAD's own body from
+    /// the analyzed macro kind — the parse-domain witness: `defineProps` /
+    /// `withDefaults` own-body direct members carry the bit (a props-axis
+    /// concern consumed by the published surface policy); every other macro
+    /// is structural.
+    #[must_use]
+    pub const fn from_macro_kind(kind: verter_semantic::analysis::AnalyzedMacroKind) -> Self {
+        use verter_semantic::analysis::AnalyzedMacroKind;
+        match kind {
+            AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults => Self(true),
+            AnalyzedMacroKind::DefineEmits
+            | AnalyzedMacroKind::DefineModel
+            | AnalyzedMacroKind::DefineExpose
+            | AnalyzedMacroKind::DefineOptions
+            | AnalyzedMacroKind::DefineSlots => Self(false),
+        }
+    }
+}
+
+impl PartialEq<bool> for MacroOwnBodyStamp {
+    fn eq(&self, other: &bool) -> bool {
+        self.0 == *other
+    }
+}
+
+/// Witness-gated member-merge-role stamp — the value stored in
+/// [`SurfaceMember::merge_role`] / `ShallowSurfaceMember::merge_role`.
+///
+/// The inner [`MemberMergeRole`] is PRIVATE and there are exactly two
+/// producer families: the caller-invariant [`Self::NEUTRAL`]
+/// ([`MemberMergeRole::Authored`], the only value a role-free lowering path
+/// can construct) and the reduction-context-witnessed
+/// [`ProjectionReductionContext::role_stamp`] /
+/// [`ProjectionReductionContext::stamp_role`]. A non-neutral role therefore
+/// requires a `ProjectionReductionContext` in hand — the caller-relative
+/// witness the sealed locator-shape lowering path cannot obtain (see
+/// [`MacroOwnBodyStamp`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, verter_no_typeexpr::NoTypeExpr)]
+pub struct MergeRoleStamp(MemberMergeRole);
+
+impl MergeRoleStamp {
+    /// The role-free stamp ([`MemberMergeRole::Authored`]): the only value
+    /// constructible without a [`ProjectionReductionContext`] witness.
+    pub const NEUTRAL: Self = Self(MemberMergeRole::Authored);
+
+    /// The stamped surface-merge role.
+    #[must_use]
+    pub const fn role(self) -> MemberMergeRole {
+        self.0
+    }
+}
+
+impl PartialEq<MemberMergeRole> for MergeRoleStamp {
+    fn eq(&self, other: &MemberMergeRole) -> bool {
+        self.0 == *other
+    }
+}
+
 /// Projection reduction context — the `(mode, demand, provenance, merge_role)`
 /// tuple threaded through every operator dispatch (`Instantiate` /
 /// `KeyOf` / `MappedType` and the builtin-utility dispatch that
@@ -1374,6 +1471,30 @@ impl ProjectionReductionContext {
     #[must_use]
     pub const fn merge_role(self) -> MemberMergeRole {
         self.merge_role
+    }
+
+    /// Derive the macro own-body stamp this context applies to object
+    /// members it lowers. One of the two [`MacroOwnBodyStamp`] producers —
+    /// a non-neutral stamp exists only where a reduction context does.
+    #[must_use]
+    pub const fn own_body_stamp(self) -> MacroOwnBodyStamp {
+        MacroOwnBodyStamp(self.is_macro_type_arg_own_body())
+    }
+
+    /// Derive the merge-role stamp this context applies to object members
+    /// it lowers (the context's own [`Self::merge_role`] axis).
+    #[must_use]
+    pub const fn role_stamp(self) -> MergeRoleStamp {
+        MergeRoleStamp(self.merge_role)
+    }
+
+    /// Stamp an explicitly computed surface-merge `role` (heritage-arm /
+    /// own-body discrimination the surface walkers derive per arm), with
+    /// this context as the caller-relative witness: a non-neutral role
+    /// exists only where a reduction context does.
+    #[must_use]
+    pub const fn stamp_role(self, role: MemberMergeRole) -> MergeRoleStamp {
+        MergeRoleStamp(role)
     }
 }
 
@@ -1757,8 +1878,10 @@ pub struct SurfaceMember {
     /// from an external source). See
     /// [`verter_compiler::utils::oxc::script::type_surface::ResolvedProp::declared_in_macro_type_arg`]
     /// for the structural definition. Propagated through the prepared-surface
-    /// walker and `surface_member_to_expanded_field`.
-    pub declared_in_macro_type_arg: bool,
+    /// walker and `surface_member_to_expanded_field`. Witness-gated: a
+    /// non-neutral value exists only via
+    /// [`ProjectionReductionContext::own_body_stamp`].
+    pub declared_in_macro_type_arg: MacroOwnBodyStamp,
     /// Surface-merge role (by design, for the type-resolution
     /// unification). Distinguishes a member declared in the consuming
     /// declaration's OWN body ([`MemberMergeRole::OwnBody`]) from one reached
@@ -1768,9 +1891,11 @@ pub struct SurfaceMember {
     /// own-body-shadows-heritage decision in the intersection surface merge
     /// (`merge_intersection_surfaces_with_graph`). Stamped at the
     /// object-member lowering leaf from
-    /// [`ProjectionReductionContext::merge_role`], orthogonal to
-    /// `declared_in_macro_type_arg` (which is macro-only).
-    pub merge_role: MemberMergeRole,
+    /// [`ProjectionReductionContext::role_stamp`], orthogonal to
+    /// `declared_in_macro_type_arg` (which is macro-only). Witness-gated: a
+    /// non-neutral value exists only via the
+    /// [`ProjectionReductionContext`] producers.
+    pub merge_role: MergeRoleStamp,
 }
 
 /// One index signature (`{ [K: K_T]: V_T }` or `{ readonly [K: K_T]: V_T }`)

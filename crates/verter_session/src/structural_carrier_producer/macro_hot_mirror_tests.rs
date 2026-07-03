@@ -226,7 +226,9 @@ fn inline_props_macro_arg_mirrors_to_object_with_macro_own_body_provenance() {
             // Provenance survives the mirror path: DefineProps requests the
             // macro-T own-body provenance on its direct members.
             assert!(
-                view.members.iter().all(|m| m.declared_in_macro_type_arg),
+                view.members
+                    .iter()
+                    .all(|m| m.declared_in_macro_type_arg.get()),
                 "inline DefineProps members must carry `declared_in_macro_type_arg = true` \
                  through the mirror path"
             );

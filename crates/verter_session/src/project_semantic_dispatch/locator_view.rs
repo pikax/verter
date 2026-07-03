@@ -451,9 +451,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         spans: member.spans,
                         declaration_origin: member.declaration_origin.clone(),
                         // The caller-relative stamps — applied to the VIEW,
-                        // never shape-node identity.
-                        declared_in_macro_type_arg: ctx.is_macro_type_arg_own_body(),
-                        merge_role: ctx.merge_role(),
+                        // never shape-node identity. The reduction context
+                        // is the witness the producers require.
+                        declared_in_macro_type_arg: ctx.own_body_stamp(),
+                        merge_role: ctx.role_stamp(),
                     })
                     .collect();
                 let call_signatures: Vec<SemanticNodeId> = view

@@ -508,8 +508,8 @@ mod tests {
             visibility,
             spans: Default::default(),
             declaration_origin: None,
-            declared_in_macro_type_arg: false,
-            merge_role: crate::semantic_query::MemberMergeRole::Authored,
+            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
         }
     }
 

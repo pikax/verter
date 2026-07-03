@@ -209,6 +209,27 @@ fn locator_shape_ctx_is_sealed_against_the_reducing_lowerer() {
     t.compile_fail("tests/cases/compile-fail/locator_reducing_lowerer_not_nameable.rs");
 }
 
+/// The role-free shape-node payload witness: the member role stamps
+/// (`MacroOwnBodyStamp` / `MergeRoleStamp`) carried by `SurfaceMember` have
+/// PRIVATE inner fields, so a non-neutral stamp cannot be minted from raw
+/// values (E0423) and the payload cannot be reached directly (E0616) — the
+/// only producers are the neutral consts and the
+/// `ProjectionReductionContext` / analyzed-macro-kind witness methods.
+/// Combined with the sealed-context fixtures above (the locator lowering
+/// entry accepts only `LocatorShapeCtx`, which neither contains nor
+/// converts to a reduction context), this proves BY TYPE that cached
+/// `LowerLocator` shape-node identity cannot carry a caller-relative role
+/// stamp.
+#[test]
+#[cfg_attr(
+    not(feature = "compile-fail"),
+    ignore = "run with --features compile-fail (CI)"
+)]
+fn member_role_stamps_are_not_mintable_without_a_witness() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/cases/compile-fail/member_role_stamps_not_mintable_without_witness.rs");
+}
+
 /// ALWAYS-ON structural-rail smoke — the load-bearing proof that the
 /// hot-materialize STRUCTURAL rails reject their regression shapes in the
 /// DEFAULT gate (no feature flag; the full compile-fail suite above stays

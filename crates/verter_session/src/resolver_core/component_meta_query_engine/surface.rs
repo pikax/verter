@@ -465,7 +465,7 @@ pub(crate) fn surface_view_to_projected_surface(
             // visibility-lossless: a non-public class member stays non-public
             // through the reconstruction (`projected_surface_to_type_expr`).
             visibility: member.visibility,
-            declared_in_macro_type_arg: member.declared_in_macro_type_arg,
+            declared_in_macro_type_arg: member.declared_in_macro_type_arg.get(),
             // Graph `SurfaceMember` carries the real OXC declaration-site spans
             // (stamped during shallow lowering) AND the member's declaration
             // file; carry both verbatim so the reconstruction re-emits the spans

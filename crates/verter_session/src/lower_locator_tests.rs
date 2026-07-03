@@ -279,7 +279,7 @@ fn locator_shape_nodes_exclude_caller_relative_stamps() {
 
     let stamped_surface = object_surface(&host, stamped);
     assert!(
-        stamped_surface.members[0].declared_in_macro_type_arg,
+        stamped_surface.members[0].declared_in_macro_type_arg.get(),
         "control: the OLD path under a macro-own-body context stamps \
          declared_in_macro_type_arg"
     );
@@ -291,7 +291,9 @@ fn locator_shape_nodes_exclude_caller_relative_stamps() {
 
     let role_free_surface = object_surface(&host, role_free);
     assert!(
-        !role_free_surface.members[0].declared_in_macro_type_arg,
+        !role_free_surface.members[0]
+            .declared_in_macro_type_arg
+            .get(),
         "the locator-shape entry must NOT stamp declared_in_macro_type_arg"
     );
     assert_eq!(

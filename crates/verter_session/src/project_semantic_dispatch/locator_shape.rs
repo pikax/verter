@@ -34,8 +34,13 @@
 //! - declared type parameters stay `TypeParam` shells (the key is strictly
 //!   unsubstituted; substituted demands route through `Instantiate { args }`);
 //! - the produced nodes are ROLE-FREE: object members carry the neutral
-//!   `declared_in_macro_type_arg = false` / `MemberMergeRole::Authored`
-//!   stamps. Caller-relative provenance / merge-role stamping is
+//!   `MacroOwnBodyStamp::NEUTRAL` / `MergeRoleStamp::NEUTRAL` stamps — the
+//!   ONLY stamp values this path can construct. The stamp types' inner
+//!   fields are private (minting a non-neutral value requires a
+//!   `ProjectionReductionContext` / analyzed-macro-kind witness, neither of
+//!   which this path holds — the sealed context yields no reduction
+//!   context), so a role-stamped locator shape node is a COMPILE error, not
+//!   a convention. Caller-relative provenance / merge-role stamping is
 //!   projection-time work applied to the fetched shape — never shape-node
 //!   identity — so one reusable body-shape family exists per locator/env.
 
@@ -52,10 +57,10 @@ use crate::locator_identity::{
 };
 use crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope;
 use crate::semantic_query::{
-    DeclIdentity, FunctionParam, HashValue, IndexKey, IndexSignature, MapperKey, MapperKind,
-    MemberMergeRole, NodeScopeId, OptionalityMod, PrimitiveKind, QueryError, QueryResult,
-    ReadonlyMod, ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryKey, SurfaceMember,
-    SurfaceView, SyntheticBindingId, TupleElement, TypeParamDecl, ValueRootKey,
+    DeclIdentity, FunctionParam, HashValue, IndexKey, IndexSignature, MacroOwnBodyStamp, MapperKey,
+    MapperKind, MergeRoleStamp, NodeScopeId, OptionalityMod, PrimitiveKind, QueryError,
+    QueryResult, ReadonlyMod, ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
+    SurfaceMember, SurfaceView, SyntheticBindingId, TupleElement, TypeParamDecl, ValueRootKey,
 };
 
 /// One lexical binder frame of the locator-shape lowering: declared
@@ -535,9 +540,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             // never carries a caller-relative provenance or
                             // merge role — those are projection-time stamps
                             // applied to the fetched shape, never node
-                            // identity.
-                            declared_in_macro_type_arg: false,
-                            merge_role: MemberMergeRole::Authored,
+                            // identity. NEUTRAL is the ONLY stamp this path
+                            // can construct: the non-neutral producers
+                            // require a `ProjectionReductionContext`
+                            // witness, and the sealed `LocatorShapeCtx`
+                            // neither contains nor converts to one.
+                            declared_in_macro_type_arg: MacroOwnBodyStamp::NEUTRAL,
+                            merge_role: MergeRoleStamp::NEUTRAL,
                         }),
                         ObjectMember::Method(method) => {
                             let function_expr =
@@ -551,8 +560,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 visibility: method.visibility,
                                 spans: method.spans,
                                 declaration_origin: declaration_origin.clone(),
-                                declared_in_macro_type_arg: false,
-                                merge_role: MemberMergeRole::Authored,
+                                declared_in_macro_type_arg: MacroOwnBodyStamp::NEUTRAL,
+                                merge_role: MergeRoleStamp::NEUTRAL,
                             });
                         }
                         ObjectMember::CallSignature(func) => {

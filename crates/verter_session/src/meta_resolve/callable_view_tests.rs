@@ -109,7 +109,7 @@ fn object_surface(
             visibility: MemberVisibility::Public,
             spans: Default::default(),
             declaration_origin: None,
-            declared_in_macro_type_arg: false,
+            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
             merge_role: Default::default(),
         })
         .collect();

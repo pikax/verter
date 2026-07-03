@@ -1144,7 +1144,12 @@ fn lowers_interface_heritage_preserving_ref_args_and_member_provenance() {
     let expr = TypeExpr::Intersection(Arc::from(vec![base_ref, own_body].into_boxed_slice()));
     let binders: [BinderScope; 0] = [];
     // The consuming declaration's own-body role.
-    let ctx = StructuralLowerContext::new(&binders).with_merge_role(MemberMergeRole::OwnBody);
+    let ctx = StructuralLowerContext::new(&binders).with_merge_role(
+        crate::semantic_query::ProjectionReductionContext::published(
+            crate::semantic_query::ProjectionMode::Shallow,
+        )
+        .stamp_role(MemberMergeRole::OwnBody),
+    );
     let handle = lower_type_expr_structural(&graph, &expr, fixture_scope(), &ctx)
         .expect("structural lowering should succeed");
     let arms: Arc<[SemanticNodeId]> = match &*node(&graph, handle.node()) {
@@ -1180,7 +1185,7 @@ fn lowers_interface_heritage_preserving_ref_args_and_member_provenance() {
                 Some("/fixture.ts"),
                 "the member is declared in the object's lowering file"
             );
-            assert!(!m.declared_in_macro_type_arg);
+            assert!(!m.declared_in_macro_type_arg.get());
             assert!(matches!(
                 &*node(&graph, m.value),
                 SemanticNodeData::Primitive(PrimitiveKind::Number)

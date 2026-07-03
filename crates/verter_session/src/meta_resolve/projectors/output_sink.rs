@@ -691,7 +691,7 @@ pub(crate) fn surface_member_to_expanded_field(
     // heritage-reached member downgrades to `false`. NOT
     // `source_field.unwrap_or(false)`: that would also strip own-body members
     // (the cross-file-simple discriminating positive test rejects that accident).
-    let declared_in_macro_type_arg = member.declared_in_macro_type_arg
+    let declared_in_macro_type_arg = member.declared_in_macro_type_arg.get()
         && member.merge_role != crate::semantic_query::MemberMergeRole::Heritage;
     ExpandedField {
         name: member.name.as_ref().to_string(),

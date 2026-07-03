@@ -493,14 +493,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 // type resolves (an unresolved `MissingType` value
                                 // is scope-less but the member still declares here).
                                 declaration_origin: scope.canonical_file(),
-                                declared_in_macro_type_arg: reduction_context
-                                    .is_macro_type_arg_own_body(),
+                                declared_in_macro_type_arg: reduction_context.own_body_stamp(),
                                 // Leaf stamping of the surface-merge role from
                                 // the threaded context (by design):
                                 // an interface/class own `Object` arm flows
                                 // `OwnBody`, a heritage reference arm flows
                                 // `Heritage`, everything else stays `Authored`.
-                                merge_role: reduction_context.merge_role(),
+                                merge_role: reduction_context.role_stamp(),
                             });
                         }
                         ObjectMember::Method(method) => {
@@ -553,11 +552,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 // Declaration file of THIS method (see the
                                 // `Property` companion note).
                                 declaration_origin: scope.canonical_file(),
-                                declared_in_macro_type_arg: reduction_context
-                                    .is_macro_type_arg_own_body(),
+                                declared_in_macro_type_arg: reduction_context.own_body_stamp(),
                                 // Leaf stamping of the surface-merge role —
                                 // mirrors the `Property` arm.
-                                merge_role: reduction_context.merge_role(),
+                                merge_role: reduction_context.role_stamp(),
                             });
                         }
                         ObjectMember::CallSignature(func) => {

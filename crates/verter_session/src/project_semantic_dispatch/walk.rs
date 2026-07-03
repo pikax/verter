@@ -382,8 +382,8 @@ pub struct ShallowSurfaceMember {
     /// `Public` only when Public in EVERY contributor; a member non-public in
     /// any contributor stays non-public.
     pub visibility: verter_type_expr::MemberVisibility,
-    pub declared_in_macro_type_arg: bool,
-    pub merge_role: crate::semantic_query::MemberMergeRole,
+    pub declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp,
+    pub merge_role: crate::semantic_query::MergeRoleStamp,
     /// OXC declaration-site spans, carried verbatim from the source
     /// [`SurfaceMember`] through the walker's intermediate state so the
     /// empty-path Shallow projection round-trip is lossless for member
@@ -3179,7 +3179,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 // own-body-shadows-heritage merge fires.
                 if let Some(role) = member_role_override {
                     for member in &mut surface.members {
-                        member.merge_role = role;
+                        member.merge_role = self.context.stamp_role(role);
                     }
                 }
                 self.contribute_surface(
@@ -4183,11 +4183,11 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     // member is not literally written in the consuming
                     // macro's T body — it is reached structurally via
                     // the mapper. `false` is the structural truth.
-                    declared_in_macro_type_arg: false,
+                    declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
                     // A mapped-produced member is synthesized via the mapper,
                     // never an interface/class heritage overlay — `Authored`
                     // (it never shadows / is shadowed).
-                    merge_role: crate::semantic_query::MemberMergeRole::Authored,
+                    merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
                     spans: if inherits_declaration_site {
                         source_spans
                     } else {
@@ -4480,15 +4480,19 @@ struct MergedMemberAccum {
     own_body_values: Vec<SemanticNodeId>,
     /// Distinct value nodes from `Heritage` / `Authored` contributors.
     other_values: Vec<SemanticNodeId>,
-    /// True iff at least one contributor was `Heritage` (a real
-    /// interface/class `extends`/`implements` overlay).
-    saw_heritage: bool,
-    /// True iff at least one contributor was `OwnBody`.
-    saw_own_body: bool,
+    /// The first `Heritage` contributor's role stamp (`Some` iff at least
+    /// one contributor was `Heritage` — a real interface/class
+    /// `extends`/`implements` overlay). Retaining the arriving STAMP (not a
+    /// re-minted role) keeps the merge a pure propagation: a non-neutral
+    /// merged role always originates from a witnessed contributor stamp.
+    heritage_role: Option<crate::semantic_query::MergeRoleStamp>,
+    /// The first `OwnBody` contributor's role stamp (`Some` iff at least one
+    /// contributor was `OwnBody`).
+    own_body_role: Option<crate::semantic_query::MergeRoleStamp>,
     optional: bool,
     readonly: bool,
     is_method: bool,
-    declared_in_macro_type_arg: bool,
+    declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp,
     /// Spans of the first `OwnBody` contributor — the winning member when the
     /// own-body-shadows-heritage rule fires (or when the result is `OwnBody`).
     own_body_spans: Option<verter_type_expr::MemberSpans>,
@@ -4519,14 +4523,14 @@ impl MergedMemberAccum {
             name: Arc::clone(name),
             own_body_values: Vec::new(),
             other_values: Vec::new(),
-            saw_heritage: false,
-            saw_own_body: false,
+            heritage_role: None,
+            own_body_role: None,
             // `optional` is required-wins (AND across arms); seed `true` so the
             // first absorb sets the truth.
             optional: true,
             readonly: false,
             is_method: false,
-            declared_in_macro_type_arg: false,
+            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
             own_body_spans: None,
             first_spans: None,
             own_body_origin: None,
@@ -4541,8 +4545,9 @@ impl MergedMemberAccum {
         self.optional = self.optional && member.optional;
         self.readonly = self.readonly || member.readonly;
         self.is_method = self.is_method || member.is_method;
-        self.declared_in_macro_type_arg =
-            self.declared_in_macro_type_arg || member.declared_in_macro_type_arg;
+        self.declared_in_macro_type_arg = self
+            .declared_in_macro_type_arg
+            .merged_with(member.declared_in_macro_type_arg);
         // Retain a representative span + declaration file per the
         // value-selection rule: the first own-body contributor (the shadow
         // winner) and the first contributor of any role (the
@@ -4552,7 +4557,7 @@ impl MergedMemberAccum {
             self.first_spans = Some(member.spans);
             self.first_origin = member.declaration_origin.clone();
         }
-        if matches!(member.merge_role, MemberMergeRole::OwnBody) && self.own_body_spans.is_none() {
+        if member.merge_role == MemberMergeRole::OwnBody && self.own_body_spans.is_none() {
             self.own_body_spans = Some(member.spans);
             self.own_body_origin = member.declaration_origin.clone();
         }
@@ -4569,16 +4574,17 @@ impl MergedMemberAccum {
                 None => member.visibility,
             });
         };
-        match member.merge_role {
+        match member.merge_role.role() {
             MemberMergeRole::OwnBody => {
-                self.saw_own_body = true;
+                // Retain the arriving stamp (propagation, never a mint).
+                self.own_body_role.get_or_insert(member.merge_role);
                 fold(&mut self.own_body_visibility_agg);
                 if !self.own_body_values.contains(&member.value) {
                     self.own_body_values.push(member.value);
                 }
             }
             MemberMergeRole::Heritage => {
-                self.saw_heritage = true;
+                self.heritage_role.get_or_insert(member.merge_role);
                 fold(&mut self.other_visibility_agg);
                 if !self.other_values.contains(&member.value) {
                     self.other_values.push(member.value);
@@ -4602,26 +4608,29 @@ impl MergedMemberAccum {
         // values are dropped entirely. Authored intersections never set
         // `saw_heritage`, so `type Props = Base & { dup }` falls through to the
         // intersect branch and keeps `number & string`.
-        let (values, role): (Vec<SemanticNodeId>, MemberMergeRole) =
-            if self.saw_own_body && self.saw_heritage {
-                (self.own_body_values, MemberMergeRole::OwnBody)
-            } else {
-                // Intersect every distinct contributor value. Own-body values
-                // first preserves authored arm order for the common case.
-                let mut values = self.own_body_values;
-                for v in self.other_values {
-                    if !values.contains(&v) {
-                        values.push(v);
+        let saw_own_body = self.own_body_role.is_some();
+        let saw_heritage = self.heritage_role.is_some();
+        let (values, role): (Vec<SemanticNodeId>, crate::semantic_query::MergeRoleStamp) =
+            match (self.own_body_role, self.heritage_role) {
+                (Some(own_role), Some(_)) => (self.own_body_values, own_role),
+                (own_role, heritage_role) => {
+                    // Intersect every distinct contributor value. Own-body
+                    // values first preserves authored arm order for the
+                    // common case.
+                    let mut values = self.own_body_values;
+                    for v in self.other_values {
+                        if !values.contains(&v) {
+                            values.push(v);
+                        }
                     }
+                    // Role precedence own-body > heritage > authored, each a
+                    // PROPAGATED contributor stamp (the neutral fallback is
+                    // the only freely-constructible value).
+                    let role = own_role
+                        .or(heritage_role)
+                        .unwrap_or(crate::semantic_query::MergeRoleStamp::NEUTRAL);
+                    (values, role)
                 }
-                let role = if self.saw_own_body {
-                    MemberMergeRole::OwnBody
-                } else if self.saw_heritage {
-                    MemberMergeRole::Heritage
-                } else {
-                    MemberMergeRole::Authored
-                };
-                (values, role)
             };
         let value = match values.as_slice() {
             [single] => *single,
@@ -4647,7 +4656,7 @@ impl MergedMemberAccum {
         // `absorb`, so two contributors sharing one value type are still
         // aggregated correctly (the deduped-value-node count would have
         // mis-treated them as a single source).
-        let visibility = if self.saw_own_body && self.saw_heritage {
+        let visibility = if saw_own_body && saw_heritage {
             self.own_body_visibility_agg.unwrap_or_default()
         } else {
             match (self.own_body_visibility_agg, self.other_visibility_agg) {
@@ -4661,7 +4670,7 @@ impl MergedMemberAccum {
         // own-body result references the own-body declaration site; otherwise
         // the first contributor's site. The declaration file is selected in
         // LOCKSTEP with the spans so the surviving span indexes its own file.
-        let (spans, declaration_origin) = if matches!(role, MemberMergeRole::OwnBody) {
+        let (spans, declaration_origin) = if role == MemberMergeRole::OwnBody {
             match (self.own_body_spans, self.own_body_origin) {
                 (Some(spans), origin) => (spans, origin),
                 (None, _) => (self.first_spans.unwrap_or_default(), self.first_origin),
@@ -4752,8 +4761,6 @@ fn merge_union_surfaces(
     graph: &SemanticGraphStore,
     arm_surfaces: &[Option<ShallowSurface>],
 ) -> Option<ShallowSurface> {
-    use crate::semantic_query::MemberMergeRole;
-
     if arm_surfaces.is_empty() {
         return None;
     }
@@ -4814,8 +4821,8 @@ fn merge_union_surfaces(
             visibility: verter_type_expr::MemberVisibility::merge_member_visibility(
                 per_arm_visibilities,
             ),
-            declared_in_macro_type_arg: false,
-            merge_role: MemberMergeRole::Authored,
+            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
             // Union common-member: the name appears in every arm, so there is
             // no single source declaration site — genuinely synthetic. No spans
             // and no single declaration file (a multi-origin fact).
@@ -4861,8 +4868,6 @@ fn merge_union_surfaces_for_macro(
     graph: &SemanticGraphStore,
     arm_surfaces: &[Option<ShallowSurface>],
 ) -> Option<ShallowSurface> {
-    use crate::semantic_query::MemberMergeRole;
-
     if arm_surfaces.is_empty() {
         return None;
     }
@@ -4932,8 +4937,8 @@ fn merge_union_surfaces_for_macro(
             // shared merge rule): Public only when Public in every declaring
             // arm.
             visibility: merged_visibility,
-            declared_in_macro_type_arg: false,
-            merge_role: MemberMergeRole::Authored,
+            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
             // Union arm-member: reached THROUGH the union, no single source
             // declaration site — genuinely synthetic (multi-origin).
             spans: verter_type_expr::MemberSpans::default(),
@@ -5116,8 +5121,11 @@ mod m1_merge_visibility_tests {
             readonly: false,
             is_method: false,
             visibility: vis,
-            declared_in_macro_type_arg: false,
-            merge_role: role,
+            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+            merge_role: crate::semantic_query::ProjectionReductionContext::published(
+                crate::semantic_query::ProjectionMode::Shallow,
+            )
+            .stamp_role(role),
             spans: MemberSpans::default(),
             declaration_origin: None,
         }

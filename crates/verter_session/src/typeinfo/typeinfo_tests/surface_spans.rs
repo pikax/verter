@@ -721,8 +721,11 @@ fn member_build_uses_declaration_origin_for_scopeless_value() {
         // The member's DECLARATION file — the only correct anchor for a member
         // whose value is scope-less.
         declaration_origin: Some(std::sync::Arc::from(FILE)),
-        declared_in_macro_type_arg: false,
-        merge_role: MemberMergeRole::OwnBody,
+        declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+        merge_role: crate::semantic_query::ProjectionReductionContext::published(
+            crate::semantic_query::ProjectionMode::Shallow,
+        )
+        .stamp_role(MemberMergeRole::OwnBody),
     };
     let view = SurfaceView {
         members: std::sync::Arc::from(vec![built_member].into_boxed_slice()),

@@ -25,13 +25,28 @@ use crate::semantic_query::{
     SemanticNodeId, SemanticQueryKey, SurfaceMember, SurfaceView, ValueRootKey,
 };
 
+/// One folded cross-file augmentation contributor: its version self-root
+/// (`canonical` + the `FileWholeHash` the body was lowered from) TOGETHER
+/// WITH the exact artifact key the contributor's locator-backed body read
+/// served from. One carrier BY CONSTRUCTION: a contributor cannot enter the
+/// parent's `self_root_canonicals` without its source-env identity — the
+/// version-root fields and the `artifact_key` are inseparable, and the fact
+/// emission records the contributor's `FileWholeHash` observation AND its
+/// `FileSourceEnv` observation from the SAME element in one step.
+struct AugmentationContributorRoot {
+    canonical: Arc<str>,
+    whole_hash: crate::semantic_query::HashValue,
+    artifact_key: crate::file_artifact_store::FileArtifactKey,
+}
+
 /// Result of a cross-file declaration-augmentation stitch
 /// ([`ProjectSemanticDispatch::stitch_module_augmentations`]): the folded
-/// [`SemanticNodeData::MergedDecl`] node plus the per-augmenter `FileWholeHash`
-/// self-roots that must enter the cached value's `self_root_canonicals`.
+/// [`SemanticNodeData::MergedDecl`] node plus the per-augmenter
+/// [`AugmentationContributorRoot`]s whose `(canonical, whole_hash)` version
+/// roots must enter the cached value's `self_root_canonicals`.
 struct AugmentationStitch {
     merged: SemanticNodeId,
-    augmenter_self_roots: Vec<(Arc<str>, crate::semantic_query::HashValue)>,
+    contributor_roots: Vec<AugmentationContributorRoot>,
     /// `true` when a contributor's coherent source-env identity could not
     /// be observed (a torn / unhealable augmenter entry): the parent result
     /// is served but never warm-admitted.
@@ -40,12 +55,12 @@ struct AugmentationStitch {
 
 /// Shared return shape of the augmenter-fold path
 /// ([`ProjectSemanticDispatch::collect_augmentation_contributions`]): the
-/// ordered augmenter contributor nodes, their per-augmenter
-/// `(canonical, FileWholeHash)` self-roots, and whether any contributor's
-/// source-env identity was unobservable (torn state ⇒ no warm admission).
+/// ordered augmenter contributor nodes, one [`AugmentationContributorRoot`]
+/// per contributing augmenter, and whether any contributor's source-env
+/// identity was unobservable (torn state ⇒ no warm admission).
 struct AugmentationContributions {
     contributor_nodes: Vec<SemanticNodeId>,
-    self_roots: Vec<(Arc<str>, crate::semantic_query::HashValue)>,
+    contributor_roots: Vec<AugmentationContributorRoot>,
     source_env_unobservable: bool,
 }
 
@@ -832,8 +847,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // its declaration lives in the dependency module.
                 spans: verter_type_expr::MemberSpans::default(),
                 declaration_origin: Some(Arc::from(dep_canonical)),
-                declared_in_macro_type_arg: false,
-                merge_role: crate::semantic_query::MemberMergeRole::Authored,
+                declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
             });
         }
 
@@ -2365,15 +2380,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // Performed while `(decl_canonical, decl_name)` is still on the
         // instantiate-active stack so a self-referential augmenter body
         // terminates at the recursive-ref back-edge instead of recursing.
-        let mut augmenter_self_roots: Vec<(Arc<str>, crate::semantic_query::HashValue)> =
-            Vec::new();
+        let mut augmenter_contributor_roots: Vec<AugmentationContributorRoot> = Vec::new();
         let mut augmentation_source_env_unobservable = false;
         if !is_non_file_base {
             if let Some(stitch) =
                 self.stitch_module_augmentations(decl_canonical, decl_name, result, &scope, context)
             {
                 result = stitch.merged;
-                augmenter_self_roots = stitch.augmenter_self_roots;
+                augmenter_contributor_roots = stitch.contributor_roots;
                 augmentation_source_env_unobservable = stitch.source_env_unobservable;
             }
         }
@@ -2449,15 +2463,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 observed_self_roots.push(arg_root);
             }
         }
-        // Cross-file augmentation self-roots: each augmenter file's whole-hash
-        // (`self_root_canonicals = {base} ∪ {augmenters}`), so a
-        // content edit to ANY augmenter misses the warm read.
-        for aug_root in augmenter_self_roots {
+        // Cross-file augmentation self-roots: each contributor root's
+        // `(canonical, whole_hash)` (`self_root_canonicals = {base} ∪
+        // {augmenters}`), so a content edit to ANY augmenter misses the warm
+        // read. Every root entering here already carried its artifact key
+        // through the fold, so its `FileSourceEnv` observation is on this
+        // build's read-set by construction.
+        for aug_root in augmenter_contributor_roots {
             if !observed_self_roots
                 .iter()
-                .any(|(c, h)| *c == aug_root.0 && *h == aug_root.1)
+                .any(|(c, h)| *c == aug_root.canonical && *h == aug_root.whole_hash)
             {
-                observed_self_roots.push(aug_root);
+                observed_self_roots.push((aug_root.canonical, aug_root.whole_hash));
             }
         }
         let mut output = crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
@@ -2520,7 +2537,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let target = AugmentationTargetKind::ResolvedRelativeCanonical(Arc::clone(decl_canonical));
         let AugmentationContributions {
             contributor_nodes,
-            self_roots,
+            contributor_roots,
             source_env_unobservable,
         } = self.collect_augmentation_contributions(target, decl_name.as_ref(), context)?;
 
@@ -2546,7 +2563,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         );
         Some(AugmentationStitch {
             merged,
-            augmenter_self_roots: self_roots,
+            contributor_roots,
             source_env_unobservable,
         })
     }
@@ -2625,12 +2642,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
 
         let mut contributor_nodes: Vec<SemanticNodeId> = Vec::new();
-        let mut self_roots: Vec<(Arc<str>, crate::semantic_query::HashValue)> = Vec::new();
-        // Per-contributing-augmenter EXACT artifact keys — the source the
-        // contributor `LowerLocator` served from — recorded as
-        // `FileSourceEnv` observations on the parent read-set below.
-        let mut contributor_source_env_keys: Vec<crate::file_artifact_store::FileArtifactKey> =
-            Vec::new();
+        // One root per contributing augmenter: the version self-root AND the
+        // EXACT artifact key the contributor `LowerLocator` served from,
+        // inseparable in one carrier — recorded below as paired
+        // `FileWholeHash` + `FileSourceEnv` observations on the parent
+        // read-set.
+        let mut contributor_roots: Vec<AugmentationContributorRoot> = Vec::new();
         let mut source_env_unobservable = false;
         // Stale-key self-heals discovered below are written back into the
         // cached `AugmenterSet` after the loop so the NEXT stitch hits the
@@ -2779,8 +2796,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // but the fact pins base content, so a BASE re-query validates
                 // the session candidate and is poisoned. Rooting on the
                 // overlay hash makes the base re-query miss and recompute.
-                self_roots.push((Arc::clone(augmenter_canonical), indexed.whole_hash));
-                contributor_source_env_keys.push(effective_artifact_key);
+                // The version root and the source-env artifact key travel as
+                // ONE carrier: a contributor cannot be version-rooted without
+                // its source-env identity.
+                contributor_roots.push(AugmentationContributorRoot {
+                    canonical: Arc::clone(augmenter_canonical),
+                    whole_hash: indexed.whole_hash,
+                    artifact_key: effective_artifact_key,
+                });
             }
         }
 
@@ -2840,27 +2863,29 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 },
             ),
         );
-        for (canon, hash) in &self_roots {
+        // Parent transitive contributor rule, emitted from the ONE carrier in
+        // ONE step per contributor: the content-version fact
+        // (`FileWholeHash`) AND the typed SOURCE-ENV observation
+        // (`FileSourceEnv`), the latter taken from the EXACT artifact key the
+        // contributor `LowerLocator` served from (never re-derived from
+        // canonical/path/env at this site, never a stale index entry). A warm
+        // parent hit revalidates the four source-env identity fields against
+        // the live view — a contributor parse-env / parser-version /
+        // file-language move with UNCHANGED content misses the warm read and
+        // recomputes through the contributor's new `LowerLocator`. Because
+        // both facts come from the same element, a contributor that is
+        // version-rooted on the parent is source-env-observed by
+        // construction.
+        for root in &contributor_roots {
             crate::resolver_core::resolver_context::observe_fan_out(
                 crate::resolver_core::FactVersionRef::FileWholeHash {
-                    canonical_id: canon.as_ref().to_owned(),
-                    hash: *hash,
+                    canonical_id: root.canonical.as_ref().to_owned(),
+                    hash: root.whole_hash,
                 },
             );
-        }
-        // Parent transitive contributor rule: one typed SOURCE-ENV
-        // observation per folded cross-file contributor body, taken from the
-        // EXACT artifact key the contributor `LowerLocator` served from
-        // (never re-derived from canonical/path/env at this site, never a
-        // stale index entry). A warm parent hit revalidates these four
-        // identity fields against the live view — a contributor parse-env /
-        // parser-version / file-language move with UNCHANGED content misses
-        // the warm read and recomputes through the contributor's new
-        // `LowerLocator`.
-        for key in &contributor_source_env_keys {
             if crate::fact_signature_helpers::observe_file_source_env_from_artifact_key(
                 self.ctx,
-                Some(key),
+                Some(&root.artifact_key),
             )
             .is_none()
             {
@@ -2870,7 +2895,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
         Some(AugmentationContributions {
             contributor_nodes,
-            self_roots,
+            contributor_roots,
             source_env_unobservable,
         })
     }
@@ -2938,7 +2963,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             AugmentationTargetKind::ExternalSpecifier(InternedSpecifier::from(specifier.as_str()));
         let AugmentationContributions {
             contributor_nodes,
-            self_roots: _,
+            contributor_roots: _,
             source_env_unobservable,
         } = self.collect_augmentation_contributions(target, name, context)?;
         // A torn contributor (unobservable source-env identity) is served
@@ -3199,12 +3224,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .iter()
             .map(|member| {
                 if own_body_bit
-                    && !member.declared_in_macro_type_arg
+                    && !member.declared_in_macro_type_arg.get()
                     && prepared.member_index.contains_key(member.name.as_ref())
                 {
                     restamped_any = true;
                     SurfaceMember {
-                        declared_in_macro_type_arg: true,
+                        declared_in_macro_type_arg: context.own_body_stamp(),
                         ..member.clone()
                     }
                 } else {
@@ -3248,12 +3273,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     spans: member.spans,
                     declaration_origin: (!member.declaration_origin.is_empty())
                         .then(|| Arc::from(member.declaration_origin.as_str())),
-                    declared_in_macro_type_arg: own_body_bit,
+                    declared_in_macro_type_arg: context.own_body_stamp(),
                     // `member_index` is the declaration's OWN-body direct
                     // member index (heritage `extends` arms are excluded), so
                     // an appended member is own-body — it SHADOWS an inherited
                     // heritage member of the same name.
-                    merge_role: crate::semantic_query::MemberMergeRole::OwnBody,
+                    merge_role: context.stamp_role(crate::semantic_query::MemberMergeRole::OwnBody),
                 }
             })
             .collect::<Vec<_>>();
@@ -3933,8 +3958,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             // source declaration site.
                             spans: verter_type_expr::MemberSpans::default(),
                             declaration_origin: None,
-                            declared_in_macro_type_arg: false,
-                            merge_role: crate::semantic_query::MemberMergeRole::Authored,
+                            declared_in_macro_type_arg:
+                                crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
                         })
                         .collect();
                     let result_surface = SurfaceView {
@@ -6111,11 +6137,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // synthesized member is `Public`.
                     visibility: source_member
                         .map_or(verter_type_expr::MemberVisibility::Public, |m| m.visibility),
-                    declared_in_macro_type_arg: false,
+                    declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
                     // Mapped-type produced members are synthesized by the mapped
                     // construction, never an interface/class heritage overlay —
                     // `Authored` (they do not participate in own-body shadowing).
-                    merge_role: crate::semantic_query::MemberMergeRole::Authored,
+                    merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
                     spans: identity_source.map(|m| m.spans).unwrap_or_default(),
                     declaration_origin: identity_source.and_then(|m| m.declaration_origin.clone()),
                 });

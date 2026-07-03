@@ -123,10 +123,10 @@ use verter_type_expr::{FunctionExpr, LiteralValue, MappedModifier, ObjectMember,
 
 use crate::resolver_core::ResolverContext;
 use crate::semantic_query::{
-    DeclIdentity, FunctionParam, HashValue, HotTypeRef, IndexKey, IndexSignature, MapperKey,
-    MapperKind, MemberMergeRole, NodeScopeId, OptionalityMod, PrimitiveKind, QueryError,
-    ReadonlyMod, ScopeId, SemanticNodeData, SemanticNodeId, SurfaceMember, SurfaceView,
-    SyntheticBindingId, TupleElement, TypeParamDecl, ValueRootKey,
+    DeclIdentity, FunctionParam, HashValue, HotTypeRef, IndexKey, IndexSignature,
+    MacroOwnBodyStamp, MapperKey, MapperKind, MergeRoleStamp, NodeScopeId, OptionalityMod,
+    PrimitiveKind, QueryError, ReadonlyMod, ScopeId, SemanticNodeData, SemanticNodeId,
+    SurfaceMember, SurfaceView, SyntheticBindingId, TupleElement, TypeParamDecl, ValueRootKey,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 
@@ -177,15 +177,18 @@ struct StructuralLowerContext<'a> {
     /// from the top (last) frame outward so an inner type-parameter shadows
     /// an outer one of the same name.
     binders: &'a [BinderScope],
-    /// Surface-merge role stamped on the DIRECT members of an object lowered
-    /// under this context — `OwnBody` for an interface/class own body arm,
-    /// `Heritage` for a heritage arm, `Authored` (the default) otherwise.
+    /// Surface-merge role stamp applied to the DIRECT members of an object
+    /// lowered under this context — `OwnBody` for an interface/class own
+    /// body arm, `Heritage` for a heritage arm, NEUTRAL (`Authored`, the
+    /// default) otherwise. Carried as the witness-gated stamp VALUE: this
+    /// context never mints a role, it transports one minted upstream.
     /// Orthogonal to the macro-own-body axis.
-    merge_role: MemberMergeRole,
-    /// Whether the object lowered under this context is the macro
-    /// type-argument's own body (sets `declared_in_macro_type_arg` on its
-    /// direct members).
-    macro_own_body: bool,
+    merge_role: MergeRoleStamp,
+    /// Macro own-body stamp for the object lowered under this context (sets
+    /// `declared_in_macro_type_arg` on its direct members). Witness-gated:
+    /// minted from the analyzed macro kind at the payload entry, NEUTRAL
+    /// everywhere else.
+    macro_own_body: MacroOwnBodyStamp,
     /// Per-lowering allocator for mapped-type binder ordinals. The eager
     /// path keys these through the host-owned `MapperBinderRegistry` for
     /// cross-lowering cache stability; the query-free lowerer cannot reach
@@ -203,8 +206,8 @@ impl<'a> StructuralLowerContext<'a> {
     fn new(binders: &'a [BinderScope]) -> Self {
         Self {
             binders,
-            merge_role: MemberMergeRole::Authored,
-            macro_own_body: false,
+            merge_role: MergeRoleStamp::NEUTRAL,
+            macro_own_body: MacroOwnBodyStamp::NEUTRAL,
             mapper_ordinals: None,
         }
     }
@@ -232,13 +235,13 @@ impl<'a> StructuralLowerContext<'a> {
     /// Replace the surface-merge role (the owner stamps `OwnBody` on an
     /// interface/class own-body arm and `Heritage` on a heritage arm).
     #[cfg(test)]
-    fn with_merge_role(mut self, merge_role: MemberMergeRole) -> Self {
+    fn with_merge_role(mut self, merge_role: MergeRoleStamp) -> Self {
         self.merge_role = merge_role;
         self
     }
 
     /// Mark whether this context lowers the macro type-argument's own body.
-    fn with_macro_own_body(mut self, macro_own_body: bool) -> Self {
+    fn with_macro_own_body(mut self, macro_own_body: MacroOwnBodyStamp) -> Self {
         self.macro_own_body = macro_own_body;
         self
     }
@@ -265,7 +268,7 @@ impl<'a> StructuralLowerContext<'a> {
         Self {
             binders: self.binders,
             merge_role: self.merge_role,
-            macro_own_body: false,
+            macro_own_body: MacroOwnBodyStamp::NEUTRAL,
             mapper_ordinals: self.mapper_ordinals,
         }
     }
@@ -1363,19 +1366,9 @@ fn build_macro_hot_ref(
     // structural. This mirrors `macro_payload_surface_provenance` —
     // PROVENANCE is a structural-lowering property of the macro's own body,
     // not a demand/mode property, so it belongs on the mode-neutral mirror.
-    use verter_semantic::analysis::AnalyzedMacroKind;
-    // De-sugared `matches!`: this producer module forbids ALL production bang
-    // macro invocations (so the no-codegen-surface guard can ban the whole
-    // class instead of allowlisting individual std macros), so the macro-own-
-    // body classification stays an explicit `match`. Behavior-identical to
-    // `matches!(mac.kind, DefineProps | WithDefaults)`. Clippy's
-    // `match_like_matches_macro` suggestion to collapse this back to `matches!`
-    // MUST NOT be applied here.
-    #[allow(clippy::match_like_matches_macro)]
-    let macro_own_body = match mac.kind {
-        AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults => true,
-        _ => false,
-    };
+    // The parse-domain producer owns the kind classification
+    // (`defineProps` / `withDefaults` own bodies carry the bit).
+    let macro_own_body = MacroOwnBodyStamp::from_macro_kind(mac.kind);
 
     // Seed the script-setup generic binders so `defineProps<T>()`'s `T` in a
     // `<script setup generic="T">` SFC lowers to its `TypeParam` binder, not

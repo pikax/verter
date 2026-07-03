@@ -833,8 +833,8 @@ impl StructuralEncoder<'_> {
             }
             None => self.push_present(false),
         }
-        self.buf.push(u8::from(m.declared_in_macro_type_arg));
-        self.push_str(&format!("{:?}", m.merge_role));
+        self.buf.push(u8::from(m.declared_in_macro_type_arg.get()));
+        self.push_str(&format!("{:?}", m.merge_role.role()));
     }
 
     /// Encode one [`IndexSignature`]: key / value types by recursive child

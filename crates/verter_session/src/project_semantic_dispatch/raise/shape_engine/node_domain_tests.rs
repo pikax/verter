@@ -607,8 +607,8 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
     use super::super::RaisedRootKind;
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::semantic_query::{
-        IndexKey, MapperKey, MapperKind, MemberMergeRole, OptionalityMod, PrimitiveKind,
-        ReadonlyMod, SemanticNodeData, SemanticNodeId, SurfaceMember, SurfaceView,
+        IndexKey, MapperKey, MapperKind, OptionalityMod, PrimitiveKind, ReadonlyMod,
+        SemanticNodeData, SemanticNodeId, SurfaceMember, SurfaceView,
     };
     use crate::VerterHost;
     use verter_type_expr::MemberVisibility;
@@ -773,8 +773,8 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
                 optional: false,
                 readonly: false,
                 is_method: false,
-                declared_in_macro_type_arg: false,
-                merge_role: MemberMergeRole::Authored,
+                declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
                 spans: Default::default(),
                 declaration_origin: None,
             }]
