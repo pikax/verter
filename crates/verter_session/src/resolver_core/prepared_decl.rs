@@ -9,7 +9,6 @@ use verter_semantic::analysis::type_solver::{
 };
 
 use super::shallow_file_state::ClassifiedTypeDeps;
-use super::structural_body_memo::PreparedStructuralBodyCache;
 use super::{ExportTarget, ShallowFileState};
 use crate::decl_body_memo::{LoweredTypeDecl, LoweredValueDecl};
 
@@ -669,25 +668,6 @@ pub struct PreparedDeclBundle {
     /// Each entry is a [`TypeParamBinding`] — type parameters are not
     /// type aliases, so they do not flow through `PreparedTypeDecl`.
     pub script_setup_type_bindings: FxHashMap<String, TypeParamBinding>,
-    /// Bundle-local context-keyed structural-body memo + its slot registry.
-    /// Built BESIDE the resolution path; not yet wired into dispatch and not
-    /// yet populated from the producer (that population while structural-lowering
-    /// real declarations is the later wiring step). Bundle-local — this bundle is
-    /// one canonical file at one `owner_whole_hash`, which roots the content
-    /// version, so the memo needs no per-entry content version (R6). Private:
-    /// the cache is bundle-internal.
-    structural_body_cache: Arc<PreparedStructuralBodyCache>,
-}
-
-impl PreparedDeclBundle {
-    /// The bundle-local structural-body cache (slot registry + context-keyed
-    /// memo). The future producer-wiring step reads this to register bodies and
-    /// memoize their context-qualified lowered handles; until then the cache is
-    /// built empty BESIDE the resolution path.
-    #[allow(dead_code)]
-    pub(crate) fn structural_body_cache(&self) -> &Arc<PreparedStructuralBodyCache> {
-        &self.structural_body_cache
-    }
 }
 
 /// Build an atomic declaration-surface bundle from a shallow file state and
@@ -754,10 +734,6 @@ pub fn build_prepared_decl_bundle(
         scope_type_names,
         scope_value_names,
         script_setup_type_bindings,
-        // Built empty BESIDE the resolution path; the producer wiring that
-        // populates it lands later. An empty memo changes no resolution
-        // behavior.
-        structural_body_cache: Arc::new(PreparedStructuralBodyCache::default()),
     }
 }
 

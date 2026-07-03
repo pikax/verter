@@ -28,8 +28,6 @@ pub mod resolver_runtime;
 pub mod route_demand;
 mod runtime_values;
 pub mod shallow_file_state;
-pub(crate) mod structural_body_memo;
-pub mod structural_body_memo_instrumentation;
 pub(crate) mod surface_projector;
 #[cfg(test)]
 mod surface_projector_tests;
