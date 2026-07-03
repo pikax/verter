@@ -43,8 +43,11 @@ pub struct FramingConstants {
 /// The maintained pin: the tsgo version and the wire shape the codec targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SchemaManifest {
-    /// The exact `typescript` distribution version this codec was verified
-    /// against (e.g. `7.0.1-rc`).
+    /// The REFERENCE `typescript` distribution version this codec was verified
+    /// against (e.g. `7.0.1-rc`). The gate accepts a version CHANNEL
+    /// ([`crate::gate::classify_engine_version`]), not this one build; this
+    /// field documents the build the hand-written codec was checked against
+    /// and appears in gate refusal messages.
     pub engine_version: &'static str,
     /// The framing constants the codec emits/accepts.
     pub framing: FramingConstants,
@@ -138,9 +141,12 @@ pub const PINNED_CALLBACKS: &[&str] = &[
 ///
 /// On a version bump the maintainer re-verifies the hand-written codec, then
 /// updates `engine_version` (and the op/callback inventory if the surface
-/// changed). Pinned to `typescript@7.0.1-rc` — the engine installed in this
-/// worktree, whose opaque-numeric handle class is the bare-integer wire the
-/// codec ([`crate::proto::types::OpaqueHandle`]) targets. The op inventory
+/// changed). `engine_version` is `typescript@7.0.1-rc` — the REFERENCE build
+/// within the accepted version channel
+/// ([`crate::gate::classify_engine_version`]), not the sole accepted version:
+/// the gate admits every build in the channel, all of which share the
+/// bare-integer opaque-handle wire the codec
+/// ([`crate::proto::types::OpaqueHandle`]) targets. The op inventory
 /// carries `getConfigFileParsingDiagnostics` (the project config-parse /
 /// compiler-options diagnostic surface the codec now hand-writes); the
 /// fingerprint reflects that op set.

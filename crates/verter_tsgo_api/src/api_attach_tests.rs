@@ -96,7 +96,7 @@ async fn initialize_decodes_typed_response() {
 async fn update_snapshot_sends_open_project_only() {
     let (client, recorder) = setup();
     let snap = client
-        .update_snapshot_open_project("/ws/tsconfig.json")
+        .update_snapshot_open_project("/ws/tsconfig.json", "7.0.1-rc")
         .await
         .expect("updateSnapshot ok");
     // The fake server issues an INTEGER handle (1); it decodes into OpaqueHandle.
@@ -128,6 +128,128 @@ async fn update_snapshot_sends_open_project_only() {
     );
     let obj = params.as_object().expect("params is an object");
     assert_eq!(obj.len(), 1, "openProject must be the ONLY param: {params}");
+}
+
+/// A fake `--api` server whose `updateSnapshot` reply encodes a STRING snapshot
+/// handle (`"n0000000000000003"`) — the pre-integer opaque-handle wire class the
+/// codec does NOT speak. Everything else mirrors [`fake_api_server`].
+async fn fake_api_server_string_handle(
+    mut reader: tokio::io::ReadHalf<tokio::io::DuplexStream>,
+    mut writer: tokio::io::WriteHalf<tokio::io::DuplexStream>,
+) {
+    let mut framer = MessageFramer::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        let n = match reader.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        framer.push(&chunk[..n]);
+        while let Ok(Some(msg)) = framer.next_message() {
+            let Some(id) = msg.get("id").cloned() else {
+                continue;
+            };
+            if id.is_null() {
+                continue;
+            }
+            let result = serde_json::json!({
+                "snapshot": "n0000000000000003",
+                "projects": []
+            });
+            let reply = serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result });
+            let _ = writer.write_all(&encode_message(&reply)).await;
+            let _ = writer.flush().await;
+        }
+    }
+}
+
+/// DISCRIMINATING: the OWNED attach path's first-`updateSnapshot` integer-handle
+/// rail. An engine whose first snapshot handle is a STRING must be refused with a
+/// typed `UnsupportedTsgoWire` naming the observed version — NOT the generic
+/// `Json` decode error the raw `deserialize` would produce. This fails RED
+/// against the pre-rail `update_snapshot_open_project` (which returns `Json`).
+#[tokio::test]
+async fn first_update_snapshot_string_handle_fails_closed() {
+    let (client, server) = tokio::io::duplex(64 * 1024);
+    let (cr, cw) = tokio::io::split(client);
+    let (sr, sw) = tokio::io::split(server);
+    tokio::spawn(fake_api_server_string_handle(sr, sw));
+    let client = ApiAttachClient::new(JsonRpcConnection::connect(cr, cw));
+
+    let err = client
+        .update_snapshot_open_project("/ws/tsconfig.json", "7.0.1-rc")
+        .await
+        .expect_err("a string first snapshot handle must be refused");
+    assert!(
+        matches!(err, crate::error::TsgoApiError::UnsupportedTsgoWire(ref m)
+            if m.contains("7.0.1-rc") && m.contains("not a bare i64 integer")),
+        "the refusal must be the typed UnsupportedTsgoWire naming the observed \
+         engine version, not a generic Json decode error; got {err:?}"
+    );
+}
+
+/// CONCURRENCY-SAFETY: the double-checked async init serializes the cold-start
+/// rail so N concurrent FIRST `update_snapshot_open_project` calls all observe a
+/// consistent outcome — no fail-open under contention, no panic, no deadlock.
+/// Runs on a multi-threaded runtime for genuine parallel contention.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_first_update_snapshots_are_serialized_and_consistent() {
+    const N: usize = 8;
+
+    // (a) STRING-handle engine: EVERY concurrent first call is refused
+    //     (fail-closed) — the rail never leaks a product result under a race.
+    {
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let (cr, cw) = tokio::io::split(client);
+        let (sr, sw) = tokio::io::split(server);
+        tokio::spawn(fake_api_server_string_handle(sr, sw));
+        let client = ApiAttachClient::new(JsonRpcConnection::connect(cr, cw));
+
+        let mut handles = Vec::new();
+        for _ in 0..N {
+            let c = client.clone();
+            handles.push(tokio::spawn(async move {
+                c.update_snapshot_open_project("/ws/tsconfig.json", "7.0.1-rc")
+                    .await
+            }));
+        }
+        for h in handles {
+            let res = h.await.expect("task did not panic/deadlock");
+            assert!(
+                matches!(res, Err(crate::error::TsgoApiError::UnsupportedTsgoWire(_))),
+                "every concurrent first call to a string-handle engine must be \
+                 refused (no fail-open under contention); got {res:?}"
+            );
+        }
+    }
+
+    // (b) INTEGER-handle engine: EVERY concurrent first call succeeds and the
+    //     client stays usable — the serialized rail admits the valid wire once
+    //     and the waiters proceed on the fast path.
+    {
+        let (client, _recorder) = setup();
+        let mut handles = Vec::new();
+        for _ in 0..N {
+            let c = client.clone();
+            handles.push(tokio::spawn(async move {
+                c.update_snapshot_open_project("/ws/tsconfig.json", "7.0.1-rc")
+                    .await
+            }));
+        }
+        for h in handles {
+            let snap = h
+                .await
+                .expect("task did not panic/deadlock")
+                .expect("an integer-handle engine admits every concurrent first call");
+            assert_eq!(snap.snapshot, OpaqueHandle(1));
+        }
+        // Still usable after the concurrent cold start (fast path now).
+        let snap = client
+            .update_snapshot_open_project("/ws/tsconfig.json", "7.0.1-rc")
+            .await
+            .expect("post-race call still works");
+        assert_eq!(snap.snapshot, OpaqueHandle(1));
+    }
 }
 
 #[tokio::test]
@@ -181,7 +303,7 @@ async fn type_at_position_and_type_to_string() {
 async fn project_for_config_predicate() {
     let (client, _rec) = setup();
     let snap = client
-        .update_snapshot_open_project("/ws/tsconfig.json")
+        .update_snapshot_open_project("/ws/tsconfig.json", "7.0.1-rc")
         .await
         .unwrap();
     let proj = snap

@@ -168,7 +168,9 @@ async fn attach_api_over_spawned_lsp_sees_didopen_overlay_carrier() {
     //    carrier rides the configured tsconfig, NOT a config-less inferred project.
     let snap = tokio::time::timeout(
         Duration::from_secs(30),
-        attach.api().update_snapshot_open_project(&tsconfig_norm),
+        attach
+            .api()
+            .update_snapshot_open_project(&tsconfig_norm, "7.0.1-rc"),
     )
     .await
     .expect("updateSnapshot timed out")
@@ -251,7 +253,7 @@ async fn one_process_serves_both_api_checker_and_lsp_feature() {
         .expect("didOpen + sync");
     let snap = attach
         .api()
-        .update_snapshot_open_project(&tsconfig_norm)
+        .update_snapshot_open_project(&tsconfig_norm, "7.0.1-rc")
         .await
         .expect("updateSnapshot");
     let project = snap

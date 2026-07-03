@@ -14,6 +14,8 @@
 
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use crate::actor::{spawn_actor, ClientHandle};
 use crate::error::{TsgoApiError, TsgoApiResult};
@@ -34,6 +36,17 @@ use crate::RequestOptions;
 pub struct TsgoClient {
     handle: ClientHandle,
     clearance: GateClearance,
+    /// Whether a first `updateSnapshot` response has passed the
+    /// integer-handle rail ([`gate::require_integer_snapshot_handle`]).
+    /// Shared across clones (the clones share one engine), so the validated
+    /// raw first-response path runs once per client, not once per clone. This
+    /// is the lock-free fast-path check; cold-start serialization rides
+    /// [`Self::first_validation_lock`].
+    first_snapshot_validated: Arc<AtomicBool>,
+    /// Serializes the cold-start first-`updateSnapshot` validation: exactly one
+    /// caller runs the rail while concurrent clones wait, then take the fast
+    /// path. Shared across clones (they share one engine).
+    first_validation_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl TsgoClient {
@@ -57,7 +70,12 @@ impl TsgoClient {
         let transport = StdioPipeTransport::spawn(exe, cwd)?;
         let handle = spawn_actor(transport, snapshot, queue_depth);
 
-        Ok(Self { handle, clearance })
+        Ok(Self {
+            handle,
+            clearance,
+            first_snapshot_validated: Arc::new(AtomicBool::new(false)),
+            first_validation_lock: Arc::new(tokio::sync::Mutex::new(())),
+        })
     }
 
     /// Construct a client over an already-built handle + clearance. Test-only:
@@ -65,12 +83,22 @@ impl TsgoClient {
     /// the typed methods and their exact request-param wire shape is assertable.
     #[cfg(test)]
     pub(crate) fn from_parts(handle: ClientHandle, clearance: GateClearance) -> Self {
-        Self { handle, clearance }
+        Self {
+            handle,
+            clearance,
+            first_snapshot_validated: Arc::new(AtomicBool::new(false)),
+            first_validation_lock: Arc::new(tokio::sync::Mutex::new(())),
+        }
     }
 
     /// The capabilities the wire gate confirmed for the connected engine.
     pub fn clearance(&self) -> &GateClearance {
         &self.clearance
+    }
+
+    /// The engine version string the wire gate observed and channel-validated.
+    pub fn observed_version(&self) -> &str {
+        &self.clearance.observed_version
     }
 
     /// The underlying handle (for advanced callers needing lane/cancel control).
@@ -91,11 +119,39 @@ impl TsgoClient {
     }
 
     /// `updateSnapshot` — open/refresh a project snapshot.
+    ///
+    /// The FIRST response is decoded raw and run through the version-lie-immune
+    /// integer-handle rail ([`gate::require_integer_snapshot_handle`]): an
+    /// engine whose snapshot handle is not a bare JSON integer speaks a
+    /// different opaque-handle wire class and is refused with a typed
+    /// [`TsgoApiError::UnsupportedTsgoWire`] BEFORE any product result.
+    ///
+    /// Cold start is a double-checked async init: the rail runs exactly once
+    /// even under concurrent first calls — one caller holds
+    /// [`Self::first_validation_lock`] and validates while the rest wait, then
+    /// take the fast path. Steady state is a single atomic load, no lock. The
+    /// flag flips ONLY after the rail AND the typed decode both succeed, so a
+    /// refused first call never unlocks the typed fast path (fail-closed).
     pub async fn update_snapshot(
         &self,
         params: &UpdateSnapshotParams,
     ) -> TsgoApiResult<UpdateSnapshotResponse> {
-        self.typed(method::UPDATE_SNAPSHOT, params).await
+        // Fast path: the first response already cleared the rail.
+        if self.first_snapshot_validated.load(Ordering::Acquire) {
+            return self.typed(method::UPDATE_SNAPSHOT, params).await;
+        }
+        // Slow path: serialize the cold-start validation.
+        let _guard = self.first_validation_lock.lock().await;
+        if self.first_snapshot_validated.load(Ordering::Acquire) {
+            // Another caller validated while we waited for the lock.
+            return self.typed(method::UPDATE_SNAPSHOT, params).await;
+        }
+        let raw = self.typed_value(method::UPDATE_SNAPSHOT, params).await?;
+        gate::require_integer_snapshot_handle(&raw["snapshot"], self.observed_version())?;
+        let resp = serde_json::from_value(raw)?;
+        // Flip the warm flag ONLY after the full first response validated AND decoded.
+        self.first_snapshot_validated.store(true, Ordering::Release);
+        Ok(resp)
     }
 
     /// `getSemanticDiagnostics` — type-check diagnostics for `file` in the given
@@ -255,6 +311,21 @@ impl TsgoClient {
         serde_json::from_slice(&bytes).map_err(Into::into)
     }
 
+    /// A typed request decoded to a raw [`serde_json::Value`], for call sites
+    /// that must inspect the response shape before committing to a DTO.
+    async fn typed_value<P: serde::Serialize>(
+        &self,
+        method: &str,
+        params: &P,
+    ) -> TsgoApiResult<serde_json::Value> {
+        let payload = serde_json::to_vec(params)?;
+        let bytes = self
+            .handle
+            .request(method, payload, RequestOptions::default())
+            .await?;
+        serde_json::from_slice(&bytes).map_err(Into::into)
+    }
+
     /// A typed request whose result is `undefined`/empty → `None` (the engine
     /// returns an empty payload when there is no value, sync/client.js:51-54).
     async fn typed_opt<P: serde::Serialize, R: serde::de::DeserializeOwned>(
@@ -331,7 +402,7 @@ mod tests {
     //    `file` key) would fail here. Drives the ACTUAL client methods over a
     //    mock-engine FrameStream and inspects the captured request payload. ──────
     use crate::actor::{spawn_actor, FrameStream};
-    use crate::gate::{GateClearance, WireCapability};
+    use crate::gate::{EngineVersionWitness, GateClearance, WireCapability};
     use crate::proto::frame::{decode_frame, encode_frame, MessageType};
     use crate::proto::schema_manifest::PINNED;
     use crate::proto::types::OpaqueHandle;
@@ -346,6 +417,8 @@ mod tests {
         let clearance = GateClearance {
             manifest: PINNED,
             capabilities: vec![WireCapability::SyncTupleApi],
+            observed_version: PINNED.engine_version.to_string(),
+            witness: EngineVersionWitness::VersionProbe,
         };
         (
             TsgoClient::from_parts(handle, clearance),
@@ -458,6 +531,64 @@ mod tests {
             payload.get("file").is_none(),
             "getConfigFileParsingDiagnostics is program-wide and carries no `file`"
         );
+    }
+
+    // ── DISCRIMINATING: the OWNED first-`updateSnapshot` integer-handle rail.
+    //    An engine whose first snapshot handle is a STRING (the pre-integer
+    //    opaque-handle wire) must be refused with the typed
+    //    `UnsupportedTsgoWire` naming the observed engine version — never
+    //    decoded into a product result and never a generic decode error. ──────
+    #[tokio::test]
+    async fn first_update_snapshot_with_string_handle_fails_closed() {
+        let (client, from_engine, to_engine) = test_client();
+        let engine = tokio::spawn(async move {
+            let mut to_engine = to_engine;
+            let raw = to_engine.recv().await.expect("client sends updateSnapshot");
+            let (req, _) = decode_frame(&raw, 0).expect("decode request frame");
+            let body = serde_json::json!({ "snapshot": "n0000000000000003", "projects": [] });
+            let resp = encode_frame(
+                MessageType::Response,
+                req.name,
+                &serde_json::to_vec(&body).unwrap(),
+            );
+            from_engine.send(resp).await.expect("engine reply");
+        });
+        let err = client
+            .update_snapshot(&UpdateSnapshotParams::default())
+            .await
+            .expect_err("a string first snapshot handle must be refused");
+        engine.await.unwrap();
+        assert!(
+            matches!(err, TsgoApiError::UnsupportedTsgoWire(ref m) if m.contains("7.0.1-rc")),
+            "the refusal must be the typed UnsupportedTsgoWire naming the observed \
+             engine version; got {err:?}"
+        );
+    }
+
+    /// The genuine integer-handle wire still decodes through the validated
+    /// first-call path (the rail must not break the real engine).
+    #[tokio::test]
+    async fn first_update_snapshot_with_integer_handle_decodes() {
+        let (client, from_engine, to_engine) = test_client();
+        let engine = tokio::spawn(async move {
+            let mut to_engine = to_engine;
+            let raw = to_engine.recv().await.expect("client sends updateSnapshot");
+            let (req, _) = decode_frame(&raw, 0).expect("decode request frame");
+            let body = serde_json::json!({ "snapshot": 7, "projects": [] });
+            let resp = encode_frame(
+                MessageType::Response,
+                req.name,
+                &serde_json::to_vec(&body).unwrap(),
+            );
+            from_engine.send(resp).await.expect("engine reply");
+        });
+        let resp = client
+            .update_snapshot(&UpdateSnapshotParams::default())
+            .await
+            .expect("an integer first handle decodes");
+        engine.await.unwrap();
+        assert_eq!(resp.snapshot, OpaqueHandle(7));
+        assert!(resp.projects.is_empty());
     }
 
     #[test]

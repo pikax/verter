@@ -63,6 +63,10 @@ struct ApiSurface {
     client: ApiAttachClient,
     /// The configured tsconfig path (forward-slashed) opened on the `--api` side.
     tsconfig_path: String,
+    /// The engine version the wire gate channel-validated at attach. Passed to
+    /// the first `updateSnapshot` so its integer-handle rail refusal names the
+    /// real observed engine.
+    engine_version: String,
     /// The current `--api` snapshot context: `(snapshot_handle, project_id)`, refreshed
     /// on demand. `None` until the first `updateSnapshot` succeeds.
     snapshot: SyncMutex<Option<(OpaqueHandle, String)>>,
@@ -111,10 +115,10 @@ impl TsgoOwnedProvider {
         let version = probe_engine_version(tsgo_bin.as_ref()).map_err(|e| {
             crate::protocol::TypeProviderError::new(format!("tsgo capability probe failed: {e}"))
         })?;
-        let _clearance =
-            gate::validate(&ObservedEngine::from_codec_wire(version)).map_err(|e| {
-                crate::protocol::TypeProviderError::new(format!("unsupported tsgo --api wire: {e}"))
-            })?;
+        let clearance = gate::validate(&ObservedEngine::from_codec_wire(version)).map_err(|e| {
+            crate::protocol::TypeProviderError::new(format!("unsupported tsgo --api wire: {e}"))
+        })?;
+        let engine_version = clearance.observed_version;
 
         let session = lsp.initialize_api_session().await?;
         let (read, write) = connect_attach_pipe(&session.pipe)
@@ -129,6 +133,7 @@ impl TsgoOwnedProvider {
             api: Arc::new(ApiSurface {
                 client,
                 tsconfig_path: tsconfig_path.into(),
+                engine_version,
                 snapshot: SyncMutex::new(None),
             }),
         })
@@ -236,7 +241,7 @@ impl ApiSurface {
         // open) rather than letting it silently degrade to empty diagnostics.
         let snap = match self
             .client
-            .update_snapshot_open_project(&self.tsconfig_path)
+            .update_snapshot_open_project(&self.tsconfig_path, &self.engine_version)
             .await
         {
             Ok(snap) => snap,
