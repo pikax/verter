@@ -86,6 +86,25 @@ fn no_storedspan_compile_fail() {
     t.pass("tests/cases/compile-fail/no_storedspan_good_carrier.rs");
 }
 
+/// The recursive-self derive escape (`#[no_typeexpr(recursive_self)]` /
+/// `#[no_storedspan(recursive_self)]`) omits ONLY the `Arc<[Self]>` self-bound.
+/// A carrier using the escape that ALSO grows a NEW non-recursive arm owning a
+/// `TypeExpr` / `Span` still FAILS the derive — the future-arm proof for the
+/// `ClosednessRecipe` fixpoint (the escape closes the recursive arm without
+/// opening a hole for a forbidden payload). The pass fixture proves the escape
+/// does not over-reject a sound recursive carrier.
+#[test]
+#[cfg_attr(
+    not(feature = "compile-fail"),
+    ignore = "run with --features compile-fail (CI)"
+)]
+fn recursive_self_derive_escape_compile_fail() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/cases/compile-fail/recursive_self_rejects_typeexpr_arm.rs");
+    t.compile_fail("tests/cases/compile-fail/recursive_self_rejects_span_arm.rs");
+    t.pass("tests/cases/compile-fail/recursive_self_good_recursive_carrier.rs");
+}
+
 /// The remaining substrate structural negatives: (a) a closed-fact carrier with
 /// a `TypeExpr` field fails `NoTypeExpr`; (c) an R6-forbidden dimension
 /// (`SemanticNodeId`) cannot satisfy the sealed `R6KeyDimension` bound, so it
@@ -102,6 +121,9 @@ fn fact_and_key_substrate_compile_fail() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/cases/compile-fail/fact_carrier_with_typeexpr_field.rs");
     t.compile_fail("tests/cases/compile-fail/r6_key_forbidden_dimension.rs");
+    // A forbidden dimension NESTED inside a composite key position (a container)
+    // is also rejected — the `R6KeySafe` witness forwards through containers.
+    t.compile_fail("tests/cases/compile-fail/r6_key_nested_forbidden_dimension.rs");
     t.compile_fail("tests/cases/compile-fail/dto_names_session_hot_handle.rs");
 }
 

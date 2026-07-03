@@ -1,5 +1,5 @@
 error[E0277]: the trait bound `TypeExpr: NoTypeExprWitness` is not satisfied
-  --> tests/cases/compile-fail/no_typeexpr_aliased_field.rs:12:10
+  --> tests/cases/compile-fail/recursive_self_rejects_typeexpr_arm.rs:12:10
    |
 12 | #[derive(verter_no_typeexpr::NoTypeExpr)]
    |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `NoTypeExprWitness` is not implemented for `TypeExpr`
