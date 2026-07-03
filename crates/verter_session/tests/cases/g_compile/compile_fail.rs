@@ -87,12 +87,21 @@ fn no_storedspan_compile_fail() {
 }
 
 /// The recursive-self derive escape (`#[no_typeexpr(recursive_self)]` /
-/// `#[no_storedspan(recursive_self)]`) omits ONLY the `Arc<[Self]>` self-bound.
-/// A carrier using the escape that ALSO grows a NEW non-recursive arm owning a
-/// `TypeExpr` / `Span` still FAILS the derive — the future-arm proof for the
-/// `ClosednessRecipe` fixpoint (the escape closes the recursive arm without
-/// opening a hole for a forbidden payload). The pass fixture proves the escape
-/// does not over-reject a sound recursive carrier.
+/// `#[no_storedspan(recursive_self)]`) omits ONLY the `Arc<[Self]>` self-bound,
+/// and the matcher for that shape is TIGHT — it accepts only the standard `Arc`
+/// wrapper over the container's OWN single-segment element:
+///
+/// - A carrier using the escape that ALSO grows a NEW non-recursive arm owning a
+///   `TypeExpr` / `Span` still FAILS the derive — the future-arm proof for the
+///   `ClosednessRecipe` fixpoint.
+/// - `Arc<[some_mod::Recipe]>` — a DIFFERENT type sharing the container's
+///   LAST-segment name — keeps its bound (the last-segment-match false-witness
+///   red-proof).
+/// - A shadowed/custom `shadow::Arc<[Self]>` wrapper keeps its bound (the
+///   custom-wrapper false-witness red-proof).
+///
+/// The pass fixture proves the escape does not over-reject a sound recursive
+/// carrier.
 #[test]
 #[cfg_attr(
     not(feature = "compile-fail"),
@@ -102,6 +111,8 @@ fn recursive_self_derive_escape_compile_fail() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/cases/compile-fail/recursive_self_rejects_typeexpr_arm.rs");
     t.compile_fail("tests/cases/compile-fail/recursive_self_rejects_span_arm.rs");
+    t.compile_fail("tests/cases/compile-fail/recursive_self_foreign_slice_element.rs");
+    t.compile_fail("tests/cases/compile-fail/recursive_self_shadowed_arc_wrapper.rs");
     t.pass("tests/cases/compile-fail/recursive_self_good_recursive_carrier.rs");
 }
 
