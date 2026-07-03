@@ -161,21 +161,35 @@ fn parse_recursive_self(attrs: &[syn::Attribute]) -> Result<bool, proc_macro2::T
     Ok(found)
 }
 
-/// Whether `ty` is exactly `Arc<[Self]>` — the container's own type wrapped in
-/// `Arc<[..]>` (the approved fixed-point self-container). Matches on the LAST
-/// path segment being `Arc` (so `std::sync::Arc<[..]>` and `Arc<[..]>` both
-/// match) whose single argument is a slice of a path whose last segment is the
-/// container ident or the literal `Self`.
+/// Whether `ty` is exactly `Arc<[Self]>` — the container's OWN type wrapped in
+/// the standard `Arc<[..]>` (the approved fixed-point self-container).
+///
+/// TIGHTENED (both the wrapper and the slice element must be exact), so the
+/// escape omits the bound ONLY for the genuine fixed-point shape and stays
+/// FAIL-CLOSED (bound KEPT) for anything that merely resembles it:
+///
+/// - The wrapper must be [`is_std_arc_path`] — bare `Arc`, `std::sync::Arc`, or
+///   `alloc::sync::Arc`. A shadowed/custom `foo::Arc` (which could OWN a
+///   `TypeExpr`) is rejected, so its bound is kept.
+/// - The slice element must be the container's own type: a bare SINGLE-SEGMENT
+///   path (no qualified `<X as Y>::T`, no `::`-anchored, no `foo::T`) whose sole
+///   segment ident is the container ident or the literal `Self`, with NO generic
+///   args. This rejects `Arc<[some_mod::Recipe]>` — a DIFFERENT type sharing the
+///   container's LAST-segment name that owns a `TypeExpr` — whose bound is then
+///   KEPT. A same-module single-segment name cannot be a foreign shadow (E0428
+///   name-collision prevents it), so the ident-equality check is sound.
 fn is_arc_slice_of_self(ty: &Type, self_ident: &syn::Ident) -> bool {
+    // The wrapper must be a bare `Arc<..>` path — reject a qualified `<X as
+    // Y>::Arc` and any shadowed/custom `foo::Arc`.
     let Type::Path(type_path) = ty else {
         return false;
     };
+    if type_path.qself.is_some() || !is_std_arc_path(&type_path.path) {
+        return false;
+    }
     let Some(seg) = type_path.path.segments.last() else {
         return false;
     };
-    if seg.ident != "Arc" {
-        return false;
-    }
     let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
         return false;
     };
@@ -188,9 +202,32 @@ fn is_arc_slice_of_self(ty: &Type, self_ident: &syn::Ident) -> bool {
     let Type::Path(elem_path) = slice.elem.as_ref() else {
         return false;
     };
-    match elem_path.path.segments.last() {
-        Some(elem_seg) => elem_seg.ident == *self_ident || elem_seg.ident == "Self",
-        None => false,
+    // The slice element must be the container's OWN single-segment type — reject
+    // qualified / `::`-anchored / multi-segment / generic-arg-bearing elements.
+    if elem_path.qself.is_some() || elem_path.path.leading_colon.is_some() {
+        return false;
+    }
+    if elem_path.path.segments.len() != 1 {
+        return false;
+    }
+    let elem_seg = &elem_path.path.segments[0];
+    if !matches!(elem_seg.arguments, syn::PathArguments::None) {
+        return false;
+    }
+    elem_seg.ident == *self_ident || elem_seg.ident == "Self"
+}
+
+/// Whether `path` names the standard `Arc` wrapper: bare single-segment `Arc`,
+/// or the full `std::sync::Arc` / `alloc::sync::Arc` path (a leading `::` on the
+/// full path is fine). A DIFFERENT `Arc` — a shadowed `::Arc` crate root or a
+/// custom `foo::Arc` that could OWN a `TypeExpr` — is NOT matched, so the
+/// recursive-self bound is KEPT for it (fail-closed).
+fn is_std_arc_path(path: &syn::Path) -> bool {
+    let segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+    match segs.len() {
+        1 => segs[0] == "Arc" && path.leading_colon.is_none(),
+        3 => segs[1] == "sync" && segs[2] == "Arc" && (segs[0] == "std" || segs[0] == "alloc"),
+        _ => false,
     }
 }
 
@@ -440,6 +477,53 @@ mod tests {
         assert!(
             out.contains("Arc"),
             "without the attr, `Arc<[Self]>` keeps its bound: {out}"
+        );
+    }
+
+    #[test]
+    fn recursive_self_keeps_bound_on_multi_segment_arc_slice_element() {
+        // TIGHTENED matcher: `Arc<[foo::R]>` is a DIFFERENT type that merely shares
+        // the container's LAST-segment name — its bound MUST be KEPT. Discriminating:
+        // the pre-fix last-segment matcher treated `foo::R` as the self type and
+        // OMITTED the bound, so `foo :: R` would be absent from the output.
+        let out = expand_str(
+            "#[no_typeexpr(recursive_self)] enum R { Rec(std::sync::Arc<[R]>), \
+             Foreign(std::sync::Arc<[foo::R]>) }",
+        );
+        assert!(
+            out.contains("foo :: R"),
+            "a multi-segment slice element (foo::R) must KEEP its witness bound: {out}"
+        );
+    }
+
+    #[test]
+    fn recursive_self_keeps_bound_on_custom_arc_wrapper() {
+        // TIGHTENED matcher: a shadowed/custom `foo::Arc` wrapper (which could OWN a
+        // `TypeExpr`) is NOT the standard `Arc`, so its bound MUST be KEPT.
+        // Discriminating: the pre-fix last-segment `== "Arc"` check matched
+        // `foo::Arc` and OMITTED the bound.
+        let out = expand_str(
+            "#[no_typeexpr(recursive_self)] enum R { Rec(std::sync::Arc<[R]>), \
+             Custom(foo::Arc<[R]>) }",
+        );
+        assert!(
+            out.contains("foo :: Arc"),
+            "a custom `foo::Arc` wrapper must KEEP its witness bound: {out}"
+        );
+    }
+
+    #[test]
+    fn recursive_self_rejects_generic_arg_slice_element() {
+        // TIGHTENED matcher: a generic-arg-bearing element (`R<u8>`) is NOT the bare
+        // fixed-point self type, so its bound MUST be KEPT. Discriminating: the
+        // pre-fix matcher ignored element generic args and OMITTED the bound.
+        let out = expand_str(
+            "#[no_typeexpr(recursive_self)] enum R { Rec(std::sync::Arc<[R]>), \
+             Gen(std::sync::Arc<[R<u8>]>) }",
+        );
+        assert!(
+            out.contains("R < u8 >"),
+            "a generic-arg slice element (R<u8>) must KEEP its witness bound: {out}"
         );
     }
 }
