@@ -25,6 +25,24 @@ The B1 substrate defines these fact types and their witnesses; consumer flip and
 `SemanticNodeId`, or `HotTypeRef`; each is `Eq + Hash + NoTypeExpr +
 NoStoredSpan` (asserted in `verter_type_expr/src/fact_witnesses.rs`).
 
+**No forbidden data in a fact (content-free discipline).** Beyond the marker
+bounds, a fact NEVER carries a raw CONTENT HASH or a raw SOURCE OFFSET:
+
+- A CONTENT HASH (`PreparedCacheDeps`' `(String, u64)` file/barrel hashes,
+  `DeclProvenance`' potential hashes) is value-side / read-set validation
+  metadata — it validates a cached value, it is not fact identity. Such sources
+  are mapped to "NOT a fact field — value-side metadata", never projected into a
+  content-free fact.
+- A RAW SOURCE OFFSET (`DeclProvenance.source_range: Option<(u32,u32)>`) bypasses
+  `NoStoredSpan` (which only rejects `Span`-typed fields, not bare `u32` pairs),
+  so it is converted to a declaration-span ORIGIN LOCATOR (`span_origins.rs`) or
+  an explicit display-only carve-out — never a raw `(u32,u32)` fact field. The
+  span-origin locators themselves carry only PRODUCER-EMITTED named positions /
+  small ordinals (`contributor_index`, member ordinals), never byte offsets.
+
+Auditing the current `facts.rs`, no fact type carries a raw source-offset or
+content-hash field.
+
 ---
 
 ## A. Analyzed* (`verter_semantic/src/analysis/types.rs`)
@@ -190,10 +208,10 @@ display-only default-value passthrough, not a semantic fact.
 | `local_deps: Vec<String>` | fact field (same-file dependency names) |
 | `external_deps: Vec<PreparedExternalDep>` | fact field (cross-file dependency edges — already `NoTypeExpr`) |
 | `name_resolution: FxHashMap<String, ResolvedRootIdentity>` | fact field (pre-resolved name context; slot identities) |
-| `provenance: DeclProvenance` | fact field (already `NoTypeExpr`) |
-| `cache_deps: PreparedCacheDeps` | fact field (already `NoTypeExpr`) |
-| `wrapper_shape: PreparedWrapperShape` | narrowed wrapper facts (see C wrapper table) |
-| `projection_class: PreparedProjectionClass` | narrowed projection facts (`PreparedForwardPayloadFact`) |
+| `provenance: DeclProvenance` | narrowed: `route_kind` / `barrel_hops` are metadata fact fields; `source_range: Option<(u32,u32)>` becomes a declaration-span ORIGIN locator (or a display-only carve-out) — NEVER a raw `(u32,u32)` offset fact field (a raw offset bypasses `NoStoredSpan`) |
+| `cache_deps: PreparedCacheDeps` | **NOT a fact field** — value-side / read-set validation metadata (carries content hashes: `defining_file`/`barrel_participants` `(String, u64)`). It feeds cache-validity (`ReadSetSignature` / self-roots), never fact identity, so a content hash never enters the content-free fact substrate |
+| `wrapper_shape: PreparedWrapperShape` | `PreparedWrapperShapeFact` (see C wrapper table) |
+| `projection_class: PreparedProjectionClass` | `PreparedProjectionClassFact` (`DirectMembers` / `Wrapper` / `ForwardSubject(PreparedForwardPayloadFact)` / `Opaque`) |
 
 ### `PreparedMember` → `facts::PreparedMemberFact`
 
@@ -221,7 +239,7 @@ display-only default-value passthrough, not a semantic fact.
 | `enum_members: Option<Vec<(String, EnumMemberValue)>>` | `EnumMemberFact` (ordered name → closed scalar) |
 | `external_deps: Vec<PreparedExternalDep>` | fact field |
 | `name_resolution: FxHashMap<String, ResolvedRootIdentity>` | fact field |
-| `cache_deps: PreparedCacheDeps` | fact field (already `NoTypeExpr`) |
+| `cache_deps: PreparedCacheDeps` | **NOT a fact field** — value-side / read-set validation metadata (carries content hashes); feeds cache-validity, never fact identity |
 
 ### `PreparedValueMember` → `facts::PreparedValueMemberFact`
 
@@ -240,7 +258,29 @@ display-only default-value passthrough, not a semantic fact.
 | `has_implementation_body: bool` | fact field `has_implementation_body` |
 | (`FunctionExpr.spans: FunctionSpans`) | origin locator `spans_origin: FunctionSpansOrigin` |
 
-### Wrapper / forward payloads
+### `PreparedWrapperShape` → `facts::PreparedWrapperShapeFact`
+
+The full 6-field wrapper classification — every field mapped (no vague bundle prose).
+
+| source field | disposition |
+|---|---|
+| `kind: PreparedWrapperKind` | fact field `kind: PreparedWrapperKindFact` (`None`/`Identity`/`PureOverlay`/`KeyFilter`/`KeyRemap`, 1:1) |
+| `source_param_index: Option<u16>` | fact field `source_param_index: Option<u16>` |
+| `key_filter: PreparedKeyFilterShape` | fact field `key_filter: PreparedKeyFilterShapeFact` |
+| `key_remap: PreparedKeyRemapShape` | fact field `key_remap: PreparedKeyRemapShapeFact` |
+| `value_rule: PreparedValueRuleShape` | fact field `value_rule: PreparedValueRuleShapeFact` |
+| `modifiers: PreparedSurfaceModifiers` | fact field `modifiers: PreparedSurfaceModifiersFact` (`optional`/`readonly: Option<bool>`, 1:1) |
+
+### `PreparedProjectionClass` → `facts::PreparedProjectionClassFact`
+
+| source variant | disposition |
+|---|---|
+| `DirectMembers` | `PreparedProjectionClassFact::DirectMembers` |
+| `Wrapper` | `PreparedProjectionClassFact::Wrapper` (wrapper details on `PreparedWrapperShapeFact`) |
+| `ForwardSubject(PreparedForwardPayload)` | `PreparedProjectionClassFact::ForwardSubject(PreparedForwardPayloadFact)` |
+| `Opaque` | `PreparedProjectionClassFact::Opaque` |
+
+### Wrapper sub-shapes / forward payloads
 
 | source | disposition |
 |---|---|
@@ -265,17 +305,27 @@ display-only default-value passthrough, not a semantic fact.
 
 ## D. Synthesized (`ResolvedLocalType`) → `facts::ResolvedLocalTypeFact`
 
-Demo producer: `verter_semantic/src/analysis/fact_projection.rs`.
+Demo/witness producer: `verter_semantic/src/analysis/fact_projection.rs`.
 
-| source field | disposition |
+| source field | schema disposition |
 |---|---|
 | `name: String` | fact field `name` |
 | `expanded: String` | carve-out (expanded type TEXT, display-only) |
-| `type_expr: Option<TypeExpr>` | fact field `shape: ResolvedLocalShape` (object → `SynthesizedMemberFact` per member with `MemberSpansOrigin`; tuple → `TuplePayloadFact`/`TupleElementFact`; indexed access → `IndexedAccessFact`; leaf → `LeafTypeFact`; else shallow `Ref` locator) |
+| `type_expr: Option<TypeExpr>` | fact field `shape: ResolvedLocalShape` — the CLOSED schema admits object (`SynthesizedMemberFact` per member with `MemberSpansOrigin`), tuple (`TuplePayloadFact`/`TupleElementFact`), indexed access (`IndexedAccessFact`), leaf (`LeafTypeFact`), and shallow `Ref` locator |
 | `span: Span` | origin locator (the reference span is addressed by the enclosing macro payload locator; no top-level fact span field) |
 
 Synthesized-(d) producer constants (documented, not stored): each synthesized
 object member is `readonly = false`, `visibility = Public`.
+
+**Demo producer scope (NOT full projection).** The committed demo producer's
+ROLE is the [P2] EXHAUSTIVE-destructure witness (it destructures
+`ResolvedLocalType` with no `..`, so a new source field fails compilation until
+mapped), NOT the full semantic `ResolvedLocalShape` projection. It maps a
+primitive body to `ResolvedLocalShape::Leaf` and EVERY other body to a shallow
+`ResolvedLocalShape::Ref` locator. The full object/tuple/indexed-access
+projection over the closed schema above lands with the real synthesized-(d)
+producer in a later block (the schema exists here; the producer does not populate
+every variant yet).
 
 ---
 
@@ -302,10 +352,57 @@ object member is `readonly = false`, `visibility = Public`.
 
 ### `SvelteScriptCandidates` / `SveltePropsCandidate` (parse-domain capture)
 
-These are the content-addressed capture candidates (parse-domain). Their
-persisted `TypeExpr` positions (`SveltePropsCandidate.props_type`,
-`SvelteScriptCandidates.dispatcher_events`) narrow to the same body-locator +
-scope-pairing form as `SvelteScriptFactsFact`; the remaining scalar fields
-(`from_generic_argument`, `bindable_members`, `snippet_candidates`,
-`instance_exports`, `module_exports`, `dispatcher_import_source`) are 1:1 fact
-fields or provenance metadata. `prop_defaults` stays a display-only carve-out.
+These are the content-addressed capture candidates (parse-domain). Every
+span-bearing / `TypeExpr`-bearing source field is dispositioned below (no field
+left implicit).
+
+`SveltePropsCandidate`:
+
+| source field | disposition |
+|---|---|
+| `call_span: Span` | **carve-out** — a display/output macro-CALL span outside the `FactPayload` class (per design §8.4). It is not a member-declaration span that participates in fact identity; when a materialized call-span VALUE is needed it rides a separate output DTO, never a stored fact field. No `Span` enters the fact. |
+| `props_type: Option<TypeExpr>` | body locator `props_type: Option<SymbolBodyLocator>` + scope pairing (as `SvelteScriptFactsFact`; the props DECLARATION span is recovered via the locator anchor, per §7) |
+| `from_generic_argument: bool` | fact field |
+| `bindable_members: Vec<String>` | fact field |
+| `prop_defaults: Vec<AnalyzedDefaultValue>` | carve-out (display-only runtime default text) |
+
+`SvelteScriptCandidates`:
+
+| source field | disposition |
+|---|---|
+| `props: Option<SveltePropsCandidate>` | nested (above) |
+| `snippet_candidates: Vec<SvelteSnippetImportCandidate>` | fact fields (metadata: `local_binding`/`import_source`/`member_name`) |
+| `instance_exports: Vec<String>` | fact field |
+| `module_exports: Vec<String>` | fact field |
+| `legacy_props: Vec<SvelteLegacyProp>` | fact field `Arc<[SvelteLegacyPropFact]>` |
+| `dispatcher_events: Option<TypeExpr>` | body locator `Option<SymbolBodyLocator>` + scope pairing (declaration span recovered via the locator anchor) |
+| `dispatcher_import_source: Option<String>` | fact field (provenance metadata) |
+
+The resolved-output `SvelteScriptFactsFact` carries NO direct `Span` field — its
+only span-bearing source information (the props / dispatcher DECLARATION spans)
+is recovered via the `SymbolBodyLocator` anchor of `props_type` /
+`dispatcher_events`, per §7, so no origin locator field is stored on the fact.
+
+---
+
+## F. Syntax-synthesized fact families (no fixed source struct to narrow)
+
+Several closed fact families in `facts.rs` do NOT narrow a single fixed source
+struct — they are SYNTHESIZED at prep/analysis time from the OXC syntax by a
+producer that lands in a LATER block. They are listed here so [P2] completeness
+is auditable (forgotten vs. deferred is unambiguous): the CLOSED TYPES exist and
+are witnessed in B1; their real PRODUCERS are named below.
+
+| fact family | synthesized from | producer block |
+|---|---|---|
+| `HeritageBaseFact` | authored `extends`/`implements` clauses + local `name_resolution` | B6 (Surface A heritage facts) |
+| `ClosednessRecipe` | cheap decidable-from-syntax body shapes (object/intersection/mapped) | B6 (graph-native closedness) |
+| `KeyDomainFact` | the key-domain axis of a wrapper subject | B6 (graph-native key-domain) |
+| `NarrowFrontierBody` | `external_type_frontier::ResolvedSymbol.body` narrowing | B5 (Surface B frontier) |
+| `ShallowRouteFacts` (+ `MemberNamesRoute`, `MemberDependencyEdge`) | `ShallowFileState` route/closure walks | B5 (Surface B shallow) |
+| `ValueTypeAnnotationFact` (+ `typeof_alias_target`) | the `eval_env` `TypeOf` peel | B5 (Surface B eval-env) |
+| `NarrowTypeParam` / `TypeParamDeclFact` | `Vec<TypeParam>` on decls/frontier | B3 / B5 |
+
+Every other family in `facts.rs` narrows a fixed source struct enumerated in
+sections A–E above; the demo producer in section D exercises the exhaustive-
+destructure obligation that the B3–B7 producers inherit.
