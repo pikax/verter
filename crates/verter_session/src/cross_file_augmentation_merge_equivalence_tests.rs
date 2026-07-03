@@ -287,3 +287,136 @@ fn cross_file_module_augmentation_merge_surface_matches_oracle() {
          got {base_only:?}"
     );
 }
+
+/// Warm-parent contributor source-env discriminator: a parent augmented
+/// `Instantiate` records ONE `FileSourceEnv` observation per folded
+/// contributor, taken from the EXACT artifact key the contributor's
+/// locator-backed body read served from — and the strict source-env
+/// validation branch REJECTS the recorded read-set once the contributor's
+/// source-env identity moves (parse env P0 → P1) with UNCHANGED content /
+/// whole hash, even though the contributor `FileWholeHash` fact still
+/// validates. The whole-hash + augmenter-set facts alone cannot catch a
+/// parse-env-only contributor move; the source-env fact is the rail that
+/// forces the warm parent to miss and recompute the contributor body under
+/// its new source env.
+#[test]
+fn warm_parent_rejects_contributor_source_env_move_with_unchanged_content() {
+    use rustc_hash::FxHashMap;
+
+    use crate::file_artifact_store::FileArtifactKey;
+    use crate::locator_identity::ParseEnvHash;
+    use crate::resolver_core::{FactReadSetFinalise, FactVersionRef, StoreView};
+    use crate::resolver_store::{HostStoreView, SourceEnvIdentity};
+
+    let host = make_host();
+    upsert_augmentation_fixture(&host);
+
+    // Cold resolve of the augmented base decl under a fact tracer: the
+    // parent fold must record the contributor source-env observation.
+    let (resolved, read_set) = host.with_fact_tracer(|| {
+        host.resolve_named_symbol("/types.ts", "Foo", &[], Some(ProjectionMode::Expanded))
+    });
+    let node = resolved.expect("augmented Foo must resolve");
+    match node_data(&host, node).as_ref() {
+        SemanticNodeData::MergedDecl { contributors } => {
+            assert_eq!(contributors.len(), 2, "base + augmenter contributors");
+        }
+        other => panic!("augmented Foo must be a MergedDecl carrier, got {other:?}"),
+    }
+    let FactReadSetFinalise::Ok(signature) = read_set.finalise() else {
+        panic!("the traced resolve must seal a fact signature (no overflow)");
+    };
+    let source_env_fact = signature
+        .iter()
+        .find(|fact| {
+            matches!(
+                fact,
+                FactVersionRef::FileSourceEnv { canonical_id, .. } if canonical_id == "/aug.ts"
+            )
+        })
+        .expect(
+            "the augmentation fold must record one FileSourceEnv observation for the \
+             folded contributor /aug.ts",
+        )
+        .clone();
+    let FactVersionRef::FileSourceEnv {
+        canonical_id,
+        parse_env_hash,
+        parser_version,
+        file_language_id,
+    } = source_env_fact.clone()
+    else {
+        unreachable!("matched FileSourceEnv above");
+    };
+    assert_eq!(canonical_id, "/aug.ts");
+    // Recorded from the EXACT artifact key: the language column equals the
+    // contributor's registry row (never re-derived from another canonical).
+    assert_eq!(
+        file_language_id,
+        FileArtifactKey::derived_file_language_id("/aug.ts"),
+        "the recorded source-env identity must carry the contributor's own language row"
+    );
+
+    // The contributor's CONTENT rail (unchanged across the move).
+    let aug_hash = host
+        .current_or_read_whole_hash("/aug.ts")
+        .expect("live whole hash for /aug.ts");
+    let whole_hash_fact = FactVersionRef::FileWholeHash {
+        canonical_id: "/aug.ts".to_string(),
+        hash: aug_hash,
+    };
+
+    // P0: the view-current identity equals the recorded identity — the
+    // warm parent validates.
+    let p0_view = HostStoreView::with_source_env_snapshot_for_tests(
+        FxHashMap::from_iter([("/aug.ts".to_string(), aug_hash)]),
+        FxHashMap::from_iter([(
+            "/aug.ts".to_string(),
+            SourceEnvIdentity {
+                parse_env_hash,
+                parser_version,
+                file_language_id: file_language_id.clone(),
+            },
+        )]),
+        std::collections::HashSet::new(),
+    );
+    assert!(
+        p0_view.validates(&source_env_fact),
+        "the recorded contributor source-env identity must validate against the identity \
+         it was recorded from"
+    );
+    assert!(p0_view.validates(&whole_hash_fact));
+
+    // P1: the contributor's parse env moves with UNCHANGED content. The
+    // whole-hash fact still validates; the source-env fact alone rejects.
+    let moved = ParseEnvHash::from_env_hash([0xA7u8; 16]);
+    assert_ne!(
+        moved, parse_env_hash,
+        "the moved parse env must differ from the recorded one"
+    );
+    let p1_view = HostStoreView::with_source_env_snapshot_for_tests(
+        FxHashMap::from_iter([("/aug.ts".to_string(), aug_hash)]),
+        FxHashMap::from_iter([(
+            "/aug.ts".to_string(),
+            SourceEnvIdentity {
+                parse_env_hash: moved,
+                parser_version,
+                file_language_id,
+            },
+        )]),
+        std::collections::HashSet::new(),
+    );
+    assert!(
+        p1_view.validates(&whole_hash_fact),
+        "content is unchanged — the contributor FileWholeHash must still validate"
+    );
+    assert!(
+        !p1_view.validates(&source_env_fact),
+        "a contributor parse-env move with unchanged content must reject the recorded \
+         source-env identity"
+    );
+    assert!(
+        !p1_view.validates_fact_signature(std::slice::from_ref(&source_env_fact)),
+        "the recorded read-set must reject as a whole on the contributor source-env move"
+    );
+}

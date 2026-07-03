@@ -39,6 +39,8 @@ pub(crate) fn all_cases() -> Vec<Box<dyn PublishedSurfaceCase>> {
         Box::new(ComponentMetaPayloadCase),
         Box::new(FallthroughRootInheritanceCase),
         Box::new(MacroOwnBodyProvenanceCase),
+        Box::new(HeritageShadowingCase),
+        Box::new(AuthoredIntersectionCollisionCase),
         Box::new(OpenKeyDomainCarrierStopCase),
         Box::new(ModuleAugmentationSurfaceCase),
         Box::new(GenericSubstitutionCase),
@@ -380,5 +382,125 @@ defineProps<Pair<string, number>>()
     }
     fn assert_discriminating(&self, envelope: &OracleEnvelope) {
         assert_json_has(envelope, &["\"first\"", "\"second\""], self.id());
+    }
+}
+
+// ─── shape/view split: heritage shadowing ────────────────────────────────
+
+/// A REAL `extends` heritage collision: the consuming declaration's
+/// own-body `dup` must SHADOW the inherited `dup` on the published surface
+/// (the derived member wins) — the inbound merge role is a projection-time
+/// stamp, so the shadow decision must survive the shape/view split
+/// byte-identically.
+pub(crate) struct HeritageShadowingCase;
+
+impl PublishedSurfaceCase for HeritageShadowingCase {
+    fn id(&self) -> &'static str {
+        "heritage_shadowing_own_body_wins"
+    }
+    fn class(&self) -> Stage10SurfaceClass {
+        Stage10SurfaceClass::MacroOwnBodyProvenance
+    }
+    fn files(&self) -> &'static [FixtureFile] {
+        &[
+            FixtureFile {
+                path: "/oracle/shadow-base.ts",
+                source: "export interface ShadowBase { dup: number; fromBase: boolean }\n",
+            },
+            FixtureFile {
+                path: "/oracle/Heritage.vue",
+                source: r#"<script setup lang="ts">
+import type { ShadowBase } from './shadow-base'
+interface Props extends ShadowBase { dup: string }
+defineProps<Props>()
+</script>
+<template><div /></template>
+"#,
+            },
+        ]
+    }
+    fn entry(&self) -> &'static str {
+        "/oracle/Heritage.vue"
+    }
+    fn run(&self, host: &VerterHost) -> OracleEnvelope {
+        let meta = host
+            .get_component_meta(self.entry())
+            .expect("component meta must resolve (anti-vacuity)");
+        let dup = meta
+            .props
+            .iter()
+            .find(|p| p.name == "dup")
+            .expect("colliding prop must publish");
+        assert!(
+            matches!(
+                dup.type_expr,
+                verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+            ),
+            "the own-body `dup: string` must shadow the inherited `dup: number`; got {:?}",
+            dup.type_expr
+        );
+        assert!(
+            meta.props.iter().any(|p| p.name == "fromBase"),
+            "non-colliding inherited members must still publish"
+        );
+        component_meta_envelope(Some(&meta))
+    }
+    fn assert_discriminating(&self, envelope: &OracleEnvelope) {
+        assert_json_has(envelope, &["\"dup\"", "\"fromBase\""], self.id());
+    }
+}
+
+// ─── shape/view split: authored-intersection collision ──────────────────
+
+/// An AUTHORED intersection collision (`Base & { dup }`): authored arms
+/// intersect — they must NOT apply the heritage shadow rule. The merge
+/// role driving that decision is a projection-time stamp, so the published
+/// surface must survive the shape/view split byte-identically.
+pub(crate) struct AuthoredIntersectionCollisionCase;
+
+impl PublishedSurfaceCase for AuthoredIntersectionCollisionCase {
+    fn id(&self) -> &'static str {
+        "authored_intersection_collision_intersects"
+    }
+    fn class(&self) -> Stage10SurfaceClass {
+        Stage10SurfaceClass::MacroOwnBodyProvenance
+    }
+    fn files(&self) -> &'static [FixtureFile] {
+        &[
+            FixtureFile {
+                path: "/oracle/collision-base.ts",
+                source: "export interface CollisionBase { dup: number; fromBase: boolean }\n",
+            },
+            FixtureFile {
+                path: "/oracle/Collision.vue",
+                source: r#"<script setup lang="ts">
+import type { CollisionBase } from './collision-base'
+type Props = CollisionBase & { dup: string }
+defineProps<Props>()
+</script>
+<template><div /></template>
+"#,
+            },
+        ]
+    }
+    fn entry(&self) -> &'static str {
+        "/oracle/Collision.vue"
+    }
+    fn run(&self, host: &VerterHost) -> OracleEnvelope {
+        let meta = host
+            .get_component_meta(self.entry())
+            .expect("component meta must resolve (anti-vacuity)");
+        assert!(
+            meta.props.iter().any(|p| p.name == "dup"),
+            "colliding authored-intersection prop must publish"
+        );
+        assert!(
+            meta.props.iter().any(|p| p.name == "fromBase"),
+            "non-colliding arm members must publish"
+        );
+        component_meta_envelope(Some(&meta))
+    }
+    fn assert_discriminating(&self, envelope: &OracleEnvelope) {
+        assert_json_has(envelope, &["\"dup\"", "\"fromBase\""], self.id());
     }
 }

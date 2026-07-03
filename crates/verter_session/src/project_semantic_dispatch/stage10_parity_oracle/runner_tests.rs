@@ -236,3 +236,13 @@ fn parity_module_augmentation_surface() {
 fn parity_generic_substitution() {
     run_dual_leg_parity(&super::cases_tests::GenericSubstitutionCase);
 }
+
+#[test]
+fn parity_heritage_shadowing() {
+    run_dual_leg_parity(&super::cases_tests::HeritageShadowingCase);
+}
+
+#[test]
+fn parity_authored_intersection_collision() {
+    run_dual_leg_parity(&super::cases_tests::AuthoredIntersectionCollisionCase);
+}
