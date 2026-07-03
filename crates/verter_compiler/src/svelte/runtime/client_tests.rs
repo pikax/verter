@@ -8227,11 +8227,367 @@ fn state_snapshot_in_expression_fails_closed() {
 }
 
 #[test]
-fn inspect_rune_fails_closed() {
-    // F4: `$inspect(...)` is an advanced rune (prod no-op form not emitted).
-    assert_fail_closed(
+fn inspect_standalone_elided() {
+    // A top-level `$inspect(x);` statement is production-ELIDED: official
+    // `svelte@5.56.3` (`dev:false`) removes the whole statement (leaving only a
+    // cosmetic `;;` empty-statement residue). Verter emits NO helper, NO import,
+    // NO dev form, and the statement forces NO component frame — the signature
+    // stays `App($$anchor)`. RED against the pre-elision fail-closed arm
+    // (`AdvancedRune { rune: "$inspect" }`).
+    let js = emit(
         "<script>let c = $state(0); $inspect(c);</script>\n<button onclick={() => c++}>{c}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("export default function App($$anchor) {"),
+        "a plain `$inspect(x);` must NOT force the component frame:\n{js}"
+    );
+    // NEGATIVES: no `$$props` param, no push/pop frame, no inspect token of ANY
+    // form (`$inspect`, `$.inspect(`, an inspect import).
+    assert!(
+        !js.contains("$$props"),
+        "no `$$props` threading for a propless component with `$inspect`:\n{js}"
+    );
+    assert!(!js.contains("$.push"), "no `$.push` frame:\n{js}");
+    assert!(!js.contains("$.pop"), "no `$.pop` frame:\n{js}");
+    assert!(
+        !js.contains("inspect"),
+        "no inspect token of any form:\n{js}"
+    );
+    // The surrounding script still lowers (state decl + handler preserved).
+    assert!(js.contains("let c = $.state(0);"), "state decl:\n{js}");
+    assert!(
+        js.contains("$.update(c)"),
+        "onclick update preserved:\n{js}"
+    );
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+}
+
+#[test]
+fn inspect_with_elided_forces_frame() {
+    // `$inspect(x).with(fn);` — the chain is ELIDED like the plain form, BUT the
+    // `.with(...)` FORCES the component frame in official production output:
+    // `App($$anchor, $$props)` + `$.push($$props, true)` first + `$.pop()` last
+    // (verified first-hand against svelte@5.56.3, even for an empty `() => {}`
+    // callback). RED against the pre-elision fail-closed arm.
+    let js = emit(
+        "<script>let c = $state(0); $inspect(c).with(console.log);</script>\n<button onclick={() => c++}>{c}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("export default function App($$anchor, $$props) {"),
+        "`.with` forces the `$$props` param:\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true);"),
+        "`.with` forces the runes push frame:\n{js}"
+    );
+    assert!(js.contains("$.pop();"), "`.with` forces the pop:\n{js}");
+    // NEGATIVES: the chain (including its callback argument) is fully elided —
+    // no helper call, no import, no inspect token.
+    assert!(
+        !js.contains("inspect"),
+        "no inspect token of any form:\n{js}"
+    );
+    assert!(
+        !js.contains("console.log"),
+        "the `.with` callback is elided with the chain:\n{js}"
+    );
+    assert!(js.contains("let c = $.state(0);"), "state decl:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+}
+
+#[test]
+fn inspect_trace_dropped_in_event_arrow() {
+    // `$inspect.trace();` as a STATEMENT inside an event-handler BLOCK arrow is
+    // DROPPED IN PLACE (production elision): the surrounding body statements are
+    // preserved (`c++` → `$.update(c)`) and inspect forces NO frame. RED against
+    // the pre-elision `$inspect.<member>` fail-closed arm.
+    let js = emit(
+        "<script>let c = $state(0);</script>\n<button onclick={() => { $inspect.trace(); c++; }}>{c}</button>\n",
+        "App.svelte",
+    );
+    assert!(!js.contains("inspect"), "the trace call is dropped:\n{js}");
+    assert!(!js.contains("trace"), "no trace token survives:\n{js}");
+    assert!(
+        js.contains("$.update(c)"),
+        "the rest of the handler body is preserved:\n{js}"
+    );
+    assert!(
+        js.contains("export default function App($$anchor) {"),
+        "`$inspect.trace()` must NOT force the component frame:\n{js}"
+    );
+    assert!(!js.contains("$.push"), "no push frame from trace:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // CONTROL: the SAME handler WITHOUT the trace call emits the identical module
+    // modulo whitespace — the drop is a TARGETED span removal, not a blanket body
+    // rewrite (nothing else in the body was touched).
+    let control = emit(
+        "<script>let c = $state(0);</script>\n<button onclick={() => { c++; }}>{c}</button>\n",
+        "App.svelte",
+    );
+    let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert_eq!(
+        norm(&js),
+        norm(&control),
+        "the dropped-trace module must equal the no-trace control modulo \
+         whitespace\nDROPPED:\n{js}\nCONTROL:\n{control}"
+    );
+}
+
+/// Assert that `source` rejects with the EXACT `inspect_trace_invalid_placement`
+/// official-reject disposition (rule + official code + diagnostic id) — the
+/// reject-parity channel, not a generic unsupported surface.
+fn assert_inspect_trace_invalid_placement(source: &str) {
+    let err = emit_result(source).expect_err("a misplaced `$inspect.trace()` must reject");
+    let ClientCompileError::OfficialReject(rejection) = err else {
+        panic!("expected an OfficialReject(InspectTraceInvalidPlacement), got {err:?}");
+    };
+    assert_eq!(
+        rejection.rule,
+        CoreOfficialValidationRule::InspectTraceInvalidPlacement,
+        "wrong official-reject rule: {rejection:?}"
+    );
+    assert_eq!(
+        rejection.official_code, "inspect_trace_invalid_placement",
+        "wrong official code: {rejection:?}"
+    );
+    assert_eq!(
+        rejection.rule.diagnostic_code(),
+        "svelte-official-reject-inspect-trace-invalid-placement"
+    );
+}
+
+#[test]
+fn inspect_trace_non_first_statement_rejects() {
+    // `$effect(() => { c++; $inspect.trace(); })` — the trace is NOT the first
+    // statement of the function body, an official HARD ERROR
+    // (`inspect_trace_invalid_placement`). RED before the fix: Verter silently
+    // DROPPED the statement and emitted a Main (over-acceptance + unsafe span-drop).
+    assert_inspect_trace_invalid_placement(
+        "<script>let c = $state(0); $effect(() => { c++; $inspect.trace(); });</script>\n<p>{c}</p>\n",
+    );
+    // The same non-first position in a HANDLER arrow body.
+    assert_inspect_trace_invalid_placement(
+        "<script>let c = $state(0);</script>\n<button onclick={() => { c++; $inspect.trace(); }}>{c}</button>\n",
+    );
+}
+
+#[test]
+fn inspect_trace_nested_block_rejects() {
+    // A trace nested inside an `if` consequent (first in the IF's block, but that
+    // block is not a FUNCTION body) — official still hard-errors. Same for a bare
+    // nested `{ }` block. RED before the fix (silent drop → `if (ok) ;`-class
+    // wrong/invalid JS).
+    assert_inspect_trace_invalid_placement(
+        "<script>let c = $state(0);</script>\n<button onclick={() => { if (c > 0) { $inspect.trace(); } c++; }}>{c}</button>\n",
+    );
+    assert_inspect_trace_invalid_placement(
+        "<script>let c = $state(0); $effect(() => { { $inspect.trace(); } c++; });</script>\n<p>{c}</p>\n",
+    );
+}
+
+#[test]
+fn inspect_trace_top_level_rejects_with_exact_code() {
+    // A TOP-LEVEL `$inspect.trace();` is an official ERROR
+    // (`inspect_trace_invalid_placement`: it must be the first statement of a
+    // FUNCTION body) — the production elision does NOT extend to it. It now rejects
+    // through the official-reject gate with the EXACT code (previously the generic
+    // instance-script-item refusal — the exact-code disposition is the parity
+    // improvement).
+    assert_inspect_trace_invalid_placement(
+        "<script>let c = $state(0); $inspect.trace();</script>\n<button onclick={() => c++}>{c}</button>\n",
+    );
+}
+
+#[test]
+fn inspect_trace_first_statement_drops() {
+    // POSITIVE (stays green across the placement fix): the ONE legal position — the
+    // FIRST statement of a function body — never trips the placement reject.
+    // (a) EMIT drop on a DIRECT (`$.event`) host: first statement of an `onfocus`
+    // block arrow — the trace is dropped in place by the shared body rewriter, the
+    // rest of the body lowers. (The DELEGATED-host drop is pinned by
+    // `inspect_trace_dropped_in_event_arrow`.)
+    let js = emit(
+        "<script>let c = $state(0);</script>\n<button onclick={() => c++} onfocus={() => { $inspect.trace(); c++; }}>{c}</button>\n",
+        "App.svelte",
+    );
+    assert!(!js.contains("inspect"), "the trace call is dropped:\n{js}");
+    assert!(!js.contains("trace"), "no trace token survives:\n{js}");
+    assert!(
+        js.contains("focus"),
+        "the onfocus handler body is preserved:\n{js}"
+    );
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // (b)+(c) The OTHER owning function forms — a first-statement trace in an
+    // `$effect` arrow / a top-level `function` declaration body — must NOT reject
+    // as the placement error. Each fixture still fails closed on its own,
+    // ORTHOGONAL unsupported-FEATURE channel on this branch (`$effect` is a 5g
+    // deferral; a top-level `function` is out of the instance-item allowlist) —
+    // the discriminating fact is the refusal channel: a mis-firing placement scan
+    // would surface `OfficialReject(InspectTraceInvalidPlacement)` instead. (The
+    // gate-level `None` positives live in `official_reject_tests.rs`.)
+    assert_fail_closed(
+        "<script>let c = $state(0); $effect(() => { $inspect.trace(); c++; });</script>\n<p>{c}</p>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$effect"),
+    );
+    assert_fail_closed(
+        "<script>let c = $state(0); function tick() { $inspect.trace(); c = c + 1; }</script>\n<button onclick={() => c++}>{c}</button>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::InstanceScriptItem { construct, .. } if *construct == "function"),
+    );
+}
+
+#[test]
+fn inspect_trace_parenthesized_first_statement_drops() {
+    // A PARENTHESIZED first-statement trace (`($inspect.trace());`) is the SAME
+    // legal position — official svelte@5.56.3 ACCEPTS and drops it under
+    // `dev:false`. The whole statement (parens included) is dropped in place; the
+    // rest of the handler body lowers. RED before the fix: false-rejected as
+    // `inspect_trace_invalid_placement` (the allow-set required a bare call).
+    let js = emit(
+        "<script>let c = $state(0);</script>\n<button onclick={() => { ($inspect.trace()); c++; }}>{c}</button>\n",
+        "App.svelte",
+    );
+    assert!(!js.contains("inspect"), "the trace call is dropped:\n{js}");
+    assert!(!js.contains("trace"), "no trace token survives:\n{js}");
+    assert!(
+        js.contains("$.update(c)"),
+        "the rest of the handler body is preserved:\n{js}"
+    );
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // CONTROL: the module equals the no-trace control modulo whitespace — the
+    // WHOLE parenthesized statement is dropped (no stray `()` residue).
+    let control = emit(
+        "<script>let c = $state(0);</script>\n<button onclick={() => { c++; }}>{c}</button>\n",
+        "App.svelte",
+    );
+    let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert_eq!(
+        norm(&js),
+        norm(&control),
+        "the dropped parenthesized-trace module must equal the no-trace control \
+         modulo whitespace\nDROPPED:\n{js}\nCONTROL:\n{control}"
+    );
+
+    // POSITIVE: parens never legalize a NON-first trace — still the exact reject.
+    assert_inspect_trace_invalid_placement(
+        "<script>let c = $state(0);</script>\n<button onclick={() => { c++; ($inspect.trace()); }}>{c}</button>\n",
+    );
+}
+
+#[test]
+fn inspect_trace_object_parenthesized_first_statement_drops() {
+    // Parens around the `$inspect` RECEIVER (`($inspect).trace();`) are equally
+    // transparent — official svelte@5.56.3 ACCEPTS and drops it as a first statement.
+    // The whole statement drops in place; the rest of the handler body lowers. RED
+    // before the fix: the trace shape-check required a BARE `$inspect` member object, so
+    // `($inspect).trace()` was not recognised — the `$inspect` reference failed closed
+    // in the rewriter instead of dropping.
+    let js = emit(
+        "<script>let c = $state(0);</script>\n<button onclick={() => { ($inspect).trace(); c++; }}>{c}</button>\n",
+        "App.svelte",
+    );
+    assert!(!js.contains("inspect"), "the trace call is dropped:\n{js}");
+    assert!(!js.contains("trace"), "no trace token survives:\n{js}");
+    assert!(
+        js.contains("$.update(c)"),
+        "the rest of the handler body is preserved:\n{js}"
+    );
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+    // CONTROL: equals the no-trace control modulo whitespace (whole statement dropped).
+    let control = emit(
+        "<script>let c = $state(0);</script>\n<button onclick={() => { c++; }}>{c}</button>\n",
+        "App.svelte",
+    );
+    let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert_eq!(
+        norm(&js),
+        norm(&control),
+        "DROPPED:\n{js}\nCONTROL:\n{control}"
+    );
+}
+
+#[test]
+fn inspect_trace_param_shadow_local_call_survives() {
+    // A `$inspect` PARAMETER shadows the rune: `$inspect.trace()` under it is an
+    // ORDINARY local method call. Official svelte@5.56.3 ACCEPTS
+    // `($inspect) => { c++; $inspect.trace(); }` and EMITS the call FAITHFULLY (verified
+    // via the pinned-oracle probe: `.trace(` survives in the official output). The
+    // scope-aware pipeline must NOT drop it as a production-elided rune trace, and must
+    // NOT reject it as a misplaced rune trace. `onfocus` is a NON-delegated (DIRECT)
+    // event, so the arrow lowers through the shared expression rewriter. RED before the
+    // fix: the placement scan false-rejected the whole component (`emit` panics).
+    let js = emit(
+        "<script>let c = $state(0);</script>\n<button onfocus={($inspect) => { c++; $inspect.trace(); }}>{c}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$inspect.trace()"),
+        "the param-shadowed local `$inspect.trace()` must survive (not dropped):\n{js}"
+    );
+    assert!(
+        js.contains("$.update(c)"),
+        "the rest of the handler body still lowers:\n{js}"
+    );
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+}
+
+#[test]
+fn inspect_in_expression_position_fails_closed() {
+    // An `$inspect` reference OUTSIDE statement position is NOT part of the
+    // supported elision surface — official emits broken `() => ;` for a concise
+    // `() => $inspect(c)`, so it fails closed at the shared rewriter (never a raw
+    // `$inspect` reference, a runtime ReferenceError). Guards the fail-open hole
+    // the rune-scan relaxation would otherwise leave. The DIRECT (`$.event`) host
+    // (`onfocus`) admits any inline arrow, so the body reaches the rewriter — the
+    // refusal is the rewriter's. (The `onclick` writer keeps `{c}` reactive so the
+    // interpolation gate does not fire first.)
+    assert_fail_closed(
+        "<script>let c = $state(0);</script>\n<button onclick={() => c++} onfocus={() => $inspect(c)}>{c}</button>\n",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$inspect"),
+    );
+    // A concise `() => $inspect.trace()` is the official HARD ERROR
+    // (`inspect_trace_invalid_placement`) — it rejects with the EXACT official code
+    // (previously the generic advanced-rune refusal; the exact-code disposition is
+    // the parity improvement).
+    assert_inspect_trace_invalid_placement(
+        "<script>let c = $state(0);</script>\n<button onclick={() => c++} onfocus={() => $inspect.trace()}>{c}</button>\n",
+    );
+    // The DELEGATED narrow gate (§1.2 nullary state-write arrow) refuses a
+    // non-elidable `$inspect` body BEFORE the rewriter — still fail-closed, at
+    // the handler-shape gate (never raw emission).
+    assert_fail_closed(
+        "<script>let c = $state(0);</script>\n<button onclick={() => $inspect(c)}>{c}</button>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::NonDelegatedEvent { event_type, .. } if event_type == "click"),
+    );
+}
+
+#[test]
+fn import_dollar_prefixed_binding_rejects() {
+    // `import $inspect from './x.svelte'; $inspect(c);` — a `$`-prefixed imported
+    // LOCAL binding is official `dollar_prefix_invalid` ("The $ prefix is reserved,
+    // and cannot be used for variables and imports"). RED before the fix: the
+    // top-level declarator scan covered VariableDeclarations only, so the invalid
+    // import slipped through to `$inspect`-elision (fail-open on invalid input —
+    // an emitted Main for a source official compile-errors).
+    let err = emit_result(
+        "<script>import $inspect from './x.svelte'; let c = $state(0); $inspect(c);</script>\n<button onclick={() => c++}>{c}</button>\n",
+    )
+    .expect_err("a `$`-prefixed import local must reject");
+    let ClientCompileError::OfficialReject(rejection) = err else {
+        panic!("expected an OfficialReject(DollarPrefixInvalid), got {err:?}");
+    };
+    assert_eq!(
+        rejection.rule,
+        CoreOfficialValidationRule::DollarPrefixInvalid,
+        "wrong official-reject rule: {rejection:?}"
+    );
+    assert_eq!(
+        rejection.official_code, "dollar_prefix_invalid",
+        "wrong official code: {rejection:?}"
     );
 }
 

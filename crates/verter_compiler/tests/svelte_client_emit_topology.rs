@@ -62,6 +62,20 @@ const SUPPORTED_FIXTURES: &[&str] = &[
     // with NO `$.next()`. The negative golden for the fragment `$.next()` advance —
     // a single-element root must NOT emit it.
     "runes/static_single_root",
+    // ── 5g-a production `$inspect` elision ──
+    // A top-level `$inspect(c);` statement — production-ELIDED with NO frame
+    // (`App($$anchor)`, no push/pop, no inspect helper/import; official leaves a
+    // cosmetic `;;` residue the statement-list comparator filters).
+    "runes/inspect_standalone",
+    // `$inspect(c).with(console.log);` — elided, BUT the `.with` chain FORCES the
+    // official production frame: `App($$anchor, $$props)` + `$.push($$props,
+    // true)` first + `$.pop()` last (the golden pins the params + push/pop
+    // helper topology).
+    "runes/inspect_with",
+    // `$inspect.trace();` as the first statement of a delegated onclick BLOCK
+    // arrow — the trace call is dropped in place, the rest of the body lowers
+    // (`$.update(c)`), and no frame is added.
+    "runes/inspect_trace_handler",
 ];
 
 /// The SUPPORTED MATRIX — the exhaustive enumeration of supported client

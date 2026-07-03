@@ -755,3 +755,33 @@ fn spread_inside_function_bodies_stays_not_state() {
         "a plain object literal must NOT mark has_state"
     );
 }
+
+#[test]
+fn inspect_with_chain_sets_needs_context_but_plain_and_trace_do_not() {
+    // `$inspect(...).with(...)` FORCES the component frame in official production
+    // output (`$.push($$props, true)` / `$.pop()` + the `$$props` param) even
+    // though the statement itself is elided — the `.with` chain is a
+    // `needs_context` trigger. Plain `$inspect(x)` and `$inspect.trace()` are rune
+    // calls and must NOT trigger context (their elision leaves no frame).
+    let alloc = oxc_allocator::Allocator::default();
+    assert!(
+        super::needs_context(
+            &alloc,
+            Some("let c = $state(0); $inspect(c).with(console.log);"),
+            &[],
+        ),
+        "`$inspect(...).with(...)` must set needs_context (the official frame)"
+    );
+    assert!(
+        !super::needs_context(&alloc, Some("let c = $state(0); $inspect(c);"), &[]),
+        "plain `$inspect(x)` must NOT set needs_context"
+    );
+    assert!(
+        !super::needs_context(
+            &alloc,
+            Some("let c = $state(0);"),
+            &["() => { $inspect.trace(); c++; }"],
+        ),
+        "`$inspect.trace()` in a handler must NOT set needs_context"
+    );
+}

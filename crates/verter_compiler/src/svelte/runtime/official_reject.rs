@@ -26,7 +26,9 @@
 //!   every committed reject row to one rule.
 
 use oxc_allocator::Allocator;
-use oxc_ast::ast::{Program, Statement};
+use oxc_ast::ast::{
+    ArrowFunctionExpression, CallExpression, Expression, Function, Program, Statement,
+};
 use rustc_hash::FxHashSet;
 
 use super::expr::{collect_pattern_names, reparse_module, BindTargetFact, ShadowStack};
@@ -35,8 +37,8 @@ use crate::svelte::bind_contract::{bind_target_policy, resolve_runtime_bind, Bin
 use crate::svelte::parser::tokenizer_scan::find_matching_brace_in;
 use crate::svelte::parser::{
     CloseTagViolationKind, ParsedSvelte, ScriptBodyGrammar, SvelteAttribute, SvelteAttributeKind,
-    SvelteAttributeValue, SvelteDirectiveKind, SvelteElement, SvelteElementKind, SvelteNode,
-    SvelteParseRejectKind, SvelteSpecialKind,
+    SvelteAttributeValue, SvelteBlockKind, SvelteClauseKind, SvelteDirectiveKind, SvelteElement,
+    SvelteElementKind, SvelteNode, SvelteParseRejectKind, SvelteSpecialKind,
 };
 
 /// Run the OFFICIAL-REJECT analysis gate over a parsed component: detect the
@@ -127,6 +129,17 @@ pub fn official_reject_gate(source: &str, parsed: &ParsedSvelte) -> Option<Offic
     // one of the scanned template expression sources). (`$$slots`, which official ACCEPTS, is
     // a deferrable unsupported feature — never an official reject here.)
     if let Some(rejection) = scan_global_dollar_references(source, parsed, &declared) {
+        return Some(rejection);
+    }
+
+    // (b.3) `$inspect.trace(...)` placement (`inspect_trace_invalid_placement`): the
+    // ONLY legal position is the first statement of a function body. Official throws
+    // this in the analyze-phase `CallExpression` visitor — the same walk as the scope
+    // checks above — so it is ordered with the script-scope family, after the binder /
+    // global-reference codes and before the template-walk attribute-name / placement
+    // scans. Scanned over every script AND template expression source (a misplaced
+    // trace in an interpolation / handler value is the same official hard error).
+    if let Some(rejection) = scan_inspect_trace_placement(source, parsed) {
         return Some(rejection);
     }
 
@@ -772,33 +785,63 @@ fn script_sources<'a>(source: &'a str, parsed: &ParsedSvelte) -> Vec<&'a str> {
 
 /// Scan ONE script's top-level declarations for a `$` / `$$`-prefixed binding NAME (a
 /// declaration-position binding official's `validate_identifier_name` binder rejects —
-/// `dollar_prefix_invalid`). Driven from the OXC AST of the reparsed script. Returns an
-/// [`OfficialRejection`], or `None`.
+/// `dollar_prefix_invalid`; the official message names BOTH forms: "The $ prefix is
+/// reserved, and cannot be used for variables and imports"). Driven from the OXC AST of
+/// the reparsed script. Returns an [`OfficialRejection`], or `None`.
 ///
 /// A SAME-lexical-scope duplicate declaration (`let a; let a`) is NOT detected here — it is a
 /// PARSE-phase error Acorn (and the OXC body-probe) rejects, owned by the body-probe
 /// `js_parse_error` slot (a clean body never reaches the analyze phase). So this scan is the
 /// `$`-prefix binder check only.
 fn scan_script_declaration_rules(script_source: &str) -> Option<OfficialRejection> {
+    use oxc_ast::ast::{ImportDeclarationSpecifier, ImportOrExportKind};
+
     let alloc = Allocator::default();
     let program = reparse_module(&alloc, script_source)?;
 
-    // The top-level declarator names (every `let`/`const`/`var` declarator pattern
-    // name), in source order.
+    // The top-level binding names official's binder validates: every `let`/`const`/
+    // `var` declarator pattern name, plus every VALUE import specifier's LOCAL binding
+    // (default / named-`as` local / namespace), in source order. A type-only import
+    // (`import type …` / a per-specifier `type` modifier) binds no VALUE — the TS
+    // strip removes it — so it is not scanned.
     let mut decl_names: Vec<String> = Vec::new();
     for stmt in &program.body {
-        let Statement::VariableDeclaration(decl) = stmt else {
-            continue;
-        };
-        for d in &decl.declarations {
-            collect_pattern_names(&d.id, &mut decl_names);
+        match stmt {
+            Statement::VariableDeclaration(decl) => {
+                for d in &decl.declarations {
+                    collect_pattern_names(&d.id, &mut decl_names);
+                }
+            }
+            Statement::ImportDeclaration(import) => {
+                if !matches!(import.import_kind, ImportOrExportKind::Value) {
+                    continue;
+                }
+                let Some(specifiers) = &import.specifiers else {
+                    continue;
+                };
+                for spec in specifiers {
+                    let local = match spec {
+                        ImportDeclarationSpecifier::ImportSpecifier(s) => {
+                            if matches!(s.import_kind, ImportOrExportKind::Type) {
+                                continue; // `import { type Foo as $x }` — type-only
+                            }
+                            &s.local
+                        }
+                        ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => &s.local,
+                        ImportDeclarationSpecifier::ImportNamespaceSpecifier(s) => &s.local,
+                    };
+                    decl_names.push(local.name.to_string());
+                }
+            }
+            _ => {}
         }
     }
 
-    // A `$` / `$$`-prefixed binding name in ANY top-level declarator pattern position.
-    // Official `validate_identifier_name` errors at the binder for a `$`-prefixed binding at
-    // the top level (`dollar_prefix_invalid`). (A clean body that reaches here parses fine,
-    // so a same-scope redeclaration would already have failed the body-probe.)
+    // A `$` / `$$`-prefixed binding name in ANY top-level declarator pattern / import
+    // local position. Official `validate_identifier_name` errors at the binder for a
+    // `$`-prefixed binding at the top level (`dollar_prefix_invalid`). (A clean body
+    // that reaches here parses fine, so a same-scope redeclaration would already have
+    // failed the body-probe.)
     if decl_names.iter().any(|n| n.starts_with('$')) {
         return Some(OfficialRejection::of(
             CoreOfficialValidationRule::DollarPrefixInvalid,
@@ -967,6 +1010,172 @@ impl<'a> oxc_ast_visit::Visit<'a> for DollarRefScan<'_> {
     }
 }
 
+/// Scan for a `$inspect.trace(...)` call OUTSIDE its single legal position — the
+/// official `inspect_trace_invalid_placement` hard error ("`$inspect.trace(...)` must
+/// be the first statement of a function body"). Covers every script source AND every
+/// template expression source (the same inputs the global-`$`-reference scan walks).
+/// Returns the rejection on the first violating source, or `None`.
+fn scan_inspect_trace_placement(source: &str, parsed: &ParsedSvelte) -> Option<OfficialRejection> {
+    let mut sources: Vec<String> = script_sources(source, parsed)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    collect_template_expression_sources(source, &parsed.template, &mut sources);
+
+    for src in &sources {
+        if source_has_misplaced_inspect_trace(src) {
+            return Some(OfficialRejection::of(
+                CoreOfficialValidationRule::InspectTraceInvalidPlacement,
+            ));
+        }
+    }
+    None
+}
+
+/// Whether ONE expression / statement source contains a `$inspect.trace(...)` call in
+/// an ILLEGAL position. Driven from the OXC AST: the walker records the span of every
+/// UNSHADOWED trace call plus an allow-set of the trace calls sitting in the ONE legal
+/// position (the `expression` of an `ExpressionStatement` that is `statements[0]` of a
+/// NON-generator function body — a declaration/expression `Function` or a BLOCK-bodied
+/// arrow); any trace span outside the allow-set is the violation. The scan is
+/// SCOPE-AWARE (it mirrors the [`DollarRefScan`] `ShadowStack`): a `$inspect`
+/// PARAMETER is VALID Svelte (`($inspect) => …` / `function get($inspect) { … }` are
+/// accepted by official — only a `const $inspect` LOCAL is `dollar_prefix_invalid`), so
+/// `$inspect.trace()` under a local `$inspect` binding is an ORDINARY method call and is
+/// ignored entirely.
+fn source_has_misplaced_inspect_trace(src: &str) -> bool {
+    let alloc = Allocator::default();
+    // Parse as a statement source; a bare expression source is wrapped so it parses.
+    let Some(program) = reparse_module(&alloc, src).or_else(|| {
+        let wrapped = format!("({src});");
+        reparse_module(&alloc, &wrapped)
+    }) else {
+        return false;
+    };
+    let mut scan = InspectTracePlacementScan::default();
+    use oxc_ast_visit::Visit;
+    scan.visit_program(&program);
+    scan.trace_spans
+        .iter()
+        .any(|span| !scan.legal_spans.contains(span))
+}
+
+/// The placement-scan state: every UNSHADOWED `$inspect.trace(...)` call span, plus the
+/// allow-set of spans in the one legal (function-body-first-statement) position. Carries
+/// the same lexical [`ShadowStack`] as [`DollarRefScan`] so a param-shadowed `$inspect`
+/// (a valid Svelte parameter) is treated as an ordinary local and ignored.
+#[derive(Default)]
+struct InspectTracePlacementScan {
+    /// The span of EVERY UNSHADOWED `$inspect.trace(...)` call encountered, in walk order.
+    trace_spans: Vec<(u32, u32)>,
+    /// The spans of the trace calls that are the first statement of a function body.
+    legal_spans: FxHashSet<(u32, u32)>,
+    /// The active lexical shadow frames (function/arrow params + block-local names).
+    scopes: ShadowStack,
+}
+
+impl InspectTracePlacementScan {
+    /// Record the ONE legal trace position of a function body: `statements[0]` being
+    /// an `ExpressionStatement` whose expression is the trace call. A PARENTHESIZED
+    /// wrapper (`($inspect.trace());`) is transparent — official accepts it in the
+    /// same position — so parens are unwrapped (recursively) and the INNER call's
+    /// span is recorded, matching what `visit_call_expression` records. A locally
+    /// SHADOWED `$inspect` is an ordinary call — not the rune trace — so nothing is
+    /// recorded (the caller pushes the owning function's scope frame first).
+    fn allow_first_statement(&mut self, statements: &[Statement<'_>]) {
+        if self.scopes.is_shadowed("$inspect") {
+            return;
+        }
+        let Some(Statement::ExpressionStatement(es)) = statements.first() else {
+            return;
+        };
+        let mut expr = &es.expression;
+        while let Expression::ParenthesizedExpression(paren) = expr {
+            expr = &paren.expression;
+        }
+        let Expression::CallExpression(call) = expr else {
+            return;
+        };
+        if call_is_inspect_trace(call) {
+            self.legal_spans.insert((call.span.start, call.span.end));
+        }
+    }
+}
+
+impl<'a> oxc_ast_visit::Visit<'a> for InspectTracePlacementScan {
+    fn visit_program(&mut self, it: &Program<'a>) {
+        let mut frame = FxHashSet::default();
+        super::expr::collect_direct_decls(&it.body, &mut frame);
+        super::expr::collect_var_hoists(&it.body, &mut frame);
+        self.scopes.push(frame);
+        oxc_ast_visit::walk::walk_program(self, it);
+        self.scopes.pop();
+    }
+
+    fn visit_function(&mut self, it: &Function<'a>, flags: oxc_syntax::scope::ScopeFlags) {
+        // Push THIS function's scope (params + own id + body-local decls) FIRST so
+        // `allow_first_statement` sees a `$inspect` PARAM as a shadow. A
+        // declaration/expression `Function` body (incl. a class method's value) hosts
+        // the legal first-statement position.
+        self.scopes.push(super::expr::function_scope_names(it));
+        // A GENERATOR body is NOT a legal trace host — official svelte@5.56.3 rejects a
+        // generator-body first-statement trace with `inspect_trace_generator`. Only a
+        // NON-generator function body hosts the legal first-statement position, so a
+        // generator's first statement is never admitted to the allow-set and its trace
+        // rejects via the placement rule (both fail-closed). Async is fine — only
+        // generators are excluded.
+        if !it.r#generator {
+            if let Some(body) = &it.body {
+                self.allow_first_statement(&body.statements);
+            }
+        }
+        oxc_ast_visit::walk::walk_function(self, it, flags);
+        self.scopes.pop();
+    }
+
+    fn visit_arrow_function_expression(&mut self, it: &ArrowFunctionExpression<'a>) {
+        self.scopes.push(super::expr::arrow_scope_names(it));
+        // Only a BLOCK-bodied arrow has a function BODY; a concise (expression) body
+        // is an EXPRESSION position — never legal. (An arrow is never a generator.)
+        if !it.r#expression {
+            self.allow_first_statement(&it.body.statements);
+        }
+        oxc_ast_visit::walk::walk_arrow_function_expression(self, it);
+        self.scopes.pop();
+    }
+
+    fn visit_block_statement(&mut self, it: &oxc_ast::ast::BlockStatement<'a>) {
+        self.scopes.push(super::expr::block_scope_names(it));
+        oxc_ast_visit::walk::walk_block_statement(self, it);
+        self.scopes.pop();
+    }
+
+    fn visit_call_expression(&mut self, it: &CallExpression<'a>) {
+        // Only an UNSHADOWED `$inspect.trace()` is the rune trace; a param/local-shadowed
+        // `$inspect` is an ordinary object method call.
+        if call_is_inspect_trace(it) && !self.scopes.is_shadowed("$inspect") {
+            self.trace_spans.push((it.span.start, it.span.end));
+        }
+        oxc_ast_visit::walk::walk_call_expression(self, it);
+    }
+}
+
+/// Whether a call is `$inspect.trace(...)` — a `CallExpression` whose callee is the
+/// static `.trace` member on the bare `$inspect` identifier. Typed-AST only.
+fn call_is_inspect_trace(call: &CallExpression<'_>) -> bool {
+    let Expression::StaticMemberExpression(member) = &call.callee else {
+        return false;
+    };
+    // The member OBJECT is paren-transparent (`($inspect).trace()`) — official treats
+    // redundant parens around the `$inspect` receiver as transparent.
+    let mut object = &member.object;
+    while let Expression::ParenthesizedExpression(paren) = object {
+        object = &paren.expression;
+    }
+    member.property.name.as_str() == "trace"
+        && matches!(object, Expression::Identifier(id) if id.name.as_str() == "$inspect")
+}
+
 /// The set of declared TOP-LEVEL local names across the instance + module scripts (an
 /// accepted `bind:this` target / `$foo`-store referent must be one of these). Driven
 /// from the OXC AST of each script's top-level declarators.
@@ -1004,8 +1213,9 @@ fn directive_value_text(source: &str, value: &Option<SvelteAttributeValue>) -> O
 }
 
 /// Collect every template EXPRESSION source (interpolations, directive expressions,
-/// attribute expression values, spreads) under `nodes` into `out`. Used by the
-/// global-`$`-ref scan to cover template / bind / event positions.
+/// attribute expression values, spreads, and block/clause HEAD expressions) under
+/// `nodes` into `out`. Used by the global-`$`-ref scan and the `$inspect.trace()`
+/// placement scan to cover every template / bind / event / block-head position.
 fn collect_template_expression_sources(source: &str, nodes: &[SvelteNode], out: &mut Vec<String>) {
     for node in nodes {
         match node {
@@ -1019,8 +1229,40 @@ fn collect_template_expression_sources(source: &str, nodes: &[SvelteNode], out: 
                 collect_template_expression_sources(source, &el.children, out);
             }
             SvelteNode::Block(block) => {
+                // The block's HEAD expression (`{#if expr}` condition, `{#each list …}`
+                // list, `{#await expr}` subject, `{#key expr}` key) is an EXPRESSION
+                // position, not the body — collect it so the reference / placement scans
+                // see it (official rejects a misplaced trace / a `$`-global there too).
+                if let Some(head) = &block.head_expr {
+                    out.push(source[head.start as usize..head.end as usize].to_string());
+                }
+                // The `{#each list as item (KEY)}` KEY is a SEPARATE expression position
+                // (not folded into `head_expr`), so collect it too.
+                if let SvelteBlockKind::Each { key: Some(key), .. } = &block.kind {
+                    out.push(source[key.start as usize..key.end as usize].to_string());
+                }
                 collect_template_expression_sources(source, &block.children, out);
                 for clause in &block.clauses {
+                    // Only an `{:else if}` clause head is an EXPRESSION (a condition). A
+                    // `{:then v}` / `{:catch e}` `clause.expr` is a BINDING PATTERN, not an
+                    // expression — feeding it to the reference scan would false-reject a
+                    // `$`-prefixed await binding (`{:then $foo}`, which official accepts).
+                    // TODO(follow-up): a `{:then}` / `{:catch}` binding pattern can still
+                    // carry global `$` references in a DEFAULT initializer (`{:then {x =
+                    // $foo}}` → official `global_reference_invalid`), and a clause-bound
+                    // `$`-name referenced in the clause BODY (`{:then $foo}<b>{$foo}</b>`)
+                    // is official-accepted but currently false-rejected because the bound
+                    // name is not registered as a declared local. Both are PRE-EXISTING
+                    // await-clause global-`$`-scan gaps (unchanged by this block; the
+                    // pattern spans were never scanned before). The proper fix registers
+                    // the clause bindings as declared locals and scans only the pattern's
+                    // default-initializer expressions — a scope-aware pattern walk, not a
+                    // whole-span reparse.
+                    if matches!(clause.kind, SvelteClauseKind::ElseIf) {
+                        if let Some(expr) = &clause.expr {
+                            out.push(source[expr.start as usize..expr.end as usize].to_string());
+                        }
+                    }
                     collect_template_expression_sources(source, &clause.children, out);
                 }
             }

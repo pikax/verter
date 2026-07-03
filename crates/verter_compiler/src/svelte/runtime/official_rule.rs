@@ -163,6 +163,16 @@ pub enum CoreOfficialValidationRule {
     /// source-text scan; scanned AFTER the group-policy and paren scans so the more-specific
     /// codes win.
     BindInvalidExpression,
+    /// A `$inspect.trace(...)` call OUTSIDE its single legal position — official
+    /// `inspect_trace_invalid_placement` ("`$inspect.trace(...)` must be the first
+    /// statement of a function body"). The ONLY legal position is the `expression` of an
+    /// `ExpressionStatement` that is `statements[0]` of a function body (a
+    /// declaration/expression `Function` or a BLOCK-bodied arrow). Everything else — a
+    /// top-level script statement, a non-first statement, a statement nested in an
+    /// `if`/loop/block/`try`/`switch`, a concise-arrow expression body, a call argument,
+    /// an interpolation — is the official hard error. Detected from the OXC AST of every
+    /// script + template expression source, never a source-text scan.
+    InspectTraceInvalidPlacement,
 }
 
 impl CoreOfficialValidationRule {
@@ -193,6 +203,7 @@ impl CoreOfficialValidationRule {
         CoreOfficialValidationRule::BindGroupInvalidExpression,
         CoreOfficialValidationRule::BindInvalidParens,
         CoreOfficialValidationRule::BindInvalidExpression,
+        CoreOfficialValidationRule::InspectTraceInvalidPlacement,
     ];
 
     /// The PascalCase rule name as it appears in a reject corpus row's `rule` field.
@@ -222,6 +233,7 @@ impl CoreOfficialValidationRule {
             Self::BindGroupInvalidExpression => "BindGroupInvalidExpression",
             Self::BindInvalidParens => "BindInvalidParens",
             Self::BindInvalidExpression => "BindInvalidExpression",
+            Self::InspectTraceInvalidPlacement => "InspectTraceInvalidPlacement",
         }
     }
 
@@ -271,6 +283,7 @@ impl CoreOfficialValidationRule {
             Self::BindGroupInvalidExpression => "bind_group_invalid_expression",
             Self::BindInvalidParens => "bind_invalid_parens",
             Self::BindInvalidExpression => "bind_invalid_expression",
+            Self::InspectTraceInvalidPlacement => "inspect_trace_invalid_placement",
         }
     }
 
@@ -310,6 +323,9 @@ impl CoreOfficialValidationRule {
             }
             Self::BindInvalidParens => "svelte-official-reject-bind-invalid-parens",
             Self::BindInvalidExpression => "svelte-official-reject-bind-invalid-expression",
+            Self::InspectTraceInvalidPlacement => {
+                "svelte-official-reject-inspect-trace-invalid-placement"
+            }
         }
     }
 
@@ -372,6 +388,9 @@ impl CoreOfficialValidationRule {
                 "a `bind:` directive whose target is neither a valid lvalue \
                  (Identifier / MemberExpression) nor a two-element `{get, set}` pair \
                  (a call, a literal, a 3+-element sequence, or other non-assignable shape)"
+            }
+            Self::InspectTraceInvalidPlacement => {
+                "a `$inspect.trace()` call that is not the first statement of a function body"
             }
         };
         format!(

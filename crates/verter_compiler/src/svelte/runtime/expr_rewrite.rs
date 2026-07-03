@@ -326,7 +326,7 @@ fn rewrite_expression_dialect(
             inner, &mut ct, 0, &wrapped,
         );
     }
-    // (2) Apply the signal read/write rewrites.
+    // (2) Apply the signal read/write rewrites + the elision drops.
     for edit in &edits {
         match edit {
             Edit::Overwrite { start, end, text } => {
@@ -334,6 +334,9 @@ fn rewrite_expression_dialect(
             }
             Edit::Append { at, text } => {
                 ct.append_left(*at, text);
+            }
+            Edit::Remove { start, end } => {
+                ct.remove(*start, *end);
             }
         }
     }
@@ -416,6 +419,11 @@ enum Edit {
     /// Append `text` after byte `at` (the closing `)` of an assignment / update
     /// wrap, placed after a sub-expression that keeps its own leaf edits).
     Append { at: u32, text: String },
+    /// Remove `[start, end)` entirely (a production-elided `$inspect.trace(...)`
+    /// statement dropped in place). The dropped span carries no inner edits (the
+    /// walk never descends into a dropped statement), so the removal composes
+    /// disjointly with the leaf rewrites.
+    Remove { start: u32, end: u32 },
 }
 
 /// The resolution context the rewriter consults (binding table, scope graph, prop
@@ -453,18 +461,29 @@ enum Occurrence {
     /// A signal update (`x++` → `$.update(x)`). Carries the whole-update span + the
     /// emitted text.
     SignalUpdate { span: oxc_span::Span, text: String },
+    /// A production-ELIDED statement dropped in place — an unshadowed
+    /// `$inspect.trace(...)` expression STATEMENT inside a lowered function /
+    /// arrow body (official `dev:false` removes the call; the surrounding body is
+    /// preserved). Carries the whole-statement span; the walk never descends into
+    /// it, so the span holds no other occurrence.
+    DropStatement { span: oxc_span::Span },
 }
 
 /// Pass 1: the COMPLETE scope-aware occurrence collector. It walks the OXC
 /// expression and records each binding-bearing READ / REASSIGN / UPDATE as a typed
 /// [`Occurrence`] (already lowered to its rewrite decision), plus the FIRST
 /// unsupported expression form it hits (`await`, a destructuring write target, a
-/// TS-wrapped reactive write target) as a `refusal`.
+/// TS-wrapped reactive write target, a non-statement-position `$inspect`
+/// reference) as a `refusal`. A statement-position `$inspect.trace(...)` inside a
+/// lowered function / arrow body records a [`Occurrence::DropStatement`] instead
+/// (the production elision).
 ///
 /// COMPLETE BY CONSTRUCTION: every override DELEGATES to `walk::walk_*` after
 /// handling its node, so the traversal reaches EVERY expression AND statement node
-/// — no subtree is dropped. A LOCAL shadow stack (`locals`) models the expression's
-/// own nested scopes so a shadowing local of a signal name is NOT recorded.
+/// — no subtree is dropped (the ONE deliberate exception: a DROPPED
+/// `$inspect.trace()` statement, whose whole span is removed so its subtree must
+/// record nothing). A LOCAL shadow stack (`locals`) models the expression's own
+/// nested scopes so a shadowing local of a signal name is NOT recorded.
 struct BindingOccurrenceCollector<'s> {
     ctx: RewriteResolveCtx<'s>,
     /// The active LOCAL shadow frames (innermost last).
@@ -805,7 +824,23 @@ impl<'a> Visit<'a> for BindingOccurrenceCollector<'_> {
 
     fn visit_arrow_function_expression(&mut self, it: &ArrowFunctionExpression<'a>) {
         self.locals.push(arrow_scope_names(it));
-        walk::walk_arrow_function_expression(self, it);
+        if it.r#expression {
+            // A CONCISE (expression-bodied) arrow: OXC models the body as ONE
+            // synthetic `ExpressionStatement`, but it is an EXPRESSION position,
+            // not a droppable statement — dropping it would remove the whole
+            // body (`() => )`, invalid JS). Visit the params and the body
+            // EXPRESSION directly so the statement-drop never fires; a concise
+            // `$inspect.trace()` then refuses via the identifier walk (matching
+            // the official `inspect_trace_invalid_placement` error).
+            self.visit_formal_parameters(&it.params);
+            if let [Statement::ExpressionStatement(stmt)] = it.body.statements.as_slice() {
+                self.visit_expression(&stmt.expression);
+            } else {
+                self.visit_function_body(&it.body);
+            }
+        } else {
+            walk::walk_arrow_function_expression(self, it);
+        }
         self.locals.pop();
     }
 
@@ -894,7 +929,37 @@ impl<'a> Visit<'a> for BindingOccurrenceCollector<'_> {
         walk::walk_object_property(self, it);
     }
 
+    fn visit_expression_statement(&mut self, it: &oxc_ast::ast::ExpressionStatement<'a>) {
+        // A production-ELIDED `$inspect.trace(...)` expression STATEMENT inside a
+        // lowered function / arrow body is DROPPED IN PLACE (official `dev:false`
+        // removes the call; the surrounding body statements are preserved). The
+        // walk does NOT descend into the dropped statement, so no inner occurrence
+        // (and no `$inspect` refusal) is recorded inside the removed span. A
+        // SHADOWED `$inspect` is an ordinary local call and lowers normally.
+        if is_inspect_trace_call(&it.expression) && !self.is_local("$inspect") {
+            self.occurrences
+                .push(Occurrence::DropStatement { span: it.span });
+            return;
+        }
+        walk::walk_expression_statement(self, it);
+    }
+
     fn visit_identifier_reference(&mut self, it: &IdentifierReference<'a>) {
+        // An UNSHADOWED `$inspect` reference reaching a NON-elided position (a
+        // concise arrow body `() => $inspect.trace()` — an official ERROR
+        // (`inspect_trace_invalid_placement`) — an interpolation `{$inspect(c)}`,
+        // a call argument) is outside the supported production-elision surface
+        // (statement position only). Fail closed rather than emit a raw
+        // `$inspect` reference (a runtime `ReferenceError`); a statement-position
+        // `$inspect.trace()` was consumed by the drop above (its subtree is never
+        // walked), and the top-level `$inspect(...)` / `.with(...)` statements
+        // never reach the rewriter (the instance-item classifier elides them).
+        if it.name.as_str() == "$inspect" && !self.is_local("$inspect") {
+            self.refuse(UnsupportedSvelteRuntimeSurface::AdvancedRune {
+                rune: "$inspect",
+                span: VerterSpan::new(it.span.start, it.span.end),
+            });
+        }
         // A READ-position reference: record a signal / prop leaf. Assignment / update
         // HEAD identifiers never reach here (their visitors consume the head before
         // recursing), so this is purely the read surface.
@@ -972,9 +1037,45 @@ impl RewritePlanner {
                         text: text.clone(),
                     });
                 }
+                Occurrence::DropStatement { span } => {
+                    self.edits.push(Edit::Remove {
+                        start: span.start,
+                        end: span.end,
+                    });
+                }
             }
         }
     }
+}
+
+/// Whether an expression is an unshadowed-CANDIDATE `$inspect.trace(...)` call —
+/// a CallExpression whose callee is the static `.trace` member on the bare
+/// `$inspect` identifier. A PARENTHESIZED wrapper (`($inspect.trace())`) is
+/// transparent — official treats it as the same statement — so parens are
+/// unwrapped (recursively) before the shape check. Shadowing is the CALLER's
+/// check (the collector consults its own local shadow frames). Driven from the
+/// typed OXC AST only. Shared with the delegated event-handler shape gate
+/// ([`super::client_shapes`]), which skips the statement this rewriter later
+/// drops.
+pub(super) fn is_inspect_trace_call(expr: &Expression<'_>) -> bool {
+    let mut expr = expr;
+    while let Expression::ParenthesizedExpression(paren) = expr {
+        expr = &paren.expression;
+    }
+    let Expression::CallExpression(call) = expr else {
+        return false;
+    };
+    let Expression::StaticMemberExpression(member) = &call.callee else {
+        return false;
+    };
+    // The member OBJECT is likewise paren-transparent (`($inspect).trace()`) — official
+    // treats redundant parens around the `$inspect` receiver as transparent.
+    let mut object = &member.object;
+    while let Expression::ParenthesizedExpression(paren) = object {
+        object = &paren.expression;
+    }
+    member.property.name.as_str() == "trace"
+        && matches!(object, Expression::Identifier(id) if id.name.as_str() == "$inspect")
 }
 
 /// The base operator of a compound assignment (`+=` → `+`, `*=` → `*`, …).

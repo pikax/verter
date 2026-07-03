@@ -442,7 +442,10 @@ pub fn script_uses_effect(alloc: &Allocator, instance_source: &str) -> bool {
 ///   → `let name;` (the `bind:this` clone-root local);
 /// - [`BindLocalLet`](super::instance_items::SupportedInstanceScriptItem::BindLocalLet)
 ///   → `let name = <init>;` / `let name;` (a plain-local DOM bind-target root, verbatim
-///   literal init, or the uninitialized no-init form).
+///   literal init, or the uninitialized no-init form);
+/// - [`InspectElided`](super::instance_items::SupportedInstanceScriptItem::InspectElided)
+///   → NOTHING (a production-elided `$inspect(...)` / `$inspect(...).with(...)`
+///   statement).
 ///
 /// A primitive-literal init carries no signal read and no TS syntax, so it is emitted
 /// verbatim (the over-arity / non-primitive / destructured / `$state.raw` forms were
@@ -473,6 +476,12 @@ pub(super) fn lower_simple_instance_item(
         // A named function-pair function: its body lowers through the FALLIBLE rewriter,
         // which lives on the projection — the caller handles it.
         Item::FunctionDecl { .. } => SimpleItemLowering::NeedsRewriter,
+        // A top-level `$inspect(...);` / `$inspect(...).with(...);` statement is
+        // production-ELIDED: it emits NOTHING (no helper, no import, no dev form —
+        // official `dev:false` drops the statement, leaving only a cosmetic `;;`
+        // residue Verter does not reproduce). The `.with` context-frame fact is
+        // owned by the `needs_context` scan, not this lowering.
+        Item::InspectElided => SimpleItemLowering::None,
     }
 }
 
@@ -481,7 +490,8 @@ pub(super) fn lower_simple_instance_item(
 pub(super) enum SimpleItemLowering {
     /// The emitted client-body statement.
     Statement(String),
-    /// The item emits no component-body declaration (a no-default props destructure).
+    /// The item emits no component-body declaration (a no-default props
+    /// destructure, a production-elided `$inspect` statement).
     None,
     /// The item is a `FunctionDecl` whose body lowers through the FALLIBLE expression
     /// rewriter — the caller (which holds the rewriter) handles it.

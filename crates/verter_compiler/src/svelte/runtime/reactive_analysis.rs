@@ -1067,7 +1067,11 @@ impl HasCallScan<'_> {
 ///   safe;
 /// - a member expression whose leftmost identifier resolves to such an unsafe
 ///   binding;
-/// - a `$effect(...)` rune (Svelte needs the runes-mode context for it).
+/// - a `$effect(...)` rune (Svelte needs the runes-mode context for it);
+/// - a `$inspect(...).with(...)` chain (unshadowed `$inspect`) — the elided
+///   `.with` statement still forces the official production frame
+///   (`$.push($$props, true)` / `$.pop()` + the `$$props` param); plain
+///   `$inspect(x)` / `$inspect.trace()` never trigger.
 ///
 /// The "unsafe root names" (imports + prop names) come from the instance script;
 /// the scan is scope-aware (a local shadowing an unsafe name is safe). This is the
@@ -1303,7 +1307,18 @@ impl<'a> Visit<'a> for NeedsContextScan<'_> {
         } else if !is_rune_call(it) && self.root_is_unsafe(&it.callee) {
             // A NON-rune call whose callee roots at an unsafe binding (import / prop)
             // is unsafe. A rune call (`$state`/`$derived`/`$props`/…) is never an
-            // unsafe runtime call here.
+            // unsafe runtime call here. This arm fires for the
+            // `$inspect(...).with(...)` chain, which FORCES the component frame in
+            // official production output (`App($$anchor, $$props)` +
+            // `$.push($$props, true)` / `$.pop()`) even though the statement itself
+            // is elided: the `.with` callee's OBJECT is a CallExpression (not an
+            // identifier), so the chain is not a rune call and its call-result root
+            // is unsafe — shadowed or not, matching the official
+            // `is_safe_identifier` semantics. (The `.with` member is ALSO reached by
+            // `visit_static_member_expression` below, whose `root_is_unsafe(&object)`
+            // independently forces the frame — the coverage is redundant by design, so
+            // removing either path preserves the frame.) Plain `$inspect(x)` and
+            // `$inspect.trace()` are rune calls and never trigger context.
             self.found = true;
         }
         walk::walk_call_expression(self, it);

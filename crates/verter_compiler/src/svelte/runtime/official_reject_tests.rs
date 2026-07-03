@@ -530,6 +530,53 @@ fn dollar_prefixed_identifier_declarator_is_dollar_prefix_invalid() {
 }
 
 #[test]
+fn dollar_prefixed_import_locals_are_dollar_prefix_invalid() {
+    // `import $inspect from './x.svelte'` — a `$`-prefixed imported LOCAL binding is
+    // official `dollar_prefix_invalid` ("The $ prefix is reserved, and cannot be used
+    // for variables and imports"). RED before the fix: the declarator scan covered
+    // top-level VariableDeclarations only, so the import slipped through to
+    // `$inspect`-elision (fail-open on invalid input). All three local-binding forms:
+    // default, named-`as` local, namespace.
+    assert_eq!(
+        gate_full(
+            "<script>import $inspect from './x.svelte'; let c = $state(0); $inspect(c);</script>\n<button onclick={() => c++}>{c}</button>\n"
+        ),
+        Some(OfficialRejection::with_code(
+            CoreOfficialValidationRule::DollarPrefixInvalid,
+            "dollar_prefix_invalid",
+        )),
+        "a `$`-prefixed DEFAULT import local must reject with the exact code"
+    );
+    assert_eq!(
+        gate("<script>import { foo as $bar } from './m'; let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n"),
+        Some(CoreOfficialValidationRule::DollarPrefixInvalid),
+        "a `$`-prefixed NAMED-`as` import local must reject"
+    );
+    assert_eq!(
+        gate("<script>import * as $ns from './m'; let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n"),
+        Some(CoreOfficialValidationRule::DollarPrefixInvalid),
+        "a `$`-prefixed NAMESPACE import local must reject"
+    );
+}
+
+#[test]
+fn plain_import_locals_are_not_dollar_prefix_invalid() {
+    // NEGATIVE: plain (non-`$`) import locals never trip the dollar-prefix scan —
+    // the §1.2 component-import surface (`import Child from './Child.svelte'`) must
+    // keep passing the gate cleanly.
+    assert_eq!(
+        gate("<script>import Child from './Child.svelte'; let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n"),
+        None,
+        "a plain default import local must pass the gate"
+    );
+    assert_eq!(
+        gate("<script>import { foo, bar as baz } from './m'; let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n"),
+        None,
+        "plain named import locals must pass the gate"
+    );
+}
+
+#[test]
 fn plain_named_declarations_are_not_dollar_prefix_invalid() {
     // NEGATIVE: a plain (non-`$`) declaration is never a dollar-prefix violation —
     // the §1.2 fixture's `let name`/`let count` must pass the gate cleanly.
@@ -537,6 +584,300 @@ fn plain_named_declarations_are_not_dollar_prefix_invalid() {
             gate("<script>let name = $state('world'); let count = $state(0);</script>\n<h1>Hello {name}!</h1>\n<input bind:value={name} />\n<button onclick={() => count += 1}>clicks: {count}</button>\n"),
             None
         );
+}
+
+// ── InspectTraceInvalidPlacement (`$inspect.trace()` placement) ──────────────
+
+#[test]
+fn inspect_trace_non_first_statement_is_invalid_placement() {
+    // A trace call as a NON-first statement of an `$effect` arrow body — official
+    // svelte@5.56.3 hard-errors `inspect_trace_invalid_placement` ("must be the first
+    // statement of a function body"). RED before the fix: Verter silently DROPPED the
+    // statement (over-acceptance).
+    assert_eq!(
+        gate_full(
+            "<script>let c = $state(0); $effect(() => { c++; $inspect.trace(); });</script>\n<p>{c}</p>\n"
+        ),
+        Some(OfficialRejection::with_code(
+            CoreOfficialValidationRule::InspectTraceInvalidPlacement,
+            "inspect_trace_invalid_placement",
+        )),
+        "a non-first-statement `$inspect.trace()` must reject with the exact code"
+    );
+}
+
+#[test]
+fn inspect_trace_nested_in_if_or_block_is_invalid_placement() {
+    // A trace call nested inside an `if` consequent of a handler arrow — the statement
+    // is first in the IF's block, but that block is not a FUNCTION body, so official
+    // still errors. Same for a bare nested `{ }` block.
+    assert_eq!(
+        gate(
+            "<script>let c = $state(0);</script>\n<button onclick={() => { if (c > 0) { $inspect.trace(); } c++; }}>{c}</button>\n"
+        ),
+        Some(CoreOfficialValidationRule::InspectTraceInvalidPlacement),
+        "a trace inside an `if` consequent must reject"
+    );
+    assert_eq!(
+        gate(
+            "<script>let c = $state(0); $effect(() => { { $inspect.trace(); } c++; });</script>\n<p>{c}</p>\n"
+        ),
+        Some(CoreOfficialValidationRule::InspectTraceInvalidPlacement),
+        "a trace inside a bare nested block must reject"
+    );
+}
+
+#[test]
+fn inspect_trace_top_level_is_invalid_placement() {
+    // A TOP-LEVEL script `$inspect.trace();` — the program body is not a function
+    // body, so official hard-errors. (Previously refused as a generic unsupported
+    // instance-script item; the exact official code is the parity improvement.)
+    assert_eq!(
+        gate_full(
+            "<script>let c = $state(0); $inspect.trace();</script>\n<button onclick={() => c++}>{c}</button>\n"
+        ),
+        Some(OfficialRejection::with_code(
+            CoreOfficialValidationRule::InspectTraceInvalidPlacement,
+            "inspect_trace_invalid_placement",
+        )),
+        "a top-level `$inspect.trace()` must reject with the exact code"
+    );
+}
+
+#[test]
+fn inspect_trace_concise_arrow_is_invalid_placement() {
+    // A CONCISE-arrow expression body (`() => $inspect.trace()`) is an EXPRESSION
+    // position, not the first statement of a function body — official hard-errors.
+    assert_eq!(
+        gate(
+            "<script>let c = $state(0);</script>\n<button onclick={() => c++} onfocus={() => $inspect.trace()}>{c}</button>\n"
+        ),
+        Some(CoreOfficialValidationRule::InspectTraceInvalidPlacement),
+        "a concise-arrow `$inspect.trace()` body must reject"
+    );
+}
+
+#[test]
+fn inspect_trace_first_statement_positions_pass_the_gate() {
+    // NEGATIVE: the ONE legal position — the first statement of a function body — for
+    // each owning function form. The gate must NOT reject these (official accepts and
+    // drops the call under `dev:false`); downstream the rewriter elides them.
+    // (a) First statement of an `$effect` BLOCK arrow.
+    assert_eq!(
+        gate(
+            "<script>let c = $state(0); $effect(() => { $inspect.trace(); c++; });</script>\n<p>{c}</p>\n"
+        ),
+        None,
+        "first statement of an $effect arrow body is the legal position"
+    );
+    // (b) First statement of a handler BLOCK arrow.
+    assert_eq!(
+        gate(
+            "<script>let c = $state(0);</script>\n<button onclick={() => { $inspect.trace(); c++; }}>{c}</button>\n"
+        ),
+        None,
+        "first statement of a handler arrow body is the legal position"
+    );
+    // (c) First statement of a `function` DECLARATION body (the gate must not flag it
+    // even though the top-level function itself fails closed downstream as an
+    // unsupported instance-script item — a different, non-official-reject channel).
+    assert_eq!(
+        gate(
+            "<script>let c = $state(0); function tick() { $inspect.trace(); c = c + 1; }</script>\n<button onclick={() => c++}>{c}</button>\n"
+        ),
+        None,
+        "first statement of a function declaration body is the legal position"
+    );
+    // (d) First statement of a function EXPRESSION body.
+    assert_eq!(
+        gate(
+            "<script>let c = $state(0); const tick = function () { $inspect.trace(); c = c + 1; };</script>\n<button onclick={() => c++}>{c}</button>\n"
+        ),
+        None,
+        "first statement of a function expression body is the legal position"
+    );
+}
+
+#[test]
+fn inspect_trace_parenthesized_first_statement_passes_the_gate() {
+    // NEGATIVE: a PARENTHESIZED first-statement trace — `($inspect.trace());` /
+    // `(($inspect.trace()));` as `statements[0]` of a handler arrow body. The paren
+    // wrapper is transparent: official svelte@5.56.3 ACCEPTS (and drops) both. RED
+    // before the fix: the allow-set required a BARE `CallExpression`, so the inner
+    // call span was collected as illegal (a false reject of valid Svelte).
+    assert_eq!(
+        gate(
+            "<script>let c = $state(0);</script>\n<button onclick={() => { ($inspect.trace()); c++; }}>{c}</button>\n"
+        ),
+        None,
+        "a single-parenthesized first-statement trace must pass the gate"
+    );
+    assert_eq!(
+        gate(
+            "<script>let c = $state(0);</script>\n<button onclick={() => { (($inspect.trace())); c++; }}>{c}</button>\n"
+        ),
+        None,
+        "a double-parenthesized first-statement trace must pass the gate"
+    );
+    // POSITIVE: parens never LEGALIZE a NON-first trace — official still errors.
+    assert_eq!(
+        gate(
+            "<script>let c = $state(0);</script>\n<button onclick={() => { c++; ($inspect.trace()); }}>{c}</button>\n"
+        ),
+        Some(CoreOfficialValidationRule::InspectTraceInvalidPlacement),
+        "a parenthesized NON-first trace must still reject"
+    );
+}
+
+#[test]
+fn inspect_trace_param_shadow_is_local_not_rune() {
+    // A `$inspect` PARAMETER is VALID Svelte — svelte@5.56.3 ACCEPTS `($inspect) => {
+    // ... }` and `function get($inspect) { ... }` (a `$`-prefixed PARAM is legal; only a
+    // `const $inspect` LOCAL is `dollar_prefix_invalid`). Under that param
+    // `$inspect.trace()` is an ORDINARY local method call, NOT the rune trace. The
+    // placement scan must be SCOPE-AWARE (mirroring the `DollarRefScan` `ShadowStack`):
+    // a param-shadowed `$inspect.trace()` is ignored, so a NON-first-statement local
+    // trace does NOT trip the placement reject. RED before the fix: the scan treated
+    // EVERY `$inspect.trace()` as a rune trace, so `c++; $inspect.trace();` under a
+    // `$inspect` param false-rejected as `inspect_trace_invalid_placement`.
+    // (a) an ARROW with a `$inspect` param.
+    assert_eq!(
+        gate(
+            "<script>let c = $state(0);</script>\n<button onclick={($inspect) => { c++; $inspect.trace(); }}>{c}</button>\n"
+        ),
+        None,
+        "a `$inspect` arrow PARAM makes `$inspect.trace()` an ordinary local call"
+    );
+    // (b) a function DECLARATION with a `$inspect` param.
+    assert_eq!(
+        gate(
+            "<script>let c = $state(0); function get($inspect){ c++; $inspect.trace(); }</script>\n<button onclick={() => c++}>{c}</button>\n"
+        ),
+        None,
+        "a `$inspect` function-decl PARAM makes `$inspect.trace()` an ordinary local call"
+    );
+    // POSITIVE control: WITHOUT the param shadow the SAME non-first `$inspect.trace()`
+    // is the rune trace and still rejects — scope-awareness must not disable the rule.
+    assert_eq!(
+        gate(
+            "<script>let c = $state(0);</script>\n<button onclick={() => { c++; $inspect.trace(); }}>{c}</button>\n"
+        ),
+        Some(CoreOfficialValidationRule::InspectTraceInvalidPlacement),
+        "without a `$inspect` local, a non-first trace still rejects"
+    );
+}
+
+#[test]
+fn inspect_trace_in_generator_body_is_invalid_placement() {
+    // A GENERATOR function is NOT a legal trace host — official svelte@5.56.3 rejects a
+    // generator-body first-statement `$inspect.trace()` with `inspect_trace_generator`
+    // (a SEPARATE official rule); Verter rejects it via the placement rule (both
+    // fail-closed). RED before the fix: the allow-set admitted a generator body's first
+    // statement, so the generator trace false-passed the gate.
+    assert_eq!(
+        gate(
+            "<script>let c = $state(0); function* g(){ $inspect.trace(); yield c; }</script>\n<button onclick={() => c++}>{c}</button>\n"
+        ),
+        Some(CoreOfficialValidationRule::InspectTraceInvalidPlacement),
+        "a generator-body first-statement trace is not a legal position"
+    );
+    // POSITIVE control: an ASYNC (non-generator) first-statement trace stays LEGAL
+    // (official accepts + drops it) — the generator exclusion must not over-reach.
+    assert_eq!(
+        gate(
+            "<script>let c = $state(0); async function tick(){ $inspect.trace(); await 0; }</script>\n<button onclick={() => c++}>{c}</button>\n"
+        ),
+        None,
+        "an async (non-generator) first-statement trace is still legal"
+    );
+}
+
+#[test]
+fn inspect_trace_in_block_head_is_invalid_placement() {
+    // A `$inspect.trace()` in a block HEAD / clause / key expression is not a
+    // function-body first statement — official svelte@5.56.3 rejects
+    // `inspect_trace_invalid_placement`. RED before the fix: the shared
+    // template-expression collection walked block/clause CHILDREN but skipped the block
+    // head / clause / `{#await}` subject / `{#key}` expression, so the trace scan never
+    // saw those positions (they only fell to a generic downstream refusal, not the exact
+    // official code).
+    for src in [
+        "<script>let c = $state(0);</script>\n{#if $inspect.trace()}<p>{c}</p>{/if}\n",
+        "<script>let c = $state(0);</script>\n{#if c}<p>a</p>{:else if $inspect.trace()}<p>b</p>{/if}\n",
+        "<script>let c = $state(0);</script>\n{#await $inspect.trace()}<p>a</p>{/await}\n",
+        "<script>let c = $state(0);</script>\n{#key $inspect.trace()}<p>{c}</p>{/key}\n",
+    ] {
+        assert_eq!(
+            gate(src),
+            Some(CoreOfficialValidationRule::InspectTraceInvalidPlacement),
+            "a block-head trace must reject: {src}"
+        );
+    }
+}
+
+#[test]
+fn inspect_trace_object_parenthesized_is_placement_aware() {
+    // `($inspect).trace()` — parens around the member OBJECT. The paren wrapper is
+    // transparent: official svelte@5.56.3 ACCEPTS (and drops) it as a first statement
+    // and REJECTS it non-first. RED before the fix: the trace-shape check required a
+    // BARE `$inspect` identifier as the member object, so `($inspect).trace()` was not
+    // recognised as the rune trace at all (a first-statement one failed closed in the
+    // rewriter instead of dropping; a non-first one escaped the exact placement code).
+    assert_eq!(
+        gate(
+            "<script>let c = $state(0);</script>\n<button onclick={() => { ($inspect).trace(); c++; }}>{c}</button>\n"
+        ),
+        None,
+        "an object-parenthesized first-statement trace passes the gate"
+    );
+    assert_eq!(
+        gate(
+            "<script>let c = $state(0);</script>\n<button onclick={() => { c++; ($inspect).trace(); }}>{c}</button>\n"
+        ),
+        Some(CoreOfficialValidationRule::InspectTraceInvalidPlacement),
+        "an object-parenthesized NON-first trace still rejects with the exact code"
+    );
+}
+
+#[test]
+fn await_then_catch_dollar_bindings_are_not_global_references() {
+    // `{:then $foo}` / `{:catch $err}` bind a `$`-prefixed name — official svelte@5.56.3
+    // ACCEPTS these await-clause bindings (they are BINDINGS, not references). The block
+    // head-expression collection must NOT feed a `{:then}` / `{:catch}` BINDING span into
+    // the global-`$`-reference scan (only an `{:else if}` CONDITION is an expression). RED
+    // before the fix: collecting every `clause.expr` fed the binding `$foo` to the
+    // reference scan, which false-rejected it as `global_reference_invalid`.
+    assert_eq!(
+        gate("<script>let p = $state(Promise.resolve(1));</script>\n{#await p}<i>w</i>{:then $foo}<b>x</b>{/await}\n"),
+        None,
+        "a dollar-prefixed then-binding is not a global reference"
+    );
+    assert_eq!(
+        gate("<script>let p = $state(Promise.resolve(1));</script>\n{#await p}<i>w</i>{:catch $err}<b>x</b>{/await}\n"),
+        None,
+        "a dollar-prefixed catch-binding is not a global reference"
+    );
+    // POSITIVE control: an `{:else if}` CONDITION is still collected — a misplaced trace
+    // there still rejects.
+    assert_eq!(
+        gate("<script>let c = $state(0);</script>\n{#if c}<p>a</p>{:else if $inspect.trace()}<p>b</p>{/if}\n"),
+        Some(CoreOfficialValidationRule::InspectTraceInvalidPlacement),
+        "an else-if condition trace still rejects"
+    );
+}
+
+#[test]
+fn inspect_trace_in_each_key_is_invalid_placement() {
+    // `{#each list as item (KEY)}` — the KEY is an EXPRESSION position stored SEPARATELY
+    // from the block head (`SvelteBlockKind::Each { key }`), not in `head_expr`. Official
+    // svelte@5.56.3 rejects a `$inspect.trace()` in the each-key with
+    // `inspect_trace_invalid_placement`. RED before the fix: the each-key span was not
+    // collected, so the trace escaped the exact placement code (generic refusal only).
+    assert_eq!(
+        gate("<script>let c = $state(0);</script>\n{#each [1] as i ($inspect.trace())}<p>{i}</p>{/each}\n"),
+        Some(CoreOfficialValidationRule::InspectTraceInvalidPlacement),
+        "a misplaced trace in an each-key rejects with the exact code"
+    );
 }
 
 // ── ScriptBodyParse (same-scope redeclaration) ───────────────────────────────

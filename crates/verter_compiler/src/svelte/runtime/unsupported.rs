@@ -53,7 +53,9 @@ pub enum UnsupportedSvelteRuntimeSurface {
     /// A rune beyond the supported `$state` / `$derived` / `$effect` / basic
     /// `$props()` subset (`$state.raw` / `$state.snapshot` / `$effect.pre` /
     /// `$effect.root` / `$effect.tracking` / `$props()` rest / `$props.id` /
-    /// `$bindable` / `$inspect`).
+    /// `$bindable`), or a `$inspect` reference OUTSIDE the production-elided
+    /// statement positions (the statement forms are supported as elision; a
+    /// non-statement-position `$inspect` reference fails closed at the rewriter).
     AdvancedRune {
         /// A short rune label.
         rune: &'static str,

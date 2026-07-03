@@ -97,17 +97,29 @@ pub(super) enum SupportedInstanceScriptItem {
         /// The function declaration's full source text (lowered via the rewriter).
         source: String,
     },
+    /// A top-level `$inspect(...);` / `$inspect(...).with(...);` expression
+    /// STATEMENT — the production-ELIDED `$inspect` family. Official
+    /// `svelte@5.56.3` (`dev:false`) removes the whole statement (leaving only a
+    /// cosmetic `;;` empty-statement residue); Verter lowers it to NOTHING (no
+    /// client-body item, no helper, no import, no dev form), so the variant
+    /// carries no payload. A `.with(...)` chain still FORCES the component
+    /// context frame (`$.push($$props, true)` / `$.pop()` + the `$$props`
+    /// param) — that fact is owned by the [`super::reactive_analysis`]
+    /// `needs_context` scan, not by this item (which records only the elision).
+    InspectElided,
 }
 
 /// Classify the instance script's TOP-LEVEL items into the strict finite
 /// [`SupportedInstanceScriptItem`] allowlist, or fail closed on the FIRST
 /// out-of-allowlist item.
 ///
-/// The four supported shapes are EXACTLY:
+/// The five supported shapes are EXACTLY:
 /// 1. `let name = $state(<primitive literal>);`
 /// 2. a single no-default `$props()` destructure;
 /// 3. `let el;` used solely as a supported `bind:this` target;
-/// 4. `let v = <literal-only init>;` used solely as a DOM bind-TARGET lvalue root.
+/// 4. `let v = <literal-only init>;` used solely as a DOM bind-TARGET lvalue root;
+/// 5. a production-ELIDED `$inspect(...);` / `$inspect(...).with(...);` statement
+///    (lowered to nothing).
 ///
 /// `bind_this_targets` is the set of local names used as a supported `bind:this`
 /// target (from the accepted bind shapes) — a bare `let el;` is admitted ONLY when
@@ -172,9 +184,10 @@ pub(super) fn classify_supported_instance_items(
 
 /// Classify ONE top-level instance-script statement into its supported item, or
 /// fail closed. The supported statements are EXACTLY a `let`-variable declaration
-/// matching a `$state` / `$props()` / `bind:this` / plain-local bind shape, OR a named
-/// `function` declaration referenced by a DOM function-pair bind; every other statement
-/// kind fails closed with a precise `construct` label.
+/// matching a `$state` / `$props()` / `bind:this` / plain-local bind shape, a named
+/// `function` declaration referenced by a DOM function-pair bind, OR a
+/// production-elided `$inspect(...);` / `$inspect(...).with(...);` statement; every
+/// other statement kind fails closed with a precise `construct` label.
 fn classify_instance_statement(
     stmt: &Statement<'_>,
     instance_source: &str,
@@ -197,6 +210,16 @@ fn classify_instance_statement(
         Statement::FunctionDeclaration(func) => {
             classify_function_declaration(func, instance_source, bind_function_pair_names)
         }
+        // A top-level `$inspect(...);` / `$inspect(...).with(...);` expression
+        // statement is production-ELIDED (official `dev:false` removes the whole
+        // statement). Classified from the TYPED OXC expression shape; every OTHER
+        // expression statement — including a top-level `$inspect.trace();`, an
+        // official ERROR (`inspect_trace_invalid_placement`) — still fails closed
+        // below. (A top-level shadowing `let $inspect` is a `$`-prefixed binding
+        // refused by the declarator gate, so the bare name here is the rune.)
+        Statement::ExpressionStatement(stmt) if is_inspect_elision_expression(&stmt.expression) => {
+            Ok(SupportedInstanceScriptItem::InspectElided)
+        }
         // Every OTHER NON-variable top-level statement fails closed with its construct
         // label. The labels are precise so the completeness gate can pin each family.
         other => Err(UnsupportedSvelteRuntimeSurface::InstanceScriptItem {
@@ -204,6 +227,37 @@ fn classify_instance_statement(
             span: stmt_span(other),
         }),
     }
+}
+
+/// Whether a top-level expression is the production-ELIDED `$inspect` statement
+/// shape: a `$inspect(...)` CallExpression (callee the bare identifier
+/// `$inspect`), or a `$inspect(...).with(...)` chain (a CallExpression whose
+/// callee is a static member `.with` whose object is itself a `$inspect(...)`
+/// call). Driven from the typed OXC AST only. Any other shape — a longer chain
+/// (`$inspect(x).with(f).g()`), a different member, a non-call — is NOT the
+/// elision shape (the caller falls through to the fail-closed refusal).
+fn is_inspect_elision_expression(expr: &Expression<'_>) -> bool {
+    let Expression::CallExpression(call) = expr else {
+        return false;
+    };
+    if is_inspect_callee(&call.callee) {
+        return true;
+    }
+    // `$inspect(...).with(...)`: the callee is a static `.with` member on a
+    // `$inspect(...)` call.
+    if let Expression::StaticMemberExpression(member) = &call.callee {
+        if member.property.name.as_str() == "with" {
+            if let Expression::CallExpression(inner) = &member.object {
+                return is_inspect_callee(&inner.callee);
+            }
+        }
+    }
+    false
+}
+
+/// Whether a callee is the bare `$inspect` identifier.
+fn is_inspect_callee(callee: &Expression<'_>) -> bool {
+    matches!(callee, Expression::Identifier(id) if id.name.as_str() == "$inspect")
 }
 
 /// Classify a top-level `function name(...) {}` declaration into the

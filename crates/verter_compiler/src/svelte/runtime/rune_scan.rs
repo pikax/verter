@@ -255,8 +255,12 @@ fn rune_root_ident_span(callee: &Expression<'_>, root: &str) -> Option<(u32, u32
 ///
 /// - an unsupported rune FORM — an advanced member (`$state.snapshot` /
 ///   `$effect.pre` / `$props.id` / …, with `$derived.by` the single supported
-///   member form) or an advanced bare call (`$inspect(...)` / `$host(...)` / a
-///   standalone `$bindable(...)`);
+///   member form) or an advanced bare call (`$host(...)` / a standalone
+///   `$bindable(...)`). The `$inspect` family is NOT refused here: it is
+///   SUPPORTED as production ELISION (the statement-position `$inspect(...)` /
+///   `$inspect(...).with(...)` / body `$inspect.trace()` forms are elided by
+///   the instance-item classifier / the body rewriter, and a
+///   non-statement-position `$inspect` reference fails closed at the rewriter);
 /// - an unsupported rune POSITION — a bare `$state` / `$derived` / `$props` /
 ///   `$effect` reference that is NOT in its exact legal supported position (a
 ///   default-param `$state(0)`, a call-arg `$props()`, a function-body `$effect`, a
@@ -315,9 +319,10 @@ impl UnsupportedRuneScan {
     /// anywhere else is an unsupported rune form (`$state` in a default-param, a
     /// module-script rune, `foo($state)`, …) and fails closed. Only the
     /// position-sensitive runes (`$state` / `$derived` / `$props` / `$effect`) are
-    /// classified here; the advanced-only runes (`$bindable` / `$inspect` /
-    /// `$host`) are classified by [`Self::classify_rune_call`] / member handling
-    /// and have no supported bare position at all.
+    /// classified here; the advanced-only runes (`$bindable` / `$host`) are
+    /// classified by [`Self::classify_rune_call`] / member handling and have no
+    /// supported bare position at all, and the production-elided `$inspect`
+    /// family is owned by the instance-item classifier / the body rewriter.
     fn classify_rune_position(&mut self, root: &str, span: Span) {
         if !matches!(root, "$state" | "$derived" | "$props" | "$effect") {
             return;
@@ -343,6 +348,12 @@ impl UnsupportedRuneScan {
         let surface = match (root, member) {
             // `$derived.by` is the supported member form (a Derived binding).
             ("$derived", "by") => return,
+            // `$inspect.<member>` (incl. `.trace`) is never refused here: the
+            // `$inspect` family is SUPPORTED as production ELISION. A
+            // statement-position `$inspect.trace()` is dropped in place by the
+            // shared body rewriter; a non-statement-position reference fails
+            // closed at the rewriter (never emitted raw).
+            ("$inspect", _) => return,
             // Experimental-async rune members (5j).
             ("$state", "eager") => UnsupportedSvelteRuntimeSurface::ExperimentalAsync {
                 surface: "$state.eager",
@@ -384,7 +395,6 @@ impl UnsupportedRuneScan {
                     "$effect" => "$effect.<member>",
                     "$props" => "$props.<member>",
                     "$derived" => "$derived.<member>",
-                    "$inspect" => "$inspect.<member>",
                     _ => "$rune.<member>",
                 };
                 let _ = member;
@@ -395,15 +405,15 @@ impl UnsupportedRuneScan {
     }
 
     /// Classify a bare-rune-root reference used in a non-supported position (a
-    /// `$inspect(...)` call, a `$host()` call, a `$bindable(...)` outside a
-    /// `$props()` default). The supported bare calls (`$state` / `$derived` /
-    /// `$props` / `$effect`) are skipped by the caller before reaching here.
+    /// `$host()` call, a `$bindable(...)` outside a `$props()` default). The
+    /// supported bare calls (`$state` / `$derived` / `$props` / `$effect`) are
+    /// skipped by the caller before reaching here. A `$inspect(...)` call is NOT
+    /// refused: the `$inspect` family is SUPPORTED as production ELISION (the
+    /// statement-position forms are elided by the instance-item classifier / the
+    /// body rewriter; a non-statement-position reference fails closed at the
+    /// rewriter, never emitted raw).
     fn classify_rune_call(&mut self, root: &str, span: Span) {
         let surface = match root {
-            "$inspect" => UnsupportedSvelteRuntimeSurface::AdvancedRune {
-                rune: "$inspect",
-                span,
-            },
             "$host" => UnsupportedSvelteRuntimeSurface::HostOrCustomElement {
                 surface: "$host",
                 span,
@@ -504,12 +514,13 @@ impl<'a> Visit<'a> for UnsupportedRuneScan {
     }
 
     fn visit_call_expression(&mut self, it: &oxc_ast::ast::CallExpression<'a>) {
-        // A BARE rune call to an ADVANCED-only rune (`$inspect(...)`, `$host(...)`,
-        // a standalone `$bindable(...)`) has no supported bare position at all —
-        // classify it here. The position-sensitive runes (`$state` / `$derived` /
-        // `$props` / `$effect`) are classified per-identifier in
-        // `visit_identifier_reference` (a supported position is exempt; everything
-        // else refuses), so a `$state(0)` in a default-param / call-arg fails closed.
+        // A BARE rune call to an ADVANCED-only rune (`$host(...)`, a standalone
+        // `$bindable(...)`) has no supported bare position at all — classify it
+        // here (`$inspect(...)` is production-elided, never refused here). The
+        // position-sensitive runes (`$state` / `$derived` / `$props` / `$effect`)
+        // are classified per-identifier in `visit_identifier_reference` (a
+        // supported position is exempt; everything else refuses), so a `$state(0)`
+        // in a default-param / call-arg fails closed.
         if let Expression::Identifier(id) = &it.callee {
             let root = id.name.as_str();
             if self.is_unshadowed_rune(root)
@@ -529,8 +540,9 @@ impl<'a> Visit<'a> for UnsupportedRuneScan {
         // destructure for `$props()`, a top-level statement for `$effect`); a
         // reference anywhere else (a default-param `$state(0)`, a call-arg
         // `$props()`, a module-script rune, a bare-identifier `foo($state)`) fails
-        // closed. The advanced-only runes (`$bindable` / `$inspect` / `$host`) are
-        // refused by the call / member handlers, never here.
+        // closed. The advanced-only runes (`$bindable` / `$host`) are refused by
+        // the call / member handlers, never here; the production-elided `$inspect`
+        // family is owned by the instance-item classifier / the body rewriter.
         let name = it.name.as_str();
         if self.is_unshadowed_rune(name) {
             self.classify_rune_position(name, to_span(it.span));

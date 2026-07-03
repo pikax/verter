@@ -277,10 +277,13 @@ pub(super) fn classify_script_items(
     // A scope-aware, POSITION-SENSITIVE scan over the instance script. It has
     // supported rune positions (a top-level `$state` / `$props()` declarator init);
     // `$derived` / `$effect` have NONE (they are refused entirely). The scan also
-    // refuses an advanced FORM (`$state.snapshot` / `$effect.pre` / `$inspect` /
-    // `$host` / `$props.id`) the binding classifier does not see as a top-level
-    // declarator. A SHADOWED rune name is never refused. (A `<script module>` was
-    // already refused above as a script-hoisting deferral.)
+    // refuses an advanced FORM (`$state.snapshot` / `$effect.pre` / `$host` /
+    // `$props.id`) the binding classifier does not see as a top-level declarator.
+    // The `$inspect` family is NOT refused here — it is production-ELIDED (the
+    // instance-item classifier / the body rewriter own the elision, and the
+    // rewriter fails a non-statement-position reference closed). A SHADOWED rune
+    // name is never refused. (A `<script module>` was already refused above as a
+    // script-hoisting deferral.)
     let mut alloc = Allocator::default();
     if let Some(instance) = ir.analysis.scripts.instance_source {
         if let Some(reason) = scan_unsupported_rune_forms(&alloc, instance, true) {

@@ -142,7 +142,11 @@ pub(super) fn classify_event_handler_shape(
 /// statements (the supported §1.2-class onclick body). An EXPRESSION-bodied arrow
 /// (`() => count += 1`) must have a `$state` assignment / update expression; a
 /// BLOCK-bodied arrow (`() => { a++; b++; }`) must have a non-empty body whose every
-/// statement is a `$state` assignment / update expression statement.
+/// statement is a `$state` assignment / update expression statement. A
+/// production-ELIDED `$inspect.trace(...)` statement is SKIPPED (the shared body
+/// rewriter drops it in place at projection time — official `dev:false` removes
+/// the call and still delegates the handler), but at least one real `$state`
+/// write must remain.
 ///
 /// Decided structurally over the parsed arrow + the scope-aware binding table — a
 /// call, a declaration, an `if`, an update of a non-`$state` (a plain local / prop /
@@ -155,22 +159,32 @@ fn arrow_body_is_state_writes(
 ) -> bool {
     // An expression-bodied arrow lowers its single expression into the function
     // body as a return/expression statement; OXC models it as a one-statement body
-    // flagged `expression`.
+    // flagged `expression`. (A concise-body `$inspect.trace()` is an EXPRESSION
+    // position — an official ERROR, not the elidable statement form — so it is
+    // NOT skipped here; it fails the state-write check and refuses downstream.)
     if arrow.r#expression {
         let [Statement::ExpressionStatement(stmt)] = arrow.body.statements.as_slice() else {
             return false;
         };
         return expr_is_state_write(&stmt.expression, scope, bindings, scopes);
     }
-    // A block-bodied arrow: a non-empty body whose every statement is a `$state`
-    // assignment / update expression statement.
-    if arrow.body.statements.is_empty() {
-        return false;
+    // A block-bodied arrow: every statement is a `$state` assignment / update
+    // expression statement, with production-elided `$inspect.trace(...)`
+    // statements skipped; at least one real state write must remain.
+    let mut state_writes = 0usize;
+    for stmt in &arrow.body.statements {
+        let Statement::ExpressionStatement(es) = stmt else {
+            return false;
+        };
+        if super::expr_rewrite::is_inspect_trace_call(&es.expression) {
+            continue;
+        }
+        if !expr_is_state_write(&es.expression, scope, bindings, scopes) {
+            return false;
+        }
+        state_writes += 1;
     }
-    arrow.body.statements.iter().all(|stmt| {
-        matches!(stmt, Statement::ExpressionStatement(es)
-            if expr_is_state_write(&es.expression, scope, bindings, scopes))
-    })
+    state_writes > 0
 }
 
 /// Whether an expression is a `$state` assignment / update: an `AssignmentExpression`
