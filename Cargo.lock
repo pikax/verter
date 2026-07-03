@@ -4031,6 +4031,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "verter_no_storedspan"
+version = "0.0.1-beta.1"
+dependencies = [
+ "rustc-hash 2.1.2",
+ "static_assertions",
+ "verter_no_storedspan_derive",
+ "verter_span",
+]
+
+[[package]]
+name = "verter_no_storedspan_derive"
+version = "0.0.1-beta.1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "verter_no_typeexpr"
 version = "0.0.1-beta.1"
 dependencies = [
@@ -4182,6 +4201,7 @@ dependencies = [
  "verter_audit",
  "verter_compiler",
  "verter_language",
+ "verter_no_storedspan",
  "verter_no_typeexpr",
  "verter_parser",
  "verter_protocol",
@@ -4244,6 +4264,7 @@ dependencies = [
  "serde",
  "serde_json",
  "static_assertions",
+ "verter_no_storedspan",
  "verter_no_typeexpr",
  "verter_span",
 ]

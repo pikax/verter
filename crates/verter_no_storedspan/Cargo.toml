@@ -1,0 +1,24 @@
+[package]
+name = "verter_no_storedspan"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Compiler-enforced NoStoredSpan marker trait — a carrier owning a transitive Span fails the bound"
+publish = false
+
+[dependencies]
+verter_no_storedspan_derive = { path = "../verter_no_storedspan_derive" }
+rustc-hash = { workspace = true }
+
+[dev-dependencies]
+static_assertions = "1.1.0"
+# `verter_span` is a DEV-dependency ONLY. The whole point of this marker is that
+# `verter_span::Span` is NOT a witness — so the crate must NOT provide a leaf
+# impl for it, and therefore must NOT depend on it non-dev. The dev-dep only
+# lets the discriminating negative test NAME `Span` to assert it is not a
+# witness.
+verter_span = { path = "../verter_span" }
