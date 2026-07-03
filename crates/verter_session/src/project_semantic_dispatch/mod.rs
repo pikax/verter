@@ -92,6 +92,7 @@ pub(crate) mod carrier;
 pub(crate) mod enumerate;
 pub(crate) mod evaluate;
 pub(crate) mod locator_shape;
+pub(crate) mod locator_view;
 pub(crate) mod lower;
 pub(crate) mod output_materialization;
 // Private adjacent module: crate-wide compile-time `assert_not_impl_any!`

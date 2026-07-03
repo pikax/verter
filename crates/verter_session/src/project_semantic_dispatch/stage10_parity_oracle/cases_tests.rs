@@ -10,8 +10,28 @@
 //! or degenerate surface FAILS instead of passing vacuously.
 
 use super::envelope_tests::{component_meta_envelope, fallthrough_envelope, OracleEnvelope};
-use super::{FixtureFile, PublishedSurfaceCase, Stage10SurfaceClass};
+use super::Stage10SurfaceClass;
 use crate::VerterHost;
+
+/// One fixture file mounted on each leg's fresh host.
+pub(crate) struct FixtureFile {
+    pub(crate) path: &'static str,
+    pub(crate) source: &'static str,
+}
+
+/// One published-surface parity case: fixture files, an entry canonical,
+/// a published-surface run producing an [`OracleEnvelope`], and a typed
+/// anti-vacuity assertion (so "both legs returned empty" fails loudly
+/// instead of passing trivially).
+pub(crate) trait PublishedSurfaceCase {
+    fn id(&self) -> &'static str;
+    fn class(&self) -> Stage10SurfaceClass;
+    fn files(&self) -> &'static [FixtureFile];
+    /// The canonical id the published-surface query targets.
+    fn entry(&self) -> &'static str;
+    fn run(&self, host: &VerterHost) -> OracleEnvelope;
+    fn assert_discriminating(&self, envelope: &OracleEnvelope);
+}
 
 /// All registered parity cases, in class order.
 pub(crate) fn all_cases() -> Vec<Box<dyn PublishedSurfaceCase>> {

@@ -151,11 +151,11 @@ pub(crate) fn observe_fact_signature(sig: &[FactVersionRef]) {
 /// unobservable-fact convention of the sibling
 /// [`parse_fact_ref_for_observed_current_content`] builder.
 ///
-/// No production emitter records this fact yet — the cross-file
-/// contributor stitch that folds contributor bodies into a parent
-/// value is the recording site; until it lands only the validation /
-/// fingerprint / reverse-index rails consume the arm.
-#[allow(dead_code)]
+/// The recording site is the cross-file module-augmentation contributor
+/// fold (`collect_augmentation_contributions`): one observation per
+/// contributor body folded into a parent value, so a warm parent hit
+/// revalidates each contributor's source-env identity against the live
+/// view.
 pub(crate) fn observe_file_source_env_from_artifact_key(
     ctx: &dyn ResolverContext,
     artifact_key: Option<&crate::file_artifact_store::FileArtifactKey>,

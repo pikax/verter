@@ -113,15 +113,16 @@ fn no_intersection_merge_synthesis_in_verter_session() {
 }
 
 /// (iv) The load-bearing decision: a multi-contributor merged interface lowers
-/// to a distinct `SemanticNodeData::MergedDecl` carrier (consuming
-/// `prepared.merged_contributors`), NOT a pre-collapsed intersection.
+/// to a distinct `SemanticNodeData::MergedDecl` carrier (the derefed
+/// merged-contributor shape, `DerefedBodyShape::Merged`), NOT a pre-collapsed
+/// intersection. The body source is the locator-shape build; the carrier is
+/// interned there and preserved through substitution and the view projection.
 #[test]
 fn merged_decl_lowers_to_distinct_carrier_not_intersection() {
-    let src = read("crates/verter_session/src/project_semantic_dispatch/build.rs");
+    let src = read("crates/verter_session/src/project_semantic_dispatch/locator_shape.rs");
     assert!(
-        src.contains("prepared.merged_contributors")
-            && src.contains("SemanticNodeData::MergedDecl {"),
-        "lower_decl_body_with_provenance must lower `prepared.merged_contributors` \
-         to a distinct `SemanticNodeData::MergedDecl` carrier"
+        src.contains("DerefedBodyShape::Merged") && src.contains("SemanticNodeData::MergedDecl {"),
+        "the locator-shape body build must lower the derefed merged-contributor \
+         shape to a distinct `SemanticNodeData::MergedDecl` carrier"
     );
 }

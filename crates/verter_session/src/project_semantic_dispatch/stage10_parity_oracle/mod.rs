@@ -123,23 +123,3 @@ pub(crate) enum BodyLeg {
     /// The retained prepared-body implementation behind the RAII guard.
     LegacyPreparedBody,
 }
-
-/// One fixture file mounted on each leg's fresh host.
-pub(crate) struct FixtureFile {
-    pub(crate) path: &'static str,
-    pub(crate) source: &'static str,
-}
-
-/// One published-surface parity case: fixture files, an entry canonical,
-/// a published-surface run producing an [`envelope_tests::OracleEnvelope`],
-/// and a typed anti-vacuity assertion (so "both legs returned empty"
-/// fails loudly instead of passing trivially).
-pub(crate) trait PublishedSurfaceCase {
-    fn id(&self) -> &'static str;
-    fn class(&self) -> Stage10SurfaceClass;
-    fn files(&self) -> &'static [FixtureFile];
-    /// The canonical id the published-surface query targets.
-    fn entry(&self) -> &'static str;
-    fn run(&self, host: &crate::VerterHost) -> envelope_tests::OracleEnvelope;
-    fn assert_discriminating(&self, envelope: &envelope_tests::OracleEnvelope);
-}

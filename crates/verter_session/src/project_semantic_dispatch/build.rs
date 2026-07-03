@@ -32,16 +32,22 @@ use crate::semantic_query::{
 struct AugmentationStitch {
     merged: SemanticNodeId,
     augmenter_self_roots: Vec<(Arc<str>, crate::semantic_query::HashValue)>,
+    /// `true` when a contributor's coherent source-env identity could not
+    /// be observed (a torn / unhealable augmenter entry): the parent result
+    /// is served but never warm-admitted.
+    source_env_unobservable: bool,
 }
 
 /// Shared return shape of the augmenter-fold path
 /// ([`ProjectSemanticDispatch::collect_augmentation_contributions`]): the
-/// ordered augmenter contributor nodes paired with their per-augmenter
-/// `(canonical, FileWholeHash)` self-roots.
-type AugmentationContributions = (
-    Vec<SemanticNodeId>,
-    Vec<(Arc<str>, crate::semantic_query::HashValue)>,
-);
+/// ordered augmenter contributor nodes, their per-augmenter
+/// `(canonical, FileWholeHash)` self-roots, and whether any contributor's
+/// source-env identity was unobservable (torn state ⇒ no warm admission).
+struct AugmentationContributions {
+    contributor_nodes: Vec<SemanticNodeId>,
+    self_roots: Vec<(Arc<str>, crate::semantic_query::HashValue)>,
+    source_env_unobservable: bool,
+}
 
 /// One resolved heritage base from a class's `extends` clause
 /// ([`ProjectSemanticDispatch::class_heritage_bases`]): the base decl's
@@ -2361,12 +2367,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // terminates at the recursive-ref back-edge instead of recursing.
         let mut augmenter_self_roots: Vec<(Arc<str>, crate::semantic_query::HashValue)> =
             Vec::new();
+        let mut augmentation_source_env_unobservable = false;
         if !is_non_file_base {
             if let Some(stitch) =
                 self.stitch_module_augmentations(decl_canonical, decl_name, result, &scope, context)
             {
                 result = stitch.merged;
                 augmenter_self_roots = stitch.augmenter_self_roots;
+                augmentation_source_env_unobservable = stitch.source_env_unobservable;
             }
         }
         self.pop_instantiate_active();
@@ -2452,11 +2460,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 observed_self_roots.push(aug_root);
             }
         }
-        crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
+        let mut output = crate::project_semantic_dispatch::walk::QueryBuildOutput::from((
             QueryResult::Value(result),
             fence,
         ))
-        .with_observed_self_roots(observed_self_roots)
+        .with_observed_self_roots(observed_self_roots);
+        // A contributor whose source-env identity could not be observed
+        // coherently routes the parent result through no-warm-admission
+        // semantics: the value is served, never published warm.
+        if augmentation_source_env_unobservable {
+            output.cache_suppress = true;
+        }
+        output
     }
 
     /// Cross-file declaration-augmentation stitch (`declare module "./local"`
@@ -2503,8 +2518,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
 
         let target = AugmentationTargetKind::ResolvedRelativeCanonical(Arc::clone(decl_canonical));
-        let (contributor_nodes, self_roots) =
-            self.collect_augmentation_contributions(target, decl_name.as_ref(), context)?;
+        let AugmentationContributions {
+            contributor_nodes,
+            self_roots,
+            source_env_unobservable,
+        } = self.collect_augmentation_contributions(target, decl_name.as_ref(), context)?;
 
         // Build the single peer-merge carrier: base contributors ∪ augmenter
         // contributions. If the base body is itself a `MergedDecl` (same-file
@@ -2529,6 +2547,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         Some(AugmentationStitch {
             merged,
             augmenter_self_roots: self_roots,
+            source_env_unobservable,
         })
     }
 
@@ -2607,6 +2626,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
         let mut contributor_nodes: Vec<SemanticNodeId> = Vec::new();
         let mut self_roots: Vec<(Arc<str>, crate::semantic_query::HashValue)> = Vec::new();
+        // Per-contributing-augmenter EXACT artifact keys — the source the
+        // contributor `LowerLocator` served from — recorded as
+        // `FileSourceEnv` observations on the parent read-set below.
+        let mut contributor_source_env_keys: Vec<crate::file_artifact_store::FileArtifactKey> =
+            Vec::new();
+        let mut source_env_unobservable = false;
         // Stale-key self-heals discovered below are written back into the
         // cached `AugmenterSet` after the loop so the NEXT stitch hits the
         // fast exact-key path instead of re-healing every call — the SAME
@@ -2621,6 +2646,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .ensure_indexed_ready_serve(augmenter_canonical.as_ref())
                 .map(|serve| serve.indexed)
             else {
+                // A set member the live view cannot serve is a torn state:
+                // its contribution (and source-env identity) cannot be
+                // observed coherently — the parent result must not warm.
+                source_env_unobservable = true;
                 continue;
             };
             let state = &indexed.shallow_state;
@@ -2643,8 +2672,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let Some((art, refreshed_key)) = artifact_store
                 .augmenter_artifacts_self_healing(&augmenter.artifact_key, indexed.whole_hash)
             else {
+                // Unhealable captured key: the augmenter's exact artifact
+                // identity is unobservable — refuse warm admission.
+                source_env_unobservable = true;
                 continue;
             };
+            // The EXACT key the contributor read serves from (the healed
+            // current key when the captured one was stale).
+            let effective_artifact_key = refreshed_key
+                .clone()
+                .unwrap_or_else(|| augmenter.artifact_key.clone());
             if let Some(refreshed_key) = refreshed_key {
                 refreshed_keys.push((augmenter_idx, refreshed_key));
             }
@@ -2700,11 +2737,29 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     continue;
                 };
                 let mut aug_subs: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
-                // An augmenter contribution is never the macro-T own body —
-                // downgrade provenance to structural (same rule the builtin /
-                // heritage paths apply).
-                let node = self.lower_decl_body_with_provenance(
-                    &aug_prepared,
+                // Demand the augmenter's RETAINED contribution body through
+                // the augmenter's OWN `LowerLocator` (the augmentation-scoped
+                // locator leaf) — never an inline lowering of another file's
+                // prepared body. An augmenter contribution is never the
+                // macro-T own body — downgrade provenance to structural
+                // (same rule the builtin / heritage paths apply).
+                let locator = verter_type_expr::locators::AuthoredBodyLocator::AugmentationBody(
+                    verter_type_expr::locators::AugmentationBodyLocator {
+                        anchor: verter_type_expr::locators::AuthoredAnchor {
+                            canonical_id: Arc::clone(augmenter_canonical),
+                            symbol: Arc::from(decl_name),
+                            space: verter_type_expr::locators::LocatorSymbolSpace::Type,
+                        },
+                        scope: verter_type_expr::locators::AuthoredAugmentationScope::Module {
+                            specifier: Arc::from(spec.as_str()),
+                        },
+                    },
+                );
+                let node = self.lower_located_body_with_provenance(
+                    locator,
+                    aug_prepared.kind,
+                    &aug_prepared.type_parameters,
+                    &aug_prepared.name_resolution,
                     &aug_env,
                     &aug_scope,
                     aug_scope_payload.as_ref(),
@@ -2725,6 +2780,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // the session candidate and is poisoned. Rooting on the
                 // overlay hash makes the base re-query miss and recompute.
                 self_roots.push((Arc::clone(augmenter_canonical), indexed.whole_hash));
+                contributor_source_env_keys.push(effective_artifact_key);
             }
         }
 
@@ -2792,8 +2848,31 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 },
             );
         }
+        // Parent transitive contributor rule: one typed SOURCE-ENV
+        // observation per folded cross-file contributor body, taken from the
+        // EXACT artifact key the contributor `LowerLocator` served from
+        // (never re-derived from canonical/path/env at this site, never a
+        // stale index entry). A warm parent hit revalidates these four
+        // identity fields against the live view — a contributor parse-env /
+        // parser-version / file-language move with UNCHANGED content misses
+        // the warm read and recomputes through the contributor's new
+        // `LowerLocator`.
+        for key in &contributor_source_env_keys {
+            if crate::fact_signature_helpers::observe_file_source_env_from_artifact_key(
+                self.ctx,
+                Some(key),
+            )
+            .is_none()
+            {
+                source_env_unobservable = true;
+            }
+        }
 
-        Some((contributor_nodes, self_roots))
+        Some(AugmentationContributions {
+            contributor_nodes,
+            self_roots,
+            source_env_unobservable,
+        })
     }
 
     /// Resolve a bare type name imported from a NON-FILE (external / ambient)
@@ -2857,8 +2936,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
         let target =
             AugmentationTargetKind::ExternalSpecifier(InternedSpecifier::from(specifier.as_str()));
-        let (contributor_nodes, _self_roots) =
-            self.collect_augmentation_contributions(target, name, context)?;
+        let AugmentationContributions {
+            contributor_nodes,
+            self_roots: _,
+            source_env_unobservable,
+        } = self.collect_augmentation_contributions(target, name, context)?;
+        // A torn contributor (unobservable source-env identity) is served
+        // but never warm-admitted: taint the surrounding request's
+        // materialisation admission.
+        if source_env_unobservable {
+            crate::request_context::mark_request_materialization_cache_suppress();
+        }
 
         // Peer-merge carrier from the augmenter contributions ONLY (no base
         // body): every `declare module "<spec>"` block is a peer. The carrier is
@@ -2953,153 +3041,112 @@ impl<'a> ProjectSemanticDispatch<'a> {
             );
         }
 
-        use verter_type_expr::TypeExpr;
+        // The declaration's OWN decl-body locator (whole body).
+        let canonical: Arc<str> = match scope {
+            NodeScopeId::File { canonical_id, .. } => Arc::clone(canonical_id),
+            NodeScopeId::Global => Arc::from(prepared.root_identity.canonical_id.as_str()),
+        };
+        let locator = verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
+            verter_type_expr::locators::TypeBodySlot {
+                anchor: verter_type_expr::locators::AuthoredAnchor {
+                    canonical_id: canonical,
+                    symbol: Arc::from(prepared.root_identity.symbol_name.as_str()),
+                    space: verter_type_expr::locators::LocatorSymbolSpace::Type,
+                },
+                path: Arc::from(Vec::new().into_boxed_slice()),
+            },
+        );
+        self.lower_located_body_with_provenance(
+            locator,
+            prepared.kind,
+            &prepared.type_parameters,
+            &prepared.name_resolution,
+            env,
+            scope,
+            scope_payload,
+            shadowing,
+            substitutions,
+            context,
+        )
+    }
 
-        // Whether an intersection arm is an own-body member-bearing arm
-        // (an inline `Object` literal, or a `Parenthesized` wrapper of
-        // one) vs a reference carrier (`Ref` / anything else).
-        //
-        // This is the precise eager `from_root_body` rule: a member is
-        // `declared_in_macro_type_arg = true` only when it was lowered
-        // from an inline object LITERAL at the macro-T own body. Members
-        // reached through a named REFERENCE arm inside an intersection
-        // (`defineProps<A & B>()`, or an interface's `extends Base`
-        // heritage `Ref`) are NOT literally written in the macro T body,
-        // so their provenance decays to structural (`false`). A single
-        // direct reference at the macro-T root (`defineProps<Props>()`)
-        // is the other `true` case — its OWN-body members carry the bit
-        // because `Instantiate(Props)` lowers Props's own object body
-        // under the caller's provenance (the non-intersection arm below).
-        fn arm_is_own_body(arm: &TypeExpr) -> bool {
-            match arm {
-                TypeExpr::Object(_) => true,
-                TypeExpr::Parenthesized(inner) => arm_is_own_body(inner),
-                _ => false,
+    /// Lower an authored body named by `locator` under the caller's demand:
+    /// fetch the ROLE-FREE unsubstituted shape through the memoized
+    /// `LowerLocator` query, apply the caller's `env` bindings via semantic
+    /// type-param substitution over the declaration's binder shells, and
+    /// ONLY THEN project the demand-specific view (`ProjectionStamp`
+    /// application + deferred-carrier evaluation) under `context`.
+    ///
+    /// This is the SOLE production body source — a locator miss surfaces as
+    /// the query's miss semantics (`Opaque(Miss)`), never a prepared-body
+    /// read. An `env` name with no binding substitutes the shared miss
+    /// sentinel (open generics are preserved only when the caller pre-bound
+    /// `TypeParam` shells, e.g. Skeleton-mode instantiation).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn lower_located_body_with_provenance(
+        &self,
+        locator: verter_type_expr::locators::AuthoredBodyLocator,
+        decl_kind: verter_semantic::analysis::type_eval::TypeDeclKind,
+        type_parameters: &[verter_type_expr::TypeParam],
+        name_resolution: &FxHashMap<String, ResolvedRootIdentity>,
+        env: &FxHashMap<String, SemanticNodeId>,
+        scope: &NodeScopeId,
+        scope_payload: Option<&crate::resolver_core::bare_name_resolve::DeclarationScopePayload>,
+        shadowing: &crate::resolver_core::scope_shadowing::ScopeShadowing,
+        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        let owner_symbol = match &locator {
+            verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot) => {
+                Arc::clone(&slot.anchor.symbol)
             }
-        }
-
-        // Member-merge role for this declaration's REFERENCE arms (by
-        // design, for the type-resolution unification). A reference arm
-        // of an interface/class body is REAL `extends`/`implements` heritage —
-        // its inherited members are `Heritage` and SHADOWED by the own-body
-        // members. A reference arm of a type-alias body is an AUTHORED
-        // intersection arm (`type Props = Base & { dup }`) — its members are
-        // `Authored` and must NOT shadow (they intersect). This is the single
-        // distinguishing fact P2-1 turns on, read from the typed
-        // `prepared.kind`.
-        use crate::semantic_query::MemberMergeRole;
-        use verter_semantic::analysis::type_eval::TypeDeclKind;
-        let reference_arm_role = match prepared.kind {
-            TypeDeclKind::Interface | TypeDeclKind::Class => MemberMergeRole::Heritage,
-            TypeDeclKind::Alias => MemberMergeRole::Authored,
+            verter_type_expr::locators::AuthoredBodyLocator::AugmentationBody(aug) => {
+                Arc::clone(&aug.anchor.symbol)
+            }
+            verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(payload) => {
+                Arc::clone(&payload.anchor.symbol)
+            }
         };
 
-        // Same-name merged interface (TS same-file declaration merging): lower
-        // each contributor body as its own OWN-body surface and intern a
-        // distinct `MergedDecl` carrier. The peer-merge reducer (raise/expand)
-        // unions members and accumulates same-name methods into ordered overload
-        // groups — it must NOT collapse to a bare `Intersection`, whose reducer
-        // applies heritage-shadow precedence.
-        if !prepared.merged_contributors.is_empty() {
-            let contributor_ids: Vec<SemanticNodeId> = prepared
-                .merged_contributors
-                .iter()
-                .map(|contributor| {
-                    self.shallow_lower_type_expr_with_context(
-                        contributor,
-                        env,
-                        scope,
-                        &prepared.name_resolution,
-                        scope_payload,
-                        shadowing,
-                        substitutions,
-                        context.with_merge_role(MemberMergeRole::OwnBody),
-                    )
-                })
-                .collect();
-            return self.graph().intern_node_with_scope(
-                SemanticNodeData::MergedDecl {
-                    contributors: Arc::from(contributor_ids.into_boxed_slice()),
-                },
-                scope.clone(),
-            );
-        }
+        // 1. Fetch the fixed authored shape (one reusable body-shape family
+        //    per locator/source-env).
+        let shape = match self.lower_locator(locator) {
+            QueryResult::Value(node) => node,
+            QueryResult::Recursive(_) | QueryResult::Error(_) => {
+                return self.opaque(QueryError::Miss)
+            }
+        };
 
-        match &prepared.body {
-            TypeExpr::Intersection(arms) => {
-                // Per-arm provenance + merge role: inline-object own-body arms
-                // keep the caller's provenance and carry `OwnBody`; reference
-                // arms (heritage `extends` Refs for interface/class, or named
-                // refs in an author intersection `A & B` for an alias) decay to
-                // structural provenance and carry `reference_arm_role`. The
-                // own-body arm's members thus SHADOW heritage members of the
-                // same name in the surface merge, while authored-intersection
-                // arms intersect. Re-intern the merged Intersection so the
-                // consumer-visible shape is unchanged.
-                let arm_ids: Vec<SemanticNodeId> = arms
-                    .iter()
-                    .map(|arm| {
-                        let arm_context = if arm_is_own_body(arm) {
-                            context.with_merge_role(MemberMergeRole::OwnBody)
-                        } else {
-                            context
-                                .into_structural_provenance()
-                                .with_merge_role(reference_arm_role)
-                        };
-                        self.shallow_lower_type_expr_with_context(
-                            arm,
-                            env,
-                            scope,
-                            &prepared.name_resolution,
-                            scope_payload,
-                            shadowing,
-                            substitutions,
-                            arm_context,
-                        )
-                    })
-                    .collect();
-                if arm_ids.is_empty() {
-                    self.graph()
-                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never))
-                } else if arm_ids.len() == 1 {
-                    arm_ids[0]
-                } else {
-                    self.graph().intern_node_with_scope(
-                        SemanticNodeData::Intersection(Arc::from(arm_ids.into_boxed_slice())),
-                        scope.clone(),
-                    )
+        // 2. Apply the caller's bindings via semantic type-param
+        //    substitution. Binder identity is re-derived deterministically
+        //    from the declaration's parameter list (content-addressed
+        //    interning — the same ids the shape build bound). An unbound
+        //    parameter substitutes the shared miss sentinel, mirroring the
+        //    "unbound param propagates a miss through the body" rule.
+        let (_, bindings) = self.locator_shape_binder_frame(scope, &owner_symbol, type_parameters);
+        let mut substituted = shape;
+        for (name, binder) in bindings {
+            let bound = env.get(name.as_ref()).copied();
+            let replacement = bound.unwrap_or_else(|| self.opaque(QueryError::Miss));
+            let next = self.substitute_semantic_type_param(substituted, binder, replacement);
+            if next != substituted {
+                if let Some(arg_id) = bound {
+                    substitutions.push((name, arg_id));
                 }
             }
-            // Non-intersection body: a plain inline `Object` (own-body
-            // members → caller provenance + `OwnBody`), or a single reference /
-            // other shape. For a single direct reference at the macro-T root
-            // the caller's provenance flows into the referenced decl's own
-            // object body (which surfaces own members `true`, heritage
-            // `false` via this same per-arm split one level down). A plain
-            // inline object body carries `OwnBody` so a later intersection
-            // (e.g. via declaration merging) shadows heritage correctly.
-            TypeExpr::Object(_) | TypeExpr::Parenthesized(_) => self
-                .shallow_lower_type_expr_with_context(
-                    &prepared.body,
-                    env,
-                    scope,
-                    &prepared.name_resolution,
-                    scope_payload,
-                    shadowing,
-                    substitutions,
-                    context.with_merge_role(MemberMergeRole::OwnBody),
-                ),
-            _ => self.shallow_lower_type_expr_with_context(
-                &prepared.body,
-                env,
-                scope,
-                &prepared.name_resolution,
-                scope_payload,
-                shadowing,
-                substitutions,
-                context,
-            ),
+            substituted = next;
         }
+
+        // 3. Project the demanded view: per-arm ProjectionStamp application
+        //    + deferred-carrier evaluation under the caller's context.
+        let inputs = crate::project_semantic_dispatch::locator_view::LocatorViewInputs {
+            env,
+            scope,
+            name_resolution,
+            scope_payload,
+            shadowing,
+        };
+        self.project_located_decl_body(substituted, decl_kind, &inputs, substitutions, context)
     }
 
     pub(super) fn backfill_member_index_surface(

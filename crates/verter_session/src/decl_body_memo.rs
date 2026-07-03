@@ -47,7 +47,8 @@ use verter_semantic::analysis::type_eval_build::{
     build_eval_env, lower_jsdoc_typedef_named, lower_top_level_statement,
 };
 use verter_type_expr::locators::{
-    AuthoredBodyLocator, LocatorSymbolSpace, MacroPayloadPosition, TypeBodyPathStep,
+    AuthoredAugmentationScope, AuthoredBodyLocator, LocatorSymbolSpace, MacroPayloadPosition,
+    TypeBodyPathStep,
 };
 use verter_type_expr::{ObjectExpr, ObjectMember, TypeExpr, TypeParam};
 
@@ -869,12 +870,7 @@ impl DeclBodyMemo {
 /// body and NEVER falls back to a transient re-parse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LocatorBodyDerefError {
-    /// No live lease pinned the retained snapshot; the lease-only deref
-    /// never parses, so a missing lease is a hard miss.
-    LeaseMiss,
-    /// The retained parse is fatal (the snapshot program is `None`).
-    FatalParse,
-    /// The locator anchor names no inventoried declaration header.
+    /// The locator anchor names no inventoried declaration.
     UnknownSymbol,
     /// The producer-emitted path does not resolve against the authored
     /// body (a stale / out-of-range ordinal, or a shape mismatch).
@@ -885,6 +881,9 @@ pub(crate) enum LocatorBodyDerefError {
     /// Namespace bodies are not inventoried by the decl-body memo; a
     /// namespace anchor has no memo-backed authored body to deref.
     NamespaceBodyUnrouted,
+    /// No consumer demands an augmentation-scoped VALUE / namespace body
+    /// through a locator; the deref fails closed rather than fabricating one.
+    AugmentationBodySpaceUnrouted,
     /// The macro generic type argument has exactly ONE sanctioned producer
     /// (`macro_type_arg_hot_ref`, the sole query-free structural
     /// macro-argument producer); a locator deref for it is rejected so a
@@ -961,35 +960,35 @@ impl DeclBodyMemo {
                 );
                 match slot.anchor.space {
                     LocatorSymbolSpace::Type => {
-                        let (contributors, from_jsdoc) = {
-                            let header = self
-                                .header_index
-                                .type_header(slot.anchor.symbol.as_ref())
-                                .ok_or(LocatorBodyDerefError::UnknownSymbol)?;
-                            (header.contributors.clone(), header.from_jsdoc_typedef)
+                        // Serve through the memo's OWN lazy demand cell so a
+                        // body lowers exactly once per (canonical, content,
+                        // symbol) regardless of which route demands it first.
+                        // A file-scope miss falls through to the GLOBAL
+                        // ambient inventory — the same file-scope-then-global
+                        // resolution order the prepared-decl route applies.
+                        let lowered = match self.type_decl(slot.anchor.symbol.as_ref()) {
+                            Some(lowered) => lowered,
+                            None => self
+                                .augmentation_type_decl(
+                                    &AugmentationScopeKind::Global,
+                                    slot.anchor.symbol.as_ref(),
+                                )
+                                .ok_or(LocatorBodyDerefError::UnknownSymbol)?,
                         };
-                        let (body, type_parameters) = self.lower_type_group_leased(
-                            slot.anchor.symbol.as_ref(),
-                            &contributors,
-                            from_jsdoc,
-                        )?;
-                        let shape = navigate_type_body(body, &slot.path)?;
+                        let shape = navigate_type_body(lowered.body.clone(), &slot.path)?;
                         Ok(DerefedAuthoredBody {
                             shape,
-                            type_parameters,
+                            type_parameters: lowered.type_parameters.clone(),
                         })
                     }
                     LocatorSymbolSpace::Value => {
-                        let contributors = self
-                            .header_index
-                            .value_header(slot.anchor.symbol.as_ref())
-                            .ok_or(LocatorBodyDerefError::UnknownSymbol)?
-                            .contributors
-                            .clone();
-                        let annotation = self.lower_value_annotation_leased(
-                            slot.anchor.symbol.as_ref(),
-                            &contributors,
-                        )?;
+                        let lowered = self
+                            .value_decl(slot.anchor.symbol.as_ref())
+                            .ok_or(LocatorBodyDerefError::UnknownSymbol)?;
+                        let annotation = lowered
+                            .type_annotation
+                            .clone()
+                            .ok_or(LocatorBodyDerefError::ValueAnnotationAbsent)?;
                         let shape =
                             navigate_type_body(TypeDeclBody::Single(annotation), &slot.path)?;
                         Ok(DerefedAuthoredBody {
@@ -1004,131 +1003,40 @@ impl DeclBodyMemo {
                     }
                 }
             }
-        }
-    }
-
-    /// Lower one TYPE symbol's contributing statements through the
-    /// LEASE-RETAINED snapshot (never a transient parse) into the owned
-    /// merged body + unioned type parameters — the same per-symbol folding
-    /// [`Self::type_decl`]'s batch path performs, restricted to the
-    /// demanded group.
-    fn lower_type_group_leased(
-        &self,
-        name: &str,
-        contributors: &[u32],
-        from_jsdoc_typedef: bool,
-    ) -> Result<(TypeDeclBody, Vec<TypeParam>), LocatorBodyDerefError> {
-        let Some(service) = self.service.as_ref() else {
-            // A seeded memo has every entry pre-filled — serve from it.
-            let lowered = self
-                .type_decl(name)
-                .ok_or(LocatorBodyDerefError::UnknownSymbol)?;
-            return Ok((lowered.body.clone(), lowered.type_parameters.clone()));
-        };
-        self.ensure_lease();
-        let contributors = contributors.to_vec();
-        let name_owned = name.to_string();
-        let outcome = service.run_leased(&self.key, move |program| {
-            let Some(program) = program else {
-                return Err(LocatorBodyDerefError::FatalParse);
-            };
-            let source = program.source_str();
-            let program = program.borrow_dependent();
-            let mut scratch = EvalEnv::new();
-            for index in &contributors {
-                if let Some(stmt) = program.body.get(*index as usize) {
-                    lower_top_level_statement(stmt, source, &mut scratch);
-                }
-            }
-            if from_jsdoc_typedef {
-                lower_jsdoc_typedef_named(&program.comments, source, &name_owned, &mut scratch);
-            }
-            let lowered_count = scratch.total_decl_count();
-            let Some(group) = scratch.type_symbols.get(&name_owned) else {
-                return Err(LocatorBodyDerefError::UnknownSymbol);
-            };
-            // An enum's type-space body is the value-derived member union —
-            // the same replacement rule the memo's per-symbol fold applies.
-            let enum_body = scratch
-                .value_symbols
-                .get(&name_owned)
-                .and_then(ValueDeclGroup::enum_type_union);
-            let body = match enum_body {
-                Some(union) => TypeDeclBody::Single(union),
-                None => group.merged_body(),
-            };
-            let mut type_parameters: Vec<TypeParam> = Vec::new();
-            for decl in group.contributors() {
-                for param in &decl.type_parameters {
-                    if !type_parameters.iter().any(|p| p.name == param.name) {
-                        type_parameters.push(param.clone());
+            AuthoredBodyLocator::AugmentationBody(aug) => {
+                debug_assert_eq!(
+                    aug.anchor.canonical_id.as_ref(),
+                    self.key.canonical.as_ref(),
+                    "a locator must deref through the memo of its OWN producing canonical"
+                );
+                let scope_kind = match &aug.scope {
+                    AuthoredAugmentationScope::Global => AugmentationScopeKind::Global,
+                    AuthoredAugmentationScope::Module { specifier } => {
+                        AugmentationScopeKind::Module(specifier.as_ref().to_string())
+                    }
+                };
+                match aug.anchor.space {
+                    LocatorSymbolSpace::Type => {
+                        // Serve through the memo's scoped lazy demand cell
+                        // (one lowering per (scope, symbol) per content).
+                        let lowered = self
+                            .augmentation_type_decl(&scope_kind, aug.anchor.symbol.as_ref())
+                            .ok_or(LocatorBodyDerefError::UnknownSymbol)?;
+                        let shape = match lowered.body.clone() {
+                            TypeDeclBody::Single(expr) => DerefedBodyShape::Single(expr),
+                            TypeDeclBody::Merged(merged) => {
+                                DerefedBodyShape::Merged(merged.contributors)
+                            }
+                        };
+                        Ok(DerefedAuthoredBody {
+                            shape,
+                            type_parameters: lowered.type_parameters.clone(),
+                        })
+                    }
+                    LocatorSymbolSpace::Value | LocatorSymbolSpace::Namespace => {
+                        Err(LocatorBodyDerefError::AugmentationBodySpaceUnrouted)
                     }
                 }
-            }
-            Ok(((body, type_parameters), lowered_count))
-        });
-        match outcome {
-            None => Err(LocatorBodyDerefError::LeaseMiss),
-            Some(Err(error)) => Err(error),
-            Some(Ok((value, lowered_count))) => {
-                self.provenance
-                    .decl_bodies_lowered
-                    .fetch_add(lowered_count as u64, Ordering::Relaxed);
-                Ok(value)
-            }
-        }
-    }
-
-    /// Lower one VALUE symbol's contributing statements through the
-    /// LEASE-RETAINED snapshot and return its authored type annotation.
-    fn lower_value_annotation_leased(
-        &self,
-        name: &str,
-        contributors: &[u32],
-    ) -> Result<TypeExpr, LocatorBodyDerefError> {
-        let Some(service) = self.service.as_ref() else {
-            let lowered = self
-                .value_decl(name)
-                .ok_or(LocatorBodyDerefError::UnknownSymbol)?;
-            return lowered
-                .type_annotation
-                .clone()
-                .ok_or(LocatorBodyDerefError::ValueAnnotationAbsent);
-        };
-        self.ensure_lease();
-        let contributors = contributors.to_vec();
-        let name_owned = name.to_string();
-        let outcome = service.run_leased(&self.key, move |program| {
-            let Some(program) = program else {
-                return Err(LocatorBodyDerefError::FatalParse);
-            };
-            let source = program.source_str();
-            let program = program.borrow_dependent();
-            let mut scratch = EvalEnv::new();
-            for index in &contributors {
-                if let Some(stmt) = program.body.get(*index as usize) {
-                    lower_top_level_statement(stmt, source, &mut scratch);
-                }
-            }
-            let lowered_count = scratch.total_decl_count();
-            let Some(group) = scratch.value_symbols.get(&name_owned) else {
-                return Err(LocatorBodyDerefError::UnknownSymbol);
-            };
-            let annotation = group
-                .primary()
-                .type_annotation
-                .clone()
-                .ok_or(LocatorBodyDerefError::ValueAnnotationAbsent);
-            annotation.map(|a| (a, lowered_count))
-        });
-        match outcome {
-            None => Err(LocatorBodyDerefError::LeaseMiss),
-            Some(Err(error)) => Err(error),
-            Some(Ok((value, lowered_count))) => {
-                self.provenance
-                    .decl_bodies_lowered
-                    .fetch_add(lowered_count as u64, Ordering::Relaxed);
-                Ok(value)
             }
         }
     }

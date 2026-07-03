@@ -39,7 +39,6 @@
 //!   projection-time work applied to the fetched shape — never shape-node
 //!   identity — so one reusable body-shape family exists per locator/env.
 
-use std::cell::Cell;
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
@@ -105,19 +104,17 @@ impl<'a> LocatorShapeCtx<'a> {
     }
 }
 
-/// The module-internal working context of one locator-shape lowering pass:
-/// the sealed inputs plus the per-lowering mapped-binder ordinal counter.
+/// The module-internal working context of one locator-shape lowering pass.
 #[derive(Clone, Copy)]
 struct ShapeLowerCtx<'a> {
     scope: &'a NodeScopeId,
     binders: &'a [LocatorBinderFrame],
-    mapper_ordinals: &'a Cell<u16>,
 }
 
 impl<'a> ShapeLowerCtx<'a> {
-    /// Swap the binder stack (the surrounding scope + ordinal counter are
-    /// preserved) — used when a function's own generics / a mapper binder /
-    /// an `infer` frame extends the stack for a sub-position.
+    /// Swap the binder stack (the surrounding scope is preserved) — used
+    /// when a function's own generics / a mapper binder / an `infer` frame
+    /// extends the stack for a sub-position.
     fn with_binders<'b>(&self, binders: &'b [LocatorBinderFrame]) -> ShapeLowerCtx<'b>
     where
         'a: 'b,
@@ -125,7 +122,6 @@ impl<'a> ShapeLowerCtx<'a> {
         ShapeLowerCtx {
             scope: self.scope,
             binders,
-            mapper_ordinals: self.mapper_ordinals,
         }
     }
 
@@ -135,13 +131,6 @@ impl<'a> ShapeLowerCtx<'a> {
             .iter()
             .rev()
             .find_map(|frame| frame.lookup(name))
-    }
-
-    /// The next mapped-binder ordinal for this lowering pass.
-    fn next_mapper_ordinal(&self) -> u16 {
-        let next = self.mapper_ordinals.get();
-        self.mapper_ordinals.set(next.saturating_add(1));
-        next
     }
 }
 
@@ -158,11 +147,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         expr: &TypeExpr,
         ctx: &LocatorShapeCtx<'_>,
     ) -> SemanticNodeId {
-        let mapper_ordinals = Cell::new(0u16);
         let work = ShapeLowerCtx {
             scope: ctx.scope,
             binders: ctx.binders,
-            mapper_ordinals: &mapper_ordinals,
         };
         self.lower_locator_shape_node(expr, &work)
     }
@@ -336,10 +323,27 @@ impl<'a> ProjectSemanticDispatch<'a> {
             } => {
                 let mapper_display_name: Arc<str> = Arc::from(parameter.as_str());
                 let mapper_decl = DeclIdentity::from_scope(scope, Arc::from("<mapper-param>"));
+                // The mapper binder ordinal comes from the host-owned
+                // registry — the SAME identity authority the reducing
+                // lowering entry consults — so two lowerings of the same
+                // source mapper share one binder identity while distinct
+                // mappers in one file stay distinct.
+                let fingerprint = crate::mapper_binder_registry::MapperFingerprint::from_components(
+                    source,
+                    value,
+                    *optional,
+                    *readonly,
+                    name_type.as_ref(),
+                );
+                let mapper_ordinal = self
+                    .ctx
+                    .project_type_store()
+                    .mapper_binder_registry()
+                    .ordinal_for(&mapper_decl.canonical_id, &mapper_display_name, fingerprint);
                 let parameter_node = graph.intern_node_with_scope(
                     SemanticNodeData::TypeParam {
                         decl: mapper_decl,
-                        param_index: ctx.next_mapper_ordinal(),
+                        param_index: mapper_ordinal,
                         constraint: None,
                         default: None,
                         display_name: Arc::clone(&mapper_display_name),
@@ -789,6 +793,65 @@ impl<'a> ProjectSemanticDispatch<'a> {
         )
     }
 
+    /// Build the locator-shape binder frame for a declaration's type
+    /// parameters: declared parameters stay SHELLS — one `TypeParam` binder
+    /// per declared parameter, each constraint / default lowered under the
+    /// frame built so far (TS scoping — earlier parameters are visible to
+    /// later heads).
+    ///
+    /// Returns the frame plus the ordered `(name, binder)` bindings.
+    /// Binder identity is deterministic (content-addressed interning over
+    /// the same scope + owner + parameter list), so the substitution step
+    /// that applies `Instantiate` args to a fetched shape re-derives the
+    /// SAME binder ids from the prepared declaration's parameter list.
+    ///
+    /// The binder's declaration identity carries the OWNING symbol name
+    /// plus the parameter's declared ordinal — a DISTINCT identity from
+    /// the display-name-keyed shells a nested function type's own `<T>`
+    /// binders intern, so applying an argument to the declaration's `T`
+    /// can never rewrite a shadowing inner `T`.
+    pub(super) fn locator_shape_binder_frame(
+        &self,
+        scope: &NodeScopeId,
+        owner_symbol: &Arc<str>,
+        type_parameters: &[verter_type_expr::TypeParam],
+    ) -> (LocatorBinderFrame, Vec<(Arc<str>, SemanticNodeId)>) {
+        let mut frame = LocatorBinderFrame::default();
+        let mut bindings: Vec<(Arc<str>, SemanticNodeId)> =
+            Vec::with_capacity(type_parameters.len());
+        for (index, param) in type_parameters.iter().enumerate() {
+            let display_name: Arc<str> = Arc::from(param.name.as_str());
+            let (constraint, default) = {
+                let head_frames = std::slice::from_ref(&frame);
+                let head_ctx = LocatorShapeCtx::new(scope, head_frames);
+                (
+                    param
+                        .constraint
+                        .as_deref()
+                        .map(|c| self.lower_type_expr_for_locator_shape(c, &head_ctx)),
+                    param
+                        .default
+                        .as_deref()
+                        .map(|d| self.lower_type_expr_for_locator_shape(d, &head_ctx)),
+                )
+            };
+            let decl = DeclIdentity::from_scope(scope, Arc::clone(owner_symbol));
+            let binder = self.graph().intern_node_with_scope(
+                SemanticNodeData::TypeParam {
+                    decl,
+                    param_index: index as u16,
+                    constraint,
+                    default,
+                    display_name: Arc::clone(&display_name),
+                },
+                scope.clone(),
+            );
+            frame.bind(Arc::clone(&display_name), binder);
+            bindings.push((display_name, binder));
+        }
+        (frame, bindings)
+    }
+
     /// Cold build for [`SemanticQueryKey::LowerLocator`] — the SESSION
     /// phase of the two-phase worker-purity split.
     ///
@@ -845,40 +908,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             whole_hash: indexed.whole_hash,
             local_scope: None,
         };
-        // Declared type parameters stay SHELLS: bind one `TypeParam` binder
-        // per declared parameter, each constraint / default lowered under
-        // the frame built so far (TS scoping — earlier parameters are
-        // visible to later heads).
-        let mut frame = LocatorBinderFrame::default();
-        for param in &derefed.type_parameters {
-            let display_name: Arc<str> = Arc::from(param.name.as_str());
-            let (constraint, default) = {
-                let head_frames = std::slice::from_ref(&frame);
-                let head_ctx = LocatorShapeCtx::new(&scope, head_frames);
-                (
-                    param
-                        .constraint
-                        .as_deref()
-                        .map(|c| self.lower_type_expr_for_locator_shape(c, &head_ctx)),
-                    param
-                        .default
-                        .as_deref()
-                        .map(|d| self.lower_type_expr_for_locator_shape(d, &head_ctx)),
-                )
-            };
-            let decl = DeclIdentity::from_scope(&scope, Arc::clone(&display_name));
-            let binder = self.graph().intern_node_with_scope(
-                SemanticNodeData::TypeParam {
-                    decl,
-                    param_index: 0,
-                    constraint,
-                    default,
-                    display_name: Arc::clone(&display_name),
-                },
-                scope.clone(),
-            );
-            frame.bind(display_name, binder);
-        }
+        let anchor_symbol = match key.locator() {
+            AuthoredBodyLocator::DeclBody(slot) => Arc::clone(&slot.anchor.symbol),
+            AuthoredBodyLocator::AugmentationBody(aug) => Arc::clone(&aug.anchor.symbol),
+            AuthoredBodyLocator::MacroPayload(payload) => Arc::clone(&payload.anchor.symbol),
+        };
+        let (frame, _bindings) =
+            self.locator_shape_binder_frame(&scope, &anchor_symbol, &derefed.type_parameters);
         let frames = [frame];
         let shape_ctx = LocatorShapeCtx::new(&scope, &frames);
 
@@ -924,16 +960,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// Strictly unsubstituted: substituted demands route through
     /// `Instantiate { args }`, never through this provider.
     ///
-    /// The locator-emitting body-source consumers are wired separately;
-    /// until they route here the provider is exercised by its contract
-    /// tests only.
-    #[allow(dead_code)]
+    /// This is the production body source:
+    /// `lower_located_body_with_provenance` demands every declaration body
+    /// through this provider (never a prepared-body read), then owns
+    /// args-substitution and the post-substitution view projection.
     pub(crate) fn lower_locator(
         &self,
         locator: AuthoredBodyLocator,
     ) -> QueryResult<SemanticNodeId> {
         let anchor = match &locator {
             AuthoredBodyLocator::DeclBody(slot) => &slot.anchor,
+            AuthoredBodyLocator::AugmentationBody(aug) => &aug.anchor,
             AuthoredBodyLocator::MacroPayload(payload) => &payload.anchor,
         };
         let slot = self

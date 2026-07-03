@@ -59,8 +59,9 @@ use std::sync::Arc;
 
 use crate::semantic_query::{HashValue, ResolvedDeclSlotIdentity, SemanticSymbolSpace};
 use verter_type_expr::locators::{
-    AuthoredAnchor, AuthoredBodyLocator, LocatorSymbolSpace, MacroPayloadLocator,
-    MacroPayloadPosition, SymbolBodyLocator, TypeArgLocator, TypeBodyPathStep, TypeBodySlot,
+    AugmentationBodyLocator, AuthoredAnchor, AuthoredAugmentationScope, AuthoredBodyLocator,
+    LocatorSymbolSpace, MacroPayloadLocator, MacroPayloadPosition, SymbolBodyLocator,
+    TypeArgLocator, TypeBodyPathStep, TypeBodySlot,
 };
 
 mod sealed {
@@ -340,6 +341,8 @@ impl_r6_key_safe!(
     TypeArgLocator => w_type_arg_locator,
     MacroPayloadPosition => w_macro_payload_position,
     MacroPayloadLocator => w_macro_payload_locator,
+    AuthoredAugmentationScope => w_authored_augmentation_scope,
+    AugmentationBodyLocator => w_augmentation_body_locator,
     AuthoredBodyLocator => w_authored_body_locator,
     SemanticSymbolSpace => w_semantic_symbol_space,
     SlotEnvIdentity => w_slot_env_identity,
@@ -419,9 +422,23 @@ fn w_macro_payload_locator(l: &MacroPayloadLocator) {
     key_safe(payload);
 }
 
+fn w_authored_augmentation_scope(s: &AuthoredAugmentationScope) {
+    match s {
+        AuthoredAugmentationScope::Global => {}
+        AuthoredAugmentationScope::Module { specifier } => key_safe(specifier),
+    }
+}
+
+fn w_augmentation_body_locator(l: &AugmentationBodyLocator) {
+    let AugmentationBodyLocator { anchor, scope } = l;
+    key_safe(anchor);
+    key_safe(scope);
+}
+
 fn w_authored_body_locator(l: &AuthoredBodyLocator) {
     match l {
         AuthoredBodyLocator::DeclBody(slot) => key_safe(slot),
+        AuthoredBodyLocator::AugmentationBody(aug) => key_safe(aug),
         AuthoredBodyLocator::MacroPayload(payload) => key_safe(payload),
     }
 }
@@ -549,6 +566,7 @@ impl LocatorLoweringKey {
     ) -> Result<Self, LocatorKeyError> {
         let anchor = match &locator {
             AuthoredBodyLocator::DeclBody(slot_locator) => &slot_locator.anchor,
+            AuthoredBodyLocator::AugmentationBody(aug) => &aug.anchor,
             AuthoredBodyLocator::MacroPayload(payload) => &payload.anchor,
         };
         if anchor.canonical_id != slot.defining_canonical {

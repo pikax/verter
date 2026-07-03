@@ -1295,10 +1295,11 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         class: ReaderClass::ProducerLowering,
         method_chain: false,
         required_hot_route: &[],
-        reason: "the body-lowering producer/mint — reads prepared.body + the merged_contributors \
-                 gate to lower the authored body into the semantic graph; the required bridge from \
-                 authored IR into graph IR (the hot accessor wraps THIS producer's Instantiate \
-                 result)",
+        reason: "the body-lowering producer entry — demands the authored body through the \
+                 locator-backed `LowerLocator` query (never a prepared.body read; the retained \
+                 prepared-body implementation is a test-only oracle leg) and owns substitution \
+                 plus the post-substitution view projection; the required bridge from authored \
+                 IR into graph IR (the hot accessor wraps THIS producer's Instantiate result)",
     },
     ReaderRow {
         file: "src/resolver_core/prepared_decl.rs",

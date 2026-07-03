@@ -12,12 +12,9 @@
 
 use std::sync::Arc;
 
-use super::cases_tests::all_cases;
+use super::cases_tests::{all_cases, FixtureFile, PublishedSurfaceCase};
 use super::envelope_tests::OracleEnvelope;
-use super::{
-    legacy_prepared_body_reads, BodyLeg, FixtureFile, LegacyPreparedBodyLegGuard,
-    PublishedSurfaceCase, Stage10SurfaceClass,
-};
+use super::{legacy_prepared_body_reads, BodyLeg, LegacyPreparedBodyLegGuard, Stage10SurfaceClass};
 use crate::meta::MetaProject;
 use crate::types::HostConfig;
 use crate::VerterHost;
@@ -65,12 +62,26 @@ fn run_leg(case: &dyn PublishedSurfaceCase, leg: BodyLeg) -> OracleEnvelope {
         }
         BodyLeg::NewLocator => {
             super::LEGACY_PREPARED_BODY_READS.with(|c| c.set(0));
+            let _trace = crate::project_semantic_dispatch::raise::enable_dispatch_trace_for_test();
             let envelope = case.run(host);
             assert_eq!(
                 legacy_prepared_body_reads(),
                 0,
                 "{}: the production leg must never route through the retained \
                  prepared-body implementation",
+                case.id()
+            );
+            let lower_locator_dispatches = crate::project_semantic_dispatch::raise::DISPATCH_TRACE
+                .with(|t| {
+                    t.borrow()
+                        .iter()
+                        .filter(|tag| **tag == "LowerLocator")
+                        .count()
+                });
+            assert!(
+                lower_locator_dispatches > 0,
+                "{}: the production leg must serve decl bodies through the \
+                 LowerLocator query (anti-vacuity for the locator body source)",
                 case.id()
             );
             envelope

@@ -109,13 +109,46 @@ pub struct MacroPayloadLocator {
     pub payload: MacroPayloadPosition,
 }
 
+/// Ambient augmentation scope of an augmentation-scoped declaration body —
+/// the lower-neutral analogue of the retained-inventory scope tag
+/// (`declare global` / `declare module "<specifier>"`). The specifier is the
+/// AUTHORED module-specifier text, exactly as retained by the inventory —
+/// never a resolved path and never a content hash.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+pub enum AuthoredAugmentationScope {
+    /// A `declare global { ... }` block.
+    Global,
+    /// A `declare module "<specifier>" { ... }` block.
+    Module {
+        /// The authored module specifier the block names.
+        specifier: Arc<str>,
+    },
+}
+
+/// Locator for a retained ambient-augmentation contribution body: the inner
+/// `symbol` declaration a `declare global` / `declare module "<specifier>"`
+/// block contributes inside the anchor's file. Augmentation-scoped inner
+/// declarations never enter file-scope symbol inventories, so the plain
+/// decl-body anchor cannot address them — the scope tag is part of the
+/// authored position's identity.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+pub struct AugmentationBodyLocator {
+    /// The augmenter file + the augmented symbol name + its space.
+    pub anchor: AuthoredAnchor,
+    /// Which ambient augmentation block the contribution lives in.
+    pub scope: AuthoredAugmentationScope,
+}
+
 /// The cross-boundary CONTENT-FREE slot identity — a CLOSED sum over the authored
-/// parse-backed source kinds only: (a) decl-body + (b) authored macro/field
-/// payloads. The keyable inverse of a session `HotTypeRef`.
+/// parse-backed source kinds only: (a) decl-body (top-level or
+/// augmentation-scoped) + (b) authored macro/field payloads. The keyable
+/// inverse of a session `HotTypeRef`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
 pub enum AuthoredBodyLocator {
     /// (a) a top-level declaration body (or a named sub-slot of it).
     DeclBody(TypeBodySlot),
+    /// (a) an ambient augmentation-scoped contribution body.
+    AugmentationBody(AugmentationBodyLocator),
     /// (b) an authored macro / field payload body.
     MacroPayload(MacroPayloadLocator),
 }
