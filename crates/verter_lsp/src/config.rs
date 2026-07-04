@@ -1,8 +1,10 @@
 use std::path::PathBuf;
 
 /// Check if a workspace has any solution-style `tsconfig.json` (non-empty `references` array).
-/// TSGO cannot resolve path aliases from referenced tsconfig files, so this is used by
-/// auto-mode provider selection to prefer tsserver when composite tsconfigs are detected.
+/// TSGO cannot resolve path aliases from referenced tsconfig files, so composite detection is
+/// ONE input to [`prefer_tsserver_backend`]: a detected composite prefers tsserver only when the
+/// workspace is NOT tsgo. A tsgo/TS7 workspace routes to the tsgo external engine regardless of
+/// composite (the tsgo-active veto wins).
 ///
 /// All file reads route through `workspace` so overlays and snapshot caches
 /// are honored.
@@ -11,6 +13,29 @@ pub fn has_solution_style_tsconfig(
     workspace_root: &str,
 ) -> bool {
     verter_workspace::config::has_solution_style_tsconfig(workspace, workspace_root)
+}
+
+/// Auto-mode provider-backend classification: should the LSP try `tsserver`
+/// before falling back to the `tsgo` external engine?
+///
+/// A workspace whose ACTIVE TypeScript engine is tsgo/native-preview (TS >= 7,
+/// `workspace_typescript_is_tsgo`) is ALWAYS served by the tsgo external engine
+/// and is never dragged to a lower bundled/global tsserver — this veto wins even
+/// when a composite `tsconfig` is present (a TS <= 6 tsserver is the wrong engine
+/// for a TS7 project; tsgo's referenced-config path-alias handling is a separate
+/// concern). Otherwise `tsserver` is preferred for a detected TypeScript 5.x/6.x
+/// tsserver (`tsserver_major`) or when a solution-style (composite) `tsconfig` is
+/// present (TSGO cannot resolve path aliases from referenced configs).
+///
+/// `tsserver_major` is the major version of the tsserver candidate the caller
+/// resolved (`None` when none was found). `has_composite` is
+/// [`has_solution_style_tsconfig`].
+pub fn prefer_tsserver_backend(
+    workspace_typescript_is_tsgo: bool,
+    tsserver_major: Option<u32>,
+    has_composite: bool,
+) -> bool {
+    !workspace_typescript_is_tsgo && (matches!(tsserver_major, Some(5 | 6)) || has_composite)
 }
 
 pub use verter_diagnostics::{
@@ -1811,6 +1836,27 @@ export default defineConfig(({ mode }) => ({
             !has_solution_style_tsconfig(&fs_workspace(), &canonical_str(dir.path())),
             "should not scan node_modules"
         );
+    }
+
+    // provider-backend classification (auto-mode) — a tsgo (TS7) WORKSPACE routes
+    // to the tsgo external engine, never dragged to a lower bundled/global tsserver
+    #[test]
+    fn prefer_tsserver_backend_workspace_tsgo_vetoes_tsserver() {
+        // THE BUG CASE: a tsgo (TS7) workspace whose find_tsserver resolved a bundled
+        // TS6 tsserver must NOT prefer tsserver — the workspace-tsgo veto wins.
+        assert!(!prefer_tsserver_backend(true, Some(6), false));
+        // tsgo veto wins even with a composite tsconfig.
+        assert!(!prefer_tsserver_backend(true, Some(6), true));
+        assert!(!prefer_tsserver_backend(true, None, true));
+        // Non-tsgo workspace: TS5/TS6 tsserver -> prefer tsserver (unchanged).
+        assert!(prefer_tsserver_backend(false, Some(5), false));
+        assert!(prefer_tsserver_backend(false, Some(6), false));
+        // Non-tsgo workspace + composite -> tsserver (unchanged), even with no tsserver major yet.
+        assert!(prefer_tsserver_backend(false, None, true));
+        // Non-tsgo workspace, nothing to prefer tsserver for -> tsgo.
+        assert!(!prefer_tsserver_backend(false, None, false));
+        // A TS7 tsserver candidate (shouldn't exist) is not a 5/6 -> tsgo.
+        assert!(!prefer_tsserver_backend(false, Some(7), false));
     }
 
     // ── SSR Detection Tests ──────────────────────────────────────────────

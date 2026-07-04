@@ -25,6 +25,9 @@ verter_language = { path = "../verter_language" }
 verter_tsgo_api = { path = "../verter_tsgo_api" }
 
 [dev-dependencies]
+# Per-test isolated temp dirs (auto-cleaned) for the discovery version-parse
+# tests, so parallel runs never collide on a fixed temp path.
+tempfile = "3.27"
 # `test-util` provides the paused virtual clock (`#[tokio::test(start_paused = true)]`)
 # the resilient restart-interleaving tests use to drive respawn backoff
 # deterministically without any wall-clock sleep.

@@ -55,6 +55,14 @@ pub struct NativeIntrinsicLibrary {
     /// (`@typescript/typescript-<platform>-<arch>`) carrying real declarations
     /// was discoverable in the workspace — i.e. the active engine is TS>=7.
     rc_platform_available: bool,
+    /// Whether the workspace's ACTIVE TypeScript engine uses the tsgo/native-preview
+    /// (TypeScript >= 7) toolchain, decided by [`workspace_active_typescript_is_tsgo`]
+    /// — a bounded parent walk (mirroring `find_tsserver`) that, nearest-first,
+    /// prefers a readable hoisted `node_modules/typescript` major and falls back to
+    /// rc-per-platform-package presence AT THE SAME level. Both signals resolve over
+    /// the SAME walk, so a nested member open under a hoisted (possibly launcher-only,
+    /// unreadable-version) install is classified consistently.
+    active_typescript_is_tsgo: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -68,9 +76,11 @@ impl NativeIntrinsicLibrary {
     ///    ACTIVE ENGINE VERSION (see [`discover_active_lib_dir_with_rc_flag`]).
     pub fn discover(workspace_root: &std::path::Path) -> Self {
         let (lib_dir, rc_platform_available) = discover_active_lib_dir_with_rc_flag(workspace_root);
+        let active_typescript_is_tsgo = workspace_active_typescript_is_tsgo(workspace_root);
         Self {
             lib_dir,
             rc_platform_available,
+            active_typescript_is_tsgo,
         }
     }
 
@@ -102,6 +112,17 @@ impl NativeIntrinsicLibrary {
         self.lib_dir
             .as_deref()
             .is_some_and(lib_dir_is_rc_platform_package)
+    }
+
+    /// Does the workspace's ACTIVE TypeScript engine use the tsgo/native-preview
+    /// (TypeScript >= 7) toolchain? Auto-mode provider selection uses this to route a
+    /// tsgo workspace to the tsgo external engine instead of a lower bundled/global
+    /// tsserver. Resolved by [`workspace_active_typescript_is_tsgo`] — a bounded parent
+    /// walk (mirroring `find_tsserver`) that, nearest-first, prefers a readable hoisted
+    /// `typescript` major and falls back to rc-per-platform-package presence at the same
+    /// level, so a nested member open under a hoisted install is classified consistently.
+    pub fn active_typescript_is_tsgo(&self) -> bool {
+        self.active_typescript_is_tsgo
     }
 }
 
@@ -205,6 +226,42 @@ fn read_package_version(pkg_dir: &std::path::Path) -> Option<String> {
     let rest = &after_colon[quote_start..];
     let quote_end = rest.find('"')?;
     Some(rest[..quote_end].to_string())
+}
+
+/// Does the workspace's ACTIVE TypeScript engine (found by walking `workspace_root`
+/// up to the monorepo root, bounded, mirroring `find_tsserver`'s parent walk) use
+/// the tsgo/native-preview (TypeScript >= 7) toolchain? At each level, nearest-first:
+/// a readable hoisted `node_modules/typescript` version is authoritative
+/// (major >= 7 ⇒ tsgo); otherwise, when that version is unreadable but the rc
+/// per-platform package carrying real libs is present at that level (launcher-only
+/// rc layout), the workspace is tsgo. Both signals resolve over the SAME walk, so a
+/// nested member open under a hoisted install is classified consistently.
+#[cfg(not(target_arch = "wasm32"))]
+fn workspace_active_typescript_is_tsgo(workspace_root: &std::path::Path) -> bool {
+    let mut dir = workspace_root;
+    for _ in 0..10 {
+        let node_modules = dir.join("node_modules");
+        if let Some(version) = read_package_version(&node_modules.join("typescript")) {
+            return version
+                .split('.')
+                .next()
+                .and_then(|m| m.parse::<u32>().ok())
+                .is_some_and(|major| major >= 7);
+        }
+        // Launcher-only rc layout: no readable `typescript` version at this level,
+        // but the rc per-platform package (real libs) is present ⇒ tsgo engine.
+        if collect_lib_candidates(&node_modules)
+            .iter()
+            .any(|c| c.is_rc_platform)
+        {
+            return true;
+        }
+        match dir.parent() {
+            Some(parent) if parent != dir => dir = parent,
+            _ => break,
+        }
+    }
+    false
 }
 
 /// Compare two TypeScript version strings (`major.minor.patch[-prerelease]`) by
@@ -782,5 +839,170 @@ mod tests {
             "the legacy hoisted lib dir is not an rc per-platform package"
         );
         assert_eq!(lib.lib_dir(), Some(hoisted.as_path()));
+    }
+
+    // ── active_typescript_is_tsgo: auto-mode provider selection keys on the
+    //    WORKSPACE'S active TypeScript engine (the hoisted `node_modules/typescript`
+    //    major version), NOT on whatever bundled/global tsserver the editor
+    //    supplies. A hoisted TS7-rc install is a tsgo engine. ─────────────────────
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn active_typescript_is_tsgo_true_for_hoisted_ts7_rc() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write_pkg(
+            &root.join("node_modules/typescript"),
+            "typescript",
+            "7.0.1-rc",
+        );
+        assert!(
+            NativeIntrinsicLibrary::discover(root).active_typescript_is_tsgo(),
+            "a hoisted typescript@7.0.1-rc workspace is a tsgo (TS>=7) engine"
+        );
+    }
+
+    // ── A hoisted TS6 workspace is NOT tsgo (the major arm returns false). ───────
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn active_typescript_is_tsgo_false_for_hoisted_ts6() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write_pkg(&root.join("node_modules/typescript"), "typescript", "6.0.3");
+        assert!(
+            !NativeIntrinsicLibrary::discover(root).active_typescript_is_tsgo(),
+            "a hoisted typescript@6.0.3 workspace is NOT a tsgo engine"
+        );
+    }
+
+    // ── Fallback: when the hoisted `typescript` version is unreadable (launcher-
+    //    only rc layout with no readable `package.json`), the decision falls back
+    //    to whether the SELECTED active lib is the rc per-platform package. ───────
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn active_typescript_is_tsgo_falls_back_to_rc_platform_when_hoisted_unreadable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // Launcher-only hoisted typescript WITHOUT a package.json (version
+        // unreadable) + an rc per-platform package carrying the real libs.
+        let js_lib = root.join("node_modules/typescript/lib");
+        write_lib(&js_lib, "tsc.js", "// launcher");
+        let rc_pkg = root.join(
+            "node_modules/.pnpm/@typescript+typescript-some-plat@7.0.1-rc/node_modules/@typescript/typescript-some-plat",
+        );
+        write_lib(&rc_pkg.join("lib"), "lib.es5.d.ts", "// rc");
+
+        let lib = NativeIntrinsicLibrary::discover(root);
+        assert!(
+            lib.active_typescript_is_tsgo(),
+            "unreadable hoisted version must fall back to selected_lib_is_rc_platform \
+             (true here): {:?}",
+            lib.lib_dir()
+        );
+    }
+
+    // ── A legacy-only workspace (no rc platform package, no readable hoisted
+    //    version) is NOT tsgo — the rc-platform fallback returns false. ───────────
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn active_typescript_is_tsgo_false_for_legacy_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // Legacy pnpm store only; no hoisted typescript/package.json, no rc package.
+        let legacy_pkg = root.join("node_modules/.pnpm/typescript@5.8.2/node_modules/typescript");
+        write_pkg(&legacy_pkg, "typescript", "5.8.2");
+        write_lib(&legacy_pkg.join("lib"), "lib.es5.d.ts", "// legacy");
+
+        let lib = NativeIntrinsicLibrary::discover(root);
+        assert!(
+            !lib.active_typescript_is_tsgo(),
+            "a legacy-only (TS5) workspace with no rc platform package is not tsgo"
+        );
+    }
+
+    // ── Nested-workspace open: a TS7-rc `typescript` hoisted at the MONOREPO ROOT
+    //    must be found by walking up from a nested member root, mirroring
+    //    find_tsserver's parent walk — so a nested subpackage open is not dragged to
+    //    a bundled/global lower tsserver. ──────────────────────────────────────────
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn active_typescript_is_tsgo_walks_up_to_hoisted_ts7_at_monorepo_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // TS7-rc hoisted at the monorepo root; the nested member has NO own typescript.
+        write_pkg(
+            &root.join("node_modules/typescript"),
+            "typescript",
+            "7.0.1-rc",
+        );
+        let member = root.join("packages/app");
+        std::fs::create_dir_all(&member).unwrap();
+        assert!(
+            NativeIntrinsicLibrary::discover(&member).active_typescript_is_tsgo(),
+            "a nested member open must walk up to the monorepo-root hoisted typescript@7.0.1-rc \
+             and classify the workspace as tsgo"
+        );
+    }
+    // ── Negative: nested member open under a TS6-hoisted monorepo root stays non-tsgo
+    //    (the walk must not false-positive). ────────────────────────────────────────
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn active_typescript_is_tsgo_walks_up_but_stays_false_for_hoisted_ts6_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write_pkg(&root.join("node_modules/typescript"), "typescript", "6.0.3");
+        let member = root.join("packages/app");
+        std::fs::create_dir_all(&member).unwrap();
+        assert!(
+            !NativeIntrinsicLibrary::discover(&member).active_typescript_is_tsgo(),
+            "a nested member under a TS6-hoisted root is not tsgo"
+        );
+    }
+    // ── Nearest-first: a member with its OWN TS7 typescript wins even under a TS6 root. ──
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn active_typescript_is_tsgo_prefers_nearest_member_typescript() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write_pkg(&root.join("node_modules/typescript"), "typescript", "6.0.3");
+        let member = root.join("packages/app");
+        write_pkg(
+            &member.join("node_modules/typescript"),
+            "typescript",
+            "7.0.1-rc",
+        );
+        assert!(
+            NativeIntrinsicLibrary::discover(&member).active_typescript_is_tsgo(),
+            "the nearest (member) typescript@7 wins over the TS6 monorepo root"
+        );
+    }
+
+    // ── Nested launcher-only rc: a nested member open where the monorepo ROOT
+    //    node_modules has the rc per-platform package (real libs) but the hoisted
+    //    `typescript` has NO readable package.json must still classify tsgo — the
+    //    rc-platform signal resolves over the SAME parent walk as the version read. ──
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn active_typescript_is_tsgo_walks_up_to_rc_platform_when_root_typescript_unreadable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // Root hoisted `typescript` is launcher-only WITHOUT a package.json (version
+        // unreadable), and the rc per-platform package carries the real libs.
+        write_lib(
+            &root.join("node_modules/typescript/lib"),
+            "tsc.js",
+            "// launcher",
+        );
+        let rc_pkg = root.join(
+            "node_modules/.pnpm/@typescript+typescript-some-plat@7.0.1-rc/node_modules/@typescript/typescript-some-plat",
+        );
+        write_lib(&rc_pkg.join("lib"), "lib.es5.d.ts", "// rc");
+        // Open a NESTED member with no own typescript.
+        let member = root.join("packages/app");
+        std::fs::create_dir_all(&member).unwrap();
+        assert!(
+            NativeIntrinsicLibrary::discover(&member).active_typescript_is_tsgo(),
+            "a nested member open must walk up and detect the root rc per-platform package \
+             even when the hoisted typescript version is unreadable"
+        );
     }
 }

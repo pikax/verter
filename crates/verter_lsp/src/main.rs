@@ -220,8 +220,10 @@ impl CliArgs {
 
 /// Create the type provider based on CLI args.
 ///
-/// Auto mode: if TypeScript 5.x is installed in node_modules, use tsserver
-/// and recommend switching to TSGO. If no TypeScript is found, try TSGO.
+/// Auto mode: a workspace whose active TypeScript engine is tsgo/native-preview
+/// (TS >= 7) uses the tsgo external engine; otherwise a resolved TS 5.x/6.x
+/// tsserver candidate or a composite `tsconfig` selects tsserver, falling back
+/// to tsgo.
 ///
 /// Returns `(provider, kind, suggest_tsgo, none_reason)` where `none_reason`
 /// explains why no provider could be started (only set when provider is None).
@@ -298,11 +300,13 @@ async fn create_type_provider(
             )
         }
         _ => {
-            // "auto" (default): if TS 5.x/6.x installed, use tsserver; else try TSGO.
-            // Also prefer tsserver when composite tsconfigs are detected (TSGO upstream
-            // limitation: cannot resolve path aliases from referenced configs).
-            let tsserver_path =
-                verter_lsp::tsserver::find_tsserver(args.tsdk.as_deref(), Some(&ws_canonical));
+            // "auto" (default): the decision keys on the WORKSPACE's active
+            // TypeScript engine, not on whatever find_tsserver resolves (which for
+            // a tsgo/TS7 workspace with no workspace tsserver.js would be the
+            // editor's bundled/global lower tsserver). A tsgo (TS7) workspace is
+            // served by the tsgo external engine; otherwise a TS 5.x/6.x tsserver
+            // or a composite tsconfig prefers tsserver (TSGO cannot resolve path
+            // aliases from referenced configs).
             let mut tsserver_reason = None;
 
             let composite_ws = verter_workspace::FilesystemWorkspace::new(
@@ -318,33 +322,37 @@ async fn create_type_provider(
                 );
             }
 
-            if let Some(ref ts_path) = tsserver_path {
-                let ts_major = verter_lsp::tsserver::detect_ts_major_version(ts_path);
-                tracing::info!(
-                    "auto mode: detected TypeScript {} at {}",
-                    ts_major.map_or("unknown".to_string(), |v| format!("{v}.x")),
-                    ts_path.display()
-                );
+            // The active workspace TypeScript engine (owner: verter_workspace's
+            // intrinsic-library discovery) — a tsgo/TS7 workspace routes to the
+            // tsgo external engine regardless of any editor-supplied tsserver.
+            let workspace_ts = verter_workspace::NativeIntrinsicLibrary::discover(
+                std::path::Path::new(&ws_canonical),
+            );
+            let workspace_tsgo = workspace_ts.active_typescript_is_tsgo();
 
-                let prefer_tsserver = ts_major == Some(5) || ts_major == Some(6) || has_composite;
+            // A tsgo workspace is served by tsgo — never resolve a lower tsserver
+            // launch path for it.
+            let tsserver_path = if workspace_tsgo {
+                None
+            } else {
+                verter_lsp::tsserver::find_tsserver(args.tsdk.as_deref(), Some(&ws_canonical))
+            };
+            let tsserver_major = tsserver_path
+                .as_deref()
+                .and_then(verter_lsp::tsserver::detect_ts_major_version);
 
-                if prefer_tsserver {
-                    match try_spawn_tsserver(args, &ws_canonical, client_cell).await {
-                        Ok(tp) => return (Some(tp), TypeProviderKind::Tsserver, false, None),
-                        Err(reason) => {
-                            tracing::warn!("auto mode: tsserver unavailable: {reason}");
-                            tsserver_reason = Some(reason);
-                        }
-                    }
-                }
-            } else if has_composite {
-                // No local TypeScript found, but composite tsconfigs detected.
-                // Try spawning tsserver anyway — find_node + global TS might work,
-                // and tsserver handles composite configs better than TSGO.
-                tracing::info!(
-                    "auto mode: no local TypeScript found, but composite tsconfig detected — \
-                     attempting tsserver anyway"
-                );
+            tracing::info!(
+                "auto mode: workspace_tsgo={} tsserver={} has_composite={}",
+                workspace_tsgo,
+                tsserver_major.map_or("none".to_string(), |v| format!("{v}.x")),
+                has_composite
+            );
+
+            if verter_lsp::config::prefer_tsserver_backend(
+                workspace_tsgo,
+                tsserver_major,
+                has_composite,
+            ) {
                 match try_spawn_tsserver(args, &ws_canonical, client_cell).await {
                     Ok(tp) => return (Some(tp), TypeProviderKind::Tsserver, false, None),
                     Err(reason) => {

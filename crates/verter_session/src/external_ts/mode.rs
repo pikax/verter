@@ -95,10 +95,17 @@
 //! `ProjectBinding` reference URI to its referenced project's canonical
 //! [`ProjectIdentity`] before graph construction, the warm-state cache
 //! keyed on [`EngineIdentity`], and mode renegotiation on editor
-//! reconnect — is owned by the live editor-attach integration. That
-//! integration also owns the provider-selection correction for TypeScript 7
-//! release-candidate installations currently classified as tsserver in the
-//! LSP's `select_type_provider`.
+//! reconnect — is owned by the live editor-attach integration.
+//!
+//! Auto-mode provider selection routes a workspace whose active TypeScript engine
+//! is tsgo/native-preview (TypeScript >= 7) to the tsgo external engine: the
+//! decision keys on the workspace-active engine
+//! (`verter_workspace::NativeIntrinsicLibrary::active_typescript_is_tsgo`), so a
+//! tsgo workspace is never dragged to a lower bundled/global `tsserver` even when
+//! the editor supplies one. For a non-tsgo workspace, `tsserver` is selected when
+//! the resolved tsserver candidate (workspace, editor `--tsdk`, or global) is
+//! TypeScript 5.x/6.x, or when a solution-style composite `tsconfig` is present
+//! (`verter_lsp::config::prefer_tsserver_backend`).
 
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::Arc;
