@@ -3534,7 +3534,19 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 // demand: StructuralTransit walks return None (transit
                 // is the non-publication rail; mapped enumeration is
                 // publication work).
-                let surface = self.synthesise_mapped_surface(source, &mapper);
+                let mut surface = self.synthesise_mapped_surface(source, &mapper);
+                // Apply the heritage role override exactly like the
+                // `Object` arm above: a mapped surface reached through a
+                // consuming declaration's heritage carrier (`extends
+                // Partial<Base>` — the builtin mappers materialise here)
+                // produces members that are `Heritage` relative to the
+                // consuming declaration, so the own-body-shadows-heritage
+                // merge fires instead of intersecting the collision.
+                if let (Some(role), Some(surface)) = (member_role_override, surface.as_mut()) {
+                    for member in &mut surface.members {
+                        member.merge_role = self.context.stamp_role(role);
+                    }
+                }
                 self.contribute_surface(
                     target,
                     root_contribution,

@@ -32,9 +32,9 @@ use crate::resolver_core::scope_shadowing::ScopeShadowing;
 use crate::semantic_query::{
     may_reduce_operator, DeclIdentity, FunctionParam, IndexKey, IndexSignature, MapperKey,
     MemberMergeRole, NodeScopeId, PathSegment, PrimitiveKind, ProjectionMode,
-    ProjectionReductionContext, QueryError, QueryResult, ResolveDeclKey, ScopeId, SemanticNodeData,
-    SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput, SurfaceMember,
-    SurfaceView, TupleElement, TypeParamDecl, ValueRootKey,
+    ProjectionReductionContext, QueryError, QueryResult, ReductionDemand, ResolveDeclKey, ScopeId,
+    SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
+    SurfaceMember, SurfaceView, TupleElement, TypeParamDecl, ValueRootKey,
 };
 
 /// The demand-specific stamp `Instantiate`/`ProjectPath` applies to a
@@ -147,6 +147,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
         context: ProjectionReductionContext,
     ) -> SemanticNodeId {
+        // The declaration-kind role stamped onto reference arms. Two
+        // consumers: on the `CallerMode` path (a single declaration's
+        // Intersection body) it drives the role-driven intersection surface
+        // merge — `Heritage` shadows, `Authored` intersects (the
+        // interface-vs-alias collision semantics the published-surface tests
+        // lock). On the `Deferred` path it rides the transit context as
+        // projection identity (distinct memo slots per role) and as the
+        // member stamp for any arm the transit projection still reduces
+        // (e.g. a closed conditional); the peer-merge walker re-derives the
+        // heritage classification for carrier arms from topology.
         let reference_arm_role = match decl_kind {
             TypeDeclKind::Interface | TypeDeclKind::Class => MemberMergeRole::Heritage,
             TypeDeclKind::Alias => MemberMergeRole::Authored,
@@ -280,12 +290,32 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         let mut arm_ctx = stamp.stamped_context(context);
                         if matches!(arm_kind, AuthoredArmKind::ReferenceArm)
                             && matches!(reference_arm_demand, ReferenceArmDemand::Deferred)
-                            && matches!(
-                                arm_ctx.mode,
-                                ProjectionMode::Expanded | ProjectionMode::Identity
-                            )
                         {
-                            arm_ctx = arm_ctx.with_mode(ProjectionMode::Navigate);
+                            // A DEFERRED reference arm is a TRUE carrier-only
+                            // projection: the arm projects under the
+                            // NON-PUBLICATION `StructuralTransit` demand (with
+                            // the eager modes demoted to `Navigate`) so every
+                            // materialisation gate along the arm — the mapper
+                            // builtins (`Partial`/`Required`/`Readonly`)
+                            // included — carrier-stops. A `Published` demand
+                            // here would let a closed-arg builtin heritage ref
+                            // fall through to an executed `Instantiate`, and
+                            // the resulting `Object` is mis-bucketed as OWN
+                            // surface by the topology-driven peer-merge
+                            // reducer — inverting own-body-shadows-heritage.
+                            // The stamped merge role (`Heritage` for an
+                            // interface/class) is PRESERVED on the transit
+                            // context; substitution env and structural
+                            // provenance carry through unchanged.
+                            let mode = match arm_ctx.mode {
+                                ProjectionMode::Expanded | ProjectionMode::Identity => {
+                                    ProjectionMode::Navigate
+                                }
+                                other => other,
+                            };
+                            arm_ctx =
+                                ProjectionReductionContext::structural_transit_with_mode(mode)
+                                    .with_merge_role(arm_ctx.merge_role);
                         }
                         self.project_view_node(*arm, arm_ctx, inputs, substitutions, memo)
                     })
@@ -1009,8 +1039,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         return rebuild(projected_args);
                     }
                     // Builtin carrier gate — identical decision table to the
-                    // reducing entry's builtin fast path.
-                    let build_carrier = ctx.mode == ProjectionMode::Shallow
+                    // reducing entry's builtin fast path, PLUS the
+                    // non-publication transit rail: a `StructuralTransit`
+                    // demand carrier-stops the builtins (the deferred
+                    // reference-arm projection above routes heritage refs
+                    // here — a mapper builtin materialised mid-transit would
+                    // reach the peer-merge reducer as an own-surface Object
+                    // and invert own-body-shadows-heritage). `Skeleton` is
+                    // exempt from the transit stop: the BFS / generic-helper
+                    // traversal (the open/closed enumeration-domain oracle in
+                    // particular) probes builtin bodies under
+                    // `StructuralTransit(Skeleton)` and must keep executing
+                    // them — carrier-stopping the probe makes the oracle
+                    // judge every closed utility source "unknown" and
+                    // over-broadens the L1 carrier-stop; Skeleton results
+                    // never publish.
+                    let build_carrier = (ctx.demand == ReductionDemand::StructuralTransit
+                        && ctx.mode != ProjectionMode::Skeleton)
+                        || ctx.mode == ProjectionMode::Shallow
                         || (super::raise::is_l1_object_filter_utility(base.decl_name.as_ref())
                             && (ctx.mode == ProjectionMode::Navigate
                                 || super::raise::utility_enumeration_domain_is_open_or_unknown(

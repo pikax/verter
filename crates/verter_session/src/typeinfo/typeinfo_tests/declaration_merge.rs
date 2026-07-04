@@ -463,6 +463,98 @@ fn merged_interface_generic_heritage_own_member_shadows_expanded() {
     assert_primitive(&props["shared"].ty, PrimitiveName::Number);
 }
 
+/// The same own-body-shadows-heritage precedence when the heritage clause
+/// is a MAPPER BUILTIN over a CLOSED base (`extends Partial<Base>` — not an
+/// L1 object-filter utility, no open argument): the merged contributor's
+/// heritage arm must stay a REFERENCE carrier through the deferred-arm
+/// projection — an eagerly materialised `Partial<Base>` becomes an `Object`
+/// the peer-merge reducer mis-buckets as OWN surface, and first-contributor
+/// precedence then INVERTS own-body-shadows-heritage (the Partial-ized
+/// inherited `shared` steals the own `shared: number`).
+#[test]
+fn merged_interface_mapper_builtin_heritage_own_member_shadows_expanded() {
+    use crate::semantic_query::SemanticNodeData;
+
+    let host = make_host_with_footprint();
+    upsert_ts(
+        &host,
+        PATH,
+        "export interface Base { shared: string; fromBase: boolean }\n\
+         export interface X extends Partial<Base> { shared: number }\n\
+         export interface X { other: string }\n",
+    );
+
+    let node = host
+        .resolve_named_symbol(PATH, "X", &[], Some(ProjectionMode::Expanded))
+        .expect("merged X must resolve Expanded");
+    let graph = host.project_type_store().semantic_graph();
+
+    // 1. Carrier topology: the merged carrier survives and the extending
+    //    contributor's `extends Partial<Base>` arm is still a REFERENCE
+    //    carrier (the peer-merge reducer classifies heritage arms by
+    //    topology — a materialised heritage Object is indistinguishable
+    //    from the own body and silently steals member precedence).
+    let contributors = match graph.node_data(node).as_deref() {
+        Some(SemanticNodeData::MergedDecl { contributors }) => contributors.clone(),
+        other => panic!("merged X must stay a MergedDecl carrier, got {other:?}"),
+    };
+    assert_eq!(contributors.len(), 2, "two same-name contributors");
+    let heritage_arm_is_reference =
+        contributors.iter().any(
+            |contributor| match graph.node_data(*contributor).as_deref() {
+                Some(SemanticNodeData::Intersection(arms)) => arms.iter().any(|arm| {
+                    matches!(
+                        graph.node_data(*arm).as_deref(),
+                        Some(
+                            SemanticNodeData::InstantiationRef { .. }
+                                | SemanticNodeData::DeclRef { .. }
+                        )
+                    )
+                }),
+                _ => false,
+            },
+        );
+    assert!(
+        heritage_arm_is_reference,
+        "the `extends Partial<Base>` heritage arm must stay a reference \
+         carrier in the projected contributor — an eagerly materialised \
+         mapper-builtin heritage Object inverts own-body-shadows-heritage"
+    );
+
+    // 2. Surface precedence: the own `shared: number` wins over the
+    //    Partial-ized inherited `shared`; the non-conflicting heritage
+    //    member still surfaces (optional-ized by Partial — heritage is
+    //    NOT dropped); the second contributor's own member survives.
+    let surface = shallow_surface_expr(&host, PATH, "X");
+    let props = object_props(&surface);
+    let names = prop_names(&props);
+    assert!(
+        names.contains(&"fromBase"),
+        "the non-conflicting Partial-ized heritage member must still \
+         surface; got {names:?}"
+    );
+    assert!(
+        props["fromBase"].optional,
+        "the heritage member reached through Partial must surface \
+         optional-ized"
+    );
+    assert!(
+        names.contains(&"other"),
+        "the second contributor's own member must survive the merge; got {names:?}"
+    );
+    // Negative: `shared` must NOT be the heritage type (the Partial-ized
+    // `string`) — that is the precedence inversion this test pins.
+    assert!(
+        !matches!(
+            props["shared"].ty,
+            TypeExpr::Primitive(PrimitiveName::String)
+        ),
+        "own-body-shadows-heritage inverted: `shared` resolved to the \
+         heritage `string` instead of the own `number`"
+    );
+    assert_primitive(&props["shared"].ty, PrimitiveName::Number);
+}
+
 /// The same own-body-shadows-heritage precedence through the EXPANDED
 /// surface route for a SINGLE (non-merged) interface with a GENERIC heritage
 /// base: the `extends Base<string>` reference arm is HERITAGE relative to
