@@ -675,6 +675,70 @@ mod tests {
         drop(others);
     }
 
+    /// The retained snapshot for a live-leased key is released EXCLUSIVELY
+    /// by dropping its own lease (the RAII memo-drop). No production
+    /// eviction, release, or budget path exists: a heavy battery of
+    /// other-key traffic — acquire-and-DROP many other keys (the release
+    /// path runs for each) interleaved with leased runs of those keys (the
+    /// access path) — leaves the leased key pinned across ALL of it, and
+    /// ONLY dropping its lease releases it. A production eviction / release
+    /// / budget path wired into any of that other-key acquire / release /
+    /// access traffic would drop the leased snapshot and force a re-parse,
+    /// failing this test. This is the companion to
+    /// `live_lease_pins_snapshot_across_many_other_keys` (which pins the
+    /// budget/eviction-on-acquire axis): together they close the eviction,
+    /// access, and release axes of the lease-liveness invariant.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn retained_snapshot_release_is_lease_drop_only() {
+        // Single worker so every key shares one shard and job order is
+        // deterministic regardless of host parallelism.
+        let service = Arc::new(DeclLoweringService::new_single_worker());
+        let st = oxc_span::SourceType::ts();
+        let k1 = key("/ws/pinned.ts", 1);
+        let src1: Arc<str> = Arc::from("type Pinned = { a: 1 };\n");
+
+        let lease1 = service.acquire_lease(&k1, &src1, st);
+        assert!(lease1.parsed_now, "leasing k1 parses it once");
+
+        // Churn 32 other keys through the FULL acquire -> access -> release
+        // lifecycle each — every hook a production eviction / release /
+        // budget path could attach to. Each other lease drops before the
+        // next is acquired, so the release path fires 32 times while k1
+        // stays leased.
+        for i in 0..32u8 {
+            let k = key(&format!("/ws/churn{i}.ts"), i.wrapping_add(80));
+            let src: Arc<str> = Arc::from(format!("type C{i} = {{ v: {i} }};\n"));
+            let other = service.acquire_lease(&k, &src, st);
+            // Access the just-leased other key (the access path), then drop
+            // its lease (the release path). Neither must touch k1's entry.
+            let hit = service.run_leased(&k, |program| program.is_some());
+            assert_eq!(hit, Some(true), "the just-leased other key is retained");
+            drop(other.lease);
+        }
+
+        // k1 is STILL pinned by its live lease across all that release and
+        // access traffic — no eviction, release, or budget path released it.
+        let warm = service.run(&k1, &src1, st, |program| program.is_some());
+        assert!(
+            !warm.parsed_now,
+            "the leased snapshot must survive all other-key release/access \
+             traffic — release is reachable ONLY by dropping k1's own lease"
+        );
+        assert!(warm.value);
+
+        // Dropping k1's lease is the SOLE release path: the next run
+        // re-parses fresh.
+        drop(lease1.lease);
+        let after = service.run(&k1, &src1, st, |program| program.is_some());
+        assert!(
+            after.parsed_now,
+            "dropping the last lease is the sole release path — the next run \
+             re-parses"
+        );
+        assert!(after.value);
+    }
+
     /// Dropping the LAST lease releases the retained snapshot: a later
     /// run of the same key parses fresh again.
     #[test]
