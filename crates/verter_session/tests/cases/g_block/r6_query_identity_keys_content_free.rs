@@ -90,8 +90,12 @@ fn r6_semantic_query_key_instantiate_base_is_content_free_decl_key() {
             // destructure cannot enumerate its fields. The accessors expose
             // the embedded projection-reduction identity, the
             // `resolve_env_hash` ENV dim, and the `body_source` source-kind
-            // axis — no content/version hash; the exhaustive in-module R6
-            // field proof lives with the sealed definition.
+            // axis — no content/version hash. The exhaustive in-module R6
+            // field proof is the `w_instantiate_context` witness beside the
+            // sealed definition (`semantic_query.rs`): a compile-anchored
+            // no-`..` destructure classifying every private field through an
+            // allowed-dimension path, so a new field — including an
+            // R6-forbidden hash — fails compilation there until classified.
             context,
         } => {
             let _ = context.projection_reduction();

@@ -242,8 +242,11 @@ pub trait R6KeySafe: key_safe_sealed::Sealed {}
 /// dimension nested in a container is still not key-safe).
 pub fn assert_r6_key_safe<T: R6KeySafe>() {}
 
-/// Internal per-field witness call used by the exhaustive-destructure witnesses.
-fn key_safe<T: R6KeySafe>(_: &T) {}
+/// Internal per-field witness call used by the exhaustive-destructure
+/// witnesses — here and by the sealed-key-context witnesses that live with
+/// their private-field definitions in other modules (e.g. the
+/// `InstantiateContext` witness in `semantic_query`).
+pub(crate) fn key_safe<T: R6KeySafe>(_: &T) {}
 
 /// Stamp the sealed [`R6KeySafe`] witness for a sealed env/substitution DIMENSION
 /// leaf. A dimension has NO key-bearing fields to destructure, so (unlike a

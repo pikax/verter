@@ -1655,6 +1655,91 @@ impl InstantiateContext {
     }
 }
 
+// Compile-bind the exhaustive witness fn to the sealed context type
+// (mirrors the `impl_r6_key_safe!` stamp anchor in `locator_identity`): the
+// anchor guarantees a signature-matching witness EXISTS; the witness body's
+// no-`..` destructure guarantees it is exhaustive.
+const _: fn(&InstantiateContext) = w_instantiate_context;
+
+/// R6 exhaustive-destructure witness for the sealed [`InstantiateContext`]
+/// — the per-key context that enters the derived `Hash`/`Eq` of
+/// [`SemanticQueryKey::Instantiate`] and folds onto
+/// `FamilyKey::Instantiate`. The EXHAUSTIVE destructure (no `..`, no `_`
+/// field) classifies EVERY field through an allowed-dimension path, so a
+/// NEW field — including an R6-forbidden content/version hash — FAILS
+/// compilation here until it is classified. The witness lives with the
+/// sealed definition because the fields are private: outside readers use
+/// the getter accessors and cannot enumerate the fields, so this in-module
+/// destructure is the one place field-set drift is provable.
+#[allow(dead_code)]
+fn w_instantiate_context(context: &InstantiateContext) {
+    let InstantiateContext {
+        projection_reduction,
+        resolve_env_hash,
+        body_source,
+    } = context;
+    w_projection_reduction_context(projection_reduction);
+    instantiate_resolve_env_hash_dim(resolve_env_hash);
+    w_instantiate_body_source(body_source);
+}
+
+/// [`ProjectionReductionContext`] is a content-free projection-demand
+/// identity: every axis is a CLOSED enum, classified exhaustively (no `_`
+/// arm) so a new axis field or a new variant fails compilation until it is
+/// classified here.
+#[allow(dead_code)]
+fn w_projection_reduction_context(context: &ProjectionReductionContext) {
+    let ProjectionReductionContext {
+        mode,
+        demand,
+        provenance,
+        merge_role,
+    } = context;
+    match mode {
+        ProjectionMode::Identity
+        | ProjectionMode::Navigate
+        | ProjectionMode::Shallow
+        | ProjectionMode::Expanded
+        | ProjectionMode::Skeleton => {}
+    }
+    match demand {
+        ReductionDemand::Published
+        | ReductionDemand::StructuralTransit
+        | ReductionDemand::MacroObjectSurface => {}
+    }
+    match provenance {
+        SurfaceProvenanceContext::Structural | SurfaceProvenanceContext::MacroTypeArgOwnBody => {}
+    }
+    match merge_role {
+        MemberMergeRole::Authored | MemberMergeRole::OwnBody | MemberMergeRole::Heritage => {}
+    }
+}
+
+/// The sealed source-kind axis: `FileBacked` carries ONLY the sealed
+/// [`ParseEnvHash`] env dimension (an `R6KeySafe` leaf); `NonFile` carries
+/// nothing. Exhaustive over the closed two-state enum.
+#[allow(dead_code)]
+fn w_instantiate_body_source(source: &InstantiateBodySource) {
+    match source {
+        InstantiateBodySource::FileBacked(parse_env_hash) => {
+            crate::locator_identity::key_safe(parse_env_hash);
+        }
+        InstantiateBodySource::NonFile => {}
+    }
+}
+
+/// NAMED allowed-dimension path for the RAW `resolve_env_hash` field: the
+/// `HashValue` bytes at this position are the `resolve_env_hash` ENV
+/// dimension (`R`), never a content/version hash — but the raw `[u8; 16]`
+/// type cannot prove that BY TYPE (a raw `HashValue` is never `R6KeySafe`
+/// on its own). Typing this field as the sealed `ResolveEnvHash` newtype is
+/// carried env-hash typing debt; until then this NAMED classifier (never an
+/// unchecked `_`) is the sole raw-hash admission on this key context, so a
+/// new raw-hash field cannot silently ride through it without naming itself
+/// here.
+#[allow(dead_code)]
+fn instantiate_resolve_env_hash_dim(_resolve_env_hash: &HashValue) {}
+
 /// Per-key env+mode context for [`SemanticQueryKey::ResolveMacroPayload`].
 ///
 /// The macro owner's slot-intrinsic env dims (`T` / `L` / `J`) come from
