@@ -581,9 +581,18 @@ impl GatedWireSink for RelayInjectPort {
 /// are written to the editor transport, not the server-writer channel.
 ///
 /// The relay does not own the server engine: stopping it never sends `exit`
-/// (or any other lifecycle write). All Verter writes enter exclusively
-/// through [`LspRelay::injection_channel`] — the deny-by-default
-/// [`CarrierInjectionChannel`] gate.
+/// (or any other lifecycle write). Every Verter-authored carrier-injection
+/// / carrier-overlay write enters this relay exclusively through
+/// [`LspRelay::injection_channel`] — the deny-by-default
+/// [`CarrierInjectionChannel`] gate. The relay's direct bypass writes are
+/// not carrier injection: editor-originated frames are forwarded as raw,
+/// editor-owned bytes; server→editor `Forward` writes are carrier-free, and
+/// `FilterCarrierEntries` writes are re-encoded only after carrier entries
+/// are removed. The synthesized protocol-liveness responses — server-bound
+/// `AnswerServer` negatives and reserved-id request-anomaly answers, plus
+/// editor-bound `AnswerEditor` neutrals — use fixed sanitized bodies and
+/// only echo the original JSON-RPC `id`; they bypass the carrier gate
+/// because they do not author carrier overlays.
 pub struct LspRelay {
     port: RelayInjectPort,
     /// The ACTIVE-lifecycle overlay tracker (retraction state) for
