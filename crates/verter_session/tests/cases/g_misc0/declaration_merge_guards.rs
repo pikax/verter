@@ -130,16 +130,17 @@ fn merged_decl_lowers_to_distinct_carrier_not_intersection() {
     use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 
     let host = VerterHost::new_standalone(HostConfig::default());
-    host.upsert(UpsertRequest {
-        canonical_id: Some("/merged_carrier.ts".to_string()),
-        input_id: "/merged_carrier.ts".to_string(),
-        source: Arc::from(
-            "export interface Foo { a: string }\nexport interface Foo { b: number }\n",
-        ),
-        file_language: FileLanguage::script_ts(),
-        aliases: Vec::new(),
-    })
-    .expect("upsert merged-interface fixture");
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: Some("/merged_carrier.ts".to_string()),
+            input_id: "/merged_carrier.ts".to_string(),
+            source: Arc::from(
+                "export interface Foo { a: string }\nexport interface Foo { b: number }\n",
+            ),
+            file_language: FileLanguage::script_ts(),
+            aliases: Vec::new(),
+        })
+        .expect("upsert merged-interface fixture");
 
     let node = host
         .resolve_named_symbol(

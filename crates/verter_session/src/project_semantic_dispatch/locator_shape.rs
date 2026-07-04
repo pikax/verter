@@ -844,9 +844,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let (final_canonical, final_symbol) = self
                     .ctx
                     .resolve_imported_type_root(&direct.canonical_id, &direct.symbol_name);
-                if self.ctx.shallow_file_state(&final_canonical).is_none() {
-                    return None;
-                }
+                self.ctx.shallow_file_state(&final_canonical)?;
                 Some(ResolvedRootIdentity::new(final_canonical, final_symbol))
             })
             .or_else(|| match scope {
