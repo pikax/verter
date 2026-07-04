@@ -2041,25 +2041,25 @@ const LIFTED_ROW_OVERRIDES = new Map([
   [
     tkey("wide_deep.rs", "wide_deep_projected_token_resolves_literal_union"),
     {
-      mech: "MappedTemplateRemap",
+      mech: "IndexedAccessUnionDistribution",
       proof: "ProofRequirement::Ts7Oracle(OracleId::IndexedAccess)",
       semantic_queries: [
         "IndexedAccess",
         "Instantiate",
-        "KeyOf",
-        "MappedType",
         "ProjectPath",
         "ResolveDecl",
         "LowerLocator",
       ],
-      consumed_mechanisms: ["QueryValueDomainFoundation", "IndexedAccessUnionDistribution"],
+      consumed_mechanisms: ["QueryValueDomainFoundation"],
       unblocker:
-        "lifted by U2.MAPPED_TEMPLATE: `WideDeepProjectedToken` reduces the " +
-        "multi-hop indexed-access chain through the terminal " +
-        "`Pick<TLeaf,'id'|'score'> & { token }` intersection to the literal " +
-        "union `'alpha' | 'beta' | 'gamma'`; the terminal `Pick` mapped remap is " +
-        "the dominant MappedTemplateRemap producer, proven against the " +
-        "checked-in tsgo oracle snapshot via oracle::run_row",
+        "lifted on its measured trace: `WideDeepProjectedToken` reduces the " +
+        "multi-hop indexed-access chain to the literal union " +
+        "`'alpha' | 'beta' | 'gamma'` PATH-PRECISELY — the requested `token` " +
+        "member projects from the inline `{ token }` intersection arm via " +
+        "indexed-access distribution while the non-contributing terminal " +
+        "`Pick<TLeaf,'id'|'score'>` arm stays a deferred carrier (no " +
+        "KeyOf/MappedType dispatch), proven against the checked-in tsgo " +
+        "oracle snapshot via oracle::run_row",
     },
   ],
   [

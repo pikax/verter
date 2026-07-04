@@ -3230,7 +3230,7 @@ The complete partition (each entry `file::function — substrate`):
 - `variadic_tuples.rs::variadic_tuple_tail_of_sample_resolves_to_remaining_tuple` — `TupleFeatures`
 - `variadic_tuples.rs::variadic_tuple_variadic_function_with_explicit_type_args_concatenates_tuples` — `TupleFeatures`
 
-**`U2.INDEXED_ACCESS`** (23 rows):
+**`U2.INDEXED_ACCESS`** (24 rows):
 
 - `branded_types.rs::branded_key_access_projects_boolean_literal_brand_tag` — `ApparentTypes`
 - `branded_types.rs::branded_key_access_projects_literal_brand_tag` — `ApparentTypes`
@@ -3254,9 +3254,10 @@ The complete partition (each entry `file::function — substrate`):
 - `union_key_access.rs::union_key_access_two_key_union_projects_member_type_union` — `UnionDistribution`
 - `wide_deep.rs::wide_deep_flag_active_resolves_boolean_terminal` — `PathProjection`
 - `wide_deep.rs::wide_deep_projected_target_resolves_terminal_pick_intersection` — `PathProjection`
+- `wide_deep.rs::wide_deep_projected_token_resolves_literal_union` — `PathProjection`
 - `wide_deep.rs::wide_deep_row_flags_resolve_partial_record_surface` — `PathProjection`
 
-**`U2.MAPPED_TEMPLATE`** (19 rows):
+**`U2.MAPPED_TEMPLATE`** (18 rows):
 
 - `mapped_modifiers.rs::mapped_modifier_as_never_filter_drops_matching_keys` — `MappedTypes`
 - `mapped_modifiers.rs::mapped_modifier_as_rename_capitalize_rewrites_keys` — `MappedTypes`
@@ -3276,7 +3277,6 @@ The complete partition (each entry `file::function — substrate`):
 - `typescript_rules.rs::typescript_rules_template_intrinsic_evaluates_union` — `TypeScriptRules`
 - `utility_edge.rs::utility_edge_readonly_required_composes_modifiers` — `UtilityComposition`
 - `utility_edge.rs::utility_edge_required_strips_optional_markers` — `UtilityComposition`
-- `wide_deep.rs::wide_deep_projected_token_resolves_literal_union` — `PathProjection`
 
 **`U2.CLASS_SURFACES`** (38 rows):
 

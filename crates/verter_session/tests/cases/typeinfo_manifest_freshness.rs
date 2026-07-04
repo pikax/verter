@@ -188,7 +188,7 @@ fn manifest_block_counts_reflect_lifts() {
     );
     assert_eq!(
         count("block_id: TypeInfoParityBlockId::U2IndexedAccess,"),
-        23,
+        24,
         "U2.INDEXED_ACCESS must own 23 rows after the 2 brand-tag index chains \
          and the 2 decoration-invariance indexed-access rows moved IN from \
          U2.CLASS_SURFACES (14 → 18), the 3 module-augmentation indexed-member \
@@ -209,10 +209,12 @@ fn manifest_block_counts_reflect_lifts() {
     );
     assert_eq!(
         count("block_id: TypeInfoParityBlockId::U2MappedTemplate,"),
-        19,
-        "U2.MAPPED_TEMPLATE must own 19 rows after the 2 built-in modifier-utility \
-         rows arrived lifted (16 → 18) and `wide_deep_projected_token` moved in on \
-         the IndexedAccess-reduction lift (18 → 19)",
+        18,
+        "U2.MAPPED_TEMPLATE must own 18 rows after the 2 built-in modifier-utility \
+         rows arrived lifted (16 → 18) and `wide_deep_projected_token` re-homed \
+         OUT to U2.INDEXED_ACCESS on its measured trace (19 → 18): the token \
+         member projects path-precisely from the inline intersection arm and the \
+         non-contributing `Pick` arm stays a deferred carrier",
     );
 
     assert_eq!(
@@ -249,22 +251,25 @@ fn manifest_block_counts_reflect_lifts() {
     );
     assert_eq!(
         count("status: IgnoreStatus::Lifted { block_id: TypeInfoParityBlockId::U2IndexedAccess }"),
-        14,
+        15,
         "the 2 terminal indexed-access projection lifts, the 3 keyof-expansion \
          lifts, the 2 brand-tag index-chain lifts, the 2 \
          decoration-invariance lifts, the 3 module-augmentation \
-         indexed-member projection lifts, and the 2 JSX parametric \
-         intrinsic-lookup lifts must record their lifting block as \
-         U2.INDEXED_ACCESS",
+         indexed-member projection lifts, the 2 JSX parametric \
+         intrinsic-lookup lifts, and the wide/deep literal-union projection \
+         lift (re-homed on its measured path-precise trace) must record \
+         their lifting block as U2.INDEXED_ACCESS",
     );
     assert_eq!(
         count("status: IgnoreStatus::Lifted { block_id: TypeInfoParityBlockId::U2MappedTemplate }"),
-        6,
-        "the 2 built-in modifier-utility lifts + the wide/deep literal-union \
-         projection lift + the `-?` optional-remover (`mapped_modifier_minus_optional`) \
+        5,
+        "the 2 built-in modifier-utility lifts + the `-?` optional-remover \
+         (`mapped_modifier_minus_optional`) \
          lift + the 2 mapped-template-era lifts (the `RecordTemplateRootSlot` \
          string-literal index-chain row + the `CounterHandlers` key-remap \
-         mapped-type row) must record their lifting block as U2.MAPPED_TEMPLATE",
+         mapped-type row) must record their lifting block as U2.MAPPED_TEMPLATE \
+         (the wide/deep literal-union projection lift re-homed to \
+         U2.INDEXED_ACCESS on its measured path-precise trace)",
     );
 
     assert_eq!(
