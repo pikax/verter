@@ -40,6 +40,7 @@
 
 mod carrier;
 mod engine;
+mod mode;
 mod resolver;
 
 // Explicit re-exports only. We deliberately do NOT `pub use resolver::*`: that
@@ -52,6 +53,12 @@ pub use engine::{
     EngineCapabilities, EngineError, EnsureProject, EnvDims, OpenState, PublishSnapshot, Query,
     QueryFeature, QueryOutcome, ScratchProject, ScratchProjectSeal, ScriptKind, SnapshotFile,
     SnapshotRole,
+};
+pub use mode::{
+    editor_binding_matches, failover_component_to_owned, select_component_mode,
+    ComponentModeDecision, EligibilityFailure, EngineIdentity, EngineSessionCandidates,
+    EngineSessionFacts, FailoverCause, OwnedReason, OwnedSessionFacts, ProjectEligibility,
+    RedirectRef, RedirectReferenceGraph, ReferenceComponent, ServeMode, SharedSessionFacts,
 };
 pub use resolver::{
     AmbiguityCause, ExternalTsProjectResolver, ProjectBinding, ProjectEnvDimsSource,
