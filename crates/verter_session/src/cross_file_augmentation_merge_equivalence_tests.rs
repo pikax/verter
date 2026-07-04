@@ -767,3 +767,156 @@ fn warm_parent_rejects_contributor_live_parse_env_move_with_unchanged_content() 
         "after the recompute under the moved env the entry must warm-serve again"
     );
 }
+
+/// EXTERNAL (`declare module "<bare>"`) augmentation fold — warm-parent
+/// validity rail through the REAL memo warm-read path.
+///
+/// `resolve_external_module_augmentation` builds the peer-merge carrier
+/// PURELY from `ExternalSpecifier(spec)` augmenters (no base body), routes
+/// through the SHARED `collect_augmentation_contributions` folder, and
+/// DISCARDS the returned `contributor_roots` (it marks only the
+/// request-materialisation suppress sticky, never `output.cache_suppress`).
+/// The compensating validity rail is that the shared folder ALREADY observes
+/// each folded contributor's `FileWholeHash` (+ `FileSourceEnv`) onto the
+/// enclosing `Instantiate` read-set — so an external augmenter content edit,
+/// with the CONSUMER file untouched (host upsert never reverse-evicts the
+/// `/use.ts::U` memo), MUST reject the warm parent and cold-recompute the
+/// corrected merged surface.
+///
+/// Adjudication (round-4 P1↔P3 split): the codex leg feared the discarded
+/// `contributor_roots` / materialisation-only suppress could warm-publish a
+/// torn external `MergedDecl`; the adversarial claude leg rated it sound
+/// because the per-contributor fact rail rejects on warm read. This is the
+/// end-to-end proof of that rail for the external path. The residual
+/// torn-contributor skip (`source_env_unobservable`) is unreachable on a
+/// cold external fold: the external path pre-loads EVERY `known_canonicals()`
+/// before the `ExternalSpecifier` scan, so every augmenter is servable and
+/// its artifact key fresh, and the shared folder observes its facts.
+///
+/// Discrimination: a regression that dropped the external fold's
+/// per-contributor `FileWholeHash` observation from the parent read-set would
+/// warm-serve the STALE `fromTwo: number` surface here (flat build count),
+/// failing both the `+ 1` build assertion and the edited-surface assertion.
+#[test]
+fn external_module_augmentation_warm_parent_rejects_contributor_content_edit_end_to_end() {
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::semantic_query::{
+        ProjectionReductionContext, QueryResult, SemanticQueryApi, SemanticQueryKey,
+        SemanticQueryOutput,
+    };
+
+    let host = make_host();
+    // TWO external `declare module "ext-pkg"` peers (no base body) + a
+    // consumer aliasing the augmented `Cfg`.
+    upsert_ts(
+        host.as_ref(),
+        "/aug1.d.ts",
+        "declare module \"ext-pkg\" { interface Cfg { fromOne: string } }\n",
+    );
+    upsert_ts(
+        host.as_ref(),
+        "/aug2.d.ts",
+        "declare module \"ext-pkg\" { interface Cfg { fromTwo: number } }\n",
+    );
+    upsert_ts(
+        host.as_ref(),
+        "/use.ts",
+        "import type { Cfg } from \"ext-pkg\"\nexport type U = Cfg\n",
+    );
+
+    // Warm-up: settle the augmentation index + shared caches.
+    host.resolve_named_symbol("/use.ts", "U", &[], Some(ProjectionMode::Expanded))
+        .expect("U = Cfg must resolve through the external augmentation fold");
+
+    let graph = host.project_type_store().semantic_graph();
+    let baseline_view = host.resolver_store_view_read().into_owned_view();
+
+    // Hoist the `/use.ts::U` parent Instantiate key once, then a `demand`
+    // closure that drives THAT key under any view.
+    let key = {
+        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let ctx = crate::resolver_core::HostResolverContext::new(&host, &baseline_view, overlay);
+        let dispatch = ProjectSemanticDispatch::new(&ctx);
+        SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+            dispatch.type_slot_for(Arc::from("/use.ts"), Arc::from("U")),
+            Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
+            dispatch.instantiate_context_for(
+                "/use.ts",
+                ProjectionReductionContext::published(ProjectionMode::Expanded),
+            ),
+        ))
+    };
+    let demand = |view: &crate::resolver_store::HostStoreView| {
+        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let ctx = crate::resolver_core::HostResolverContext::new(&host, view, overlay);
+        let dispatch = ProjectSemanticDispatch::new(&ctx);
+        match dispatch.execute_type_node(key.clone()) {
+            QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
+            other => panic!("the external-augmented U demand must produce a value, got {other:?}"),
+        }
+    };
+
+    // Cold baseline + warm control: the cold fold peer-merges both
+    // augmenters, and re-serving the identical demand under the UNCHANGED
+    // view is a memo hit (proves the parent IS warm-cached — anti-vacuity for
+    // the reject assertion below).
+    let cold_node = demand(&baseline_view);
+    let cold_surface = object_member_surface(
+        &host
+            .project_node_to_type_expr_for_test(cold_node)
+            .expect("cold external merge must project"),
+    );
+    assert_eq!(
+        cold_surface,
+        vec![
+            ("fromOne".to_string(), "Primitive(String)".to_string()),
+            ("fromTwo".to_string(), "Primitive(Number)".to_string()),
+        ],
+        "the cold external fold must peer-merge both `declare module \"ext-pkg\"` \
+         augmenters; got {cold_surface:?}"
+    );
+    let builds_after_first = graph.stats_snapshot().instantiate_count;
+    demand(&baseline_view);
+    assert_eq!(
+        graph.stats_snapshot().instantiate_count,
+        builds_after_first,
+        "control: re-serving the identical demand under the UNCHANGED view must be a \
+         memo hit (no new parent build) — the parent is genuinely warm-cached"
+    );
+
+    // Edit ONE external augmenter's member TYPE. Only `/aug2.d.ts` content
+    // moves; `/use.ts` is untouched and host upsert does NOT reverse-evict the
+    // `/use.ts::U` memo, so the ONLY rail that can force the warm parent to
+    // miss is the per-contributor fact the external fold recorded.
+    upsert_ts(
+        host.as_ref(),
+        "/aug2.d.ts",
+        "declare module \"ext-pkg\" { interface Cfg { fromTwo: boolean } }\n",
+    );
+    let edited_view = host.resolver_store_view_read().into_owned_view();
+    let edited_node = demand(&edited_view);
+    assert_eq!(
+        graph.stats_snapshot().instantiate_count,
+        builds_after_first + 1,
+        "an external augmenter content edit must REJECT the warm `/use.ts::U` parent \
+         through the per-contributor fact rail the shared fold recorded and \
+         cold-recompute — a flat build count means the external fold did not observe \
+         the contributor's FileWholeHash on the parent read-set (the discarded \
+         contributor_roots were NOT compensated)"
+    );
+    let edited_surface = object_member_surface(
+        &host
+            .project_node_to_type_expr_for_test(edited_node)
+            .expect("edited external merge must re-project"),
+    );
+    assert_eq!(
+        edited_surface,
+        vec![
+            ("fromOne".to_string(), "Primitive(String)".to_string()),
+            ("fromTwo".to_string(), "Primitive(Boolean)".to_string()),
+        ],
+        "the recomputed external merge must reflect the edited augmenter member type \
+         (fromTwo: number → boolean); a stale `Primitive(Number)` means the external \
+         fold warm-served a torn/stale surface; got {edited_surface:?}"
+    );
+}

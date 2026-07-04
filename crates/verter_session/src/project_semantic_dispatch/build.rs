@@ -2970,6 +2970,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
             AugmentationTargetKind::ExternalSpecifier(InternedSpecifier::from(specifier.as_str()));
         let AugmentationContributions {
             contributor_nodes,
+            // The external path DISCARDS the returned `contributor_roots`
+            // (the relative stitch folds them into the enclosing
+            // `instantiate_shell` output's `observed_self_roots`; there is no
+            // such per-base output here — the carrier is interned mid-reference
+            // resolution and returned as a bare node). This is COMPENSATED, not
+            // a hole: `collect_augmentation_contributions` ALREADY observed each
+            // folded contributor's `FileWholeHash` + `FileSourceEnv` onto the
+            // active fact tracer (the enclosing `Instantiate` read-set), so a
+            // contributor content edit OR source-env move rejects the warm
+            // parent through the strict per-contributor reject rail — proven
+            // end-to-end by
+            // `cross_file_augmentation_merge_equivalence_tests::external_module_augmentation_warm_parent_rejects_contributor_content_edit_end_to_end`.
+            // The residual torn-contributor SKIP (`source_env_unobservable`) is
+            // unreachable on a cold external fold: the caller pre-loads EVERY
+            // `known_canonicals()` before the `ExternalSpecifier` scan, so every
+            // augmenter is servable with a fresh artifact key.
             contributor_roots: _,
             source_env_unobservable,
         } = self.collect_augmentation_contributions(target, name, context)?;
