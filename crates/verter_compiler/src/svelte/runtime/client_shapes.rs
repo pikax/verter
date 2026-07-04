@@ -206,21 +206,24 @@ fn arrow_body_is_state_writes(
     admitted > 0
 }
 
-/// Whether an expression is a `$state` assignment / update — the DELEGATED narrow
-/// handler surface. An `AssignmentExpression` / `UpdateExpression` counts when its
-/// target is EITHER:
+/// Whether an expression is a `$state` / PROP-SOURCE assignment / update — the
+/// DELEGATED narrow handler surface. An `AssignmentExpression` /
+/// `UpdateExpression` counts when its target is EITHER:
 ///
 /// - a BARE identifier resolving to a writable signal (`StateSignal { .. }` — a
-///   primitive OR a `$state.raw` signal — or a `StateProxy`): a REASSIGNMENT
-///   (`c = 1`, `o = { a: 2 }`); OR
-/// - a MEMBER whose ROOT resolves to a proxy (`BareProxy` / `StateProxy`) OR a
-///   `$state.raw` SIGNAL (`StateSignal { raw: true }`): a DEEP MUTATION (`o.a = 2`,
-///   `o.a++`). A raw signal holds a plain object, so official emits the member
-///   mutation via `$.get(o).a` (the signal read) — the same handler shape as a proxy
-///   member mutation.
+///   primitive OR a `$state.raw` signal — or a `StateProxy`) OR a `$props()` prop
+///   (plain or bindable — the write makes it a PROP SOURCE, lowered through the
+///   getter/setter): a REASSIGNMENT (`c = 1`, `o = { a: 2 }`, `v = 9`); OR
+/// - a MEMBER whose ROOT resolves to a proxy (`BareProxy` / `StateProxy`), a
+///   `$state.raw` SIGNAL (`StateSignal { raw: true }`), or a `$props()` prop: a
+///   DEEP MUTATION (`o.a = 2`, `o.a++`, `v.a++`). A raw signal holds a plain
+///   object, so official emits the member mutation via `$.get(o).a` (the signal
+///   read) — the same handler shape as a proxy member mutation; a prop member
+///   mutation lowers over the getter base (`a().x++`; a bindable wraps in the
+///   setter with the mutation flag).
 ///
-/// A target resolving to a plain local / prop / derived / primitive signal member, or
-/// any other expression, is NOT a supported `$state` write. The handler body lowers
+/// A target resolving to a plain local / derived / primitive signal member, or
+/// any other expression, is NOT a supported write. The handler body lowers
 /// through the shared rewriter, which emits the correct per-lowering read/write form
 /// (`$.set` / `$.get(o).a = …` / plain `o.a`).
 fn expr_is_state_write(
@@ -240,9 +243,12 @@ fn expr_is_state_write(
     let kind = bindings.resolve_kind(scopes, scope, &name);
     if is_member {
         // A deep MUTATION whose ROOT is a proxy object/array (`BareProxy` /
-        // `StateProxy` — `o.a = 2` / `o.a++`, plain member access) OR a `$state.raw`
+        // `StateProxy` — `o.a = 2` / `o.a++`, plain member access), a `$state.raw`
         // SIGNAL (`StateSignal { raw: true }` — a raw signal holds a plain object, so
-        // `o.x++` reads the signal via `$.get(o).x++`; official emits exactly that).
+        // `o.x++` reads the signal via `$.get(o).x++`; official emits exactly that),
+        // OR a `$props()` PROP (plain or bindable — the write makes the prop a
+        // PROP SOURCE, so `a.x++` lowers over the getter base `a().x++`, and a
+        // bindable member mutation wraps in the setter `v(v().a++, true)`).
         // A primitive signal (`StateSignal { raw: false }`) is NOT admitted here: a
         // member of a primitive is not a supported mutation shape.
         matches!(
@@ -251,13 +257,23 @@ fn expr_is_state_write(
                 BindingRuntimeKind::BareProxy
                     | BindingRuntimeKind::StateProxy
                     | BindingRuntimeKind::StateSignal { raw: true }
+                    | BindingRuntimeKind::Prop
+                    | BindingRuntimeKind::BindableProp
             )
         )
     } else {
-        // A bare-identifier REASSIGNMENT of a signal (`c = 1`, `o = { a: 2 }`).
+        // A bare-identifier REASSIGNMENT of a signal (`c = 1`, `o = { a: 2 }`) OR
+        // of a `$props()` PROP (plain or bindable — the write makes the prop a
+        // PROP SOURCE, lowering through the setter: `a = 1` → `a(1)`, `a++` →
+        // `$.update_prop(a)`).
         matches!(
             kind,
-            Some(BindingRuntimeKind::StateSignal { .. } | BindingRuntimeKind::StateProxy)
+            Some(
+                BindingRuntimeKind::StateSignal { .. }
+                    | BindingRuntimeKind::StateProxy
+                    | BindingRuntimeKind::Prop
+                    | BindingRuntimeKind::BindableProp
+            )
         )
     }
 }
@@ -339,16 +355,20 @@ fn update_write_target(
 pub(super) enum ClientInterpolationShape {
     /// `{x}` where `x` resolves to a reactive `$state` signal — emitted `$.get(x)`.
     SignalIdentRead,
-    /// `{x}` where `x` resolves to a no-default read-only prop — emitted `$$props.x`.
-    NoDefaultPropRead,
+    /// `{x}` where `x` resolves to a `$props()` prop (plain or bindable) — a
+    /// PROP-SOURCE member (default-bearing or written) reads as the getter call
+    /// `x()`; a non-source member reads directly as `$$props.x`. The read form
+    /// is the projection's `PropRead` fact; this shape is the acceptance proof.
+    PropRead,
     /// `{x}` where `x` resolves to a `{#snippet}` PARAMETER — emitted as a thunk CALL
     /// `x()` (the snippet receives its args as zero-arg getter thunks). Reactive (joins
     /// the slot/snippet body's `$.template_effect`).
     SnippetParamRead,
-    /// `{t}` where `t` resolves to a top-level `$effect.tracking()` const — read
-    /// PLAIN (`t`, never `$.get`) inside the region's `$.template_effect`
-    /// (official emits the template effect because a call-init const cannot be
-    /// static-folded; oracle-verified against svelte@5.56.3).
+    /// `{t}` where `t` resolves to a top-level `$effect.tracking()` /
+    /// `$props.id()` const — read PLAIN (`t`, never `$.get`) inside the region's
+    /// `$.template_effect` (official emits the template effect because a
+    /// call-init const cannot be static-folded; oracle-verified against
+    /// svelte@5.56.3).
     EffectTrackingConstRead,
 }
 
@@ -397,17 +417,21 @@ pub(super) fn classify_interpolation_shape(
     match bindings.resolve_kind(scopes, scope, id.name.as_str()) {
         // A reactive `$state` signal read → `$.get(x)`.
         Some(k) if is_signal_binding(k) => Ok(ClientInterpolationShape::SignalIdentRead),
-        // A no-default read-only prop read → `$$props.x`. (A DEFAULT-bearing prop is
-        // already refused at the props-shape gate; a `BindableProp` is refused at the
-        // binding-kind gate — so a `Prop` here is a no-default prop.)
-        Some(BindingRuntimeKind::Prop) => Ok(ClientInterpolationShape::NoDefaultPropRead),
+        // A `$props()` prop read (plain or bindable) → the getter call `x()` for
+        // a PROP-SOURCE member (default-bearing or written) or the direct
+        // `$$props.x` member read for a non-source member; the read form is the
+        // projection's `PropRead` fact, this shape is the acceptance proof.
+        Some(BindingRuntimeKind::Prop | BindingRuntimeKind::BindableProp) => {
+            Ok(ClientInterpolationShape::PropRead)
+        }
         // A `{#snippet}` parameter read → a thunk CALL `x()` (reactive — the value rides
         // the snippet arg). The rewrite emits `x()`; this shape is the acceptance proof.
         Some(BindingRuntimeKind::SnippetParam) => Ok(ClientInterpolationShape::SnippetParamRead),
-        // A `$effect.tracking()` const read → the PLAIN name inside the region's
-        // `$.template_effect` (official cannot static-fold a call-init const, so
-        // the read stays reactive; the rewriter leaves a non-signal read bare).
-        Some(BindingRuntimeKind::EffectTrackingConst) => {
+        // A `$effect.tracking()` / `$props.id()` const read → the PLAIN name
+        // inside the region's `$.template_effect` (official cannot static-fold a
+        // call-init const, so the read stays reactive; the rewriter leaves a
+        // non-signal read bare).
+        Some(BindingRuntimeKind::EffectTrackingConst | BindingRuntimeKind::PropsIdConst) => {
             Ok(ClientInterpolationShape::EffectTrackingConstRead)
         }
         // A bare identifier resolving to a NON-reactive binding (a plain local, a
@@ -1102,12 +1126,11 @@ pub(super) fn classify_dynamic_attr_shape(
 // $props() usage shape (read-only vs written/bound)
 // ---------------------------------------------------------------------------
 
-/// The accepted `$props()` usage fact — the props are READ-ONLY (no instance-script
-/// write, no template write-ref, no `bind:` target resolves to a prop local).
-///
-/// A written prop (official's flag-7 setter-call form) or a bound prop (official's
-/// 2-arg `$.bind_value(input, label)` form) is a deferral-ledger follow-up — both
-/// fail closed BEFORE `lower_props_declarator`.
+/// The accepted `$props()` usage fact — no INSTANCE-SCRIPT prop reference
+/// (outside the `$props()` declaration itself) and no `bind:` target resolving
+/// to a prop local. TEMPLATE prop writes are supported (a written prop is a
+/// PROP SOURCE, lowered through the getter/setter); a bound prop (official's
+/// 2-arg `$.bind_value(input, label)` form) stays fail-closed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ClientPropsUsage {
     /// The prop local names (the destructure locals), retained as the accepted fact.

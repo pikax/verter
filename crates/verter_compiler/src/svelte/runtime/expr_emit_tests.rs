@@ -241,8 +241,8 @@ fn free_identifier_is_untouched() {
 
 #[test]
 fn props_shape_no_default_basic_destructure_is_supported() {
-    // ONLY a NO-DEFAULT basic destructure (identifier / alias / string keys) is
-    // supported; a default-bearing member is demoted (see below).
+    // A basic destructure (identifier / alias / string keys) is supported, with
+    // or without defaults.
     assert_eq!(
         props_shape("let { name, count } = $props();"),
         PropsShape::BasicDestructure
@@ -254,19 +254,22 @@ fn props_shape_no_default_basic_destructure_is_supported() {
 }
 
 #[test]
-fn props_shape_any_default_is_advanced() {
-    // ANY `$props()` member default (even a constant literal) is the demoted
-    // props-default surface — `$props() default`, NOT `BasicDestructure`.
+fn props_shape_defaults_are_basic() {
+    // A `$props()` member DEFAULT — constant-literal or referencing — is part of
+    // the BASIC destructure (the shared `$.prop` prop-source path), no longer a
+    // demoted shape. A NESTED-destructure default stays advanced.
     assert_eq!(
         props_shape("let { name = 'world', count = 0 } = $props();"),
-        PropsShape::Advanced {
-            rune: "$props() default"
-        }
+        PropsShape::BasicDestructure
     );
     assert_eq!(
         props_shape("let { a = 1 } = $props();"),
+        PropsShape::BasicDestructure
+    );
+    assert_eq!(
+        props_shape("let { a: { b } = {} } = $props();"),
         PropsShape::Advanced {
-            rune: "$props() default"
+            rune: "$props() nested destructure"
         }
     );
 }
@@ -292,10 +295,13 @@ fn props_shape_whole_object_is_advanced() {
 }
 
 #[test]
-fn props_shape_bindable_is_advanced() {
+fn props_shape_bindable_default_is_basic() {
+    // A `$bindable(...)` default is the BINDABLE prop-source form — part of the
+    // basic destructure (the `$bindable` call's own form/position validity is
+    // owned by the rune scan, not the shape gate).
     assert_eq!(
         props_shape("let { value = $bindable(0) } = $props();"),
-        PropsShape::Advanced { rune: "$bindable" }
+        PropsShape::BasicDestructure
     );
 }
 

@@ -440,6 +440,15 @@ impl<'a> ClientEmitter<'a> {
         let name = &self.plan.component.name;
         out.push_str(&format!("export default function {name}({params}) {{\n"));
 
+        // The hoisted `$props.id()` declaration — the ABSOLUTE body-top slot,
+        // ABOVE the `$.push` frame line (the official hoist order; the plan owns
+        // the decision, the emitter only reads it).
+        if let Some(decl) = &self.plan.props_id_hoist {
+            out.push('\t');
+            out.push_str(decl);
+            out.push('\n');
+        }
+
         if needs_push {
             // The RUNES form carries the trailing `true` (`$.push($$props, true)`)
             // — the runes-mode flag the official `5.56.3` compiler emits (a legacy

@@ -322,21 +322,10 @@ const FAIL_MATRIX: &[FailRow] = &[
         source: "<script>let { 0: zero } = $props();</script>\n<p>{zero}</p>\n",
         code: "svelte-runtime-unsupported-advanced-rune",
     },
-    FailRow {
-        name: "props_bindable",
-        source: "<script>let { value = $bindable(0) } = $props();</script>\n<p>{value}</p>\n",
-        code: "svelte-runtime-unsupported-advanced-rune",
-    },
-    FailRow {
-        name: "props_ref_default",
-        source: "<script>let { a = 1, b = a } = $props();</script>\n<p>{a}{b}</p>\n",
-        code: "svelte-runtime-unsupported-advanced-rune",
-    },
-    FailRow {
-        name: "props_array_default",
-        source: "<script>let { a = [] } = $props();</script>\n<p>{a}</p>\n",
-        code: "svelte-runtime-unsupported-advanced-rune",
-    },
+    // (`props_bindable` / `props_ref_default` / `props_array_default` removed —
+    // a `$bindable(...)` default and plain `$props()` defaults are now the
+    // supported `$.prop` prop-source surface; their positive topology is pinned
+    // by the oracle-backed client tests.)
     FailRow {
         // A prop WRITE in the instance script (no default — so the prop-usage gate, not
         // the default gate, is the surface). The onclick is a supported `$state` arrow.
@@ -1269,12 +1258,6 @@ const FAIL_MATRIX: &[FailRow] = &[
         source: "<script>let count = $state(0);</script>\n<button onclick={() => count++}>{count ? count : 0}</button>\n",
         code: "svelte-runtime-unsupported-complex-interpolation",
     },
-    // ── CONVERGENCE: $props default ─────────────────────────────────────────
-    FailRow {
-        name: "props_literal_default",
-        source: "<script>let { a = 1 } = $props();</script>\n<p>{a}</p>\n",
-        code: "svelte-runtime-unsupported-advanced-rune",
-    },
     FailRow {
         name: "derived_simple",
         source: "<script>let c = $state(0); let d = $derived(c + 1);</script>\n<button onclick={() => c++}>{d}</button>\n",
@@ -1805,12 +1788,11 @@ fn generated_effect_shapes_land_on_boundary() {
 
 #[test]
 fn generated_props_pattern_and_default_shapes_land_on_boundary() {
-    // The finite grammar of a `$props()` destructure PATTERN + DEFAULT shape. ONLY a
-    // read-only NO-DEFAULT basic destructure with identifier / string keys is
-    // supported; ANY default (even a constant literal), a rest / whole-object /
-    // computed / numeric / nested / `$bindable` / written / duplicate form fails
-    // closed. (Literal defaults were supported; demoted to the §1.2-class
-    // no-default core.)
+    // The finite grammar of a `$props()` destructure PATTERN + DEFAULT shape. A
+    // basic destructure with identifier / string keys is supported WITH or
+    // WITHOUT defaults — plain and `$bindable(...)` defaults lower through the
+    // shared `$.prop` prop-source path — while a rest / whole-object / computed /
+    // numeric / nested / duplicate form fails closed.
     let variants: &[(&str, &str, Expected)] = &[
         // ── supported: no-default destructure ────────────────────────────────────
         ("plain", "let { a } = $props();", Expected::Supported),
@@ -1820,38 +1802,43 @@ fn generated_props_pattern_and_default_shapes_land_on_boundary() {
             "let { \"data-x\": x } = $props();",
             Expected::Supported,
         ),
-        // ── demoted: ANY default ────────────────────────────────────────────
+        // ── supported: the `$.prop` prop-source defaults ─────────────────────
         (
             "literal_default_num",
             "let { a = 1 } = $props();",
-            Expected::FailClosed,
+            Expected::Supported,
         ),
         (
             "literal_default_str",
             "let { a = \"x\" } = $props();",
-            Expected::FailClosed,
+            Expected::Supported,
         ),
         (
             "literal_default_bool",
             "let { a = true } = $props();",
-            Expected::FailClosed,
+            Expected::Supported,
         ),
         (
             "ref_default",
             "let { a = 1, b = a } = $props();",
-            Expected::FailClosed,
+            Expected::Supported,
         ),
         (
             "array_default",
             "let { a = [] } = $props();",
-            Expected::FailClosed,
+            Expected::Supported,
         ),
         (
             "call_default",
             "let { a = f() } = $props();",
-            Expected::FailClosed,
+            Expected::Supported,
         ),
-        // ── demoted: other out-of-boundary pattern shapes ───────────────────
+        (
+            "bindable",
+            "let { a = $bindable(0) } = $props();",
+            Expected::Supported,
+        ),
+        // ── demoted: out-of-boundary pattern shapes ──────────────────────────
         (
             "rest",
             "let { a, ...rest } = $props();",
@@ -1867,11 +1854,6 @@ fn generated_props_pattern_and_default_shapes_land_on_boundary() {
         (
             "nested",
             "let { a: { b } } = $props();",
-            Expected::FailClosed,
-        ),
-        (
-            "bindable",
-            "let { a = $bindable(0) } = $props();",
             Expected::FailClosed,
         ),
         (
@@ -2554,11 +2536,18 @@ fn fail_matrix_covers_every_documented_sub_shape() {
     //   `effect_pre_type_args`, `effect_root_type_args_stmt`,
     //   `effect_root_type_args_init` (the tracking spelling is a plain-JS
     //   parse error pinned at the official-reject rail instead).
-    // With the effect-family remainder in place the matrix pins 185 rows.
+    // The `$props()` default / `$bindable` prop-source surface removed FOUR rows
+    // (now accepted-positive with oracle-backed goldens): `props_literal_default`
+    // (`{ a = 1 }` → the eager flag-3 `$.prop`), `props_ref_default`
+    // (`{ a = 1, b = a }` → the lazy bare-getter carrier), `props_array_default`
+    // (`{ a = [] }` → the lazy thunk), and `props_bindable`
+    // (`{ value = $bindable(0) }` → the flag-11 prop source with the context
+    // frame) — net −4 rows.
+    // With the effect-family remainder in place the matrix pins 181 rows.
     assert_eq!(
         FAIL_MATRIX.len(),
-        185,
-        "the fail matrix pins 185 fail-closed rows — one documented \
+        181,
+        "the fail matrix pins 181 fail-closed rows — one documented \
          unsupported-feature sub-shape per row, EXCEPT the D-43 custom-element-host / \
          native-slotting rows, which are REPRESENTATIVE smoke probes for that \
          root-scoped over-refusal class (protected by the generic host-gate rows plus \

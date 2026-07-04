@@ -21,9 +21,10 @@ use verter_span::Span;
 
 use super::client::UnsupportedSvelteRuntimeSurface;
 use super::expr::{
-    arrow_scope_names, block_scope_names, collect_direct_decls, collect_pattern_names,
-    collect_var_hoists, effect_family_call_fact, for_left_names, function_scope_names,
-    is_props_callee, peel_parens, state_rune_call, statement_position_user_effect_span,
+    arrow_scope_names, bindable_call_is_well_formed, block_scope_names, collect_direct_decls,
+    collect_pattern_names, collect_var_hoists, effect_family_call_fact, for_left_names,
+    function_scope_names, is_bindable_call, is_props_callee, is_props_id_callee, peel_parens,
+    props_id_call_is_well_formed, state_rune_call, statement_position_user_effect_span,
     EffectFamilyCallKind, ShadowStack,
 };
 
@@ -236,6 +237,76 @@ fn supported_rune_root_spans(program: &Program<'_>, is_instance: bool) -> FxHash
     spans
 }
 
+/// Collect the SUPPORTED-POSITION `$props.id(...)` and `$bindable(...)` CALL
+/// spans of an instance program (empty for a module-script / template-expression
+/// program):
+///
+/// - `$props.id(...)` — the init of a TOP-LEVEL `let`/`const` IDENTIFIER
+///   declarator, matched through the STRICT shared callee predicate
+///   ([`is_props_id_callee`]: no parens, no optional chaining). A `var`
+///   declarator stays OUT (the non-`let` rune-declarator boundary), as does any
+///   non-identifier declarator id. Position only — the call FORM (arity /
+///   spread / optionality) is validated at the call visitor.
+/// - `$bindable(...)` — a DIRECT `$props()` destructure member DEFAULT
+///   (`let { x = $bindable(...) } = $props()`), matched through the strict
+///   bare-identifier callee ([`is_bindable_call`]: no parens). A parenthesized
+///   default spelling (`($bindable)(0)` / `($bindable(0))`) never enters the
+///   set, so it fails closed at the visitors. Position only — form is validated
+///   at the call visitor.
+fn supported_props_rune_call_spans(
+    program: &Program<'_>,
+    is_instance: bool,
+) -> SupportedPropsRuneSpans {
+    let mut props_id = FxHashSet::default();
+    let mut bindable = FxHashSet::default();
+    if !is_instance {
+        return SupportedPropsRuneSpans { props_id, bindable };
+    }
+    for stmt in &program.body {
+        let Statement::VariableDeclaration(decl) = stmt else {
+            continue;
+        };
+        for d in &decl.declarations {
+            let Some(Expression::CallExpression(call)) = &d.init else {
+                continue;
+            };
+            // `$props.id(...)` in a `let`/`const` IDENTIFIER-declarator init.
+            if matches!(
+                decl.kind,
+                VariableDeclarationKind::Let | VariableDeclarationKind::Const
+            ) && matches!(&d.id, BindingPattern::BindingIdentifier(_))
+                && is_props_id_callee(&call.callee)
+            {
+                props_id.insert((call.span.start, call.span.end));
+            }
+            // `$bindable(...)` as a direct `$props()` destructure member default.
+            if !is_props_callee(&call.callee) {
+                continue;
+            }
+            if let BindingPattern::ObjectPattern(obj) = &d.id {
+                for prop in &obj.properties {
+                    if let BindingPattern::AssignmentPattern(assign) = &prop.value {
+                        if is_bindable_call(&assign.right) {
+                            if let Expression::CallExpression(bc) = &assign.right {
+                                bindable.insert((bc.span.start, bc.span.end));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    SupportedPropsRuneSpans { props_id, bindable }
+}
+
+/// The SUPPORTED-POSITION call-span sets [`supported_props_rune_call_spans`]
+/// collects: the `$props.id(...)` declarator-init spans and the `$bindable(...)`
+/// destructure-default spans.
+struct SupportedPropsRuneSpans {
+    props_id: FxHashSet<(u32, u32)>,
+    bindable: FxHashSet<(u32, u32)>,
+}
+
 /// The span of the rune-ROOT identifier `root` in a callee that is either a bare
 /// identifier (`$state(...)`) or a static member whose object is that identifier
 /// (`$state.raw(...)` / `$derived.by(...)`). `None` for any other callee shape.
@@ -299,6 +370,19 @@ pub(super) struct UnsupportedRuneScan {
     /// `effect_invalid_placement`); a family call whose span is NOT in this set
     /// is a value position and refuses.
     stmt_effect_spans: FxHashSet<(u32, u32)>,
+    /// The SUPPORTED-POSITION `$props.id(...)` call spans (a top-level instance
+    /// `let`/`const` IDENTIFIER-declarator init). A `$props.id` call whose span
+    /// is NOT in this set is an invalid placement and refuses (official
+    /// `props_id_invalid_placement`).
+    props_id_positions: FxHashSet<(u32, u32)>,
+    /// Whether a valid `$props.id()` use was already accepted — a SECOND valid
+    /// use refuses (official `props_duplicate`).
+    props_id_used: bool,
+    /// The SUPPORTED-POSITION `$bindable(...)` call spans (a direct `$props()`
+    /// destructure member default). A `$bindable` call whose span is NOT in this
+    /// set is an invalid location and refuses (official
+    /// `bindable_invalid_location`).
+    bindable_positions: FxHashSet<(u32, u32)>,
     /// Whether the PROGRAM-DIRECT statements are the SYNTHETIC wrapper of a
     /// WRAPPED template-expression program (`({expr});`) — never authored
     /// statement positions, so the program walk bypasses the statement-position
@@ -321,11 +405,15 @@ impl UnsupportedRuneScan {
     /// statement position). (A `<script module>` never reaches this scan — it is
     /// refused upstream as the script-hoisting deferral.)
     pub(super) fn for_program(program: &Program<'_>, is_instance: bool) -> Self {
+        let props_rune_spans = supported_props_rune_call_spans(program, is_instance);
         Self {
             found: None,
             scopes: ShadowStack::default(),
             supported: supported_rune_root_spans(program, is_instance),
             stmt_effect_spans: FxHashSet::default(),
+            props_id_positions: props_rune_spans.props_id,
+            props_id_used: false,
+            bindable_positions: props_rune_spans.bindable,
             synthetic_program_stmts: !is_instance,
         }
     }
@@ -350,14 +438,20 @@ impl UnsupportedRuneScan {
     /// Classify a bare rune-root IDENTIFIER reference by POSITION: a reference in a
     /// supported position (its span is in [`Self::supported`]) is fine; a reference
     /// anywhere else is an unsupported rune form (`$state` in a default-param, a
-    /// module-script rune, `foo($state)`, …) and fails closed. Only the
-    /// position-sensitive runes (`$state` / `$derived` / `$props` / `$effect`) are
-    /// classified here; the advanced-only runes (`$bindable` / `$host`) are
-    /// classified by [`Self::classify_rune_call`] / member handling and have no
-    /// supported bare position at all, and the production-elided `$inspect`
-    /// family is owned by the instance-item classifier / the body rewriter.
+    /// module-script rune, `foo($state)`, …) and fails closed. The
+    /// position-sensitive runes (`$state` / `$derived` / `$props` / `$effect`) and
+    /// `$bindable` are classified here — `$bindable` has NO supported BARE
+    /// position at all (its CALLED form is consumed by the call visitor, so a
+    /// bare reference reaching here is the UNCALLED rune — official
+    /// `rune_missing_parentheses` — or a paren-wrapped callee spelling, both
+    /// fail-closed). `$host` is classified by [`Self::classify_rune_call`], and
+    /// the production-elided `$inspect` family is owned by the instance-item
+    /// classifier / the body rewriter.
     fn classify_rune_position(&mut self, root: &str, span: Span) {
-        if !matches!(root, "$state" | "$derived" | "$props" | "$effect") {
+        if !matches!(
+            root,
+            "$state" | "$derived" | "$props" | "$effect" | "$bindable"
+        ) {
             return;
         }
         if self.supported.contains(&(span.start, span.end)) {
@@ -368,6 +462,7 @@ impl UnsupportedRuneScan {
             "$derived" => "$derived",
             "$props" => "$props",
             "$effect" => "$effect",
+            "$bindable" => "$bindable",
             _ => return,
         };
         self.record(UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, span });
@@ -446,7 +541,15 @@ impl UnsupportedRuneScan {
                 rune: "$effect.tracking",
                 span,
             },
-            // Advanced `$props` member (props block).
+            // `$props.id` reaches this MEMBER handler ONLY as an UNCALLED value
+            // reference (`const f = $props.id;` — official
+            // `rune_missing_parentheses`) or through a PARENTHESIZED callee
+            // spelling (`($props.id)()` / `($props).id()` — the strict supported
+            // spelling does not peel): the supported CALLED form `$props.id()`
+            // is consumed upstream by `visit_call_expression` (which validates
+            // form + position + single use and never descends into the callee
+            // member). Record the refusal (do NOT stop the descent) so it fails
+            // closed rather than emitting a raw rune member.
             ("$props", "id") => UnsupportedSvelteRuntimeSurface::AdvancedRune {
                 rune: "$props.id",
                 span,
@@ -469,21 +572,19 @@ impl UnsupportedRuneScan {
     }
 
     /// Classify a bare-rune-root reference used in a non-supported position (a
-    /// `$host()` call, a `$bindable(...)` outside a `$props()` default). The
-    /// supported bare calls (`$state` / `$derived` / `$props` / `$effect`) are
-    /// skipped by the caller before reaching here. A `$inspect(...)` call is NOT
-    /// refused: the `$inspect` family is SUPPORTED as production ELISION (the
-    /// statement-position forms are elided by the instance-item classifier / the
-    /// body rewriter; a non-statement-position reference fails closed at the
-    /// rewriter, never emitted raw).
+    /// `$host()` call). The supported bare calls (`$state` / `$derived` /
+    /// `$props` / `$effect`) are skipped by the caller before reaching here, and
+    /// a `$bindable(...)` call is consumed by its POSITION-AWARE arm in
+    /// `visit_call_expression` (valid only as a `$props()` destructure-member
+    /// default). A `$inspect(...)` call is NOT refused: the `$inspect` family is
+    /// SUPPORTED as production ELISION (the statement-position forms are elided
+    /// by the instance-item classifier / the body rewriter; a
+    /// non-statement-position reference fails closed at the rewriter, never
+    /// emitted raw).
     fn classify_rune_call(&mut self, root: &str, span: Span) {
         let surface = match root {
             "$host" => UnsupportedSvelteRuntimeSurface::HostOrCustomElement {
                 surface: "$host",
-                span,
-            },
-            "$bindable" => UnsupportedSvelteRuntimeSurface::AdvancedRune {
-                rune: "$bindable",
                 span,
             },
             _ => return,
@@ -685,6 +786,90 @@ impl<'a> Visit<'a> for UnsupportedRuneScan {
                 }
             }
         }
+        // A `$props.id(...)` CALL through the STRICT callee spelling (the bare
+        // `$props` object + `.id`, no parens, no optional member) on the
+        // unshadowed `$props` root. Supported ONLY as a WELL-FORMED (zero-arg,
+        // non-optional) call in a TOP-LEVEL instance `let`/`const`
+        // IDENTIFIER-declarator init, ONCE per component — official
+        // `props_id_invalid_placement` / `rune_invalid_arguments` /
+        // `rune_invalid_spread` / `props_duplicate`. The callee member is
+        // CONSUMED here (the member handler owns only UNCALLED / paren-spelled
+        // references); the arguments still scan for nested runes. A
+        // parenthesized callee spelling (`($props.id)()` / `($props).id()`)
+        // never matches the strict predicate: it falls through to the generic
+        // walk, whose member handler fails it closed.
+        if is_props_id_callee(&it.callee) && self.is_unshadowed_rune("$props") {
+            let well_formed = props_id_call_is_well_formed(it);
+            let position_ok = self
+                .props_id_positions
+                .contains(&(it.span.start, it.span.end));
+            if !well_formed || !position_ok {
+                self.record(UnsupportedSvelteRuntimeSurface::AdvancedRune {
+                    rune: "$props.id",
+                    span: to_span(it.span),
+                });
+            } else if self.props_id_used {
+                // A SECOND valid `$props.id()` use — official `props_duplicate`
+                // ("Cannot use `$props.id()` more than once"); the second call
+                // carries the refusal.
+                self.record(UnsupportedSvelteRuntimeSurface::AdvancedRune {
+                    rune: "$props.id duplicate",
+                    span: to_span(it.span),
+                });
+            } else {
+                self.props_id_used = true;
+            }
+            for arg in &it.arguments {
+                match arg.as_expression() {
+                    Some(expr) => self.visit_expression(expr),
+                    None => {
+                        if let oxc_ast::ast::Argument::SpreadElement(s) = arg {
+                            self.visit_expression(&s.argument);
+                        }
+                    }
+                }
+            }
+            return;
+        }
+        // A `$bindable(...)` CALL through the STRICT bare-identifier callee on
+        // the unshadowed root. Supported ONLY as a WELL-FORMED (zero-or-one
+        // non-spread arg, non-optional) DIRECT `$props()` destructure-member
+        // DEFAULT — official `bindable_invalid_location` /
+        // `rune_invalid_arguments_length` / `rune_invalid_spread`; every other
+        // position or form fails closed. The callee identifier is CONSUMED here
+        // (the bare-reference position arm owns only UNCALLED references), and
+        // the arguments still scan for nested runes. A parenthesized callee
+        // (`($bindable)(0)`) does not match the strict predicate: its callee
+        // identifier reaches the bare-reference arm and fails closed; a
+        // parenthesized CALL (`($bindable(0))`) matches here but its span was
+        // never collected as a supported default position, so it fails closed
+        // too. The VALID position's emission is owned by the props lowering —
+        // this arm records nothing for it (no double-refusal).
+        if let Expression::Identifier(id) = &it.callee {
+            if id.name.as_str() == "$bindable" && self.is_unshadowed_rune("$bindable") {
+                let well_formed = bindable_call_is_well_formed(it);
+                let position_ok = self
+                    .bindable_positions
+                    .contains(&(it.span.start, it.span.end));
+                if !well_formed || !position_ok {
+                    self.record(UnsupportedSvelteRuntimeSurface::AdvancedRune {
+                        rune: "$bindable",
+                        span: to_span(it.span),
+                    });
+                }
+                for arg in &it.arguments {
+                    match arg.as_expression() {
+                        Some(expr) => self.visit_expression(expr),
+                        None => {
+                            if let oxc_ast::ast::Argument::SpreadElement(s) = arg {
+                                self.visit_expression(&s.argument);
+                            }
+                        }
+                    }
+                }
+                return;
+            }
+        }
         // An effect-family rune CALL (`$effect(fn)` / `$effect.pre(fn)` /
         // `$effect.root(fn)` / `$effect.tracking()`) on the unshadowed rune root.
         // A WELL-FORMED call in a LEGAL POSITION is SUPPORTED at ANY depth. The
@@ -782,9 +967,12 @@ impl<'a> Visit<'a> for UnsupportedRuneScan {
         // well-formed `$effect(fn)` callee admitted by the walk-time call
         // exemption); a reference anywhere else (a default-param `$state(0)`, a
         // call-arg `$props()`, a module-script rune, a bare-identifier
-        // `foo($state)` / `foo($effect)`) fails closed. The advanced-only runes
-        // (`$bindable` / `$host`) are refused by the call / member handlers, never
-        // here; the production-elided `$inspect` family is owned by the
+        // `foo($state)` / `foo($effect)`) fails closed. An unshadowed `$bindable`
+        // identifier reaching here is UNCALLED (its called forms are consumed by
+        // the call visitor) — official `rune_missing_parentheses` — or a
+        // paren-wrapped callee spelling; both fail closed (no supported bare
+        // position exists). `$host` is refused by the call / member handlers,
+        // never here; the production-elided `$inspect` family is owned by the
         // instance-item classifier / the body rewriter.
         let name = it.name.as_str();
         if self.is_unshadowed_rune(name) {

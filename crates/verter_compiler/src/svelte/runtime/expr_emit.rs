@@ -11,9 +11,11 @@
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{BindingPattern, CallExpression, Expression, Statement};
+use rustc_hash::FxHashSet;
 
 use super::expr::{
-    is_bindable_call, is_props_callee, reparse_module, state_rune_call, BindingTable, StateLowering,
+    expr_is_proxiable, is_bindable_call, is_props_callee, peel_parens, reparse_module,
+    state_rune_call, BindingTable, StateLowering,
 };
 use super::expr_rewrite::{PropRead, PropReads};
 
@@ -275,26 +277,148 @@ fn top_level_undefined_shadow_is_reactive_rune(program: &oxc_ast::ast::Program<'
 pub enum PropsShape {
     /// No `$props()` call.
     None,
-    /// A basic destructure: `let { a, b = 1 } = $props()` (named members + native
-    /// defaults, no rest / `$bindable` / whole-object).
+    /// A basic destructure: `let { a, b = 1, c = $bindable(0) } = $props()` —
+    /// named / aliased / string-key members, with optional defaults (including
+    /// `$bindable(...)` defaults). No rest, no whole-object binding, no
+    /// computed / numeric keys, no nested destructure.
     BasicDestructure,
     /// An advanced form that fails closed (a rest member, a whole-object
-    /// identifier binding, or a `$bindable()` default).
+    /// identifier binding, a computed / numeric key, or a nested destructure).
     Advanced {
         /// A short rune label for the diagnostic.
         rune: &'static str,
     },
 }
 
-/// Collect the per-name `$props()` read forms from the instance script: a
-/// default-bearing member is a getter call (`name()`); a no-default member is a
-/// direct props access (`$$props.name`). An empty map when there is no `$props()`.
+/// Collect the per-name `$props()` read forms from the instance script through
+/// the SHARED member-plan authority ([`props_member_plans`]): a PROP-SOURCE
+/// member (a default-bearing OR written member — the official `is_prop_source`)
+/// is declared via `$.prop` and reads as a getter call (`name()`); a
+/// non-source member reads directly off the props object (`$$props.name`).
+/// `updated_locals` is the set of prop LOCAL names written anywhere (a
+/// template-expression or `$props()`-default reassign / deep-mutate). An empty
+/// map when there is no `$props()`.
 #[must_use]
-pub fn collect_prop_reads(alloc: &Allocator, instance_source: &str) -> PropReads {
+pub fn collect_prop_reads(
+    alloc: &Allocator,
+    instance_source: &str,
+    updated_locals: &FxHashSet<String>,
+) -> PropReads {
     let mut reads = PropReads::default();
+    for plan in props_member_plans(alloc, instance_source, updated_locals) {
+        let read = if plan.is_prop_source() {
+            PropRead::Getter
+        } else {
+            PropRead::PropsMember {
+                source_key: plan.source_key.clone(),
+            }
+        };
+        reads.insert(plan.local, read);
+    }
+    reads
+}
+
+/// One `$props()` destructure member's typed lowering facts — the SINGLE
+/// authority BOTH the prop-read projection ([`collect_prop_reads`]) and the
+/// `$.prop` declarator lowering consume, so the read form and the emitted
+/// declaration can never diverge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PropsMemberPlan {
+    /// The SOURCE prop key (the destructure key; may differ from the local
+    /// under aliasing).
+    pub(super) source_key: String,
+    /// The LOCAL binding name.
+    pub(super) local: String,
+    /// Whether the member default is a `$bindable(...)` call (the BINDABLE flag
+    /// axis; the `$.proxy` wrap is bindable-only).
+    pub(super) bindable: bool,
+    /// The DEFAULT initializer facts (`None` = no default; for a bindable
+    /// member the `$bindable(...)` ARGUMENT is the default, so a zero-arg
+    /// `$bindable()` carries `None`).
+    pub(super) default: Option<PropsDefaultFacts>,
+    /// Whether the local is WRITTEN anywhere (a template-expression or
+    /// `$props()`-default reassign / deep-mutate) — the official `updated`
+    /// axis (runes mode: `reassigned || mutated`).
+    pub(super) updated: bool,
+}
+
+impl PropsMemberPlan {
+    /// The official `is_prop_source` predicate on Verter's runes-only surface:
+    /// the member has a default initial OR is updated. A non-source member
+    /// emits NO `$.prop` declaration and reads directly off `$$props`.
+    pub(super) fn is_prop_source(&self) -> bool {
+        self.default.is_some() || self.updated
+    }
+}
+
+/// The typed facts of ONE `$props()` member default initializer, computed over
+/// the paren-PEELED expression (official's ESTree AST has no paren nodes, so
+/// author parens around a default VALUE are transparent at every level).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PropsDefaultFacts {
+    /// The peeled default expression's byte span into the instance source (the
+    /// slice the rewriter lowers).
+    pub(super) span: (u32, u32),
+    /// Whether the peeled root is a TOP-LEVEL TS wrapper (`as` / `satisfies` /
+    /// non-null `!` / type assertion) — a distinct surface that fails closed
+    /// (the official lazy/simple decision runs over the TS node).
+    pub(super) ts_wrapped: bool,
+    /// The official `is_simple_expression` decision SHAPE over the peeled
+    /// node, evaluated with VISITED-node semantics — official runs the
+    /// predicate on the initializer AFTER reference rewriting
+    /// (`initial = context.visit(binding.initial)`), where a FUNCTION
+    /// literal's outer node kind survives inner rewrites but a rewritten
+    /// identifier LEAF becomes a getter call / `$$props` member (no longer
+    /// simple). `None` when the skeleton is structurally non-simple (always
+    /// LAZY); `Some(leaves)` when the skeleton is simple — a literal /
+    /// identifier / arrow / function root, or a conditional / binary / logical
+    /// over simple parts — where `leaves` collects every identifier in a
+    /// non-function leaf position: the initial passes RAW (no LAZY bit) iff
+    /// every collected leaf stays unrewritten. Function roots/parts collect no
+    /// leaves (a rewrite inside a body never changes the node kind the
+    /// official predicate sees).
+    pub(super) simple_ident_leaves: Option<Vec<String>>,
+    /// The identifier name when the peeled root IS a bare identifier (drives
+    /// the rewritten-getter collapse and the bindable proxy follow).
+    pub(super) bare_ident: Option<String>,
+    /// The callee name when the peeled root is a NON-optional ZERO-ARG call on
+    /// a bare identifier callee — the official callee-collapse optimization
+    /// (`{ a = foo() }` → `$.prop($$props, 'a', 19, foo)`).
+    pub(super) zero_arg_ident_callee: Option<String>,
+    /// Whether the peeled root is an ObjectExpression (the emitted thunk body
+    /// needs the `() => ({ … })` parenthesization).
+    pub(super) object_root: bool,
+    /// Whether the peeled root is a SequenceExpression (the emitted thunk body
+    /// / proxy argument needs explicit parenthesization so the comma expression
+    /// stays ONE value: `() => (1, 2)`, `$.proxy((1, 2))`).
+    pub(super) sequence_root: bool,
+    /// The official `should_proxy` over the peeled node SHAPE (with the one-hop
+    /// identifier follow against the instance program's top-level bindings) —
+    /// consulted only for a BINDABLE default whose root identifier does not
+    /// rewrite.
+    pub(super) proxiable_by_shape: bool,
+}
+
+/// Walk the instance script's single `$props()` destructure into per-member
+/// [`PropsMemberPlan`] rows, in source order. Empty when there is no `$props()`
+/// destructure. `updated_locals` carries the write facts across BOTH accepted
+/// write surfaces — template expressions and `$props()` defaults (the
+/// `updated` axis). The malformed shapes (rest / computed keys / nested
+/// destructures / malformed `$bindable` calls) are refused UPSTREAM
+/// ([`props_shape`] + the rune scan), so this walker only classifies the
+/// accepted subset; a malformed `$bindable` argument list degrades to a
+/// no-default bindable here and never reaches emission (the scan already
+/// refused the component).
+pub(super) fn props_member_plans(
+    alloc: &Allocator,
+    instance_source: &str,
+    updated_locals: &FxHashSet<String>,
+) -> Vec<PropsMemberPlan> {
+    let mut plans = Vec::new();
     let Some(program) = reparse_module(alloc, instance_source) else {
-        return reads;
+        return plans;
     };
+    let proxy_inits = super::state_scan::collect_proxy_inits(&program);
     for stmt in &program.body {
         let Statement::VariableDeclaration(decl) = stmt else {
             continue;
@@ -306,39 +430,143 @@ pub fn collect_prop_reads(alloc: &Allocator, instance_source: &str) -> PropReads
             if !is_props_callee(&call.callee) {
                 continue;
             }
-            if let BindingPattern::ObjectPattern(obj) = &d.id {
-                for prop in &obj.properties {
-                    // The SOURCE prop key (the destructure key), which may differ
-                    // from the local binding name under aliasing
-                    // (`let { foo: bar }` → key `foo`, local `bar`).
-                    let key = prop_key_name(prop);
-                    match &prop.value {
-                        // A default-bearing member is declared via `$.prop` (getter)
-                        // keyed on the LOCAL name; the source key lives in the decl.
-                        BindingPattern::AssignmentPattern(assign) => {
-                            let local = single_ident(&assign.left).unwrap_or(&key).to_string();
-                            reads.insert(local, PropRead::Getter);
-                        }
-                        // A no-default member reads off the props object by its
-                        // SOURCE key, under the LOCAL binding name (which may be an
-                        // alias): `let { foo: bar }` → read `bar` as `$$props.foo`.
-                        BindingPattern::BindingIdentifier(id) => {
-                            reads.insert(
-                                id.name.to_string(),
-                                PropRead::PropsMember {
-                                    source_key: key.clone(),
-                                },
-                            );
-                        }
-                        _ => {
-                            reads.insert(key.clone(), PropRead::PropsMember { source_key: key });
-                        }
+            let BindingPattern::ObjectPattern(obj) = &d.id else {
+                continue;
+            };
+            for prop in &obj.properties {
+                let source_key = prop_key_name(prop);
+                match &prop.value {
+                    BindingPattern::BindingIdentifier(id) => plans.push(PropsMemberPlan {
+                        source_key,
+                        local: id.name.to_string(),
+                        bindable: false,
+                        default: None,
+                        updated: updated_locals.contains(id.name.as_str()),
+                    }),
+                    BindingPattern::AssignmentPattern(assign) => {
+                        let local = single_ident(&assign.left)
+                            .unwrap_or(&source_key)
+                            .to_string();
+                        let bindable = is_bindable_call(&assign.right);
+                        let default = if bindable {
+                            let Expression::CallExpression(bc) = &assign.right else {
+                                unreachable!("a bindable default is a call expression");
+                            };
+                            bc.arguments
+                                .first()
+                                .and_then(|a| a.as_expression())
+                                .map(|arg| props_default_facts(arg, &proxy_inits))
+                        } else {
+                            Some(props_default_facts(&assign.right, &proxy_inits))
+                        };
+                        let updated = updated_locals.contains(local.as_str());
+                        plans.push(PropsMemberPlan {
+                            source_key,
+                            local,
+                            bindable,
+                            default,
+                            updated,
+                        });
                     }
+                    // A nested destructure member is refused upstream
+                    // (`props_shape`); no plan row.
+                    _ => {}
                 }
             }
         }
     }
-    reads
+    plans
+}
+
+/// Compute the typed [`PropsDefaultFacts`] of one default initializer
+/// expression (paren-peeled).
+fn props_default_facts(
+    expr: &Expression<'_>,
+    proxy_inits: &rustc_hash::FxHashMap<String, super::expr::ProxyInit>,
+) -> PropsDefaultFacts {
+    use oxc_span::GetSpan;
+    let peeled = peel_parens(expr);
+    let span = peeled.span();
+    let ts_wrapped = matches!(
+        peeled,
+        Expression::TSAsExpression(_)
+            | Expression::TSSatisfiesExpression(_)
+            | Expression::TSNonNullExpression(_)
+            | Expression::TSTypeAssertion(_)
+    );
+    let bare_ident = match peeled {
+        Expression::Identifier(id) => Some(id.name.to_string()),
+        _ => None,
+    };
+    let zero_arg_ident_callee = match peeled {
+        Expression::CallExpression(call) if !call.optional && call.arguments.is_empty() => {
+            match peel_parens(&call.callee) {
+                Expression::Identifier(id) => Some(id.name.to_string()),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    PropsDefaultFacts {
+        span: (span.start, span.end),
+        ts_wrapped,
+        simple_ident_leaves: simple_ident_leaves(peeled),
+        bare_ident,
+        zero_arg_ident_callee,
+        object_root: matches!(peeled, Expression::ObjectExpression(_)),
+        sequence_root: matches!(peeled, Expression::SequenceExpression(_)),
+        proxiable_by_shape: expr_is_proxiable(peeled, Some(proxy_inits)),
+    }
+}
+
+/// The official `is_simple_expression` skeleton over a default initializer
+/// (paren-transparent at EVERY recursion level — official's ESTree AST carries
+/// no paren nodes): a literal (string / number / boolean / null / bigint /
+/// regexp), an identifier, an arrow / function expression, a conditional over
+/// simple parts, or a binary / logical over simple parts. Everything else
+/// (a template literal, an object / array, a call, a member, an assignment, …)
+/// is NOT simple (`None`) and rides the LAZY thunk.
+///
+/// Official applies the predicate to the VISITED initializer, so the skeleton
+/// alone does not decide: `Some(leaves)` carries every identifier in a
+/// non-function leaf position, and the consumer re-checks each against the
+/// shared reference rewriter (a rewritten leaf becomes a getter call /
+/// `$$props` member — no longer simple). Function roots/parts contribute NO
+/// leaves: a rewrite inside a body never changes the outer node kind. A
+/// private-`in` test (`#x in obj`) is a distinct OXC node
+/// (`PrivateInExpression`), so official's `PrivateIdentifier` left-operand
+/// exclusion falls out of the catch-all arm.
+fn simple_ident_leaves(expr: &Expression<'_>) -> Option<Vec<String>> {
+    fn collect(expr: &Expression<'_>, leaves: &mut Vec<String>) -> bool {
+        match peel_parens(expr) {
+            Expression::StringLiteral(_)
+            | Expression::NumericLiteral(_)
+            | Expression::BooleanLiteral(_)
+            | Expression::NullLiteral(_)
+            | Expression::BigIntLiteral(_)
+            | Expression::RegExpLiteral(_)
+            | Expression::ArrowFunctionExpression(_)
+            | Expression::FunctionExpression(_) => true,
+            Expression::Identifier(id) => {
+                leaves.push(id.name.to_string());
+                true
+            }
+            Expression::ConditionalExpression(cond) => {
+                collect(&cond.test, leaves)
+                    && collect(&cond.consequent, leaves)
+                    && collect(&cond.alternate, leaves)
+            }
+            Expression::BinaryExpression(bin) => {
+                collect(&bin.left, leaves) && collect(&bin.right, leaves)
+            }
+            Expression::LogicalExpression(log) => {
+                collect(&log.left, leaves) && collect(&log.right, leaves)
+            }
+            _ => false,
+        }
+    }
+    let mut leaves = Vec::new();
+    collect(expr, &mut leaves).then_some(leaves)
 }
 
 /// Classify the instance script's `$props()` usage, scanning EVERY `$props()`
@@ -347,13 +575,14 @@ pub fn collect_prop_reads(alloc: &Allocator, instance_source: &str) -> PropReads
 ///
 /// The official compiler supports exactly ONE top-level `$props()` destructure: a
 /// second `$props()` call is `props_duplicate`, and any non-basic shape (a computed
-/// / numeric / nested key, a rest, a whole-object binding, a `$bindable()` default)
-/// is `props_invalid_pattern`. Scanning ALL declarators is load-bearing:
-/// `let {a}=$props(), {[k]:b}=$props()` must fail closed on the SECOND
-/// (computed-key) declarator rather than classify on the first basic one and
-/// silently emit a raw prop read for `b`. The FIRST advanced shape is reported; if
-/// every shape is basic but there are 2+ `$props()` calls, the duplicate is
-/// reported.
+/// / numeric / nested key, a rest, a whole-object binding) is
+/// `props_invalid_pattern`. A member DEFAULT — plain or `$bindable(...)` — is part
+/// of the BASIC destructure (the shared `$.prop` prop-source path). Scanning ALL
+/// declarators is load-bearing: `let {a}=$props(), {[k]:b}=$props()` must fail
+/// closed on the SECOND (computed-key) declarator rather than classify on the
+/// first basic one and silently emit a raw prop read for `b`. The FIRST advanced
+/// shape is reported; if every shape is basic but there are 2+ `$props()` calls,
+/// the duplicate is reported.
 #[must_use]
 pub fn props_shape(instance_source: &str) -> PropsShape {
     let alloc = Allocator::default();
@@ -437,27 +666,21 @@ fn classify_props_pattern(pattern: &BindingPattern<'_>) -> PropsShape {
                         rune: "$props() numeric/computed key",
                     };
                 }
-                // The member VALUE must be a plain identifier with NO default. A
-                // default-bearing member (`{ a = 1 }`) — INCLUDING a constant-literal
-                // default (official's flag-3 eager `$.prop($$props, key, 3, <literal>)`
-                // form) — is the deferral-ledger props-default surface and fails
-                // closed (5g). A `$bindable()` default is the bindable-prop form; a
-                // nested destructure is rejected by official.
-                // TODO(follow-up): lower a `$props()` member DEFAULT — the official
-                // flag-3 eager form for a constant literal (`$.prop($$props, key, 3,
-                // <literal>)`) and the lazy flag-19 `get_prop_source` thunk form for a
-                // non-literal default. Until then ANY default fails closed above.
+                // The member VALUE is a plain identifier, optionally with a
+                // DEFAULT (`{ a = 1 }` — the official prop-source
+                // `$.prop($$props, key, flags[, default])` path, shared with
+                // `$bindable(...)` defaults; the `$bindable` call's own
+                // form/position validity is owned by the rune scan). A NESTED
+                // destructure — as the member value OR as a default's left —
+                // is rejected by official (`props_invalid_pattern`).
                 match &prop.value {
                     BindingPattern::BindingIdentifier(_) => {}
                     BindingPattern::AssignmentPattern(assign) => {
-                        if is_bindable_call(&assign.right) {
-                            return PropsShape::Advanced { rune: "$bindable" };
+                        if !matches!(&assign.left, BindingPattern::BindingIdentifier(_)) {
+                            return PropsShape::Advanced {
+                                rune: "$props() nested destructure",
+                            };
                         }
-                        // A no-default-only props surface — ANY default is a deferral
-                        // (5g), whether constant-literal or referencing.
-                        return PropsShape::Advanced {
-                            rune: "$props() default",
-                        };
                     }
                     // An object / array nested destructure value is invalid.
                     BindingPattern::ObjectPattern(_) | BindingPattern::ArrayPattern(_) => {
@@ -495,7 +718,14 @@ fn classify_props_pattern(pattern: &BindingPattern<'_>) -> PropsShape {
 ///   proxiable object init → `$.get`, TS stripped) before the `StateLowering` wrapper
 ///   (`$.state` / `$.proxy` / `$.state($.proxy(…))`) is applied;
 /// - [`PropsDestructure`](super::instance_items::SupportedInstanceScriptItem::PropsDestructure)
-///   → NOTHING (a no-default props destructure reads off `$$props`, emitting no decl);
+///   → `NeedsRewriter`: the PROP-SOURCE members lower to the
+///   `let <local> = $.prop($$props, <key>, <flags>[, <default>])` declaration
+///   (default expressions rewrite through the shared rewriter; a destructure with
+///   no prop-source member emits nothing — those props read off `$$props`);
+/// - [`PropsIdDecl`](super::instance_items::SupportedInstanceScriptItem::PropsIdDecl)
+///   → the hoisted `const <name> = $.props_id();` rides the plan's body-top slot;
+///   the literal-only siblings emit as one verbatim declaration in the source
+///   slot (or nothing when the id declarator stood alone);
 /// - [`BindThisLocal`](super::instance_items::SupportedInstanceScriptItem::BindThisLocal)
 ///   → `let name;` (the `bind:this` clone-root local);
 /// - [`BindLocalLet`](super::instance_items::SupportedInstanceScriptItem::BindLocalLet)
@@ -515,9 +745,38 @@ pub(super) fn lower_simple_instance_item(
         // init becomes `$.get`, TS is stripped) BEFORE the `StateLowering` wrapper is
         // applied — the caller (which holds the rewriter) handles it.
         Item::StatePrimitive { .. } => SimpleItemLowering::NeedsRewriter,
-        // A no-default `$props()` destructure emits no component-body declaration
-        // (the props are read directly off `$$props`).
-        Item::PropsDestructure => SimpleItemLowering::None,
+        // A `$props()` destructure lowers through the FALLIBLE rewriter: its
+        // PROP-SOURCE members (default-bearing or written) emit the
+        // `let <local> = $.prop($$props, <key>, <flags>[, <default>])` declaration
+        // (default expressions rewrite through the shared rewriter); a destructure
+        // with NO prop-source member emits nothing (reads go directly off
+        // `$$props`). The caller (which holds the rewriter + the write facts)
+        // handles it.
+        Item::PropsDestructure => SimpleItemLowering::NeedsRewriter,
+        // A `$props.id()` declarator: the hoisted `const <name> = $.props_id();`
+        // rides the plan's dedicated body-top slot (populated by the caller); the
+        // literal-only SIBLING declarators emit as one verbatim declaration in the
+        // item's source slot — or nothing when the id declarator stood alone.
+        Item::PropsIdDecl {
+            const_decl,
+            siblings,
+            ..
+        } => {
+            if siblings.is_empty() {
+                SimpleItemLowering::None
+            } else {
+                let kw = if *const_decl { "const" } else { "let" };
+                let decls = siblings
+                    .iter()
+                    .map(|(name, init)| match init {
+                        Some(init) => format!("{name} = {init}"),
+                        None => name.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                SimpleItemLowering::Statement(format!("{kw} {decls};"))
+            }
+        }
         Item::BindThisLocal { name } => SimpleItemLowering::Statement(format!("let {name};")),
         // A plain-local DOM bind-target root: the declaration stays a verbatim plain
         // `let name = <literal init>;` (official keeps the plain local), or a bare

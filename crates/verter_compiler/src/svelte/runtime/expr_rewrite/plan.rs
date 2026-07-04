@@ -129,6 +129,10 @@ pub(super) enum Edit {
     /// prop read → `name()`, an assignment / update head). The text is inserted
     /// (unmapped synthesized scaffolding); surrounding source stays mapped.
     Overwrite { start: u32, end: u32, text: String },
+    /// Insert `text` BEFORE byte `at` (the bindable mutation-wrap head
+    /// `name(`, placed before a sub-expression that keeps its own leaf edits —
+    /// an empty-span `Overwrite` would be a silent no-op).
+    Insert { at: u32, text: String },
     /// Append `text` after byte `at` (the closing `)` of an assignment / update
     /// wrap, placed after a sub-expression that keeps its own leaf edits).
     Append { at: u32, text: String },
@@ -175,6 +179,17 @@ pub(super) enum Occurrence {
     /// A signal update (`x++` → `$.update(x)`). Carries the whole-update span + the
     /// emitted text.
     SignalUpdate { span: oxc_span::Span, text: String },
+    /// A BINDABLE-prop member MUTATION wrapped in the setter with the mutation
+    /// flag (`v.a++` → `v(v().a++, true)` — official interop with legacy parent
+    /// bindings). Carries the pure-INSERT head position + text (`v(`) and the
+    /// trailing append (`, true)`); the wrapped mutation keeps its own leaf
+    /// edits (the base identifier read-rewrites to the getter).
+    WrapCall {
+        insert_at: u32,
+        head_text: String,
+        append_at: u32,
+        append_text: String,
+    },
     /// A production-ELIDED statement dropped in place — an unshadowed
     /// `$inspect.trace(...)` expression STATEMENT inside a lowered function /
     /// arrow body (official `dev:false` removes the call; the surrounding body is
@@ -311,6 +326,153 @@ impl BindingOccurrenceCollector<'_> {
         )
     }
 
+    /// The typed PROP lvalue of a bare-identifier target resolving to a `$props()`
+    /// prop binding: a PROP-SOURCE local (a `Getter` read — declared via
+    /// `$.prop`) writes through the setter (`PropSetter`); a NON-source prop
+    /// target is a projection divergence (a write makes the prop a source, so
+    /// its recorded read form must already be the getter) and fails closed
+    /// defensively. `None` for a non-prop binding.
+    fn prop_lvalue(&self, name: &str) -> Option<ClientLvalue> {
+        if !matches!(
+            self.signal_kind(name),
+            Some(BindingRuntimeKind::Prop | BindingRuntimeKind::BindableProp)
+        ) {
+            return None;
+        }
+        Some(match self.ctx.prop_reads.get(name) {
+            Some(PropRead::Getter) => ClientLvalue::PropSetter {
+                name: name.to_string(),
+            },
+            _ => ClientLvalue::UnsupportedReactiveTarget,
+        })
+    }
+
+    /// The BINDABLE-prop-source ROOT name of a MEMBER write target (`v.a++` /
+    /// `v.a.b = 1` — the leftmost identifier of the member chain, resolving to a
+    /// `BindableProp` with a getter read), or `None`. A bindable member MUTATION
+    /// wraps in the setter with the mutation flag (`v(v().a++, true)` — official
+    /// interop with legacy parent bindings); a PLAIN-prop member mutation stays a
+    /// raw member write over the rewritten getter base.
+    // TODO(follow-up): this walk has no TS-wrapper arms (`TSNonNullExpression` /
+    // `TSAsExpression` / …), so a TS-wrapped chain (`v!.a++`) would miss the
+    // bindable wrap. Unreachable for that shape today: `member_write_lvalue`
+    // fails every TS-wrapped prop-rooted write chain closed before the wrap
+    // walk runs. When the `lang="ts"` lowering lands, peel the TS wrappers
+    // here (mirroring `target_expr_root_ident`) so the wrap matches the
+    // official TS-component emit. Owned by the script-completion block (5t).
+    fn member_root_bindable_prop_source(&self, mut object: &Expression<'_>) -> Option<String> {
+        loop {
+            match object {
+                Expression::StaticMemberExpression(m) => object = &m.object,
+                Expression::ComputedMemberExpression(m) => object = &m.object,
+                Expression::PrivateFieldExpression(m) => object = &m.object,
+                Expression::ParenthesizedExpression(p) => object = &p.expression,
+                Expression::Identifier(id) => {
+                    let name = id.name.as_str();
+                    if matches!(
+                        self.signal_kind(name),
+                        Some(BindingRuntimeKind::BindableProp)
+                    ) && matches!(self.ctx.prop_reads.get(name), Some(PropRead::Getter))
+                    {
+                        return Some(name.to_string());
+                    }
+                    return None;
+                }
+                _ => return None,
+            }
+        }
+    }
+
+    /// Whether a MEMBER write target — the WHOLE lvalue: its object chain AND
+    /// every computed KEY along it (`computed_key` is the target's own
+    /// outermost key, which sits outside the object spine) — BOTH carries a
+    /// TS-only wrapper (`v!` / `v as T` / `v satisfies T` / `<T>v` / `v<T>`,
+    /// at any depth inside a key) anywhere on the walk down to its root
+    /// identifier AND roots at a `$props()` prop (plain or bindable). Such a
+    /// write must FAIL CLOSED: official svelte@5.56.3 parse-rejects TypeScript
+    /// syntax in a plain-`<script>` component's template (`expected_token`),
+    /// and accepting it would emit a corrupted prop write (the
+    /// TypeScript-strip pass cannot strip under an update target, and the
+    /// bindable mutation-wrap walk does not peel TS wrappers — `v!.a++` would
+    /// emit the invalid `v()!.a++` with no `v(…, true)` wrap; a TS-wrapped
+    /// KEY leaks the same way, `v[k!]++` → the invalid `v()[k()!]++`). A
+    /// chain rooting at a NON-prop binding (a `$state` proxy, a raw signal, a
+    /// plain local) keeps its existing `Member` classification — this
+    /// predicate scopes the fail-close to the prop write surfaces, never
+    /// widening it. Structural over the parsed OXC nodes; shadow-aware via
+    /// [`Self::signal_kind`]; the key inspection is the recursive
+    /// [`expression_contains_ts_only_syntax`] walk.
+    fn member_lvalue_is_ts_wrapped_prop_chain(
+        &self,
+        mut object: &Expression<'_>,
+        computed_key: Option<&Expression<'_>>,
+    ) -> bool {
+        let mut saw_ts = computed_key.is_some_and(expression_contains_ts_only_syntax);
+        loop {
+            match object {
+                Expression::ParenthesizedExpression(p) => object = &p.expression,
+                Expression::StaticMemberExpression(m) => object = &m.object,
+                Expression::ComputedMemberExpression(m) => {
+                    saw_ts = saw_ts || expression_contains_ts_only_syntax(&m.expression);
+                    object = &m.object;
+                }
+                Expression::PrivateFieldExpression(m) => object = &m.object,
+                Expression::TSNonNullExpression(e) => {
+                    saw_ts = true;
+                    object = &e.expression;
+                }
+                Expression::TSAsExpression(e) => {
+                    saw_ts = true;
+                    object = &e.expression;
+                }
+                Expression::TSSatisfiesExpression(e) => {
+                    saw_ts = true;
+                    object = &e.expression;
+                }
+                Expression::TSTypeAssertion(e) => {
+                    saw_ts = true;
+                    object = &e.expression;
+                }
+                Expression::TSInstantiationExpression(e) => {
+                    saw_ts = true;
+                    object = &e.expression;
+                }
+                Expression::Identifier(id) => {
+                    return saw_ts
+                        && matches!(
+                            self.signal_kind(id.name.as_str()),
+                            Some(BindingRuntimeKind::Prop | BindingRuntimeKind::BindableProp)
+                        );
+                }
+                _ => return false,
+            }
+        }
+    }
+
+    /// The typed lvalue of a MEMBER write target (`o.a = …` / `o[i]++` /
+    /// `o.#x = …`), classified from the whole lvalue — object chain plus
+    /// computed keys (`computed_key` is a computed target's own outermost
+    /// key) — the SINGLE funnel every member assignment AND update target
+    /// passes through (both [`Self::classify_target`] and
+    /// [`Self::classify_simple_target`] route their member arms here). A
+    /// TS-wrapped chain rooting at a `$props()` prop — the wrapper on the
+    /// spine OR anywhere inside a computed key — is the TS-wrapped
+    /// REACTIVE-write class and fails closed
+    /// ([`ClientLvalue::UnsupportedReactiveTarget`], same as a TS-wrapped
+    /// bare-identifier target); every other member target stays the plain
+    /// deep-write [`ClientLvalue::Member`].
+    fn member_write_lvalue(
+        &self,
+        object: &Expression<'_>,
+        computed_key: Option<&Expression<'_>>,
+    ) -> ClientLvalue {
+        if self.member_lvalue_is_ts_wrapped_prop_chain(object, computed_key) {
+            ClientLvalue::UnsupportedReactiveTarget
+        } else {
+            ClientLvalue::Member
+        }
+    }
+
     /// Record the first refusal (later refusals are ignored — the first surface is
     /// reported).
     fn refuse(&mut self, surface: UnsupportedSvelteRuntimeSurface) {
@@ -336,15 +498,27 @@ impl BindingOccurrenceCollector<'_> {
                     ClientLvalue::SignalIdent {
                         name: name.to_string(),
                     }
+                } else if let Some(prop) = self.prop_lvalue(name) {
+                    prop
                 } else {
                     ClientLvalue::PlainIdent
                 }
             }
-            // Member targets (`o.a` / `o[i]` / `o.#x`) are deep writes — plain
-            // member access (a `BareProxy` / `StateProxy` member write stays plain).
-            AssignmentTarget::StaticMemberExpression(_)
-            | AssignmentTarget::ComputedMemberExpression(_)
-            | AssignmentTarget::PrivateFieldExpression(_) => ClientLvalue::Member,
+            // Member targets (`o.a` / `o[i]` / `o.#x`) are deep writes,
+            // classified through the single member-write funnel: plain member
+            // access (a `BareProxy` / `StateProxy` member write stays plain),
+            // EXCEPT a TS-wrapped chain (spine OR computed key) rooting at a
+            // `$props()` prop, which fails closed. A computed target hands the
+            // funnel its own outermost key alongside the object spine.
+            AssignmentTarget::StaticMemberExpression(m) => {
+                self.member_write_lvalue(&m.object, None)
+            }
+            AssignmentTarget::ComputedMemberExpression(m) => {
+                self.member_write_lvalue(&m.object, Some(&m.expression))
+            }
+            AssignmentTarget::PrivateFieldExpression(m) => {
+                self.member_write_lvalue(&m.object, None)
+            }
             // A TS-wrapped target (`(x as T) = …` / `x! = …` / `<T>x = …`) could
             // denote a reactive write but is outside the supported plain-identifier
             // subset — fail closed rather than drop the rewrite.
@@ -370,13 +544,24 @@ impl BindingOccurrenceCollector<'_> {
                     ClientLvalue::SignalIdent {
                         name: name.to_string(),
                     }
+                } else if let Some(prop) = self.prop_lvalue(name) {
+                    prop
                 } else {
                     ClientLvalue::PlainIdent
                 }
             }
-            SimpleAssignmentTarget::StaticMemberExpression(_)
-            | SimpleAssignmentTarget::ComputedMemberExpression(_)
-            | SimpleAssignmentTarget::PrivateFieldExpression(_) => ClientLvalue::Member,
+            // Member update targets route through the SAME single member-write
+            // funnel as assignment member targets (a TS-wrapped chain — spine
+            // OR computed key — rooting at a `$props()` prop fails closed).
+            SimpleAssignmentTarget::StaticMemberExpression(m) => {
+                self.member_write_lvalue(&m.object, None)
+            }
+            SimpleAssignmentTarget::ComputedMemberExpression(m) => {
+                self.member_write_lvalue(&m.object, Some(&m.expression))
+            }
+            SimpleAssignmentTarget::PrivateFieldExpression(m) => {
+                self.member_write_lvalue(&m.object, None)
+            }
             SimpleAssignmentTarget::TSAsExpression(_)
             | SimpleAssignmentTarget::TSSatisfiesExpression(_)
             | SimpleAssignmentTarget::TSNonNullExpression(_)
@@ -394,18 +579,21 @@ impl BindingOccurrenceCollector<'_> {
             // `transform[arg] = { read: b.call }` — a snippet receives its args as
             // zero-arg getter thunks defaulting to `$.noop`).
             Some(BindingRuntimeKind::SnippetParam) => Some(format!("{name}()")),
-            Some(BindingRuntimeKind::Prop) => Some(match self.ctx.prop_reads.get(name) {
-                // A default-bearing prop reads as a getter call `name()`.
-                Some(PropRead::Getter) => format!("{name}()"),
-                // A no-default prop reads off the props object by its SOURCE key. A
-                // non-identifier-safe source key (`foo-bar`) reads via BRACKET access
-                // (`$$props['foo-bar']`); an identifier-safe key reads via dotted
-                // access (`$$props.foo`).
-                Some(PropRead::PropsMember { source_key }) => props_member_access(source_key),
-                // No recorded read form — a plain props member by name (the binding
-                // name is always identifier-safe here).
-                None => format!("$$props.{name}"),
-            }),
+            Some(BindingRuntimeKind::Prop | BindingRuntimeKind::BindableProp) => {
+                Some(match self.ctx.prop_reads.get(name) {
+                    // A PROP-SOURCE member (default-bearing or written — declared
+                    // via `$.prop`) reads as a getter call `name()`.
+                    Some(PropRead::Getter) => format!("{name}()"),
+                    // A non-source prop reads off the props object by its SOURCE
+                    // key. A non-identifier-safe source key (`foo-bar`) reads via
+                    // BRACKET access (`$$props['foo-bar']`); an identifier-safe key
+                    // reads via dotted access (`$$props.foo`).
+                    Some(PropRead::PropsMember { source_key }) => props_member_access(source_key),
+                    // No recorded read form — a plain props member by name (the
+                    // binding name is always identifier-safe here).
+                    None => format!("$$props.{name}"),
+                })
+            }
             // A non-signal / shadowed identifier stays as the original source.
             _ => None,
         }
@@ -498,6 +686,31 @@ impl BindingOccurrenceCollector<'_> {
                 // Recurse the RHS only (the head identifier is consumed above).
                 self.visit_expression(&assign.right);
             }
+            // A PROP-SOURCE write lowers through the getter/setter function:
+            // `name = rhs` → `name(rhs)`; a compound `name += y` →
+            // `name(name() + y)`. An identifier reassignment never carries the
+            // mutation flag (official `assign: (node, value) => b.call(node,
+            // value)` — no trailing `true`).
+            ClientLvalue::PropSetter { name } => {
+                let left_start = assign.left.span().start;
+                let rhs_start = assign.right.span().start;
+                let rhs_end = assign.right.span().end;
+                let head_text = match assign.operator {
+                    AssignmentOperator::Assign => format!("{name}("),
+                    op => {
+                        let base = compound_base_operator(op);
+                        format!("{name}({name}() {base} ")
+                    }
+                };
+                self.occurrences.push(Occurrence::SignalReassign {
+                    head_span: oxc_span::Span::new(left_start, rhs_start),
+                    head_text,
+                    append_at: rhs_end,
+                    append_text: ")".to_string(),
+                });
+                // Recurse the RHS only (the head identifier is consumed above).
+                self.visit_expression(&assign.right);
+            }
             ClientLvalue::UnsupportedReactiveTarget | ClientLvalue::UnsupportedTarget => {
                 // A TS-wrapped reactive write or a destructuring write — fail closed.
                 self.refuse(UnsupportedSvelteRuntimeSurface::DestructuringWrite {
@@ -505,12 +718,44 @@ impl BindingOccurrenceCollector<'_> {
                 });
             }
             ClientLvalue::Member | ClientLvalue::PlainIdent => {
+                // A BINDABLE-prop member MUTATION wraps the whole assignment in
+                // the setter with the mutation flag (`v.a = 1` → `v(v().a = 1,
+                // true)` — official interop with legacy parent bindings); the
+                // wrapped mutation keeps its own leaf edits (the base identifier
+                // read-rewrites to the getter below). A PLAIN-prop / proxy member
+                // write stays a raw member write.
+                if let Some(root) = self.member_assignment_bindable_root(&assign.left) {
+                    self.occurrences.push(Occurrence::WrapCall {
+                        insert_at: assign.span.start,
+                        head_text: format!("{root}("),
+                        append_at: assign.span.end,
+                        append_text: ", true)".to_string(),
+                    });
+                }
                 // A member-rooted or non-signal target: recurse both sides (a
                 // `BareProxy` member write stays plain; a member of a signal object
                 // reads via a getter, handled by recursing into the target object).
                 self.visit_assignment_target(&assign.left);
                 self.visit_expression(&assign.right);
             }
+        }
+    }
+
+    /// The bindable-prop-source root of an ASSIGNMENT member target, or `None`
+    /// (delegates to [`Self::member_root_bindable_prop_source`] over the member
+    /// target's object).
+    fn member_assignment_bindable_root(&self, target: &AssignmentTarget<'_>) -> Option<String> {
+        match target {
+            AssignmentTarget::StaticMemberExpression(m) => {
+                self.member_root_bindable_prop_source(&m.object)
+            }
+            AssignmentTarget::ComputedMemberExpression(m) => {
+                self.member_root_bindable_prop_source(&m.object)
+            }
+            AssignmentTarget::PrivateFieldExpression(m) => {
+                self.member_root_bindable_prop_source(&m.object)
+            }
+            _ => None,
         }
     }
 
@@ -553,12 +798,43 @@ impl BindingOccurrenceCollector<'_> {
                     text,
                 });
             }
+            // A PROP-SOURCE update lowers through the prop update helpers:
+            // `name++` → `$.update_prop(name)`, `--name` →
+            // `$.update_pre_prop(name, -1)` (the official prefix/decrement forms,
+            // mirroring the signal `$.update` family).
+            ClientLvalue::PropSetter { name } => {
+                let helper = if update.prefix {
+                    "update_pre_prop"
+                } else {
+                    "update_prop"
+                };
+                let text = match update.operator {
+                    UpdateOperator::Increment => format!("$.{helper}({name})"),
+                    UpdateOperator::Decrement => format!("$.{helper}({name}, -1)"),
+                };
+                self.occurrences.push(Occurrence::SignalUpdate {
+                    span: update.span,
+                    text,
+                });
+            }
             ClientLvalue::UnsupportedReactiveTarget | ClientLvalue::UnsupportedTarget => {
                 self.refuse(UnsupportedSvelteRuntimeSurface::DestructuringWrite {
                     span: VerterSpan::new(update.span.start, update.span.end),
                 });
             }
             ClientLvalue::Member | ClientLvalue::PlainIdent => {
+                // A BINDABLE-prop member MUTATION wraps the whole update in the
+                // setter with the mutation flag (`v.a++` → `v(v().a++, true)`);
+                // a PLAIN-prop / proxy member update stays a raw member write
+                // over the rewritten getter base.
+                if let Some(root) = self.member_update_bindable_root(&update.argument) {
+                    self.occurrences.push(Occurrence::WrapCall {
+                        insert_at: update.span.start,
+                        head_text: format!("{root}("),
+                        append_at: update.span.end,
+                        append_text: ", true)".to_string(),
+                    });
+                }
                 // A member target (`o.a++`) or non-signal: recurse the object base.
                 match &update.argument {
                     SimpleAssignmentTarget::StaticMemberExpression(m) => {
@@ -576,6 +852,24 @@ impl BindingOccurrenceCollector<'_> {
                     _ => {}
                 }
             }
+        }
+    }
+
+    /// The bindable-prop-source root of an UPDATE member target, or `None`
+    /// (delegates to [`Self::member_root_bindable_prop_source`] over the member
+    /// target's object).
+    fn member_update_bindable_root(&self, target: &SimpleAssignmentTarget<'_>) -> Option<String> {
+        match target {
+            SimpleAssignmentTarget::StaticMemberExpression(m) => {
+                self.member_root_bindable_prop_source(&m.object)
+            }
+            SimpleAssignmentTarget::ComputedMemberExpression(m) => {
+                self.member_root_bindable_prop_source(&m.object)
+            }
+            SimpleAssignmentTarget::PrivateFieldExpression(m) => {
+                self.member_root_bindable_prop_source(&m.object)
+            }
+            _ => None,
         }
     }
 }
@@ -1017,6 +1311,21 @@ impl RewritePlanner {
                         text: text.clone(),
                     });
                 }
+                Occurrence::WrapCall {
+                    insert_at,
+                    head_text,
+                    append_at,
+                    append_text,
+                } => {
+                    self.edits.push(Edit::Insert {
+                        at: *insert_at,
+                        text: head_text.clone(),
+                    });
+                    self.edits.push(Edit::Append {
+                        at: *append_at,
+                        text: append_text.clone(),
+                    });
+                }
                 Occurrence::DropStatement { span }
                 | Occurrence::RelocatedWrapperComment { span } => {
                     self.edits.push(Edit::Remove {
@@ -1027,6 +1336,42 @@ impl RewritePlanner {
             }
         }
     }
+}
+
+/// Whether `expr` contains a TS-only wrapper expression (`x!` / `x as T` /
+/// `x satisfies T` / `<T>x` / `x<T>`) at ANY depth — the recursive
+/// computed-KEY half of the TS-wrapped prop-chain write gate
+/// ([`BindingOccurrenceCollector::member_lvalue_is_ts_wrapped_prop_chain`]).
+/// Structural over the parsed OXC nodes through the exhaustive `walk`
+/// traversal (every sub-expression — call arguments, nested members, arrow
+/// bodies — is reached; `String(k as any)` is found), never a text scan. The
+/// wrapper kinds are exactly the five the chain walk itself peels.
+fn expression_contains_ts_only_syntax(expr: &Expression<'_>) -> bool {
+    struct TsOnlySyntaxDetector {
+        found: bool,
+    }
+    impl<'a> Visit<'a> for TsOnlySyntaxDetector {
+        fn visit_expression(&mut self, it: &Expression<'a>) {
+            if self.found {
+                return;
+            }
+            if matches!(
+                it,
+                Expression::TSNonNullExpression(_)
+                    | Expression::TSAsExpression(_)
+                    | Expression::TSSatisfiesExpression(_)
+                    | Expression::TSTypeAssertion(_)
+                    | Expression::TSInstantiationExpression(_)
+            ) {
+                self.found = true;
+                return;
+            }
+            walk::walk_expression(self, it);
+        }
+    }
+    let mut detector = TsOnlySyntaxDetector { found: false };
+    detector.visit_expression(expr);
+    detector.found
 }
 
 /// Whether a call expression's callee is the `$state.snapshot` rune member — a

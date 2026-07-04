@@ -19,22 +19,16 @@ use oxc_allocator::Allocator;
 
 use super::client::UnsupportedSvelteRuntimeSurface;
 use super::client_allowlist::SupportedHtmlElement;
-use super::client_codegen_helpers::{
-    escape_template_text, js_single_quoted, object_key, op_target_node, style_object,
-};
+use super::client_codegen_helpers::{js_single_quoted, op_target_node};
 use super::client_shapes::{
     ClientBindShape, ClientDynamicAttrShape, ClientEventHandlerShape, ClientInterpolationShape,
 };
 use super::client_surface::ClassifiedClientSurface;
-use super::entity_decode::decode_attr_entities;
 use super::events::{validate_event_modifiers, EventModifierError};
-use super::expr::{BindingRuntimeKind, ScopeId};
+use super::expr::{BindingRuntimeKind, ExprRefKind, ScopeId};
 use super::expr_emit;
-use super::expr_rewrite::{PropReads, ProxyInitMap};
-use super::ir::{
-    AttrIr, AttrOpKind, ExprId, IrNode, NodeId, NonStaticPropertyKind, NonStaticPropertyValue,
-    OpId, RuntimeOp, StyleDirectiveValue, SvelteRuntimeIr,
-};
+use super::expr_rewrite::{PropRead, PropReads, ProxyInitMap};
+use super::ir::{AttrIr, AttrOpKind, ExprId, IrNode, NodeId, OpId, RuntimeOp, SvelteRuntimeIr};
 use verter_span::Span;
 
 // The narrow client-plan VOCABULARY (the closed node / attribute / op / value type set
@@ -42,9 +36,9 @@ use verter_span::Span;
 // projects the broad IR onto it. Re-exported so existing consumers (`super::client`, …)
 // keep importing the vocabulary as `super::client_plan::<Type>`.
 pub(super) use super::client_plan_types::{
-    AttrValue, AttrValuePart, ClientAttr, ClientBindTarget, ClientBlock, ClientDynAttrEmit,
-    ClientNode, ClientNodeId, ClientRuntimeOp, ClientScriptItem, ElementLifecycleOp, EventEmit,
-    EventEmitTarget, EventMode, RegionOps,
+    AttrValue, ClientAttr, ClientBindTarget, ClientBlock, ClientNode, ClientNodeId,
+    ClientRuntimeOp, ClientScriptItem, ElementLifecycleOp, EventEmit, EventEmitTarget, EventMode,
+    RegionOps,
 };
 
 /// The narrow client module plan — the SOLE emitter input.
@@ -60,6 +54,10 @@ pub(super) struct ClientModulePlan<'a> {
     /// / instance import is fail-closed upstream, so there are no module-scope
     /// imports / hoists — the body is the only script-item slot.)
     pub(super) body_statements: Vec<ClientScriptItem>,
+    /// The hoisted `$props.id()` declaration (`const <name> = $.props_id();`) —
+    /// emitted at the ABSOLUTE function-body top, ABOVE the `$.push` frame line
+    /// (the official hoist slot). `None` for the common no-`$props.id` component.
+    pub(super) props_id_hoist: Option<String>,
     /// The narrow reactive ops, grouped by their owning template-scope REGION (the root
     /// region plus every block body / branch region), in source order within each region.
     /// A block body's reactive surface is its OWN region: the emitter builds each region's
@@ -87,6 +85,74 @@ pub(super) struct ClientModulePlan<'a> {
     pub(super) build: SupportedClientIr<'a>,
 }
 
+/// Collect the prop LOCAL names WRITTEN anywhere — every reference of kind
+/// `Reassign` / `DeepMutate` that resolves (scope-awarely, so a shadowing local
+/// of the same name never counts) to a `Prop` / `BindableProp` binding. This is
+/// the official `updated` flag axis in runes mode (`reassigned || mutated`) and
+/// the write half of `is_prop_source`.
+///
+/// The accepted prop-WRITE surfaces are exactly TWO — this collection observes
+/// both (any other instance-script prop reference is fail-closed upstream by
+/// the prop-usage gate):
+///
+/// 1. TEMPLATE expressions (handlers / interpolations / binds) — the analyzed
+///    expression arena, resolved through each expression's own scope;
+/// 2. `$props()` DEFAULT expressions (a self write `{ a = (a = 1) }`, a sibling
+///    write `{ a = (b.x++), b = {} }`, plain or `$bindable(...)`) — enumerated
+///    through the SAME typed member-plan authority the `$.prop` lowering
+///    consumes ([`expr_emit::props_member_plans`]) and harvested with the SAME
+///    shared reference collector the template arena uses
+///    ([`super::expr::collect_expr_references`] — expression-local shadowers
+///    such as an arrow param already excluded), resolved at the instance ROOT
+///    scope (where the defaults lexically live).
+fn collect_prop_updated_locals(ir: &SvelteRuntimeIr) -> rustc_hash::FxHashSet<String> {
+    let mut updated = rustc_hash::FxHashSet::default();
+    let mark_prop_writes =
+        |scope: ScopeId,
+         references: &[super::expr::ExprReference],
+         updated: &mut rustc_hash::FxHashSet<String>| {
+            for r in references {
+                if !matches!(r.kind, ExprRefKind::Reassign | ExprRefKind::DeepMutate) {
+                    continue;
+                }
+                if matches!(
+                    ir.analysis
+                        .bindings
+                        .resolve_kind(&ir.analysis.scopes, scope, &r.name),
+                    Some(BindingRuntimeKind::Prop | BindingRuntimeKind::BindableProp)
+                ) {
+                    updated.insert(r.name.clone());
+                }
+            }
+        };
+    // (1) The template expression arena.
+    for expr in ir.analysis.expressions.all() {
+        mark_prop_writes(expr.scope, &expr.references, &mut updated);
+    }
+    // (2) The `$props()` default expressions. A default that fails the wrapped
+    // reparse contributes nothing here — the same slice refuses the shared
+    // rewriter at lowering, so the component never emits with a missed mark.
+    if let Some(instance) = ir.analysis.scripts.instance_source {
+        let alloc = Allocator::default();
+        let root_scope = ir.root_scope().scope;
+        for plan in
+            expr_emit::props_member_plans(&alloc, instance, &rustc_hash::FxHashSet::default())
+        {
+            let Some(default) = &plan.default else {
+                continue;
+            };
+            let Some(src) = instance.get(default.span.0 as usize..default.span.1 as usize) else {
+                continue;
+            };
+            let Ok(facts) = super::expr::collect_expr_references(src) else {
+                continue;
+            };
+            mark_prop_writes(root_scope, &facts.references, &mut updated);
+        }
+    }
+    updated
+}
+
 /// The semantic projection stage — it attaches the reactivity / lvalue / prop-read
 /// facts the narrow plan needs, then builds the [`ClientModulePlan`].
 pub(super) struct SupportedClientIr<'a> {
@@ -95,6 +161,11 @@ pub(super) struct SupportedClientIr<'a> {
     pub(super) ir: &'a SvelteRuntimeIr<'a>,
     /// The component's `$props()` read forms.
     pub(super) prop_reads: PropReads,
+    /// The prop LOCAL names WRITTEN anywhere (a template-expression or
+    /// `$props()`-default reassign / deep-mutate resolving scope-awarely to a
+    /// `Prop` / `BindableProp` binding) — the official `updated` flag axis
+    /// (bit 4) and the `is_prop_source` write half.
+    pub(super) prop_updated: rustc_hash::FxHashSet<String>,
     /// The per-instance one-hop proxy-init map (threaded into the TEMPLATE-side
     /// rewrite so a handler reassignment matches the official `should_proxy(rhs)`).
     pub(super) proxy_inits: ProxyInitMap,
@@ -193,11 +264,16 @@ impl<'a> SupportedClientIr<'a> {
         ir: &'a SvelteRuntimeIr<'a>,
     ) -> Result<ClientModulePlan<'a>, UnsupportedSvelteRuntimeSurface> {
         let alloc = Allocator::default();
+        // The prop WRITE facts (a template-expression or `$props()`-default
+        // reassign / deep-mutate resolving to a prop binding) — the `updated` flag
+        // axis. Computed BEFORE the read forms so a written prop's reads flip to
+        // the getter (`is_prop_source`).
+        let prop_updated = collect_prop_updated_locals(ir);
         let prop_reads = ir
             .analysis
             .scripts
             .instance_source
-            .map(|src| expr_emit::collect_prop_reads(&alloc, src))
+            .map(|src| expr_emit::collect_prop_reads(&alloc, src, &prop_updated))
             .unwrap_or_default();
         // The per-instance proxy-init map — threaded into the TEMPLATE-side rewrite
         // so a handler `o = primitiveVar` does NOT proxy (the one-hop follow).
@@ -216,6 +292,7 @@ impl<'a> SupportedClientIr<'a> {
         let mut projection = SupportedClientIr {
             ir,
             prop_reads,
+            prop_updated,
             proxy_inits,
             declared_roots,
             event_shapes: classified.event_shapes.clone(),
@@ -275,8 +352,9 @@ impl<'a> SupportedClientIr<'a> {
         // (1) The component-body statements from the TYPED instance-script item
         // allowlist (a `<script module>` / instance import is fail-closed upstream, so
         // there are no module-scope imports / hoists). A function-pair function body
-        // lowers through the fallible rewriter, so this is fallible.
-        let body_statements = projection.build_script_items()?;
+        // lowers through the fallible rewriter, so this is fallible. A `$props.id()`
+        // item ALSO yields the body-top hoist (`const <name> = $.props_id();`).
+        let (body_statements, props_id_hoist) = projection.build_script_items()?;
 
         // (2) The narrow node arena (mirrors the supported IR node space). The
         // reactivity decision for each interpolation is made here: a non-reactive
@@ -289,13 +367,12 @@ impl<'a> SupportedClientIr<'a> {
 
         // (4) Component context + props-param facts.
         let needs_context = projection.needs_context(&alloc);
-        let uses_props = ir
-            .analysis
-            .bindings
-            .all()
-            .iter()
-            .any(|b| b.kind == BindingRuntimeKind::Prop)
-            || needs_context;
+        let uses_props = ir.analysis.bindings.all().iter().any(|b| {
+            matches!(
+                b.kind,
+                BindingRuntimeKind::Prop | BindingRuntimeKind::BindableProp
+            )
+        }) || needs_context;
 
         let (module_snippets, instance_snippets) = projection.collect_top_level_snippets();
 
@@ -303,6 +380,7 @@ impl<'a> SupportedClientIr<'a> {
             component: ir.component.clone(),
             nodes,
             body_statements,
+            props_id_hoist,
             region_ops,
             user_imports: classified.user_imports.clone(),
             module_snippets,
@@ -330,12 +408,24 @@ impl<'a> SupportedClientIr<'a> {
     /// rooted at the instance-script scope — so a signal read/write inside the body
     /// becomes `$.get`/`$.set` (`function get() { return $.get(value); }`), NEVER verbatim.
     /// FALLIBLE: a function body using an unsupported form refuses.
-    fn build_script_items(&self) -> Result<Vec<ClientScriptItem>, UnsupportedSvelteRuntimeSurface> {
+    fn build_script_items(
+        &self,
+    ) -> Result<(Vec<ClientScriptItem>, Option<String>), UnsupportedSvelteRuntimeSurface> {
         use super::instance_items::SupportedInstanceScriptItem as Item;
         use expr_emit::SimpleItemLowering;
         let root_scope = self.ir.root_scope().scope;
         let mut items = Vec::new();
+        // The hoisted `$props.id()` declaration — the scan enforces the single-use
+        // rule, so at most one item carries it.
+        let mut props_id_hoist = None;
         for item in &self.script_items {
+            // A `$props.id()` item yields the BODY-TOP hoist (always a `const`,
+            // regardless of the source keyword — official emits `const` for a
+            // `let` source declarator); its literal-only SIBLINGS flow through the
+            // simple lowering below into the item's source slot.
+            if let Item::PropsIdDecl { name, .. } = item {
+                props_id_hoist = Some(format!("const {name} = $.props_id();"));
+            }
             match expr_emit::lower_simple_instance_item(item) {
                 SimpleItemLowering::Statement(code) => {
                     items.push(ClientScriptItem::BodyStatement { code });
@@ -358,6 +448,17 @@ impl<'a> SupportedClientIr<'a> {
                                 rewritten.as_deref(),
                                 &self.ir.analysis.bindings,
                             )
+                        }
+                        // The `$props()` destructure: its PROP-SOURCE members lower
+                        // to ONE `let <local> = $.prop($$props, <key>, <flags>[,
+                        // <default>]), …;` declaration (default expressions rewrite
+                        // through the shared rewriter); a destructure with no
+                        // prop-source member emits nothing.
+                        Item::PropsDestructure => {
+                            match self.lower_props_destructure(root_scope)? {
+                                Some(code) => code,
+                                None => continue,
+                            }
                         }
                         // A named function-pair function: its body lowers through the shared
                         // rewriter (signal reads/writes rewrite; the `function name(...) {}`
@@ -413,14 +514,179 @@ impl<'a> SupportedClientIr<'a> {
                         // `NeedsRewriter` is produced ONLY for the arms above; any other
                         // item reaching here is a classifier/lowering divergence.
                         _ => unreachable!(
-                            "only StatePrimitive, FunctionDecl, EffectStatement, and EffectRuneInit need the rewriter"
+                            "only StatePrimitive, PropsDestructure, FunctionDecl, EffectStatement, and EffectRuneInit need the rewriter"
                         ),
                     };
                     items.push(ClientScriptItem::BodyStatement { code });
                 }
             }
         }
-        Ok(items)
+        Ok((items, props_id_hoist))
+    }
+
+    /// Lower the instance script's `$props()` destructure into its ONE
+    /// prop-source declaration statement, or `None` when no member is a prop
+    /// source (every prop reads directly off `$$props`).
+    ///
+    /// Per PROP-SOURCE member (the official `is_prop_source`: a default initial
+    /// OR a written local), the declarator is
+    /// `<local> = $.prop($$props, '<source-key>', <flags>[, <default>])` with
+    /// the official flag algorithm on Verter's runes-only surface:
+    /// `IMMUTABLE(1) | RUNES(2)` always, `UPDATED(4)` when the local is written
+    /// (reassigned or deep-mutated), `BINDABLE(8)` for a `$bindable(...)`
+    /// default, `LAZY_INITIAL(16)` when the default rides a thunk / collapsed
+    /// callee. Declarators join ONE `let` declaration in source order (the
+    /// official single-declaration shape). FALLIBLE: a default whose expression
+    /// refuses the shared rewriter (or a TS-wrapped default) fails closed.
+    fn lower_props_destructure(
+        &self,
+        root_scope: ScopeId,
+    ) -> Result<Option<String>, UnsupportedSvelteRuntimeSurface> {
+        let Some(instance) = self.ir.analysis.scripts.instance_source else {
+            return Ok(None);
+        };
+        let alloc = Allocator::default();
+        let plans = expr_emit::props_member_plans(&alloc, instance, &self.prop_updated);
+        let mut decls = Vec::new();
+        for plan in &plans {
+            if !plan.is_prop_source() {
+                continue;
+            }
+            // IMMUTABLE | RUNES — always set on Verter's runes-only surface.
+            let mut flags = 3u8;
+            if plan.updated {
+                flags |= 4;
+            }
+            if plan.bindable {
+                flags |= 8;
+            }
+            let arg = match &plan.default {
+                None => None,
+                Some(facts) => {
+                    Some(self.lower_props_default(instance, plan, facts, &mut flags, root_scope)?)
+                }
+            };
+            let key = js_single_quoted(&plan.source_key);
+            let call = match arg {
+                Some(arg) => format!("$.prop($$props, {key}, {flags}, {arg})"),
+                None => format!("$.prop($$props, {key}, {flags})"),
+            };
+            decls.push(format!("{} = {call}", plan.local));
+        }
+        if decls.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(format!("let {};", decls.join(", "))))
+    }
+
+    /// Lower ONE `$props()` member DEFAULT into its `$.prop` initial argument,
+    /// setting `LAZY_INITIAL` (bit 16) when the carrier is a thunk / collapsed
+    /// callee — the official `get_prop_source` initial algorithm over the
+    /// REWRITTEN expression:
+    ///
+    /// - a BINDABLE default that `should_proxy` → `() => $.proxy(<rewritten>)`
+    ///   (the proxy wrap is bindable-only and always rides the thunk; a
+    ///   sequence root parenthesizes the argument — `$.proxy((1, 2))` — so the
+    ///   comma expression stays ONE proxy argument);
+    /// - a VISITED-simple expression → RAW (no lazy bit): the simple skeleton
+    ///   holds AND every identifier leaf stays unrewritten — a function
+    ///   literal passes raw even when its BODY carries rewrites (`() =>
+    ///   (a = 1)` → `() => (a(1))`, official flags 7), because official runs
+    ///   `is_simple_expression` on the initializer AFTER visiting and a body
+    ///   rewrite never changes the outer node kind;
+    /// - an unrewritten NON-optional zero-arg identifier call → the BARE callee;
+    /// - a bare identifier that rewrites to a sibling GETTER call → the BARE
+    ///   getter (the same zero-arg collapse over the rewritten node);
+    /// - everything else → `() => <rewritten>` (an object or sequence root
+    ///   parenthesizes the body: `() => ({ … })` / `() => (1, 2)`).
+    fn lower_props_default(
+        &self,
+        instance: &str,
+        plan: &expr_emit::PropsMemberPlan,
+        facts: &expr_emit::PropsDefaultFacts,
+        flags: &mut u8,
+        root_scope: ScopeId,
+    ) -> Result<String, UnsupportedSvelteRuntimeSurface> {
+        if facts.ts_wrapped {
+            // A TS-wrapped default is a distinct surface (the official
+            // simple/lazy decision runs over the TS node) — fail closed, the
+            // same boundary as the `$state()` ts-wrapped init.
+            return Err(UnsupportedSvelteRuntimeSurface::AdvancedRune {
+                rune: "$props() ts-wrapped default",
+                span: Span::new(facts.span.0, facts.span.1),
+            });
+        }
+        let src = instance
+            .get(facts.span.0 as usize..facts.span.1 as usize)
+            .unwrap_or_default();
+        let rewritten = self.rewrite_source(src, root_scope)?;
+        let identity = rewritten == src;
+        if plan.bindable {
+            // The official `should_proxy` runs over the REWRITTEN node: a bare
+            // identifier whose read rewrites (a signal / prop getter / props
+            // member) becomes a call/member — always proxiable; an unrewritten
+            // root keeps the shape-based decision (with the one-hop follow).
+            let proxiable = match &facts.bare_ident {
+                Some(_) if !identity => true,
+                _ => facts.proxiable_by_shape,
+            };
+            if proxiable {
+                *flags |= 16;
+                // A sequence root parenthesizes so the comma expression stays
+                // ONE `$.proxy` argument.
+                if facts.sequence_root {
+                    return Ok(format!("() => $.proxy(({rewritten}))"));
+                }
+                return Ok(format!("() => $.proxy({rewritten})"));
+            }
+        }
+        // The official `is_simple_expression` runs over the VISITED
+        // initializer: the skeleton fact carries the identifier leaves, and a
+        // leaf rewrites iff the shared rewriter changes its bare text (getter
+        // call / `$$props` member / signal read). Rewrites inside a function
+        // literal's body never break simplicity — the outer node kind is what
+        // the official predicate sees.
+        let visited_simple = match &facts.simple_ident_leaves {
+            None => false,
+            // The whole default text is unrewritten — every leaf trivially is.
+            Some(_) if identity => true,
+            Some(leaves) => {
+                let mut all_unrewritten = true;
+                for leaf in leaves {
+                    if self.rewrite_source(leaf, root_scope)? != *leaf {
+                        all_unrewritten = false;
+                        break;
+                    }
+                }
+                all_unrewritten
+            }
+        };
+        if visited_simple {
+            return Ok(rewritten);
+        }
+        *flags |= 16;
+        if identity {
+            if let Some(callee) = &facts.zero_arg_ident_callee {
+                return Ok(callee.clone());
+            }
+        }
+        if let Some(name) = &facts.bare_ident {
+            // A bare identifier that rewrote to the sibling GETTER call
+            // (`{ b = a }` → `a()`) collapses to the bare getter — the official
+            // zero-arg-callee optimization over the rewritten node. (A rewrite
+            // to `$$props.x` / `$.get(x)` is not a zero-arg identifier call and
+            // rides the thunk below.)
+            if !identity && matches!(self.prop_reads.get(name.as_str()), Some(PropRead::Getter)) {
+                return Ok(name.clone());
+            }
+        }
+        if facts.object_root || facts.sequence_root {
+            // An object body needs the arrow-body parenthesization; a sequence
+            // body needs it so the comma expression stays ONE thunk return
+            // value (`() => (1, 2)`), never a stray call argument.
+            return Ok(format!("() => ({rewritten})"));
+        }
+        Ok(format!("() => {rewritten}"))
     }
 
     /// Build the narrow node arena (one `ClientNode` per supported IR node, indexed
@@ -1049,439 +1315,5 @@ impl<'a> SupportedClientIr<'a> {
             ));
         }
         Ok(out)
-    }
-
-    /// The IR element node for a target [`NodeId`] (a non-element target is a
-    /// classifier/plan divergence — fail closed defensively).
-    pub(super) fn element_for(
-        &self,
-        target: NodeId,
-    ) -> Result<&super::ir::ElementIr, UnsupportedSvelteRuntimeSurface> {
-        match self.ir.node(target) {
-            IrNode::Element(el) => Ok(el),
-            _ => Err(UnsupportedSvelteRuntimeSurface::DynamicAttribute {
-                name: "non-element-attr-target".to_string(),
-                span: Span::new(0, 0),
-            }),
-        }
-    }
-
-    /// Project a dynamic PLAIN attribute (`AttrIr::Dynamic` / `AttrIr::Mixed`,
-    /// `AttrOpKind::Plain`) into its narrow [`ClientRuntimeOp::ReactiveAttr`]. The
-    /// emission shape is re-derived from the (deterministic) name classifier — a DOM
-    /// property write vs `$.set_attribute`. The value is the WHOLE attribute value
-    /// (read from the element's `Dynamic` / `Mixed` attr, not the single op expr) —
-    /// a `Dynamic` single expression or a `Mixed` `` `lit${expr ?? ''}lit` ``
-    /// template literal. `has_state` is the official `metadata.expression.has_state`.
-    fn project_reactive_attr_op(
-        &self,
-        target: NodeId,
-        name: &str,
-    ) -> Result<ClientRuntimeOp, UnsupportedSvelteRuntimeSurface> {
-        let el = self.element_for(target)?;
-        // The element's `Dynamic` / `Mixed` attribute under this name → its STRUCTURED
-        // value (each expression carrying its `has_call` fact for the emit-time
-        // memoizer) + `has_state`.
-        let (value, has_state) = self.attr_value_for(el, name)?;
-        // The write is REACTIVE when it references state OR `has_call` (a `has_call`
-        // value is memoized into a `$N` placeholder that only the effect can bind — the
-        // official `Memoizer.add` rule, which forces even a pure `String(plain_let)`
-        // into the render `$.template_effect`).
-        let reactive = has_state || value.has_call();
-        // Re-derive the emission shape from the name (deterministic, matches the
-        // classifier's recorded fact). The span is unused on the accept path.
-        let shape = super::client_shapes::classify_dynamic_attr_shape(name, Span::new(0, 0))?;
-        let emit = match shape {
-            ClientDynamicAttrShape::SetAttribute { name } => {
-                ClientDynAttrEmit::SetAttribute { name, value }
-            }
-            ClientDynamicAttrShape::DomProperty { prop } => {
-                ClientDynAttrEmit::Property { prop, value }
-            }
-            // A PLAIN-kind op is never `autofocus` (autofocus is a `NonStaticProperty`
-            // op, projected by `project_non_static_property_op`) — defensively refuse
-            // rather than mis-emit it as a reactive write.
-            ClientDynamicAttrShape::Autofocus
-            // Class / style never reach here (they are `AttrOpKind::Class` / `Style`).
-            | ClientDynamicAttrShape::Class
-            | ClientDynamicAttrShape::Style => {
-                return Err(UnsupportedSvelteRuntimeSurface::DynamicAttribute {
-                    name: name.to_string(),
-                    span: Span::new(0, 0),
-                });
-            }
-        };
-        Ok(ClientRuntimeOp::ReactiveAttr {
-            target: ClientNodeId(target.0),
-            emit,
-            reactive,
-        })
-    }
-
-    /// Project a `NonStaticProperty` op (`autofocus` / media `muted`, static or
-    /// dynamic) into its narrow [`ClientRuntimeOp::ReactiveAttr`]. `autofocus` →
-    /// init-only `$.autofocus(node, value)`; a DOM property (`muted`) → `node.<name> =
-    /// value`. The init value is `true` (a valueless attr), a literal, or the rewritten
-    /// expression.
-    fn project_non_static_property_op(
-        &self,
-        target: NodeId,
-        property: &super::ir::NonStaticPropertyOp,
-    ) -> Result<ClientRuntimeOp, UnsupportedSvelteRuntimeSurface> {
-        // The STRUCTURED value + whether it is reactive. A `Mixed` value retains its
-        // FULL ordered literal+expr run; each expression carries `has_call` for the
-        // emit-time memoizer.
-        let (value, has_state) = self.non_static_property_value(&property.value)?;
-        // `autofocus` is init-only regardless of state; a property write (`muted`)
-        // joins the effect when its value is stateful OR `has_call` (the official rule
-        // — a `has_call` value is memoized and can only live in the effect).
-        let init_only = matches!(property.kind, NonStaticPropertyKind::Autofocus);
-        let reactive = (has_state || value.has_call()) && !init_only;
-        let emit = match property.kind {
-            // `autofocus` is ALWAYS init-only `$.autofocus(node, value)` — even a
-            // dynamic value (`autofocus={v}`) is read once at init, so it is NEVER
-            // memoized; flatten the structured value to a plain emit string.
-            NonStaticPropertyKind::Autofocus => ClientDynAttrEmit::Autofocus {
-                value: self.flatten_init_attr_value(&value),
-            },
-            // A DOM property write (`video.muted = value`) — carries the structured
-            // value so a `has_call` reactive value memoizes at emit time.
-            NonStaticPropertyKind::DomProperty => ClientDynAttrEmit::Property {
-                prop: super::client_allowlist::normalize_attribute(&property.name),
-                value,
-            },
-        };
-        Ok(ClientRuntimeOp::ReactiveAttr {
-            target: ClientNodeId(target.0),
-            emit,
-            reactive,
-        })
-    }
-
-    /// Build the STRUCTURED value of a non-static-property op (`autofocus` / `muted`),
-    /// plus its `has_state`. A `Boolean` valueless attr is the constant `true`; a
-    /// static literal is a quoted constant; a single `Expr` carries its `has_call`; a
-    /// `Mixed` value retains its full literal+expr run (each expr with `has_call`).
-    fn non_static_property_value(
-        &self,
-        value: &NonStaticPropertyValue,
-    ) -> Result<(AttrValue, bool), UnsupportedSvelteRuntimeSurface> {
-        match value {
-            NonStaticPropertyValue::Boolean => Ok((AttrValue::Const("true".to_string()), false)),
-            NonStaticPropertyValue::Literal(text) => {
-                Ok((AttrValue::Const(js_single_quoted(text)), false))
-            }
-            NonStaticPropertyValue::Expr(expr) => {
-                // A VALUE position (`defaultValue={…}`; the `$.autofocus(node, value)` init
-                // likewise) — source-preserving (author parens kept; sequence wrapped once).
-                let rewritten = self.rewrite_value_preserving_source(*expr)?;
-                Ok((
-                    AttrValue::Single {
-                        rewritten,
-                        has_call: self.expr_has_call(*expr),
-                    },
-                    self.expr_has_state(*expr),
-                ))
-            }
-            NonStaticPropertyValue::Mixed(parts) => self.mixed_attr_value(parts),
-        }
-    }
-
-    /// Flatten a structured [`AttrValue`] for an INIT-only (`$.autofocus`) emit, where
-    /// no effect-side memoizer runs. A `Single` value emits its bare expression; a
-    /// `Const` emits verbatim; a `Mixed` value builds the `` `lit${expr ?? ''}lit` ``
-    /// template inline (no memoization, since an init-only value is read once).
-    fn flatten_init_attr_value(&self, value: &AttrValue) -> String {
-        match value {
-            AttrValue::Const(text) => text.clone(),
-            AttrValue::Single { rewritten, .. } => rewritten.clone(),
-            AttrValue::Mixed(parts) => {
-                let mut tmpl = String::from("`");
-                for part in parts {
-                    match part {
-                        AttrValuePart::Literal(text) => tmpl.push_str(&escape_template_text(text)),
-                        AttrValuePart::Expr { rewritten, .. } => {
-                            tmpl.push_str(&format!("${{{rewritten} ?? ''}}"));
-                        }
-                    }
-                }
-                tmpl.push('`');
-                tmpl
-            }
-        }
-    }
-
-    /// Project the coalesced `$.set_class(node, is_html, value, css_hash, prev, next)`
-    /// op for a regular element — the shared [`project_set_class_pieces`] merge over the
-    /// element's attribute set, wrapped with the target node id. The emitter assembles
-    /// the final call with the real DOM var (`is_html = 1`) + accumulator name.
-    ///
-    /// [`project_set_class_pieces`]: Self::project_set_class_pieces
-    fn project_set_class_op(
-        &self,
-        target: NodeId,
-    ) -> Result<ClientRuntimeOp, UnsupportedSvelteRuntimeSurface> {
-        let el = self.element_for(target)?;
-        let pieces = self.project_set_class_pieces(&el.attrs)?;
-        Ok(ClientRuntimeOp::SetClass {
-            target: ClientNodeId(target.0),
-            value: pieces.value,
-            css_hash: pieces.css_hash,
-            directives: pieces.directives,
-            directives_has_call: pieces.directives_has_call,
-            reactive: pieces.reactive,
-            accumulator_stem: pieces.accumulator_stem,
-        })
-    }
-
-    /// Project the SEMANTIC pieces of one coalesced `$.set_class` write over an
-    /// element's typed attribute set. Merges the `class={…}` base attribute (if any —
-    /// a missing base is the directive-synthesized `''`) with EVERY `class:` directive
-    /// into ONE call, matching the official `build_set_class`. Scoped CSS is refused
-    /// upstream (5l), so `css_hash` is `null` only when directives are present (the
-    /// official `!css_hash && next` rule), else absent. Host-independent: SHARED by the
-    /// regular-element class op ([`Self::project_set_class_op`]) and the
-    /// `<svelte:element>` lone-class fast path — one class-merge substrate; the emitters
-    /// assemble the final call with their real host expression + `is_html` flag +
-    /// accumulator name.
-    pub(super) fn project_set_class_pieces(
-        &self,
-        attrs: &[AttrIr],
-    ) -> Result<super::client_plan_types::SetClassPieces, UnsupportedSvelteRuntimeSurface> {
-        // The base `class` attribute (a `Static` / `Dynamic` / `Mixed` named `class` —
-        // matched case-insensitively, the official `get_attribute_name` normalization),
-        // and every `class:` directive, in source order.
-        let mut base_value: Option<AttrValue> = None;
-        let mut base_has_state = false;
-        let mut directives: Vec<(String, String)> = Vec::new();
-        let mut dir_has_state = false;
-        let mut directives_has_call = false;
-        for attr in attrs {
-            match attr {
-                AttrIr::Static { name, value } if name.eq_ignore_ascii_case("class") => {
-                    // A static `class` consumed as the `$.set_class` BASE value is a
-                    // runtime JS-STRING argument (NOT a baked skeleton attr), so its
-                    // HTML entities DECODE — the same `decode_attr_entities` the mixed
-                    // literal chunks already use (`class="a&amp;b"` → base `'a&b'`). A
-                    // VALUELESS `class` (`value: None` — `<div class class:on={c}>`) is the
-                    // RAW boolean base `true`, distinct from a present empty-string `class=""`
-                    // (`Some("")`) which stays `''`.
-                    base_value = Some(match value {
-                        None => AttrValue::Const("true".to_string()),
-                        Some(v) => {
-                            AttrValue::Const(js_single_quoted(&decode_attr_entities(&v.value)))
-                        }
-                    });
-                }
-                AttrIr::Dynamic { name, expr } if name.eq_ignore_ascii_case("class") => {
-                    // The `$.set_class` BASE value is a VALUE position — source-preserving
-                    // (author parens kept; sequence wrapped once). The `needs_clsx` decision
-                    // below reads the UNWRAPPED-ROOT KIND fact (computed on the
-                    // transparent-paren-unwrapped root), so a parenthesized literal / binary /
-                    // template is correctly classified as no-clsx.
-                    let v = self.rewrite_value_preserving_source(*expr)?;
-                    // Official `Attribute.js` sets `needs_clsx` for a single-expression
-                    // `class={…}` UNLESS the value is a `Literal` / `TemplateLiteral` /
-                    // `BinaryExpression`: a `class={a + b}` string-concatenation, a
-                    // `class={'x'}` literal, and a `` class={`a${b}`} `` template emit the
-                    // value RAW (no `$.clsx` wrap); every other shape IS wrapped. When
-                    // wrapped, the whole `$.clsx(expr)` wrap is the base value — a
-                    // `has_call` base memoizes the WHOLE wrap (`[() => $.clsx(call)]`, the
-                    // official `build_set_class`).
-                    let analyzed = self.ir.analysis.expressions.get(*expr);
-                    let rewritten = if super::reactive_analysis::class_value_needs_clsx(
-                        analyzed.unwrapped_root_kind,
-                    ) {
-                        format!("$.clsx({v})")
-                    } else {
-                        v
-                    };
-                    base_value = Some(AttrValue::Single {
-                        rewritten,
-                        has_call: self.expr_has_call(*expr),
-                    });
-                    base_has_state |= self.expr_has_state(*expr);
-                }
-                AttrIr::Mixed { name, parts } if name.eq_ignore_ascii_case("class") => {
-                    // A MIXED-string class (`class="a {x} b"`) is already a string
-                    // template — official `needs_clsx` is FALSE for it, so it is NOT
-                    // wrapped in `$.clsx` (verified against svelte@5.56.3). The
-                    // structured value memoizes each EXPRESSION PART at emit time, not
-                    // the whole rendered template.
-                    let (mixed, st) = self.mixed_attr_value(parts)?;
-                    base_value = Some(mixed);
-                    base_has_state |= st;
-                }
-                AttrIr::Class { name, condition } => {
-                    let cond = match condition {
-                        Some(e) => {
-                            dir_has_state |= self.expr_has_state(*e);
-                            directives_has_call |= self.expr_has_call(*e);
-                            // The directive condition is a VALUE position — source-preserving
-                            // (author parens kept; sequence wrapped once).
-                            self.rewrite_value_preserving_source(*e)?
-                        }
-                        // A value-less shorthand `class:foo` with no synthesized
-                        // condition is a defensive empty (lowering always synthesizes
-                        // one) — skip it.
-                        None => continue,
-                    };
-                    directives.push((object_key(name), cond));
-                }
-                _ => {}
-            }
-        }
-        let has_directives = !directives.is_empty();
-        // The `value` arg: the structured base value, or `''` when only directives are
-        // present.
-        let value = base_value.unwrap_or_else(|| AttrValue::Const("''".to_string()));
-        let directives_has_call = directives_has_call && has_directives;
-        // The op is REACTIVE when any contributor references state OR `has_call` (the
-        // base or any directive) — the official rule that forces the effect +
-        // memoization (and the accumulator) even over a pure-call/plain-let surface.
-        let reactive = base_has_state || dir_has_state || value.has_call() || directives_has_call;
-        // css_hash: `null` when directives are present (scoped CSS is refused upstream,
-        // so there is never a real hash); absent otherwise.
-        let css_hash = has_directives.then(|| "null".to_string());
-        // The directives object `{ foo: cond, ... }`; absent when no directives.
-        let directives_obj = has_directives.then(|| {
-            let entries = directives
-                .iter()
-                .map(|(k, v)| format!("{k}: {v}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("{{ {entries} }}")
-        });
-        // The reactive-directive path needs the `let classes;` accumulator (used for
-        // BOTH the `prev` arg and the `<name> =` assignment); a non-reactive directive
-        // path passes `{}` as `prev` (no accumulator).
-        let accumulator_stem = (has_directives && reactive).then_some("classes");
-        Ok(super::client_plan_types::SetClassPieces {
-            value,
-            css_hash,
-            directives: directives_obj,
-            directives_has_call,
-            reactive,
-            accumulator_stem,
-        })
-    }
-
-    /// Project the coalesced `$.set_style(node, value, prev, next)` op for an element
-    /// . Merges the `style={…}` base attribute (if any) with EVERY `style:`
-    /// directive into ONE call, matching the official `build_set_style`. The
-    /// `|important` directives split into the `[normal, important]` array `next`;
-    /// custom / hyphenated property keys are quoted.
-    fn project_set_style_op(
-        &self,
-        target: NodeId,
-    ) -> Result<ClientRuntimeOp, UnsupportedSvelteRuntimeSurface> {
-        let el = self.element_for(target)?;
-        let mut base_value: Option<AttrValue> = None;
-        let mut base_has_state = false;
-        // Normal + important directive entries (key already quoted as needed).
-        let mut normal: Vec<(String, String)> = Vec::new();
-        let mut important: Vec<(String, String)> = Vec::new();
-        let mut dir_has_state = false;
-        let mut directives_has_call = false;
-        for attr in &el.attrs {
-            match attr {
-                AttrIr::Static { name, value } if name.eq_ignore_ascii_case("style") => {
-                    // A static `style` consumed as the `$.set_style` BASE value is a
-                    // runtime JS-STRING argument (NOT a baked skeleton attr), so its
-                    // HTML entities DECODE (`style="q:'&quot;'"` → base `'q:\'"\''`). A
-                    // VALUELESS `style` (`value: None` — `<div style style:color={c}>`) is the
-                    // RAW boolean base `true`, distinct from a present empty-string `style=""`
-                    // (`Some("")`) which stays `''`.
-                    base_value = Some(match value {
-                        None => AttrValue::Const("true".to_string()),
-                        Some(v) => {
-                            AttrValue::Const(js_single_quoted(&decode_attr_entities(&v.value)))
-                        }
-                    });
-                }
-                AttrIr::Dynamic { name, expr } if name.eq_ignore_ascii_case("style") => {
-                    // The `$.set_style` BASE value is a VALUE position — source-preserving
-                    // (author parens kept; sequence wrapped once).
-                    let v = self.rewrite_value_preserving_source(*expr)?;
-                    // The whole dynamic expression is the base value; a `has_call` base
-                    // memoizes the whole expression.
-                    base_value = Some(AttrValue::Single {
-                        rewritten: v,
-                        has_call: self.expr_has_call(*expr),
-                    });
-                    base_has_state |= self.expr_has_state(*expr);
-                }
-                AttrIr::Mixed { name, parts } if name.eq_ignore_ascii_case("style") => {
-                    // The structured mixed value memoizes each EXPRESSION PART at emit
-                    // time, not the whole rendered template.
-                    let (mixed, st) = self.mixed_attr_value(parts)?;
-                    base_value = Some(mixed);
-                    base_has_state |= st;
-                }
-                AttrIr::Style {
-                    property,
-                    value,
-                    important: is_important,
-                } => {
-                    let v = match value {
-                        StyleDirectiveValue::Expr(e) => {
-                            dir_has_state |= self.expr_has_state(*e);
-                            directives_has_call |= self.expr_has_call(*e);
-                            // A VALUE position — source-preserving (author parens kept;
-                            // sequence wrapped once).
-                            self.rewrite_value_preserving_source(*e)?
-                        }
-                        // A static-text style value folds as a quoted string literal
-                        // (`{ color: 'red' }`) — no state / call flags.
-                        StyleDirectiveValue::Text(text) => js_single_quoted(text),
-                        // A MIXED text+interpolation value (`style:color="a{x}b"`) folds as
-                        // the template-literal `` `a${x ?? ''}b` ``, built through the shared
-                        // mixed-value + fold-text path with NO memoizer (the effect re-runs).
-                        StyleDirectiveValue::Mixed(parts) => {
-                            let (mixed, st) = self.mixed_attr_value(parts)?;
-                            dir_has_state |= st;
-                            // A `has_call` interpolation inside the template forces the
-                            // effect (the official memoizer rule), exactly as a base mixed
-                            // value does.
-                            directives_has_call |= mixed.has_call();
-                            self.fold_attr_value_text(&mixed)
-                        }
-                    };
-                    let entry = (object_key(property), v);
-                    if *is_important {
-                        important.push(entry);
-                    } else {
-                        normal.push(entry);
-                    }
-                }
-                _ => {}
-            }
-        }
-        let has_directives = !normal.is_empty() || !important.is_empty();
-        // The `value` arg: the structured base value, or `''` when only directives are
-        // present (the official `build_set_style` passes an empty-string base then).
-        let value = base_value.unwrap_or_else(|| AttrValue::Const("''".to_string()));
-        let directives_has_call = directives_has_call && has_directives;
-        // The op is REACTIVE when any contributor references state OR `has_call`.
-        let reactive = base_has_state || dir_has_state || value.has_call() || directives_has_call;
-        // The directives object, or the `[normal, important]` array when any
-        // `|important` directive is present (the official `build_style_directives_object`).
-        let directives_obj = has_directives.then(|| {
-            let normal_obj = style_object(&normal);
-            if important.is_empty() {
-                normal_obj
-            } else {
-                format!("[{}, {}]", normal_obj, style_object(&important))
-            }
-        });
-        let accumulator_stem = (has_directives && reactive).then_some("styles");
-        Ok(ClientRuntimeOp::SetStyle {
-            target: ClientNodeId(target.0),
-            value,
-            directives: directives_obj,
-            directives_has_call,
-            reactive,
-            accumulator_stem,
-        })
     }
 }

@@ -41,7 +41,6 @@ use super::client_surface_special::{
     classify_special_host, classify_svelte_boundary, classify_svelte_element, classify_svelte_head,
 };
 use super::events::{validate_event_modifiers, EventModifierError};
-use super::expr::BindingRuntimeKind;
 use super::html::{synthesize_region, TemplateFactory};
 use super::instance_items::{self, SupportedInstanceScriptItem};
 use super::ir::{
@@ -61,8 +60,8 @@ use verter_span::Span;
 /// `ClassifiedClientSurface` can ONLY be minted by a successful default-deny walk,
 /// so the semantic-projection / plan stages are UNREACHABLE for an unsupported
 /// component. It carries the typed accepted SHAPE FACTS (the per-handler
-/// [`ClientEventHandlerShape`], the per-bind [`ClientBindShape`], the read-only
-/// [`ClientPropsUsage`]) — the proof-of-classification PLUS the sub-shape the
+/// [`ClientEventHandlerShape`], the per-bind [`ClientBindShape`], the
+/// [`ClientPropsUsage`] prop-usage fact) — the proof-of-classification PLUS the sub-shape the
 /// downstream plan/emitter consumes, so emission reads a typed shape, never
 /// re-classifies a generic string.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,8 +113,10 @@ pub(super) struct ClassifiedClientSurface {
     /// source-ordered attribute list from the IR, this is the per-element acceptance
     /// proof.
     pub(super) spread_elements: Vec<NodeId>,
-    /// The read-only `$props()` usage fact (no prop write / bind reached the
-    /// classifier).
+    /// The accepted `$props()` usage fact — no INSTANCE-SCRIPT prop reference
+    /// outside the `$props()` declaration itself, and no `bind:` target
+    /// resolving to a prop local. TEMPLATE prop writes are supported: a written
+    /// prop is a PROP SOURCE, lowered through the `$.prop` getter/setter.
     pub(super) props_usage: ClientPropsUsage,
     /// The TYPED supported instance-script items — the strict finite allowlist the
     /// downstream `SupportedClientIr::build_script_items` consumes (the SOLE
@@ -145,21 +146,7 @@ impl ClientSyntaxSurface {
             });
         }
 
-        // (2) Binding kinds: an advanced `$bindable` binding is 5g. A `$state.raw`
-        // signal (`StateSignal { raw: true }`) is SUPPORTED — it lowers to a bare
-        // `$.state(<init>)` (no `$.proxy`), and the raw-aware reassignment flag
-        // suppresses the trailing `, true`; the object/array `BareProxy` / `StateProxy`
-        // forms are likewise supported and fall through.
-        for binding in ir.analysis.bindings.all() {
-            if binding.kind == BindingRuntimeKind::BindableProp {
-                return Err(UnsupportedSvelteRuntimeSurface::AdvancedRune {
-                    rune: "$bindable",
-                    span: Span::new(0, 0),
-                });
-            }
-        }
-
-        // (3) Script-item classification: scan every instance + module script
+        // (2) Script-item classification: scan every instance + module script
         // declarator/statement for an unsupported shape. The basic no-default
         // `$props()` form, ALL primitive-literal `$state` declarators
         // (multi-declarator scanned), and the advanced rune forms are gated here
@@ -169,12 +156,14 @@ impl ClientSyntaxSurface {
         // static-import-prelude deferral (not yet supported) and fail closed here.
         let user_imports = classify_script_items(ir)?;
 
-        // (4) `$props()` USAGE: the read-only fact. A written prop (official's
-        // flag-7 setter-call form) or a bound prop (official's 2-arg
-        // `$.bind_value(input, label)` form) fails closed BEFORE `lower_props_declarator`.
+        // (3) `$props()` USAGE: an INSTANCE-SCRIPT prop reference (outside the
+        // `$props()` declaration itself) and a BOUND prop (official's 2-arg
+        // `$.bind_value(input, label)` form) fail closed here. A TEMPLATE prop
+        // WRITE is supported — it makes the prop a PROP SOURCE (the flag-4
+        // `updated` axis), lowered through the getter/setter by the projection.
         let props_usage = classify_props_usage(ir)?;
 
-        // (5) Template-node classification: walk every node + attribute, ACCUMULATING
+        // (4) Template-node classification: walk every node + attribute, ACCUMULATING
         // the per-node accepted event/bind/interp shape facts. Every node maps to a
         // supported `ClientNodeKind` or REFUSES (no wildcard accept).
         //
@@ -188,7 +177,7 @@ impl ClientSyntaxSurface {
             ir.analysis.scripts.module_source,
             ir.analysis.scripts.instance_source,
         );
-        // (4b) `animate:` PLACEMENT gate (pre-pass): the official `AnimateDirective`
+        // (4a) `animate:` PLACEMENT gate (pre-pass): the official `AnimateDirective`
         // analyze rules — one `animate:` per element (`animation_duplicate`), the
         // animated element the ONLY significant child of an `{#each}` body
         // (`animation_invalid_placement`), and that each KEYED
@@ -238,7 +227,7 @@ impl ClientSyntaxSurface {
             }
         }
 
-        // (6) ROOT-REGION emission shape: the root template region's clone-frame is
+        // (5) ROOT-REGION emission shape: the root template region's clone-frame is
         // emitted as `var <region> = root();`, which calls `root()` as a FACTORY
         // FUNCTION. That is correct ONLY for a `from_html` factory (the cloned
         // element / multi-root fragment). The official text-first (`$.text()`) and
@@ -254,7 +243,7 @@ impl ClientSyntaxSurface {
             return Err(surface);
         }
 
-        // (6b) `<svelte:self>` PLACEMENT gate: the official `svelte_self_invalid_placement`
+        // (5b) `<svelte:self>` PLACEMENT gate: the official `svelte_self_invalid_placement`
         // rule — a `<svelte:self>` may only appear inside an `{#if}` / `{#each}` /
         // `{#snippet}` block or a slot passed to a component. At the component root (or
         // nested only in elements at the root, or in an `{#await}` / `{#key}` block with no
@@ -264,7 +253,7 @@ impl ClientSyntaxSurface {
             return Err(surface);
         }
 
-        // (7) Instance-script item allowlist: classify EVERY top-level instance-script
+        // (6) Instance-script item allowlist: classify EVERY top-level instance-script
         // statement into the strict finite `SupportedInstanceScriptItem` set, or fail
         // closed on the first out-of-allowlist item (a function / class / enum /
         // namespace / interface / type / plain `let`-`const`-`var` / arbitrary

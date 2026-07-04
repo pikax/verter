@@ -1,6 +1,9 @@
 //! Script-facing classification for the DEFAULT-DENY client syntax classifier
-//! ([`super::client_surface`]): the read-only `$props()` usage gate
-//! ([`classify_props_usage`]), the instance/module script-item allowlist
+//! ([`super::client_surface`]): the `$props()` usage gate
+//! ([`classify_props_usage`] — instance-script prop references and prop
+//! `bind:` targets fail closed; TEMPLATE prop reads/writes and plain /
+//! `$bindable` destructure defaults are supported through the `$.prop`
+//! substrate), the instance/module script-item allowlist
 //! ([`classify_script_items`]), and the scope-aware unsupported-rune-form scan
 //! they drive. Every gate fails closed — an unrecognised script surface is a
 //! typed [`UnsupportedSvelteRuntimeSurface`] refusal, never a pass.
@@ -10,22 +13,21 @@ use oxc_allocator::Allocator;
 use super::client::UnsupportedSvelteRuntimeSurface;
 use super::client_plan_types::UserImport;
 use super::client_shapes::{self, ClientPropsUsage};
-use super::expr::{BindingRuntimeKind, ExprRefKind};
+use super::expr::BindingRuntimeKind;
 use super::expr_emit::{self, PropsShape, StateDeclShape};
 use super::instance_items;
 use super::ir::{AttrIr, IrNode, SvelteRuntimeIr};
 use verter_span::Span;
 
-/// Classify the `$props()` USAGE: a prop is supported READ-ONLY. Any write to a
-/// prop local — an instance-script reassignment (`a += 1`), a template-expression
-/// write-ref (`onclick={() => a++}`), or a `bind:` target resolving to a prop —
-/// fails closed BEFORE `lower_props_declarator` (a written prop is official's
-/// flag-7 setter-call form; a bound prop is official's 2-arg `$.bind_value(input,
-/// label)` form — both deferral-ledger follow-ups). Returns the read-only
-/// [`ClientPropsUsage`] fact when every prop is read-only.
+/// Classify the `$props()` USAGE: prop reads/writes are supported in TEMPLATE
+/// expressions (a template write makes the prop a PROP SOURCE, lowered through
+/// the getter/setter), but an INSTANCE-SCRIPT reference to a prop local outside
+/// its own `$props()` declaration, or a `bind:` target resolving to a prop (the
+/// official 2-arg `$.bind_value(input, label)` form), fails closed. Returns the
+/// [`ClientPropsUsage`] fact when the usage is inside the supported boundary.
 ///
-/// Prop locals are resolved SCOPE-AWARELY through the binding table: a write to a
-/// SHADOWING local of the same name (an arrow param) is not a prop write.
+/// Prop locals are resolved SCOPE-AWARELY through the binding table: a reference
+/// to a SHADOWING local of the same name (an arrow param) is not a prop usage.
 pub(super) fn classify_props_usage(
     ir: &SvelteRuntimeIr,
 ) -> Result<ClientPropsUsage, UnsupportedSvelteRuntimeSurface> {
@@ -35,11 +37,13 @@ pub(super) fn classify_props_usage(
     }
 
     // (a) Instance-script prop REFERENCES — the supported prop read position is a
-    // bare template interpolation `{a}` ONLY. ANY instance-script reference to a prop
-    // local outside its own `$props()` declaration (a read `cb()` / `console.log(a)`,
-    // a write `a += 1`, a mutating call) is the deferral-ledger non-interpolation
-    // prop-usage surface (5g). Observed structurally by scanning every NON-declaration
-    // instance statement for a reference resolving to a prop binding.
+    // template expression ONLY. ANY instance-script reference to a prop local
+    // outside its own `$props()` declaration (a read `cb()` / `console.log(a)`,
+    // a write `a += 1`, a mutating call) is the fail-closed non-interpolation
+    // prop-usage surface. Observed structurally by scanning every NON-declaration
+    // instance statement for a reference resolving to a prop binding. (A sibling
+    // reference INSIDE the `$props()` declaration — a default reading another
+    // prop — is part of the declaration and stays supported.)
     if let Some(instance) = ir.analysis.scripts.instance_source {
         if instance_script_references_a_prop(instance, ir) {
             return Err(UnsupportedSvelteRuntimeSurface::AdvancedRune {
@@ -49,25 +53,9 @@ pub(super) fn classify_props_usage(
         }
     }
 
-    // (b) Template-expression write-refs — a handler / interpolation that writes a
-    // prop local (`onclick={() => a++}`). Resolved scope-awarely through the binding
-    // table so a shadowing local is not a prop write.
-    for expr in ir.analysis.expressions.all() {
-        for r in &expr.references {
-            if !matches!(r.kind, ExprRefKind::Reassign | ExprRefKind::DeepMutate) {
-                continue;
-            }
-            if resolves_to_prop(ir, expr.scope, &r.name) {
-                return Err(UnsupportedSvelteRuntimeSurface::AdvancedRune {
-                    rune: "$props() written prop",
-                    span: Span::new(0, 0),
-                });
-            }
-        }
-    }
-
-    // (c) `bind:` targets — a `bind:value={prop}` resolves to a prop local (the
-    // bound prop is official's 2-arg `$.bind_value` form — fail closed at 5c). The
+    // (b) `bind:` targets — a `bind:value={prop}` resolves to a prop local (the
+    // bound prop is official's 2-arg `$.bind_value` form — a fail-closed
+    // follow-up surface). The
     // attribute walk also catches this (via `classify_bind_shape`); this top-level
     // sweep keeps the prop-bind refusal owned by the prop-usage gate so a bound prop
     // is refused even when its element is otherwise unsupported-adjacent.
@@ -112,8 +100,8 @@ fn resolves_to_prop(ir: &SvelteRuntimeIr, scope: super::expr::ScopeId, name: &st
 }
 
 /// Whether the instance script REFERENCES (reads or writes) a `$props()` prop local
-/// anywhere outside its own `$props()` declaration. The supported prop read position
-/// is a bare template interpolation `{a}` ONLY, so any instance-script prop reference
+/// anywhere outside its own `$props()` declaration. The supported prop usage
+/// positions are TEMPLATE expressions only, so any instance-script prop reference
 /// (a read `cb()` / `console.log(a)`, a write `a += 1`) fails the prop gate.
 ///
 /// Reparses the instance program ONCE and walks it with a scope-aware visitor that
@@ -241,7 +229,8 @@ pub(super) fn classify_script_items(
         Vec::new()
     };
     // A non-basic `$props()` form (rest / whole-object / computed / numeric /
-    // nested / default / `$bindable`) is an advanced rune form that fails closed.
+    // nested destructure) is an advanced rune form that fails closed (defaults —
+    // plain and `$bindable` — are part of the basic prop-source surface).
     if let Some(instance) = ir.analysis.scripts.instance_source {
         // A NON-`let` rune declarator (`var`/`const` `$state` / `$derived` /
         // `$props`) is a distinct official surface (`var` reads use `$.safe_get`; a

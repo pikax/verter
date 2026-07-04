@@ -64,6 +64,14 @@ pub(super) enum ClientLvalue {
         /// The signal binding name.
         name: String,
     },
+    /// A bare-identifier target that resolves to a `$props()` PROP SOURCE (a
+    /// default-bearing or written prop, declared `let name = $.prop(...)`) — the
+    /// write lowers through the getter/setter function (`name = v` → `name(v)`;
+    /// `name += v` → `name(name() + v)`; `name++` → `$.update_prop(name)`).
+    PropSetter {
+        /// The prop-source local name (the `$.prop` getter/setter binding).
+        name: String,
+    },
     /// A bare-identifier target that is NOT a signal (a plain local / global) —
     /// the assignment passes through unchanged.
     PlainIdent,
@@ -418,6 +426,12 @@ fn rewrite_expression_dialect(
         match edit {
             Edit::Overwrite { start, end, text } => {
                 ct.overwrite(*start, *end, text);
+            }
+            Edit::Insert { at, text } => {
+                // A pure insertion BEFORE `at` (the bindable mutation-wrap head):
+                // `prepend_left` lands it before any overwrite starting at the
+                // same byte (an empty-span `overwrite` would be a silent no-op).
+                ct.prepend_left(*at, text);
             }
             Edit::Append { at, text } => {
                 ct.append_left(*at, text);

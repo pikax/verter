@@ -46,6 +46,7 @@ mod client_module_frame;
 mod client_plan;
 mod client_plan_attr_value;
 mod client_plan_bind;
+mod client_plan_element_ops;
 mod client_plan_rewrite;
 mod client_plan_spread_html;
 mod client_plan_types;

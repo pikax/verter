@@ -202,7 +202,7 @@ fn collect_program_top_level_names(program: &Program<'_>, out: &mut rustc_hash::
 /// reactive read is a one-shot init (the `has_state ? update : init` split in
 /// `RegularElement.js`). A PROP read counts as state because props are reactive
 /// (`$$props.x` can change), matching the text-interpolation reactivity
-/// classifier (`NoDefaultPropRead` is reactive) and official. An
+/// classifier (`PropRead` is reactive) and official. An
 /// `EffectTrackingConst` read counts as state because official cannot
 /// static-fold a call-init const (`Identifier.js`: `!scope.evaluate(node)
 /// .is_known` sets `has_state`), so `disabled={t}` joins the template effect
@@ -228,7 +228,9 @@ pub(super) fn expr_references_signal(
             .is_some_and(|k| {
                 is_signal_kind(k)
                     || k == BindingRuntimeKind::Prop
+                    || k == BindingRuntimeKind::BindableProp
                     || k == BindingRuntimeKind::EffectTrackingConst
+                    || k == BindingRuntimeKind::PropsIdConst
             })
     })
 }
@@ -273,13 +275,15 @@ pub(super) fn prop_value_has_state(
                 .is_some_and(|k| {
                     is_signal_kind(k)
                         || k == BindingRuntimeKind::Prop
+                        || k == BindingRuntimeKind::BindableProp
                         || k == BindingRuntimeKind::SnippetName
-                        // An `$effect.tracking()` const: a call-init const is not
-                        // statically known, so official marks its read `has_state`
-                        // (the same rule that puts `disabled={t}` in the template
-                        // effect) — a component-prop value reading it emits the
-                        // getter form.
+                        // An `$effect.tracking()` / `$props.id()` const: a
+                        // call-init const is not statically known, so official
+                        // marks its read `has_state` (the same rule that puts
+                        // `disabled={t}` in the template effect) — a
+                        // component-prop value reading it emits the getter form.
                         || k == BindingRuntimeKind::EffectTrackingConst
+                        || k == BindingRuntimeKind::PropsIdConst
                 })
     }) || expr_has_binding_impurity(source, scope, bindings, scopes)
 }
@@ -1348,6 +1352,12 @@ impl<'a> Visit<'a> for NeedsContextScan<'_> {
         // own).
         if is_user_effect_family_call(it) && !self.scopes.is_shadowed("$effect") {
             self.found = true;
+        } else if is_bindable_call_expression(it) && !self.scopes.is_shadowed("$bindable") {
+            // A `$bindable(...)` call (unshadowed) — official sets `needs_context`
+            // on the call itself (purely syntactic presence in the instance
+            // script), so EVERY bindable component gains the frame — including
+            // the read-only-no-default case that emits no `$.prop` at all.
+            self.found = true;
         } else if !is_rune_call(it) && self.root_is_unsafe(&it.callee) {
             // A NON-rune call whose callee roots at an unsafe binding (import / prop)
             // is unsafe. A rune call (`$state`/`$derived`/`$props`/…) is never an
@@ -1384,6 +1394,13 @@ impl<'a> Visit<'a> for NeedsContextScan<'_> {
         }
         walk::walk_computed_member_expression(self, it);
     }
+}
+
+/// Whether a call's callee is the BARE `$bindable` identifier — the
+/// `needs_context` trigger arm's callee match (shadowing is the CALLER's check,
+/// through the shared scope stack).
+fn is_bindable_call_expression(call: &CallExpression<'_>) -> bool {
+    matches!(&call.callee, Expression::Identifier(id) if id.name.as_str() == "$bindable")
 }
 
 /// Whether a call's callee is a Svelte rune root (`$state` / `$derived` / `$props`

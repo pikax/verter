@@ -84,6 +84,11 @@ pub fn collect_state_declarations<'a>(program: &Program<'a>) -> Vec<(String, Sta
 ///   declaration the carrier REFUSES (`var`, multi-declarator, TS-annotated,
 ///   `$`-prefixed, malformed call) mints NO fact — the minting is never broader
 ///   than the carrier.
+/// - a declaration matching the `$props.id()` declarator carrier's shape (the
+///   shared [`super::instance_items::props_id_decl_shape`] predicate) → the id
+///   name is [`BindingRuntimeKind::PropsIdConst`] — the same plain one-shot
+///   call-init-const read discipline (the hoisted `const <name> = $.props_id();`);
+///   its literal-only SIBLING declarators mint nothing (plain locals).
 ///
 /// Only DIRECT top-level declarators whose initializer is one of these rune
 /// calls are returned (a shadowing local is excluded by the structural callee
@@ -106,6 +111,15 @@ pub fn collect_rune_bindings<'a>(program: &Program<'a>) -> Vec<(String, BindingR
             if shape.kind == EffectFamilyCallKind::EffectTracking {
                 out.push((shape.name, BindingRuntimeKind::EffectTrackingConst));
             }
+            continue;
+        }
+        // The `$props.id()` declarator carrier — the id binding is a PLAIN
+        // one-shot `PropsIdConst` (read bare, never `$.get`; template reads join
+        // the region's `$.template_effect`). Consults the item carrier's SHARED
+        // declaration-shape predicate, so a carrier-refused declaration mints no
+        // fact; the literal-only SIBLING declarators mint nothing (plain locals).
+        if let Some(shape) = super::instance_items::props_id_decl_shape(decl) {
+            out.push((shape.name, BindingRuntimeKind::PropsIdConst));
             continue;
         }
         for d in &decl.declarations {

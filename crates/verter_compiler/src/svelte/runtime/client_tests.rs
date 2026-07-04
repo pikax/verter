@@ -790,46 +790,105 @@ fn props_alias_no_default_reads_source_key_off_props() {
 }
 
 #[test]
-fn props_default_referencing_a_sibling_prop_fails_closed() {
-    // A `$props()` member DEFAULT is the deferral-ledger props-default surface —
-    // the supported props surface is a NO-DEFAULT destructure only. A referencing
-    // default (`{ a = 1, b = a }`) is one such demoted shape.
-    assert_fail_closed(
-        "<script>let { a = 1, b = a } = $props();</script>\n<p>{b}</p>\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$props() default"),
+fn props_default_referencing_a_sibling_prop_lowers_getter_carrier() {
+    // `let { a = 1, b = a } = $props()` — the sibling-reference default lowers via
+    // the official prop-source path: the default reads the sibling GETTER, and the
+    // zero-arg getter call collapses to the bare getter as the LAZY carrier
+    // (`$.prop($$props, 'b', 19, a)`). Verified against svelte@5.56.3.
+    let src = "<script>let { a = 1, b = a } = $props();</script>\n<p>{b}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("$.prop($$props, 'a', 3, 1)"),
+        "the literal-default sibling is an eager flag-3 prop source:\n{js}"
     );
+    assert!(
+        js.contains("$.prop($$props, 'b', 19, a)"),
+        "the sibling-reference default is the LAZY bare-getter carrier:\n{js}"
+    );
+    assert!(
+        js.contains("$.set_text(text, b())"),
+        "a prop-source read is the getter call:\n{js}"
+    );
+    // NEGATIVE: the getter carrier is the bare getter, never a thunk over the
+    // getter call, and never the raw sibling read.
+    assert!(
+        !js.contains("19, () => a") && !js.contains("19, a()"),
+        "the zero-arg getter call collapses to the bare getter:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
 }
 
 #[test]
-fn props_default_referencing_via_no_default_sibling_fails_closed() {
-    // `let { a, b = a } = $props()` — `b` carries a default, so it is the demoted
-    // props-default surface, regardless that the default references a sibling.
-    assert_fail_closed(
-        "<script>let { a, b = a } = $props();</script>\n<p>{a}</p>\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$props() default"),
+fn props_default_referencing_a_no_default_sibling_lowers_props_member_thunk() {
+    // `let { a, b = a } = $props()` — the referenced sibling has NO default (a
+    // `$$props.a` member read), so the default is the LAZY member thunk
+    // `$.prop($$props, 'b', 19, () => $$props.a)`. Verified against svelte@5.56.3.
+    let src = "<script>let { a, b = a } = $props();</script>\n<p>{a}{b}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("$.prop($$props, 'b', 19, () => $$props.a)"),
+        "a no-default sibling reference is the lazy `$$props` member thunk:\n{js}"
     );
+    // The no-default sibling itself emits NO `$.prop` and reads off `$$props`.
+    assert!(
+        !js.contains("$.prop($$props, 'a'"),
+        "a no-default unwritten prop is not a prop source:\n{js}"
+    );
+    assert!(
+        js.contains("$$props.a"),
+        "the no-default sibling reads off $$props:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
 }
 
 #[test]
-fn props_non_literal_default_fails_closed() {
-    // A non-literal `$props()` default (`[]`) is the demoted props-default surface
-    // — like every default, including a constant literal.
-    assert_fail_closed(
-        "<script>let { a = [] } = $props();</script>\n<p>{a}</p>\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$props() default"),
+fn props_non_literal_default_lowers_lazy_thunk() {
+    // A non-simple `$props()` default (`[]`) is the LAZY flag-19 thunk form
+    // (`$.prop($$props, 'a', 19, () => [])`). Verified against svelte@5.56.3.
+    let src = "<script>let { a = [] } = $props();</script>\n<p>{a}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("$.prop($$props, 'a', 19, () => [])"),
+        "a non-simple default is the lazy thunk carrier:\n{js}"
     );
+    assert!(
+        js.contains("$.set_text(text, a())"),
+        "a prop-source read is the getter call:\n{js}"
+    );
+    // NEGATIVE: a PLAIN (non-bindable) lazy default never proxies.
+    assert!(
+        !js.contains("$.proxy"),
+        "a plain lazy default must not proxy:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
 }
 
 #[test]
-fn props_literal_default_fails_closed() {
-    // A CONSTANT-LITERAL `$props()` default (`{ a = 1 }`) is ALSO demoted — the
-    // supported props surface is a NO-DEFAULT destructure only (the literal-default
-    // flag-3 eager form is a deferral-ledger follow-up). The discriminating negative
-    // for the no-default-only rule.
-    assert_fail_closed(
-        "<script>let { a = 1 } = $props();</script>\n<p>{a}</p>\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$props() default"),
+fn props_literal_default_lowers_eager_flag_3_prop_source() {
+    // A CONSTANT-LITERAL `$props()` default (`{ a = 1 }`) is the eager flag-3
+    // `$.prop($$props, 'a', 3, 1)` form, read via the `a()` getter. Verified
+    // against svelte@5.56.3.
+    let src = "<script>let { a = 1 } = $props();</script>\n<p>{a}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("let a = $.prop($$props, 'a', 3, 1);"),
+        "a literal default is the eager flag-3 prop source:\n{js}"
     );
+    assert!(
+        js.contains("$.set_text(text, a())"),
+        "a default-bearing prop reads via the getter:\n{js}"
+    );
+    // NEGATIVE: a plain-default component opens NO context frame, and the getter
+    // read replaces the direct `$$props.a` member read.
+    assert!(
+        !js.contains("$.push") && !js.contains("$.pop"),
+        "a plain default must not force the component context frame:\n{js}"
+    );
+    assert!(
+        !js.contains("$$props.a"),
+        "a prop-source read never reads $$props directly:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
 }
 #[test]
 fn primitive_state_reassigned_to_proxiable_rhs_gets_trailing_true() {
@@ -7701,11 +7760,37 @@ fn props_rest_fails_closed_not_partial() {
 }
 
 #[test]
-fn props_bindable_fails_closed() {
-    assert_fail_closed(
-        "<script>let { value = $bindable(0) } = $props();</script>\n<p>{value}</p>\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$bindable"),
+fn props_bindable_default_lowers_prop_source_with_context_frame() {
+    // INVERTED (was `props_bindable_fails_closed`, which pinned the now-SUPPORTED
+    // valid position): a read-only `$bindable(0)` default in a `$props()`
+    // destructure is the flag-11 prop source (`IMMUTABLE|RUNES|BINDABLE`), read via
+    // the getter, with the component context frame (`$.push($$props, true)` /
+    // `$.pop()`) the `$bindable` call forces. Verified against svelte@5.56.3.
+    let src = "<script>let { value = $bindable(0) } = $props();</script>\n<p>{value}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("let value = $.prop($$props, 'value', 11, 0);"),
+        "a read-only bindable default is the flag-11 prop source:\n{js}"
     );
+    assert!(
+        js.contains("$.set_text(text, value())"),
+        "a bindable prop-source read is the getter call:\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true);") && js.contains("$.pop();"),
+        "a bindable component opens the context frame:\n{js}"
+    );
+    // NEGATIVE: never the direct member read, and a read-only bindable never
+    // emits an update helper.
+    assert!(
+        !js.contains("$$props.value"),
+        "a bindable prop source never reads $$props directly:\n{js}"
+    );
+    assert!(
+        !js.contains("$.update_prop"),
+        "a read-only bindable emits no update helper:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
 }
 
 #[test]
@@ -16982,4 +17067,2161 @@ fn effect_tracking_in_delegated_handler_lowers_without_frame() {
     assert!(!js.contains("$.push"), "no frame from tracking:\n{js}");
     assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
     assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+}
+
+// ── $props.id() — hoisted body-top const + fail-closed siblings ───────────────
+
+#[test]
+fn props_id_hoists_const_with_zero_arg_helper() {
+    // `let uid = $props.id();` → hoisted body-top `const uid = $.props_id();`
+    // (the source `let` still emits `const`), a zero-arg helper. Verified against
+    // svelte@5.56.3.
+    let src = "<script>let uid = $props.id();</script>\n<p>{uid}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("const uid = $.props_id();"),
+        "the id decl is a `const` + zero-arg `$.props_id()`:\n{js}"
+    );
+    assert!(
+        js.contains("export default function App($$anchor) {"),
+        "an id-only component keeps the `($$anchor)` signature:\n{js}"
+    );
+    assert!(
+        js.contains("$.set_text(text, uid)"),
+        "the uid read stays a PLAIN name inside the template effect:\n{js}"
+    );
+    // NEGATIVE: `$props.id()` pulls in NO `$$props` and NO context frame, and the
+    // raw rune member never survives.
+    assert!(
+        !js.contains("$$props"),
+        "an id-only component must not thread $$props:\n{js}"
+    );
+    assert!(
+        !js.contains("$.push") && !js.contains("$.pop"),
+        "`$props.id()` must not force the component context frame:\n{js}"
+    );
+    assert!(
+        !js.contains("$props.id"),
+        "no raw rune member survives:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_id_splits_multi_declarator_and_hoists_above_siblings() {
+    // `const a = 1, uid = $props.id();` splits: the uid const hoists to the
+    // FUNCTION-BODY TOP (above every other body statement), the literal sibling
+    // stays a separate declaration in its source slot with its source keyword.
+    // Verified against svelte@5.56.3.
+    let src = "<script>let s = $state(0); const a = 1, uid = $props.id();</script>\n<button onclick={() => s = 2}>{uid}{s}</button>\n";
+    let js = emit(src, "App.svelte");
+    let uid = js.find("const uid = $.props_id();").expect("uid hoist");
+    let state = js.find("let s = $.state(0);").expect("state decl");
+    let sibling = js.find("const a = 1;").expect("literal sibling decl");
+    assert!(
+        uid < state && state < sibling,
+        "hoist order: uid const above the state decl, sibling in its source slot:\n{js}"
+    );
+    // NEGATIVE: the multi-declarator must not survive joined.
+    assert!(
+        !js.contains("const a = 1, uid"),
+        "the multi-declarator must split:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_id_coexists_with_props_destructure() {
+    // `$props.id()` is independent of the `$props()` destructure: the signature
+    // carries `$$props` (from the destructure), `$.props_id()` stays zero-arg, and
+    // no context frame opens. Verified against svelte@5.56.3.
+    let src = "<script>let { a } = $props(); const uid = $props.id();</script>\n<p>{a}{uid}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("export default function App($$anchor, $$props) {"),
+        "the destructure threads $$props:\n{js}"
+    );
+    assert!(
+        js.contains("const uid = $.props_id();"),
+        "the id decl stays the zero-arg helper:\n{js}"
+    );
+    assert!(
+        js.contains("$$props.a"),
+        "the no-default prop reads off $$props:\n{js}"
+    );
+    // NEGATIVE: no context frame, and never `$.props_id($$props)`.
+    assert!(
+        !js.contains("$.push") && !js.contains("$.pop"),
+        "no context frame from `$props.id()` + a plain destructure:\n{js}"
+    );
+    assert!(
+        !js.contains("$.props_id($$props)"),
+        "`$.props_id` stays zero-arg:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_id_hoists_above_context_frame_and_prop_sources() {
+    // With a bindable present the hoist ordering is: `const uid = $.props_id();`
+    // FIRST, then `$.push($$props, true);`, then the `$.prop` declarations.
+    // Verified against svelte@5.56.3 (the id const hoists above the frame push).
+    let src = "<script>let { v = $bindable('hi') } = $props(); const uid = $props.id();</script>\n<p>{v}{uid}</p>\n";
+    let js = emit(src, "App.svelte");
+    let uid = js.find("const uid = $.props_id();").expect("uid hoist");
+    let push = js.find("$.push($$props, true);").expect("frame push");
+    let prop = js
+        .find("$.prop($$props, 'v', 11, 'hi')")
+        .expect("prop source");
+    assert!(
+        uid < push && push < prop,
+        "hoist order: uid const, then the frame push, then the prop source:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_id_value_position_fails_closed() {
+    // Template value placement (`{$props.id()}`) — official
+    // `props_id_invalid_placement`.
+    assert_fail_closed(
+        "<script>let c = $state(0);</script>\n<p>{$props.id()}{c}</p>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$props.id"),
+    );
+}
+
+#[test]
+fn props_id_statement_position_fails_closed() {
+    // Statement placement (`$props.id();`) — official `props_id_invalid_placement`.
+    assert_fail_closed(
+        "<script>$props.id();</script>\n<p>x</p>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$props.id"),
+    );
+}
+
+#[test]
+fn props_id_call_arg_position_fails_closed() {
+    // Call-argument placement (`foo($props.id())`) — the init is a `foo(...)`
+    // call, not a `$props.id()` declarator init.
+    assert_fail_closed(
+        "<script>const x = foo($props.id());</script>\n<p>{x}</p>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$props.id"),
+    );
+}
+
+#[test]
+fn props_id_nested_value_position_fails_closed() {
+    // A nested value position (`const x = [$props.id()];`) is not a declarator
+    // INIT — official `props_id_invalid_placement`.
+    assert_fail_closed(
+        "<script>const x = [$props.id()];</script>\n<p>{x}</p>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$props.id"),
+    );
+}
+
+#[test]
+fn props_id_function_body_position_fails_closed() {
+    // Function-body placement — official `props_id_invalid_placement` (only the
+    // component top level is legal).
+    assert_fail_closed(
+        "<script>function f(){ return $props.id(); }</script>\n<p>x</p>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$props.id"),
+    );
+}
+
+#[test]
+fn props_id_module_script_fails_closed() {
+    // Module-script placement — the `<script module>` surface is itself
+    // fail-closed (the script-hoisting deferral owns the refusal).
+    assert_fail_closed(
+        "<script module>const uid = $props.id();</script>\n<script>let c = $state(0);</script>\n<p>{c}</p>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::ScriptImport { construct, .. } if *construct == "module script"),
+    );
+}
+
+#[test]
+fn props_id_uncalled_member_fails_closed() {
+    // An uncalled `$props.id` (no parens) — official `rune_missing_parentheses`.
+    assert_fail_closed(
+        "<script>const f = $props.id;</script>\n<p>{f}</p>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$props.id"),
+    );
+}
+
+#[test]
+fn props_id_with_arguments_fails_closed() {
+    // `$props.id('x')` — official `rune_invalid_arguments` (zero args only), even
+    // in the valid declarator position.
+    assert_fail_closed(
+        "<script>const uid = $props.id('x');</script>\n<p>{uid}</p>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$props.id"),
+    );
+}
+
+#[test]
+fn props_id_with_spread_argument_fails_closed() {
+    // `$props.id(...a)` — official `rune_invalid_spread`.
+    assert_fail_closed(
+        "<script>const uid = $props.id(...[1]);</script>\n<p>{uid}</p>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$props.id"),
+    );
+}
+
+#[test]
+fn props_wrong_member_fails_closed() {
+    // `$props.foo()` — official `rune_invalid_name` (the member wildcard arm).
+    assert_fail_closed(
+        "<script>const x = $props.foo();</script>\n<p>{x}</p>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$props.<member>"),
+    );
+}
+
+#[test]
+fn props_id_duplicate_use_fails_closed() {
+    // Two `$props.id()` uses — official `props_duplicate` ("Cannot use
+    // `$props.id()` more than once"). Both are in the valid position; the SECOND
+    // use is the refusal.
+    assert_fail_closed(
+        "<script>const u1 = $props.id(); const u2 = $props.id();</script>\n<p>{u1}{u2}</p>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$props.id duplicate"),
+    );
+}
+
+#[test]
+fn props_id_parenthesized_spellings_fail_closed() {
+    // Verter locks every parenthesized `$props.id` spelling fail-closed (the
+    // strict declarator-init shape is the sole accepted spelling).
+    for (label, src) in [
+        (
+            "paren-callee",
+            "<script>const uid = ($props.id)();</script>\n<p>{uid}</p>\n",
+        ),
+        (
+            "paren-object",
+            "<script>const uid = ($props).id();</script>\n<p>{uid}</p>\n",
+        ),
+        (
+            "paren-init",
+            "<script>const uid = ($props.id());</script>\n<p>{uid}</p>\n",
+        ),
+    ] {
+        assert_fail_closed_labeled(
+            label,
+            src,
+            |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$props.id"),
+        );
+    }
+}
+
+#[test]
+fn props_id_optional_chain_spellings_fail_closed() {
+    // `$props.id?.()` / `$props?.id()` — official `props_id_invalid_placement`;
+    // Verter locks both optional spellings fail-closed.
+    for (label, src) in [
+        (
+            "optional-call",
+            "<script>const uid = $props.id?.();</script>\n<p>{uid}</p>\n",
+        ),
+        (
+            "optional-member",
+            "<script>const uid = $props?.id();</script>\n<p>{uid}</p>\n",
+        ),
+    ] {
+        assert_fail_closed_labeled(
+            label,
+            src,
+            |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$props.id"),
+        );
+    }
+}
+
+#[test]
+fn props_id_shadowed_root_is_not_a_rune_reference() {
+    // A function PARAMETER named `$props` shadows the rune: `$props.id()` inside
+    // is a PLAIN member call, NOT a rune — so the refusal is the instance-script
+    // ITEM gate (an unadmitted function), never the `$props.id` rune arm. This
+    // discriminates the scan's shadow-awareness.
+    assert_fail_closed(
+        "<script>let c = $state(0);\nfunction f($props){ return $props.id(); }</script>\n<button onclick={() => c = 1}>{c}</button>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::InstanceScriptItem { construct, .. } if *construct == "function"),
+    );
+}
+
+#[test]
+fn props_id_var_keyword_fails_closed() {
+    // A `var` `$props.id()` declarator stays fail-closed — the same non-`let`
+    // rune-declarator boundary the other runes keep (`var` read semantics are a
+    // distinct official surface).
+    assert_fail_closed(
+        "<script>var uid = $props.id();</script>\n<p>{uid}</p>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$props.id"),
+    );
+}
+
+#[test]
+fn props_id_ts_annotated_declarator_fails_closed() {
+    // A TS-annotated `$props.id()` declarator stays fail-closed: a plain
+    // `<script>` rejects the annotation at the official script-body parse gate,
+    // and a `lang="ts"` script is the fail-closed TypeScript boundary pinned
+    // here (the item carrier additionally admits only the unannotated shape).
+    assert_fail_closed(
+        "<script lang=\"ts\">const uid: string = $props.id();</script>\n<p>x</p>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::TypeScript { .. }),
+    );
+}
+
+#[test]
+fn props_id_non_literal_sibling_declarator_fails_closed() {
+    // A multi-declarator with a NON-literal sibling init (`const a = foo(), uid =
+    // $props.id();`) stays fail-closed — the split carrier admits literal-only
+    // sibling declarators.
+    assert_fail_closed(
+        "<script>const a = foo(), uid = $props.id();</script>\n<p>x</p>\n",
+        |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::InstanceScriptItem { .. }
+            )
+        },
+    );
+}
+
+// ── $bindable — the `$.prop` substrate + fail-closed siblings ─────────────────
+
+#[test]
+fn props_bindable_assigned_lowers_flag_15_setter_call() {
+    // A reassigned bindable (`v = 9`) is the flag-15 prop source
+    // (`IMMUTABLE|RUNES|UPDATED|BINDABLE`) and the write is the SETTER CALL
+    // `v(9)`. Verified against svelte@5.56.3.
+    let src = "<script>let { v = $bindable(0) } = $props();</script>\n<button onclick={() => v = 9}>{v}</button>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("let v = $.prop($$props, 'v', 15, 0);"),
+        "a reassigned bindable is the flag-15 prop source:\n{js}"
+    );
+    assert!(js.contains("v(9)"), "the write is the setter call:\n{js}");
+    assert!(
+        js.contains("$.push($$props, true);") && js.contains("$.pop();"),
+        "a bindable component opens the context frame:\n{js}"
+    );
+    // NEGATIVE: an identifier reassignment never carries the mutation `true`.
+    assert!(
+        !js.contains("v(9, true)"),
+        "an identifier reassign has no mutation flag:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_bindable_update_lowers_update_prop_helper() {
+    // `v++` on a bindable prop source lowers to `$.update_prop(v)` (the prop
+    // update helper, not `$.update`). Verified against svelte@5.56.3.
+    let src = "<script>let { v = $bindable(0) } = $props();</script>\n<button onclick={() => v++}>{v}</button>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("let v = $.prop($$props, 'v', 15, 0);"),
+        "an updated bindable is the flag-15 prop source:\n{js}"
+    );
+    assert!(
+        js.contains("$.update_prop(v)"),
+        "the postfix update is the prop update helper:\n{js}"
+    );
+    // NEGATIVE: never the signal update helper.
+    assert!(
+        !js.contains("$.update(v)"),
+        "a prop update never uses the signal `$.update`:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_bindable_lazy_object_default_readonly_lowers_flag_27_proxy_thunk() {
+    // A read-only bindable OBJECT default is the LAZY flag-27 proxy thunk
+    // (`() => $.proxy({ a: 1 })`) — the `$.proxy` wrap is BINDABLE-only.
+    // Verified against svelte@5.56.3.
+    let src = "<script>let { v = $bindable({ a: 1 }) } = $props();</script>\n<p>{v}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("let v = $.prop($$props, 'v', 27, () => $.proxy({ a: 1 }));"),
+        "a bindable object default is the lazy flag-27 proxy thunk:\n{js}"
+    );
+    assert!(
+        js.contains("$.set_text(text, v())"),
+        "reads go through the getter:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_bindable_lazy_object_default_mutated_lowers_flag_31_mutation_call() {
+    // A deep-MUTATED bindable object default is flag-31, and the member mutation
+    // wraps in the setter with the mutation flag (`v(v().a++, true)`). Verified
+    // against svelte@5.56.3.
+    let src = "<script>let { v = $bindable({ a: 1 }) } = $props();</script>\n<button onclick={() => v.a++}>{v}</button>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("let v = $.prop($$props, 'v', 31, () => $.proxy({ a: 1 }));"),
+        "a mutated bindable object default is flag-31:\n{js}"
+    );
+    assert!(
+        js.contains("v(v().a++, true)"),
+        "a bindable member mutation wraps in the setter with the mutation flag:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_bindable_readonly_no_default_emits_no_prop_source() {
+    // `is_prop_source` — a read-only bindable with NO default is NOT a prop
+    // source: NO `$.prop` anywhere; reads go DIRECT `$$props.value`; the context
+    // frame still opens (the `$bindable` call forces it). Verified against
+    // svelte@5.56.3.
+    let src = "<script>let { value = $bindable() } = $props();</script>\n<p>{value}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        !js.contains("$.prop("),
+        "a read-only no-default bindable emits NO $.prop:\n{js}"
+    );
+    assert!(
+        js.contains("$.set_text(text, $$props.value)"),
+        "reads go direct off $$props:\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true);") && js.contains("$.pop();"),
+        "the `$bindable` call still forces the context frame:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_bindable_no_default_assigned_lowers_flag_15_without_default_arg() {
+    // A no-default bindable that IS reassigned becomes a prop source with NO
+    // default argument: `$.prop($$props, 'v', 15)`. Verified against
+    // svelte@5.56.3.
+    let src = "<script>let { v = $bindable() } = $props();</script>\n<button onclick={() => v = 1}>{v}</button>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("let v = $.prop($$props, 'v', 15);"),
+        "a reassigned no-default bindable is `$.prop($$props, 'v', 15)`:\n{js}"
+    );
+    assert!(js.contains("v(1)"), "the write is the setter call:\n{js}");
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_bindable_aliased_uses_source_key() {
+    // `{ value: local = $bindable(0) }` keys the prop by its SOURCE key
+    // (`'value'`) bound as the LOCAL (`local`). Verified against svelte@5.56.3.
+    let src = "<script>let { value: local = $bindable(0) } = $props();</script>\n<p>{local}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("let local = $.prop($$props, 'value', 11, 0);"),
+        "the prop keys by the SOURCE key, bound as the local:\n{js}"
+    );
+    assert!(
+        js.contains("$.set_text(text, local())"),
+        "reads use the local getter:\n{js}"
+    );
+    // NEGATIVE: never the local name as the prop key.
+    assert!(
+        !js.contains("'local'"),
+        "the local alias is never the prop key:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_bindable_ident_default_proxies_lazily() {
+    // A bindable IDENTIFIER default that does not resolve to a known
+    // non-proxiable initializer proxies lazily (`() => $.proxy(base)`, flag 27) —
+    // the official scope-follow defaults to proxiable. Verified against
+    // svelte@5.56.3.
+    let src = "<script>let { v = $bindable(base) } = $props();</script>\n<p>{v}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("let v = $.prop($$props, 'v', 27, () => $.proxy(base));"),
+        "an unresolvable identifier default proxies lazily:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn bindable_forces_context_frame_props_id_does_not() {
+    // The `needs_context` policy trigger discriminator: a `$bindable(...)` call
+    // forces `$.push($$props, true)` / `$.pop()` — even with NO `$.prop` emission
+    // (read-only no-default) — while `$props.id()` alone never does.
+    let bindable = emit(
+        "<script>let { value = $bindable() } = $props();</script>\n<p>{value}</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        bindable.contains("$.push($$props, true);") && bindable.contains("$.pop();"),
+        "a bindable component opens the frame:\n{bindable}"
+    );
+    let id_only = emit(
+        "<script>const uid = $props.id();</script>\n<p>{uid}</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        !id_only.contains("$.push") && !id_only.contains("$.pop"),
+        "a `$props.id()`-only component opens NO frame:\n{id_only}"
+    );
+}
+
+#[test]
+fn bindable_two_arguments_fails_closed() {
+    // `$bindable(1, 2)` — official `rune_invalid_arguments_length` (zero or one),
+    // even in the valid default position.
+    assert_fail_closed(
+        "<script>let { value = $bindable(1, 2) } = $props();</script>\n<p>{value}</p>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$bindable"),
+    );
+}
+
+#[test]
+fn bindable_spread_argument_fails_closed() {
+    // `$bindable(...a)` — official `rune_invalid_spread`.
+    assert_fail_closed(
+        "<script>let { value = $bindable(...[1]) } = $props();</script>\n<p>{value}</p>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$bindable"),
+    );
+}
+
+#[test]
+fn bindable_standalone_statement_fails_closed() {
+    // A standalone `$bindable(0);` statement — official
+    // `bindable_invalid_location`.
+    assert_fail_closed(
+        "<script>$bindable(0);</script>\n<p>x</p>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$bindable"),
+    );
+}
+
+#[test]
+fn bindable_standalone_declarator_fails_closed() {
+    // A standalone `const x = $bindable(0);` declarator — official
+    // `bindable_invalid_location` (only a `$props()` destructure default).
+    assert_fail_closed(
+        "<script>const x = $bindable(0);</script>\n<p>{x}</p>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$bindable"),
+    );
+}
+
+#[test]
+fn bindable_call_argument_fails_closed() {
+    // `foo($bindable(0))` — official `bindable_invalid_location`.
+    assert_fail_closed(
+        "<script>foo($bindable(0));</script>\n<p>x</p>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$bindable"),
+    );
+}
+
+#[test]
+fn bindable_bare_reference_standalone_fails_closed() {
+    // An UNCALLED bare `$bindable` reference (`const x = $bindable;`) — official
+    // `rune_missing_parentheses`. Locks the reference-position fail-open closed.
+    assert_fail_closed(
+        "<script>const x = $bindable;</script>\n<p>{x}</p>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$bindable"),
+    );
+}
+
+#[test]
+fn bindable_bare_reference_in_effect_body_fails_closed() {
+    // The uncalled-`$bindable` FAIL-OPEN pin: a bare `$bindable` inside a lowered
+    // `$effect` body previously slipped every arm and emitted RAW (a runtime
+    // `ReferenceError`). It must fail closed.
+    assert_fail_closed(
+        "<script>let c = $state(0); $effect(() => { const x = $bindable; console.log(x, c); });</script>\n<p>{c}</p>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$bindable"),
+    );
+}
+
+#[test]
+fn bindable_bare_reference_in_handler_fails_closed() {
+    // The same fail-open pin for a TEMPLATE expression: a bare `$bindable` in a
+    // handler must fail closed, never emit raw.
+    assert_fail_closed(
+        "<script>let c = $state(0);</script>\n<button onclick={() => console.log($bindable, c)}>x</button>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$bindable"),
+    );
+}
+
+#[test]
+fn bindable_uncalled_in_default_fails_closed() {
+    // `{ value = $bindable }` (uncalled, in the default position) — official
+    // `rune_missing_parentheses`. Must be refused explicitly, never lowered as a
+    // literal default value.
+    assert_fail_closed(
+        "<script>let { value = $bindable } = $props();</script>\n<p>{value}</p>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$bindable"),
+    );
+}
+
+#[test]
+fn bindable_nested_destructure_default_fails_closed() {
+    // `{ a: { b = $bindable(0) } }` — official `props_invalid_pattern` (nested
+    // properties); the nested-destructure gate owns the refusal.
+    assert_fail_closed(
+        "<script>let { a: { b = $bindable(0) } } = $props();</script>\n<p>{b}</p>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$props() nested destructure"),
+    );
+}
+
+#[test]
+fn bindable_non_props_destructure_default_fails_closed() {
+    // A `$bindable()` default in a destructure of a NON-`$props()` init —
+    // official `bindable_invalid_location`.
+    assert_fail_closed(
+        "<script>let c = $state(0); let { v = $bindable(0) } = foo;</script>\n<p>{c}</p>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$bindable"),
+    );
+}
+
+#[test]
+fn bindable_function_param_default_fails_closed() {
+    // A `$bindable()` default in a FUNCTION-parameter destructure — official
+    // `bindable_invalid_location`.
+    assert_fail_closed(
+        "<script>let c = $state(0);\nfunction f({ v = $bindable(0) }){ return v; }</script>\n<p>{c}</p>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$bindable"),
+    );
+}
+
+#[test]
+fn bindable_parenthesized_spellings_fail_closed() {
+    // Verter locks the parenthesized `$bindable` spellings fail-closed (the
+    // strict `$bindable(...)` default shape is the sole accepted spelling).
+    for (label, src) in [
+        (
+            "paren-callee",
+            "<script>let { v = ($bindable)(0) } = $props();</script>\n<p>{v}</p>\n",
+        ),
+        (
+            "paren-call",
+            "<script>let { v = ($bindable(0)) } = $props();</script>\n<p>{v}</p>\n",
+        ),
+    ] {
+        assert_fail_closed_labeled(
+            label,
+            src,
+            |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$bindable"),
+        );
+    }
+}
+
+#[test]
+fn bindable_optional_call_fails_closed() {
+    // `$bindable?.(0)` — official `bindable_invalid_location`; the optional
+    // spelling is locked fail-closed.
+    assert_fail_closed(
+        "<script>let { v = $bindable?.(0) } = $props();</script>\n<p>{v}</p>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$bindable"),
+    );
+}
+
+#[test]
+fn bindable_template_value_position_fails_closed() {
+    // `{$bindable(0)}` in a template value position — official
+    // `bindable_invalid_location`.
+    assert_fail_closed(
+        "<script>let c = $state(0);</script>\n<p>{$bindable(0)}{c}</p>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$bindable"),
+    );
+}
+
+#[test]
+fn bindable_shadowed_handler_param_is_not_a_rune_reference() {
+    // A handler PARAMETER named `$bindable` shadows the rune — the call inside is
+    // a PLAIN call, NOT a rune. The component still refuses, but on the
+    // PRE-EXISTING parametered-delegated-arrow boundary (`NonDelegatedEvent`),
+    // never the `$bindable` rune arm — which discriminates the scan's
+    // shadow-awareness (a shadow-blind scan would refuse `$bindable` FIRST, since
+    // the rune scan runs before the template-shape walk).
+    assert_fail_closed(
+        "<script>let c = $state(0);</script>\n<button onclick={($bindable) => $bindable(0)}>{c}</button>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::NonDelegatedEvent { event_type, .. } if event_type == "click"),
+    );
+}
+
+// ── plain `$props()` defaults — the shared `$.prop` substrate ─────────────────
+
+#[test]
+fn props_plain_mutated_default_lowers_flag_7() {
+    // A mutated plain default (`a++`) sets UPDATED: flags 7, `$.update_prop(a)`,
+    // and NO context frame (a plain prop write never forces it). Verified against
+    // svelte@5.56.3.
+    let src =
+        "<script>let { a = 1 } = $props();</script>\n<button onclick={() => a++}>{a}</button>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("let a = $.prop($$props, 'a', 7, 1);"),
+        "a mutated plain default is the flag-7 prop source:\n{js}"
+    );
+    assert!(
+        js.contains("$.update_prop(a)"),
+        "the postfix update is the prop update helper:\n{js}"
+    );
+    assert!(
+        !js.contains("$.push"),
+        "a plain prop write opens no context frame:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_plain_prefix_decrement_lowers_update_pre_prop() {
+    // `--a` (prefix) lowers to `$.update_pre_prop(a, -1)` — the prefix prop
+    // update helper with the decrement literal. Verified against svelte@5.56.3.
+    let src =
+        "<script>let { a = 1 } = $props();</script>\n<button onclick={() => --a}>{a}</button>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("$.update_pre_prop(a, -1)"),
+        "a prefix decrement is the pre-update prop helper:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_plain_compound_assign_lowers_getter_setter_form() {
+    // `a += 1` lowers to the getter/setter compound form `a(a() + 1)`. Verified
+    // against svelte@5.56.3.
+    let src =
+        "<script>let { a = 1 } = $props();</script>\n<button onclick={() => a += 1}>{a}</button>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("a(a() + 1)"),
+        "a compound assign reads through the getter and writes the setter:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_plain_object_default_thunk_parenthesizes_object_body() {
+    // An OBJECT default thunk parenthesizes its body (`() => ({ x: 1 })`) — the
+    // required arrow-body syntax. Verified against svelte@5.56.3.
+    let src = "<script>let { a = { x: 1 } } = $props();</script>\n<p>{a}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("$.prop($$props, 'a', 19, () => ({ x: 1 }))"),
+        "an object default thunk parenthesizes the body:\n{js}"
+    );
+    // NEGATIVE: a plain lazy default never proxies.
+    assert!(
+        !js.contains("$.proxy"),
+        "a plain lazy default must not proxy:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_zero_arg_call_default_collapses_to_bare_callee() {
+    // `{ a = foo() }` — the zero-arg identifier-callee default collapses to the
+    // BARE callee as the lazy carrier (`$.prop($$props, 'a', 19, foo)`), never a
+    // thunk. Verified against svelte@5.56.3.
+    let src = "<script>let { a = foo() } = $props();</script>\n<p>{a}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("$.prop($$props, 'a', 19, foo)"),
+        "a zero-arg call default collapses to the bare callee:\n{js}"
+    );
+    assert!(
+        !js.contains("19, () =>"),
+        "never a thunk for the zero-arg callee optimization:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_getter_call_sibling_default_thunks_the_call() {
+    // `{ a = 1, b = a() }` — calling the sibling PROP VALUE rewrites the callee to
+    // the getter (`a()`), so the rewritten call is `a()()` and must ride a FULL
+    // thunk (the zero-arg collapse applies only to a bare identifier callee).
+    // The prop-rooted call also forces the context frame (the official unsafe-call
+    // rule). Verified against svelte@5.56.3.
+    let src = "<script>let { a = 1, b = a() } = $props();</script>\n<p>{b}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("$.prop($$props, 'b', 19, () => a()())"),
+        "a sibling-value call default thunks the rewritten call:\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true);"),
+        "a prop-rooted call forces the context frame:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_mixed_getter_and_member_reads_split_per_member() {
+    // `{ a = 1, b }` — the default-bearing member is a `$.prop` getter; the
+    // no-default member stays the direct `$$props.b` read; ONE `$.prop` total.
+    let src = "<script>let { a = 1, b } = $props();</script>\n<p>{a}{b}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("$.prop($$props, 'a', 3, 1)"),
+        "the default-bearing member is a prop source:\n{js}"
+    );
+    assert!(
+        js.contains("$$props.b"),
+        "the no-default member reads direct:\n{js}"
+    );
+    assert!(
+        !js.contains("$.prop($$props, 'b'"),
+        "the no-default member emits no $.prop:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_no_default_mutated_lowers_flag_7_without_default_arg() {
+    // A NO-default plain prop that is written becomes a prop source (`updated`)
+    // with NO default argument: `$.prop($$props, 'a', 7)`; reads flip to the
+    // getter. Verified against svelte@5.56.3.
+    let src = "<script>let { a } = $props();</script>\n<button onclick={() => a++}>{a}</button>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("let a = $.prop($$props, 'a', 7);"),
+        "a written no-default prop is `$.prop($$props, 'a', 7)`:\n{js}"
+    );
+    assert!(
+        js.contains("$.set_text(text, a())"),
+        "reads flip to the getter:\n{js}"
+    );
+    assert!(
+        !js.contains("$$props.a"),
+        "a prop-source read never reads $$props directly:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_no_default_deep_mutated_plain_prop_stays_raw_member_write() {
+    // A PLAIN (non-bindable) prop deep-mutation (`a.x++`) keeps the RAW member
+    // write over the getter base (`a().x++`) — the setter-with-mutation-flag wrap
+    // is bindable-only — and the member root forces the context frame. Verified
+    // against svelte@5.56.3.
+    let src = "<script>let { a } = $props();</script>\n<button onclick={() => a.x++}>x</button>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("let a = $.prop($$props, 'a', 7);"),
+        "a deep-mutated no-default prop is flag-7:\n{js}"
+    );
+    assert!(
+        js.contains("a().x++"),
+        "the plain-prop member mutation stays a raw member write:\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true);"),
+        "a prop-rooted member forces the context frame:\n{js}"
+    );
+    // NEGATIVE: the bindable-only mutation wrap never applies to a plain prop.
+    assert!(
+        !js.contains("a(a().x++, true)"),
+        "the setter mutation wrap is bindable-only:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_object_default_single_member_update_locks_flag_23() {
+    // A SINGLE-LEVEL member update over an object default (`a.x++`) pins the
+    // full UPDATED | LAZY flag composition: exactly 23 (3 | 4 | 16), with the
+    // parenthesized thunk and the getter-based member write. Verified against
+    // svelte@5.56.3.
+    let src = "<script>let { a = { x: 1 } } = $props();</script>\n<button onclick={() => a.x++}>x</button>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("let a = $.prop($$props, 'a', 23, () => ({ x: 1 }));"),
+        "a member-updated object default is flags 23 with the thunk:\n{js}"
+    );
+    assert!(
+        js.contains("a().x++"),
+        "the member update reads through the getter base:\n{js}"
+    );
+    // NEGATIVE: neither flag axis may drop — not LAZY-only (19), not bare (3).
+    assert!(
+        !js.contains("'a', 19,"),
+        "the member update must not drop UPDATED to flags 19:\n{js}"
+    );
+    assert!(
+        !js.contains("'a', 3,"),
+        "the lazy object default must never emit bare flags 3:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_plain_default_nested_member_update_sets_updated_flag_7() {
+    // A NESTED member update (`a.b.c++`, depth ≥ 2) is a DEEP MUTATION of the
+    // ROOT prop `a` exactly like an immediate one (`a.x++`): UPDATED is set,
+    // flags 7 with the raw simple default. Verified against svelte@5.56.3.
+    let src = "<script>let { a = 1 } = $props();</script>\n<button onclick={() => a.b.c++}>{a}</button>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("let a = $.prop($$props, 'a', 7, 1);"),
+        "a nested member update sets UPDATED (flags 7):\n{js}"
+    );
+    assert!(
+        js.contains("a().b.c++"),
+        "the nested member write reads through the getter base:\n{js}"
+    );
+    // NEGATIVE: the un-updated flag value must be gone.
+    assert!(
+        !js.contains("$.prop($$props, 'a', 3, 1)"),
+        "the nested write must not drop UPDATED to flags 3:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_object_default_nested_member_update_sets_updated_flag_23() {
+    // A nested member update over an OBJECT default keeps the parenthesized
+    // thunk AND sets UPDATED: flags 23 (3 | UPDATED 4 | LAZY 16). Verified
+    // against svelte@5.56.3.
+    let src = "<script>let { a = { b: { c: 0 } } } = $props();</script>\n<button onclick={() => a.b.c++}>x</button>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("let a = $.prop($$props, 'a', 23, () => ({ b: { c: 0 } }));"),
+        "a nested member update over an object default is flags 23 with the thunk:\n{js}"
+    );
+    assert!(
+        js.contains("a().b.c++"),
+        "the nested member write reads through the getter base:\n{js}"
+    );
+    // NEGATIVE: the un-updated flag value must be gone.
+    assert!(
+        !js.contains("'a', 19,"),
+        "the nested write must not drop UPDATED to flags 19:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_bindable_object_default_nested_member_update_sets_updated_flag_31() {
+    // A nested member update of a BINDABLE prop sets UPDATED on top of
+    // BINDABLE | LAZY (flags 31) and keeps the bindable setter-with-mutation
+    // wrap `v(v().b.c++, true)`. Verified against svelte@5.56.3.
+    let src = "<script>let { v = $bindable({ b: { c: 0 } }) } = $props();</script>\n<button onclick={() => v.b.c++}>x</button>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("let v = $.prop($$props, 'v', 31, () => $.proxy({ b: { c: 0 } }));"),
+        "a nested-mutated bindable is flags 31 with the proxied thunk:\n{js}"
+    );
+    assert!(
+        js.contains("v(v().b.c++, true)"),
+        "the bindable nested mutation rides the setter mutation wrap:\n{js}"
+    );
+    // NEGATIVE: the un-updated flag value must be gone.
+    assert!(
+        !js.contains("'v', 27,"),
+        "the nested write must not drop UPDATED to flags 27:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_object_default_nested_member_assignment_sets_updated_flag_23() {
+    // The nested ASSIGNMENT form (`a.b.c = 1`) is the same deep mutation of the
+    // root prop as the update form: UPDATED set, flags 23. Verified against
+    // svelte@5.56.3.
+    let src = "<script>let { a = { b: { c: 0 } } } = $props();</script>\n<button onclick={() => a.b.c = 1}>x</button>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("let a = $.prop($$props, 'a', 23, () => ({ b: { c: 0 } }));"),
+        "a nested member assignment sets UPDATED (flags 23):\n{js}"
+    );
+    assert!(
+        js.contains("a().b.c = 1"),
+        "the nested assignment reads through the getter base:\n{js}"
+    );
+    // NEGATIVE: the un-updated flag value must be gone.
+    assert!(
+        !js.contains("'a', 19,"),
+        "the nested assignment must not drop UPDATED to flags 19:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_computed_root_nested_update_sets_updated_and_keeps_key_read() {
+    // A COMPUTED link inside the mutation chain (`a[k].c++`) still attributes
+    // the deep mutation to the ROOT `a` (flags 23), while the computed KEY `k`
+    // stays a READ: `k` keeps flags 3 and its reference rewrites to the getter
+    // (`a()[k()].c++`). Verified against svelte@5.56.3.
+    let src = "<script>let { a = { b: { c: 0 } }, k = 'b' } = $props();</script>\n<button onclick={() => a[k].c++}>x</button>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("$.prop($$props, 'a', 23, () => ({ b: { c: 0 } }))"),
+        "the computed-link chain still sets UPDATED on the root (flags 23):\n{js}"
+    );
+    assert!(
+        js.contains("$.prop($$props, 'k', 3, 'b')"),
+        "the computed key stays a read-only prop (flags 3):\n{js}"
+    );
+    assert!(
+        js.contains("a()[k()].c++"),
+        "the computed key resolves as a getter READ inside the write target:\n{js}"
+    );
+    // NEGATIVE: the root must not stay un-updated; the key must not gain UPDATED.
+    assert!(
+        !js.contains("'a', 19,"),
+        "the computed-link write must not drop UPDATED to flags 19:\n{js}"
+    );
+    assert!(
+        !js.contains("'k', 7,"),
+        "the computed KEY is a read, never an updated prop:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_computed_leaf_nested_update_sets_updated_and_keeps_key_read() {
+    // A computed OUTERMOST member (`a.b[k]++`) roots the deep mutation at `a`
+    // (flags 23) through the static link, and the computed key `k` stays a
+    // getter READ (`a().b[k()]++`). Verified against svelte@5.56.3.
+    let src = "<script>let { a = { b: { c: 0 } }, k = 'c' } = $props();</script>\n<button onclick={() => a.b[k]++}>x</button>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("$.prop($$props, 'a', 23, () => ({ b: { c: 0 } }))"),
+        "the computed-leaf chain still sets UPDATED on the root (flags 23):\n{js}"
+    );
+    assert!(
+        js.contains("$.prop($$props, 'k', 3, 'c')"),
+        "the computed key stays a read-only prop (flags 3):\n{js}"
+    );
+    assert!(
+        js.contains("a().b[k()]++"),
+        "the computed key resolves as a getter READ inside the write target:\n{js}"
+    );
+    // NEGATIVE: the root must not stay un-updated.
+    assert!(
+        !js.contains("'a', 19,"),
+        "the computed-leaf write must not drop UPDATED to flags 19:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_sequence_default_thunk_parenthesizes_sequence_body() {
+    // A SEQUENCE-expression default (`= (1, 2)`) embeds as ONE parenthesized
+    // thunk body — `() => (1, 2)` — so the comma expression stays a single
+    // `$.prop` argument and the thunk returns the sequence value (2). Verified
+    // against svelte@5.56.3.
+    let src = "<script>let { a = (1, 2) } = $props();</script>\n<p>{a}</p>\n";
+    let js = emit(src, "App.svelte");
+    // The FULL call text pins the arity: exactly four `$.prop` arguments.
+    assert!(
+        js.contains("let a = $.prop($$props, 'a', 19, () => (1, 2));"),
+        "a sequence default is one parenthesized lazy thunk:\n{js}"
+    );
+    // NEGATIVE: the bare embedding would splice a stray fifth `$.prop` argument
+    // and truncate the thunk body to `() => 1`.
+    assert!(
+        !js.contains("() => 1, 2"),
+        "the sequence must never embed unparenthesized:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_bindable_sequence_default_proxy_parenthesizes_sequence_argument() {
+    // A BINDABLE sequence default (`$bindable((1, { x: 1 }))`) parenthesizes
+    // the sequence inside the proxy call — `$.proxy((1, { x: 1 }))` — keeping
+    // `$.proxy` a ONE-argument call. Verified against svelte@5.56.3.
+    let src = "<script>let { v = $bindable((1, { x: 1 })) } = $props();</script>\n<p>{v}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("let v = $.prop($$props, 'v', 27, () => $.proxy((1, { x: 1 })));"),
+        "a bindable sequence default proxies the parenthesized sequence:\n{js}"
+    );
+    // NEGATIVE: the bare embedding would make the sequence a 2-arg `$.proxy`.
+    assert!(
+        !js.contains("$.proxy(1,"),
+        "the sequence must never split into proxy arguments:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_string_key_default_quotes_source_key() {
+    // `{ 'a-b': ab = 1 }` — the non-identifier SOURCE key stays the quoted prop
+    // key. Verified against svelte@5.56.3.
+    let src = "<script>let { 'a-b': ab = 1 } = $props();</script>\n<p>{ab}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("let ab = $.prop($$props, 'a-b', 3, 1);"),
+        "the string source key stays quoted:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_arrow_default_is_simple_and_passes_raw() {
+    // An ARROW default is a SIMPLE expression (official `is_simple_expression`):
+    // it passes RAW with NO lazy bit (`3, () => 1`). Verified against
+    // svelte@5.56.3.
+    let src = "<script>let { cb = () => 1 } = $props();</script>\n<p>{cb}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("$.prop($$props, 'cb', 3, () => 1)"),
+        "an arrow default is simple → raw, flags 3:\n{js}"
+    );
+    assert!(
+        !js.contains("'cb', 19"),
+        "an arrow default never sets LAZY:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_binary_default_is_simple_and_passes_raw() {
+    // A literal BINARY default (`1 + 2`) is simple → raw, flags 3. Verified
+    // against svelte@5.56.3.
+    let src = "<script>let { a = 1 + 2 } = $props();</script>\n<p>{a}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("$.prop($$props, 'a', 3, 1 + 2)"),
+        "a literal binary default is simple → raw:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_template_literal_default_is_lazy() {
+    // A TEMPLATE-LITERAL default is NOT simple (official excludes it): lazy thunk,
+    // flags 19. Verified against svelte@5.56.3.
+    let src = "<script>let { a = `x` } = $props();</script>\n<p>{a}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("$.prop($$props, 'a', 19, () => `x`)"),
+        "a template-literal default is the lazy thunk:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_undefined_default_passes_raw() {
+    // `{ a = undefined }` — the `undefined` identifier is simple → raw, flags 3
+    // (the initial argument survives). Verified against svelte@5.56.3.
+    let src = "<script>let { a = undefined } = $props();</script>\n<p>{a}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("$.prop($$props, 'a', 3, undefined)"),
+        "an `undefined` default is simple → raw:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_parenthesized_default_peels_transparently() {
+    // `{ a = (1) }` — author parens around a default VALUE are transparent
+    // (official's ESTree has no paren nodes): simple → raw, flags 3, emitted `1`.
+    // Verified against svelte@5.56.3.
+    let src = "<script>let { a = (1) } = $props();</script>\n<p>{a}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("$.prop($$props, 'a', 3, 1)"),
+        "a parenthesized literal default peels to the raw literal:\n{js}"
+    );
+    assert!(
+        !js.contains("3, (1)"),
+        "the transparent parens never survive into the carrier:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_signal_reading_default_thunks_the_getter_read() {
+    // A default reading a LIVE `$state` signal rewrites the read (`$.get(s)`)
+    // and rides the lazy thunk; the declarations keep source order. Verified
+    // against svelte@5.56.3.
+    let src = "<script>let s = $state(1); let { a = s } = $props();</script>\n<button onclick={() => s = 2}>{a}</button>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("let a = $.prop($$props, 'a', 19, () => $.get(s));"),
+        "a signal-reading default thunks the rewritten read:\n{js}"
+    );
+    let s_decl = js.find("let s = $.state(1);").expect("state decl");
+    let a_decl = js.find("let a = $.prop(").expect("prop decl");
+    assert!(s_decl < a_decl, "declarations keep source order:\n{js}");
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_ts_wrapped_default_fails_closed() {
+    // A TS-wrapped default (`1 as number`) cannot reach emission: a plain
+    // `<script>` rejects it at the official script-body parse gate
+    // (`js_parse_error` parity), and a `lang="ts"` script is the fail-closed
+    // TypeScript boundary pinned here. (The props lowering carries its own
+    // defensive `$props() ts-wrapped default` refusal for when that boundary
+    // opens — the same layered rail as the `$state()` ts-wrapped init.)
+    assert_fail_closed(
+        "<script lang=\"ts\">let { a = 1 as number } = $props();</script>\n<p>{a}</p>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::TypeScript { .. }),
+    );
+}
+
+#[test]
+fn props_bind_value_to_bindable_prop_stays_fail_closed() {
+    // SURVIVING refusal: `bind:value={bindableProp}` (official's 2-arg
+    // `$.bind_value(input, value)` form) stays fail-closed — the prop-bind gate is
+    // out of this substrate's scope.
+    assert_fail_closed(
+        "<script>let { value = $bindable(0) } = $props();</script>\n<input bind:value={value} />\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "value"),
+    );
+}
+
+#[test]
+fn props_instance_script_prop_reference_stays_fail_closed() {
+    // SURVIVING refusal: an INSTANCE-SCRIPT reference to a prop local (outside
+    // its own declaration) stays the fail-closed non-interpolation prop-usage
+    // boundary.
+    assert_fail_closed(
+        "<script>let { a = 1 } = $props(); $effect(() => { console.log(a); });</script>\n<p>{a}</p>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$props() non-interpolation usage"),
+    );
+}
+
+// ── TS-only syntax in a prop-rooted template WRITE chain — fail-closed ─────────
+//
+// Official svelte@5.56.3 PARSE-REJECTS TypeScript syntax in a plain-`<script>`
+// component's template (`expected_token`), so a template write whose member
+// chain carries a TS-only wrapper (`v!.a++` / `(v as any).a++`) must never
+// emit. Verter Tsx-parses template expressions, and the TypeScript-strip pass
+// cannot strip under an update target — accepting these would emit INVALID JS
+// (`v()!.a++`) and drop the bindable mutation wrap. The write-target
+// classifier fails the whole chain closed when it roots at a `$props()` prop
+// (plain or bindable); non-prop roots are outside this substrate's boundary.
+
+#[test]
+fn props_bindable_ts_nonnull_member_update_fails_closed() {
+    // `v!.a++` on a bindable prop — the TS non-null wrapper sits between the
+    // write target and its prop root. Official parse-rejects the template
+    // expression outright; Verter fails the TS-wrapped reactive write closed.
+    assert_fail_closed(
+        "<script>let { v = $bindable({ a: 0 }) } = $props();</script>\n<button onclick={() => v!.a++}>{v}</button>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::DestructuringWrite { .. }),
+    );
+}
+
+#[test]
+fn props_bindable_ts_nonnull_member_assignment_fails_closed() {
+    // `v!.a = 1` — the ASSIGNMENT form of the same TS-wrapped bindable member
+    // write shares the fail-closed classification.
+    assert_fail_closed(
+        "<script>let { v = $bindable({ a: 0 }) } = $props();</script>\n<button onclick={() => v!.a = 1}>{v}</button>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::DestructuringWrite { .. }),
+    );
+}
+
+#[test]
+fn props_bindable_ts_nonnull_mid_chain_member_update_fails_closed() {
+    // `v.a!.b++` — the TS wrapper sits MID-chain (not on the root identifier);
+    // the chain walk still sees it and fails closed.
+    assert_fail_closed(
+        "<script>let { v = $bindable({ a: { b: 0 } }) } = $props();</script>\n<button onclick={() => v.a!.b++}>{v}</button>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::DestructuringWrite { .. }),
+    );
+}
+
+#[test]
+fn props_plain_default_ts_nonnull_member_update_fails_closed() {
+    // `a!.b.c++` on a PLAIN default prop (no `$bindable`) — the flags path
+    // shares the same fail-closed chain classification as the bindable wrap
+    // path (one gate, not per-lane checks).
+    assert_fail_closed(
+        "<script>let { a = { b: { c: 0 } } } = $props();</script>\n<button onclick={() => a!.b.c++}>{a}</button>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::DestructuringWrite { .. }),
+    );
+}
+
+#[test]
+fn props_bindable_ts_as_cast_member_update_fails_closed() {
+    // `(v as any).a++` — an `as`-cast in the target chain, on the DIRECT
+    // (`$.event`) handler lane (`onfocus` is non-delegated, so the body reaches
+    // the shared rewriter rather than the narrow delegated shape gate).
+    assert_fail_closed(
+        "<script>let { v = $bindable({ a: 0 }) } = $props();</script>\n<button onfocus={() => (v as any).a++}>{v}</button>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::DestructuringWrite { .. }),
+    );
+}
+
+// ── TS-only syntax in a prop-rooted write target's COMPUTED KEY — fail-closed ──
+//
+// The fail-closed classification inspects the WHOLE member lvalue, not just the
+// object spine: a COMPUTED KEY anywhere along a prop-rooted write target
+// (`v[k as any]++` / `v[k!].b++`) carries the same officially-parse-rejected
+// TypeScript syntax (svelte@5.56.3 `expected_token` in a plain-`<script>`
+// component's template), and accepting it would strip the wrapper and emit a
+// write official never compiles. The key inspection is RECURSIVE — a TS node
+// nested at any depth inside the key (`v[f(k as any)]++`) fails closed too —
+// through the same single member-write funnel, never a per-lane check.
+
+#[test]
+fn props_bindable_computed_key_ts_as_update_fails_closed() {
+    // `v[k as any]++` — the `as`-cast rides the OUTERMOST computed KEY of a
+    // bindable-rooted update target (the key is not part of the object spine).
+    assert_fail_closed(
+        "<script>let { v = $bindable({ a: 0 }), k = 'a' } = $props();</script>\n<button onclick={() => v[k as any]++}>{v}</button>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::DestructuringWrite { .. }),
+    );
+}
+
+#[test]
+fn props_bindable_computed_key_ts_as_assignment_fails_closed() {
+    // `v[k as any] = 1` — the ASSIGNMENT form of the same TS-keyed bindable
+    // write shares the fail-closed classification (one funnel, both target
+    // classifiers).
+    assert_fail_closed(
+        "<script>let { v = $bindable({ a: 0 }), k = 'a' } = $props();</script>\n<button onclick={() => v[k as any] = 1}>{v}</button>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::DestructuringWrite { .. }),
+    );
+}
+
+#[test]
+fn props_plain_computed_key_ts_nonnull_update_fails_closed() {
+    // `v.a[k!]++` — a non-null-wrapped computed key deeper in the chain, on a
+    // PLAIN default prop (no `$bindable`): the flags path shares the same
+    // fail-closed key inspection as the bindable wrap path.
+    assert_fail_closed(
+        "<script>let { v = { a: { b: 0 } }, k = 'b' } = $props();</script>\n<button onclick={() => v.a[k!]++}>{v}</button>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::DestructuringWrite { .. }),
+    );
+}
+
+#[test]
+fn props_bindable_computed_key_nested_ts_as_update_fails_closed() {
+    // `v[String(k as any)]++` — the TS node sits DEEP inside the key (a call
+    // argument), not at the key's top level; a shallow top-level-only key check
+    // would leave the same hole one level down.
+    assert_fail_closed(
+        "<script>let { v = $bindable({ a: 0 }), k = 'a' } = $props();</script>\n<button onclick={() => v[String(k as any)]++}>{v}</button>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::DestructuringWrite { .. }),
+    );
+}
+
+#[test]
+fn props_bindable_spine_computed_key_ts_nonnull_update_fails_closed() {
+    // `v[k!].b++` — the TS-keyed computed hop sits on the object SPINE (the
+    // chain walk reaches it while descending to the root), not on the write
+    // target's outermost hop.
+    assert_fail_closed(
+        "<script>let { v = $bindable({ a: { b: 0 } }), k = 'a' } = $props();</script>\n<button onclick={() => v[k!].b++}>{v}</button>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::DestructuringWrite { .. }),
+    );
+}
+
+#[test]
+fn props_bindable_plain_computed_key_update_keeps_key_read() {
+    // CONTROL: a PLAIN computed key on a bindable-rooted update (`v[k]++`) stays
+    // accepted — the mutation wraps in the setter with the mutation flag
+    // (`v(v()[k()]++, true)`) and the key stays a getter READ (flags 3) — the
+    // TS-key gate never widens onto TS-free computed keys.
+    let src = "<script>let { v = $bindable({ a: 0 }), k = 'a' } = $props();</script>\n<button onclick={() => v[k]++}>x</button>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("v(v()[k()]++, true)"),
+        "a TS-free computed-key bindable mutation stays the setter wrap with the key a getter READ:\n{js}"
+    );
+    assert!(
+        js.contains("$.prop($$props, 'k', 3, 'a')"),
+        "the computed key stays a read-only prop (flags 3):\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+// ── Prop-rooted PRIVATE-FIELD member writes set UPDATED ────────────────────────
+//
+// A `#private`-field member write whose target roots at a `$props()` prop
+// (`v.#x++` / `v.#x = 1` inside a template-handler class body — the only
+// position where a private name is in scope) is the SAME deep mutation of the
+// root binding as a static/computed member write: official svelte@5.56.3 sets
+// the UPDATED flag bit and applies the bindable setter-with-mutation wrap
+// (`v(v().#x++, true)`) identically to `v.x++`. The reference collector must
+// classify the private-field target arm through the same root-walked
+// deep-mutate fact as the static/computed arms — the write-ACCEPT classifiers
+// already admit the target shape, so a collector miss under-flags the prop
+// (27-instead-of-31 / 19-instead-of-23) rather than refusing. The handlers
+// ride the DIRECT (`$.event`) lane (`onfocus` is non-delegated) — a class
+// declaration statement is outside the narrow delegated body-shape subset, so
+// the non-delegated lane is where these bodies reach the shared rewriter.
+
+#[test]
+fn props_bindable_private_field_update_sets_updated_flag_31() {
+    // `v.#x++` through a bindable prop, inside a handler-declared class body.
+    // Official: flags 31 (IMMUTABLE|RUNES|UPDATED|BINDABLE|LAZY), proxied
+    // thunk, and the setter mutation wrap. Verified against svelte@5.56.3.
+    let src = "<script>let { v = $bindable({}) } = $props();</script>\n<button onfocus={() => { class C { static #x = 0; static m() { v.#x++; } } C.m(); }}>x</button>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("let v = $.prop($$props, 'v', 31, () => $.proxy({}));"),
+        "a private-field-mutated bindable is flags 31 with the proxied thunk:\n{js}"
+    );
+    assert!(
+        js.contains("v(v().#x++, true)"),
+        "the bindable private-field mutation rides the setter mutation wrap:\n{js}"
+    );
+    // NEGATIVE: the un-updated flag value and the non-source read path must be gone.
+    assert!(
+        !js.contains("'v', 27,"),
+        "the private-field write must not drop UPDATED to flags 27:\n{js}"
+    );
+    assert!(
+        !js.contains("$$props.v"),
+        "the mutated bindable must read through the prop source, not $$props.v:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_bindable_private_field_assignment_sets_updated_flag_31() {
+    // The ASSIGNMENT form (`v.#x = 1`) is the same deep mutation of the root
+    // prop as the update form: flags 31 and the wrap `v(v().#x = 1, true)`.
+    // Verified against svelte@5.56.3.
+    let src = "<script>let { v = $bindable({}) } = $props();</script>\n<button onfocus={() => { class C { static #x = 0; static m() { v.#x = 1; } } C.m(); }}>x</button>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("let v = $.prop($$props, 'v', 31, () => $.proxy({}));"),
+        "a private-field-assigned bindable is flags 31 with the proxied thunk:\n{js}"
+    );
+    assert!(
+        js.contains("v(v().#x = 1, true)"),
+        "the bindable private-field assignment rides the setter mutation wrap:\n{js}"
+    );
+    // NEGATIVE: the un-updated flag value must be gone.
+    assert!(
+        !js.contains("'v', 27,"),
+        "the private-field assignment must not drop UPDATED to flags 27:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_plain_default_private_field_update_sets_updated_flag_23() {
+    // `a.#x++` through a PLAIN object-default prop (no `$bindable`): official
+    // sets UPDATED — flags 23 (3 | UPDATED 4 | LAZY 16) — and the write reads
+    // through the getter base (`a().#x++`). Verified against svelte@5.56.3.
+    let src = "<script>let { a = {} } = $props();</script>\n<button onfocus={() => { class C { static #x = 0; static m() { a.#x++; } } C.m(); }}>x</button>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("let a = $.prop($$props, 'a', 23, () => ({}));"),
+        "a private-field update over an object default sets UPDATED (flags 23):\n{js}"
+    );
+    assert!(
+        js.contains("a().#x++"),
+        "the private-field write reads through the getter base:\n{js}"
+    );
+    // NEGATIVE: the un-updated flag value must be gone.
+    assert!(
+        !js.contains("'a', 19,"),
+        "the private-field write must not drop UPDATED to flags 19:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_private_field_write_to_local_root_keeps_prop_read_only_flag_19() {
+    // CONTROL: the SAME class/private-field shape mutating a handler LOCAL
+    // (`o.#x++`) attributes nothing to the prop — `a` stays a read-only lazy
+    // default (flags 19, no UPDATED), the local write stays raw, and the prop
+    // read stays the getter call. Verified against svelte@5.56.3.
+    let src = "<script>let { a = {} } = $props();</script>\n<button onfocus={() => { const o = { n: 0 }; class C { static #x = 0; static m() { o.#x++; } } C.m(); console.log(a); }}>x</button>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("let a = $.prop($$props, 'a', 19, () => ({}));"),
+        "a local-rooted private-field write leaves the prop read-only (flags 19):\n{js}"
+    );
+    assert!(
+        js.contains("o.#x++"),
+        "the local private-field write stays a raw member write:\n{js}"
+    );
+    assert!(
+        js.contains("console.log(a())"),
+        "the prop read stays the getter call:\n{js}"
+    );
+    // NEGATIVE: the local write must not leak UPDATED onto the prop.
+    assert!(
+        !js.contains("'a', 23,"),
+        "a local-rooted private-field write must not set UPDATED on the prop:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_bindable_ts_nonnull_private_field_update_fails_closed() {
+    // CONTROL: `v!.#x++` — a TS non-null wrapper on the private-field target's
+    // OBJECT spine, rooting at a bindable prop. Official svelte@5.56.3
+    // parse-rejects the TS syntax in a plain-`<script>` component's template
+    // (`js_parse_error`); the shared member-write funnel keeps the TS-wrapped
+    // reactive write fail-closed — the private-field arm must not widen it.
+    assert_fail_closed(
+        "<script>let { v = $bindable({}) } = $props();</script>\n<button onfocus={() => { class C { static #x = 0; static m() { v!.#x++; } } C.m(); }}>x</button>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::DestructuringWrite { .. }),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// UPDATED-bit + context-frame parity for writes INSIDE `$props()` DEFAULT
+// expressions — the default expressions are an accepted prop-write surface
+// (the write rewrites through the prop setter/getter), so the `updated` flag
+// axis (bit 4) and the `is_prop_source` flip must observe them exactly like
+// template-expression writes. Every expectation below is oracle-pinned against
+// svelte@5.56.3.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn props_self_assign_default_sets_updated_flag_23() {
+    // `let { a = (a = 1) }` — the self-assignment INSIDE the default rewrites
+    // through the setter (`a(1)`) AND sets UPDATED: flags 23 (3 | 4 | 16), no
+    // context frame (a plain reassign never forces `$.push`). Verified against
+    // svelte@5.56.3.
+    let src = "<script>let { a = (a = 1) } = $props();</script>\n<p>{a}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("let a = $.prop($$props, 'a', 23, () => a(1));"),
+        "a self-assign default sets UPDATED (flags 23) with the setter rewrite:\n{js}"
+    );
+    // NEGATIVE: the write must not be dropped from the updated axis, and a
+    // plain reassign must not grow the context frame.
+    assert!(
+        !js.contains("'a', 19,"),
+        "the self-assign default must not drop UPDATED to flags 19:\n{js}"
+    );
+    assert!(
+        !js.contains("$.push"),
+        "a plain reassign inside a default never forces the context frame:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_self_update_default_sets_updated_flag_23() {
+    // `let { a = (a++, 2) }` — the self-update inside the default rewrites to
+    // `$.update_prop(a)` and sets UPDATED: flags 23. Verified against
+    // svelte@5.56.3.
+    let src = "<script>let { a = (a++, 2) } = $props();</script>\n<p>{a}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("let a = $.prop($$props, 'a', 23, () => ($.update_prop(a), 2));"),
+        "a self-update default sets UPDATED (flags 23) with the update_prop rewrite:\n{js}"
+    );
+    assert!(
+        !js.contains("'a', 19,"),
+        "the self-update default must not drop UPDATED to flags 19:\n{js}"
+    );
+    assert!(
+        !js.contains("$.push"),
+        "a self-update inside a default never forces the context frame:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_default_sibling_member_write_marks_written_sibling_not_writer() {
+    // `let { a = (b.x++), b = { x: 0 } }` — the member write inside `a`'s
+    // default deep-mutates the SIBLING `b`: `b` gains UPDATED (flags 23), the
+    // WRITER `a` stays read-only-lazy (flags 19), and the prop-rooted member
+    // write forces the context frame. Verified against svelte@5.56.3.
+    let src = "<script>let { a = (b.x++), b = { x: 0 } } = $props();</script>\n<p>{a}{b}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("a = $.prop($$props, 'a', 19, () => b().x++)"),
+        "the writer member stays flags 19 with the getter-based member write:\n{js}"
+    );
+    assert!(
+        js.contains("b = $.prop($$props, 'b', 23, () => ({ x: 0 }))"),
+        "the WRITTEN sibling gains UPDATED (flags 23):\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true);"),
+        "a prop-rooted member write inside a default forces the context frame:\n{js}"
+    );
+    // NEGATIVE: the updated mark lands on the written sibling, never the writer.
+    assert!(
+        !js.contains("'b', 19,"),
+        "the written sibling must not drop UPDATED to flags 19:\n{js}"
+    );
+    assert!(
+        !js.contains("'a', 23,"),
+        "the writer must not inherit the sibling's UPDATED mark:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_default_sibling_member_write_marks_sibling_writer_second() {
+    // The SAME sibling member write with the member order swapped
+    // (`let { b = { x: 0 }, a = (b.x++) }`) — the mark is order-independent:
+    // `b` is 23, `a` is 19, frame present. Verified against svelte@5.56.3.
+    let src = "<script>let { b = { x: 0 }, a = (b.x++) } = $props();</script>\n<p>{a}{b}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("b = $.prop($$props, 'b', 23, () => ({ x: 0 }))"),
+        "the written sibling gains UPDATED regardless of member order:\n{js}"
+    );
+    assert!(
+        js.contains("a = $.prop($$props, 'a', 19, () => b().x++)"),
+        "the writer stays flags 19 regardless of member order:\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true);"),
+        "the context frame is order-independent:\n{js}"
+    );
+    assert!(
+        !js.contains("'b', 19,"),
+        "the written sibling must not drop UPDATED to flags 19:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_default_sibling_reassign_marks_sibling_flag_7_without_frame() {
+    // `let { a = (b = 5), b = 0 }` — a PLAIN sibling reassign inside a default
+    // sets UPDATED on `b` (flags 7 — its own default `0` is simple/raw, no
+    // LAZY) and, unlike a member write, never forces the context frame.
+    // Verified against svelte@5.56.3.
+    let src = "<script>let { a = (b = 5), b = 0 } = $props();</script>\n<p>{a}{b}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("a = $.prop($$props, 'a', 19, () => b(5))"),
+        "the writer stays flags 19 with the setter rewrite:\n{js}"
+    );
+    assert!(
+        js.contains("b = $.prop($$props, 'b', 7, 0)"),
+        "the reassigned sibling gains UPDATED (flags 7) with the raw simple default:\n{js}"
+    );
+    assert!(
+        !js.contains("'b', 3,"),
+        "the reassigned sibling must not drop UPDATED to flags 3:\n{js}"
+    );
+    assert!(
+        !js.contains("$.push"),
+        "a plain sibling reassign never forces the context frame:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_default_write_to_no_default_sibling_makes_it_prop_source_flag_7() {
+    // `let { a = (b = 5), b }` — the sibling reassign makes the NO-default `b`
+    // a PROP SOURCE (`is_prop_source` = updated): it emits `$.prop($$props,
+    // 'b', 7)` with NO default argument and its reads flip to the getter (no
+    // direct `$$props.b` read survives). Verified against svelte@5.56.3.
+    let src = "<script>let { a = (b = 5), b } = $props();</script>\n<p>{a}{b}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("b = $.prop($$props, 'b', 7);"),
+        "a no-default sibling written in a default becomes a flag-7 prop source:\n{js}"
+    );
+    assert!(
+        js.contains("a = $.prop($$props, 'a', 19, () => b(5))"),
+        "the writer rewrites through the sibling's setter:\n{js}"
+    );
+    assert!(
+        !js.contains("$$props.b"),
+        "a prop-source read never reads $$props directly:\n{js}"
+    );
+    assert!(
+        !js.contains("$.push"),
+        "a plain sibling reassign never forces the context frame:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_bindable_self_assign_default_sets_updated_flag_31() {
+    // `let { a = $bindable(a = 1) }` — the self-assign inside the bindable
+    // default sets UPDATED on top of BINDABLE | LAZY: flags 31 (3 | 4 | 8 |
+    // 16), with the proxied setter rewrite; `$bindable` itself forces the
+    // context frame. Verified against svelte@5.56.3.
+    let src = "<script>let { a = $bindable(a = 1) } = $props();</script>\n<p>{a}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("let a = $.prop($$props, 'a', 31, () => $.proxy(a(1)));"),
+        "a bindable self-assign default sets UPDATED (flags 31) with the proxied setter:\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true);"),
+        "a bindable prop always forces the context frame:\n{js}"
+    );
+    assert!(
+        !js.contains("'a', 27,"),
+        "the bindable self-assign must not drop UPDATED to flags 27:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_bindable_default_sibling_member_write_marks_sibling_flag_23() {
+    // `let { a = $bindable(b.x++), b = { x: 0 } }` — the member write inside
+    // the BINDABLE default deep-mutates the plain sibling `b`: `b` gains
+    // UPDATED (flags 23) while the bindable writer stays un-updated (flags
+    // 27), frame present. Verified against svelte@5.56.3.
+    let src =
+        "<script>let { a = $bindable(b.x++), b = { x: 0 } } = $props();</script>\n<p>{a}{b}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("a = $.prop($$props, 'a', 27, () => $.proxy(b().x++))"),
+        "the bindable writer stays flags 27 with the proxied getter-based write:\n{js}"
+    );
+    assert!(
+        js.contains("b = $.prop($$props, 'b', 23, () => ({ x: 0 }))"),
+        "the written plain sibling gains UPDATED (flags 23):\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true);"),
+        "the bindable + prop-rooted member write forces the context frame:\n{js}"
+    );
+    assert!(
+        !js.contains("'b', 19,"),
+        "the written sibling must not drop UPDATED to flags 19:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_self_member_write_default_sets_updated_and_context_frame() {
+    // `let { a = a.x++ ?? { x: 0 } }` — the SELF member write inside the
+    // default deep-mutates `a`: UPDATED set (flags 23), the write reads
+    // through the getter base, and the prop-rooted member forces the context
+    // frame (`$.push($$props, true)` / `$.pop()`). Verified against
+    // svelte@5.56.3.
+    let src = "<script>let { a = a.x++ ?? { x: 0 } } = $props();</script>\n<p>{a}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("let a = $.prop($$props, 'a', 23, () => a().x++ ?? { x: 0 });"),
+        "a self member-write default sets UPDATED (flags 23) over the getter base:\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true);"),
+        "a prop-rooted member write inside a default forces the context frame:\n{js}"
+    );
+    assert!(
+        js.contains("$.pop();"),
+        "the context frame closes with $.pop():\n{js}"
+    );
+    assert!(
+        !js.contains("'a', 19,"),
+        "the self member write must not drop UPDATED to flags 19:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_self_member_assign_default_sets_updated_and_context_frame() {
+    // `let { a = (a.x = 1) }` — the self member ASSIGNMENT variant: flags 23,
+    // getter-based member assign, context frame present. Verified against
+    // svelte@5.56.3.
+    let src = "<script>let { a = (a.x = 1) } = $props();</script>\n<p>{a}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("let a = $.prop($$props, 'a', 23, () => a().x = 1);"),
+        "a self member-assign default sets UPDATED (flags 23) over the getter base:\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true);"),
+        "a prop-rooted member assign inside a default forces the context frame:\n{js}"
+    );
+    assert!(
+        !js.contains("'a', 19,"),
+        "the self member assign must not drop UPDATED to flags 19:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_aliased_local_self_assign_default_sets_updated_flag_23() {
+    // `let { a: local = (local = 1) }` — the updated axis keys on the LOCAL
+    // binding name under aliasing: flags 23 on source key 'a' with the aliased
+    // setter rewrite. Verified against svelte@5.56.3.
+    let src = "<script>let { a: local = (local = 1) } = $props();</script>\n<p>{local}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("let local = $.prop($$props, 'a', 23, () => local(1));"),
+        "an aliased self-assign default sets UPDATED (flags 23) on the local:\n{js}"
+    );
+    assert!(
+        !js.contains("'a', 19,"),
+        "the aliased self-assign must not drop UPDATED to flags 19:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_default_shadowed_param_write_keeps_prop_read_only_flag_19() {
+    // CONTROL: `let { a = ((a) => (a = 1))(0) }` — the write inside the
+    // default hits the SHADOWING arrow parameter `a`, never the prop: the prop
+    // stays read-only-lazy (flags 19, no UPDATED). The IIFE's non-identifier
+    // callee root still forces the context frame (official
+    // `is_safe_identifier` returns false for a non-identifier leaf). Verified
+    // against svelte@5.56.3.
+    let src = "<script>let { a = ((a) => (a = 1))(0) } = $props();</script>\n<p>{a}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("'a', 19,"),
+        "a shadowed-param write leaves the prop read-only (flags 19):\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true);"),
+        "the non-identifier IIFE callee root forces the context frame:\n{js}"
+    );
+    // NEGATIVE: the shadowed write must not leak UPDATED onto the prop, and
+    // the param write must stay a raw assignment (no setter call).
+    assert!(
+        !js.contains("'a', 23,"),
+        "a shadowed-param write must not set UPDATED on the prop:\n{js}"
+    );
+    assert!(
+        !js.contains("a(1)"),
+        "the shadowed-param write must not rewrite through the prop setter:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+// ── Destructuring-assignment WRITES inside `$props()` defaults — fail-closed ──
+//
+// PINS A DELIBERATE BOUNDARY: official svelte@5.56.3 ACCEPTS a destructuring-
+// assignment WRITE inside a `$props()` default and lowers the write through
+// the prop SETTER inside an UPDATED (flags 23) IIFE thunk. Verter deliberately
+// fails EVERY destructuring-assignment write closed — the single shared
+// `DestructuringWrite` refusal rail covers all expression surfaces, with no
+// per-surface carve-outs — so this officially-accepted form refuses too (a
+// fail-safe over-refusal, never a wrong emit). These pins keep the exclusion
+// EXPLICIT rather than silent: they are GREEN by design (they pin the current
+// fail-closed behavior), and their discrimination target is a future change
+// that silently starts ACCEPTING and EMITTING destructuring writes without
+// the rail's typed refusal.
+
+#[test]
+fn props_default_object_destructuring_write_fails_closed() {
+    // `let { a = ({ a } = { a: 1 }) } = $props();` — official svelte@5.56.3
+    // ACCEPTS the OBJECT-pattern destructuring-assignment write inside the
+    // default, assigning through the prop setter (oracle-verified emit):
+    //   let a = $.prop($$props, 'a', 23, () => (($$value) => {
+    //       a($$value.a);
+    //       return $$value;
+    //   })({ a: 1 }));
+    // Verter deliberately fails ALL destructuring-assignment writes closed
+    // through the shared `DestructuringWrite` rail, so this officially-
+    // accepted form refuses too — the pin documents the boundary so the
+    // exclusion stays explicit, not silent. It must go RED if destructuring
+    // writes ever start emitting WITHOUT the rail's typed refusal.
+    assert_fail_closed(
+        "<script>let { a = ({ a } = { a: 1 }) } = $props();</script>\n<p>{a}</p>\n",
+        |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::DestructuringWrite { .. }
+            )
+        },
+    );
+}
+
+#[test]
+fn props_default_array_destructuring_write_fails_closed() {
+    // `let { a = ([a] = [1]) } = $props();` — the ARRAY-pattern form. Official
+    // svelte@5.56.3 ACCEPTS it, assigning through the prop setter over the
+    // destructured array (oracle-verified emit):
+    //   let a = $.prop($$props, 'a', 23, () => (($$value) => {
+    //       var $$array = $.to_array($$value, 1);
+    //       a($$array[0]);
+    //       return $$value;
+    //   })([1]));
+    // Verter fails it closed through the same shared `DestructuringWrite`
+    // rail — both pattern kinds sit on one explicit, documented boundary; a
+    // silent acceptance/emission without the typed refusal turns this RED.
+    assert_fail_closed(
+        "<script>let { a = ([a] = [1]) } = $props();</script>\n<p>{a}</p>\n",
+        |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::DestructuringWrite { .. }
+            )
+        },
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Simple/lazy decision over the VISITED initializer — official
+// `is_simple_expression` runs on the `$props()` default AFTER reference
+// rewriting (`initial = context.visit(binding.initial)` in
+// `VariableDeclaration.js`), so a FUNCTION-LITERAL default stays a RAW simple
+// initial (no LAZY bit) even when its body carries rewrites (the outer node
+// kind survives visiting), while a rewritten identifier LEAF (a getter call /
+// `$$props` member / signal read) breaks simplicity. Every expectation below
+// is oracle-pinned against svelte@5.56.3.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn props_arrow_default_with_inner_self_write_stays_raw_simple_flag_7() {
+    // `let { a = () => (a = 1) }` — the arrow's OUTER node kind survives the
+    // inner setter rewrite, so the default stays a RAW simple initial: flags 7
+    // (3 | 4 — the deferred write sets UPDATED, NO LAZY bit) with the single
+    // rewritten arrow. Official prints `() => a(1)`; Verter's source-
+    // preserving carrier keeps the author's body parens (`() => (a(1))`) — a
+    // waived cosmetic difference. Verified against svelte@5.56.3.
+    let src = "<script>let { a = () => (a = 1) } = $props();</script>\n<p>{a}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("let a = $.prop($$props, 'a', 7, () => (a(1)));"),
+        "an arrow default with an inner self-write stays a raw simple initial (flags 7):\n{js}"
+    );
+    // NEGATIVE: no double thunk over the already-function default, no LAZY
+    // bit, and the UPDATED bit is kept.
+    assert!(
+        !js.contains("() => () =>"),
+        "a function-literal default must never ride an extra thunk:\n{js}"
+    );
+    assert!(
+        !js.contains("'a', 23,") && !js.contains("'a', 19,"),
+        "a function-literal default must not set LAZY:\n{js}"
+    );
+    assert!(
+        !js.contains("'a', 3,"),
+        "the inner self-write must keep UPDATED:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_function_expression_default_with_inner_self_read_stays_raw_flag_3() {
+    // `let { a = function () { return a; } }` — a FUNCTION-EXPRESSION default
+    // is simple over the visited node: the inner prop READ rewrites to the
+    // getter inside the body while the initial passes RAW — flags 3 (a read
+    // never sets UPDATED). Verified against svelte@5.56.3.
+    let src = "<script>let { a = function () { return a; } } = $props();</script>\n<p>{a}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("let a = $.prop($$props, 'a', 3, function () { return a(); });"),
+        "a function-expression default stays a raw simple initial (flags 3):\n{js}"
+    );
+    assert!(
+        !js.contains("'a', 19,") && !js.contains("=> function"),
+        "a function-expression default must not ride the LAZY thunk:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_function_expression_default_with_inner_self_write_stays_raw_flag_7() {
+    // `let { a = function () { a = 1; } }` — the deferred write inside the
+    // function body sets UPDATED and rewrites through the setter; the
+    // function-expression initial stays RAW (flags 7, no LAZY). Verified
+    // against svelte@5.56.3.
+    let src = "<script>let { a = function () { a = 1; } } = $props();</script>\n<p>{a}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("let a = $.prop($$props, 'a', 7, function () { a(1); });"),
+        "a written function-expression default stays raw with UPDATED (flags 7):\n{js}"
+    );
+    assert!(
+        !js.contains("'a', 23,") && !js.contains("=> function"),
+        "the function-expression default must not set LAZY / ride a thunk:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_arrow_default_referencing_sibling_stays_raw_with_getter_body() {
+    // `let { a = () => b, b = 0 }` — the sibling GETTER rewrite lands INSIDE
+    // the arrow body; the arrow default stays a RAW simple initial (flags 3,
+    // `() => b()`), never the lazy thunk over it. Verified against
+    // svelte@5.56.3.
+    let src = "<script>let { a = () => b, b = 0 } = $props();</script>\n<p>{a}{b}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("a = $.prop($$props, 'a', 3, () => b())"),
+        "an arrow default over a sibling read stays raw (flags 3):\n{js}"
+    );
+    assert!(
+        js.contains("b = $.prop($$props, 'b', 3, 0)"),
+        "the sibling keeps its simple literal default:\n{js}"
+    );
+    assert!(
+        !js.contains("'a', 19,") && !js.contains("() => () =>"),
+        "the sibling-reading arrow must not set LAZY / double-thunk:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_bindable_arrow_default_with_inner_self_write_stays_raw_flag_15() {
+    // `let { v = $bindable(() => (v = 1)) }` — official `should_proxy` is
+    // FALSE for a function literal, so the bindable arrow default skips the
+    // `$.proxy` wrap AND stays a raw simple initial: flags 15 (3 | 4 | 8 —
+    // UPDATED from the deferred write, BINDABLE, no LAZY), single rewritten
+    // arrow. Verified against svelte@5.56.3.
+    let src = "<script>let { v = $bindable(() => (v = 1)) } = $props();</script>\n<p>{v}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("let v = $.prop($$props, 'v', 15, () => (v(1)));"),
+        "a bindable arrow default with an inner self-write stays raw (flags 15):\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true);"),
+        "a bindable prop always forces the context frame:\n{js}"
+    );
+    assert!(
+        !js.contains("$.proxy"),
+        "a function-valued bindable default never proxies:\n{js}"
+    );
+    assert!(
+        !js.contains("'v', 31,") && !js.contains("() => () =>"),
+        "the bindable arrow must not set LAZY / double-thunk:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_bindable_arrow_default_stays_raw_unproxied_flag_11() {
+    // CONTROL (green pre-fix): `let { v = $bindable(() => 1) }` — official
+    // `should_proxy` is false for a function literal and the arrow is simple:
+    // raw initial, flags 11 (3 | 8), no `$.proxy`, no LAZY. Verified against
+    // svelte@5.56.3.
+    let src = "<script>let { v = $bindable(() => 1) } = $props();</script>\n<p>{v}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("let v = $.prop($$props, 'v', 11, () => 1);"),
+        "a bindable arrow default is raw flags 11:\n{js}"
+    );
+    assert!(
+        !js.contains("$.proxy") && !js.contains("'v', 27,"),
+        "a function-valued bindable default never proxies:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_conditional_default_with_function_part_stays_raw_flag_7() {
+    // `let { a = 1 ? () => (a = 1) : 0 }` — a conditional over SIMPLE parts is
+    // itself simple; the arrow PART is opaque-simple (its inner rewrite never
+    // changes the part's node kind), so the whole initial stays RAW — flags 7.
+    // Verified against svelte@5.56.3.
+    let src = "<script>let { a = 1 ? () => (a = 1) : 0 } = $props();</script>\n<p>{a}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("let a = $.prop($$props, 'a', 7, 1 ? () => (a(1)) : 0);"),
+        "a conditional over simple parts stays a raw initial (flags 7):\n{js}"
+    );
+    assert!(
+        !js.contains("'a', 23,") && !js.contains("7, () => 1 ?"),
+        "the simple conditional must not set LAZY / ride a thunk:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_conditional_default_with_unrewritten_leaf_and_function_part_stays_raw_flag_7() {
+    // `let { a = undefined ? () => (a = 1) : 0 }` — the identifier leaf
+    // `undefined` never rewrites; the arrow part is opaque-simple even though
+    // its body carries the setter rewrite: the visited conditional stays
+    // simple → RAW, flags 7. Verified against svelte@5.56.3.
+    let src =
+        "<script>let { a = undefined ? () => (a = 1) : 0 } = $props();</script>\n<p>{a}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("let a = $.prop($$props, 'a', 7, undefined ? () => (a(1)) : 0);"),
+        "an unrewritten-leaf conditional with a function part stays raw (flags 7):\n{js}"
+    );
+    assert!(
+        !js.contains("'a', 23,"),
+        "the unrewritten-leaf conditional must not set LAZY:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_logical_default_with_function_part_stays_raw_flag_7() {
+    // `let { a = (() => (a = 1)) || null }` — a logical over SIMPLE parts
+    // (arrow, null literal) stays simple over the visited node: RAW initial,
+    // flags 7 (the inner write sets UPDATED). Verified against svelte@5.56.3.
+    let src = "<script>let { a = (() => (a = 1)) || null } = $props();</script>\n<p>{a}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("let a = $.prop($$props, 'a', 7, (() => (a(1))) || null);"),
+        "a logical over simple parts stays a raw initial (flags 7):\n{js}"
+    );
+    assert!(
+        !js.contains("'a', 23,") && !js.contains("() => () =>"),
+        "the simple logical must not set LAZY / double-thunk:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_conditional_default_with_rewritten_leaf_stays_lazy_flag_19() {
+    // CONTROL (green pre-fix): `let { a = b ? 1 : 2, b = 0 }` — the sibling
+    // leaf `b` REWRITES to the getter call, so the visited conditional is NOT
+    // simple: LAZY thunk, flags 19. Discriminates the visited-node decision
+    // from one keyed on the ORIGINAL node kind alone (which would wrongly pass
+    // `b() ? 1 : 2` raw). Verified against svelte@5.56.3.
+    let src = "<script>let { a = b ? 1 : 2, b = 0 } = $props();</script>\n<p>{a}{b}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("a = $.prop($$props, 'a', 19, () => b() ? 1 : 2)"),
+        "a conditional over a rewritten leaf rides the LAZY thunk (flags 19):\n{js}"
+    );
+    assert!(
+        !js.contains("'a', 3,") && !js.contains("'a', 7,"),
+        "a rewritten-leaf conditional must not pass raw:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_conditional_default_with_rewritten_leaf_and_function_part_stays_lazy_flag_19() {
+    // CONTROL (green pre-fix): `let { a = b ? () => 1 : 0, b = 0 }` — a
+    // function PART cannot rescue a conditional whose leaf `b` rewrites: the
+    // visited test is a getter CALL, so the initial rides the LAZY thunk
+    // (flags 19). Verified against svelte@5.56.3.
+    let src = "<script>let { a = b ? () => 1 : 0, b = 0 } = $props();</script>\n<p>{a}{b}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("a = $.prop($$props, 'a', 19, () => b() ? () => 1 : 0)"),
+        "a rewritten-leaf conditional with a function part stays LAZY (flags 19):\n{js}"
+    );
+    assert!(
+        !js.contains("'a', 3,"),
+        "the rewritten-leaf conditional must not pass raw:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_array_default_with_sibling_getter_stays_lazy_flag_19() {
+    // CONTROL (green pre-fix): `let { a = [b], b = 0 }` — an ARRAY default is
+    // structurally non-simple regardless of rewrites: LAZY thunk with the
+    // sibling getter inside (flags 19). Verified against svelte@5.56.3.
+    let src = "<script>let { a = [b], b = 0 } = $props();</script>\n<p>{a}{b}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("a = $.prop($$props, 'a', 19, () => [b()])"),
+        "an array default stays the LAZY thunk (flags 19):\n{js}"
+    );
+    assert!(
+        !js.contains("'a', 3,"),
+        "an array default must never pass raw:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn props_logical_default_with_unrewritten_ident_leaf_stays_raw_flag_3() {
+    // CONTROL (green pre-fix): `let { a = undefined ?? 1 }` — the identifier
+    // leaf `undefined` never rewrites, so the visited logical stays simple:
+    // raw initial, flags 3. Verified against svelte@5.56.3.
+    let src = "<script>let { a = undefined ?? 1 } = $props();</script>\n<p>{a}</p>\n";
+    let js = emit(src, "App.svelte");
+    assert!(
+        js.contains("let a = $.prop($$props, 'a', 3, undefined ?? 1);"),
+        "an unrewritten-ident-leaf logical default stays raw (flags 3):\n{js}"
+    );
+    assert!(
+        !js.contains("'a', 19,"),
+        "an unrewritten-ident-leaf logical must not set LAZY:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
 }

@@ -94,6 +94,12 @@ pub enum BindingRuntimeKind {
     /// it bare, never `$.get`); its template read joins the region's
     /// `$.template_effect` because official cannot static-fold a call-init const.
     EffectTrackingConst,
+    /// A top-level `let`/`const` local initialized by a well-formed `$props.id()`
+    /// call — hoisted to the body-top `const <name> = $.props_id();` and read as a
+    /// PLAIN one-shot runtime value (official reads it bare, never `$.get`); its
+    /// template read joins the region's `$.template_effect` because official
+    /// cannot static-fold a call-init const.
+    PropsIdConst,
 }
 
 /// Whether a binding kind is a reactive SIGNAL (read via `$.get`).
@@ -1072,6 +1078,48 @@ pub(super) fn is_derived_callee(callee: &Expression<'_>) -> bool {
 pub(super) fn is_bindable_call(expr: &Expression<'_>) -> bool {
     matches!(expr, Expression::CallExpression(call)
         if matches!(&call.callee, Expression::Identifier(id) if id.name.as_str() == "$bindable"))
+}
+
+/// Whether a `$bindable` CALL NODE is WELL-FORMED: a NON-optional call with ZERO
+/// or ONE non-spread expression argument (official
+/// `rune_invalid_arguments_length` / `rune_invalid_spread`). The callee identity
+/// is the caller's concern ([`is_bindable_call`] / the scan's callee match).
+#[must_use]
+pub(super) fn bindable_call_is_well_formed(call: &CallExpression<'_>) -> bool {
+    !call.optional
+        && call.arguments.len() <= 1
+        && call.arguments.iter().all(|a| a.as_expression().is_some())
+}
+
+/// Whether a CALLEE expression is the STRICT `$props.id` static member — the bare
+/// `$props` identifier object + the `id` property, NO parens, NO optional
+/// chaining. The SINGLE shared `$props.id`-callee predicate (the scan's
+/// supported-position collection and the item carrier both consult it, so the
+/// accepted spelling set cannot diverge).
+#[must_use]
+pub(super) fn is_props_id_callee(callee: &Expression<'_>) -> bool {
+    matches!(callee, Expression::StaticMemberExpression(m)
+        if !m.optional
+            && m.property.name.as_str() == "id"
+            && matches!(&m.object, Expression::Identifier(id) if id.name.as_str() == "$props"))
+}
+
+/// Whether a `$props.id` CALL NODE is WELL-FORMED: a NON-optional call with ZERO
+/// arguments (official `rune_invalid_arguments`: `$props.id` cannot be called
+/// with arguments; `rune_invalid_spread` covers a spread argument). The callee
+/// identity is the caller's concern ([`is_props_id_callee`]).
+#[must_use]
+pub(super) fn props_id_call_is_well_formed(call: &CallExpression<'_>) -> bool {
+    !call.optional && call.arguments.is_empty()
+}
+
+/// Whether an EXPRESSION is a WELL-FORMED `$props.id()` call: the strict
+/// [`is_props_id_callee`] callee plus the well-formed call node
+/// ([`props_id_call_is_well_formed`]).
+#[must_use]
+pub(super) fn is_well_formed_props_id_call(expr: &Expression<'_>) -> bool {
+    matches!(expr, Expression::CallExpression(call)
+        if is_props_id_callee(&call.callee) && props_id_call_is_well_formed(call))
 }
 
 /// Whether a `$state(…)` initializer's first argument is PROXIABLE — the
@@ -2178,6 +2226,30 @@ impl ExprReferenceCollector {
     fn in_function(&self) -> bool {
         self.fn_depth > 0
     }
+
+    /// Push the DEEP-MUTATION write fact for a member-rooted mutation target:
+    /// `object` (the member target's `.object`) is ROOT-WALKED to its leftmost
+    /// identifier through static / computed / private member links (the shared
+    /// [`super::bind_target::target_expr_root_ident`] discipline the write-accept
+    /// path applies), so a nested member write (`a.b.c++`) attributes the deep
+    /// mutation to `a` exactly like an immediate one (`a.x++`). A chain rooted at
+    /// a non-identifier (`f().x++`) attributes nothing. Computed KEYS inside the
+    /// chain are never roots — the caller's continued walk collects them as READS
+    /// (`a[k].c++` reads `k`).
+    fn push_member_root_deep_mutate(&mut self, object: &Expression<'_>) {
+        let Some(name) = super::bind_target::target_expr_root_ident(object) else {
+            return;
+        };
+        if self.is_local(&name) {
+            return;
+        }
+        let in_function = self.in_function();
+        self.refs.push(ExprReference {
+            name,
+            kind: ExprRefKind::DeepMutate,
+            in_function,
+        });
+    }
 }
 
 impl<'a> Visit<'a> for ExprReferenceCollector {
@@ -2245,35 +2317,20 @@ impl<'a> Visit<'a> for ExprReferenceCollector {
 
     fn visit_assignment_expression(&mut self, it: &AssignmentExpression<'a>) {
         match &it.left {
-            // A member-rooted target (`x.a = …` / `x[i] = …`) is a DEEP MUTATION
-            // of the binding's value.
+            // A member-rooted target (`x.a = …` / `x[i] = …` / nested
+            // `x.a.b = …` / private-field `x.#p = …`) is a DEEP MUTATION of the
+            // ROOT binding's value.
             AssignmentTarget::StaticMemberExpression(m) => {
-                if let Expression::Identifier(obj) = &m.object {
-                    let name = obj.name.as_str();
-                    if !self.is_local(name) {
-                        let in_function = self.in_function();
-                        self.refs.push(ExprReference {
-                            name: name.to_string(),
-                            kind: ExprRefKind::DeepMutate,
-                            in_function,
-                        });
-                    }
-                }
+                self.push_member_root_deep_mutate(&m.object);
                 // Visit any computed sub-expressions / object as reads below.
                 walk::walk_assignment_target(self, &it.left);
             }
             AssignmentTarget::ComputedMemberExpression(m) => {
-                if let Expression::Identifier(obj) = &m.object {
-                    let name = obj.name.as_str();
-                    if !self.is_local(name) {
-                        let in_function = self.in_function();
-                        self.refs.push(ExprReference {
-                            name: name.to_string(),
-                            kind: ExprRefKind::DeepMutate,
-                            in_function,
-                        });
-                    }
-                }
+                self.push_member_root_deep_mutate(&m.object);
+                walk::walk_assignment_target(self, &it.left);
+            }
+            AssignmentTarget::PrivateFieldExpression(m) => {
+                self.push_member_root_deep_mutate(&m.object);
                 walk::walk_assignment_target(self, &it.left);
             }
             other => {
@@ -2317,32 +2374,19 @@ impl<'a> Visit<'a> for ExprReferenceCollector {
 
     fn visit_update_expression(&mut self, it: &UpdateExpression<'a>) {
         match &it.argument {
+            // A member-rooted update (`x.a++` / `x[i]++` / nested `x.a.b++` /
+            // private-field `x.#p++`) is a DEEP MUTATION of the ROOT binding's
+            // value.
             SimpleAssignmentTarget::StaticMemberExpression(m) => {
-                if let Expression::Identifier(obj) = &m.object {
-                    let name = obj.name.as_str();
-                    if !self.is_local(name) {
-                        let in_function = self.in_function();
-                        self.refs.push(ExprReference {
-                            name: name.to_string(),
-                            kind: ExprRefKind::DeepMutate,
-                            in_function,
-                        });
-                    }
-                }
+                self.push_member_root_deep_mutate(&m.object);
                 walk::walk_update_expression(self, it);
             }
             SimpleAssignmentTarget::ComputedMemberExpression(m) => {
-                if let Expression::Identifier(obj) = &m.object {
-                    let name = obj.name.as_str();
-                    if !self.is_local(name) {
-                        let in_function = self.in_function();
-                        self.refs.push(ExprReference {
-                            name: name.to_string(),
-                            kind: ExprRefKind::DeepMutate,
-                            in_function,
-                        });
-                    }
-                }
+                self.push_member_root_deep_mutate(&m.object);
+                walk::walk_update_expression(self, it);
+            }
+            SimpleAssignmentTarget::PrivateFieldExpression(m) => {
+                self.push_member_root_deep_mutate(&m.object);
                 walk::walk_update_expression(self, it);
             }
             // A bare-identifier OR a TS-WRAPPED identifier (`count!++`) update is a

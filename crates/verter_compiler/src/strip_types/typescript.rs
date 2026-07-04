@@ -469,7 +469,15 @@ impl<'a, 'ct> TypeStripper<'a, 'ct> {
                 }
             }
 
-            // Identifiers, literals, this, etc. — nothing to strip
+            // Identifiers, literals, this, etc. — nothing to strip.
+            // TODO(follow-up): there is no `Expression::UpdateExpression` descent
+            // arm, so TS syntax under an update target (`v!.a++`) is never
+            // stripped. The Svelte client rewriter fails every TS-wrapped
+            // prop-rooted write chain closed before emission
+            // (`member_write_lvalue`), so the gap is unreachable on those
+            // surfaces; add the descent (the update argument walks like an
+            // assignment target) when the `lang="ts"` lowering lands. Owned by
+            // the script-completion block (5t).
             _ => {}
         }
     }

@@ -56,11 +56,13 @@ pub(super) enum SupportedInstanceScriptItem {
         /// `null`, …), or `None` for the no-arg `$state()` form.
         init: Option<String>,
     },
-    /// A single no-default `$props()` destructure (`let { a } = $props()` /
-    /// `let { a: b } = $props()`). A no-default destructure emits NO component-body
-    /// declaration (the props are read directly off `$$props`), so this variant
-    /// carries no lowering payload — it is the classification fact that the props
-    /// destructure was accepted (the props reads are projected separately).
+    /// A single `$props()` destructure (`let { a } = $props()` / `let { a: b } =
+    /// $props()` / `let { a = 1, v = $bindable(0) } = $props()`). The destructure
+    /// emits no VERBATIM declaration: a no-default member is read directly off
+    /// `$$props`, and a default-bearing / written member lowers to a `$.prop(...)`
+    /// prop-source declaration projected from the props-shape facts — so this
+    /// variant carries no lowering payload; it is the classification fact that the
+    /// props destructure was accepted.
     PropsDestructure,
     /// `let el;` — a bare (no-init, no-annotation) `let` identifier used SOLELY as a
     /// supported `bind:this` target. Carries the binding name (lowered to `let el;`).
@@ -151,6 +153,29 @@ pub(super) enum SupportedInstanceScriptItem {
         /// for the trailing-comment-free common case.
         tail_trivia: String,
     },
+    /// A top-level `let`/`const` declaration containing EXACTLY ONE declarator
+    /// whose init is a WELL-FORMED `$props.id()` call (zero args, no spread, no
+    /// optional chaining), plus zero or more LITERAL-ONLY sibling declarators.
+    /// Official hoists the id declarator to the FUNCTION-BODY TOP as
+    /// `const <name> = $.props_id();` (the source keyword is NOT preserved — a
+    /// `let` still emits `const`) and splits the siblings into their own
+    /// declaration at the statement's source slot, keyword preserved. The
+    /// lowering emits the hoist through the plan's dedicated body-top slot and
+    /// the siblings as an ordinary body statement. The shared
+    /// [`props_id_decl_shape`] predicate proves the shape; a declaration it
+    /// refuses (a `var`, a TS-annotated declarator, a non-literal sibling init, a
+    /// second `$props.id()` declarator) falls through to the existing fail-closed
+    /// gates.
+    PropsIdDecl {
+        /// The declared id binding name (hoisted as `const <name> = $.props_id();`).
+        name: String,
+        /// Whether the declaration keyword is `const` (else `let`) — preserved on
+        /// the SIBLING declaration only (the hoisted id decl is always `const`).
+        const_decl: bool,
+        /// The literal-only sibling declarators, in source order, as
+        /// `(name, init source text)` rows (`None` init = a bare `let a;`).
+        siblings: Vec<(String, Option<String>)>,
+    },
     /// A top-level `let`/`const` declarator whose init is a WELL-FORMED
     /// assignable effect-family EXPRESSION rune — `$effect.root(fn)` (the result
     /// is the teardown function) or `$effect.tracking()`. Carries the declaration
@@ -193,7 +218,8 @@ pub(super) enum SupportedInstanceScriptItem {
 ///
 /// The seven supported shapes are EXACTLY:
 /// 1. `let name = $state(<primitive literal>);`
-/// 2. a single no-default `$props()` destructure;
+/// 2. a single `$props()` destructure (plain and `$bindable(...)` defaults
+///    included — the member shape is enforced by the props-shape gate);
 /// 3. `let el;` used solely as a supported `bind:this` target;
 /// 4. `let v = <literal-only init>;` used solely as a DOM bind-TARGET lvalue root;
 /// 5. a production-ELIDED `$inspect(...);` / `$inspect(...).with(...);` statement
@@ -537,6 +563,111 @@ fn classify_effect_rune_init(
     })
 }
 
+/// The typed shape facts of a declaration matching the `$props.id()` declarator
+/// carrier — the [`props_id_decl_shape`] output.
+pub(super) struct PropsIdDeclShape {
+    /// The declared id binding name.
+    pub(super) name: String,
+    /// Whether the declaration keyword is `const` (else `let`).
+    pub(super) const_decl: bool,
+    /// The literal-only sibling declarators, in source order, as
+    /// `(name, init span)` rows (`None` = a bare no-init declarator).
+    pub(super) siblings: Vec<(String, Option<oxc_span::Span>)>,
+}
+
+/// The SINGLE declaration-shape predicate of the `$props.id()` declarator
+/// carrier: a `let`/`const` declaration (a `var` keeps the non-`let`
+/// rune-declarator refusal) containing EXACTLY ONE declarator whose init is a
+/// WELL-FORMED `$props.id()` call (the strict shared
+/// [`is_well_formed_props_id_call`](super::expr::is_well_formed_props_id_call)
+/// spelling — no parens, no optional chaining, zero args) on a plain
+/// non-`$`-prefixed identifier binding with no TS annotation; every OTHER
+/// declarator must be a plain non-`$`-prefixed identifier with no TS annotation
+/// and a LITERAL-ONLY init (or no init) — the verbatim-emittable sibling subset.
+/// BOTH the item carrier and the rune-binding fact minting
+/// ([`super::state_scan::collect_rune_bindings`]'s `PropsIdConst` arm) consult
+/// THIS predicate, so the minting can never be broader than the carrier. A
+/// declaration with TWO `$props.id()` declarators returns `None` (the scan owns
+/// the `props_duplicate` refusal).
+pub(super) fn props_id_decl_shape(
+    decl: &oxc_ast::ast::VariableDeclaration<'_>,
+) -> Option<PropsIdDeclShape> {
+    use oxc_span::GetSpan;
+    let const_decl = match decl.kind {
+        VariableDeclarationKind::Const => true,
+        VariableDeclarationKind::Let => false,
+        _ => return None,
+    };
+    let mut name: Option<String> = None;
+    let mut siblings = Vec::new();
+    for d in &decl.declarations {
+        if d.type_annotation.is_some() || d.definite {
+            return None;
+        }
+        let BindingPattern::BindingIdentifier(id) = &d.id else {
+            return None;
+        };
+        if id.name.as_str().starts_with('$') {
+            return None;
+        }
+        if d.init
+            .as_ref()
+            .is_some_and(|init| super::expr::is_well_formed_props_id_call(init))
+        {
+            if name.is_some() {
+                // A second `$props.id()` declarator in ONE declaration — not the
+                // carrier shape (the scan refuses the duplicate use).
+                return None;
+            }
+            name = Some(id.name.to_string());
+            continue;
+        }
+        // A sibling declarator: literal-only init (or none), emitted verbatim.
+        match &d.init {
+            None => siblings.push((id.name.to_string(), None)),
+            Some(init) if init_is_literal_only(init) => {
+                siblings.push((id.name.to_string(), Some(init.span())));
+            }
+            Some(_) => return None,
+        }
+    }
+    Some(PropsIdDeclShape {
+        name: name?,
+        const_decl,
+        siblings,
+    })
+}
+
+/// Classify a `let`/`const` declaration containing a WELL-FORMED `$props.id()`
+/// declarator (plus literal-only siblings) into the
+/// [`SupportedInstanceScriptItem::PropsIdDecl`] carrier, or `None` when the
+/// declaration is not that shape (the caller falls through to the existing
+/// gates). The shape decision is the shared [`props_id_decl_shape`] predicate;
+/// the sibling init spans slice their verbatim source text here.
+fn classify_props_id_decl(
+    decl: &oxc_ast::ast::VariableDeclaration<'_>,
+    instance_source: &str,
+) -> Option<SupportedInstanceScriptItem> {
+    let shape = props_id_decl_shape(decl)?;
+    let siblings = shape
+        .siblings
+        .into_iter()
+        .map(|(name, span)| {
+            let init = span.and_then(|s| {
+                instance_source
+                    .get(s.start as usize..s.end as usize)
+                    .map(str::to_string)
+            });
+            (name, init)
+        })
+        .collect();
+    Some(SupportedInstanceScriptItem::PropsIdDecl {
+        name: shape.name,
+        const_decl: shape.const_decl,
+        siblings,
+    })
+}
+
 /// Classify a top-level `function name(...) {}` declaration into the
 /// [`SupportedInstanceScriptItem::FunctionDecl`] item, or fail closed.
 ///
@@ -594,6 +725,14 @@ fn classify_instance_variable_decl(
     if let Some(item) = classify_effect_rune_init(decl, instance_source, comments) {
         return Ok(item);
     }
+    // (0b) A `$props.id()` declarator (`let`/`const <name> = $props.id();`, plus
+    // literal-only siblings) is the hoisted-id carrier — classified BEFORE the
+    // `let`-only gate because official accepts both keywords (the hoisted decl is
+    // always `const`). A `var` / TS-annotated / non-literal-sibling shape falls
+    // through to the existing fail-closed gates.
+    if let Some(item) = classify_props_id_decl(decl, instance_source) {
+        return Ok(item);
+    }
     // (1) `let` ONLY — a `const` / `var` declaration is a distinct official surface
     // (`var` reads use `$.safe_get`, a read-only `const $state` constant-folds), and
     // a plain `const`/`var` local is not core. Fail closed.
@@ -637,10 +776,12 @@ fn classify_instance_variable_decl(
             )
         }
         BindingPattern::ObjectPattern(_) => {
-            // The ONLY supported destructure is a no-default `$props()` call. The
-            // detailed shape (no defaults / rest / computed / nested / `$bindable`)
-            // is enforced by `props_shape` upstream; here the declarator must be a
-            // `$props()` call destructure.
+            // The ONLY supported destructure is a `$props()` call destructure.
+            // The detailed member shape — plain and `$bindable(...)` defaults
+            // supported through the `$.prop` substrate; rest / computed /
+            // numeric-key / nested patterns refused — is enforced by
+            // `props_shape` upstream; here the declarator must be a `$props()`
+            // call destructure.
             let Some(Expression::CallExpression(call)) = &d.init else {
                 return Err(refuse("object-destructure let"));
             };
