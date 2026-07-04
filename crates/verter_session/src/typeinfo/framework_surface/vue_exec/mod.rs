@@ -354,14 +354,18 @@ impl VerterHost {
         // `structural_transit(Navigate)` so member values stay shallow. The
         // empty-path `Shallow` terminal below synthesises the one-level surface
         // under publication demand.
-        let base = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-            base: dispatch.type_slot_for(Arc::from(canonical_id), Arc::from("default")),
-            args: Arc::from(Vec::new().into_boxed_slice()),
-            context: dispatch.instantiate_context_for(
-                canonical_id,
-                ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
+        let base = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+            crate::semantic_query::InstantiateKey::new(
+                dispatch.type_slot_for(Arc::from(canonical_id), Arc::from("default")),
+                Arc::from(Vec::new().into_boxed_slice()),
+                dispatch.instantiate_context_for(
+                    canonical_id,
+                    ProjectionReductionContext::structural_transit_with_mode(
+                        ProjectionMode::Navigate,
+                    ),
+                ),
             ),
-        }) {
+        )) {
             QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
             QueryResult::Recursive(node) => node,
             QueryResult::Error(_) => return None,

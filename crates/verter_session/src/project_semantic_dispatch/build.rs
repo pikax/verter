@@ -1080,16 +1080,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // structural-transit keeps the instance members shallow (the consumer
         // drives any deeper projection), matching `resolve_vue_public_type`'s
         // own intermediate-hop demand.
-        let instance_read = self.execute_read(SemanticQueryKey::Instantiate {
-            base: self.type_slot_for(Arc::clone(resolved_default_canonical), Arc::from("default")),
-            args: Arc::from(Vec::new().into_boxed_slice()),
-            context: self.instantiate_context_for(
-                resolved_default_canonical,
-                crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-                    ProjectionMode::Navigate,
+        let instance_read = self.execute_read(SemanticQueryKey::Instantiate(
+            crate::semantic_query::InstantiateKey::new(
+                self.type_slot_for(Arc::clone(resolved_default_canonical), Arc::from("default")),
+                Arc::from(Vec::new().into_boxed_slice()),
+                self.instantiate_context_for(
+                    resolved_default_canonical,
+                    crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                        ProjectionMode::Navigate,
+                    ),
                 ),
             ),
-        });
+        ));
         // Two-signal fold: the `.vue` instance synthesis helper returns a
         // bare node, so a genuinely-incomplete nested `Instantiate` (budget /
         // recursion / walker-fatal) folds onto the request's sticky partial
@@ -1209,11 +1211,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     &decl_slot.defining_canonical,
                     ProjectionReductionContext::published(ProjectionMode::Shallow),
                 );
-                self.execute_read(SemanticQueryKey::Instantiate {
-                    base,
-                    args: Arc::clone(type_args),
-                    context: inst_ctx,
-                })
+                self.execute_read(SemanticQueryKey::Instantiate(
+                    crate::semantic_query::InstantiateKey::new(
+                        base,
+                        Arc::clone(type_args),
+                        inst_ctx,
+                    ),
+                ))
             }
             ClassSurfaceSide::Static => {
                 // Static side — the OWNING composer. Own statics + own
@@ -4355,11 +4359,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 ),
                 _ => return current,
             };
-            let read = self.execute_read(SemanticQueryKey::Instantiate {
-                base: slot,
-                args: inst_args,
-                context: self.instantiate_context_for(&owner_canonical, context),
-            });
+            let read = self.execute_read(SemanticQueryKey::Instantiate(
+                crate::semantic_query::InstantiateKey::new(
+                    slot,
+                    inst_args,
+                    self.instantiate_context_for(&owner_canonical, context),
+                ),
+            ));
             // A2 signal-split: fold a genuinely-incomplete carrier resolve.
             crate::request_context::observe_component_meta_read_suppress(&read);
             let next = match read.value {
@@ -5961,11 +5967,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         .type_slot_for(Arc::clone(&base.canonical_id), Arc::clone(&base.decl_name));
                     let inst_ctx = self.instantiate_context_for(&base.canonical_id, context);
                     let args = Arc::clone(args);
-                    let inst_read = self.execute_read(SemanticQueryKey::Instantiate {
-                        base: slot,
-                        args,
-                        context: inst_ctx,
-                    });
+                    let inst_read = self.execute_read(SemanticQueryKey::Instantiate(
+                        crate::semantic_query::InstantiateKey::new(slot, args, inst_ctx),
+                    ));
                     if inst_read.result_is_partial {
                         mapped_is_partial = true;
                     }
@@ -6300,11 +6304,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     self.type_slot_for(Arc::clone(&base.canonical_id), Arc::clone(&base.decl_name));
                 let inst_ctx = self.instantiate_context_for(&base.canonical_id, context);
                 let args = Arc::clone(args);
-                let read = self.execute_read(SemanticQueryKey::Instantiate {
-                    base: slot,
-                    args,
-                    context: inst_ctx,
-                });
+                let read = self.execute_read(SemanticQueryKey::Instantiate(
+                    crate::semantic_query::InstantiateKey::new(slot, args, inst_ctx),
+                ));
                 // Two-signal fold: per-K materialiser returns a bare node, so
                 // fold a genuinely-incomplete nested Instantiate onto the
                 // request's sticky partial flag.
@@ -6438,11 +6440,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     self.type_slot_for(Arc::clone(&base.canonical_id), Arc::clone(&base.decl_name));
                 let inst_ctx = self.instantiate_context_for(&base.canonical_id, context);
                 let args = Arc::clone(args);
-                let read = self.execute_read(SemanticQueryKey::Instantiate {
-                    base: slot,
-                    args,
-                    context: inst_ctx,
-                });
+                let read = self.execute_read(SemanticQueryKey::Instantiate(
+                    crate::semantic_query::InstantiateKey::new(slot, args, inst_ctx),
+                ));
                 // Two-signal fold: fold a genuinely-incomplete nested
                 // Instantiate onto the request's sticky partial flag.
                 crate::request_context::observe_component_meta_read_suppress(&read);
@@ -6517,11 +6517,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     self.type_slot_for(Arc::clone(&base.canonical_id), Arc::clone(&base.decl_name));
                 let inst_ctx = self.instantiate_context_for(&base.canonical_id, context);
                 let args = Arc::clone(args);
-                let read = self.execute_read(SemanticQueryKey::Instantiate {
-                    base: slot,
-                    args,
-                    context: inst_ctx,
-                });
+                let read = self.execute_read(SemanticQueryKey::Instantiate(
+                    crate::semantic_query::InstantiateKey::new(slot, args, inst_ctx),
+                ));
                 // Two-signal fold: fold a genuinely-incomplete nested
                 // Instantiate onto the request's sticky partial flag.
                 crate::request_context::observe_component_meta_read_suppress(&read);
@@ -7105,11 +7103,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             .collect::<Vec<_>>()
                             .into_boxed_slice(),
                     );
-                    let read = self.execute_read(SemanticQueryKey::Instantiate {
-                        base: slot,
-                        args,
-                        context: self.instantiate_context_for(&owner_canonical, operand_context),
-                    });
+                    let read = self.execute_read(SemanticQueryKey::Instantiate(
+                        crate::semantic_query::InstantiateKey::new(
+                            slot,
+                            args,
+                            self.instantiate_context_for(&owner_canonical, operand_context),
+                        ),
+                    ));
                     crate::request_context::observe_component_meta_read_suppress(&read);
                     if let QueryResult::Value(id) = read.value {
                         check_resolved = self.evaluate_deferred_semantic_node(id);
@@ -7575,11 +7575,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 self.type_slot_for(Arc::clone(&base.canonical_id), Arc::clone(&base.decl_name));
             let inst_ctx = self.instantiate_context_for(&base.canonical_id, eval_context);
             let args = Arc::clone(args);
-            let read = self.execute_read(SemanticQueryKey::Instantiate {
-                base: slot,
-                args,
-                context: inst_ctx,
-            });
+            let read = self.execute_read(SemanticQueryKey::Instantiate(
+                crate::semantic_query::InstantiateKey::new(slot, args, inst_ctx),
+            ));
             if let QueryResult::Value(id) = read.value {
                 resolved = id;
             }

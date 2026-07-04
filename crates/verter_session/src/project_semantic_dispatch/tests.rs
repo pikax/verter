@@ -277,22 +277,24 @@ fn instantiate_dedups_by_args() {
     let args_number: Arc<[SemanticNodeId]> = Arc::from(vec![arg_number].into_boxed_slice());
     let args_string: Arc<[SemanticNodeId]> = Arc::from(vec![arg_string].into_boxed_slice());
 
-    let k_number = SemanticQueryKey::Instantiate {
-        base: base.clone(),
-        args: args_number.clone(),
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
+    let k_number = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+        base.clone(),
+        args_number.clone(),
+        crate::semantic_query::InstantiateContext::non_file(
             crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
             Default::default(),
+            crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
         ),
-    };
-    let k_string = SemanticQueryKey::Instantiate {
-        base,
-        args: args_string.clone(),
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
+    ));
+    let k_string = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+        base.clone(),
+        args_string.clone(),
+        crate::semantic_query::InstantiateContext::non_file(
             crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
             Default::default(),
+            crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
         ),
-    };
+    ));
 
     let n1 = dispatch.execute_type_node(k_number.clone());
     let n2 = dispatch.execute_type_node(k_number.clone());
@@ -1023,17 +1025,22 @@ fn indexed_access_intermediate_hop_stays_navigate_only_terminal_expands() {
         QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
         other => panic!("MixedNested must resolve: {other:?}"),
     };
-    let mixed_body = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
-            Arc::from("/w/nested.ts"),
-            Arc::from("MixedNested"),
+    let mixed_body = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+                Arc::from("/w/nested.ts"),
+                Arc::from("MixedNested"),
+            ),
+            Arc::from(Vec::new().into_boxed_slice()),
+            crate::semantic_query::InstantiateContext::non_file(
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Expanded,
+                ),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-        args: Arc::from(Vec::new().into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
-        ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
         QueryResult::Recursive(node) => node,
         other => panic!("MixedNested body must materialise: {other:?}"),
@@ -1177,17 +1184,18 @@ fn raise_path_indexed_access_intermediate_stays_navigate_terminal_expands() {
     // member value is descended (a consequence of whole-surface
     // expansion). Neither node identity depends on a transient lowered
     // shell node-id, so the probe is robust.
-    let mid_expanded = SemanticQueryKey::Instantiate {
-        base: crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+    let mid_expanded = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+        crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from("/w/rnested.ts"),
             Arc::from("Mid"),
         ),
-        args: Arc::from(Vec::new().into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
+        Arc::from(Vec::new().into_boxed_slice()),
+        crate::semantic_query::InstantiateContext::non_file(
             ProjectionReductionContext::published(ProjectionMode::Expanded),
             Default::default(),
+            crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
         ),
-    };
+    ));
     let _ = whole_hash;
     let leaf_resolve = SemanticQueryKey::ResolveDecl(resolve_decl_key("/w/rnested.ts", "Leaf"));
     // Precondition: the raise has not run yet, so neither over-expansion
@@ -1879,14 +1887,15 @@ fn instantiate_is_mode_free_one_entry_across_depth_requests() {
     let string_arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let args: Arc<[SemanticNodeId]> = Arc::from(vec![string_arg].into_boxed_slice());
 
-    let key = SemanticQueryKey::Instantiate {
-        base: base.clone(),
-        args: args.clone(),
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
+    let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+        base.clone(),
+        args.clone(),
+        crate::semantic_query::InstantiateContext::non_file(
             crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
             Default::default(),
+            crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
         ),
-    };
+    ));
     let _ = dispatch.execute_type_node(key.clone());
 
     // Follow-up path projections at two different modes.
@@ -1944,14 +1953,19 @@ fn instantiate_with_concrete_args_emits_substitute_edges() {
     let string_arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let args: Arc<[SemanticNodeId]> = Arc::from(vec![string_arg].into_boxed_slice());
 
-    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base,
-        args: args.clone(),
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
+    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            base.clone(),
+            args.clone(),
+            crate::semantic_query::InstantiateContext::non_file(
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Expanded,
+                ),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
     };
@@ -2023,14 +2037,19 @@ fn shallow_instantiate_does_not_materialise_member_bodies() {
     let string_arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let args: Arc<[SemanticNodeId]> = Arc::from(vec![string_arg].into_boxed_slice());
 
-    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base,
-        args,
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
+    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            base.clone(),
+            args.clone(),
+            crate::semantic_query::InstantiateContext::non_file(
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Expanded,
+                ),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
     };
@@ -2090,25 +2109,35 @@ fn same_args_different_callers_dedup_to_one_entry() {
     let args: Arc<[SemanticNodeId]> = Arc::from(vec![string_arg].into_boxed_slice());
 
     let stats_before = graph.stats_snapshot();
-    let first = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: base.clone(),
-        args: args.clone(),
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
+    let first = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            base.clone(),
+            args.clone(),
+            crate::semantic_query::InstantiateContext::non_file(
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Expanded,
+                ),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
     };
-    let second = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base,
-        args: args.clone(),
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
+    let second = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            base.clone(),
+            args.clone(),
+            crate::semantic_query::InstantiateContext::non_file(
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Expanded,
+                ),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
     };
@@ -2147,14 +2176,19 @@ fn expanded_instantiate_materialises_through_dispatcher_not_private_walker() {
     let base = decl_identity(&host, "/w/types.ts", "Foo");
     let string_arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let args: Arc<[SemanticNodeId]> = Arc::from(vec![string_arg].into_boxed_slice());
-    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base,
-        args,
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
+    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            base.clone(),
+            args.clone(),
+            crate::semantic_query::InstantiateContext::non_file(
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Expanded,
+                ),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
     };
@@ -2211,25 +2245,35 @@ fn distinct_instantiations_share_visited_subpath_lowering_not_full_body() {
     let args_s: Arc<[SemanticNodeId]> = Arc::from(vec![string_arg].into_boxed_slice());
     let args_n: Arc<[SemanticNodeId]> = Arc::from(vec![number_arg].into_boxed_slice());
 
-    let inst_s = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: base.clone(),
-        args: args_s,
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
+    let inst_s = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            base.clone(),
+            args_s,
+            crate::semantic_query::InstantiateContext::non_file(
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Expanded,
+                ),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
     };
-    let inst_n = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base,
-        args: args_n,
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
+    let inst_n = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            base.clone(),
+            args_n,
+            crate::semantic_query::InstantiateContext::non_file(
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Expanded,
+                ),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
     };
@@ -4052,14 +4096,19 @@ fn instantiate_ref_with_args_produces_sub_instantiate_shell_with_edge() {
     let foo = decl_identity(&host, "/w/t.ts", "Foo");
     let string_arg = primitive(&graph, PrimitiveKind::String);
     let args: Arc<[SemanticNodeId]> = Arc::from(vec![string_arg].into_boxed_slice());
-    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: foo,
-        args: Arc::clone(&args),
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
+    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            foo,
+            Arc::clone(&args),
+            crate::semantic_query::InstantiateContext::non_file(
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Expanded,
+                ),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
     };
@@ -4178,14 +4227,19 @@ fn partial_routes_through_mapped_type_dispatch() {
     let partial = utility_identity(&graph, "Partial");
 
     let args: Arc<[SemanticNodeId]> = Arc::from(vec![source].into_boxed_slice());
-    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: partial,
-        args: args.clone(),
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
+    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            partial,
+            args.clone(),
+            crate::semantic_query::InstantiateContext::non_file(
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Expanded,
+                ),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
     };
@@ -4220,14 +4274,19 @@ fn required_routes_through_mapped_type_dispatch() {
     let source = simple_object(&graph, &[("a", num), ("b", num)]);
     let required = utility_identity(&graph, "Required");
 
-    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: required,
-        args: Arc::from(vec![source].into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
+    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            required,
+            Arc::from(vec![source].into_boxed_slice()),
+            crate::semantic_query::InstantiateContext::non_file(
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Expanded,
+                ),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
     };
@@ -4256,14 +4315,19 @@ fn readonly_routes_through_mapped_type_dispatch() {
     let source = simple_object(&graph, &[("m", num), ("n", num)]);
     let ro = utility_identity(&graph, "Readonly");
 
-    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: ro,
-        args: Arc::from(vec![source].into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
+    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            ro,
+            Arc::from(vec![source].into_boxed_slice()),
+            crate::semantic_query::InstantiateContext::non_file(
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Expanded,
+                ),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
     };
@@ -4292,14 +4356,19 @@ fn no_infer_returns_arg_with_alias_resolve_edge() {
     let source = simple_object(&graph, &[("v", num)]);
     let no_infer = utility_identity(&graph, "NoInfer");
 
-    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: no_infer,
-        args: Arc::from(vec![source].into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
+    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            no_infer,
+            Arc::from(vec![source].into_boxed_slice()),
+            crate::semantic_query::InstantiateContext::non_file(
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Expanded,
+                ),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
     };
@@ -4331,14 +4400,19 @@ fn utility_dispatch_emits_instantiate_edge() {
     let source = simple_object(&graph, &[("a", num)]);
     let partial = utility_identity(&graph, "Partial");
 
-    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: partial,
-        args: Arc::from(vec![source].into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
+    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            partial,
+            Arc::from(vec![source].into_boxed_slice()),
+            crate::semantic_query::InstantiateContext::non_file(
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Expanded,
+                ),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
     };
@@ -4371,14 +4445,19 @@ fn utility_substitute_type_param_edges_use_real_parameter_names() {
     // `Partial<T>` → parameter name "T".
     let source = simple_object(&graph, &[("a", num)]);
     let partial = utility_identity(&graph, "Partial");
-    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: partial,
-        args: Arc::from(vec![source].into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
+    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            partial,
+            Arc::from(vec![source].into_boxed_slice()),
+            crate::semantic_query::InstantiateContext::non_file(
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Expanded,
+                ),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
     };
@@ -4401,14 +4480,19 @@ fn utility_substitute_type_param_edges_use_real_parameter_names() {
     let k = primitive(&graph, PrimitiveKind::String);
     let v = primitive(&graph, PrimitiveKind::Number);
     let record = utility_identity(&graph, "Record");
-    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: record,
-        args: Arc::from(vec![k, v].into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
+    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            record,
+            Arc::from(vec![k, v].into_boxed_slice()),
+            crate::semantic_query::InstantiateContext::non_file(
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Expanded,
+                ),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
     };
@@ -4430,14 +4514,19 @@ fn utility_substitute_type_param_edges_use_real_parameter_names() {
 
     // `Pick<T, K>` → parameter names ["T", "K"] in order.
     let pick = utility_identity(&graph, "Pick");
-    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: pick,
-        args: Arc::from(vec![source, k].into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
+    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            pick,
+            Arc::from(vec![source, k].into_boxed_slice()),
+            crate::semantic_query::InstantiateContext::non_file(
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Expanded,
+                ),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
     };
@@ -4464,25 +4553,35 @@ fn same_utility_and_args_dedup_to_one_entry() {
     let partial = utility_identity(&graph, "Partial");
     let args: Arc<[SemanticNodeId]> = Arc::from(vec![source].into_boxed_slice());
 
-    let first = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: partial.clone(),
-        args: args.clone(),
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
+    let first = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            partial.clone(),
+            args.clone(),
+            crate::semantic_query::InstantiateContext::non_file(
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Expanded,
+                ),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
     };
-    let second = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: partial,
-        args,
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
+    let second = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            partial,
+            args.clone(),
+            crate::semantic_query::InstantiateContext::non_file(
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Expanded,
+                ),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
     };
@@ -4503,14 +4602,19 @@ fn string_intrinsics_return_string_primitive() {
     let s = primitive(&graph, PrimitiveKind::String);
     let upper = utility_identity(&graph, "Uppercase");
 
-    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: upper,
-        args: Arc::from(vec![s].into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
+    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            upper,
+            Arc::from(vec![s].into_boxed_slice()),
+            crate::semantic_query::InstantiateContext::non_file(
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Expanded,
+                ),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
     };
@@ -4613,14 +4717,19 @@ fn partial_produces_structurally_equivalent_mapped_shape_to_userland() {
     // same *shape* (Object with same member names, same optional
     // flag set per Partial semantics).
     let partial = utility_identity(&graph, "Partial");
-    let utility_result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: partial,
-        args: Arc::from(vec![source].into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
+    let utility_result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            partial,
+            Arc::from(vec![source].into_boxed_slice()),
+            crate::semantic_query::InstantiateContext::non_file(
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Expanded,
+                ),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected utility Value, got {other:?}"),
     };
@@ -4670,16 +4779,19 @@ fn deferred_utilities_return_opaque_miss_with_instantiate_edge() {
         "InstanceType",
     ] {
         let anchor = utility_identity(&graph, name);
-        let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-            base: anchor,
-            args: Arc::from(vec![source].into_boxed_slice()),
-            context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-                crate::semantic_query::ProjectionReductionContext::published(
-                    ProjectionMode::Expanded,
+        let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+            crate::semantic_query::InstantiateKey::new(
+                anchor,
+                Arc::from(vec![source].into_boxed_slice()),
+                crate::semantic_query::InstantiateContext::non_file(
+                    crate::semantic_query::ProjectionReductionContext::published(
+                        ProjectionMode::Expanded,
+                    ),
+                    Default::default(),
+                    crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
                 ),
-                Default::default(),
             ),
-        }) {
+        )) {
             QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
             other => panic!("expected Value for {name}, got {other:?}"),
         };
@@ -4706,14 +4818,19 @@ fn instantiate_utility(
     args: &[SemanticNodeId],
 ) -> SemanticNodeId {
     let anchor = utility_identity(graph, name);
-    match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: anchor,
-        args: Arc::from(args.to_vec().into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
+    match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            anchor,
+            Arc::from(args.to_vec().into_boxed_slice()),
+            crate::semantic_query::InstantiateContext::non_file(
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Expanded,
+                ),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value for {name}, got {other:?}"),
     }
@@ -7163,16 +7280,19 @@ fn non_nullable_reduces_settled_operands() {
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let anchor = utility_identity(&graph, "NonNullable");
     let run = |arg: SemanticNodeId| -> SemanticNodeId {
-        match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-            base: anchor.clone(),
-            args: Arc::from(vec![arg].into_boxed_slice()),
-            context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-                crate::semantic_query::ProjectionReductionContext::published(
-                    ProjectionMode::Expanded,
+        match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+            crate::semantic_query::InstantiateKey::new(
+                anchor.clone(),
+                Arc::from(vec![arg].into_boxed_slice()),
+                crate::semantic_query::InstantiateContext::non_file(
+                    crate::semantic_query::ProjectionReductionContext::published(
+                        ProjectionMode::Expanded,
+                    ),
+                    Default::default(),
+                    crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
                 ),
-                Default::default(),
             ),
-        }) {
+        )) {
             QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
             other => panic!("expected Value for NonNullable, got {other:?}"),
         }
@@ -7324,14 +7444,19 @@ fn return_type_of_typeof_local_fn_resolves_via_dispatch() {
     // Step 2: `ReturnType<typeof makeLabel>` → dispatches via builtin
     // utility; result is the call signature's return type node.
     let return_type_anchor = utility_identity(&graph, "ReturnType");
-    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: return_type_anchor,
-        args: Arc::from(vec![typeof_id].into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
+    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            return_type_anchor,
+            Arc::from(vec![typeof_id].into_boxed_slice()),
+            crate::semantic_query::InstantiateContext::non_file(
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Expanded,
+                ),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value for ReturnType<typeof>, got {other:?}"),
     };
@@ -7388,14 +7513,19 @@ fn return_type_of_plain_object_stays_opaque() {
     let plain_object = simple_object(&graph, &[("a", num)]);
     let anchor = utility_identity(&graph, "ReturnType");
 
-    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: anchor,
-        args: Arc::from(vec![plain_object].into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
+    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            anchor,
+            Arc::from(vec![plain_object].into_boxed_slice()),
+            crate::semantic_query::InstantiateContext::non_file(
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Expanded,
+                ),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
     };
@@ -7439,14 +7569,19 @@ fn semantic_graph_array_variant_preserves_element_and_readonly() {
 
     let _ = resolve_decl_anchor(&dispatch, "/w/arr.ts", "Mut"); // ensure indexed
     let mut_base = decl_identity(&host, "/w/arr.ts", "Mut");
-    let mut_result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: mut_base,
-        args: Arc::clone(&args),
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
+    let mut_result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            mut_base,
+            Arc::clone(&args),
+            crate::semantic_query::InstantiateContext::non_file(
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Expanded,
+                ),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value for Mut<string>, got {other:?}"),
     };
@@ -7476,14 +7611,19 @@ fn semantic_graph_array_variant_preserves_element_and_readonly() {
 
     let _ = resolve_decl_anchor(&dispatch, "/w/arr.ts", "Ro"); // ensure indexed
     let ro_base = decl_identity(&host, "/w/arr.ts", "Ro");
-    let ro_result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: ro_base,
-        args,
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
+    let ro_result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            ro_base,
+            args.clone(),
+            crate::semantic_query::InstantiateContext::non_file(
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Expanded,
+                ),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value for Ro<string>, got {other:?}"),
     };
@@ -7517,14 +7657,19 @@ fn semantic_graph_tuple_variant_preserves_label_optional_rest_and_readonly() {
 
     let _ = resolve_decl_anchor(&dispatch, "/w/tup.ts", "Tup"); // ensure indexed
     let base = decl_identity(&host, "/w/tup.ts", "Tup");
-    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base,
-        args: Arc::clone(&args),
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
+    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            base.clone(),
+            Arc::clone(&args),
+            crate::semantic_query::InstantiateContext::non_file(
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Expanded,
+                ),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
     };
@@ -7568,14 +7713,19 @@ fn semantic_graph_tuple_variant_preserves_label_optional_rest_and_readonly() {
 
     let _ = resolve_decl_anchor(&dispatch, "/w/tup.ts", "Ro"); // ensure indexed
     let ro_base = decl_identity(&host, "/w/tup.ts", "Ro");
-    let ro_result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: ro_base,
-        args,
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
+    let ro_result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            ro_base,
+            args.clone(),
+            crate::semantic_query::InstantiateContext::non_file(
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Expanded,
+                ),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
     };
@@ -7608,14 +7758,19 @@ fn semantic_graph_template_literal_variant_preserves_quasis_and_expression_refs(
 
     let _ = resolve_decl_anchor(&dispatch, "/w/tl.ts", "Greet"); // ensure indexed
     let base = decl_identity(&host, "/w/tl.ts", "Greet");
-    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base,
-        args,
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
+    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            base.clone(),
+            args.clone(),
+            crate::semantic_query::InstantiateContext::non_file(
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Expanded,
+                ),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
     };
@@ -8060,22 +8215,32 @@ fn typeparam_identity_discriminates_distinct_mapped_binders_in_same_file() {
         "/w/two_mapped.ts",
         "B",
     )));
-    let _ = dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: decl_identity(&host, "/w/two_mapped.ts", "A"),
-        args: Arc::from(vec![num].into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
+    let _ = dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            decl_identity(&host, "/w/two_mapped.ts", "A"),
+            Arc::from(vec![num].into_boxed_slice()),
+            crate::semantic_query::InstantiateContext::non_file(
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Expanded,
+                ),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-    });
-    let _ = dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: decl_identity(&host, "/w/two_mapped.ts", "B"),
-        args: Arc::from(vec![str_].into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
+    ));
+    let _ = dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            decl_identity(&host, "/w/two_mapped.ts", "B"),
+            Arc::from(vec![str_].into_boxed_slice()),
+            crate::semantic_query::InstantiateContext::non_file(
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Expanded,
+                ),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-    });
+    ));
 
     // Walk every interned node id in the arena and collect the
     // identity tuples of TypeParams whose decl_name sentinels
@@ -8137,14 +8302,19 @@ fn substitute_preserves_scope_on_shell_rebuilds() {
         "Wrap",
     )));
     let num = primitive(&graph, PrimitiveKind::Number);
-    let instantiated = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: decl_identity(&host, "/w/scope_pres.ts", "Wrap"),
-        args: Arc::from(vec![num].into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
+    let instantiated = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            decl_identity(&host, "/w/scope_pres.ts", "Wrap"),
+            Arc::from(vec![num].into_boxed_slice()),
+            crate::semantic_query::InstantiateContext::non_file(
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Expanded,
+                ),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected instantiated, got {other:?}"),
     };
@@ -8184,14 +8354,19 @@ fn unresolved_typeparameter_references_alias_by_name_within_same_file() {
         "Has",
     )));
     let num = primitive(&graph, PrimitiveKind::Number);
-    let inst = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: decl_identity(&host, "/w/unresolved.ts", "Has"),
-        args: Arc::from(vec![num].into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
+    let inst = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            decl_identity(&host, "/w/unresolved.ts", "Has"),
+            Arc::from(vec![num].into_boxed_slice()),
+            crate::semantic_query::InstantiateContext::non_file(
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Expanded,
+                ),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("inst: {other:?}"),
     };
@@ -8639,14 +8814,19 @@ fn navigate_lowering_pick_omit_preserve_carrier_other_utilities_unchanged() {
     );
     host.shallow_file_state("/gen.ts")
         .expect("gen.ts must have shallow file state");
-    let wrap_body = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: dispatch.type_slot_for(Arc::from("/gen.ts"), Arc::from("Wrap")),
-        args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Skeleton),
-            Default::default(),
+    let wrap_body = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            dispatch.type_slot_for(Arc::from("/gen.ts"), Arc::from("Wrap")),
+            Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            crate::semantic_query::InstantiateContext::non_file(
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Skeleton,
+                ),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
         other => panic!("skeleton instantiate of Wrap must produce a node, got {other:?}"),
     };
@@ -8813,11 +8993,17 @@ fn open_pick_omit_carrier_stops_in_expanded_and_structural_transit() {
                 Arc::from("__builtin__"),
                 Arc::from(util),
             );
-            let result = dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-                base,
-                args: args.clone(),
-                context: InstantiateContext::non_file_for_tests(reduction, Default::default()),
-            });
+            let result = dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+                crate::semantic_query::InstantiateKey::new(
+                    base.clone(),
+                    args.clone(),
+                    InstantiateContext::non_file(
+                        reduction,
+                        Default::default(),
+                        crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                    ),
+                ),
+            ));
             let value = match result {
                 QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                 other => panic!("{util} under {label}: expected a Value carrier, got {other:?}"),
@@ -9896,17 +10082,20 @@ fn nested_instantiation_wrappers_apply_per_argument_key_domain_rule() {
     // MATERIALISE path-precisely — an Object surface carrying `label` and
     // NOT `items`, and specifically NOT the builtin InstantiationRef
     // carrier the L1 carrier-stop would publish.
-    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: ResolvedDeclSlotIdentity::type_slot_unscoped(
-            Arc::from("__builtin__"),
-            Arc::from("Omit"),
+    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            ResolvedDeclSlotIdentity::type_slot_unscoped(
+                Arc::from("__builtin__"),
+                Arc::from("Omit"),
+            ),
+            Arc::from(vec![wrapper_of_t("AliasOuter"), items_lit].into_boxed_slice()),
+            InstantiateContext::non_file(
+                ProjectionReductionContext::published(ProjectionMode::Expanded),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-        args: Arc::from(vec![wrapper_of_t("AliasOuter"), items_lit].into_boxed_slice()),
-        context: InstantiateContext::non_file_for_tests(
-            ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
-        ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
         other => panic!("Omit<AliasOuter<T>, 'items'> must produce a Value, got {other:?}"),
     };
@@ -10011,17 +10200,20 @@ fn k_only_remapped_mapped_alias_closes_on_prepared_decl_route() {
     // Dispatch-level witness (strict): `Pick<Remapped, 'ona'>` must
     // MATERIALISE the remapped key — an Object surface carrying `ona`,
     // NOT the builtin carrier.
-    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: ResolvedDeclSlotIdentity::type_slot_unscoped(
-            Arc::from("__builtin__"),
-            Arc::from("Pick"),
+    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            ResolvedDeclSlotIdentity::type_slot_unscoped(
+                Arc::from("__builtin__"),
+                Arc::from("Pick"),
+            ),
+            Arc::from(vec![remapped_ref, ona_lit].into_boxed_slice()),
+            InstantiateContext::non_file(
+                ProjectionReductionContext::published(ProjectionMode::Expanded),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-        args: Arc::from(vec![remapped_ref, ona_lit].into_boxed_slice()),
-        context: InstantiateContext::non_file_for_tests(
-            ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
-        ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
         other => panic!("Pick<Remapped, 'ona'> must produce a Value, got {other:?}"),
     };
@@ -10370,21 +10562,23 @@ fn mapped_key_remap_inherits_declaration_site_only_for_identity_produced_names()
             decl_name: Arc::from("Src"),
         },
     });
-    let instantiate =
-        |alias: &str| match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-            base: ResolvedDeclSlotIdentity::type_slot_unscoped(
+    let instantiate = |alias: &str| match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from("/remap_origin.ts"),
                 Arc::from(alias),
             ),
-            args: Arc::from(vec![src_ref].into_boxed_slice()),
-            context: InstantiateContext::non_file_for_tests(
+            Arc::from(vec![src_ref].into_boxed_slice()),
+            InstantiateContext::non_file(
                 ProjectionReductionContext::published(ProjectionMode::Expanded),
                 Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
-        }) {
-            QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
-            other => panic!("{alias}<Src> must materialise, got {other:?}"),
-        };
+        ),
+    )) {
+        QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
+        other => panic!("{alias}<Src> must materialise, got {other:?}"),
+    };
 
     // Harness baseline: the homomorphic (no-`as`) production inherits the
     // source declaration site verbatim.
@@ -10508,17 +10702,20 @@ fn one_to_many_remap_with_non_finite_arm_fails_closed_to_mapped_carrier() {
             decl_name: Arc::from("Src"),
         },
     });
-    let value = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: ResolvedDeclSlotIdentity::type_slot_unscoped(
-            Arc::from("/remap_non_finite.ts"),
-            Arc::from("NonFiniteFanout"),
+    let value = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            ResolvedDeclSlotIdentity::type_slot_unscoped(
+                Arc::from("/remap_non_finite.ts"),
+                Arc::from("NonFiniteFanout"),
+            ),
+            Arc::from(vec![src_ref].into_boxed_slice()),
+            InstantiateContext::non_file(
+                ProjectionReductionContext::published(ProjectionMode::Expanded),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-        args: Arc::from(vec![src_ref].into_boxed_slice()),
-        context: InstantiateContext::non_file_for_tests(
-            ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
-        ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
         other => panic!("NonFiniteFanout<Src> must resolve, got {other:?}"),
     };
@@ -10761,17 +10958,20 @@ fn conditional_key_domain_classifies_only_the_oracle_selected_branch() {
     // Dispatch-level witness (strict): the TRUE-selected source must
     // MATERIALISE — an Object surface carrying `label`, NOT the builtin
     // carrier the L1 carrier-stop would publish, and NOT any other shape.
-    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: ResolvedDeclSlotIdentity::type_slot_unscoped(
-            Arc::from("__builtin__"),
-            Arc::from("Omit"),
+    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            ResolvedDeclSlotIdentity::type_slot_unscoped(
+                Arc::from("__builtin__"),
+                Arc::from("Omit"),
+            ),
+            Arc::from(vec![source_of_t("Source"), x_lit].into_boxed_slice()),
+            InstantiateContext::non_file(
+                ProjectionReductionContext::published(ProjectionMode::Expanded),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-        args: Arc::from(vec![source_of_t("Source"), x_lit].into_boxed_slice()),
-        context: InstantiateContext::non_file_for_tests(
-            ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
-        ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
         other => panic!("Omit<Source<T>, 'x'> must produce a Value, got {other:?}"),
     };
@@ -10933,17 +11133,20 @@ fn value_sensitive_operands_judge_instantiations_by_any_open_argument() {
     // Dispatch-level witness (strict): `Omit<Sel<T>, 'x'>` must publish
     // the SHALLOW builtin carrier, not materialise the open `BigOpen<T>`
     // surface.
-    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: ResolvedDeclSlotIdentity::type_slot_unscoped(
-            Arc::from("__builtin__"),
-            Arc::from("Omit"),
+    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            ResolvedDeclSlotIdentity::type_slot_unscoped(
+                Arc::from("__builtin__"),
+                Arc::from("Omit"),
+            ),
+            Arc::from(vec![inst("Sel", vec![t_param]), lit("x")].into_boxed_slice()),
+            InstantiateContext::non_file(
+                ProjectionReductionContext::published(ProjectionMode::Expanded),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-        args: Arc::from(vec![inst("Sel", vec![t_param]), lit("x")].into_boxed_slice()),
-        context: InstantiateContext::non_file_for_tests(
-            ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
-        ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
         other => panic!("Omit<Sel<T>, 'x'> must produce a Value, got {other:?}"),
     };
@@ -11224,17 +11427,20 @@ fn bare_infer_extends_selects_true_through_the_shared_oracle() {
 
     // Dispatch-level witness (strict): the TRUE-selected source must
     // MATERIALISE `label`, not the builtin carrier.
-    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: ResolvedDeclSlotIdentity::type_slot_unscoped(
-            Arc::from("__builtin__"),
-            Arc::from("Omit"),
+    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            ResolvedDeclSlotIdentity::type_slot_unscoped(
+                Arc::from("__builtin__"),
+                Arc::from("Omit"),
+            ),
+            Arc::from(vec![inst("InferSel"), x_lit].into_boxed_slice()),
+            InstantiateContext::non_file(
+                ProjectionReductionContext::published(ProjectionMode::Expanded),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-        args: Arc::from(vec![inst("InferSel"), x_lit].into_boxed_slice()),
-        context: InstantiateContext::non_file_for_tests(
-            ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
-        ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
         other => panic!("Omit<InferSel<T>, 'x'> must produce a Value, got {other:?}"),
     };
@@ -11526,17 +11732,20 @@ fn defaulted_type_parameters_bind_their_default_identity() {
     );
 
     // Dispatch-level witness (strict): materialise `label`.
-    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: ResolvedDeclSlotIdentity::type_slot_unscoped(
-            Arc::from("__builtin__"),
-            Arc::from("Omit"),
+    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            ResolvedDeclSlotIdentity::type_slot_unscoped(
+                Arc::from("__builtin__"),
+                Arc::from("Omit"),
+            ),
+            Arc::from(vec![inst("SourceDefault", vec![t_param]), lit("x")].into_boxed_slice()),
+            InstantiateContext::non_file(
+                ProjectionReductionContext::published(ProjectionMode::Expanded),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-        args: Arc::from(vec![inst("SourceDefault", vec![t_param]), lit("x")].into_boxed_slice()),
-        context: InstantiateContext::non_file_for_tests(
-            ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
-        ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
         other => panic!("Omit<SourceDefault<T>, 'x'> must produce a Value, got {other:?}"),
     };
@@ -11648,17 +11857,20 @@ fn closed_named_ref_operands_select_through_the_shared_oracle() {
     );
 
     // Dispatch-level witness (strict): materialise `label`.
-    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: ResolvedDeclSlotIdentity::type_slot_unscoped(
-            Arc::from("__builtin__"),
-            Arc::from("Omit"),
+    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            ResolvedDeclSlotIdentity::type_slot_unscoped(
+                Arc::from("__builtin__"),
+                Arc::from("Omit"),
+            ),
+            Arc::from(vec![inst("OuterNamed", vec![t_param]), x_lit].into_boxed_slice()),
+            InstantiateContext::non_file(
+                ProjectionReductionContext::published(ProjectionMode::Expanded),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-        args: Arc::from(vec![inst("OuterNamed", vec![t_param]), x_lit].into_boxed_slice()),
-        context: InstantiateContext::non_file_for_tests(
-            ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
-        ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
         other => panic!("Omit<OuterNamed<T>, 'x'> must produce a Value, got {other:?}"),
     };
@@ -11989,19 +12201,22 @@ fn binding_identity_selects_conditionals_through_concrete_arguments() {
     );
 
     // Dispatch-level witness (strict): materialise `label`.
-    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: ResolvedDeclSlotIdentity::type_slot_unscoped(
-            Arc::from("__builtin__"),
-            Arc::from("Omit"),
+    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            ResolvedDeclSlotIdentity::type_slot_unscoped(
+                Arc::from("__builtin__"),
+                Arc::from("Omit"),
+            ),
+            Arc::from(
+                vec![inst("OuterBind", vec![t_param, lit("x")]), lit("k")].into_boxed_slice(),
+            ),
+            InstantiateContext::non_file(
+                ProjectionReductionContext::published(ProjectionMode::Expanded),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-        args: Arc::from(
-            vec![inst("OuterBind", vec![t_param, lit("x")]), lit("k")].into_boxed_slice(),
-        ),
-        context: InstantiateContext::non_file_for_tests(
-            ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
-        ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
         other => panic!("Omit<OuterBind<T, 'x'>, 'k'> must produce a Value, got {other:?}"),
     };
@@ -12331,17 +12546,20 @@ fn builtin_key_domain_is_judged_per_utility_output_key_semantics() {
     // NOT an L1 predicate concern — tracked as a follow-up
     // (closed-key/open-value mapped enumeration in the shared Shallow
     // surface reader).
-    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: ResolvedDeclSlotIdentity::type_slot_unscoped(
-            Arc::from("__builtin__"),
-            Arc::from("Omit"),
+    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            ResolvedDeclSlotIdentity::type_slot_unscoped(
+                Arc::from("__builtin__"),
+                Arc::from("Omit"),
+            ),
+            Arc::from(vec![record_of_t, lit("x")].into_boxed_slice()),
+            InstantiateContext::non_file(
+                ProjectionReductionContext::published(ProjectionMode::Expanded),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-        args: Arc::from(vec![record_of_t, lit("x")].into_boxed_slice()),
-        context: InstantiateContext::non_file_for_tests(
-            ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
-        ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
         other => panic!("Omit<Record<'a', T>, 'x'> must produce a Value, got {other:?}"),
     };
@@ -12659,14 +12877,17 @@ fn open_pick_carrier_invalidates_when_cross_file_closedness_dependency_flips() {
             Arc::from("__builtin__"),
             Arc::from("Pick"),
         );
-        match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-            base,
-            args: args.clone(),
-            context: InstantiateContext::non_file_for_tests(
-                ProjectionReductionContext::published(ProjectionMode::Expanded),
-                Default::default(),
+        match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+            crate::semantic_query::InstantiateKey::new(
+                base.clone(),
+                args.clone(),
+                InstantiateContext::non_file(
+                    ProjectionReductionContext::published(ProjectionMode::Expanded),
+                    Default::default(),
+                    crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                ),
             ),
-        }) {
+        )) {
             QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
             other => panic!("Pick<Source, 'bar'> must produce a Value, got {other:?}"),
         }
@@ -14402,14 +14623,19 @@ fn execute_pick_dispatches_through_instantiate_pick_builtin() {
     let key_set = dispatch.intern_string_literal_union(&members);
 
     // Direct Instantiate dispatch.
-    let direct = dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: pick_builtin_decl_identity(),
-        args: Arc::from(vec![base, key_set].into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
+    let direct = dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            pick_builtin_decl_identity(),
+            Arc::from(vec![base, key_set].into_boxed_slice()),
+            crate::semantic_query::InstantiateContext::non_file(
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Expanded,
+                ),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-    });
+    ));
     let direct_node = match direct {
         QueryResult::Value(SemanticQueryOutput { value: n, .. }) => n,
         other => panic!("direct Pick Instantiate failed: {other:?}"),
@@ -14462,14 +14688,19 @@ fn execute_omit_dispatches_through_instantiate_omit_builtin() {
     let members = vec![Arc::from("bar")];
     let key_set = dispatch.intern_string_literal_union(&members);
 
-    let direct = dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: omit_builtin_decl_identity(),
-        args: Arc::from(vec![base, key_set].into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
+    let direct = dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            omit_builtin_decl_identity(),
+            Arc::from(vec![base, key_set].into_boxed_slice()),
+            crate::semantic_query::InstantiateContext::non_file(
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Expanded,
+                ),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-    });
+    ));
     let direct_node = match direct {
         QueryResult::Value(SemanticQueryOutput { value: n, .. }) => n,
         other => panic!("direct Omit Instantiate failed: {other:?}"),
@@ -16547,14 +16778,15 @@ fn projection_budget_counts_instantiate_and_conditional() {
     };
     use std::sync::Arc;
 
-    let instantiate = SemanticQueryKey::Instantiate {
-        base: DeclIdentity::synthetic("X").to_type_slot_unscoped(),
-        args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        context: InstantiateContext::non_file_for_tests(
+    let instantiate = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+        DeclIdentity::synthetic("X").to_type_slot_unscoped(),
+        Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        InstantiateContext::non_file(
             ProjectionReductionContext::structural_transit(),
             HashValue::default(),
+            crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
         ),
-    };
+    ));
     assert!(
         super::semantic_query_counts_toward_projection_budget(&instantiate),
         "Instantiate must count toward the request work budget (fail-closed backstop)"
@@ -16639,14 +16871,17 @@ fn identity_utility_mapped_carrier_projects_existing_members_not_miss() {
     // Production route: the relation-engine / deferred-shell evaluation
     // family dispatches builtin utilities under `StructuralTransit`,
     // where `build_mapped_type` carrier-stops before enumeration.
-    let carrier = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: utility_identity(&graph, "Partial"),
-        args: Arc::from(vec![closed].into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-            ProjectionReductionContext::structural_transit(),
-            Default::default(),
+    let carrier = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            utility_identity(&graph, "Partial"),
+            Arc::from(vec![closed].into_boxed_slice()),
+            crate::semantic_query::InstantiateContext::non_file(
+                ProjectionReductionContext::structural_transit(),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("transit Partial<closed> must yield a Value, got {other:?}"),
     };
@@ -16790,14 +17025,17 @@ fn identity_utility_shallow_empty_path_surface_publishes_source_member_values_no
     // Production route: transit Instantiate carrier-stops as the
     // deferred Mapped shell whose Identity mapper carries the lazy
     // placeholder.
-    let carrier = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: utility_identity(&graph, "Partial"),
-        args: Arc::from(vec![closed].into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-            ProjectionReductionContext::structural_transit(),
-            Default::default(),
+    let carrier = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            utility_identity(&graph, "Partial"),
+            Arc::from(vec![closed].into_boxed_slice()),
+            crate::semantic_query::InstantiateContext::non_file(
+                ProjectionReductionContext::structural_transit(),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("transit Partial<closed> must yield a Value, got {other:?}"),
     };
@@ -18349,14 +18587,17 @@ fn resolve_overload_set_settles_decl_ref_carrier_callee() {
     // `resolve_signature_source_carrier` and selects the last visible call
     // signature's return — it must agree with the set's last call-bucket
     // entry, proving the two rails no longer diverge on a carrier callee.
-    let return_type = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: utility_identity(&graph, "ReturnType"),
-        args: Arc::from(vec![callee].into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-            ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
+    let return_type = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            utility_identity(&graph, "ReturnType"),
+            Arc::from(vec![callee].into_boxed_slice()),
+            crate::semantic_query::InstantiateContext::non_file(
+                ProjectionReductionContext::published(ProjectionMode::Expanded),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
         other => panic!("ReturnType over the same carrier callee must resolve, got {other:?}"),
     };
@@ -18494,14 +18735,17 @@ fn unknown_instantiation_substitutes_into_return_carrier_args() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let (func, t_param) = generic_fn_with_carrier_return(&host);
-    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: utility_identity(&graph, "ReturnType"),
-        args: Arc::from(vec![func].into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-            ProjectionReductionContext::structural_transit(),
-            Default::default(),
+    let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            utility_identity(&graph, "ReturnType"),
+            Arc::from(vec![func].into_boxed_slice()),
+            crate::semantic_query::InstantiateContext::non_file(
+                ProjectionReductionContext::structural_transit(),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
         other => {
             panic!("ReturnType over the carrier-returning generic must resolve, got {other:?}")
@@ -19001,14 +19245,17 @@ fn resolve_overload_set_warm_entry_refused_on_type_arg_origin_edit() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     // Materialise the arg type so its node is scoped to ITS OWN file.
-    let arg = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: decl_identity(&host, "/w/overload_arg_origin.ts", "OverloadArg"),
-        args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-            ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
+    let arg = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            decl_identity(&host, "/w/overload_arg_origin.ts", "OverloadArg"),
+            Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            crate::semantic_query::InstantiateContext::non_file(
+                ProjectionReductionContext::published(ProjectionMode::Expanded),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-    }) {
+    )) {
         QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
         other => panic!("arg type must materialise, got {other:?}"),
     };

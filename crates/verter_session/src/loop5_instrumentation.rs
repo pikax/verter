@@ -517,7 +517,7 @@ pub fn kind_index_for_key(key: &crate::semantic_query::SemanticQueryKey) -> usiz
     use crate::semantic_query::SemanticQueryKey;
     match key {
         SemanticQueryKey::ResolveDecl(_) => 0,
-        SemanticQueryKey::Instantiate { .. } => 1,
+        SemanticQueryKey::Instantiate(_) => 1,
         SemanticQueryKey::ProjectMember { .. } => 2,
         SemanticQueryKey::IndexedAccess { .. } => 3,
         SemanticQueryKey::KeyOf { .. } => 4,
@@ -988,16 +988,18 @@ mod tests {
             scope: scope.clone(),
             name: Arc::from("X"),
         });
-        let instantiate = SemanticQueryKey::Instantiate {
-            base: identity.clone(),
-            args: Arc::from(Vec::new().into_boxed_slice()),
-            context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-                crate::semantic_query::ProjectionReductionContext::published(
-                    ProjectionMode::Skeleton,
+        let instantiate =
+            SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+                identity.clone(),
+                Arc::from(Vec::new().into_boxed_slice()),
+                crate::semantic_query::InstantiateContext::non_file(
+                    crate::semantic_query::ProjectionReductionContext::published(
+                        ProjectionMode::Skeleton,
+                    ),
+                    Default::default(),
+                    crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
                 ),
-                Default::default(),
-            ),
-        };
+            ));
         let project_member = SemanticQueryKey::ProjectMember {
             base: dummy_node,
             member: Arc::from("p"),

@@ -162,16 +162,17 @@ fn pathological_self_shadowing_userland_pick() {
             let arg_k = graph.intern_node(crate::semantic_query::SemanticNodeData::Primitive(
                 crate::semantic_query::PrimitiveKind::String,
             ));
-            let key = SemanticQueryKey::Instantiate {
-                base: pick_identity,
-                args: Arc::from(vec![arg_t, arg_k].into_boxed_slice()),
-                context: crate::semantic_query::InstantiateContext::non_file_for_tests(
+            let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+                pick_identity,
+                Arc::from(vec![arg_t, arg_k].into_boxed_slice()),
+                crate::semantic_query::InstantiateContext::non_file(
                     crate::semantic_query::ProjectionReductionContext::published(
                         ProjectionMode::Expanded,
                     ),
                     Default::default(),
+                    crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
                 ),
-            };
+            ));
             dispatch.execute_type_node(key)
         })
         .expect("spawn worker thread for pathological recursion fixture");
@@ -280,18 +281,17 @@ fn pathological_exclude_self_recursive() {
                 Arc::from("/A.vue"),
                 Arc::from("R"),
             );
-            let key = SemanticQueryKey::Instantiate {
-                base: r_identity,
-                args: Arc::from(
-                    Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice(),
-                ),
-                context: crate::semantic_query::InstantiateContext::non_file_for_tests(
+            let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+                r_identity,
+                Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
+                crate::semantic_query::InstantiateContext::non_file(
                     crate::semantic_query::ProjectionReductionContext::published(
                         ProjectionMode::Expanded,
                     ),
                     Default::default(),
+                    crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
                 ),
-            };
+            ));
             dispatch.execute_type_node(key)
         })
         .expect("spawn worker thread for pathological recursion fixture");
@@ -480,18 +480,17 @@ fn pathological_template_literal_key_recursion() {
                 Arc::from("/A.vue"),
                 Arc::from("R"),
             );
-            let key = SemanticQueryKey::Instantiate {
-                base: r_identity,
-                args: Arc::from(
-                    Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice(),
-                ),
-                context: crate::semantic_query::InstantiateContext::non_file_for_tests(
+            let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+                r_identity,
+                Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
+                crate::semantic_query::InstantiateContext::non_file(
                     crate::semantic_query::ProjectionReductionContext::published(
                         ProjectionMode::Expanded,
                     ),
                     Default::default(),
+                    crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
                 ),
-            };
+            ));
             dispatch.execute_type_node(key)
         })
         .expect("spawn worker thread for pathological recursion fixture");

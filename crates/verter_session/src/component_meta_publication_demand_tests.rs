@@ -119,7 +119,7 @@ fn build_host(files: &[(&str, &str)]) -> Arc<VerterHost> {
 /// contexts.
 fn key_is_published_expanded(key: &SemanticQueryKey) -> bool {
     let ctx: Option<ProjectionReductionContext> = match key {
-        SemanticQueryKey::Instantiate { context, .. } => Some(context.projection_reduction()),
+        SemanticQueryKey::Instantiate(k) => Some(k.projection_reduction()),
         SemanticQueryKey::TypeOf { context, .. } => Some(context.projection_reduction),
         SemanticQueryKey::KeyOf { context, .. }
         | SemanticQueryKey::MappedType { context, .. }
@@ -175,11 +175,15 @@ fn published_expanded_classifier_sees_every_context_bearing_family() {
         "a Navigate-demand TypeOf key must NOT be flagged"
     );
 
-    let instantiate = SemanticQueryKey::Instantiate {
-        base: crate::semantic_query::DeclIdentity::synthetic("X").to_type_slot_unscoped(),
-        args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        context: InstantiateContext::non_file_for_tests(published_expanded, Default::default()),
-    };
+    let instantiate = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+        crate::semantic_query::DeclIdentity::synthetic("X").to_type_slot_unscoped(),
+        Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        InstantiateContext::non_file(
+            published_expanded,
+            Default::default(),
+            crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+        ),
+    ));
     assert!(key_is_published_expanded(&instantiate));
     let project_path = SemanticQueryKey::ProjectPath {
         base: SemanticNodeId(0),
@@ -191,7 +195,7 @@ fn published_expanded_classifier_sees_every_context_bearing_family() {
 
 fn cold_instantiate_dispatches(log: &[DispatchEntry]) -> usize {
     log.iter()
-        .filter(|e| !e.hit && matches!(e.key, SemanticQueryKey::Instantiate { .. }))
+        .filter(|e| !e.hit && matches!(e.key, SemanticQueryKey::Instantiate(_)))
         .count()
 }
 
@@ -783,7 +787,7 @@ const ORACLE_SCHEMA_TS: &str = r#"export interface AppConfig {
 /// keys at all, not merely no `Published(Expanded)` ones.
 fn key_is_published_any_mode(key: &SemanticQueryKey) -> bool {
     let ctx: Option<ProjectionReductionContext> = match key {
-        SemanticQueryKey::Instantiate { context, .. } => Some(context.projection_reduction()),
+        SemanticQueryKey::Instantiate(k) => Some(k.projection_reduction()),
         SemanticQueryKey::TypeOf { context, .. } => Some(context.projection_reduction),
         SemanticQueryKey::KeyOf { context, .. }
         | SemanticQueryKey::MappedType { context, .. }
@@ -920,14 +924,15 @@ fn skeleton_instantiate(
     };
     host.shallow_file_state("/workspace/src/sel.ts")
         .expect("sel.ts must have shallow file state");
-    let key = SemanticQueryKey::Instantiate {
-        base: dispatch.type_slot_for(Arc::from("/workspace/src/sel.ts"), Arc::from(decl_name)),
-        args: Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
-        context: InstantiateContext::non_file_for_tests(
+    let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+        dispatch.type_slot_for(Arc::from("/workspace/src/sel.ts"), Arc::from(decl_name)),
+        Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
+        InstantiateContext::non_file(
             ProjectionReductionContext::published(ProjectionMode::Skeleton),
             Default::default(),
+            crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
         ),
-    };
+    ));
     match dispatch.execute_type_node(key) {
         QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
         other => panic!("skeleton instantiate of {decl_name} must produce a node, got {other:?}"),
@@ -1355,17 +1360,20 @@ fn typeof_value_graph_lowers_at_requested_demand() {
     let _guard = RequestContextGuard::install(ctx);
 
     let guard = CaptureToken::start_for_query("typeof_demand_skeleton");
-    let read = dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-        base: dispatch.type_slot_for(
-            Arc::from("/workspace/src/factory.ts"),
-            Arc::from("FactoryBag"),
+    let read = dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(
+            dispatch.type_slot_for(
+                Arc::from("/workspace/src/factory.ts"),
+                Arc::from("FactoryBag"),
+            ),
+            Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
+            InstantiateContext::non_file(
+                ProjectionReductionContext::published(ProjectionMode::Skeleton),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ),
-        args: Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
-        context: InstantiateContext::non_file_for_tests(
-            ProjectionReductionContext::published(ProjectionMode::Skeleton),
-            Default::default(),
-        ),
-    });
+    ));
     let snapshot = guard.end();
 
     let expanded = published_expanded_dispatches(&snapshot.dispatch_log);

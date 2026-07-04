@@ -219,19 +219,20 @@ fn instantiate_same_canonical_edit_rejects_warm_entry() {
     let string_arg = graph.intern_node(SemanticNodeData::Primitive(
         crate::semantic_query::PrimitiveKind::String,
     ));
-    let key = SemanticQueryKey::Instantiate {
-        base: crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+    let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+        crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from(c),
             Arc::from("Box"),
         ),
-        args: Arc::from(vec![string_arg].into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
+        Arc::from(vec![string_arg].into_boxed_slice()),
+        crate::semantic_query::InstantiateContext::non_file(
             crate::semantic_query::ProjectionReductionContext::published(
                 crate::semantic_query::ProjectionMode::Expanded,
             ),
             Default::default(),
+            crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
         ),
-    };
+    ));
 
     let primed = dispatch.execute_type_node(key.clone());
     assert!(
@@ -858,19 +859,20 @@ fn file_derived_object_node(host: &VerterHost, canonical: &str) -> SemanticNodeI
         .ensure_indexed_ready(canonical)
         .map(|indexed| indexed.whole_hash)
         .expect("file IndexedReady materialises");
-    let key = SemanticQueryKey::Instantiate {
-        base: crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+    let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+        crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from(canonical),
             Arc::from("Foo"),
         ),
-        args: Arc::from(Vec::new().into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
+        Arc::from(Vec::new().into_boxed_slice()),
+        crate::semantic_query::InstantiateContext::non_file(
             crate::semantic_query::ProjectionReductionContext::published(
                 crate::semantic_query::ProjectionMode::Expanded,
             ),
             Default::default(),
+            crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
         ),
-    };
+    ));
     match dispatch.execute_type_node(key) {
         crate::semantic_query::QueryResult::Value(crate::semantic_query::SemanticQueryOutput {
             value: node,
@@ -1250,16 +1252,17 @@ fn builtin_utility_instantiation_roots_on_argument_file() {
     // no self-root); the source object node is file-derived.
     let members = vec![Arc::<str>::from("a")];
     let key_set = dispatch.intern_string_literal_union(&members);
-    let key = SemanticQueryKey::Instantiate {
-        base: crate::project_semantic_dispatch::pick_builtin_decl_identity(),
-        args: Arc::from(vec![source, key_set].into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
+    let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+        crate::project_semantic_dispatch::pick_builtin_decl_identity(),
+        Arc::from(vec![source, key_set].into_boxed_slice()),
+        crate::semantic_query::InstantiateContext::non_file(
             crate::semantic_query::ProjectionReductionContext::published(
                 crate::semantic_query::ProjectionMode::Expanded,
             ),
             Default::default(),
+            crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
         ),
-    };
+    ));
 
     let primed = dispatch.execute_type_node(key.clone());
     assert!(
@@ -1362,19 +1365,20 @@ fn non_builtin_instantiation_roots_on_type_argument_file() {
         .expect("declaring file IndexedReady materialises");
     // `Box<Foo>` — the single arg is the file-derived `Foo` Object node
     // scoped to `arg`'s file. The declaring file is `gen`.
-    let key = SemanticQueryKey::Instantiate {
-        base: crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+    let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+        crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from(gen),
             Arc::from("Box"),
         ),
-        args: Arc::from(vec![arg_node].into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
+        Arc::from(vec![arg_node].into_boxed_slice()),
+        crate::semantic_query::InstantiateContext::non_file(
             crate::semantic_query::ProjectionReductionContext::published(
                 crate::semantic_query::ProjectionMode::Expanded,
             ),
             Default::default(),
+            crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
         ),
-    };
+    ));
 
     let primed = dispatch.execute_type_node(key.clone());
     assert!(

@@ -423,11 +423,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             .into_boxed_slice(),
                     );
                     drop(data);
-                    let read = self.execute_read(SemanticQueryKey::Instantiate {
-                        base: slot,
-                        args,
-                        context: self.instantiate_context_for(&owner_canonical, context),
-                    });
+                    let read = self.execute_read(SemanticQueryKey::Instantiate(
+                        crate::semantic_query::InstantiateKey::new(
+                            slot,
+                            args,
+                            self.instantiate_context_for(&owner_canonical, context),
+                        ),
+                    ));
                     crate::request_context::observe_component_meta_read_suppress(&read);
                     crate::meta_resolve::emit_dispatch_dep_signature_facts(
                         self.ctx,
@@ -718,11 +720,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // re-opened nested `keyof` / `Mapped` reification
                     // during relation-engine binding; the caller's
                     // `StructuralTransit` context now carries through.
-                    let read = self.execute_read(SemanticQueryKey::Instantiate {
-                        base,
-                        args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                        context: self.instantiate_context_for(&owner_canonical, reduction_context),
-                    });
+                    let read = self.execute_read(SemanticQueryKey::Instantiate(
+                        crate::semantic_query::InstantiateKey::new(
+                            base,
+                            Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                            self.instantiate_context_for(&owner_canonical, reduction_context),
+                        ),
+                    ));
                     result_is_partial |= read.result_is_partial;
                     crate::request_context::observe_component_meta_read_suppress(&read);
                     match read.value {

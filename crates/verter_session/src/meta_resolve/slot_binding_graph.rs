@@ -528,17 +528,16 @@ pub(crate) fn slot_param_root_is_symbolic_only(
             //   default and wrongly commit to a branch — hence Skeleton, not
             //   ProjectPath, on the carrier.)
             use crate::semantic_query::{ProjectionMode, QueryResult, SemanticQueryKey};
-            let key = SemanticQueryKey::Instantiate {
-                base: dispatch
-                    .type_slot_for(Arc::clone(&base.canonical_id), Arc::clone(&base.decl_name)),
-                args: Arc::clone(args),
-                context: dispatch.instantiate_context_for(
+            let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+                dispatch.type_slot_for(Arc::clone(&base.canonical_id), Arc::clone(&base.decl_name)),
+                Arc::clone(args),
+                dispatch.instantiate_context_for(
                     &base.canonical_id,
                     crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                         ProjectionMode::Skeleton,
                     ),
                 ),
-            };
+            ));
             let read = dispatch.execute_read(key);
             // Dual-emit: legacy accumulator + fact-tracer fan-out.
             crate::request_context::observe_component_meta_read_suppress(&read);

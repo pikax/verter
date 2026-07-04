@@ -403,14 +403,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // identity-carrier audit footprint does NOT reify per-member
         // anchors during binding.
         let transit = crate::semantic_query::ProjectionReductionContext::structural_transit();
-        let unwrapped = match self.execute_type_node(SemanticQueryKey::Instantiate {
-            base: self.type_slot_for(
-                Arc::clone(&identity.canonical_id),
-                Arc::clone(&identity.decl_name),
+        let unwrapped = match self.execute_type_node(SemanticQueryKey::Instantiate(
+            crate::semantic_query::InstantiateKey::new(
+                self.type_slot_for(
+                    Arc::clone(&identity.canonical_id),
+                    Arc::clone(&identity.decl_name),
+                ),
+                args,
+                self.instantiate_context_for(&identity.canonical_id, transit),
             ),
-            context: self.instantiate_context_for(&identity.canonical_id, transit),
-            args,
-        }) {
+        )) {
             QueryResult::Value(SemanticQueryOutput {
                 value: unwrapped, ..
             }) => self.evaluate_deferred_semantic_node_with_context(unwrapped, transit),
@@ -514,14 +516,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let transit = crate::semantic_query::ProjectionReductionContext::structural_transit();
         let unwrapped = match identity {
             None => source,
-            Some(identity) => match self.execute_type_node(SemanticQueryKey::Instantiate {
-                base: self.type_slot_for(
-                    Arc::clone(&identity.canonical_id),
-                    Arc::clone(&identity.decl_name),
+            Some(identity) => match self.execute_type_node(SemanticQueryKey::Instantiate(
+                crate::semantic_query::InstantiateKey::new(
+                    self.type_slot_for(
+                        Arc::clone(&identity.canonical_id),
+                        Arc::clone(&identity.decl_name),
+                    ),
+                    Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                    self.instantiate_context_for(&identity.canonical_id, transit),
                 ),
-                context: self.instantiate_context_for(&identity.canonical_id, transit),
-                args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-            }) {
+            )) {
                 QueryResult::Value(SemanticQueryOutput { value: id, .. }) => {
                     self.evaluate_deferred_semantic_node_with_context(id, transit)
                 }
@@ -587,11 +591,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .into_boxed_slice(),
             );
             if let QueryResult::Value(SemanticQueryOutput { value: id, .. }) = self
-                .execute_type_node(SemanticQueryKey::Instantiate {
-                    base: slot,
-                    args,
-                    context: self.instantiate_context_for(&owner_canonical, oracle_demand),
-                })
+                .execute_type_node(SemanticQueryKey::Instantiate(
+                    crate::semantic_query::InstantiateKey::new(
+                        slot,
+                        args,
+                        self.instantiate_context_for(&owner_canonical, oracle_demand),
+                    ),
+                ))
             {
                 normalised = self.evaluate_deferred_semantic_node_with_context(id, oracle_demand);
             }

@@ -487,14 +487,14 @@ fn warm_parent_memo_rejects_contributor_source_env_move_end_to_end() {
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         let ctx = crate::resolver_core::HostResolverContext::new(&host, view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&ctx);
-        let key = SemanticQueryKey::Instantiate {
-            base: dispatch.type_slot_for(Arc::from("/types.ts"), Arc::from("Foo")),
-            args: Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
-            context: dispatch.instantiate_context_for(
+        let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+            dispatch.type_slot_for(Arc::from("/types.ts"), Arc::from("Foo")),
+            Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
+            dispatch.instantiate_context_for(
                 "/types.ts",
                 ProjectionReductionContext::published(ProjectionMode::Expanded),
             ),
-        };
+        ));
         match dispatch.execute_type_node(key) {
             QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
             other => panic!("the augmented parent demand must produce a value, got {other:?}"),
@@ -705,14 +705,14 @@ fn warm_parent_rejects_contributor_live_parse_env_move_with_unchanged_content() 
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         let ctx = crate::resolver_core::HostResolverContext::new(&host, &baseline_view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&ctx);
-        SemanticQueryKey::Instantiate {
-            base: dispatch.type_slot_for(Arc::from("/types.ts"), Arc::from("Foo")),
-            args: Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
-            context: dispatch.instantiate_context_for(
+        SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+            dispatch.type_slot_for(Arc::from("/types.ts"), Arc::from("Foo")),
+            Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
+            dispatch.instantiate_context_for(
                 "/types.ts",
                 ProjectionReductionContext::published(ProjectionMode::Expanded),
             ),
-        }
+        ))
     };
     let demand = |view: &crate::resolver_store::HostStoreView| {
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());

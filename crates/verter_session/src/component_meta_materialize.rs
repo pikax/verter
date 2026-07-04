@@ -1223,17 +1223,13 @@ pub(crate) fn materialize_component_meta_structure(
                     // Step A: instantiate the actual root with its
                     // original args (preserves generic carriers via
                     // root_args per R8-2).
-                    let body_read = dispatch.execute_read(SemanticQueryKey::Instantiate {
-                        base: dispatch.type_slot_for(
+                    let body_read = dispatch.execute_read(SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(dispatch.type_slot_for(
                             Arc::clone(&extraction.root_identity.canonical_id),
                             Arc::clone(&extraction.root_identity.decl_name),
-                        ),
-                        args: Arc::clone(&extraction.root_args),
-                        context: dispatch.instantiate_context_for(
+                        ), Arc::clone(&extraction.root_args), dispatch.instantiate_context_for(
                             &extraction.root_identity.canonical_id,
                             crate::semantic_query::ProjectionReductionContext::published(crate::semantic_query::ProjectionMode::Navigate),
-                        ),
-                    });
+                        ))));
                     crate::request_context::observe_component_meta_read_suppress(&body_read);
                     crate::component_meta_audit::merge_dep_signature_into_local_fence(
                         &mut local_fence,
@@ -1262,14 +1258,10 @@ pub(crate) fn materialize_component_meta_structure(
                         RouteDemand::Omit(_) => "Omit",
                         _ => unreachable!("matched only Pick/Omit"),
                     };
-                    let projected = dispatch.execute_read(SemanticQueryKey::Instantiate {
-                        base: dispatch.builtin_type_slot(pick_or_omit_name),
-                        args: Arc::from(vec![body_id, keys_node].into_boxed_slice()),
-                        context: dispatch.instantiate_context_for(
+                    let projected = dispatch.execute_read(SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(dispatch.builtin_type_slot(pick_or_omit_name), Arc::from(vec![body_id, keys_node].into_boxed_slice()), dispatch.instantiate_context_for(
                             "__builtin__",
                             crate::semantic_query::ProjectionReductionContext::published(key_for_compute.mode),
-                        ),
-                    });
+                        ))));
                     crate::request_context::observe_component_meta_read_suppress(&projected);
                     crate::component_meta_audit::merge_dep_signature_into_local_fence(
                         &mut local_fence,
@@ -1359,17 +1351,13 @@ pub(crate) fn materialize_component_meta_structure(
                     _ => None,
                 };
             resolve_target.map(|(identity, args)| {
-                let read = dispatch.execute_read(SemanticQueryKey::Instantiate {
-                    base: dispatch.type_slot_for(
+                let read = dispatch.execute_read(SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(dispatch.type_slot_for(
                         Arc::clone(&identity.canonical_id),
                         Arc::clone(&identity.decl_name),
-                    ),
-                    context: dispatch.instantiate_context_for(
+                    ), args, dispatch.instantiate_context_for(
                         &identity.canonical_id,
                         crate::semantic_query::ProjectionReductionContext::published(crate::semantic_query::ProjectionMode::Navigate),
-                    ),
-                    args,
-                });
+                    ))));
                 crate::request_context::observe_component_meta_read_suppress(&read);
                 crate::component_meta_audit::merge_dep_signature_into_local_fence(
                     &mut local_fence,
@@ -2647,16 +2635,19 @@ export type DotPathKeys<T> = T extends object ? GetItemKeys<T> : never
         // Skeleton mode + args=[] preserves T as a TypeParam shell so the
         // Conditional doesn't collapse → recursive GetItemKeys ref is
         // visible to collect_ref_identities_node.
-        let skeleton_read = dispatch.execute_read(SemanticQueryKey::Instantiate {
-            base: dotpathkeys_id.to_type_slot_unscoped(),
-            args: StdArc::from(Vec::new().into_boxed_slice()),
-            context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-                crate::semantic_query::ProjectionReductionContext::published(
-                    ProjectionMode::Skeleton,
+        let skeleton_read = dispatch.execute_read(SemanticQueryKey::Instantiate(
+            crate::semantic_query::InstantiateKey::new(
+                dotpathkeys_id.to_type_slot_unscoped(),
+                StdArc::from(Vec::new().into_boxed_slice()),
+                crate::semantic_query::InstantiateContext::non_file(
+                    crate::semantic_query::ProjectionReductionContext::published(
+                        ProjectionMode::Skeleton,
+                    ),
+                    Default::default(),
+                    crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
                 ),
-                Default::default(),
             ),
-        });
+        ));
         let body_skeleton = match skeleton_read.value {
             QueryResult::Value(id) => id,
             other => panic!("Skeleton should return Value; got {other:?}"),
@@ -2703,29 +2694,35 @@ export type DotPathKeys<T> = T extends object ? GetItemKeys<T> : never
         let id = a0_make_decl_identity(host, "/types.ts", "Identity");
 
         // Navigate + args=[] still executes without panic (continue-skip path).
-        let navigate_read = dispatch.execute_read(SemanticQueryKey::Instantiate {
-            base: id.to_type_slot_unscoped(),
-            args: StdArc::from(Vec::new().into_boxed_slice()),
-            context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-                crate::semantic_query::ProjectionReductionContext::published(
-                    ProjectionMode::Navigate,
+        let navigate_read = dispatch.execute_read(SemanticQueryKey::Instantiate(
+            crate::semantic_query::InstantiateKey::new(
+                id.to_type_slot_unscoped(),
+                StdArc::from(Vec::new().into_boxed_slice()),
+                crate::semantic_query::InstantiateContext::non_file(
+                    crate::semantic_query::ProjectionReductionContext::published(
+                        ProjectionMode::Navigate,
+                    ),
+                    Default::default(),
+                    crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
                 ),
-                Default::default(),
             ),
-        });
+        ));
         let _ = navigate_read; // confirms execution
 
         // Expanded + args=[] still executes without panic (continue-skip path).
-        let expanded_read = dispatch.execute_read(SemanticQueryKey::Instantiate {
-            base: id.to_type_slot_unscoped(),
-            args: StdArc::from(Vec::new().into_boxed_slice()),
-            context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-                crate::semantic_query::ProjectionReductionContext::published(
-                    ProjectionMode::Expanded,
+        let expanded_read = dispatch.execute_read(SemanticQueryKey::Instantiate(
+            crate::semantic_query::InstantiateKey::new(
+                id.to_type_slot_unscoped(),
+                StdArc::from(Vec::new().into_boxed_slice()),
+                crate::semantic_query::InstantiateContext::non_file(
+                    crate::semantic_query::ProjectionReductionContext::published(
+                        ProjectionMode::Expanded,
+                    ),
+                    Default::default(),
+                    crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
                 ),
-                Default::default(),
             ),
-        });
+        ));
         let _ = expanded_read; // confirms execution
     }
 
@@ -2787,16 +2784,19 @@ export type GetItemKeys<I, T extends NestedItem<I> = NestedItem<I>> =
         // This is the discriminating mechanical proof that Skeleton-mode
         // lowering preserves the Conditional branches.
         let dotpathkeys_id = a0_make_decl_identity(host, "/u.ts", "DotPathKeys");
-        let skeleton_read = dispatch.execute_read(SemanticQueryKey::Instantiate {
-            base: dotpathkeys_id.to_type_slot_unscoped(),
-            args: StdArc::from(Vec::new().into_boxed_slice()),
-            context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-                crate::semantic_query::ProjectionReductionContext::published(
-                    ProjectionMode::Skeleton,
+        let skeleton_read = dispatch.execute_read(SemanticQueryKey::Instantiate(
+            crate::semantic_query::InstantiateKey::new(
+                dotpathkeys_id.to_type_slot_unscoped(),
+                StdArc::from(Vec::new().into_boxed_slice()),
+                crate::semantic_query::InstantiateContext::non_file(
+                    crate::semantic_query::ProjectionReductionContext::published(
+                        ProjectionMode::Skeleton,
+                    ),
+                    Default::default(),
+                    crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
                 ),
-                Default::default(),
             ),
-        });
+        ));
         let body_skeleton = match skeleton_read.value {
             QueryResult::Value(id) => id,
             other => panic!("Skeleton should return Value; got {other:?}"),

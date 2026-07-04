@@ -180,11 +180,13 @@ fn realize_callable_member_inner(
             drop(data);
             let body_context =
                 ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate);
-            let read = dispatch.execute_read(SemanticQueryKey::Instantiate {
-                base: slot,
-                args,
-                context: dispatch.instantiate_context_for(&owner_canonical, body_context),
-            });
+            let read = dispatch.execute_read(SemanticQueryKey::Instantiate(
+                crate::semantic_query::InstantiateKey::new(
+                    slot,
+                    args,
+                    dispatch.instantiate_context_for(&owner_canonical, body_context),
+                ),
+            ));
             crate::request_context::observe_component_meta_read_suppress(&read);
             emit_dispatch_dep_signature_facts(dispatch.ctx, &read.dep_signature);
             let body = match read.value {
@@ -236,18 +238,20 @@ fn realize_callable_member_inner(
             let slot = dispatch.type_slot_for(Arc::clone(canonical_id), Arc::clone(name));
             let owner_canonical = Arc::clone(canonical_id);
             drop(data);
-            let read = dispatch.execute_read(SemanticQueryKey::Instantiate {
-                base: slot,
-                args: Arc::from(
-                    Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice(),
-                ),
-                context: dispatch.instantiate_context_for(
-                    &owner_canonical,
-                    ProjectionReductionContext::structural_transit_with_mode(
-                        ProjectionMode::Navigate,
+            let read = dispatch.execute_read(SemanticQueryKey::Instantiate(
+                crate::semantic_query::InstantiateKey::new(
+                    slot,
+                    Arc::from(
+                        Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice(),
+                    ),
+                    dispatch.instantiate_context_for(
+                        &owner_canonical,
+                        ProjectionReductionContext::structural_transit_with_mode(
+                            ProjectionMode::Navigate,
+                        ),
                     ),
                 ),
-            });
+            ));
             crate::request_context::observe_component_meta_read_suppress(&read);
             emit_dispatch_dep_signature_facts(dispatch.ctx, &read.dep_signature);
             let body = match read.value {

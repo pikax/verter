@@ -2102,11 +2102,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     );
                     drop(data);
                     let expanded =
-                        match self.execute_read_folding_partial(SemanticQueryKey::Instantiate {
-                            base,
-                            args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                            context: inst_ctx,
-                        }) {
+                        match self.execute_read_folding_partial(SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(base, Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()), inst_ctx))) {
                             QueryResult::Value(id) => id,
                             QueryResult::Recursive(id) => {
                                 results.push(id);
@@ -2219,11 +2215,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         .dispatch
                         .instantiate_context_for(&identity.defining_canonical, unwrap_context);
                     let resolved =
-                        match self.execute_read_folding_partial(SemanticQueryKey::Instantiate {
-                            context: inst_context,
-                            base: identity,
-                            args: args_clone,
-                        }) {
+                        match self.execute_read_folding_partial(SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(identity, args_clone, inst_context))) {
                             QueryResult::Value(id) => id,
                             QueryResult::Recursive(id) => {
                                 results.push(id);
@@ -2457,11 +2449,9 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     &identity.canonical_id,
                     crate::semantic_query::ProjectionReductionContext::published(carrier_mode),
                 );
-                match self.execute_read_folding_partial(SemanticQueryKey::Instantiate {
-                    base: inst_base,
-                    args: args_clone,
-                    context: inst_context,
-                }) {
+                match self.execute_read_folding_partial(SemanticQueryKey::Instantiate(
+                    crate::semantic_query::InstantiateKey::new(inst_base, args_clone, inst_context),
+                )) {
                     QueryResult::Value(id) => id,
                     QueryResult::Recursive(_) | QueryResult::Error(_) => node,
                 }
@@ -2625,22 +2615,23 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     crate::semantic_query::ProjectionReductionContext::published(self.mode())
                         .with_provenance(self.provenance()),
                 );
-                let expanded =
-                    match self.execute_read_folding_partial(SemanticQueryKey::Instantiate {
-                        context: inst_context,
-                        base: identity,
-                        args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                    }) {
-                        QueryResult::Value(id) => id,
-                        QueryResult::Recursive(id) => {
-                            results.push(id);
-                            return;
-                        }
-                        QueryResult::Error(_) => {
-                            results.push(node);
-                            return;
-                        }
-                    };
+                let expanded = match self.execute_read_folding_partial(
+                    SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+                        identity,
+                        Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                        inst_context,
+                    )),
+                ) {
+                    QueryResult::Value(id) => id,
+                    QueryResult::Recursive(id) => {
+                        results.push(id);
+                        return;
+                    }
+                    QueryResult::Error(_) => {
+                        results.push(node);
+                        return;
+                    }
+                };
                 if expanded == node {
                     results.push(node);
                     return;
@@ -3259,20 +3250,16 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 // argument substituted INTO `Foo`'s body and is lowered
                 // structurally at the `Ref` arm, so only `Foo`'s own
                 // members carry the bit.
-                match self.dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-                    base: self.dispatch.type_slot_for(
+                match self.dispatch.execute_type_node(SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(self.dispatch.type_slot_for(
                         Arc::clone(&identity.canonical_id),
                         Arc::clone(&identity.decl_name),
-                    ),
-                    args: args_clone,
-                    context: self.dispatch.instantiate_context_for(
+                    ), args_clone, self.dispatch.instantiate_context_for(
                         &identity.canonical_id,
                         crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                             ProjectionMode::Navigate,
                         )
                         .with_provenance(self.effective_provenance(provenance_override)),
-                    ),
-                }) {
+                    )))) {
                     QueryResult::Value(SemanticQueryOutput { value: body, .. }) => {
                         // Continue the walk into the materialised body. If the
                         // instantiated declaration is an interface/class, its
@@ -3354,20 +3341,16 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 // `Some(Structural)` and `effective_provenance` downgrades the
                 // unwrap so `Base`'s own-body members are NOT mis-stamped as
                 // the macro type argument's own body.
-                match self.dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-                    base: self.dispatch.type_slot_for(
+                match self.dispatch.execute_type_node(SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(self.dispatch.type_slot_for(
                         Arc::clone(&identity.canonical_id),
                         Arc::clone(&identity.decl_name),
-                    ),
-                    args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                    context: self.dispatch.instantiate_context_for(
+                    ), Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()), self.dispatch.instantiate_context_for(
                         &identity.canonical_id,
                         crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                             ProjectionMode::Navigate,
                         )
                         .with_provenance(self.effective_provenance(provenance_override)),
-                    ),
-                }) {
+                    )))) {
                     QueryResult::Value(SemanticQueryOutput { value: body, .. }) => {
                         // Interface/class declaration body → heritage overlay
                         // (its reference arms are `extends`/`implements`). The

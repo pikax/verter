@@ -287,39 +287,23 @@ impl KeyFamily {
 
         match (self, key) {
             (KeyFamily::AnyDispatch, _) => true,
-            (
-                KeyFamily::InstantiateForResolvedName(name),
-                SemanticQueryKey::Instantiate { base, .. },
-            ) => base.merged_symbol_name.as_ref() == *name,
-            (
-                KeyFamily::ShallowForResolvedName(name),
-                SemanticQueryKey::Instantiate { base, context, .. },
-            ) => {
-                base.merged_symbol_name.as_ref() == *name
-                    && matches!(
-                        context.mode(),
-                        crate::semantic_query::ProjectionMode::Shallow
-                    )
+            (KeyFamily::InstantiateForResolvedName(name), SemanticQueryKey::Instantiate(k)) => {
+                k.base().merged_symbol_name.as_ref() == *name
             }
-            (
-                KeyFamily::SkeletonForResolvedName(name),
-                SemanticQueryKey::Instantiate { base, context, .. },
-            ) => {
-                base.merged_symbol_name.as_ref() == *name
-                    && matches!(
-                        context.mode(),
-                        crate::semantic_query::ProjectionMode::Skeleton
-                    )
+            (KeyFamily::ShallowForResolvedName(name), SemanticQueryKey::Instantiate(k)) => {
+                k.base().merged_symbol_name.as_ref() == *name
+                    && matches!(k.mode(), crate::semantic_query::ProjectionMode::Shallow)
+            }
+            (KeyFamily::SkeletonForResolvedName(name), SemanticQueryKey::Instantiate(k)) => {
+                k.base().merged_symbol_name.as_ref() == *name
+                    && matches!(k.mode(), crate::semantic_query::ProjectionMode::Skeleton)
             }
             (
                 KeyFamily::InstantiateExpandedForResolvedName(name),
-                SemanticQueryKey::Instantiate { base, context, .. },
+                SemanticQueryKey::Instantiate(k),
             ) => {
-                base.merged_symbol_name.as_ref() == *name
-                    && matches!(
-                        context.mode(),
-                        crate::semantic_query::ProjectionMode::Expanded
-                    )
+                k.base().merged_symbol_name.as_ref() == *name
+                    && matches!(k.mode(), crate::semantic_query::ProjectionMode::Expanded)
             }
             (
                 KeyFamily::NavigateForAlias(_root_name, hops),

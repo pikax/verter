@@ -994,14 +994,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if !routes_through_instantiate {
                     return anchor;
                 }
-                match self.execute_type_node(SemanticQueryKey::Instantiate {
-                    base: self.type_slot_for(
-                        Arc::clone(&identity.canonical_id),
-                        Arc::clone(&identity.decl_name),
+                match self.execute_type_node(SemanticQueryKey::Instantiate(
+                    crate::semantic_query::InstantiateKey::new(
+                        self.type_slot_for(
+                            Arc::clone(&identity.canonical_id),
+                            Arc::clone(&identity.decl_name),
+                        ),
+                        Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                        self.instantiate_context_for(&identity.canonical_id, ctx),
                     ),
-                    args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                    context: self.instantiate_context_for(&identity.canonical_id, ctx),
-                }) {
+                )) {
                     QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                     _ => self.opaque(QueryError::Miss),
                 }
@@ -1083,14 +1085,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     if build_carrier {
                         return rebuild(projected_args);
                     }
-                    return match self.execute_type_node(SemanticQueryKey::Instantiate {
-                        base: self.type_slot_for(
-                            Arc::clone(&base.canonical_id),
-                            Arc::clone(&base.decl_name),
+                    return match self.execute_type_node(SemanticQueryKey::Instantiate(
+                        crate::semantic_query::InstantiateKey::new(
+                            self.type_slot_for(
+                                Arc::clone(&base.canonical_id),
+                                Arc::clone(&base.decl_name),
+                            ),
+                            projected_args,
+                            self.instantiate_context_for(&base.canonical_id, ctx),
                         ),
-                        args: projected_args,
-                        context: self.instantiate_context_for(&base.canonical_id, ctx),
-                    }) {
+                    )) {
                         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                         _ => self.opaque(QueryError::Miss),
                     };
@@ -1101,12 +1105,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 ) {
                     return rebuild(projected_args);
                 }
-                match self.execute_type_node(SemanticQueryKey::Instantiate {
-                    base: self
-                        .type_slot_for(Arc::clone(&base.canonical_id), Arc::clone(&base.decl_name)),
-                    args: projected_args,
-                    context: self.instantiate_context_for(&base.canonical_id, ctx),
-                }) {
+                match self.execute_type_node(SemanticQueryKey::Instantiate(
+                    crate::semantic_query::InstantiateKey::new(
+                        self.type_slot_for(
+                            Arc::clone(&base.canonical_id),
+                            Arc::clone(&base.decl_name),
+                        ),
+                        projected_args,
+                        self.instantiate_context_for(&base.canonical_id, ctx),
+                    ),
+                )) {
                     QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                     _ => self.opaque(QueryError::Miss),
                 }

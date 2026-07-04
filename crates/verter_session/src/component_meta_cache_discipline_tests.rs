@@ -308,14 +308,14 @@ fn cache_discipline_execute_pick_repeated_keys_warm() {
     let key_set = host
         .semantic_dispatch()
         .intern_string_literal_union(&members);
-    let probe_key = SemanticQueryKey::Instantiate {
-        base: host.semantic_dispatch().builtin_type_slot("Pick"),
-        args: Arc::from(vec![base, key_set].into_boxed_slice()),
-        context: host.semantic_dispatch().instantiate_context_for(
+    let probe_key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+        host.semantic_dispatch().builtin_type_slot("Pick"),
+        Arc::from(vec![base, key_set].into_boxed_slice()),
+        host.semantic_dispatch().instantiate_context_for(
             "__builtin__",
             crate::semantic_query::ProjectionReductionContext::published(mode),
         ),
-    };
+    ));
 
     let counter = DispatchCounter;
     let baseline_cold = counter.family_cold(&probe_key);
@@ -345,14 +345,15 @@ fn cache_discipline_execute_pick_repeated_keys_warm() {
     let unrelated_key_set = host
         .semantic_dispatch()
         .intern_string_literal_union(&unrelated_members);
-    let unrelated_probe = SemanticQueryKey::Instantiate {
-        base: host.semantic_dispatch().builtin_type_slot("Pick"),
-        args: Arc::from(vec![base, unrelated_key_set].into_boxed_slice()),
-        context: host.semantic_dispatch().instantiate_context_for(
-            "__builtin__",
-            crate::semantic_query::ProjectionReductionContext::published(mode),
-        ),
-    };
+    let unrelated_probe =
+        SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+            host.semantic_dispatch().builtin_type_slot("Pick"),
+            Arc::from(vec![base, unrelated_key_set].into_boxed_slice()),
+            host.semantic_dispatch().instantiate_context_for(
+                "__builtin__",
+                crate::semantic_query::ProjectionReductionContext::published(mode),
+            ),
+        ));
     let unrelated_baseline_cold = counter.family_cold(&unrelated_probe);
     let _ = dispatch.execute_pick(base, &unrelated_members, mode);
     let unrelated_cold = counter.family_cold(&unrelated_probe) - unrelated_baseline_cold;
@@ -375,14 +376,14 @@ fn cache_discipline_execute_omit_repeated_keys_warm() {
     let key_set = host
         .semantic_dispatch()
         .intern_string_literal_union(&members);
-    let probe_key = SemanticQueryKey::Instantiate {
-        base: host.semantic_dispatch().builtin_type_slot("Omit"),
-        args: Arc::from(vec![base, key_set].into_boxed_slice()),
-        context: host.semantic_dispatch().instantiate_context_for(
+    let probe_key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+        host.semantic_dispatch().builtin_type_slot("Omit"),
+        Arc::from(vec![base, key_set].into_boxed_slice()),
+        host.semantic_dispatch().instantiate_context_for(
             "__builtin__",
             crate::semantic_query::ProjectionReductionContext::published(mode),
         ),
-    };
+    ));
 
     let counter = DispatchCounter;
     let baseline_cold = counter.family_cold(&probe_key);
@@ -411,14 +412,15 @@ fn cache_discipline_execute_omit_repeated_keys_warm() {
     let unrelated_key_set = host
         .semantic_dispatch()
         .intern_string_literal_union(&unrelated_members);
-    let unrelated_probe = SemanticQueryKey::Instantiate {
-        base: host.semantic_dispatch().builtin_type_slot("Omit"),
-        args: Arc::from(vec![base, unrelated_key_set].into_boxed_slice()),
-        context: host.semantic_dispatch().instantiate_context_for(
-            "__builtin__",
-            crate::semantic_query::ProjectionReductionContext::published(mode),
-        ),
-    };
+    let unrelated_probe =
+        SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+            host.semantic_dispatch().builtin_type_slot("Omit"),
+            Arc::from(vec![base, unrelated_key_set].into_boxed_slice()),
+            host.semantic_dispatch().instantiate_context_for(
+                "__builtin__",
+                crate::semantic_query::ProjectionReductionContext::published(mode),
+            ),
+        ));
     let unrelated_baseline_cold = counter.family_cold(&unrelated_probe);
     let _ = dispatch.execute_omit(base, &unrelated_members, mode);
     let unrelated_cold = counter.family_cold(&unrelated_probe) - unrelated_baseline_cold;

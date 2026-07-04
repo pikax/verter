@@ -406,6 +406,48 @@ pub fn dispatch_execute_type_node_for_tests(
     crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host).execute_type_node(key)
 }
 
+/// Production-shaped, NON-DECONSTRUCTABLE builder of a sealed
+/// [`SemanticQueryKey::Instantiate`](crate::semantic_query::SemanticQueryKey)
+/// key for integration tests.
+///
+/// The `Instantiate` payload is the opaque
+/// [`InstantiateKey`](crate::semantic_query::InstantiateKey) (private
+/// fields) whose [`InstantiateContext`](crate::semantic_query::InstantiateContext)
+/// carries the sealed, `pub(crate)` [`InstantiateBodySource`](crate::semantic_query::InstantiateBodySource)
+/// source-kind axis — none of which an external crate can construct.
+/// This helper is the ONLY way `tests/cases/**` can mint the key, and it
+/// hands back the OPAQUE `SemanticQueryKey` — never a raw
+/// `InstantiateContext` / `InstantiateBodySource` and never a
+/// deconstructable `{ base, args, context }` shape.
+///
+/// It routes through the SAME production choke point
+/// (`ProjectSemanticDispatch::instantiate_context_for`), so the caller
+/// does NOT choose the source kind: a real canonical base ⇒ `FileBacked(P)`
+/// (the live parse-env dim); the sentinel non-file bases (`""` /
+/// `"__builtin__"` / `"<synthetic>"`) ⇒ `NonFile`. A test therefore cannot
+/// forge the unsound `NonFile`-context-on-a-real-file-base shape.
+///
+/// Gated `#[cfg(any(test, feature = "test-support"))]` — STRICTER than the
+/// enclosing `debug_assertions`-gated module, so a plain debug build
+/// (e.g. the debug LSP) cannot reach it; only genuine test / test-support
+/// builds compile it. `test-support` is turned on for `verter_session`'s
+/// own test targets by the `[dev-dependencies]` self-edge, so BOTH gate
+/// surfaces (`cargo nextest run --workspace` and
+/// `cargo test -p verter_session --tests`) compile it.
+#[cfg(any(test, feature = "test-support"))]
+pub fn instantiate_key_for_tests(
+    host: &crate::VerterHost,
+    base: crate::semantic_query::ResolvedDeclSlotIdentity,
+    args: std::sync::Arc<[crate::semantic_query::SemanticNodeId]>,
+    prc: crate::semantic_query::ProjectionReductionContext,
+) -> crate::semantic_query::SemanticQueryKey {
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let context = dispatch.instantiate_context_for(base.defining_canonical.as_ref(), prc);
+    crate::semantic_query::SemanticQueryKey::Instantiate(
+        crate::semantic_query::InstantiateKey::new(base, args, context),
+    )
+}
+
 /// Reduce a `MergedDecl` contributor list to its canonical peer-merged graph
 /// node (the mutating reducer that interns the `Object` / heritage
 /// `Intersection`). Exposed so display guards can assert the read-only display

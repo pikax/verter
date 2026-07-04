@@ -225,7 +225,7 @@ pub(crate) fn dispatch_warm_for(key: &crate::semantic_query::SemanticQueryKey) -
 fn query_key_discriminant(key: &SemanticQueryKey) -> &'static str {
     match key {
         SemanticQueryKey::ResolveDecl(_) => "ResolveDecl",
-        SemanticQueryKey::Instantiate { .. } => "Instantiate",
+        SemanticQueryKey::Instantiate(_) => "Instantiate",
         SemanticQueryKey::ProjectMember { .. } => "ProjectMember",
         SemanticQueryKey::IndexedAccess { .. } => "IndexedAccess",
         SemanticQueryKey::KeyOf { .. } => "KeyOf",
@@ -912,11 +912,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // `ensure_indexed_ready_serve`.
                 let _ = whole_hash;
                 let base = self.type_slot_for(Arc::clone(canonical_id), Arc::clone(name));
-                let key = SemanticQueryKey::Instantiate {
-                    context: self.instantiate_context_for(&base.defining_canonical, context),
+                let inst_ctx = self.instantiate_context_for(&base.defining_canonical, context);
+                let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
                     base,
-                    args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                };
+                    Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                    inst_ctx,
+                ));
                 self.dispatch_operator_with_recurse(node, key, context, state)
             }
 
@@ -1240,11 +1241,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         .collect::<Vec<_>>()
                         .into_boxed_slice(),
                 );
-                let key = SemanticQueryKey::Instantiate {
-                    base: base_key,
-                    args,
-                    context: inst_ctx,
-                };
+                let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(base_key, args, inst_ctx));
                 self.dispatch_operator_with_recurse(node, key, context, state)
             }
 

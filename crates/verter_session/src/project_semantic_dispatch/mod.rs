@@ -123,14 +123,31 @@ mod body_source_witness {
     /// `ProjectSemanticDispatch::instantiate_context_for` choke point
     /// that owns the deterministic non-file/file-backed mapping. No
     /// other crate code (and no external crate — the constructors are
-    /// `pub(crate)`) can choose a source kind freely. Test fixtures use
-    /// the `InstantiateContext::*_for_tests` mints instead, which are
-    /// compiled out of release builds.
+    /// `pub(crate)`) can choose a source kind freely. Unit tests mint the
+    /// witness via [`Self::mint_for_unit_tests`] and call the SAME
+    /// witnessed constructors production uses; integration crates go
+    /// through the production-shaped
+    /// [`crate::for_tests::instantiate_key_for_tests`] helper, which routes
+    /// through the dispatch-factory choke point.
     pub(crate) struct BodySourceWitness(());
 
     impl BodySourceWitness {
         /// The sole production mint — dispatch-module-tree visibility.
         pub(super) const fn mint_for_dispatch_factory() -> Self {
+            Self(())
+        }
+
+        /// Test-only mint so unit tests (`#[cfg(test)]`, in-crate) can call
+        /// the SAME witnessed `InstantiateContext::file_backed` / `non_file`
+        /// constructors production uses — there is no raw `*_for_tests`
+        /// context mint. Gated `#[cfg(test)]`, so it is compiled out of
+        /// every non-test build (release AND the integration-test build,
+        /// which links the lib without `cfg(test)`); the production seal
+        /// stays intact. Integration crates use
+        /// [`crate::for_tests::instantiate_key_for_tests`] instead.
+        #[cfg(test)]
+        #[must_use]
+        pub(crate) const fn mint_for_unit_tests() -> Self {
             Self(())
         }
     }
@@ -382,8 +399,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 ctx.bump_type_resolution_hop(*mode);
                 ctx.bump_type_resolution_projection_op();
             }
-            SemanticQueryKey::Instantiate { context, .. } => {
-                ctx.bump_type_resolution_hop(context.mode());
+            SemanticQueryKey::Instantiate(k) => {
+                ctx.bump_type_resolution_hop(k.mode());
             }
             SemanticQueryKey::Conditional { .. } => {
                 ctx.bump_type_resolution_conditional_decision();
@@ -904,11 +921,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
         prc: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<crate::semantic_query::HotTypeRef> {
         let slot = self.type_slot_for(Arc::from(canonical), Arc::from(symbol));
-        let read = self.execute_read(crate::semantic_query::SemanticQueryKey::Instantiate {
-            base: slot,
-            args,
-            context: self.instantiate_context_for(canonical, prc),
-        });
+        let read = self.execute_read(crate::semantic_query::SemanticQueryKey::Instantiate(
+            crate::semantic_query::InstantiateKey::new(
+                slot,
+                args,
+                self.instantiate_context_for(canonical, prc),
+            ),
+        ));
         crate::meta_resolve::emit_dispatch_dep_signature_facts(self.ctx, &read.dep_signature);
         match read.value {
             QueryResult::Value(id) | QueryResult::Recursive(id) => {
@@ -1357,7 +1376,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             SemanticQueryKey::IndexedAccess { .. } => {
                                 Some(AuditEvent::SemanticQueryIndexedAccessCold)
                             }
-                            SemanticQueryKey::Instantiate { .. } => {
+                            SemanticQueryKey::Instantiate(_) => {
                                 Some(AuditEvent::SemanticQueryInstantiateCold)
                             }
                             SemanticQueryKey::Conditional { .. } => {
@@ -1405,9 +1424,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let sentinel = {
             let graph = Arc::clone(&graph);
             move || {
-                if let SemanticQueryKey::Instantiate { base, .. } = &sentinel_key {
+                if let SemanticQueryKey::Instantiate(k) = &sentinel_key {
                     return graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
-                        name: Arc::clone(&base.merged_symbol_name),
+                        name: Arc::clone(&k.base().merged_symbol_name),
                     }));
                 }
                 graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss))
@@ -1443,11 +1462,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     value_root,
                     context,
                 } => self.build_typeof(&value_root.root, context.projection_reduction),
-                SemanticQueryKey::Instantiate {
-                    base,
-                    args,
-                    context,
-                } => self.build_instantiate(base, args, *context),
+                SemanticQueryKey::Instantiate(k) => {
+                    self.build_instantiate(k.base(), k.args(), k.context())
+                }
                 // `ProjectMember` / `IndexedAccess` are API sugar that
                 // admission-time canonicalisation rewrites to
                 // `ProjectPath` above. The build closure never observes
@@ -1656,7 +1673,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         Some(AuditEvent::SemanticQueryTypeOfWarm)
                     }
                 }
-                SemanticQueryKey::Instantiate { .. } => {
+                SemanticQueryKey::Instantiate(_) => {
                     if is_cold {
                         Some(AuditEvent::SemanticQueryInstantiateCold)
                     } else {
@@ -1998,7 +2015,7 @@ fn semantic_query_counts_toward_projection_budget(key: &SemanticQueryKey) -> boo
             | SemanticQueryKey::ProjectPath { .. }
             | SemanticQueryKey::KeyOf { .. }
             | SemanticQueryKey::MappedType { .. }
-            | SemanticQueryKey::Instantiate { .. }
+            | SemanticQueryKey::Instantiate(_)
             | SemanticQueryKey::Conditional { .. }
             | SemanticQueryKey::TemplateLiteralReduce { .. }
             | SemanticQueryKey::TypeOf { .. }
@@ -2249,14 +2266,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> QueryResult<SemanticNodeId> {
         let key_set = self.intern_string_literal_union(members);
         crate::semantic_query::strip_output_provenance(self.execute_type_node(
-            SemanticQueryKey::Instantiate {
-                base: self.builtin_type_slot("Pick"),
-                args: Arc::from(vec![base, key_set].into_boxed_slice()),
-                context: self.instantiate_context_for(
+            SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+                self.builtin_type_slot("Pick"),
+                Arc::from(vec![base, key_set].into_boxed_slice()),
+                self.instantiate_context_for(
                     "__builtin__",
                     crate::semantic_query::ProjectionReductionContext::published(mode),
                 ),
-            },
+            )),
         ))
     }
 
@@ -2276,14 +2293,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> QueryResult<SemanticNodeId> {
         let key_set = self.intern_string_literal_union(members);
         crate::semantic_query::strip_output_provenance(self.execute_type_node(
-            SemanticQueryKey::Instantiate {
-                base: self.builtin_type_slot("Omit"),
-                args: Arc::from(vec![base, key_set].into_boxed_slice()),
-                context: self.instantiate_context_for(
+            SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+                self.builtin_type_slot("Omit"),
+                Arc::from(vec![base, key_set].into_boxed_slice()),
+                self.instantiate_context_for(
                     "__builtin__",
                     crate::semantic_query::ProjectionReductionContext::published(mode),
                 ),
-            },
+            )),
         ))
     }
 

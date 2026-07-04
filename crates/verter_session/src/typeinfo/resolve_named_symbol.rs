@@ -449,14 +449,15 @@ fn resolve_named_symbol_inner(
     let _ = &scope_node;
     let base = dispatch.type_slot_for(Arc::clone(&scope_arc), Arc::from(name));
 
-    let instantiate_key = SemanticQueryKey::Instantiate {
-        context: dispatch.instantiate_context_for(
-            &scope_arc,
-            crate::semantic_query::ProjectionReductionContext::published(effective_mode),
-        ),
-        base,
-        args: Arc::from(lowered_args.into_boxed_slice()),
-    };
+    let instantiate_key =
+        SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+            base,
+            Arc::from(lowered_args.into_boxed_slice()),
+            dispatch.instantiate_context_for(
+                &scope_arc,
+                crate::semantic_query::ProjectionReductionContext::published(effective_mode),
+            ),
+        ));
     let node = match dispatch.execute_type_node(instantiate_key) {
         QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
         QueryResult::Recursive(node) => node,
@@ -559,14 +560,15 @@ pub(crate) fn materialize_through_aliases(
                 // Materialise the placeholder by dispatching an
                 // empty-args Instantiate against its identity.
                 let base = dispatch.type_slot_for(Arc::clone(canonical_id), Arc::clone(name));
-                let key = SemanticQueryKey::Instantiate {
-                    context: dispatch.instantiate_context_for(
-                        canonical_id,
-                        crate::semantic_query::ProjectionReductionContext::published(mode),
-                    ),
-                    base,
-                    args: Arc::from(Vec::new().into_boxed_slice()),
-                };
+                let key =
+                    SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+                        base,
+                        Arc::from(Vec::new().into_boxed_slice()),
+                        dispatch.instantiate_context_for(
+                            canonical_id,
+                            crate::semantic_query::ProjectionReductionContext::published(mode),
+                        ),
+                    ));
                 let step_result = match dispatch.execute_type_node(key) {
                     QueryResult::Value(SemanticQueryOutput { value: node, .. }) => {
                         QueryResult::Value(node)
@@ -688,23 +690,25 @@ pub(crate) fn materialize_through_aliases(
                             Arc::clone(&ref_base.canonical_id),
                             Arc::clone(&ref_base.decl_name),
                         );
-                        let inst_result =
-                            match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-                                context: dispatch.instantiate_context_for(
+                        let inst_result = match dispatch
+                            .execute_type_node(SemanticQueryKey::Instantiate(
+                            crate::semantic_query::InstantiateKey::new(
+                                inst_base,
+                                Arc::clone(args),
+                                dispatch.instantiate_context_for(
                                     &ref_base.canonical_id,
                                     crate::semantic_query::ProjectionReductionContext::published(
                                         mode,
                                     ),
                                 ),
-                                base: inst_base,
-                                args: Arc::clone(args),
-                            }) {
-                                QueryResult::Value(SemanticQueryOutput { value: node, .. }) => {
-                                    QueryResult::Value(node)
-                                }
-                                QueryResult::Recursive(node) => QueryResult::Recursive(node),
-                                QueryResult::Error(err) => QueryResult::Error(err),
-                            };
+                            ),
+                        )) {
+                            QueryResult::Value(SemanticQueryOutput { value: node, .. }) => {
+                                QueryResult::Value(node)
+                            }
+                            QueryResult::Recursive(node) => QueryResult::Recursive(node),
+                            QueryResult::Error(err) => QueryResult::Error(err),
+                        };
                         classify_base_surfacing(inst_result, *base)?
                     }
                     _ => *base,

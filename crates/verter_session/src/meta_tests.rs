@@ -6022,19 +6022,22 @@ defineSlots<OpenMappedSlots<T>>()
         display_name: Arc::from("T"),
     });
     let carrier = match dispatch
-        .execute_read(crate::semantic_query::SemanticQueryKey::Instantiate {
-            base: crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
-                Arc::from("/OpenMappedSlots.vue"),
-                Arc::from("OpenMappedSlots"),
-            ),
-            args: Arc::from(vec![t_param].into_boxed_slice()),
-            context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-                crate::semantic_query::ProjectionReductionContext::published(
-                    crate::semantic_query::ProjectionMode::Navigate,
+        .execute_read(crate::semantic_query::SemanticQueryKey::Instantiate(
+            crate::semantic_query::InstantiateKey::new(
+                crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+                    Arc::from("/OpenMappedSlots.vue"),
+                    Arc::from("OpenMappedSlots"),
                 ),
-                Default::default(),
+                Arc::from(vec![t_param].into_boxed_slice()),
+                crate::semantic_query::InstantiateContext::non_file(
+                    crate::semantic_query::ProjectionReductionContext::published(
+                        crate::semantic_query::ProjectionMode::Navigate,
+                    ),
+                    Default::default(),
+                    crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                ),
             ),
-        })
+        ))
         .value
     {
         crate::semantic_query::QueryResult::Value(node) => node,

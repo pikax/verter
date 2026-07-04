@@ -235,10 +235,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let base = self.type_slot_for(Arc::clone(canonical_id), Arc::clone(name));
                 let owner_canonical = Arc::clone(canonical_id);
                 drop(data);
-                let read =
-                    self.execute_read(crate::semantic_query::SemanticQueryKey::Instantiate {
+                let read = self.execute_read(crate::semantic_query::SemanticQueryKey::Instantiate(
+                    crate::semantic_query::InstantiateKey::new(
                         base,
-                        args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                        Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
                         // Key-name enumeration consumes the body's structural
                         // shape (Object members, Union arms, etc.) — Expanded
                         // is required so the next Expand frame can read keys
@@ -248,13 +248,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         // demand (the keyspace is the explicit consumer
                         // surface), so the context stays `Published +
                         // Expanded`.
-                        context: self.instantiate_context_for(
+                        self.instantiate_context_for(
                             &owner_canonical,
                             crate::semantic_query::ProjectionReductionContext::published(
                                 crate::semantic_query::ProjectionMode::Expanded,
                             ),
                         ),
-                    });
+                    ),
+                ));
                 // A2 signal-split: fold a genuinely-incomplete keyspace
                 // instantiation onto the request's sticky partial flag.
                 crate::request_context::observe_component_meta_read_suppress(&read);
@@ -522,20 +523,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // one-level surface (names recovered by the recursive
                 // enumeration), with member values left shallow. Avoids the
                 // eager full-surface value expansion.
-                let read =
-                    self.execute_read(crate::semantic_query::SemanticQueryKey::Instantiate {
-                        base: self.type_slot_for(
+                let read = self.execute_read(crate::semantic_query::SemanticQueryKey::Instantiate(
+                    crate::semantic_query::InstantiateKey::new(
+                        self.type_slot_for(
                             Arc::clone(&identity.canonical_id),
                             Arc::clone(&identity.decl_name),
                         ),
-                        args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                        context: self.instantiate_context_for(
+                        Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                        self.instantiate_context_for(
                             &identity.canonical_id,
                             crate::semantic_query::ProjectionReductionContext::published(
                                 crate::semantic_query::ProjectionMode::Shallow,
                             ),
                         ),
-                    });
+                    ),
+                ));
                 // A2 signal-split: fold a genuinely-incomplete carrier resolve.
                 crate::request_context::observe_component_meta_read_suppress(&read);
                 let instantiated = match read.value {
@@ -558,20 +560,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // `DeclRef` arm: instantiate the carrier under SHALLOW (NOT
                 // `Expanded`) to recover its key SET without materialising
                 // member value surfaces.
-                let read =
-                    self.execute_read(crate::semantic_query::SemanticQueryKey::Instantiate {
-                        base: self.type_slot_for(
+                let read = self.execute_read(crate::semantic_query::SemanticQueryKey::Instantiate(
+                    crate::semantic_query::InstantiateKey::new(
+                        self.type_slot_for(
                             Arc::clone(&base.canonical_id),
                             Arc::clone(&base.decl_name),
                         ),
-                        args: Arc::clone(args),
-                        context: self.instantiate_context_for(
+                        Arc::clone(args),
+                        self.instantiate_context_for(
                             &base.canonical_id,
                             crate::semantic_query::ProjectionReductionContext::published(
                                 crate::semantic_query::ProjectionMode::Shallow,
                             ),
                         ),
-                    });
+                    ),
+                ));
                 // A2 signal-split: fold a genuinely-incomplete carrier resolve.
                 crate::request_context::observe_component_meta_read_suppress(&read);
                 let instantiated = match read.value {

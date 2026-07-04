@@ -1154,18 +1154,14 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
         SemanticQueryKey::ResolveDecl(decl) => {
             (FamilyKey::ResolveDecl(decl.clone()), ModeSlot::Single)
         }
-        SemanticQueryKey::Instantiate {
-            base,
-            args,
-            context,
-        } => {
-            let prc = context.projection_reduction();
+        SemanticQueryKey::Instantiate(k) => {
+            let prc = k.projection_reduction();
             (
                 FamilyKey::Instantiate {
-                    base: base.clone(),
-                    args: Arc::clone(args),
-                    resolve_env_hash: context.resolve_env_hash(),
-                    body_source: context.body_source(),
+                    base: k.base().clone(),
+                    args: Arc::clone(k.args()),
+                    resolve_env_hash: k.resolve_env_hash(),
+                    body_source: k.body_source(),
                     provenance: prc.provenance,
                     merge_role: prc.merge_role,
                 },

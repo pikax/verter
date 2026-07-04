@@ -1514,19 +1514,26 @@ impl ProjectionReductionContext {
 ///   depend on the parse env; per R21 an unconditional `P` would
 ///   false-miss every parse-env-insensitive instantiation.
 ///
-/// The dim type is the sealed [`ParseEnvHash`] newtype (in-crate
-/// construction only), and [`InstantiateContext`]'s fields are private with
+/// The enum itself is `pub(crate)` — its variants are NOT externally
+/// constructible, so the source-kind axis cannot be forged from outside
+/// the crate. The dim type inside `FileBacked` is the sealed
+/// [`ParseEnvHash`] newtype (in-crate construction only), and
+/// [`InstantiateContext`]'s fields are private with
 /// [`InstantiateContext::file_backed`] / [`InstantiateContext::non_file`]
 /// as the ONLY source-kind constructors — `pub(crate)` and gated on the
 /// [`crate::project_semantic_dispatch::BodySourceWitness`] mintable only
 /// inside the dispatch module, so call sites CANNOT choose freely; the
 /// production mapping is owned by the
-/// `ProjectSemanticDispatch::instantiate_context_for` choke point.
-/// Test fixtures key contexts through the
-/// `cfg(any(test, debug_assertions))` `*_for_tests` mints, compiled out
-/// of release builds.
+/// `ProjectSemanticDispatch::instantiate_context_for` choke point. The
+/// context is bundled with its base/args into the opaque
+/// [`InstantiateKey`] so a caller cannot transplant a `NonFile` context
+/// onto a real-file base. Test fixtures build the context through the
+/// witnessed constructors (the `#[cfg(test)]`
+/// [`crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests`]
+/// mint) or, from integration crates, the production-shaped
+/// [`crate::for_tests::instantiate_key_for_tests`] helper.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum InstantiateBodySource {
+pub(crate) enum InstantiateBodySource {
     /// The base body may read real-file parse-derived input; carries the
     /// live `parse_env_hash` as family identity.
     FileBacked(ParseEnvHash),
@@ -1571,15 +1578,19 @@ pub(crate) fn is_non_file_base(canonical: &str) -> bool {
 /// never warm-hit) and strips the embedded projection mode into the
 /// `ModeSlot`.
 ///
-/// **Sealed construction:** fields are PRIVATE; the ONLY source-kind
-/// constructors are [`Self::file_backed`] / [`Self::non_file`] —
-/// `pub(crate)`, witness-gated on the dispatch-minted
+/// **Sealed construction:** fields are PRIVATE; the ONLY constructors
+/// are [`Self::file_backed`] / [`Self::non_file`] — `pub(crate)`,
+/// witness-gated on the dispatch-minted
 /// [`crate::project_semantic_dispatch::BodySourceWitness`] — and the
 /// sole production builder is the
 /// `ProjectSemanticDispatch::instantiate_context_for` choke point.
-/// Tests mint via the `cfg(any(test, debug_assertions))`
-/// [`Self::file_backed_for_tests`] / [`Self::non_file_for_tests`].
-/// Outside readers use the accessors.
+/// There is NO raw `*_for_tests` mint: unit tests build the context
+/// through the same witnessed constructors using the `#[cfg(test)]`
+/// [`crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests`]
+/// witness; integration crates build the whole [`InstantiateKey`]
+/// through the production-shaped
+/// [`crate::for_tests::instantiate_key_for_tests`] helper (which routes
+/// through the choke point). Outside readers use the accessors.
 ///
 /// **R6-clean:** `resolve_env_hash` and the FileBacked `parse_env_hash`
 /// are ENV dimensions, NOT content/version hashes; the slot stays
@@ -1614,8 +1625,8 @@ impl InstantiateContext {
     /// [`crate::project_semantic_dispatch::BodySourceWitness`] mintable
     /// only inside the dispatch module — the
     /// `ProjectSemanticDispatch::instantiate_context_for` choke point is
-    /// the sole production caller. Tests use
-    /// [`Self::file_backed_for_tests`].
+    /// the sole production caller. Unit tests mint the witness via
+    /// [`crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests`].
     #[must_use]
     pub(crate) const fn file_backed(
         projection_reduction: ProjectionReductionContext,
@@ -1635,47 +1646,13 @@ impl InstantiateContext {
     /// no `P` folds into the family (R21).
     ///
     /// Sealed to the dispatch factory — same witness gate and rationale
-    /// as [`Self::file_backed`]. Tests use [`Self::non_file_for_tests`].
+    /// as [`Self::file_backed`]. Unit tests mint the witness via
+    /// [`crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests`].
     #[must_use]
     pub(crate) const fn non_file(
         projection_reduction: ProjectionReductionContext,
         resolve_env_hash: HashValue,
         _witness: crate::project_semantic_dispatch::BodySourceWitness,
-    ) -> Self {
-        Self {
-            projection_reduction,
-            resolve_env_hash,
-            body_source: InstantiateBodySource::NonFile,
-        }
-    }
-
-    /// Test-only mint of a FILE-BACKED context with caller-supplied dims —
-    /// bypasses the dispatch-factory witness so fixtures can key contexts
-    /// directly. Gated `cfg(any(test, debug_assertions))` (the house
-    /// `for_tests` gate: external `tests/` integration crates build the
-    /// lib without `cfg(test)`), so release builds never compile it and
-    /// the production seal stays intact.
-    #[cfg(any(test, debug_assertions))]
-    #[must_use]
-    pub const fn file_backed_for_tests(
-        projection_reduction: ProjectionReductionContext,
-        resolve_env_hash: HashValue,
-        parse_env_hash: ParseEnvHash,
-    ) -> Self {
-        Self {
-            projection_reduction,
-            resolve_env_hash,
-            body_source: InstantiateBodySource::FileBacked(parse_env_hash),
-        }
-    }
-
-    /// Test-only mint of a NON-FILE context — see
-    /// [`Self::file_backed_for_tests`] for the gate rationale.
-    #[cfg(any(test, debug_assertions))]
-    #[must_use]
-    pub const fn non_file_for_tests(
-        projection_reduction: ProjectionReductionContext,
-        resolve_env_hash: HashValue,
     ) -> Self {
         Self {
             projection_reduction,
@@ -1697,8 +1674,10 @@ impl InstantiateContext {
     }
 
     /// The base body's source kind (`FileBacked(P)` / `NonFile`).
+    /// `pub(crate)`: the source-kind axis is an internal cache-family
+    /// dimension and is never part of the public key surface.
     #[must_use]
-    pub const fn body_source(self) -> InstantiateBodySource {
+    pub(crate) const fn body_source(self) -> InstantiateBodySource {
         self.body_source
     }
 
@@ -1795,6 +1774,106 @@ fn w_instantiate_body_source(source: &InstantiateBodySource) {
 /// here.
 #[allow(dead_code)]
 fn instantiate_resolve_env_hash_dim(_resolve_env_hash: &HashValue) {}
+
+/// The sealed, non-deconstructable payload of
+/// [`SemanticQueryKey::Instantiate`] — the base declaration slot, its
+/// already-lowered generic `args`, and the per-key [`InstantiateContext`]
+/// bundled as ONE unit.
+///
+/// **Why a bundle:** the [`InstantiateBodySource`] axis inside the context
+/// (`FileBacked(P)` / `NonFile`) is only sound for the base it was minted
+/// against — a `NonFile` context omits the parse-env dim, so pairing it
+/// with a real-file base would warm-hit a stale output on a parse-env-only
+/// change. Bundling base + args + context behind PRIVATE fields makes that
+/// laundering shape UNREPRESENTABLE from outside the crate: there is no
+/// public constructor and no field access, so a caller cannot transplant a
+/// context onto a foreign base. The only builders are the `pub(crate)`
+/// [`Self::new`] (fed by the `ProjectSemanticDispatch::instantiate_context_for`
+/// choke point) and, for tests, the production-shaped
+/// [`crate::for_tests::instantiate_key_for_tests`] helper.
+///
+/// **Accessor discipline:** the public accessors expose only SAFE facts
+/// ([`Self::base`], [`Self::mode`], [`Self::projection_reduction`],
+/// [`Self::resolve_env_hash`]); the raw [`InstantiateContext`], the `args`
+/// slice, and the [`InstantiateBodySource`] axis are `pub(crate)` reveal
+/// accessors ([`Self::context`], [`Self::args`], [`Self::body_source`]) for
+/// memo internals only — never public.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct InstantiateKey {
+    /// The env-bearing, content-free type-space
+    /// [`ResolvedDeclSlotIdentity`] of the declaration being instantiated.
+    base: ResolvedDeclSlotIdentity,
+    /// The already-lowered generic arguments — part of semantic identity.
+    args: Arc<[SemanticNodeId]>,
+    /// The per-key env + reduction context (embeds the source-kind axis).
+    context: InstantiateContext,
+}
+
+impl InstantiateKey {
+    /// Bundle a base slot, its `args`, and the per-key [`InstantiateContext`]
+    /// into the sealed key payload. `pub(crate)`: the only production feeder
+    /// is the `ProjectSemanticDispatch::instantiate_context_for` choke point
+    /// (which mints the context), and the only test feeder is
+    /// [`crate::for_tests::instantiate_key_for_tests`].
+    #[must_use]
+    pub(crate) fn new(
+        base: ResolvedDeclSlotIdentity,
+        args: Arc<[SemanticNodeId]>,
+        context: InstantiateContext,
+    ) -> Self {
+        Self {
+            base,
+            args,
+            context,
+        }
+    }
+
+    /// The env-bearing, content-free base declaration slot. SAFE fact —
+    /// public.
+    #[must_use]
+    pub fn base(&self) -> &ResolvedDeclSlotIdentity {
+        &self.base
+    }
+
+    /// The embedded projection mode. SAFE fact — public.
+    #[must_use]
+    pub fn mode(&self) -> ProjectionMode {
+        self.context.mode()
+    }
+
+    /// The embedded projection-demand identity. SAFE fact — public.
+    #[must_use]
+    pub fn projection_reduction(&self) -> ProjectionReductionContext {
+        self.context.projection_reduction()
+    }
+
+    /// The `resolve_env_hash` (`R`) env dimension. SAFE fact — public.
+    #[must_use]
+    pub fn resolve_env_hash(&self) -> HashValue {
+        self.context.resolve_env_hash()
+    }
+
+    /// The already-lowered generic arguments. `pub(crate)` reveal — memo
+    /// internals only.
+    #[must_use]
+    pub(crate) fn args(&self) -> &Arc<[SemanticNodeId]> {
+        &self.args
+    }
+
+    /// The per-key [`InstantiateContext`] (embeds the source-kind axis).
+    /// `pub(crate)` reveal — memo internals only; never public.
+    #[must_use]
+    pub(crate) fn context(&self) -> InstantiateContext {
+        self.context
+    }
+
+    /// The base body's source kind (`FileBacked(P)` / `NonFile`).
+    /// `pub(crate)` reveal — the family-slot projection only; never public.
+    #[must_use]
+    pub(crate) fn body_source(&self) -> InstantiateBodySource {
+        self.context.body_source()
+    }
+}
 
 /// Per-key env+mode context for [`SemanticQueryKey::ResolveMacroPayload`].
 ///
@@ -4108,19 +4187,20 @@ pub enum SemanticQueryKey {
     /// and `(Shallow, Published)` evaluations do not collide on a
     /// single shared entry.
     ///
-    /// `base` is the env-bearing, content-free
+    /// The payload is the sealed, non-deconstructable [`InstantiateKey`]
+    /// bundling the base slot, its `args`, and the per-key
+    /// [`InstantiateContext`]. `base` is the env-bearing, content-free
     /// [`ResolvedDeclSlotIdentity`] of the declaration being instantiated
     /// (always `symbol_space = Type` — you instantiate a type / interface
     /// / class-type / alias / builtin-utility carrier). The slot carries
-    /// the `T` / `L` / `J` env dims; `context.resolve_env_hash` adds `R`.
-    /// Version-rooting lives on the cached value's
+    /// the `T` / `L` / `J` env dims; the context's `resolve_env_hash` adds
+    /// `R` and its [`InstantiateBodySource`] axis adds `P` for a file-backed
+    /// base. Bundling them behind [`InstantiateKey`]'s private fields makes
+    /// a `NonFile`-context-on-a-real-file-base transplant unrepresentable
+    /// from outside the crate. Version-rooting lives on the cached value's
     /// `ReadSetSignature.facts` + `self_root_canonicals`, re-sourced at
     /// value-build time from the live indexed view (R6).
-    Instantiate {
-        base: ResolvedDeclSlotIdentity,
-        args: Arc<[SemanticNodeId]>,
-        context: InstantiateContext,
-    },
+    Instantiate(InstantiateKey),
     ProjectMember {
         base: SemanticNodeId,
         member: Arc<str>,
@@ -4732,7 +4812,7 @@ impl SemanticQueryKey {
     pub fn tag(&self) -> SemanticQueryKeyTag {
         match self {
             SemanticQueryKey::ResolveDecl(_) => SemanticQueryKeyTag::ResolveDecl,
-            SemanticQueryKey::Instantiate { .. } => SemanticQueryKeyTag::Instantiate,
+            SemanticQueryKey::Instantiate(_) => SemanticQueryKeyTag::Instantiate,
             SemanticQueryKey::ProjectMember { .. } => SemanticQueryKeyTag::ProjectMember,
             SemanticQueryKey::IndexedAccess { .. } => SemanticQueryKeyTag::IndexedAccess,
             SemanticQueryKey::KeyOf { .. } => SemanticQueryKeyTag::KeyOf,
@@ -5919,22 +5999,24 @@ mod tests {
         let base = DeclIdentity::synthetic("Foo").to_type_slot_unscoped();
         let string_id = SemanticNodeId(1);
         let number_id = SemanticNodeId(2);
-        let a = SemanticQueryKey::Instantiate {
-            base: base.clone(),
-            args: Arc::from(vec![string_id].into_boxed_slice()),
-            context: crate::semantic_query::InstantiateContext::non_file_for_tests(
+        let a = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+            base.clone(),
+            Arc::from(vec![string_id].into_boxed_slice()),
+            crate::semantic_query::InstantiateContext::non_file(
                 ProjectionReductionContext::published(ProjectionMode::Expanded),
                 Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
-        };
-        let b = SemanticQueryKey::Instantiate {
-            base,
-            args: Arc::from(vec![number_id].into_boxed_slice()),
-            context: crate::semantic_query::InstantiateContext::non_file_for_tests(
+        ));
+        let b = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+            base.clone(),
+            Arc::from(vec![number_id].into_boxed_slice()),
+            crate::semantic_query::InstantiateContext::non_file(
                 ProjectionReductionContext::published(ProjectionMode::Expanded),
                 Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
-        };
+        ));
         assert_ne!(a, b);
     }
 
@@ -6094,24 +6176,26 @@ mod tests {
         // `(base, args, context)` triple constructs an equal key.
         let base = DeclIdentity::synthetic("Foo").to_type_slot_unscoped();
         let args = Arc::from(vec![SemanticNodeId(2)].into_boxed_slice());
-        let key = SemanticQueryKey::Instantiate {
-            base: base.clone(),
-            args: Arc::clone(&args),
-            context: crate::semantic_query::InstantiateContext::non_file_for_tests(
+        let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+            base.clone(),
+            Arc::clone(&args),
+            crate::semantic_query::InstantiateContext::non_file(
                 ProjectionReductionContext::published(ProjectionMode::Expanded),
                 Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
-        };
+        ));
         let mut map = std::collections::HashMap::new();
         map.insert(key.clone(), 1);
-        let key2 = SemanticQueryKey::Instantiate {
-            base,
+        let key2 = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+            base.clone(),
             args,
-            context: crate::semantic_query::InstantiateContext::non_file_for_tests(
+            crate::semantic_query::InstantiateContext::non_file(
                 ProjectionReductionContext::published(ProjectionMode::Expanded),
                 Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
-        };
+        ));
         assert_eq!(map.get(&key2), Some(&1), "same args dedup to one entry");
     }
 

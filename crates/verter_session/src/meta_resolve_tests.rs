@@ -5945,8 +5945,8 @@ fn materialize_member_surface_expr_preserves_open_mapped_carrier_on_walk_budget_
         .iter()
         .filter(|e| {
             let ctx = match &e.key {
-                crate::semantic_query::SemanticQueryKey::Instantiate { context, .. } => {
-                    Some(context.projection_reduction())
+                crate::semantic_query::SemanticQueryKey::Instantiate(k) => {
+                    Some(k.projection_reduction())
                 }
                 crate::semantic_query::SemanticQueryKey::KeyOf { context, .. }
                 | crate::semantic_query::SemanticQueryKey::MappedType { context, .. }

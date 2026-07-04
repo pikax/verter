@@ -199,9 +199,7 @@ impl DispatchTrace {
                         context,
                         ..
                     } => context.mode,
-                    crate::semantic_query::SemanticQueryKey::Instantiate { context, .. } => {
-                        context.mode()
-                    }
+                    crate::semantic_query::SemanticQueryKey::Instantiate(k) => k.mode(),
                     _ => crate::semantic_query::ProjectionMode::Expanded,
                 };
                 vec![SubKey {

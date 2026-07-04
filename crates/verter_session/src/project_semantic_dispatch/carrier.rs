@@ -262,15 +262,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     scope.clone(),
                 );
             }
-            return match self.execute_type_node(SemanticQueryKey::Instantiate {
-                base: self.type_slot_for(
-                    Arc::clone(&builtin_identity.canonical_id),
-                    Arc::clone(&builtin_identity.decl_name),
+            return match self.execute_type_node(SemanticQueryKey::Instantiate(
+                crate::semantic_query::InstantiateKey::new(
+                    self.type_slot_for(
+                        Arc::clone(&builtin_identity.canonical_id),
+                        Arc::clone(&builtin_identity.decl_name),
+                    ),
+                    type_args,
+                    self.instantiate_context_for(&builtin_identity.canonical_id, reduction_context),
                 ),
-                args: type_args,
-                context: self
-                    .instantiate_context_for(&builtin_identity.canonical_id, reduction_context),
-            }) {
+            )) {
                 QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                 _ => self.opaque(QueryError::Miss),
             };
@@ -428,15 +429,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if arg_count == 0 && !decl_routes_through_instantiate {
             anchor
         } else {
-            match self.execute_type_node(SemanticQueryKey::Instantiate {
-                base: self.type_slot_for(
-                    Arc::clone(&decl_identity.canonical_id),
-                    Arc::clone(&decl_identity.decl_name),
+            match self.execute_type_node(SemanticQueryKey::Instantiate(
+                crate::semantic_query::InstantiateKey::new(
+                    self.type_slot_for(
+                        Arc::clone(&decl_identity.canonical_id),
+                        Arc::clone(&decl_identity.decl_name),
+                    ),
+                    lower_args(),
+                    self.instantiate_context_for(&decl_identity.canonical_id, reduction_context),
                 ),
-                args: lower_args(),
-                context: self
-                    .instantiate_context_for(&decl_identity.canonical_id, reduction_context),
-            }) {
+            )) {
                 QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
                 _ => self.opaque(QueryError::Miss),
             }

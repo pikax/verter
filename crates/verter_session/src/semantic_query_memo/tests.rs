@@ -1015,16 +1015,17 @@ fn invalidate_canonical_evicts_instantiate_entries_that_read_that_canonical_body
     let store = SemanticGraphStore::new();
     let base = crate::semantic_query::DeclIdentity::synthetic("Foo").to_type_slot_unscoped();
     let arg = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
-    let key = SemanticQueryKey::Instantiate {
+    let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
         base,
-        args: Arc::from(vec![arg].into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
+        Arc::from(vec![arg].into_boxed_slice()),
+        crate::semantic_query::InstantiateContext::non_file(
             crate::semantic_query::ProjectionReductionContext::published(
                 crate::semantic_query::ProjectionMode::Expanded,
             ),
             Default::default(),
+            crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
         ),
-    };
+    ));
 
     // Dep-sig references /w/body.ts — the declaration file the
     // instantiation lowers from.
@@ -1065,16 +1066,17 @@ fn invalidate_canonical_keeps_instantiate_entries_whose_bases_are_unrelated() {
     let store = SemanticGraphStore::new();
     let base = crate::semantic_query::DeclIdentity::synthetic("Foo").to_type_slot_unscoped();
     let arg = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
-    let key = SemanticQueryKey::Instantiate {
+    let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
         base,
-        args: Arc::from(vec![arg].into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
+        Arc::from(vec![arg].into_boxed_slice()),
+        crate::semantic_query::InstantiateContext::non_file(
             crate::semantic_query::ProjectionReductionContext::published(
                 crate::semantic_query::ProjectionMode::Expanded,
             ),
             Default::default(),
+            crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
         ),
-    };
+    ));
 
     let value_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
     let _ = store.execute_cooperative(
@@ -8012,14 +8014,15 @@ mod env_scoped_key_identity_guards {
     }
 
     fn inst_key(slot: ResolvedDeclSlotIdentity, resolve_env: HashValue) -> SemanticQueryKey {
-        SemanticQueryKey::Instantiate {
-            base: slot,
-            args: empty_args(),
-            context: InstantiateContext::non_file_for_tests(
+        SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+            slot,
+            empty_args(),
+            InstantiateContext::non_file(
                 ProjectionReductionContext::published(ProjectionMode::Expanded),
                 resolve_env,
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
-        }
+        ))
     }
 
     fn fam(key: &SemanticQueryKey) -> FamilyKey {
@@ -8737,11 +8740,11 @@ mod instantiate_body_source_family_identity {
     }
 
     fn inst_key(context: InstantiateContext) -> SemanticQueryKey {
-        SemanticQueryKey::Instantiate {
-            base: slot(),
-            args: empty_args(),
+        SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+            slot(),
+            empty_args(),
             context,
-        }
+        ))
     }
 
     fn fam(key: &SemanticQueryKey) -> FamilyKey {
@@ -8759,20 +8762,23 @@ mod instantiate_body_source_family_identity {
     fn file_backed_parse_env_change_is_a_distinct_instantiate_family() {
         let p0 = ParseEnvHash::from_env_hash([1u8; 16]);
         let p1 = ParseEnvHash::from_env_hash([2u8; 16]);
-        let f0 = fam(&inst_key(InstantiateContext::file_backed_for_tests(
+        let f0 = fam(&inst_key(InstantiateContext::file_backed(
             prc(),
             Default::default(),
             p0,
+            crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
         )));
-        let f0_again = fam(&inst_key(InstantiateContext::file_backed_for_tests(
+        let f0_again = fam(&inst_key(InstantiateContext::file_backed(
             prc(),
             Default::default(),
             p0,
+            crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
         )));
-        let f1 = fam(&inst_key(InstantiateContext::file_backed_for_tests(
+        let f1 = fam(&inst_key(InstantiateContext::file_backed(
             prc(),
             Default::default(),
             p1,
+            crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
         )));
         assert_eq!(f0, f0_again, "same FileBacked P must be ONE family");
         assert_ne!(
@@ -8786,13 +8792,15 @@ mod instantiate_body_source_family_identity {
     /// and its folded `body_source` carries no `ParseEnvHash`.
     #[test]
     fn non_file_context_folds_no_parse_env() {
-        let a = fam(&inst_key(InstantiateContext::non_file_for_tests(
+        let a = fam(&inst_key(InstantiateContext::non_file(
             prc(),
             Default::default(),
+            crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
         )));
-        let b = fam(&inst_key(InstantiateContext::non_file_for_tests(
+        let b = fam(&inst_key(InstantiateContext::non_file(
             prc(),
             Default::default(),
+            crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
         )));
         assert_eq!(
             a, b,
@@ -8810,14 +8818,16 @@ mod instantiate_body_source_family_identity {
     /// projection / resolve env, different `body_source` ⇒ different family.
     #[test]
     fn file_backed_and_non_file_are_distinct_instantiate_families() {
-        let file_backed = fam(&inst_key(InstantiateContext::file_backed_for_tests(
+        let file_backed = fam(&inst_key(InstantiateContext::file_backed(
             prc(),
             Default::default(),
             ParseEnvHash::from_env_hash([1u8; 16]),
+            crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
         )));
-        let non_file = fam(&inst_key(InstantiateContext::non_file_for_tests(
+        let non_file = fam(&inst_key(InstantiateContext::non_file(
             prc(),
             Default::default(),
+            crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
         )));
         assert_ne!(
             file_backed, non_file,
@@ -8840,8 +8850,17 @@ mod instantiate_body_source_family_identity {
 
         let p = ParseEnvHash::from_env_hash([7u8; 16]);
         let contexts = [
-            InstantiateContext::file_backed_for_tests(prc(), Default::default(), p),
-            InstantiateContext::non_file_for_tests(prc(), Default::default()),
+            InstantiateContext::file_backed(
+                prc(),
+                Default::default(),
+                p,
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
+            InstantiateContext::non_file(
+                prc(),
+                Default::default(),
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
         ];
         for context in contexts {
             let family = fam(&inst_key(context));

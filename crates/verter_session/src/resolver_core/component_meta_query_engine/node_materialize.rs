@@ -107,14 +107,16 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
         let instantiate_prc =
             ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate);
-        let node = match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-            base: dispatch.type_slot_for(
-                std::sync::Arc::clone(&base.canonical_id),
-                std::sync::Arc::clone(&base.decl_name),
+        let node = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+            crate::semantic_query::InstantiateKey::new(
+                dispatch.type_slot_for(
+                    std::sync::Arc::clone(&base.canonical_id),
+                    std::sync::Arc::clone(&base.decl_name),
+                ),
+                std::sync::Arc::clone(args),
+                dispatch.instantiate_context_for(&base.canonical_id, instantiate_prc),
             ),
-            context: dispatch.instantiate_context_for(&base.canonical_id, instantiate_prc),
-            args: std::sync::Arc::clone(args),
-        }) {
+        )) {
             QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
             QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
         };

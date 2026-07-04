@@ -1029,18 +1029,20 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 crate::semantic_query::ProjectionMode::Shallow,
             ),
         );
-        match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-            base,
-            args: empty_semantic_args(),
-            // `dispatch_root_instantiated` feeds
-            // `projected_surface_from_semantic_node` which reads the
-            // root's surface members, call/construct lists, etc. Shallow
-            // yields the interpretable one-level surface (member names +
-            // shallow carrier values) — decl-body lowering under Shallow
-            // is carrier-preserving and the shallow-surface synthesiser
-            // materialises exactly the demanded composition spine.
-            context: root_inst_ctx,
-        }) {
+        match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+            crate::semantic_query::InstantiateKey::new(
+                base,
+                empty_semantic_args(),
+                // `dispatch_root_instantiated` feeds
+                // `projected_surface_from_semantic_node` which reads the
+                // root's surface members, call/construct lists, etc. Shallow
+                // yields the interpretable one-level surface (member names +
+                // shallow carrier values) — decl-body lowering under Shallow
+                // is carrier-preserving and the shallow-surface synthesiser
+                // materialises exactly the demanded composition spine.
+                root_inst_ctx,
+            ),
+        )) {
             QueryResult::Value(SemanticQueryOutput { value: id, .. }) => Some(id),
             _ => Some(anchor),
         }
@@ -1186,16 +1188,18 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // `[body, keys]` in the publication Navigate mode — the same path as
         // a userland `Pick<…>` / `Omit<…>`, so fix-#1's public gate applies
         // and the L1 reducer decides closed→materialise path-precisely.
-        match dispatch.execute_type_node(SemanticQueryKey::Instantiate {
-            base: dispatch.builtin_type_slot(builtin_name),
-            args: std::sync::Arc::from(vec![body_id, keys_node].into_boxed_slice()),
-            context: dispatch.instantiate_context_for(
-                "__builtin__",
-                crate::semantic_query::ProjectionReductionContext::published(
-                    ProjectionMode::Navigate,
+        match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+            crate::semantic_query::InstantiateKey::new(
+                dispatch.builtin_type_slot(builtin_name),
+                std::sync::Arc::from(vec![body_id, keys_node].into_boxed_slice()),
+                dispatch.instantiate_context_for(
+                    "__builtin__",
+                    crate::semantic_query::ProjectionReductionContext::published(
+                        ProjectionMode::Navigate,
+                    ),
                 ),
             ),
-        }) {
+        )) {
             QueryResult::Value(SemanticQueryOutput { value: node, .. }) => {
                 // Node-domain materializedness gate (the typed equivalent of the
                 // former `.filter(dispatch_route_expr_is_materialized)`); the gated

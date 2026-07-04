@@ -410,14 +410,15 @@ fn evaluate_inner(
         Arc::clone(&scratch_canonical),
         Arc::from(SCRATCH_ALIAS_NAME),
     );
-    let instantiate_key = SemanticQueryKey::Instantiate {
-        context: dispatch.instantiate_context_for(
-            &scratch_canonical,
-            crate::semantic_query::ProjectionReductionContext::published(req.mode),
-        ),
-        base,
-        args: Arc::from(Vec::new().into_boxed_slice()),
-    };
+    let instantiate_key =
+        SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+            base,
+            Arc::from(Vec::new().into_boxed_slice()),
+            dispatch.instantiate_context_for(
+                &scratch_canonical,
+                crate::semantic_query::ProjectionReductionContext::published(req.mode),
+            ),
+        ));
     let resolved_alias_node = match dispatch.execute_type_node(instantiate_key) {
         QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
         QueryResult::Recursive(node) => node,

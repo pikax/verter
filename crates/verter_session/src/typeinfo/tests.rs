@@ -952,16 +952,19 @@ export interface ColorModeSelectProps extends Omit<SelectMenuProps<Item[]>, 'ite
     );
     let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref());
     let node =
-        match dispatch.execute_type_node(crate::semantic_query::SemanticQueryKey::Instantiate {
-            base: key,
-            args: Arc::from(Vec::new().into_boxed_slice()),
-            context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-                crate::semantic_query::ProjectionReductionContext::published(
-                    ProjectionMode::Expanded,
+        match dispatch.execute_type_node(crate::semantic_query::SemanticQueryKey::Instantiate(
+            crate::semantic_query::InstantiateKey::new(
+                key,
+                Arc::from(Vec::new().into_boxed_slice()),
+                crate::semantic_query::InstantiateContext::non_file(
+                    crate::semantic_query::ProjectionReductionContext::published(
+                        ProjectionMode::Expanded,
+                    ),
+                    Default::default(),
+                    crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
                 ),
-                Default::default(),
             ),
-        }) {
+        )) {
             crate::semantic_query::QueryResult::Value(
                 crate::semantic_query::SemanticQueryOutput { value: n, .. },
             ) => n,

@@ -1112,16 +1112,16 @@ fn budget_trip_instantiate_suppresses_and_does_not_warm() {
         "__builtin__",
         ProjectionReductionContext::published(ProjectionMode::Expanded),
     );
-    let key_first = SemanticQueryKey::Instantiate {
-        base: partial_slot.clone(),
-        args: Arc::from(vec![arg_first].into_boxed_slice()),
+    let key_first = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+        partial_slot.clone(),
+        Arc::from(vec![arg_first].into_boxed_slice()),
         context,
-    };
-    let key_second = SemanticQueryKey::Instantiate {
-        base: partial_slot,
-        args: Arc::from(vec![arg_second].into_boxed_slice()),
+    ));
+    let key_second = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+        partial_slot,
+        Arc::from(vec![arg_second].into_boxed_slice()),
         context,
-    };
+    ));
 
     let ctx = RequestContext::with_kind_timing_and_projection_budget(
         1,
@@ -1589,14 +1589,16 @@ fn lower_indexed_access_chain_budget_trip_folds_partial_through_chokepoint_and_r
     let dispatch = host.semantic_dispatch();
     let deep_slot = dispatch.type_slot_for(Arc::from("/w/lower_chain.ts"), Arc::from("Deep"));
     let resolve_env = dispatch.resolve_env_hash_for("/w/lower_chain.ts");
-    let instantiate_key = SemanticQueryKey::Instantiate {
-        base: deep_slot,
-        args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
-            ProjectionReductionContext::published(ProjectionMode::Expanded),
-            resolve_env,
-        ),
-    };
+    let instantiate_key =
+        SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+            deep_slot,
+            Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            crate::semantic_query::InstantiateContext::non_file(
+                ProjectionReductionContext::published(ProjectionMode::Expanded),
+                resolve_env,
+                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
+        ));
 
     let ctx = RequestContext::with_kind_timing_and_projection_budget(
         1,

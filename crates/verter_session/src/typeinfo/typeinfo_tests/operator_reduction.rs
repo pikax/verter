@@ -239,14 +239,14 @@ fn skeleton_structural_transit_instantiate_preserves_operator_carriers() {
 
     let canonical: Arc<str> = Arc::from("/fixtures/index_signatures.ts");
     let base = dispatch.type_slot_for(Arc::clone(&canonical), Arc::from("NumericLookup"));
-    let key = SemanticQueryKey::Instantiate {
-        context: dispatch.instantiate_context_for(
+    let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+        base,
+        Arc::from(Vec::new().into_boxed_slice()),
+        dispatch.instantiate_context_for(
             &canonical,
             ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Skeleton),
         ),
-        base,
-        args: Arc::from(Vec::new().into_boxed_slice()),
-    };
+    ));
     let node = match dispatch.execute_type_node(key) {
         crate::semantic_query::QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
         crate::semantic_query::QueryResult::Recursive(value) => value,

@@ -671,16 +671,17 @@ fn typeof_resolution_stays_within_instantiate_window() {
                 std::sync::Arc::from("/leak.ts"),
                 std::sync::Arc::from("SelfT"),
             );
-            let key = SemanticQueryKey::Instantiate {
-                base: self_t,
-                args: std::sync::Arc::from(
+            let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+                self_t,
+                std::sync::Arc::from(
                     Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice(),
                 ),
-                context: InstantiateContext::non_file_for_tests(
+                InstantiateContext::non_file(
                     ProjectionReductionContext::published(ProjectionMode::Expanded),
                     Default::default(),
+                    crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
                 ),
-            };
+            ));
             match dispatch.execute_type_node(key) {
                 QueryResult::Value(SemanticQueryOutput { value, .. }) => {
                     format!("{:?}", dispatch.graph().node_data(value).as_deref())
