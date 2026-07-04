@@ -626,19 +626,28 @@ fn concurrent_type_and_value_demand_of_merged_name_does_not_deadlock() {
 
 /// The memo's demanded-lowering path is LEASE-ONLY: with the lease pin
 /// broken out-of-band (the invariant-violation scenario), a body demand
-/// fails CLOSED — nothing lowered, no transient re-parse — and fails
-/// LOUD in debug/test builds (the lease-miss `debug_assert!` fires), so
-/// a future lease-pin break cannot silently memoize misses. Release
-/// builds keep the quiet fail-closed lowering miss.
+/// fails CLOSED via ReturnOnly in DEBUG *and* RELEASE — it returns the
+/// empty/None fallback to the caller but NEVER memoizes it as a wrong-empty
+/// warm entry, and it lowers nothing / never transiently re-parses. A retry
+/// under a live lease recovers.
 ///
-/// Discrimination, both regression classes: a demanded-lowering path
-/// routed through a parse-capable run would silently re-parse and
-/// return a body (a QUIET `Some` — no panic — failing the loudness
-/// assertion, and bumping `decl_bodies_lowered`, failing the
-/// work-counter assertion); a lease-miss arm that stays silent returns
-/// a QUIET `None` and fails the loudness assertion.
+/// This supersedes the prior debug-only-loudness contract (a `debug_assert!`
+/// that PANICKED in debug and left the release build silently memoizing an
+/// empty env / body-less decl / empty capture). Per "fail lowering, not
+/// silent-skip", the release build must ALSO refuse to admit the
+/// silent-wrong-empty warm entry — so all three lease-only arms now route
+/// ReturnOnly uniformly.
+///
+/// Discrimination (RED against the pre-change tree, GREEN after): the
+/// pre-change `type_decl` / `whole_env` / `raw_surfaces_for` lease-miss arms
+/// PANICKED in this (debug_assertions) build, so the direct
+/// `memo.type_decl("Var1")` call below would abort the test — RED. Post-change
+/// each arm returns cleanly AND leaves its cell UNCOMMITTED (the
+/// `*_materialized` probes), while the work / parse counters stay flat: a
+/// silently-memoized wrong-empty entry (the release defect) would flip a
+/// `*_materialized` probe to `true` — GREEN only when NOTHING is admitted.
 #[test]
-fn broken_lease_body_demand_fails_loud_in_debug_and_lowers_nothing() {
+fn broken_lease_body_demand_fails_closed_return_only_without_caching() {
     let (memo, provenance) = memo_for(FIVE_DECLS);
 
     // First demand pins the lease and lowers the demanded body.
@@ -648,37 +657,57 @@ fn broken_lease_body_demand_fails_loud_in_debug_and_lowers_nothing() {
 
     // Break the lease pin out-of-band: the memo still HOLDS its
     // `SnapshotLease` (so `ensure_lease` will not re-acquire), but the
-    // worker-side retained snapshot is released.
+    // worker-side retained snapshot is released — every subsequent demand
+    // lease-misses.
     let service = memo
         .service
         .as_ref()
         .expect("a production memo has a service");
     service.release_retained_snapshot_for_test(&memo.key);
 
-    // Loud: the un-lowered sibling's demand hits the lease-miss arm,
-    // whose debug_assert fires in this (debug_assertions) build.
-    let memo_ref = &memo;
-    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        memo_ref.type_decl("Var1").is_some()
-    }));
-    match outcome {
-        Err(_) => {} // the lease-miss debug_assert fired — loud, as required
-        Ok(returned_some) => panic!(
-            "a body demand with a broken lease must fail LOUD in a debug build \
-             (the lease-miss debug_assert); got a quiet return (some={returned_some}) — \
-             quiet Some means a transient re-parse, quiet None a silent memoized miss"
-        ),
-    }
+    // 1. Per-symbol body demand (`lower_demanded`): ReturnOnly — a CLEAN None
+    //    (no panic), and NO body-less warm entry is admitted for `Var1`.
+    assert!(
+        memo.type_decl("Var1").is_none(),
+        "a body demand with a broken lease must fail CLOSED to None via ReturnOnly \
+         (never a panic, never a transient re-parse)"
+    );
+    assert!(
+        !memo.type_entry_materialized("Var1"),
+        "the broken-lease per-symbol demand must NOT memoize a body-less warm entry"
+    );
+
+    // 2. Whole-file env demand: ReturnOnly — an empty env is returned but NOT
+    //    memoized (the release-build silent-wrong-empty defect).
+    let env = memo.whole_env();
+    assert_eq!(
+        env.total_decl_count(),
+        0,
+        "the broken-lease whole_env must fail closed to an empty env"
+    );
+    assert!(
+        !memo.whole_env_materialized(),
+        "the broken-lease whole_env must NOT memoize a wrong-empty env"
+    );
+
+    // 3. Raw-surface capture demand: ReturnOnly — an empty capture is returned
+    //    but NOT inserted into the capture map.
+    let surfaces = memo.raw_surfaces_for("Var1", SymbolSpace::Type);
+    assert!(
+        surfaces.is_empty(),
+        "the broken-lease raw_surfaces_for must fail closed to an empty capture"
+    );
+    assert!(
+        !memo.raw_surfaces_materialized("Var1", SymbolSpace::Type),
+        "the broken-lease raw_surfaces_for must NOT memoize a wrong-empty capture"
+    );
+
+    // All three ReturnOnly arms lowered NOTHING and re-parsed NOTHING.
     assert_eq!(
         bodies(&provenance),
         lowered_before,
-        "the broken-lease demand must lower NOTHING"
+        "the broken-lease demands must lower NOTHING"
     );
-    // The parse accounting rail stays flat: parses are counted at the
-    // lease boundary, and the lease-only run path cannot parse at all
-    // (a transient parse would additionally be invisible to this
-    // counter — the lowered-bodies assertion above is the work-counter
-    // discriminator).
     assert_eq!(parses(&provenance), 1, "no re-parse is accounted");
 }
 

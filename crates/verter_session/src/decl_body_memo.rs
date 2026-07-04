@@ -103,6 +103,24 @@ pub struct LoweredValueDecl {
 type TypeCell = Arc<OnceLock<Option<Arc<LoweredTypeDecl>>>>;
 type ValueCell = Arc<OnceLock<Option<Arc<LoweredValueDecl>>>>;
 
+/// Outcome of a demanded per-symbol lowering ([`DeclBodyMemo::lower_demanded`]).
+///
+/// The two `None`-shaped miss classes are DISTINCT and must be handled
+/// differently by the caller's memo commit:
+///
+/// - [`Ready`](Self::Ready) — the lease-only run completed. `Some(batch)` is
+///   the lowered product; `None` is a GENUINE miss (no service on a seeded
+///   memo, or a fatal parse) whose body-less result is CORRECT and cacheable.
+/// - [`LeaseMiss`](Self::LeaseMiss) — the lease pin was broken (unreachable in
+///   practice): the lowering did not run and produced NOTHING. Fail CLOSED via
+///   ReturnOnly — the caller must NOT memoize this as a body-less warm entry
+///   (a silent wrong-empty result), in DEBUG *or* RELEASE. A later demand
+///   under a live lease recovers.
+enum DemandLower {
+    Ready(Option<LoweredStatementBatch>),
+    LeaseMiss,
+}
+
 /// Owned product of one statement-batch lowering job: every symbol the
 /// demanded statements actually declared, ready for entry population.
 struct LoweredStatementBatch {
@@ -342,26 +360,27 @@ impl DeclBodyMemo {
             .entry(name.to_string())
             .or_default()
             .clone();
-        // Backfill runs OUTSIDE `get_or_init` — see [`Self::backfill`]. The
-        // closure stashes the leftover batch; only the initializing thread
-        // (the one that produced `Some` here) takes it and backfills, after
-        // the demanded cell's init-lock is already released.
-        let leftover: std::cell::Cell<Option<LoweredStatementBatch>> = std::cell::Cell::new(None);
-        let result = cell
-            .get_or_init(|| {
-                self.lower_demanded(name, &contributors, from_jsdoc)
-                    .and_then(|batch| {
-                        let result = batch
-                            .types
-                            .iter()
-                            .find(|(n, _)| n == name)
-                            .map(|(_, decl)| Arc::new(decl.clone()));
-                        leftover.set(Some(batch));
-                        result
-                    })
-            })
-            .clone();
-        if let Some(batch) = leftover.take() {
+        // Backfill runs OUTSIDE the cell commit — see [`Self::backfill`]. The
+        // initializing caller receives the batch and backfills siblings after
+        // its own cell is committed; a lease-miss evicts the cell and commits
+        // nothing.
+        let (result, batch) = self.demand_and_commit(
+            &cell,
+            name,
+            &contributors,
+            from_jsdoc,
+            |batch| {
+                batch
+                    .types
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, decl)| Arc::new(decl.clone()))
+            },
+            || {
+                self.type_entries.remove(name);
+            },
+        );
+        if let Some(batch) = batch {
             self.backfill(batch, &contributors, Some((SymbolSpace::Type, name)), None);
         }
         result
@@ -375,22 +394,23 @@ impl DeclBodyMemo {
             .entry(name.to_string())
             .or_default()
             .clone();
-        let leftover: std::cell::Cell<Option<LoweredStatementBatch>> = std::cell::Cell::new(None);
-        let result = cell
-            .get_or_init(|| {
-                self.lower_demanded(name, &contributors, false)
-                    .and_then(|batch| {
-                        let result = batch
-                            .values
-                            .iter()
-                            .find(|(n, _)| n == name)
-                            .map(|(_, decl)| Arc::new(decl.clone()));
-                        leftover.set(Some(batch));
-                        result
-                    })
-            })
-            .clone();
-        if let Some(batch) = leftover.take() {
+        let (result, batch) = self.demand_and_commit(
+            &cell,
+            name,
+            &contributors,
+            false,
+            |batch| {
+                batch
+                    .values
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, decl)| Arc::new(decl.clone()))
+            },
+            || {
+                self.value_entries.remove(name);
+            },
+        );
+        if let Some(batch) = batch {
             self.backfill(batch, &contributors, Some((SymbolSpace::Value, name)), None);
         }
         result
@@ -433,22 +453,24 @@ impl DeclBodyMemo {
             .entry((scope.clone(), name.to_string()))
             .or_default()
             .clone();
-        let leftover: std::cell::Cell<Option<LoweredStatementBatch>> = std::cell::Cell::new(None);
-        let result = cell
-            .get_or_init(|| {
-                self.lower_demanded(name, &contributors, false)
-                    .and_then(|batch| {
-                        let result = batch
-                            .aug_types
-                            .iter()
-                            .find(|(s, n, _)| s == scope && n == name)
-                            .map(|(_, _, decl)| Arc::new(decl.clone()));
-                        leftover.set(Some(batch));
-                        result
-                    })
-            })
-            .clone();
-        if let Some(batch) = leftover.take() {
+        let (result, batch) = self.demand_and_commit(
+            &cell,
+            name,
+            &contributors,
+            false,
+            |batch| {
+                batch
+                    .aug_types
+                    .iter()
+                    .find(|(s, n, _)| s == scope && n == name)
+                    .map(|(_, _, decl)| Arc::new(decl.clone()))
+            },
+            || {
+                self.aug_type_entries
+                    .remove(&(scope.clone(), name.to_string()));
+            },
+        );
+        if let Some(batch) = batch {
             self.backfill(
                 batch,
                 &contributors,
@@ -475,22 +497,24 @@ impl DeclBodyMemo {
             .entry((scope.clone(), name.to_string()))
             .or_default()
             .clone();
-        let leftover: std::cell::Cell<Option<LoweredStatementBatch>> = std::cell::Cell::new(None);
-        let result = cell
-            .get_or_init(|| {
-                self.lower_demanded(name, &contributors, false)
-                    .and_then(|batch| {
-                        let result = batch
-                            .aug_values
-                            .iter()
-                            .find(|(s, n, _)| s == scope && n == name)
-                            .map(|(_, _, decl)| Arc::new(decl.clone()));
-                        leftover.set(Some(batch));
-                        result
-                    })
-            })
-            .clone();
-        if let Some(batch) = leftover.take() {
+        let (result, batch) = self.demand_and_commit(
+            &cell,
+            name,
+            &contributors,
+            false,
+            |batch| {
+                batch
+                    .aug_values
+                    .iter()
+                    .find(|(s, n, _)| s == scope && n == name)
+                    .map(|(_, _, decl)| Arc::new(decl.clone()))
+            },
+            || {
+                self.aug_value_entries
+                    .remove(&(scope.clone(), name.to_string()));
+            },
+        );
+        if let Some(batch) = batch {
             self.backfill(
                 batch,
                 &contributors,
@@ -509,58 +533,62 @@ impl DeclBodyMemo {
     /// retained snapshot and memoized; the per-symbol query path never
     /// touches it.
     pub fn whole_env(&self) -> Arc<EvalEnv> {
-        self.whole_env
-            .get_or_init(|| {
-                let Some(service) = self.service.as_ref() else {
-                    // Seeded memos pre-set the env; an un-seeded memo
-                    // without a service cannot build one.
-                    return Arc::new(EvalEnv::default());
-                };
-                // Pin the retained snapshot for this memo's lifetime
-                // (parse counted at lease acquisition); the LEASE-ONLY run
-                // below reuses it. A broken lease pin fails CLOSED to the
-                // empty env (the same value a fatal parse yields) — never
-                // a transient re-parse — and fails LOUD in debug/test
-                // builds so a lease-pin break cannot silently memoize an
-                // empty env.
-                self.ensure_lease();
-                let leased = service.run_leased(&self.key, move |program| {
-                    program
-                        .map(|p| build_eval_env(p.borrow_dependent(), p.source_str()))
-                        .unwrap_or_default()
-                });
-                debug_assert!(
-                    leased.is_some(),
-                    "decl-body lease pin broken: whole_env's lease-only run missed the \
-                     retained snapshot for {}",
-                    self.key.canonical
-                );
-                let mut env = leased.unwrap_or_default();
-                self.provenance
-                    .eval_env_builds
-                    .fetch_add(1, Ordering::Relaxed);
-                self.provenance
-                    .decl_bodies_lowered
-                    .fetch_add(env.total_decl_count() as u64, Ordering::Relaxed);
-                crate::host_resolve::apply_sfc_script_setup_type_params(
-                    &mut env,
-                    self.raw_source.as_ref(),
-                    self.framework_parse.as_deref(),
-                );
-                // A Svelte rune module (`.svelte.ts` / `.svelte.js`) merges the
-                // module-valid runes into its whole env so its exported
-                // rune-derived types infer correctly — per-file scoped, no
-                // eval_source byte change. The runes are sourced from the SAME
-                // centralized rune ambient inventory the graph-native
-                // effective-lookup consults, so the oracle and the per-symbol
-                // readers agree on rune visibility. Classify from the canonical
-                // via the static registry (no host needed) so the lazy memo
-                // path stays self-contained.
-                let file_language = self.rune_module_file_language();
-                crate::host_resolve::merge_rune_ambient_into_env(&mut env, &file_language);
-                Arc::new(env)
-            })
-            .clone()
+        // Warm path.
+        if let Some(cached) = self.whole_env.get() {
+            return cached.clone();
+        }
+        let Some(service) = self.service.as_ref() else {
+            // Seeded memos pre-set the env; an un-seeded memo without a service
+            // has no body to lower — the empty env is the CORRECT value, cache
+            // it (this is a genuine miss, not a lease-pin break).
+            return self
+                .whole_env
+                .get_or_init(|| Arc::new(EvalEnv::default()))
+                .clone();
+        };
+        // Pin the retained snapshot for this memo's lifetime (parse counted at
+        // lease acquisition); the LEASE-ONLY run below reuses it.
+        self.ensure_lease();
+        let Some(mut env) = service.run_leased(&self.key, move |program| {
+            program
+                .map(|p| build_eval_env(p.borrow_dependent(), p.source_str()))
+                .unwrap_or_default()
+        }) else {
+            // Broken lease pin (unreachable in practice): fail CLOSED via
+            // ReturnOnly. NEVER memoize the empty env — that is the silent
+            // wrong-empty warm entry release builds used to admit; a retry
+            // under a live lease recovers. Loud, not silent.
+            tracing::error!(
+                canonical = %self.key.canonical,
+                "decl-body lease pin broken: whole_env's lease-only run missed the \
+                 retained snapshot; failing closed to an uncached empty env (ReturnOnly)"
+            );
+            return Arc::new(EvalEnv::default());
+        };
+        self.provenance
+            .eval_env_builds
+            .fetch_add(1, Ordering::Relaxed);
+        self.provenance
+            .decl_bodies_lowered
+            .fetch_add(env.total_decl_count() as u64, Ordering::Relaxed);
+        crate::host_resolve::apply_sfc_script_setup_type_params(
+            &mut env,
+            self.raw_source.as_ref(),
+            self.framework_parse.as_deref(),
+        );
+        // A Svelte rune module (`.svelte.ts` / `.svelte.js`) merges the
+        // module-valid runes into its whole env so its exported
+        // rune-derived types infer correctly — per-file scoped, no
+        // eval_source byte change. The runes are sourced from the SAME
+        // centralized rune ambient inventory the graph-native
+        // effective-lookup consults, so the oracle and the per-symbol
+        // readers agree on rune visibility. Classify from the canonical
+        // via the static registry (no host needed) so the lazy memo
+        // path stays self-contained.
+        let file_language = self.rune_module_file_language();
+        crate::host_resolve::merge_rune_ambient_into_env(&mut env, &file_language);
+        // Commit only the REAL env (idempotent — a cold race loses harmlessly).
+        self.whole_env.get_or_init(|| Arc::new(env)).clone()
     }
 
     /// Whether the whole-file env has already been materialised (test
@@ -568,6 +596,24 @@ impl DeclBodyMemo {
     #[cfg(test)]
     pub(crate) fn whole_env_materialized(&self) -> bool {
         self.whole_env.get().is_some()
+    }
+
+    /// Whether a per-symbol TYPE cell has a COMMITTED entry (test
+    /// observability — never a validity signal). A lease-miss ReturnOnly
+    /// leaves the (lazily-created) cell uninitialised, so this returns `false`.
+    #[cfg(test)]
+    pub(crate) fn type_entry_materialized(&self, name: &str) -> bool {
+        self.type_entries
+            .get(name)
+            .is_some_and(|cell| cell.get().is_some())
+    }
+
+    /// Whether a `(name, space)` raw-surface capture has a COMMITTED entry
+    /// (test observability — never a validity signal). A lease-miss ReturnOnly
+    /// never inserts, so this returns `false`.
+    #[cfg(test)]
+    pub(crate) fn raw_surfaces_materialized(&self, name: &str, space: SymbolSpace) -> bool {
+        self.raw_surfaces.contains_key(&(name.to_string(), space))
     }
 
     /// Demand the parse-time `RawSourceSurface` contributor vector for
@@ -611,10 +657,11 @@ impl DeclBodyMemo {
                 self.ensure_lease();
                 let canonical = self.key.canonical.to_string();
                 let wanted = name.to_string();
-                // LEASE-ONLY run: a broken lease pin fails CLOSED to the
-                // empty capture — never a transient re-parse — and fails
-                // LOUD in debug/test builds (assert below) so a lease-pin
-                // break cannot silently memoize an empty capture.
+                // LEASE-ONLY run: never a transient re-parse. A broken lease
+                // pin (the run misses the retained snapshot) fails CLOSED via
+                // ReturnOnly BELOW — the empty capture is returned UNCACHED so
+                // a lease-pin break can never silently memoize a wrong-empty
+                // capture (in DEBUG *or* RELEASE).
                 let leased = service.run_leased(&self.key, move |program| {
                     let Some(program) = program else {
                         return Vec::new();
@@ -635,14 +682,22 @@ impl DeclBodyMemo {
                         })
                         .collect::<Vec<_>>()
                 });
-                debug_assert!(
-                    leased.is_some(),
-                    "decl-body lease pin broken: raw_surfaces_for's lease-only run missed \
-                     the retained snapshot for {}",
-                    self.key.canonical
-                );
-                leased.unwrap_or_default()
+                let Some(surfaces) = leased else {
+                    // Broken lease pin (unreachable in practice): ReturnOnly —
+                    // return the empty capture WITHOUT memoizing it; a retry
+                    // under a live lease recovers. Loud, not silent.
+                    tracing::error!(
+                        canonical = %self.key.canonical,
+                        "decl-body lease pin broken: raw_surfaces_for's lease-only run \
+                         missed the retained snapshot; failing closed to an uncached \
+                         empty capture (ReturnOnly)"
+                    );
+                    return Arc::new(Vec::new());
+                };
+                surfaces
             } else {
+                // No contributors / no service: a GENUINE empty capture — cache
+                // it (the demanded symbol has no parse-time surfaces).
                 Vec::new()
             };
 
@@ -672,8 +727,12 @@ impl DeclBodyMemo {
         name: &str,
         contributors: &[u32],
         from_jsdoc_typedef: bool,
-    ) -> Option<LoweredStatementBatch> {
-        let service = self.service.as_ref()?;
+    ) -> DemandLower {
+        // A seeded memo has no service: nothing to lower, a genuine (cacheable)
+        // body-less miss — NOT a lease-pin break.
+        let Some(service) = self.service.as_ref() else {
+            return DemandLower::Ready(None);
+        };
         self.ensure_lease();
         let contributors = contributors.to_vec();
         let name = name.to_string();
@@ -770,24 +829,80 @@ impl DeclBodyMemo {
             }
             Some(batch)
         });
-        // Outer `None` = a broken lease pin (fail CLOSED, nothing ran —
-        // and LOUD in debug/test builds, so a lease-pin break cannot
-        // silently memoize the miss); inner `None` = a fatal parse. Both
-        // are the lowering miss.
+        // Outer `None` = a broken lease pin (the lease-only run missed the
+        // retained snapshot; the job did NOT run). Fail CLOSED via ReturnOnly:
+        // this must NEVER be memoized as a body-less warm entry, in DEBUG *or*
+        // RELEASE (silent wrong-empty is the defect the prior debug-only
+        // `debug_assert!` left latent in release). Loud, not silent
+        // (fail-lowering, not silent-skip); a later demand under a live lease
+        // recovers. Inner `Some/None` = the run completed (batch / fatal-parse
+        // genuine miss) — the caller may cache it.
         let Some(inner) = outcome else {
-            debug_assert!(
-                false,
+            tracing::error!(
+                canonical = %self.key.canonical,
                 "decl-body lease pin broken: the demanded lowering's lease-only run \
-                 missed the retained snapshot for {}",
-                self.key.canonical
+                 missed the retained snapshot; failing closed to ReturnOnly (uncached)"
             );
-            return None;
+            return DemandLower::LeaseMiss;
         };
-        let batch = inner?;
-        self.provenance
-            .decl_bodies_lowered
-            .fetch_add(batch.lowered_count as u64, Ordering::Relaxed);
-        Some(batch)
+        if let Some(batch) = inner.as_ref() {
+            self.provenance
+                .decl_bodies_lowered
+                .fetch_add(batch.lowered_count as u64, Ordering::Relaxed);
+        }
+        DemandLower::Ready(inner)
+    }
+
+    /// Get-or-compute a per-symbol cell under `get_or_init` single-flight, with
+    /// a lease-miss ReturnOnly rail.
+    ///
+    /// The demanded lowering runs INSIDE `get_or_init` so a symbol demanded
+    /// concurrently lowers exactly ONCE (the hot-path single-flight contract).
+    /// A [`DemandLower::Ready`] commits the extracted decl and returns the batch
+    /// so the initializing caller can backfill siblings. A
+    /// [`DemandLower::LeaseMiss`] transiently commits `None` under the init lock
+    /// (unavoidable with a write-once `OnceLock`), then the caller's
+    /// `on_lease_miss_evict` DROPS the poisoned cell from its owning map — so no
+    /// future demand serves the wrong-empty warm entry and the next demand
+    /// retries under a live lease. Fail CLOSED via ReturnOnly, in DEBUG *and*
+    /// RELEASE.
+    fn demand_and_commit<D>(
+        &self,
+        cell: &OnceLock<Option<Arc<D>>>,
+        name: &str,
+        contributors: &[u32],
+        from_jsdoc: bool,
+        extract: impl FnOnce(&LoweredStatementBatch) -> Option<Arc<D>>,
+        on_lease_miss_evict: impl FnOnce(),
+    ) -> (Option<Arc<D>>, Option<LoweredStatementBatch>) {
+        if let Some(cached) = cell.get() {
+            return (cached.clone(), None);
+        }
+        let leftover: std::cell::Cell<Option<LoweredStatementBatch>> = std::cell::Cell::new(None);
+        let lease_missed = std::cell::Cell::new(false);
+        let result = cell
+            .get_or_init(
+                || match self.lower_demanded(name, contributors, from_jsdoc) {
+                    DemandLower::Ready(maybe_batch) => {
+                        let decl = maybe_batch.as_ref().and_then(extract);
+                        leftover.set(maybe_batch);
+                        decl
+                    }
+                    DemandLower::LeaseMiss => {
+                        lease_missed.set(true);
+                        None
+                    }
+                },
+            )
+            .clone();
+        if lease_missed.get() {
+            // The cell transiently committed `None` under the init lock; drop
+            // it from the owning map so it can never serve a wrong-empty warm
+            // entry and the next demand retries.
+            on_lease_miss_evict();
+            return (None, None);
+        }
+        (result, leftover.take())
     }
 
     /// Populate sibling entries the demanded statements ALSO declared
