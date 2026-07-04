@@ -178,7 +178,7 @@ fn published_expanded_classifier_sees_every_context_bearing_family() {
     let instantiate = SemanticQueryKey::Instantiate {
         base: crate::semantic_query::DeclIdentity::synthetic("X").to_type_slot_unscoped(),
         args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        context: InstantiateContext::non_file(published_expanded, Default::default()),
+        context: InstantiateContext::non_file_for_tests(published_expanded, Default::default()),
     };
     assert!(key_is_published_expanded(&instantiate));
     let project_path = SemanticQueryKey::ProjectPath {
@@ -923,7 +923,7 @@ fn skeleton_instantiate(
     let key = SemanticQueryKey::Instantiate {
         base: dispatch.type_slot_for(Arc::from("/workspace/src/sel.ts"), Arc::from(decl_name)),
         args: Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
-        context: InstantiateContext::non_file(
+        context: InstantiateContext::non_file_for_tests(
             ProjectionReductionContext::published(ProjectionMode::Skeleton),
             Default::default(),
         ),
@@ -1361,7 +1361,7 @@ fn typeof_value_graph_lowers_at_requested_demand() {
             Arc::from("FactoryBag"),
         ),
         args: Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
-        context: InstantiateContext::non_file(
+        context: InstantiateContext::non_file_for_tests(
             ProjectionReductionContext::published(ProjectionMode::Skeleton),
             Default::default(),
         ),

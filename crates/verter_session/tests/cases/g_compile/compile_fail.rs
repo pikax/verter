@@ -255,3 +255,25 @@ fn hot_materialize_structural_rails_smoke() {
     t.compile_fail("tests/cases/compile-fail/no_typeexpr_aliased_field.rs");
     t.compile_fail("tests/cases/compile-fail/output_projector_not_impl_outside_crate.rs");
 }
+
+/// The sealed `InstantiateBodySource` construction: the source-kind
+/// constructors `InstantiateContext::file_backed` / `::non_file` are
+/// `pub(crate)` AND require the `BodySourceWitness` mintable only inside
+/// the dispatch module, so an out-of-factory production construction of a
+/// source kind fails to compile — the
+/// `ProjectSemanticDispatch::instantiate_context_for` choke point stays
+/// the SOLE production builder and owns the deterministic
+/// non-file/file-backed mapping. If a constructor were widened back to
+/// `pub` (witness-less), the fixture would COMPILE and trybuild would
+/// fail this test.
+#[test]
+#[cfg_attr(
+    not(feature = "compile-fail"),
+    ignore = "run with --features compile-fail"
+)]
+fn instantiate_body_source_is_sealed_to_the_dispatch_factory() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail(
+        "tests/cases/compile-fail/instantiate_body_source_sealed_to_dispatch_factory.rs",
+    );
+}

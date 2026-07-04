@@ -644,7 +644,7 @@ fn class_dual_space_routes_instance_and_static_through_distinct_shared_paths() {
         base: decl_slot
             .with_symbol_space(verter_session::semantic_query::SemanticSymbolSpace::Type),
         args: Arc::from(Vec::new().into_boxed_slice()),
-        context: verter_session::semantic_query::InstantiateContext::file_backed(
+        context: verter_session::semantic_query::InstantiateContext::file_backed_for_tests(
             ProjectionReductionContext::published(ProjectionMode::Shallow),
             inner_resolve_env,
             host.live_parse_env_dim_for_tests(&decl_slot.defining_canonical),

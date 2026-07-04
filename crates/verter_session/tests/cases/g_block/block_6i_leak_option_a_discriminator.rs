@@ -216,7 +216,7 @@ fn shallow_walker_substitutes_mapper_binder_per_enumerated_key() {
     let instantiate_query = SemanticQueryKey::Instantiate {
         base: decl_identity.to_type_slot_unscoped(),
         args,
-        context: verter_session::semantic_query::InstantiateContext::non_file(
+        context: verter_session::semantic_query::InstantiateContext::non_file_for_tests(
             ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
             Default::default(),
         ),

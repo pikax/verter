@@ -1517,9 +1517,14 @@ impl ProjectionReductionContext {
 /// The dim type is the sealed [`ParseEnvHash`] newtype (in-crate
 /// construction only), and [`InstantiateContext`]'s fields are private with
 /// [`InstantiateContext::file_backed`] / [`InstantiateContext::non_file`]
-/// as the ONLY source-kind constructors — call sites never choose freely;
-/// the production mapping is owned by the
+/// as the ONLY source-kind constructors — `pub(crate)` and gated on the
+/// [`crate::project_semantic_dispatch::BodySourceWitness`] mintable only
+/// inside the dispatch module, so call sites CANNOT choose freely; the
+/// production mapping is owned by the
 /// `ProjectSemanticDispatch::instantiate_context_for` choke point.
+/// Test fixtures key contexts through the
+/// `cfg(any(test, debug_assertions))` `*_for_tests` mints, compiled out
+/// of release builds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum InstantiateBodySource {
     /// The base body may read real-file parse-derived input; carries the
@@ -1567,9 +1572,13 @@ pub(crate) fn is_non_file_base(canonical: &str) -> bool {
 /// `ModeSlot`.
 ///
 /// **Sealed construction:** fields are PRIVATE; the ONLY source-kind
-/// constructors are [`Self::file_backed`] / [`Self::non_file`], and the
+/// constructors are [`Self::file_backed`] / [`Self::non_file`] —
+/// `pub(crate)`, witness-gated on the dispatch-minted
+/// [`crate::project_semantic_dispatch::BodySourceWitness`] — and the
 /// sole production builder is the
 /// `ProjectSemanticDispatch::instantiate_context_for` choke point.
+/// Tests mint via the `cfg(any(test, debug_assertions))`
+/// [`Self::file_backed_for_tests`] / [`Self::non_file_for_tests`].
 /// Outside readers use the accessors.
 ///
 /// **R6-clean:** `resolve_env_hash` and the FileBacked `parse_env_hash`
@@ -1600,11 +1609,19 @@ impl InstantiateContext {
     /// Build the context for a FILE-BACKED base: the compute may read
     /// real-file parse-derived input, so the live `parse_env_hash` is
     /// part of the family identity.
+    ///
+    /// Sealed to the dispatch factory: `pub(crate)` AND gated on the
+    /// [`crate::project_semantic_dispatch::BodySourceWitness`] mintable
+    /// only inside the dispatch module — the
+    /// `ProjectSemanticDispatch::instantiate_context_for` choke point is
+    /// the sole production caller. Tests use
+    /// [`Self::file_backed_for_tests`].
     #[must_use]
-    pub const fn file_backed(
+    pub(crate) const fn file_backed(
         projection_reduction: ProjectionReductionContext,
         resolve_env_hash: HashValue,
         parse_env_hash: ParseEnvHash,
+        _witness: crate::project_semantic_dispatch::BodySourceWitness,
     ) -> Self {
         Self {
             projection_reduction,
@@ -1616,8 +1633,47 @@ impl InstantiateContext {
     /// Build the context for a TRUE NON-FILE base (`""` / `"__builtin__"`
     /// / `"<synthetic>"`): the value does not depend on the parse env, so
     /// no `P` folds into the family (R21).
+    ///
+    /// Sealed to the dispatch factory — same witness gate and rationale
+    /// as [`Self::file_backed`]. Tests use [`Self::non_file_for_tests`].
     #[must_use]
-    pub const fn non_file(
+    pub(crate) const fn non_file(
+        projection_reduction: ProjectionReductionContext,
+        resolve_env_hash: HashValue,
+        _witness: crate::project_semantic_dispatch::BodySourceWitness,
+    ) -> Self {
+        Self {
+            projection_reduction,
+            resolve_env_hash,
+            body_source: InstantiateBodySource::NonFile,
+        }
+    }
+
+    /// Test-only mint of a FILE-BACKED context with caller-supplied dims —
+    /// bypasses the dispatch-factory witness so fixtures can key contexts
+    /// directly. Gated `cfg(any(test, debug_assertions))` (the house
+    /// `for_tests` gate: external `tests/` integration crates build the
+    /// lib without `cfg(test)`), so release builds never compile it and
+    /// the production seal stays intact.
+    #[cfg(any(test, debug_assertions))]
+    #[must_use]
+    pub const fn file_backed_for_tests(
+        projection_reduction: ProjectionReductionContext,
+        resolve_env_hash: HashValue,
+        parse_env_hash: ParseEnvHash,
+    ) -> Self {
+        Self {
+            projection_reduction,
+            resolve_env_hash,
+            body_source: InstantiateBodySource::FileBacked(parse_env_hash),
+        }
+    }
+
+    /// Test-only mint of a NON-FILE context — see
+    /// [`Self::file_backed_for_tests`] for the gate rationale.
+    #[cfg(any(test, debug_assertions))]
+    #[must_use]
+    pub const fn non_file_for_tests(
         projection_reduction: ProjectionReductionContext,
         resolve_env_hash: HashValue,
     ) -> Self {
@@ -5866,7 +5922,7 @@ mod tests {
         let a = SemanticQueryKey::Instantiate {
             base: base.clone(),
             args: Arc::from(vec![string_id].into_boxed_slice()),
-            context: crate::semantic_query::InstantiateContext::non_file(
+            context: crate::semantic_query::InstantiateContext::non_file_for_tests(
                 ProjectionReductionContext::published(ProjectionMode::Expanded),
                 Default::default(),
             ),
@@ -5874,7 +5930,7 @@ mod tests {
         let b = SemanticQueryKey::Instantiate {
             base,
             args: Arc::from(vec![number_id].into_boxed_slice()),
-            context: crate::semantic_query::InstantiateContext::non_file(
+            context: crate::semantic_query::InstantiateContext::non_file_for_tests(
                 ProjectionReductionContext::published(ProjectionMode::Expanded),
                 Default::default(),
             ),
@@ -6041,7 +6097,7 @@ mod tests {
         let key = SemanticQueryKey::Instantiate {
             base: base.clone(),
             args: Arc::clone(&args),
-            context: crate::semantic_query::InstantiateContext::non_file(
+            context: crate::semantic_query::InstantiateContext::non_file_for_tests(
                 ProjectionReductionContext::published(ProjectionMode::Expanded),
                 Default::default(),
             ),
@@ -6051,7 +6107,7 @@ mod tests {
         let key2 = SemanticQueryKey::Instantiate {
             base,
             args,
-            context: crate::semantic_query::InstantiateContext::non_file(
+            context: crate::semantic_query::InstantiateContext::non_file_for_tests(
                 ProjectionReductionContext::published(ProjectionMode::Expanded),
                 Default::default(),
             ),

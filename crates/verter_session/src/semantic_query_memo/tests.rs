@@ -1018,7 +1018,7 @@ fn invalidate_canonical_evicts_instantiate_entries_that_read_that_canonical_body
     let key = SemanticQueryKey::Instantiate {
         base,
         args: Arc::from(vec![arg].into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::non_file(
+        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
             crate::semantic_query::ProjectionReductionContext::published(
                 crate::semantic_query::ProjectionMode::Expanded,
             ),
@@ -1068,7 +1068,7 @@ fn invalidate_canonical_keeps_instantiate_entries_whose_bases_are_unrelated() {
     let key = SemanticQueryKey::Instantiate {
         base,
         args: Arc::from(vec![arg].into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::non_file(
+        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
             crate::semantic_query::ProjectionReductionContext::published(
                 crate::semantic_query::ProjectionMode::Expanded,
             ),
@@ -8015,7 +8015,7 @@ mod env_scoped_key_identity_guards {
         SemanticQueryKey::Instantiate {
             base: slot,
             args: empty_args(),
-            context: InstantiateContext::non_file(
+            context: InstantiateContext::non_file_for_tests(
                 ProjectionReductionContext::published(ProjectionMode::Expanded),
                 resolve_env,
             ),
@@ -8759,17 +8759,17 @@ mod instantiate_body_source_family_identity {
     fn file_backed_parse_env_change_is_a_distinct_instantiate_family() {
         let p0 = ParseEnvHash::from_env_hash([1u8; 16]);
         let p1 = ParseEnvHash::from_env_hash([2u8; 16]);
-        let f0 = fam(&inst_key(InstantiateContext::file_backed(
+        let f0 = fam(&inst_key(InstantiateContext::file_backed_for_tests(
             prc(),
             Default::default(),
             p0,
         )));
-        let f0_again = fam(&inst_key(InstantiateContext::file_backed(
+        let f0_again = fam(&inst_key(InstantiateContext::file_backed_for_tests(
             prc(),
             Default::default(),
             p0,
         )));
-        let f1 = fam(&inst_key(InstantiateContext::file_backed(
+        let f1 = fam(&inst_key(InstantiateContext::file_backed_for_tests(
             prc(),
             Default::default(),
             p1,
@@ -8786,11 +8786,11 @@ mod instantiate_body_source_family_identity {
     /// and its folded `body_source` carries no `ParseEnvHash`.
     #[test]
     fn non_file_context_folds_no_parse_env() {
-        let a = fam(&inst_key(InstantiateContext::non_file(
+        let a = fam(&inst_key(InstantiateContext::non_file_for_tests(
             prc(),
             Default::default(),
         )));
-        let b = fam(&inst_key(InstantiateContext::non_file(
+        let b = fam(&inst_key(InstantiateContext::non_file_for_tests(
             prc(),
             Default::default(),
         )));
@@ -8810,12 +8810,12 @@ mod instantiate_body_source_family_identity {
     /// projection / resolve env, different `body_source` ⇒ different family.
     #[test]
     fn file_backed_and_non_file_are_distinct_instantiate_families() {
-        let file_backed = fam(&inst_key(InstantiateContext::file_backed(
+        let file_backed = fam(&inst_key(InstantiateContext::file_backed_for_tests(
             prc(),
             Default::default(),
             ParseEnvHash::from_env_hash([1u8; 16]),
         )));
-        let non_file = fam(&inst_key(InstantiateContext::non_file(
+        let non_file = fam(&inst_key(InstantiateContext::non_file_for_tests(
             prc(),
             Default::default(),
         )));
@@ -8840,8 +8840,8 @@ mod instantiate_body_source_family_identity {
 
         let p = ParseEnvHash::from_env_hash([7u8; 16]);
         let contexts = [
-            InstantiateContext::file_backed(prc(), Default::default(), p),
-            InstantiateContext::non_file(prc(), Default::default()),
+            InstantiateContext::file_backed_for_tests(prc(), Default::default(), p),
+            InstantiateContext::non_file_for_tests(prc(), Default::default()),
         ];
         for context in contexts {
             let family = fam(&inst_key(context));

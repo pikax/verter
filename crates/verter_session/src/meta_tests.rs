@@ -6028,7 +6028,7 @@ defineSlots<OpenMappedSlots<T>>()
                 Arc::from("OpenMappedSlots"),
             ),
             args: Arc::from(vec![t_param].into_boxed_slice()),
-            context: crate::semantic_query::InstantiateContext::non_file(
+            context: crate::semantic_query::InstantiateContext::non_file_for_tests(
                 crate::semantic_query::ProjectionReductionContext::published(
                     crate::semantic_query::ProjectionMode::Navigate,
                 ),

@@ -66,7 +66,7 @@ fn instantiate_slot_holds_two_concurrent_candidates_for_distinct_views() {
             Arc::from("Foo"),
         ),
         args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        context: verter_session::semantic_query::InstantiateContext::non_file(
+        context: verter_session::semantic_query::InstantiateContext::non_file_for_tests(
             ProjectionReductionContext::published(ProjectionMode::Expanded),
             Default::default(),
         ),
@@ -159,7 +159,7 @@ fn family_slot_caps_concurrent_candidates_at_four_with_fifo_eviction() {
             Arc::from("Bar"),
         ),
         args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        context: verter_session::semantic_query::InstantiateContext::non_file(
+        context: verter_session::semantic_query::InstantiateContext::non_file_for_tests(
             ProjectionReductionContext::published(ProjectionMode::Expanded),
             Default::default(),
         ),
@@ -244,7 +244,7 @@ fn multi_candidate_reverse_index_survives_sibling_invalidation() {
             Arc::from("Owner"),
         ),
         args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        context: verter_session::semantic_query::InstantiateContext::non_file(
+        context: verter_session::semantic_query::InstantiateContext::non_file_for_tests(
             ProjectionReductionContext::published(ProjectionMode::Identity),
             Default::default(),
         ),
@@ -418,7 +418,7 @@ fn family_slot_cap_eviction_prunes_orphan_reverse_index_stamp() {
             Arc::from("Foo"),
         ),
         args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        context: verter_session::semantic_query::InstantiateContext::non_file(
+        context: verter_session::semantic_query::InstantiateContext::non_file_for_tests(
             ProjectionReductionContext::published(ProjectionMode::Identity),
             Default::default(),
         ),

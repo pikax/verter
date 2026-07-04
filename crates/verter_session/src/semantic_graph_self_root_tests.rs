@@ -225,7 +225,7 @@ fn instantiate_same_canonical_edit_rejects_warm_entry() {
             Arc::from("Box"),
         ),
         args: Arc::from(vec![string_arg].into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::non_file(
+        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
             crate::semantic_query::ProjectionReductionContext::published(
                 crate::semantic_query::ProjectionMode::Expanded,
             ),
@@ -864,7 +864,7 @@ fn file_derived_object_node(host: &VerterHost, canonical: &str) -> SemanticNodeI
             Arc::from("Foo"),
         ),
         args: Arc::from(Vec::new().into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::non_file(
+        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
             crate::semantic_query::ProjectionReductionContext::published(
                 crate::semantic_query::ProjectionMode::Expanded,
             ),
@@ -1253,7 +1253,7 @@ fn builtin_utility_instantiation_roots_on_argument_file() {
     let key = SemanticQueryKey::Instantiate {
         base: crate::project_semantic_dispatch::pick_builtin_decl_identity(),
         args: Arc::from(vec![source, key_set].into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::non_file(
+        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
             crate::semantic_query::ProjectionReductionContext::published(
                 crate::semantic_query::ProjectionMode::Expanded,
             ),
@@ -1368,7 +1368,7 @@ fn non_builtin_instantiation_roots_on_type_argument_file() {
             Arc::from("Box"),
         ),
         args: Arc::from(vec![arg_node].into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::non_file(
+        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
             crate::semantic_query::ProjectionReductionContext::published(
                 crate::semantic_query::ProjectionMode::Expanded,
             ),

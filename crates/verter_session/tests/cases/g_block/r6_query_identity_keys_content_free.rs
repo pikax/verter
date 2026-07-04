@@ -70,7 +70,7 @@ fn r6_semantic_query_key_instantiate_base_is_content_free_decl_key() {
     let key = SemanticQueryKey::Instantiate {
         base: base.clone(),
         args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        context: InstantiateContext::non_file(
+        context: InstantiateContext::non_file_for_tests(
             ProjectionReductionContext::published(ProjectionMode::Expanded),
             Default::default(),
         ),

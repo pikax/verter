@@ -106,6 +106,37 @@ pub(crate) mod relation_predicates;
 pub(crate) mod substitute;
 pub(crate) mod walk;
 
+// Private leaf module sealing the `InstantiateBodySource` construction
+// witness: the unit field is private to THIS module, so the witness is
+// mintable only through the `pub(super)` mint below — reachable from the
+// dispatch module tree, unforgeable everywhere else in the crate.
+mod body_source_witness {
+    /// Construction witness for the sealed
+    /// [`InstantiateContext`](crate::semantic_query::InstantiateContext)
+    /// source-kind constructors (`file_backed` / `non_file`) — the same
+    /// house family as `MacroOwnBodyStamp` / `MergeRoleStamp`: a
+    /// capability, not a convention.
+    ///
+    /// The inner unit field is private to this leaf module, so in
+    /// production the ONLY mint is [`Self::mint_for_dispatch_factory`],
+    /// visible to the dispatch module tree — the
+    /// `ProjectSemanticDispatch::instantiate_context_for` choke point
+    /// that owns the deterministic non-file/file-backed mapping. No
+    /// other crate code (and no external crate — the constructors are
+    /// `pub(crate)`) can choose a source kind freely. Test fixtures use
+    /// the `InstantiateContext::*_for_tests` mints instead, which are
+    /// compiled out of release builds.
+    pub(crate) struct BodySourceWitness(());
+
+    impl BodySourceWitness {
+        /// The sole production mint — dispatch-module-tree visibility.
+        pub(super) const fn mint_for_dispatch_factory() -> Self {
+            Self(())
+        }
+    }
+}
+pub(crate) use body_source_witness::BodySourceWitness;
+
 /// Declaration identity used for in-flight instantiation tracking
 /// ( recursive-ref back-edge detection during body
 /// lowering). `(canonical_id, name)` tuple keyed on refcount-shared
@@ -453,12 +484,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .host_for_fact_tracer_install()
             .host_view_env_hashes_for(canonical);
         if crate::semantic_query::is_non_file_base(canonical) {
-            crate::semantic_query::InstantiateContext::non_file(prc, env.resolve_env_hash)
+            crate::semantic_query::InstantiateContext::non_file(
+                prc,
+                env.resolve_env_hash,
+                BodySourceWitness::mint_for_dispatch_factory(),
+            )
         } else {
             crate::semantic_query::InstantiateContext::file_backed(
                 prc,
                 env.resolve_env_hash,
                 crate::locator_identity::ParseEnvHash::from_env_hash(env.parse_env_hash),
+                BodySourceWitness::mint_for_dispatch_factory(),
             )
         }
     }

@@ -991,7 +991,7 @@ mod tests {
         let instantiate = SemanticQueryKey::Instantiate {
             base: identity.clone(),
             args: Arc::from(Vec::new().into_boxed_slice()),
-            context: crate::semantic_query::InstantiateContext::non_file(
+            context: crate::semantic_query::InstantiateContext::non_file_for_tests(
                 crate::semantic_query::ProjectionReductionContext::published(
                     ProjectionMode::Skeleton,
                 ),

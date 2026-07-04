@@ -71,7 +71,7 @@ fn type_resolution_audit_pathological_recursion_observes_depth_cap_exactly() {
     let key = SemanticQueryKey::Instantiate {
         base: pick_identity,
         args: Arc::from(Vec::new().into_boxed_slice()),
-        context: verter_session::semantic_query::InstantiateContext::non_file(
+        context: verter_session::semantic_query::InstantiateContext::non_file_for_tests(
             verter_session::semantic_query::ProjectionReductionContext::published(
                 ProjectionMode::Skeleton,
             ),

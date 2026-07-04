@@ -111,7 +111,7 @@ fn vue_default_object_members(host: &VerterHost, canonical_id: &str) -> Vec<Stri
             Arc::from("default"),
         ),
         args: Arc::from(Vec::new().into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::non_file(
+        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
             ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
             Default::default(),
         ),
@@ -163,7 +163,7 @@ fn vue_default_query_object_members(host: &VerterHost, canonical_id: &str) -> Op
             Arc::from("default"),
         ),
         args: Arc::from(Vec::new().into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::non_file(
+        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
             ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
             Default::default(),
         ),
@@ -213,7 +213,7 @@ fn project_vue_default_path(host: &VerterHost, canonical_id: &str, path: &[&str]
             Arc::from("default"),
         ),
         args: Arc::from(Vec::new().into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::non_file(
+        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
             ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
             Default::default(),
         ),
@@ -264,7 +264,7 @@ fn instantiate_vue_default_node(
             Arc::from("default"),
         ),
         args: Arc::from(Vec::new().into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::non_file(
+        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
             ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
             Default::default(),
         ),
@@ -940,7 +940,7 @@ fn project_vue_default_path_eager(
             Arc::from("default"),
         ),
         args: Arc::from(Vec::new().into_boxed_slice()),
-        context: crate::semantic_query::InstantiateContext::non_file(
+        context: crate::semantic_query::InstantiateContext::non_file_for_tests(
             ProjectionReductionContext::published(ProjectionMode::Expanded),
             Default::default(),
         ),
