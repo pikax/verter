@@ -366,11 +366,39 @@ pub(crate) trait ResolverContext: sealed::Sealed {
 
     // -------- Symbol / route resolution ----------------------------
 
+    /// Fact-DISCARDING import-root resolution (final `(canonical, symbol)`
+    /// tuple only).
+    ///
+    /// MUST NOT be used on a memoized-build path (a `LowerLocator` /
+    /// read-set-validated cold build): the discarded route-chain facts are
+    /// the only proof a barrel/re-export retarget invalidates the enclosing
+    /// cache entry — dropping them false-warms the entry when an
+    /// intermediate barrel changes while the owner file does not. Memoized
+    /// builds call [`Self::resolve_imported_type_root_with_facts`] and
+    /// record the returned facts onto the active tracer.
     fn resolve_imported_type_root(
         &self,
         dep_canonical: &str,
         imported_name: &str,
     ) -> (String, String);
+
+    /// Like [`Self::resolve_imported_type_root`] but ALSO returns the full
+    /// route-chain fact list the resolution observed (every barrel /
+    /// re-export participant's version).
+    ///
+    /// REQUIRED on any memoized-build path: the caller records the returned
+    /// facts onto the active fact tracer
+    /// ([`Self::observe_borrowed_signature`]) so the enclosing cache
+    /// entry's `ReadSetSignature` carries the route proof and a barrel
+    /// retarget misses the warm entry.
+    fn resolve_imported_type_root_with_facts(
+        &self,
+        dep_canonical: &str,
+        imported_name: &str,
+    ) -> (
+        (String, String),
+        Arc<[crate::resolver_core::FactVersionRef]>,
+    );
 
     fn resolve_named_type_export_target(
         &self,
@@ -847,6 +875,39 @@ impl ResolverContext for crate::VerterHost {
                 "Architectural violation: bare-host resolve_imported_type_root called from \
                  production; construct HostResolverContext::new(host, &view, overlay) at the \
                  request entry and route through `ctx.resolve_imported_type_root`"
+            );
+        }
+    }
+
+    #[inline]
+    fn resolve_imported_type_root_with_facts(
+        &self,
+        dep_canonical: &str,
+        imported_name: &str,
+    ) -> (
+        (String, String),
+        Arc<[crate::resolver_core::FactVersionRef]>,
+    ) {
+        // Bare-host arm: mirrors `resolve_imported_type_root` above — a
+        // test/debug convenience over a one-shot owned view; reaching it
+        // from production means a request-bound caller missed plumbing.
+        #[cfg(any(test, debug_assertions))]
+        {
+            let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
+            crate::VerterHost::resolve_imported_type_root_with_facts_with_store_view(
+                self,
+                &view,
+                dep_canonical,
+                imported_name,
+            )
+        }
+        #[cfg(not(any(test, debug_assertions)))]
+        {
+            let _ = (dep_canonical, imported_name);
+            panic!(
+                "Architectural violation: bare-host resolve_imported_type_root_with_facts called \
+                 from production; construct HostResolverContext::new(host, &view, overlay) at the \
+                 request entry and route through `ctx.resolve_imported_type_root_with_facts`"
             );
         }
     }

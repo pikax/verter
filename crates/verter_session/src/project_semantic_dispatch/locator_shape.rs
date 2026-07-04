@@ -841,9 +841,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if direct.canonical_id.is_empty() {
                     return None;
                 }
-                let (final_canonical, final_symbol) = self
-                    .ctx
-                    .resolve_imported_type_root(&direct.canonical_id, &direct.symbol_name);
+                // Facts-returning form + tracer record: the route-chain
+                // facts (every barrel/re-export participant's version) enter
+                // the active fact tracer and land in the enclosing
+                // `LowerLocator` entry's `ReadSetSignature`, so a barrel
+                // retarget with the owner unchanged MISSES the warm shape.
+                let ((final_canonical, final_symbol), route_facts) =
+                    self.ctx.resolve_imported_type_root_with_facts(
+                        &direct.canonical_id,
+                        &direct.symbol_name,
+                    );
+                self.ctx.observe_borrowed_signature(&route_facts);
                 self.ctx.shallow_file_state(&final_canonical)?;
                 Some(ResolvedRootIdentity::new(final_canonical, final_symbol))
             })

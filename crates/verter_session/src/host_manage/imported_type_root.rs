@@ -42,6 +42,12 @@ impl VerterHost {
     /// Delegates to
     /// [`Self::resolve_imported_type_root_with_facts_with_store_view`]
     /// and discards the route-chain fact tuple.
+    ///
+    /// Fact-DISCARDING: MUST NOT back a memoized-build path — the
+    /// discarded route facts are the only proof a barrel retarget
+    /// invalidates the enclosing cache entry. Memoized builds route
+    /// through the `_with_facts` sibling and record the facts onto the
+    /// active tracer.
     pub(crate) fn resolve_imported_type_root_with_store_view(
         &self,
         view: &dyn crate::resolver_core::StoreView,

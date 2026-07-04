@@ -445,6 +445,85 @@ fn locator_ref_head_resolves_shadowing_namespace_sibling_not_top_level() {
     }
 }
 
+/// A barrel retarget (owner file UNCHANGED) must MISS the warm
+/// `LowerLocator` memo: the cold build's ref-head resolution records the
+/// barrel/re-export route-chain facts onto the entry's read-set, so editing
+/// the barrel to re-export the same name from a DIFFERENT defining file
+/// invalidates the cached carrier identity instead of serving the stale
+/// `DeclRef` warm (the false-warm class: only the owner's self-root was
+/// recorded, and the owner never changed).
+#[test]
+fn barrel_retarget_misses_warm_locator_shape_without_owner_edit() {
+    let host = host();
+    upsert_ts(
+        &host,
+        "/w/locator/dep_a.ts",
+        "export type Boxed = { fromA: string };\n",
+    );
+    upsert_ts(
+        &host,
+        "/w/locator/dep_b.ts",
+        "export type Boxed = { fromB: number };\n",
+    );
+    upsert_ts(
+        &host,
+        "/w/locator/barrel.ts",
+        "export { Boxed } from './dep_a';\n",
+    );
+    upsert_ts(
+        &host,
+        "/w/locator/ref_owner.ts",
+        "import { Boxed } from './barrel';\nexport type Holder = { field: Boxed };\n",
+    );
+
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let locator = decl_body_locator("/w/locator/ref_owner.ts", "Holder");
+    let cold = match dispatch.lower_locator(locator.clone()) {
+        QueryResult::Value(id) => id,
+        other => panic!("cold lower_locator must produce a value, got {other:?}"),
+    };
+    let graph = host.project_type_store().semantic_graph();
+    let surface = object_surface(&host, cold);
+    match graph.node_data(member_value(&surface, "field")).as_deref() {
+        Some(SemanticNodeData::DeclRef { identity }) => {
+            assert_eq!(
+                identity.canonical_id.as_ref(),
+                "/w/locator/dep_a.ts",
+                "control: the cold ref-head resolves through the barrel to the \
+                 ORIGINAL defining file"
+            );
+        }
+        other => panic!("the reference head must be a DeclRef identity carrier, got {other:?}"),
+    }
+
+    // Retarget the barrel to a DIFFERENT defining file. The owner file is
+    // NOT touched, so its whole-hash self-root still validates — only the
+    // recorded route-chain facts can reject the warm entry.
+    upsert_ts(
+        &host,
+        "/w/locator/barrel.ts",
+        "export { Boxed } from './dep_b';\n",
+    );
+
+    let after = match dispatch.lower_locator(locator) {
+        QueryResult::Value(id) => id,
+        other => panic!("post-retarget lower_locator must produce a value, got {other:?}"),
+    };
+    let surface = object_surface(&host, after);
+    match graph.node_data(member_value(&surface, "field")).as_deref() {
+        Some(SemanticNodeData::DeclRef { identity }) => {
+            assert_eq!(
+                identity.canonical_id.as_ref(),
+                "/w/locator/dep_b.ts",
+                "a barrel retarget with the owner unchanged must MISS the warm \
+                 locator-shape memo (the read-set carries the route proof) and \
+                 re-resolve the reference head to the NEW defining file"
+            );
+        }
+        other => panic!("the reference head must stay a DeclRef identity carrier, got {other:?}"),
+    }
+}
+
 /// A sub-position locator (a `TypeBodyPathStep` path) derefs and lowers
 /// exactly the named authored position — the member's value type — in the
 /// authored lexical scope.

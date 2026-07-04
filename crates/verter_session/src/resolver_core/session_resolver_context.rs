@@ -519,6 +519,27 @@ impl<'a> ResolverContext for SessionResolverContext<'a> {
     }
 
     #[inline]
+    fn resolve_imported_type_root_with_facts(
+        &self,
+        dep_canonical: &str,
+        imported_name: &str,
+    ) -> (
+        (String, String),
+        Arc<[crate::resolver_core::FactVersionRef]>,
+    ) {
+        // Facts-returning variant for memoized-build callers: the same
+        // session-bound overlay-aware view as the tuple form, plus the
+        // route-chain fact list the caller records onto the active tracer
+        // so the enclosing cache entry invalidates on a barrel retarget.
+        self.inner
+            .resolve_imported_type_root_with_facts_with_store_view(
+                &self.request_view,
+                dep_canonical,
+                imported_name,
+            )
+    }
+
+    #[inline]
     fn resolve_named_type_export_target(
         &self,
         dep_canonical: &str,

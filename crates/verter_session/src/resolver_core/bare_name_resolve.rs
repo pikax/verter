@@ -303,8 +303,14 @@ fn resolve_imported_type_root_identity(
         return ResolvedRootIdentity::new(canonical_id, exported_name);
     }
 
-    let (resolved_canonical_id, resolved_symbol_name) =
-        ctx.resolve_imported_type_root(canonical_id, exported_name);
+    // Facts-returning form + tracer record: bare-name resolution feeds
+    // memoized builds (the `LowerLocator` ref-head fallback in particular),
+    // so the route-chain facts must enter the active tracer — otherwise a
+    // barrel retarget with the owner unchanged false-warms the enclosing
+    // cache entry. A no-op when no tracer is installed.
+    let ((resolved_canonical_id, resolved_symbol_name), route_facts) =
+        ctx.resolve_imported_type_root_with_facts(canonical_id, exported_name);
+    ctx.observe_borrowed_signature(&route_facts);
     ResolvedRootIdentity::new(resolved_canonical_id, resolved_symbol_name)
 }
 
@@ -342,8 +348,15 @@ pub(crate) fn resolve_prepared_type_decl_via_host(
         return None;
     }
 
-    let (final_canonical_id, final_symbol_name) =
-        ctx.resolve_imported_type_root(&root_identity.canonical_id, &root_identity.symbol_name);
+    // Facts-returning form + tracer record (see
+    // `resolve_imported_type_root_identity` above): this retry hop also
+    // feeds memoized builds, so its route proof must be observed.
+    let ((final_canonical_id, final_symbol_name), route_facts) = ctx
+        .resolve_imported_type_root_with_facts(
+            &root_identity.canonical_id,
+            &root_identity.symbol_name,
+        );
+    ctx.observe_borrowed_signature(&route_facts);
     if final_canonical_id == root_identity.canonical_id
         && final_symbol_name == root_identity.symbol_name
     {
