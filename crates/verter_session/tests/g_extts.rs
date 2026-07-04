@@ -14,10 +14,14 @@ mod carrier_never_shadows_real_user_file;
 mod carrier_ownership_extension_rules;
 #[path = "g_extts/component_bare_import_resolves_to_declaration_carrier.rs"]
 mod component_bare_import_resolves_to_declaration_carrier;
+#[path = "g_extts/in_band_witness_feeds_gate.rs"]
+mod in_band_witness_feeds_gate;
 #[path = "g_extts/ledger_is_off_the_serve_path.rs"]
 mod ledger_is_off_the_serve_path;
 #[path = "g_extts/no_fallback_to_inferred_anywhere.rs"]
 mod no_fallback_to_inferred_anywhere;
+#[path = "g_extts/non_owning_attach_lifecycle.rs"]
+mod non_owning_attach_lifecycle;
 #[path = "g_extts/provider_op_requires_resolved_project.rs"]
 mod provider_op_requires_resolved_project;
 #[path = "g_extts/resilient_single_writer_actor_shape.rs"]

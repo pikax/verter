@@ -166,11 +166,11 @@ async fn attach_api_over_spawned_lsp_sees_didopen_overlay_carrier() {
     // 3. Open the CONFIGURED project on the --api side (openProject only — the
     //    --lsp server owns documents). This is the project-bound membership: the
     //    carrier rides the configured tsconfig, NOT a config-less inferred project.
+    //    The updateSnapshot rail rides the STORED in-band serverInfo witness the
+    //    handshake gate accepted (attach.update_snapshot), not a hardcoded version.
     let snap = tokio::time::timeout(
         Duration::from_secs(30),
-        attach
-            .api()
-            .update_snapshot_open_project(&tsconfig_norm, "7.0.1-rc"),
+        attach.update_snapshot(&tsconfig_norm),
     )
     .await
     .expect("updateSnapshot timed out")
@@ -218,7 +218,9 @@ async fn attach_api_over_spawned_lsp_sees_didopen_overlay_carrier() {
          false TS2307); got: {diags:?}"
     );
 
-    attach.shutdown().await.expect("shutdown");
+    // Ownership-dispatched teardown: this attach rides a SPAWNED (Owned)
+    // connection, so teardown() takes the full shutdown arm (exit + kill).
+    attach.teardown().await.expect("teardown");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -251,9 +253,9 @@ async fn one_process_serves_both_api_checker_and_lsp_feature() {
         .did_open_synced(&carrier_uri, "typescript", 1, carrier_src)
         .await
         .expect("didOpen + sync");
+    // The stored in-band witness drives the updateSnapshot rail here too.
     let snap = attach
-        .api()
-        .update_snapshot_open_project(&tsconfig_norm, "7.0.1-rc")
+        .update_snapshot(&tsconfig_norm)
         .await
         .expect("updateSnapshot");
     let project = snap
@@ -301,6 +303,7 @@ async fn one_process_serves_both_api_checker_and_lsp_feature() {
          shared Program as --api): got {hover:?}"
     );
 
-    attach.shutdown().await.expect("shutdown");
+    // Owned connection ⇒ teardown() dispatches to the full shutdown arm.
+    attach.teardown().await.expect("teardown");
     let _ = std::fs::remove_dir_all(&dir);
 }
