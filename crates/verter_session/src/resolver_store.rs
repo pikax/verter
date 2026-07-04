@@ -1327,8 +1327,10 @@ pub(crate) struct StoreViewSnapshot {
     /// Per-canonical view-current SOURCE-ENV artifact identity —
     /// `(parse_env_hash, parser_version, file_language_id)` of the
     /// base artifact serving the canonical's live content. Captured in
-    /// [`HostStoreView::snapshot_file_facts_into`] from the artifact
-    /// KEY itself. The strict
+    /// [`HostStoreView::snapshot_file_facts_into`] via the shared
+    /// [`SourceEnvIdentity::live_for_artifact_key`] construction
+    /// (parser-version/language from the artifact KEY, parse-env from
+    /// the canonical's LIVE per-canonical env). The strict
     /// [`crate::resolver_core::StoreView::validates_file_source_env`]
     /// branch compares a recorded
     /// [`crate::resolver_core::FactVersionRef::FileSourceEnv`] fact
@@ -1339,15 +1341,51 @@ pub(crate) struct StoreViewSnapshot {
 }
 
 /// The view-current source-env identity of one canonical's artifact:
-/// every [`crate::file_artifact_store::FileArtifactKey`] dimension
-/// except the canonical itself and the content hash (content validity
-/// stays on the `FileWholeHash` rail). Snapshot value backing the
-/// strict `FileSourceEnv` validation branch.
+/// `parser_version` / `file_language_id` from the
+/// [`crate::file_artifact_store::FileArtifactKey`] identity, plus the
+/// canonical's LIVE `parse_env_hash` dimension (content validity stays
+/// on the `FileWholeHash` rail). Snapshot value backing the strict
+/// `FileSourceEnv` validation branch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SourceEnvIdentity {
     pub(crate) parse_env_hash: crate::locator_identity::ParseEnvHash,
     pub(crate) parser_version: u32,
     pub(crate) file_language_id: verter_language::FileLanguage,
+}
+
+impl SourceEnvIdentity {
+    /// The LIVE source-env identity for `key`'s canonical — the SINGLE
+    /// construction point shared by the fact producer
+    /// ([`crate::fact_signature_helpers::observe_file_source_env_from_artifact_key`])
+    /// and the validate-side snapshot seeding
+    /// ([`HostStoreView::snapshot_file_facts_into`]), so record and
+    /// validate compare the same dimensions by construction.
+    ///
+    /// `parser_version` / `file_language_id` come from the artifact KEY
+    /// itself (the exact identity of the artifact the read served
+    /// from). The `parse_env_hash` dimension is the canonical's LIVE
+    /// per-canonical parse env
+    /// ([`VerterHost::host_view_env_hashes_for`]) — the SAME dimension
+    /// the contributor `LowerLocator` body-source key folds — NEVER the
+    /// key's `parse_env_hash` slot: a base key carries the zero
+    /// sentinel there and an overlay-scoped key a session
+    /// discriminator, neither an env identity. Copying the key slot
+    /// would make a live parse-env move (content unchanged) invisible
+    /// to the rail on BOTH sides, warm-serving a fold whose folded
+    /// contributor body-source identity has moved.
+    pub(crate) fn live_for_artifact_key(
+        host: &VerterHost,
+        key: &crate::file_artifact_store::FileArtifactKey,
+    ) -> Self {
+        Self {
+            parse_env_hash: crate::locator_identity::ParseEnvHash::from_env_hash(
+                host.host_view_env_hashes_for(key.canonical.as_ref())
+                    .parse_env_hash,
+            ),
+            parser_version: key.parser_version,
+            file_language_id: key.file_language_id.clone(),
+        }
+    }
 }
 
 impl Default for StoreViewSnapshot {
@@ -2428,7 +2466,7 @@ impl HostStoreView {
 
         Self::snapshot_tracked_import_route_hashes(&mut snapshot, host);
         Self::snapshot_augmentation_index_into(&mut snapshot, host.project_type_store.indexed());
-        Self::snapshot_file_facts_into(&mut snapshot, host.project_type_store.indexed());
+        Self::snapshot_file_facts_into(&mut snapshot, host, host.project_type_store.indexed());
         // R26 per-domain producer handles captured at view-build
         // time. Cheap `Arc::clone` per snapshot; reads through the
         // handles are wait-free against concurrent writers because
@@ -2509,6 +2547,7 @@ impl HostStoreView {
     /// validation and recompute against the current variant.
     fn snapshot_file_facts_into(
         snapshot: &mut StoreViewSnapshot,
+        host: &VerterHost,
         store: &crate::file_artifact_store::FileArtifactStore,
     ) {
         // Snapshot ONLY the `FileFacts` variant whose `content_hash`
@@ -2536,22 +2575,23 @@ impl HostStoreView {
                 None => false,
             };
             if matches_live {
-                // View-current SOURCE-ENV identity for the canonical,
-                // taken from the artifact KEY itself (never re-derived
-                // from the path). Base keys only: an overlay-scoped
-                // key carries a session discriminator in its
-                // `parse_env_hash` dimension and must never seed the
-                // base view's identity map.
+                // View-current SOURCE-ENV identity for the canonical:
+                // parser-version/language from the artifact KEY itself
+                // (never re-derived from the path), parse-env from the
+                // canonical's LIVE per-canonical env — the shared
+                // `SourceEnvIdentity::live_for_artifact_key`
+                // construction the fact producer also uses, so record
+                // and validate compare the same dimensions by
+                // construction (the base key's own `parse_env_hash`
+                // slot is the zero sentinel, not an env identity).
+                // Base keys only: an overlay-scoped key carries a
+                // session discriminator in its `parse_env_hash`
+                // dimension and must never seed the base view's
+                // identity map.
                 if key.is_base() {
                     snapshot.source_envs.insert(
                         canonical_str.clone(),
-                        SourceEnvIdentity {
-                            parse_env_hash: crate::locator_identity::ParseEnvHash::from_env_hash(
-                                key.parse_env_hash,
-                            ),
-                            parser_version: key.parser_version,
-                            file_language_id: key.file_language_id.clone(),
-                        },
+                        SourceEnvIdentity::live_for_artifact_key(host, &key),
                     );
                 }
                 snapshot
@@ -3188,8 +3228,10 @@ impl crate::resolver_core::StoreView for HostStoreView {
     ///
     /// Compares the recorded `(parse_env_hash, parser_version,
     /// file_language_id)` against the view-current artifact identity
-    /// snapshotted for `canonical_id` (captured from the artifact KEY
-    /// in `snapshot_file_facts_into`). A tombstoned canonical rejects
+    /// snapshotted for `canonical_id` (captured in
+    /// `snapshot_file_facts_into` via the shared
+    /// [`SourceEnvIdentity::live_for_artifact_key`] construction the
+    /// fact producer also uses). A tombstoned canonical rejects
     /// first; a canonical with NO snapshotted identity — untracked,
     /// artifact not yet materialised, or session-overlay-rewritten —
     /// rejects strictly (no untracked optimistic accept: a contributor

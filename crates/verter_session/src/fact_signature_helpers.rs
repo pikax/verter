@@ -135,13 +135,23 @@ pub(crate) fn observe_fact_signature(sig: &[FactVersionRef]) {
 /// ([`FactVersionRef::FileSourceEnv`]) from the EXACT artifact key the
 /// contributor read actually used.
 ///
-/// All four identity fields — `canonical_id`, `parse_env_hash`,
-/// `parser_version`, `file_language_id` — are sourced from
-/// `artifact_key` itself, never re-derived from a canonical/path/env
+/// `canonical_id`, `parser_version`, and `file_language_id` are sourced
+/// from `artifact_key` itself, never re-derived from a canonical/path
 /// at the recording site and never read back from an index entry that
-/// could be stale. The fact is recorded onto the active fact tracer
-/// (via [`ResolverContext::observe`]) and returned so the caller can
-/// fold it into a producer-built signature.
+/// could be stale. The `parse_env_hash` dimension is DIFFERENT: it is
+/// the canonical's LIVE per-canonical parse env — the SAME dimension
+/// the contributor `LowerLocator` body-source key folds — sourced
+/// through the shared
+/// [`crate::resolver_store::SourceEnvIdentity::live_for_artifact_key`]
+/// construction the validate-side snapshot seeding also uses, so
+/// record and validate compare the same dimension by construction. The
+/// key's own `parse_env_hash` slot must NOT be copied into the fact: a
+/// base key carries the zero sentinel there and an overlay-scoped key
+/// a session discriminator — neither is an env identity, and a copied
+/// sentinel would make a live parse-env move (content unchanged)
+/// invisible to the rail. The fact is recorded onto the active fact
+/// tracer (via [`ResolverContext::observe`]) and returned so the
+/// caller can fold it into a producer-built signature.
 ///
 /// `artifact_key = None` — the read could not supply the exact key it
 /// served from — means the contributor's coherent 4-field identity is
@@ -161,11 +171,15 @@ pub(crate) fn observe_file_source_env_from_artifact_key(
     artifact_key: Option<&crate::file_artifact_store::FileArtifactKey>,
 ) -> Option<FactVersionRef> {
     let key = artifact_key?;
+    let identity = crate::resolver_store::SourceEnvIdentity::live_for_artifact_key(
+        ctx.host_for_fact_tracer_install(),
+        key,
+    );
     let fact = FactVersionRef::FileSourceEnv {
         canonical_id: key.canonical.as_ref().to_owned(),
-        parse_env_hash: crate::locator_identity::ParseEnvHash::from_env_hash(key.parse_env_hash),
-        parser_version: key.parser_version,
-        file_language_id: key.file_language_id.clone(),
+        parse_env_hash: identity.parse_env_hash,
+        parser_version: identity.parser_version,
+        file_language_id: identity.file_language_id,
     };
     ctx.observe(fact.clone());
     Some(fact)
@@ -1225,11 +1239,16 @@ mod file_source_env_observation_tests {
         assert_eq!(canons[0].as_ref(), "/contrib.d.ts");
     }
 
-    /// The observation API sources all four identity fields from the
-    /// exact artifact key the read used — never re-derived from the
-    /// canonical/path/env at the call site. The planted key carries a
-    /// non-current parser version and a language row derived from a
-    /// DIFFERENT path than the key's canonical, so any re-derivation
+    /// The observation API sources `parser_version` / `file_language_id`
+    /// from the exact artifact key the read used — never re-derived from
+    /// the canonical/path at the call site — while the `parse_env_hash`
+    /// dimension is the canonical's LIVE per-canonical parse env (the
+    /// same dimension the contributor `LowerLocator` key folds), NEVER
+    /// the key's `parse_env_hash` slot (a base key carries the zero
+    /// sentinel there, not an env identity). The planted key carries a
+    /// non-current parser version, a language row derived from a
+    /// DIFFERENT path than the key's canonical, and a non-live
+    /// `parse_env_hash`, so any re-derivation (or a key-copied env)
     /// would produce different field values and fail the assertions.
     #[test]
     fn observe_file_source_env_from_artifact_key_builds_fact_from_key_identity() {
@@ -1241,18 +1260,27 @@ mod file_source_env_observation_tests {
             parser_version: 9,
             file_language_id: FileArtifactKey::derived_file_language_id("/dep.vue"),
         };
+        let live_parse_env =
+            ParseEnvHash::from_env_hash(host.host_view_env_hashes_for("/dep.ts").parse_env_hash);
+        assert_ne!(
+            live_parse_env,
+            ParseEnvHash::from_env_hash([3u8; 16]),
+            "the planted key env must differ from the live env so the assertions \
+             below discriminate live sourcing from a key copy"
+        );
         let (returned, read_set) =
             host.with_fact_tracer(|| observe_file_source_env_from_artifact_key(&host, Some(&key)));
         let expected = FactVersionRef::FileSourceEnv {
             canonical_id: "/dep.ts".to_string(),
-            parse_env_hash: ParseEnvHash::from_env_hash([3u8; 16]),
+            parse_env_hash: live_parse_env,
             parser_version: 9,
             file_language_id: FileArtifactKey::derived_file_language_id("/dep.vue"),
         };
         assert_eq!(
             returned.as_ref(),
             Some(&expected),
-            "the returned fact must carry exactly the key's four identity fields"
+            "the returned fact must carry the key's parser-version/language identity \
+             and the canonical's LIVE parse-env dimension"
         );
         let facts = match read_set.finalise() {
             FactReadSetFinalise::Ok(facts) => facts,

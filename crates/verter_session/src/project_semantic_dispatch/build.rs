@@ -2866,16 +2866,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // Parent transitive contributor rule, emitted from the ONE carrier in
         // ONE step per contributor: the content-version fact
         // (`FileWholeHash`) AND the typed SOURCE-ENV observation
-        // (`FileSourceEnv`), the latter taken from the EXACT artifact key the
-        // contributor `LowerLocator` served from (never re-derived from
-        // canonical/path/env at this site, never a stale index entry). A warm
-        // parent hit revalidates the four source-env identity fields against
-        // the live view — a contributor parse-env / parser-version /
-        // file-language move with UNCHANGED content misses the warm read and
-        // recomputes through the contributor's new `LowerLocator`. Because
-        // both facts come from the same element, a contributor that is
-        // version-rooted on the parent is source-env-observed by
-        // construction.
+        // (`FileSourceEnv`) — its parser-version/file-language identity taken
+        // from the EXACT artifact key the contributor `LowerLocator` served
+        // from (never re-derived from canonical/path at this site, never a
+        // stale index entry), its parse-env dimension the contributor
+        // canonical's LIVE per-canonical parse env (the SAME dimension the
+        // contributor `LowerLocator` key folds; the base key's own slot is
+        // the zero sentinel, not an env identity). A warm parent hit
+        // revalidates the source-env identity against the live view — a
+        // contributor parse-env / parser-version / file-language move with
+        // UNCHANGED content misses the warm read and recomputes through the
+        // contributor's new `LowerLocator`. Because both facts come from the
+        // same element, a contributor that is version-rooted on the parent is
+        // source-env-observed by construction.
         for root in &contributor_roots {
             crate::resolver_core::resolver_context::observe_fan_out(
                 crate::resolver_core::FactVersionRef::FileWholeHash {

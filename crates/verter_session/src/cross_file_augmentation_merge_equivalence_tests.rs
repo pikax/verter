@@ -660,3 +660,110 @@ fn every_version_rooted_augmentation_contributor_records_source_env_identity() {
         );
     }
 }
+
+/// END-TO-END LIVE-parse-env rail through the REAL memo warm-read path: warm
+/// a parent augmented `Instantiate`, then move the contributor canonical's
+/// LIVE `parse_env_hash` (test override; content / whole hashes / augmenter
+/// set untouched) and re-serve the SAME hoisted key — the warm parent must
+/// MISS and recompute, because the contributor's folded `LowerLocator`
+/// body-source identity moved with the live env.
+///
+/// Discrimination: the recorded contributor `FileSourceEnv` fact and the
+/// view snapshot's per-canonical identity row must BOTH carry the LIVE
+/// per-canonical parse-env dimension (the one the contributor `LowerLocator`
+/// key folds). If either side copies the base artifact key's zero-sentinel
+/// `parse_env_hash` instead, the live move changes neither side, the warm
+/// read validates, and the stale fold serves — the flat build count fails
+/// the `+ 1` assertion below.
+///
+/// The parent key is hoisted ONCE under the baseline env (the owner context
+/// pins the baseline `FileBacked(P)` dimension), so every re-serve targets
+/// the SAME family slot and only the fact rail can discriminate.
+#[test]
+fn warm_parent_rejects_contributor_live_parse_env_move_with_unchanged_content() {
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::semantic_query::{
+        ProjectionReductionContext, QueryResult, SemanticQueryApi, SemanticQueryKey,
+        SemanticQueryOutput,
+    };
+
+    let host = make_host();
+    upsert_augmentation_fixture(&host);
+
+    // Warm-up resolve: populates the augmentation index and the shared
+    // caches so the first hoisted-key demand below is a clean
+    // cold-compute-then-admit (the very first resolution of a fixture can
+    // route ReturnOnly while lazy index population settles).
+    host.resolve_named_symbol("/types.ts", "Foo", &[], Some(ProjectionMode::Expanded))
+        .expect("augmented Foo must resolve");
+
+    let graph = host.project_type_store().semantic_graph();
+    let baseline_view = host.resolver_store_view_read().into_owned_view();
+
+    // Hoist the parent key once under the baseline env.
+    let key = {
+        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let ctx = crate::resolver_core::HostResolverContext::new(&host, &baseline_view, overlay);
+        let dispatch = ProjectSemanticDispatch::new(&ctx);
+        SemanticQueryKey::Instantiate {
+            base: dispatch.type_slot_for(Arc::from("/types.ts"), Arc::from("Foo")),
+            args: Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
+            context: dispatch.instantiate_context_for(
+                "/types.ts",
+                ProjectionReductionContext::published(ProjectionMode::Expanded),
+            ),
+        }
+    };
+    let demand = |view: &crate::resolver_store::HostStoreView| {
+        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let ctx = crate::resolver_core::HostResolverContext::new(&host, view, overlay);
+        let dispatch = ProjectSemanticDispatch::new(&ctx);
+        match dispatch.execute_type_node(key.clone()) {
+            QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
+            other => panic!("the augmented parent demand must produce a value, got {other:?}"),
+        }
+    };
+
+    // Cold baseline, then the POSITIVE companion: the same demand under the
+    // UNCHANGED env is a memo hit (no permanent-invalidation regression).
+    demand(&baseline_view);
+    let builds_after_first = graph.stats_snapshot().instantiate_count;
+    demand(&baseline_view);
+    assert_eq!(
+        graph.stats_snapshot().instantiate_count,
+        builds_after_first,
+        "companion positive: re-serving the identical demand under the UNCHANGED \
+         live env must be a memo hit (no new parent build)"
+    );
+
+    // Move the contributor's LIVE parse env with UNCHANGED content.
+    let baseline_env = host.host_view_env_hashes_for("/aug.ts").parse_env_hash;
+    let moved_env = [0xA7u8; 16];
+    assert_ne!(
+        moved_env, baseline_env,
+        "the moved live parse env must differ from the baseline"
+    );
+    *host.parse_env_override.lock() = Some(moved_env);
+    let moved_view = host.resolver_store_view_read().into_owned_view();
+
+    demand(&moved_view);
+    assert_eq!(
+        graph.stats_snapshot().instantiate_count,
+        builds_after_first + 1,
+        "a contributor LIVE parse-env move with unchanged content must REJECT the \
+         warm parent through the FileSourceEnv rail and cold-recompute — a flat \
+         build count means the recorded fact and the view snapshot both carried a \
+         parse-env dimension the live move does not shift (the base key's zero \
+         sentinel), so the stale fold warm-served"
+    );
+
+    // Recovery: the recompute recorded the MOVED live env, so the same
+    // demand under the same moved view warm-hits again (the rail
+    // discriminates the move, it does not permanently invalidate).
+    demand(&moved_view);
+    assert_eq!(
+        graph.stats_snapshot().instantiate_count,
+        builds_after_first + 1,
+        "after the recompute under the moved env the entry must warm-serve again"
+    );
+}
