@@ -8,9 +8,10 @@
 //! `TypeExpr::Intersection` (whose reducer applies heritage-shadow semantics
 //! and cannot accumulate method overload groups).
 //!
-//! These scanners are static source greps (no cargo invocation); each is
-//! discriminating — it FAILS if the pre-merge last-wins shape or the
-//! intersection-collapse front is reintroduced.
+//! Guards (i)–(iii) are grandfathered static source scans; guard (iv) is a
+//! BEHAVIORAL discriminator on the live resolve path. Each FAILS if the
+//! pre-merge last-wins shape or the intersection-collapse front is
+//! reintroduced.
 
 use std::fs;
 use std::path::PathBuf;
@@ -112,17 +113,64 @@ fn no_intersection_merge_synthesis_in_verter_session() {
     );
 }
 
-/// (iv) The load-bearing decision: a multi-contributor merged interface lowers
-/// to a distinct `SemanticNodeData::MergedDecl` carrier (the derefed
-/// merged-contributor shape, `DerefedBodyShape::Merged`), NOT a pre-collapsed
-/// intersection. The body source is the locator-shape build; the carrier is
-/// interned there and preserved through substitution and the view projection.
+/// (iv) The load-bearing decision, proven BEHAVIORALLY on the live resolve
+/// path: a multi-contributor merged interface lowers to (and resolves as) the
+/// distinct `SemanticNodeData::MergedDecl` carrier — NOT a pre-collapsed bare
+/// `Intersection` (whose reducer applies heritage-shadow member precedence
+/// and cannot accumulate method overload groups). The body source is the
+/// locator-shape build; the carrier is interned there and preserved through
+/// substitution and the view projection, so the Expanded-resolved node's
+/// kind discriminates a regression that collapses the merge into an
+/// intersection at ANY point of that chain.
 #[test]
 fn merged_decl_lowers_to_distinct_carrier_not_intersection() {
-    let src = read("crates/verter_session/src/project_semantic_dispatch/locator_shape.rs");
-    assert!(
-        src.contains("DerefedBodyShape::Merged") && src.contains("SemanticNodeData::MergedDecl {"),
-        "the locator-shape body build must lower the derefed merged-contributor \
-         shape to a distinct `SemanticNodeData::MergedDecl` carrier"
-    );
+    use std::sync::Arc;
+
+    use verter_session::semantic_query::{ProjectionMode, SemanticNodeData};
+    use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    host.upsert(UpsertRequest {
+        canonical_id: Some("/merged_carrier.ts".to_string()),
+        input_id: "/merged_carrier.ts".to_string(),
+        source: Arc::from(
+            "export interface Foo { a: string }\nexport interface Foo { b: number }\n",
+        ),
+        file_language: FileLanguage::script_ts(),
+        aliases: Vec::new(),
+    })
+    .expect("upsert merged-interface fixture");
+
+    let node = host
+        .resolve_named_symbol(
+            "/merged_carrier.ts",
+            "Foo",
+            &[],
+            Some(ProjectionMode::Expanded),
+        )
+        .expect("the merged interface must resolve through the live dispatch");
+
+    match host
+        .project_type_store()
+        .semantic_graph()
+        .node_data(node)
+        .as_deref()
+    {
+        Some(SemanticNodeData::MergedDecl { contributors }) => {
+            assert_eq!(
+                contributors.len(),
+                2,
+                "both same-name contributors must survive on the distinct carrier"
+            );
+        }
+        Some(SemanticNodeData::Intersection(_)) => panic!(
+            "a same-name interface merge must resolve to the distinct \
+             `SemanticNodeData::MergedDecl` peer-merge carrier — NEVER a bare \
+             `Intersection` (heritage-shadow precedence cannot accumulate \
+             method overload groups)"
+        ),
+        other => {
+            panic!("the merged interface must resolve to the `MergedDecl` carrier, got {other:?}")
+        }
+    }
 }
