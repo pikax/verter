@@ -665,9 +665,13 @@ impl VerterHost {
     /// `instantiate_context_for` choke point's `file_backed(P)` keying
     /// WITHOUT opening the newtype's byte constructor — the wrapped value
     /// comes from the live host env, never from caller-supplied bytes, so
-    /// the content-free-by-type seal holds. It is `pub` (not
-    /// `#[cfg(test)]`-gated) only because external `tests/` integration
-    /// crates consume it.
+    /// the content-free-by-type seal holds. Gated on the documented
+    /// `test-support` seam (`#[cfg(any(test, feature = "test-support"))]`) —
+    /// the same gate the separate integration-test binary activates through
+    /// the crate self-edge — so the sealed env-dimension accessor never
+    /// compiles into a release build; it stays `pub` only so the external
+    /// `tests/` integration crate can reach it under that seam.
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn live_parse_env_dim_for_tests(
         &self,
