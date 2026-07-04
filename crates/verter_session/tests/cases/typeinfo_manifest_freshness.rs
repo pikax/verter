@@ -156,9 +156,11 @@ fn typeinfo_manifest_files_are_byte_equal_to_regenerated_generator_output() {
 /// the 2 index-signature publications, the 8 utility-reducer lifts, the
 /// 10 class-surface-era pure-reduction lifts, and the 1 module-augmentation
 /// namespace alias-chain lift, whose measured trace terminates at
-/// {ResolveDecl, Instantiate(, TypeOf)}); `U2.INDEXED_ACCESS` owns 23 (14
+/// {ResolveDecl, Instantiate(, TypeOf)}); `U2.INDEXED_ACCESS` owns 24 (15
 /// lifted — incl. the 2 JSX parametric intrinsic-lookup rows re-homed in from
-/// `U2.JSX_FOUNDATIONS`); `U2.UTILITIES` owns 32; `U2.MAPPED_TEMPLATE` owns 19 (6 lifted);
+/// `U2.JSX_FOUNDATIONS` and the wide/deep literal-union projection row
+/// re-homed in from `U2.MAPPED_TEMPLATE` on its measured path-precise
+/// trace); `U2.UTILITIES` owns 32; `U2.MAPPED_TEMPLATE` owns 18 (5 lifted);
 /// `U2.CLASS_SURFACES` owns 38 (5 lifted — the class typeof-path rows whose
 /// trace dispatches `ResolveClassSurface` + `ProjectPath`);
 /// `U2.MODULE_AUGMENTATION` owns 4 (0 lifted — the 4 remaining rows whose
@@ -189,16 +191,18 @@ fn manifest_block_counts_reflect_lifts() {
     assert_eq!(
         count("block_id: TypeInfoParityBlockId::U2IndexedAccess,"),
         24,
-        "U2.INDEXED_ACCESS must own 23 rows after the 2 brand-tag index chains \
+        "U2.INDEXED_ACCESS must own 24 rows after the 2 brand-tag index chains \
          and the 2 decoration-invariance indexed-access rows moved IN from \
          U2.CLASS_SURFACES (14 → 18), the 3 module-augmentation indexed-member \
          projection rows (the `as const` typeof indexed member + the `typeof \
          import(...)[\"default\"]` default-export value projection + the `typeof \
          import(...)[\"leafName\"]` named-value projection) moved IN from \
-         U2.MODULE_AUGMENTATION (18 → 21), and the 2 JSX parametric \
+         U2.MODULE_AUGMENTATION (18 → 21), the 2 JSX parametric \
          intrinsic-lookup rows (`IntrinsicPropsFor<\"div\">` / \
          `IntrinsicPropsFor<\"span\">`) moved IN from U2.JSX_FOUNDATIONS on their \
-         measured-trace lifts (21 → 23)",
+         measured-trace lifts (21 → 23), and the wide/deep literal-union \
+         projection row (`wide_deep_projected_token`) re-homed IN from \
+         U2.MAPPED_TEMPLATE on its measured path-precise trace (23 → 24)",
     );
     assert_eq!(
         count("block_id: TypeInfoParityBlockId::U2Utilities,"),
