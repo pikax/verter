@@ -637,19 +637,17 @@ fn class_dual_space_routes_instance_and_static_through_distinct_shared_paths() {
     // `instantiate_context_for` choke point builds it for a real canonical:
     // `file_backed(P)` with the defining canonical's LIVE `parse_env_hash`,
     // plus its live `resolve_env_hash`.
-    let inner_resolve_env = host
-        .host_view_env_hashes_for(&decl_slot.defining_canonical)
-        .resolve_env_hash;
-    let inner_instantiate = SemanticQueryKey::Instantiate {
-        base: decl_slot
-            .with_symbol_space(verter_session::semantic_query::SemanticSymbolSpace::Type),
-        args: Arc::from(Vec::new().into_boxed_slice()),
-        context: verter_session::semantic_query::InstantiateContext::file_backed_for_tests(
-            ProjectionReductionContext::published(ProjectionMode::Shallow),
-            inner_resolve_env,
-            host.live_parse_env_dim_for_tests(&decl_slot.defining_canonical),
-        ),
-    };
+    // Built through the production-shaped helper, which routes the SAME
+    // `instantiate_context_for` choke point production uses: for a REAL
+    // canonical it mints `file_backed(P)` with the defining file's LIVE
+    // `parse_env_hash` + `resolve_env_hash`. So this key matches EXACTLY the
+    // one the dual-space algorithm's Instance side published.
+    let inner_instantiate = verter_session::for_tests::instantiate_key_for_tests(
+        &host,
+        decl_slot.with_symbol_space(verter_session::semantic_query::SemanticSymbolSpace::Type),
+        Arc::from(Vec::new().into_boxed_slice()),
+        ProjectionReductionContext::published(ProjectionMode::Shallow),
+    );
     assert!(
         graph.slot_candidate_count_for_tests(&inner_instantiate) > 0,
         "Instance side must have composed execute(Instantiate) — the inner \

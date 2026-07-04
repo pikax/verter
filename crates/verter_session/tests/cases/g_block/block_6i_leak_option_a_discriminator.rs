@@ -213,14 +213,12 @@ fn shallow_walker_substitutes_mapper_binder_per_enumerated_key() {
     // into the Mapped surface whose `value_expr` is an
     // `InstantiationRef` carrier (the body lowering carrier-stops via
     // `may_reduce_operator(StructuralTransit) == false`).
-    let instantiate_query = SemanticQueryKey::Instantiate {
-        base: decl_identity.to_type_slot_unscoped(),
+    let instantiate_query = verter_session::for_tests::instantiate_key_for_tests(
+        &host,
+        decl_identity.to_type_slot_unscoped(),
         args,
-        context: verter_session::semantic_query::InstantiateContext::non_file_for_tests(
-            ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
-            Default::default(),
-        ),
-    };
+        ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
+    );
     let body_node = match for_tests::dispatch_execute_type_node_for_tests(&host, instantiate_query)
     {
         QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,

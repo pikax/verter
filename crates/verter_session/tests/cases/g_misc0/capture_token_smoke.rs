@@ -18,8 +18,25 @@ use verter_session::for_tests::{
 
 // Re-export the shared semantic types the harness consumes.
 use verter_session::semantic_query::{
-    DeclIdentity, OriginEdgeKind, ResolveDeclKey, ScopeId, SemanticNodeId, SemanticQueryKey,
+    DeclIdentity, OriginEdgeKind, ProjectionMode, ResolveDeclKey, ScopeId, SemanticNodeId,
+    SemanticQueryKey,
 };
+
+/// Build a sealed `Instantiate` key for a SYNTHETIC base through the
+/// production-shaped helper — the `Instantiate` payload is the opaque
+/// `InstantiateKey`, so an external crate cannot construct it directly. The
+/// synthetic base (`<synthetic>`) routes the choke point to a `NonFile`
+/// source kind. A throwaway standalone host supplies the env; the returned
+/// key owns its data, so the host can be dropped immediately.
+fn synthetic_instantiate_key(name: &str, mode: ProjectionMode) -> SemanticQueryKey {
+    let host = verter_session::VerterHost::new_standalone(verter_session::HostConfig::default());
+    verter_session::for_tests::instantiate_key_for_tests(
+        &host,
+        DeclIdentity::synthetic(name).to_type_slot_unscoped(),
+        Arc::new([]),
+        verter_session::semantic_query::ProjectionReductionContext::published(mode),
+    )
+}
 
 #[test]
 fn empty_snapshot_has_no_counters() {
@@ -182,16 +199,7 @@ fn key_family_matches_resolve_decl_for_resolved_name() {
 
 #[test]
 fn key_family_matches_instantiate_for_resolved_name() {
-    let key = SemanticQueryKey::Instantiate {
-        base: DeclIdentity::synthetic("UIMessage").to_type_slot_unscoped(),
-        args: Arc::new([]),
-        context: verter_session::semantic_query::InstantiateContext::non_file_for_tests(
-            verter_session::semantic_query::ProjectionReductionContext::published(
-                verter_session::semantic_query::ProjectionMode::Skeleton,
-            ),
-            Default::default(),
-        ),
-    };
+    let key = synthetic_instantiate_key("UIMessage", ProjectionMode::Skeleton);
     assert!(KeyFamily::InstantiateForResolvedName("UIMessage").matches(&key));
     assert!(!KeyFamily::InstantiateForResolvedName("OtherName").matches(&key));
     assert!(KeyFamily::AnyDispatch.matches(&key));
@@ -224,16 +232,7 @@ fn production_paths_are_no_op_without_active_token() {
 #[test]
 fn dispatch_log_records_under_active_token() {
     let guard = CaptureToken::start_for_query("dispatch_log");
-    let key = SemanticQueryKey::Instantiate {
-        base: DeclIdentity::synthetic("UIMessage").to_type_slot_unscoped(),
-        args: Arc::new([]),
-        context: verter_session::semantic_query::InstantiateContext::non_file_for_tests(
-            verter_session::semantic_query::ProjectionReductionContext::published(
-                verter_session::semantic_query::ProjectionMode::Skeleton,
-            ),
-            Default::default(),
-        ),
-    };
+    let key = synthetic_instantiate_key("UIMessage", ProjectionMode::Skeleton);
     with_active_capture(|t| t.record_dispatch(&key, /* hit */ true));
     with_active_capture(|t| t.record_dispatch(&key, /* hit */ false));
     let snap = guard.end();
@@ -259,16 +258,7 @@ fn key_family_matches_instantiate_expanded_for_resolved_name() {
     use verter_session::semantic_query::ProjectionMode;
 
     // mode == Expanded → matches when name matches.
-    let key_expanded = SemanticQueryKey::Instantiate {
-        base: DeclIdentity::synthetic("UIMessage").to_type_slot_unscoped(),
-        args: Arc::new([]),
-        context: verter_session::semantic_query::InstantiateContext::non_file_for_tests(
-            verter_session::semantic_query::ProjectionReductionContext::published(
-                ProjectionMode::Expanded,
-            ),
-            Default::default(),
-        ),
-    };
+    let key_expanded = synthetic_instantiate_key("UIMessage", ProjectionMode::Expanded);
     assert!(KeyFamily::InstantiateExpandedForResolvedName("UIMessage").matches(&key_expanded));
     assert!(!KeyFamily::InstantiateExpandedForResolvedName("OtherName").matches(&key_expanded));
     // Distinguishing from mode-agnostic InstantiateForResolvedName: the
@@ -277,31 +267,13 @@ fn key_family_matches_instantiate_expanded_for_resolved_name() {
     assert!(KeyFamily::InstantiateForResolvedName("UIMessage").matches(&key_expanded));
 
     // mode == Skeleton → must NOT match the Expanded family.
-    let key_skeleton = SemanticQueryKey::Instantiate {
-        base: DeclIdentity::synthetic("UIMessage").to_type_slot_unscoped(),
-        args: Arc::new([]),
-        context: verter_session::semantic_query::InstantiateContext::non_file_for_tests(
-            verter_session::semantic_query::ProjectionReductionContext::published(
-                ProjectionMode::Skeleton,
-            ),
-            Default::default(),
-        ),
-    };
+    let key_skeleton = synthetic_instantiate_key("UIMessage", ProjectionMode::Skeleton);
     assert!(!KeyFamily::InstantiateExpandedForResolvedName("UIMessage").matches(&key_skeleton));
     // Correct family for Skeleton still matches.
     assert!(KeyFamily::SkeletonForResolvedName("UIMessage").matches(&key_skeleton));
 
     // mode == Shallow → must NOT match the Expanded family.
-    let key_shallow = SemanticQueryKey::Instantiate {
-        base: DeclIdentity::synthetic("UIMessage").to_type_slot_unscoped(),
-        args: Arc::new([]),
-        context: verter_session::semantic_query::InstantiateContext::non_file_for_tests(
-            verter_session::semantic_query::ProjectionReductionContext::published(
-                ProjectionMode::Shallow,
-            ),
-            Default::default(),
-        ),
-    };
+    let key_shallow = synthetic_instantiate_key("UIMessage", ProjectionMode::Shallow);
     assert!(!KeyFamily::InstantiateExpandedForResolvedName("UIMessage").matches(&key_shallow));
     assert!(KeyFamily::ShallowForResolvedName("UIMessage").matches(&key_shallow));
 

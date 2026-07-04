@@ -19,7 +19,7 @@
 
 use std::sync::Arc;
 
-use verter_session::semantic_query::{ProjectionMode, SemanticQueryKey};
+use verter_session::semantic_query::ProjectionMode;
 use verter_session::{HostConfig, UpsertRequest, VerterHost};
 
 const PATHOLOGICAL_PICK_TS: &str = r#"
@@ -68,16 +68,14 @@ fn type_resolution_audit_pathological_recursion_observes_depth_cap_exactly() {
             Arc::from("/pathological.ts"),
             Arc::from("Pick"),
         );
-    let key = SemanticQueryKey::Instantiate {
-        base: pick_identity,
-        args: Arc::from(Vec::new().into_boxed_slice()),
-        context: verter_session::semantic_query::InstantiateContext::non_file_for_tests(
-            verter_session::semantic_query::ProjectionReductionContext::published(
-                ProjectionMode::Skeleton,
-            ),
-            Default::default(),
+    let key = verter_session::for_tests::instantiate_key_for_tests(
+        &host,
+        pick_identity,
+        Arc::from(Vec::new().into_boxed_slice()),
+        verter_session::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Skeleton,
         ),
-    };
+    );
 
     let (_resolved, record) = host
         .resolve_type_with_audit(key, "/pathological.ts")

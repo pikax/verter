@@ -898,16 +898,24 @@ fn ax_hybrid_three_keys_carry_reduction_context() {
         );
     }
 
-    // Each context-bearing variant must embed a reduction context.
-    // `Instantiate` carries an `InstantiateContext` that EMBEDS a
-    // `projection_reduction: ProjectionReductionContext` (plus the
-    // `resolve_env_hash` env dim); `KeyOf` / `MappedType` / `ProjectPath`
-    // carry the bare shared `ProjectionReductionContext`.
+    // `SemanticQueryKey::Instantiate` carries the sealed `InstantiateKey`
+    // payload (a tuple variant), which in turn embeds an `InstantiateContext`
+    // that EMBEDS a `projection_reduction: ProjectionReductionContext` (plus
+    // the `resolve_env_hash` env dim). Assert both the sealed carrier and the
+    // embed.
+    assert!(
+        src.contains("Instantiate(InstantiateKey)")
+            && src.contains("pub struct InstantiateKey")
+            && src.contains("context: InstantiateContext"),
+        "reduction-context guard: `SemanticQueryKey::Instantiate` MUST carry the \
+         sealed `InstantiateKey` payload, which MUST embed \
+         `context: InstantiateContext`."
+    );
+
+    // The remaining context-bearing variants stay struct variants that embed a
+    // reduction context. `KeyOf` / `MappedType` / `ProjectPath` carry the bare
+    // shared `ProjectionReductionContext`.
     for (variant_anchor, expected_context) in [
-        (
-            "Instantiate {\n        base: ResolvedDeclSlotIdentity,",
-            "context: InstantiateContext",
-        ),
         (
             "KeyOf {\n        base: SemanticNodeId,",
             "context: ProjectionReductionContext",

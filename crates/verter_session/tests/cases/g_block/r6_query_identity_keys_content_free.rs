@@ -64,51 +64,44 @@ fn read_file(rel: &str) -> String {
 /// hashes, so R6 still holds.
 #[test]
 fn r6_semantic_query_key_instantiate_base_is_content_free_decl_key() {
-    use verter_session::semantic_query::{InstantiateContext, ResolvedDeclSlotIdentity};
-    let base =
-        ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from("/r6_check.ts"), Arc::from("Foo"));
-    let key = SemanticQueryKey::Instantiate {
-        base: base.clone(),
-        args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        context: InstantiateContext::non_file_for_tests(
-            ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
-        ),
-    };
+    use verter_session::semantic_query::ResolvedDeclSlotIdentity;
+    // The `Instantiate` payload is the SEALED, non-deconstructable
+    // `InstantiateKey` (private fields), so an external crate cannot build it
+    // directly; the production-shaped helper is the only way in. It routes the
+    // same `instantiate_context_for` choke point production uses.
+    let host = verter_session::VerterHost::new_standalone(verter_session::HostConfig::default());
+    let key = verter_session::for_tests::instantiate_key_for_tests(
+        &host,
+        ResolvedDeclSlotIdentity::type_slot_unscoped(Arc::from("/r6_check.ts"), Arc::from("Foo")),
+        Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        ProjectionReductionContext::published(ProjectionMode::Expanded),
+    );
     match key {
-        SemanticQueryKey::Instantiate {
-            base:
-                ResolvedDeclSlotIdentity {
-                    defining_canonical,
-                    merged_symbol_name,
-                    symbol_space: _,
-                    env: _,
-                },
-            args: _,
-            // `InstantiateContext` is SEALED (private fields; the only
-            // constructors are `file_backed` / `non_file`), so an external
-            // destructure cannot enumerate its fields. The accessors expose
-            // the embedded projection-reduction identity, the
-            // `resolve_env_hash` ENV dim, and the `body_source` source-kind
-            // axis — no content/version hash. The exhaustive in-module R6
-            // field proof is the `w_instantiate_context` witness beside the
-            // sealed definition (`semantic_query.rs`): a compile-anchored
-            // no-`..` destructure classifying every private field through an
-            // allowed-dimension path, so a new field — including an
-            // R6-forbidden hash — fails compilation there until classified.
-            context,
-        } => {
-            let _ = context.projection_reduction();
-            let _: verter_session::semantic_query::HashValue = context.resolve_env_hash();
-            assert_eq!(
-                context.body_source(),
-                verter_session::semantic_query::InstantiateBodySource::NonFile,
-                "the sealed constructor used above is `non_file`"
-            );
-            // The slot exposes a fixed field set with NO `whole_hash` /
-            // `content_hash` / `fact_dep_signature`. Any future addition
-            // of such a content/version field breaks this exhaustive
-            // destructuring at compile time.
+        SemanticQueryKey::Instantiate(k) => {
+            // The base slot exposes a fixed field set with NO `whole_hash` /
+            // `content_hash` / `fact_dep_signature`. Any future addition of
+            // such a content/version field breaks this exhaustive destructure
+            // at compile time. `InstantiateKey` is SEALED (private fields;
+            // the only builders are the witnessed ctors + this
+            // production-shaped helper), and the public key accessors expose
+            // only SAFE facts — the base slot, the projection-reduction
+            // identity, and the `resolve_env_hash` ENV dim — never a
+            // content/version hash and never the `body_source` source-kind
+            // axis (which is a `pub(crate)` reveal). The exhaustive in-module
+            // R6 field proof for the private context fields is the
+            // `w_instantiate_context` witness beside the sealed definition
+            // (`semantic_query.rs`): a compile-anchored no-`..` destructure
+            // classifying every private field through an allowed-dimension
+            // path, so a new field — including an R6-forbidden hash — fails
+            // compilation there until classified.
+            let ResolvedDeclSlotIdentity {
+                defining_canonical,
+                merged_symbol_name,
+                symbol_space: _,
+                env: _,
+            } = k.base();
+            let _ = k.projection_reduction();
+            let _: verter_session::semantic_query::HashValue = k.resolve_env_hash();
             assert_eq!(defining_canonical.as_ref(), "/r6_check.ts");
             assert_eq!(merged_symbol_name.as_ref(), "Foo");
         }
@@ -158,10 +151,12 @@ fn r6_semantic_query_key_resolve_macro_payload_owner_is_content_free_decl_key() 
     }
 }
 
-/// Source-AST scan over `semantic_query.rs` — the `Instantiate` and
-/// `ResolveMacroPayload` variant bodies of `SemanticQueryKey` must
-/// contain NO `whole_hash`, `content_hash`, or `fact_dep_signature`
-/// field, AND no embedded `DeclIdentity` type.
+/// Source-AST scan over `semantic_query.rs` — the query-identity payloads
+/// for `Instantiate` (the sealed `InstantiateKey` struct that
+/// `SemanticQueryKey::Instantiate` now carries) and the
+/// `ResolveMacroPayload` variant body must contain NO `whole_hash`,
+/// `content_hash`, or `fact_dep_signature` field, AND no embedded
+/// `DeclIdentity` type.
 #[test]
 fn r6_semantic_query_key_variants_carry_no_version_hash_in_source() {
     let source = read_file("crates/verter_session/src/semantic_query.rs");
@@ -201,9 +196,9 @@ fn r6_semantic_query_key_variants_carry_no_version_hash_in_source() {
         ": DeclKey}",
     ];
 
-    for variant in ["Instantiate {", "ResolveMacroPayload {"] {
+    for variant in ["pub struct InstantiateKey {", "ResolveMacroPayload {"] {
         let body = extract_brace_block(&source, variant).unwrap_or_else(|| {
-            panic!("R6 GUARD: could not locate `{variant}` variant body in semantic_query.rs")
+            panic!("R6 GUARD: could not locate `{variant}` body in semantic_query.rs")
         });
         for needle in FORBIDDEN_FIELDS {
             assert!(

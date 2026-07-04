@@ -32,7 +32,6 @@ use verter_session::for_tests::{
 };
 use verter_session::semantic_query::{
     ProjectionMode, ProjectionReductionContext, QueryResult, SemanticNodeData, SemanticNodeId,
-    SemanticQueryKey,
 };
 use verter_session::{HostConfig, VerterHost};
 
@@ -49,17 +48,15 @@ fn warm_read_validates_outside_entries_mutex() {
 
     // Publish ONE candidate so the warm path scans + validates it.
     let canonical = "/warm_read_lock_test/owner.ts";
-    let key = SemanticQueryKey::Instantiate {
-        base: verter_session::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+    let key = verter_session::for_tests::instantiate_key_for_tests(
+        &host,
+        verter_session::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from(canonical),
             Arc::from("Foo"),
         ),
-        args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        context: verter_session::semantic_query::InstantiateContext::non_file_for_tests(
-            ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
-        ),
-    };
+        Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        ProjectionReductionContext::published(ProjectionMode::Expanded),
+    );
     let value = graph.intern_node(SemanticNodeData::Primitive(
         verter_session::semantic_query::PrimitiveKind::Boolean,
     ));

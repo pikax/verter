@@ -25,7 +25,6 @@ use std::sync::Arc;
 
 use verter_session::semantic_query::{
     ProjectionMode, ProjectionReductionContext, QueryResult, SemanticNodeData, SemanticNodeId,
-    SemanticQueryKey,
 };
 use verter_session::{HostConfig, UpsertRequest, VerterHost};
 
@@ -59,18 +58,19 @@ fn instantiate_slot_holds_two_concurrent_candidates_for_distinct_views() {
 
     let graph = host.project_type_store().semantic_graph();
 
-    // Content-free key (R6).
-    let key = SemanticQueryKey::Instantiate {
-        base: verter_session::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+    // Content-free key (R6), built through the production-shaped helper —
+    // the sealed `Instantiate` payload is not externally constructible. The
+    // key is built once and reused for both publishes and the lookup, so its
+    // source-kind (real-file `FileBacked`) is self-consistent.
+    let key = verter_session::for_tests::instantiate_key_for_tests(
+        &host,
+        verter_session::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from(canonical),
             Arc::from("Foo"),
         ),
-        args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        context: verter_session::semantic_query::InstantiateContext::non_file_for_tests(
-            ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
-        ),
-    };
+        Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        ProjectionReductionContext::published(ProjectionMode::Expanded),
+    );
 
     // Publish two candidates with the SAME key but DIFFERENT
     // `validated_at_generation` discriminants. Under the
@@ -153,17 +153,15 @@ fn family_slot_caps_concurrent_candidates_at_four_with_fifo_eviction() {
 
     let graph = host.project_type_store().semantic_graph();
 
-    let key = SemanticQueryKey::Instantiate {
-        base: verter_session::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+    let key = verter_session::for_tests::instantiate_key_for_tests(
+        &host,
+        verter_session::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from(canonical),
             Arc::from("Bar"),
         ),
-        args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        context: verter_session::semantic_query::InstantiateContext::non_file_for_tests(
-            ProjectionReductionContext::published(ProjectionMode::Expanded),
-            Default::default(),
-        ),
-    };
+        Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        ProjectionReductionContext::published(ProjectionMode::Expanded),
+    );
 
     // Publish 5 distinct candidates for the SAME key (5 distinct
     // generations). The cap-4 substrate must evict the oldest after
@@ -224,7 +222,7 @@ fn multi_candidate_reverse_index_survives_sibling_invalidation() {
     use verter_session::resolver_core::FactVersionRef;
     use verter_session::semantic_query::{
         DepSignature, ProjectionMode, ProjectionReductionContext, QueryResult, SemanticNodeData,
-        SemanticNodeId, SemanticQueryKey,
+        SemanticNodeId,
     };
     use verter_session::{HostConfig, VerterHost};
 
@@ -238,17 +236,15 @@ fn multi_candidate_reverse_index_survives_sibling_invalidation() {
 
     // Identity mode — no backfills — so each publish populates
     // EXACTLY one slot. Lets the test count registrations cleanly.
-    let key = SemanticQueryKey::Instantiate {
-        base: verter_session::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+    let key = verter_session::for_tests::instantiate_key_for_tests(
+        &host,
+        verter_session::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from(canonical_keyed),
             Arc::from("Owner"),
         ),
-        args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        context: verter_session::semantic_query::InstantiateContext::non_file_for_tests(
-            ProjectionReductionContext::published(ProjectionMode::Identity),
-            Default::default(),
-        ),
-    };
+        Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        ProjectionReductionContext::published(ProjectionMode::Identity),
+    );
 
     // Fact rail for candidate A+C: depends on /a.ts and /c.ts.
     let facts_a_c: Arc<[FactVersionRef]> = Arc::from(vec![
@@ -400,7 +396,7 @@ fn family_slot_cap_eviction_prunes_orphan_reverse_index_stamp() {
     use verter_session::resolver_core::FactVersionRef;
     use verter_session::semantic_query::{
         DepSignature, ProjectionMode, ProjectionReductionContext, QueryResult, SemanticNodeData,
-        SemanticNodeId, SemanticQueryKey,
+        SemanticNodeId,
     };
     use verter_session::{HostConfig, VerterHost};
 
@@ -412,17 +408,15 @@ fn family_slot_cap_eviction_prunes_orphan_reverse_index_stamp() {
     // publish populates EXACTLY one slot. That lets the test isolate
     // FIFO-eviction's reverse-index drain from the orthogonal
     // backfill-slot behaviour.
-    let key = SemanticQueryKey::Instantiate {
-        base: verter_session::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+    let key = verter_session::for_tests::instantiate_key_for_tests(
+        &host,
+        verter_session::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from(canonical_keyed),
             Arc::from("Foo"),
         ),
-        args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        context: verter_session::semantic_query::InstantiateContext::non_file_for_tests(
-            ProjectionReductionContext::published(ProjectionMode::Identity),
-            Default::default(),
-        ),
-    };
+        Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+        ProjectionReductionContext::published(ProjectionMode::Identity),
+    );
 
     // The OLDEST candidate (which the cap-4 FIFO will evict) references
     // canonical /oldest.ts uniquely. Five later candidates reference
