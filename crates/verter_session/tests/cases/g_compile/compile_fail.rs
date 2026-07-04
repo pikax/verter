@@ -277,3 +277,33 @@ fn instantiate_body_source_is_sealed_to_the_dispatch_factory() {
         "tests/cases/compile-fail/instantiate_body_source_sealed_to_dispatch_factory.rs",
     );
 }
+
+/// The KEY-shape seal (not just the ctor): `SemanticQueryKey::Instantiate`
+/// carries the opaque `InstantiateKey` (private fields) whose
+/// `InstantiateContext` embeds the `pub(crate)` `InstantiateBodySource` axis,
+/// so a `NonFile`-context-on-a-real-file-base transplant is UNREPRESENTABLE
+/// from outside the crate. Two fail-closed fixtures:
+///
+/// 1. `instantiate_key_seal_no_features` (DEV profile, no features): an
+///    external consumer cannot call the DELETED `*_for_tests` mints, name the
+///    `pub(crate)` `InstantiateBodySource::NonFile`, struct-literal
+///    `InstantiateContext` / `InstantiateKey`, or use struct-variant syntax on
+///    the `Instantiate` tuple variant.
+/// 2. `instantiate_key_context_not_extractable`: even a consumer that OBTAINED
+///    a key through the `test-support` `instantiate_key_for_tests` helper
+///    cannot extract or transplant the raw `InstantiateContext` — the reveal
+///    accessors are `pub(crate)` and the payload fields private.
+///
+/// If any seal regressed (a ctor widened, the axis enum widened, the fields
+/// exposed, the variant reverted to a struct variant, or the reveal accessors
+/// widened), the corresponding line would COMPILE and trybuild would fail.
+#[test]
+#[cfg_attr(
+    not(feature = "compile-fail"),
+    ignore = "run with --features compile-fail"
+)]
+fn instantiate_key_shape_is_sealed_against_forgery_and_extraction() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/cases/compile-fail/instantiate_key_seal_no_features.rs");
+    t.compile_fail("tests/cases/compile-fail/instantiate_key_context_not_extractable.rs");
+}
