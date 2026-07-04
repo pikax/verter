@@ -12,9 +12,34 @@ use super::shallow_file_state::ClassifiedTypeDeps;
 use super::{ExportTarget, ShallowFileState};
 use crate::decl_body_memo::{DemandOutcome, LoweredTypeDecl, LoweredValueDecl};
 
-type PreparedTypeDeclSlot = Arc<OnceLock<Option<Arc<PreparedTypeDecl>>>>;
+/// One per-symbol prepared-decl slot: a warm write-once committed value plus a
+/// resettable in-flight gate.
+///
+/// `value` holds the committed result of a GENUINE build (`Some` decl or
+/// `None` absence). `build_gate` serialises COLD builds so a successful build
+/// runs exactly once under contention (single-flight): waiters block
+/// cooperatively on the `parking_lot::Mutex` (never a busy-spin) and, after the
+/// winner commits, re-check `value` and reuse it rather than rebuild. A broken
+/// decl-body lease pin leaves `value` VACANT and releases the gate, so a later
+/// demand under a live lease recomputes — the lease-miss is never persisted as
+/// absence (a write-once `OnceLock` alone could not express that).
+struct PreparedDeclSlot<T> {
+    value: OnceLock<Option<Arc<T>>>,
+    build_gate: parking_lot::Mutex<()>,
+}
+
+impl<T> PreparedDeclSlot<T> {
+    fn new() -> Self {
+        Self {
+            value: OnceLock::new(),
+            build_gate: parking_lot::Mutex::new(()),
+        }
+    }
+}
+
+type PreparedTypeDeclSlot = Arc<PreparedDeclSlot<PreparedTypeDecl>>;
 type PreparedTypeDeclSlots = Arc<FxHashMap<String, PreparedTypeDeclSlot>>;
-type PreparedValueDeclSlot = Arc<OnceLock<Option<Arc<PreparedValueDecl>>>>;
+type PreparedValueDeclSlot = Arc<PreparedDeclSlot<PreparedValueDecl>>;
 type PreparedValueDeclSlots = Arc<FxHashMap<String, PreparedValueDeclSlot>>;
 
 /// Outcome of a lease-aware prepared-decl build. A genuine `Ready(None)` (the
@@ -679,20 +704,28 @@ impl PreparedTypeDeclCache {
 
     pub fn get(&self, symbol_name: &str) -> Option<Arc<PreparedTypeDecl>> {
         let slot = self.slots.get(symbol_name)?;
-        // Warm hit.
-        if let Some(cached) = slot.get() {
+        // Warm fast path — no gate.
+        if let Some(cached) = slot.value.get() {
             return cached.clone();
         }
-        // Cold build. A broken decl-body lease pin surfaces the DISTINCT
-        // `LeaseMiss` — fail CLOSED via ReturnOnly: do NOT commit the write-once
-        // slot. Persisting `None` here would falsely warm a REAL symbol as
+        // Cold: serialise the build under the resettable in-flight gate
+        // (cooperative wait, never a spin), then re-check warm — a concurrent
+        // winner may have committed while we blocked, so we reuse its result
+        // rather than rebuild (single-flight for the successful case).
+        let _gate = slot.build_gate.lock();
+        if let Some(cached) = slot.value.get() {
+            return cached.clone();
+        }
+        // A broken decl-body lease pin surfaces the DISTINCT `LeaseMiss` — fail
+        // CLOSED via ReturnOnly: leave `value` VACANT (release the gate without
+        // committing). Persisting `None` would falsely warm a REAL symbol as
         // genuine ABSENCE for the bundle's life (an entry the read-side fact
-        // rail cannot reject, since content did not change), and — write-once —
-        // a later demand under a live lease could never recover. Leaving the
-        // slot vacant lets the retry recompute. A genuine result (`Some`) or
-        // genuine absence (`Ready(None)`) is cacheable; commit it under
-        // write-once single-flight (a cold race loses harmlessly — the
-        // content-addressed input yields the identical value, first writer wins).
+        // rail cannot reject, since content did not change) and could never
+        // recover; the vacant slot lets a later demand under a live lease
+        // recompute. A genuine result (`Some`) or genuine absence (`Ready(None)`)
+        // commits the write-once value.
+        #[cfg(test)]
+        PREPARED_TYPE_DECL_GET_BUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         match prepare_local_type_decl_outcome(
             self.canonical_id.as_ref(),
             self.state.as_ref(),
@@ -702,8 +735,9 @@ impl PreparedTypeDeclCache {
         ) {
             PreparedDeclOutcome::LeaseMiss => None,
             PreparedDeclOutcome::Ready(value) => {
-                let _ = slot.set(value.map(Arc::new));
-                slot.get().cloned().flatten()
+                let committed = value.map(Arc::new);
+                let _ = slot.value.set(committed.clone());
+                committed
             }
         }
     }
@@ -716,7 +750,7 @@ impl PreparedTypeDeclCache {
     pub(crate) fn slot_committed_for_test(&self, symbol_name: &str) -> bool {
         self.slots
             .get(symbol_name)
-            .is_some_and(|slot| slot.get().is_some())
+            .is_some_and(|slot| slot.value.get().is_some())
     }
 }
 
@@ -744,14 +778,20 @@ impl PreparedValueDeclCache {
 
     pub fn get(&self, symbol_name: &str) -> Option<Arc<PreparedValueDecl>> {
         let slot = self.slots.get(symbol_name)?;
-        // Warm hit.
-        if let Some(cached) = slot.get() {
+        // Warm fast path — no gate.
+        if let Some(cached) = slot.value.get() {
             return cached.clone();
         }
-        // Cold build with the same broken-lease no-warm rail as the type cache
-        // above: a `LeaseMiss` must NOT commit the write-once slot to `None`
-        // (a false-warm absence for a real symbol); only a genuine result or
-        // genuine absence is cacheable.
+        // Cold: serialise under the resettable in-flight gate, then re-check
+        // warm (single-flight) — same primitive as the type cache above. A
+        // `LeaseMiss` leaves the slot VACANT (release the gate without
+        // committing) so a false-warm absence is never persisted for a real
+        // symbol and a later live-lease demand recomputes; only a genuine
+        // result or genuine absence is cacheable.
+        let _gate = slot.build_gate.lock();
+        if let Some(cached) = slot.value.get() {
+            return cached.clone();
+        }
         match prepare_local_value_decl_outcome(
             self.canonical_id.as_ref(),
             self.state.as_ref(),
@@ -761,8 +801,9 @@ impl PreparedValueDeclCache {
         ) {
             PreparedDeclOutcome::LeaseMiss => None,
             PreparedDeclOutcome::Ready(value) => {
-                let _ = slot.set(value.map(Arc::new));
-                slot.get().cloned().flatten()
+                let committed = value.map(Arc::new);
+                let _ = slot.value.set(committed.clone());
+                committed
             }
         }
     }
@@ -772,7 +813,7 @@ impl PreparedValueDeclCache {
     pub(crate) fn slot_committed_for_test(&self, symbol_name: &str) -> bool {
         self.slots
             .get(symbol_name)
-            .is_some_and(|slot| slot.get().is_some())
+            .is_some_and(|slot| slot.value.get().is_some())
     }
 }
 
@@ -887,10 +928,10 @@ pub fn build_prepared_type_decl_cache(
     dep_edges: Arc<FxHashMap<String, String>>,
     import_canonicalization: Arc<ImportCanonicalization>,
 ) -> PreparedTypeDeclCache {
-    let mut slots: FxHashMap<String, Arc<OnceLock<Option<Arc<PreparedTypeDecl>>>>> = state
+    let mut slots: FxHashMap<String, PreparedTypeDeclSlot> = state
         .type_symbol_names()
         .filter(|symbol_name| !state.is_import_local(symbol_name))
-        .map(|symbol_name| (symbol_name.to_string(), Arc::new(OnceLock::new())))
+        .map(|symbol_name| (symbol_name.to_string(), Arc::new(PreparedDeclSlot::new())))
         .collect();
     // Global-augmentation declarations (`declare global { interface N {} }`)
     // are resolvable by bare name through `prepare_local_type_decl`'s global
@@ -904,7 +945,7 @@ pub fn build_prepared_type_decl_cache(
         ) && !slots.contains_key(name)
             && !state.is_import_local(name)
         {
-            slots.insert(name.to_string(), Arc::new(OnceLock::new()));
+            slots.insert(name.to_string(), Arc::new(PreparedDeclSlot::new()));
         }
     }
 
@@ -927,7 +968,7 @@ pub fn build_prepared_value_decl_cache(
     let slots = state
         .value_symbol_names()
         .filter(|symbol_name| !state.is_import_local(symbol_name))
-        .map(|symbol_name| (symbol_name.to_string(), Arc::new(OnceLock::new())))
+        .map(|symbol_name| (symbol_name.to_string(), Arc::new(PreparedDeclSlot::new())))
         .collect();
 
     PreparedValueDeclCache {
@@ -952,6 +993,24 @@ pub(crate) fn reset_prepared_type_decl_build_count_for_tests() {
 #[cfg(test)]
 pub(crate) fn prepared_type_decl_build_count_for_tests() -> usize {
     PREPARED_TYPE_DECL_BUILD_COUNT.with(|count| count.get())
+}
+
+/// Cross-thread count of COLD prepared-type-decl builds admitted through
+/// [`PreparedTypeDeclCache::get`] (post-gate). Unlike the per-thread
+/// [`PREPARED_TYPE_DECL_BUILD_COUNT`], this is an atomic so a concurrent
+/// single-flight test can assert exactly ONE build ran across all callers.
+#[cfg(test)]
+static PREPARED_TYPE_DECL_GET_BUILDS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+pub(crate) fn reset_prepared_type_decl_get_build_count_for_tests() {
+    PREPARED_TYPE_DECL_GET_BUILDS.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(crate) fn prepared_type_decl_get_build_count_for_tests() -> usize {
+    PREPARED_TYPE_DECL_GET_BUILDS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 #[cfg(test)]
@@ -1421,6 +1480,136 @@ declare global { namespace JSX {
             ),
             "a broken-lease augmentation prepare must surface the DISTINCT \
              LeaseMiss, not a cacheable Ready(None)"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Cold single-flight around the warm prepared-decl slot.
+    //
+    // The write-once warm `OnceLock` cannot commit a LeaseMiss (a permanent
+    // false-warm absence), so the slot pairs it with a resettable in-flight
+    // gate: concurrent cold callers serialise on the gate and reuse the
+    // winner's committed result (ONE build), while a LeaseMiss leaves the slot
+    // vacant so a later demand under a live lease recomputes.
+    // ---------------------------------------------------------------------
+
+    /// Concurrent cold callers for one symbol run exactly ONE prepared-decl
+    /// build (single-flight) and all observe the SAME committed Arc. Pre-fix
+    /// (check/build/`slot.set`, no gate) every racing cold caller builds its own
+    /// decl — the atomic get-build count is > 1. Post-fix the in-flight gate
+    /// serialises the cold build so exactly one runs.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn concurrent_cold_prepared_type_get_is_single_flight() {
+        // Heavy fixture so each prepared-decl build does real name_resolution
+        // work and concurrent cold callers genuinely overlap.
+        let mut source = String::new();
+        for i in 0..400 {
+            source.push_str(&format!("export type T{i} = {{ v{i}: number }};\n"));
+        }
+        let state = ShallowFileState::service_backed_for_test(&source);
+        let cache = build_prepared_type_decl_cache(
+            "/ws/fixture.ts",
+            Arc::clone(&state),
+            Arc::new(FxHashMap::default()),
+            Arc::new(ImportCanonicalization::default()),
+        );
+
+        reset_prepared_type_decl_get_build_count_for_tests();
+
+        const THREADS: usize = 16;
+        let barrier = Arc::new(std::sync::Barrier::new(THREADS));
+        let mut handles = Vec::new();
+        for _ in 0..THREADS {
+            let cache = cache.clone();
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                cache.get("T7")
+            }));
+        }
+        let arcs: Vec<Arc<PreparedTypeDecl>> = handles
+            .into_iter()
+            .map(|h| {
+                h.join()
+                    .expect("no caller thread may panic")
+                    .expect("T7 builds")
+            })
+            .collect();
+
+        assert_eq!(
+            prepared_type_decl_get_build_count_for_tests(),
+            1,
+            "concurrent cold callers must share ONE prepared-decl build (single-flight); \
+             a count > 1 means the in-flight gate was dropped and every racer rebuilt"
+        );
+        let first = &arcs[0];
+        for a in &arcs {
+            assert!(
+                Arc::ptr_eq(first, a),
+                "every cold caller must observe the SAME committed prepared-decl Arc"
+            );
+        }
+    }
+
+    /// A broken decl-body lease pin leaves the slot VACANT (never a write-once
+    /// `None`), so it stays re-buildable and a later demand under a live lease
+    /// recovers. Discriminates the resettable gate from a write-once `OnceLock`
+    /// (which would serve the committed `None` on retry and never recompute).
+    #[test]
+    fn broken_lease_prepared_type_slot_stays_vacant_and_is_rebuildable() {
+        let source = "export type Var0 = { v: 0 };\nexport type Var1 = { v: 1 };\n";
+        let state = ShallowFileState::service_backed_for_test(source);
+        let cache = build_prepared_type_decl_cache(
+            "/ws/fixture.ts",
+            Arc::clone(&state),
+            Arc::new(FxHashMap::default()),
+            Arc::new(ImportCanonicalization::default()),
+        );
+
+        // Pin the lease with one successful build, then break the snapshot.
+        assert!(
+            cache.get("Var0").is_some(),
+            "Var0 prepares under a live lease"
+        );
+        state.decl_bodies().release_retained_snapshot_for_test();
+
+        reset_prepared_type_decl_get_build_count_for_tests();
+        assert!(
+            cache.get("Var1").is_none(),
+            "a broken-lease prepared-type demand fails CLOSED to None (ReturnOnly)"
+        );
+        assert!(
+            !cache.slot_committed_for_test("Var1"),
+            "the lease-miss must leave the slot VACANT, not a write-once None"
+        );
+        let after_first = prepared_type_decl_get_build_count_for_tests();
+        // A vacant slot re-runs the build on the next demand; a write-once None
+        // would short-circuit and never recompute.
+        assert!(
+            cache.get("Var1").is_none(),
+            "a second broken-lease demand still fails closed to None"
+        );
+        assert!(
+            prepared_type_decl_get_build_count_for_tests() > after_first,
+            "a vacant (lease-missed) slot must re-run the build on retry — a \
+             write-once None would serve the committed absence without rebuilding"
+        );
+
+        // Recovery under a live lease: a fresh cache for the SAME source (a
+        // later content generation) DOES build Var1 — the vacant slot policy is
+        // what makes that recovery possible.
+        let fresh_state = ShallowFileState::service_backed_for_test(source);
+        let fresh_cache = build_prepared_type_decl_cache(
+            "/ws/fixture.ts",
+            Arc::clone(&fresh_state),
+            Arc::new(FxHashMap::default()),
+            Arc::new(ImportCanonicalization::default()),
+        );
+        assert!(
+            fresh_cache.get("Var1").is_some(),
+            "under a live lease the symbol recovers — the lease-miss was never a \
+             genuine absence"
         );
     }
 }
