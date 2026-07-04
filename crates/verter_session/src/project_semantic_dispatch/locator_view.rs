@@ -1058,16 +1058,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // judgment (the enumeration-domain oracle is NOT one of
                     // them: it runs under Shallow transit). Carrier-stopping
                     // the probes would judge every closed utility source
-                    // "unknown" and over-broaden the L1 carrier-stop. This
-                    // exemption's materialization policy can never corrupt a
-                    // published read: `Published(Skeleton)` IS wire-reachable
-                    // (projection mode 4, `typeinfo/request_validation.rs`),
-                    // but transit-Skeleton results live in the dedicated
-                    // `ModeSlot::TransitSkeleton` memo slot, isolated from
-                    // the `Published(Skeleton)` slot with no backfill in
-                    // either direction.
+                    // "unknown" and over-broaden the L1 carrier-stop. Both
+                    // probes run role-NEUTRAL (`MemberMergeRole::Authored`);
+                    // the DEFERRED merged-decl heritage arm ALSO reaches this
+                    // gate under `StructuralTransit(Skeleton)` but carries the
+                    // `Heritage` merge role — so the exemption is keyed OFF
+                    // that role: a `Heritage`-role transit-Skeleton demand
+                    // carrier-stops exactly like every other transit mode.
+                    // Without that carve-out `Published(Skeleton)` (wire mode
+                    // 4, `typeinfo/request_validation.rs`) DID corrupt a
+                    // published merged-decl read — the mapper-builtin heritage
+                    // `Partial<Base>` materialised mid-transit and the
+                    // topology-driven peer-merge reducer mis-bucketed it as
+                    // OWN surface, inverting own-body-shadows-heritage.
                     let build_carrier = (ctx.demand == ReductionDemand::StructuralTransit
-                        && ctx.mode != ProjectionMode::Skeleton)
+                        && (ctx.mode != ProjectionMode::Skeleton
+                            || ctx.merge_role() == MemberMergeRole::Heritage))
                         || ctx.mode == ProjectionMode::Shallow
                         || (super::raise::is_l1_object_filter_utility(base.decl_name.as_ref())
                             && (ctx.mode == ProjectionMode::Navigate

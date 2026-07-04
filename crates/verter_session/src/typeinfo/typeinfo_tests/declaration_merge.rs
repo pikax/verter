@@ -555,6 +555,80 @@ fn merged_interface_mapper_builtin_heritage_own_member_shadows_expanded() {
     assert_primitive(&props["shared"].ty, PrimitiveName::Number);
 }
 
+/// The SKELETON twin of
+/// [`merged_interface_mapper_builtin_heritage_own_member_shadows_expanded`]:
+/// Published(Skeleton) (projection mode 4) is wire-reachable, and the
+/// merged-decl deferred heritage arm (`extends Partial<Base>`) projects under
+/// `StructuralTransit(Skeleton)` carrying the `Heritage` merge role. The
+/// mapper-builtin `Partial<Base>` MUST stay a reference carrier there — an
+/// eagerly materialised `Partial<Base>` Object is mis-bucketed by the
+/// topology-driven peer-merge reducer as OWN surface, and first-contributor
+/// precedence then INVERTS own-body-shadows-heritage (the Partial-ized
+/// heritage `shared?: string` steals the own `shared: number`).
+///
+/// Discriminating: pre-fix the builtin gate exempts EVERY `Skeleton` demand
+/// from the transit carrier-stop (an exemption sized for the two neutral-role
+/// Skeleton probe executors), so the `Heritage`-role deferred arm materialises
+/// and `shared` resolves to the heritage `string`; post-fix the exemption is
+/// keyed off the `Heritage` merge role so the deferred heritage arm
+/// carrier-stops and `shared` resolves to the own `number`.
+#[test]
+fn merged_interface_mapper_builtin_heritage_own_member_shadows_skeleton() {
+    use crate::semantic_query::SemanticNodeData;
+
+    let host = make_host_with_footprint();
+    upsert_ts(
+        &host,
+        PATH,
+        "export interface Base { shared: string; fromBase: boolean }\n\
+         export interface X extends Partial<Base> { shared: number }\n\
+         export interface X { other: string }\n",
+    );
+
+    // Resolve X under Published(Skeleton): the deferred merged-decl heritage
+    // arm projects under StructuralTransit(Skeleton), where the builtin gate
+    // decides whether `Partial<Base>` carrier-stops or materialises.
+    let node = host
+        .resolve_named_symbol(PATH, "X", &[], Some(ProjectionMode::Skeleton))
+        .expect("merged X must resolve under Skeleton");
+    let graph = host.project_type_store().semantic_graph();
+
+    // Carrier topology (the direct structural discriminator, mirroring the
+    // Expanded twin): the merged carrier survives and the extending
+    // contributor's `extends Partial<Base>` arm is still a REFERENCE carrier.
+    // A materialised heritage `Object` / `Mapped` there is mis-bucketed as OWN
+    // surface by the topology-driven peer-merge reducer and silently steals
+    // member precedence (own-body-shadows-heritage inverts).
+    let contributors = match graph.node_data(node).as_deref() {
+        Some(SemanticNodeData::MergedDecl { contributors }) => contributors.clone(),
+        other => panic!("merged X must stay a MergedDecl carrier under Skeleton, got {other:?}"),
+    };
+    assert_eq!(contributors.len(), 2, "two same-name contributors");
+    let heritage_arm_is_reference =
+        contributors.iter().any(
+            |contributor| match graph.node_data(*contributor).as_deref() {
+                Some(SemanticNodeData::Intersection(arms)) => arms.iter().any(|arm| {
+                    matches!(
+                        graph.node_data(*arm).as_deref(),
+                        Some(
+                            SemanticNodeData::InstantiationRef { .. }
+                                | SemanticNodeData::DeclRef { .. }
+                        )
+                    )
+                }),
+                _ => false,
+            },
+        );
+    assert!(
+        heritage_arm_is_reference,
+        "the `extends Partial<Base>` heritage arm must stay a reference carrier in the \
+         Published(Skeleton)-projected contributor — the builtin gate's blanket Skeleton \
+         exemption materialised the mapper-builtin heritage `Partial<Base>` mid-transit, \
+         which the topology-driven peer-merge reducer mis-buckets as OWN surface and \
+         inverts own-body-shadows-heritage"
+    );
+}
+
 /// The same own-body-shadows-heritage precedence through the EXPANDED
 /// surface route for a SINGLE (non-merged) interface with a GENERIC heritage
 /// base: the `extends Base<string>` reference arm is HERITAGE relative to
