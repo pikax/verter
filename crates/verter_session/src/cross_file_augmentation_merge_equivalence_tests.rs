@@ -1039,3 +1039,116 @@ fn external_module_augmentation_torn_contributor_folds_cache_suppress() {
          contributor, not an inherently non-cacheable key"
     );
 }
+
+/// EXTERNAL (`declare module "<bare>"`) augmentation fold — a BROKEN decl-body
+/// lease pin on a contributing augmenter (`prepare_augmentation_type_decl_outcome`
+/// → `PreparedDeclOutcome::LeaseMiss`) must FOLD its no-warm bit into the
+/// enclosing `Instantiate` query's `QueryBuildOutput.cache_suppress`, so the
+/// parent `/use.ts::U` cannot warm-publish an under-merged surface.
+///
+/// Unlike [`external_module_augmentation_torn_contributor_folds_cache_suppress`]
+/// (which drives the `source_env_unobservable` fold through the `for_tests`
+/// injection knob at the collector's own skip), this exercises the DISTINCT
+/// `PreparedDeclOutcome::LeaseMiss` arm inside `collect_augmentation_contributions`
+/// with a REAL broken lease: one augmenter's retained parse snapshot is released
+/// out-of-band so its `(Module "ext-pkg", Cfg)` body demand ReturnOnly's. The
+/// arm sets `source_env_unobservable = true`; a `continue`-without-setting-taint
+/// mutation of that arm would silently drop the unobservable contributor and
+/// warm-admit the parent.
+///
+/// Discrimination:
+///   - BROKEN LEASE: aug1's `Cfg` body demand lease-misses; the LeaseMiss arm
+///     taints the fold ⇒ `cache_suppress == true`. RED against a build.rs
+///     mutation that drops the `source_env_unobservable = true` in that arm.
+///   - CONTROL (anti-vacuity): aug1 re-indexed with fresh content ⇒ live lease
+///     ⇒ clean stitch ⇒ `cache_suppress == false`, proving the `true` is caused
+///     by the broken lease, not the key itself.
+#[test]
+fn external_module_augmentation_broken_lease_contributor_folds_cache_suppress() {
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::semantic_query::{ProjectionReductionContext, SemanticQueryKey};
+
+    let host = make_host();
+    // TWO external `declare module "ext-pkg"` peers augmenting `Cfg`, plus a
+    // file-scope `Pin1` in aug1 (demanded to pin aug1's retained-snapshot lease
+    // WITHOUT lowering the `Cfg` augmentation body), plus a consumer aliasing
+    // the augmented `Cfg`.
+    upsert_ts(
+        host.as_ref(),
+        "/aug1.d.ts",
+        "declare module \"ext-pkg\" { interface Cfg { fromOne: string } }\n\
+         export type Pin1 = { p: 1 };\n",
+    );
+    upsert_ts(
+        host.as_ref(),
+        "/aug2.d.ts",
+        "declare module \"ext-pkg\" { interface Cfg { fromTwo: number } }\n",
+    );
+    upsert_ts(
+        host.as_ref(),
+        "/use.ts",
+        "import type { Cfg } from \"ext-pkg\"\nexport type U = Cfg\n",
+    );
+
+    // Reach aug1's DeclBodyMemo, pin its lease with one successful file-scope
+    // demand (`Pin1` — never the `Cfg` augmentation body), then break the
+    // retained snapshot out-of-band. aug1's NEXT demand — the stitch's
+    // `(Module "ext-pkg", Cfg)` body — now lease-misses.
+    let serve = host
+        .ensure_indexed_ready_serve("/aug1.d.ts")
+        .expect("aug1 indexes");
+    let aug1_state = Arc::clone(&serve.indexed.shallow_state);
+    assert!(
+        aug1_state.decl_bodies().type_decl("Pin1").is_some(),
+        "the file-scope pin demand must acquire aug1's retained-snapshot lease"
+    );
+    aug1_state
+        .decl_bodies()
+        .release_retained_snapshot_for_test();
+
+    let suppress_of = |view: &crate::resolver_store::HostStoreView| -> bool {
+        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let ctx = crate::resolver_core::HostResolverContext::new(&host, view, overlay);
+        let dispatch = ProjectSemanticDispatch::new(&ctx);
+        let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+            dispatch.type_slot_for(Arc::from("/use.ts"), Arc::from("U")),
+            Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
+            dispatch.instantiate_context_for(
+                "/use.ts",
+                ProjectionReductionContext::published(ProjectionMode::Expanded),
+            ),
+        ));
+        dispatch.execute_read(key).cache_suppress
+    };
+
+    // BROKEN LEASE: cold-build `/use.ts::U`. The external augmentation stitch
+    // reaches aug1, demands its `(Module "ext-pkg", Cfg)` body → LeaseMiss →
+    // `source_env_unobservable` → the enclosing Instantiate build's
+    // `cache_suppress`.
+    let broken_view = host.resolver_store_view_read().into_owned_view();
+    assert!(
+        suppress_of(&broken_view),
+        "a broken-lease augmentation contributor (PreparedDeclOutcome::LeaseMiss) \
+         must fold its no-warm bit into the `/use.ts::U` Instantiate build's \
+         cache_suppress — cache_suppress == false means the stitch silently \
+         dropped the unobservable contributor and could warm-admit an \
+         under-merged surface"
+    );
+
+    // CONTROL (anti-vacuity): re-index aug1 with fresh content ⇒ fresh memo +
+    // live lease ⇒ clean stitch ⇒ NOT suppressed. Proves the `true` above is
+    // caused by the broken lease, not an inherently non-cacheable key.
+    upsert_ts(
+        host.as_ref(),
+        "/aug1.d.ts",
+        "declare module \"ext-pkg\" { interface Cfg { fromOne: string } }\n\
+         export type Pin1 = { p: 1 };\n// clean\n",
+    );
+    let clean_view = host.resolver_store_view_read().into_owned_view();
+    assert!(
+        !suppress_of(&clean_view),
+        "a CLEAN augmentation fold (live lease) must NOT set cache_suppress on the \
+         `/use.ts::U` Instantiate build — the `true` above is caused by the broken \
+         lease, not an inherently non-cacheable key"
+    );
+}
