@@ -501,8 +501,6 @@ fn concurrent_cold_prepared_type_get_is_single_flight() {
         Arc::new(ImportCanonicalization::default()),
     );
 
-    reset_prepared_type_decl_get_build_count_for_tests();
-
     const THREADS: usize = 16;
     let barrier = Arc::new(std::sync::Barrier::new(THREADS));
     let mut handles = Vec::new();
@@ -524,7 +522,7 @@ fn concurrent_cold_prepared_type_get_is_single_flight() {
         .collect();
 
     assert_eq!(
-        prepared_type_decl_get_build_count_for_tests(),
+        cache.cold_build_count_for_test(),
         1,
         "concurrent cold callers must share ONE prepared-decl build (single-flight); \
              a count > 1 means the in-flight gate was dropped and every racer rebuilt"
@@ -560,7 +558,6 @@ fn broken_lease_prepared_type_slot_stays_vacant_and_is_rebuildable() {
     );
     state.decl_bodies().release_retained_snapshot_for_test();
 
-    reset_prepared_type_decl_get_build_count_for_tests();
     assert!(
         cache.get("Var1").is_none(),
         "a broken-lease prepared-type demand fails CLOSED to None (ReturnOnly)"
@@ -569,7 +566,7 @@ fn broken_lease_prepared_type_slot_stays_vacant_and_is_rebuildable() {
         !cache.slot_committed_for_test("Var1"),
         "the lease-miss must leave the slot VACANT, not a write-once None"
     );
-    let after_first = prepared_type_decl_get_build_count_for_tests();
+    let after_first = cache.cold_build_count_for_test();
     // A vacant slot re-runs the build on the next demand; a write-once None
     // would short-circuit and never recompute.
     assert!(
@@ -577,7 +574,7 @@ fn broken_lease_prepared_type_slot_stays_vacant_and_is_rebuildable() {
         "a second broken-lease demand still fails closed to None"
     );
     assert!(
-        prepared_type_decl_get_build_count_for_tests() > after_first,
+        cache.cold_build_count_for_test() > after_first,
         "a vacant (lease-missed) slot must re-run the build on retry — a \
              write-once None would serve the committed absence without rebuilding"
     );

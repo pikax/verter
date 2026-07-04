@@ -670,6 +670,12 @@ pub struct PreparedTypeDeclCache {
     dep_edges: Arc<FxHashMap<String, String>>,
     import_canonicalization: Arc<ImportCanonicalization>,
     slots: PreparedTypeDeclSlots,
+    /// Per-cache-instance count of COLD builds admitted through
+    /// [`PreparedTypeDeclCache::get`] (post-gate). Instance-scoped so a
+    /// concurrent single-flight test asserts exactly ONE build on ITS OWN
+    /// cache without a sibling test's cold `.get()` racing a shared global.
+    #[cfg(test)]
+    cold_build_count: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl PreparedTypeDeclCache {
@@ -725,7 +731,8 @@ impl PreparedTypeDeclCache {
         // recompute. A genuine result (`Some`) or genuine absence (`Ready(None)`)
         // commits the write-once value.
         #[cfg(test)]
-        PREPARED_TYPE_DECL_GET_BUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.cold_build_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         match prepare_local_type_decl_outcome(
             self.canonical_id.as_ref(),
             self.state.as_ref(),
@@ -751,6 +758,15 @@ impl PreparedTypeDeclCache {
         self.slots
             .get(symbol_name)
             .is_some_and(|slot| slot.value.get().is_some())
+    }
+
+    /// Test observability: this cache instance's own count of COLD builds
+    /// admitted through [`get`](Self::get). Instance-scoped so a concurrent
+    /// single-flight assertion is hermetic against sibling tests' cold `.get()`.
+    #[cfg(test)]
+    pub(crate) fn cold_build_count_for_test(&self) -> usize {
+        self.cold_build_count
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -955,6 +971,8 @@ pub fn build_prepared_type_decl_cache(
         dep_edges,
         import_canonicalization,
         slots: Arc::new(slots),
+        #[cfg(test)]
+        cold_build_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     }
 }
 
@@ -993,24 +1011,6 @@ pub(crate) fn reset_prepared_type_decl_build_count_for_tests() {
 #[cfg(test)]
 pub(crate) fn prepared_type_decl_build_count_for_tests() -> usize {
     PREPARED_TYPE_DECL_BUILD_COUNT.with(|count| count.get())
-}
-
-/// Cross-thread count of COLD prepared-type-decl builds admitted through
-/// [`PreparedTypeDeclCache::get`] (post-gate). Unlike the per-thread
-/// [`PREPARED_TYPE_DECL_BUILD_COUNT`], this is an atomic so a concurrent
-/// single-flight test can assert exactly ONE build ran across all callers.
-#[cfg(test)]
-static PREPARED_TYPE_DECL_GET_BUILDS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-
-#[cfg(test)]
-pub(crate) fn reset_prepared_type_decl_get_build_count_for_tests() {
-    PREPARED_TYPE_DECL_GET_BUILDS.store(0, std::sync::atomic::Ordering::Relaxed);
-}
-
-#[cfg(test)]
-pub(crate) fn prepared_type_decl_get_build_count_for_tests() -> usize {
-    PREPARED_TYPE_DECL_GET_BUILDS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 #[cfg(test)]
