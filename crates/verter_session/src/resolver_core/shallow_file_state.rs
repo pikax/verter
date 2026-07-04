@@ -551,59 +551,6 @@ impl ShallowFileState {
         state
     }
 
-    /// Test-only builder for a SERVICE-backed [`ShallowFileState`] — the
-    /// production lazy-memo shape whose declaration-body lease can be broken
-    /// out-of-band (via [`crate::decl_body_memo::DeclBodyMemo::release_retained_snapshot_for_test`])
-    /// to exercise the fail-closed no-warm rails. Unlike [`Self::from_analysis`]
-    /// (a SEEDED memo, which can never lease-miss), this wires a live
-    /// [`crate::decl_lowering::DeclLoweringService`], so a broken retained-
-    /// snapshot pin surfaces the typed `LeaseMiss` outcome instead of a
-    /// genuine miss. `#[cfg(test)]`-only: the sole callers are the inline
-    /// broken-lease no-warm regressions.
-    #[cfg(test)]
-    pub(crate) fn service_backed_for_test(source: &str) -> Arc<Self> {
-        let allocator = oxc_allocator::Allocator::default();
-        let parsed =
-            oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
-        assert!(
-            !parsed.panicked,
-            "service_backed_for_test fixture must parse"
-        );
-        let header_index = Arc::new(
-            verter_semantic::analysis::decl_headers::build_decl_header_index(
-                &parsed.program,
-                source,
-            ),
-        );
-        let analysis = Arc::new(
-            verter_compiler::utils::oxc::script::type_surface::analyze_external_type_source(
-                source, &allocator,
-            ),
-        );
-        let eval_source: Arc<str> = Arc::from(source);
-        let memo = crate::decl_body_memo::DeclBodyMemo::new(
-            crate::decl_lowering::SnapshotKey {
-                canonical: Arc::from("/ws/fixture.ts"),
-                whole_hash: [7u8; 16],
-                parse_env_hash: [0u8; 16],
-            },
-            Arc::clone(&eval_source),
-            eval_source,
-            None,
-            oxc_span::SourceType::ts(),
-            Arc::new(crate::decl_lowering::DeclLoweringService::new()),
-            header_index,
-            Arc::new(crate::types::MetaProvenance::default()),
-            None,
-        );
-        Arc::new(Self::from_analysis_with_resolver(
-            Hash16::default(),
-            analysis,
-            Arc::new(memo),
-            &NullResolver,
-        ))
-    }
-
     /// Build from the header-only analysis + the lazy declaration-body
     /// memo, with a resolver that canonicalizes all cross-file edges.
     ///
@@ -2937,6 +2884,60 @@ mod tests {
     use super::*;
     use verter_semantic::analysis::type_eval::ValueDeclKind;
     use verter_semantic::analysis::type_eval_build::parse_and_build_env;
+
+    impl ShallowFileState {
+        /// Test-only builder for a SERVICE-backed [`ShallowFileState`] — the
+        /// production lazy-memo shape whose declaration-body lease can be broken
+        /// out-of-band (via [`crate::decl_body_memo::DeclBodyMemo::release_retained_snapshot_for_test`])
+        /// to exercise the fail-closed no-warm rails. Unlike [`Self::from_analysis`]
+        /// (a SEEDED memo, which can never lease-miss), this wires a live
+        /// [`crate::decl_lowering::DeclLoweringService`], so a broken retained-
+        /// snapshot pin surfaces the typed `LeaseMiss` outcome instead of a
+        /// genuine miss. `#[cfg(test)]`-only: the sole callers are the
+        /// broken-lease no-warm regressions in `prepared_decl_tests.rs`.
+        pub(crate) fn service_backed_for_test(source: &str) -> Arc<Self> {
+            let allocator = oxc_allocator::Allocator::default();
+            let parsed =
+                oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+            assert!(
+                !parsed.panicked,
+                "service_backed_for_test fixture must parse"
+            );
+            let header_index = Arc::new(
+                verter_semantic::analysis::decl_headers::build_decl_header_index(
+                    &parsed.program,
+                    source,
+                ),
+            );
+            let analysis = Arc::new(
+                verter_compiler::utils::oxc::script::type_surface::analyze_external_type_source(
+                    source, &allocator,
+                ),
+            );
+            let eval_source: Arc<str> = Arc::from(source);
+            let memo = crate::decl_body_memo::DeclBodyMemo::new(
+                crate::decl_lowering::SnapshotKey {
+                    canonical: Arc::from("/ws/fixture.ts"),
+                    whole_hash: [7u8; 16],
+                    parse_env_hash: [0u8; 16],
+                },
+                Arc::clone(&eval_source),
+                eval_source,
+                None,
+                oxc_span::SourceType::ts(),
+                Arc::new(crate::decl_lowering::DeclLoweringService::new()),
+                header_index,
+                Arc::new(crate::types::MetaProvenance::default()),
+                None,
+            );
+            Arc::new(Self::from_analysis_with_resolver(
+                Hash16::default(),
+                analysis,
+                Arc::new(memo),
+                &NullResolver,
+            ))
+        }
+    }
 
     fn make_analysis(source: &str) -> Arc<AnalyzedExternalTypeSource> {
         let alloc = oxc_allocator::Allocator::new();
