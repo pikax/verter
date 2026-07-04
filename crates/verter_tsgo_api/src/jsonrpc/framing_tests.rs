@@ -103,6 +103,62 @@ fn extra_headers_are_tolerated() {
     assert_eq!(decoded["result"], json!(42));
 }
 
+#[test]
+fn next_frame_yields_parsed_value_and_exact_raw_bytes() {
+    // A hand-built frame with NON-alphabetical keys and extra whitespace —
+    // re-encoding the parsed value could not reproduce these bytes.
+    let body: &[u8] = br#"{ "zulu": 1,  "alpha": 2 }"#;
+    let mut frame = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();
+    frame.extend_from_slice(body);
+
+    let mut framer = MessageFramer::new();
+    framer.push(&frame);
+    let (value, raw) = framer
+        .next_frame()
+        .expect("decode ok")
+        .expect("a complete frame");
+    assert_eq!(
+        raw, frame,
+        "the raw bytes must be the EXACT received frame (header + separator + body)"
+    );
+    assert_eq!(value, json!({ "zulu": 1, "alpha": 2 }));
+    assert_ne!(
+        encode_message(&value),
+        frame,
+        "the discriminating premise: a re-encode of the parsed value does \
+         NOT reproduce the original bytes (key order + whitespace differ)"
+    );
+    assert!(
+        framer.next_frame().expect("ok").is_none(),
+        "the frame must be drained exactly once"
+    );
+}
+
+#[test]
+fn next_frame_drains_exact_frame_boundaries_across_concatenated_frames() {
+    let a_body: &[u8] = br#"{"zulu":1,"alpha":2}"#;
+    let mut bytes = format!("Content-Length: {}\r\n\r\n", a_body.len()).into_bytes();
+    bytes.extend_from_slice(a_body);
+    let a_frame_len = bytes.len();
+    let b = json!({ "jsonrpc": "2.0", "id": 2, "result": 2 });
+    let b_frame = encode_message(&b);
+    bytes.extend_from_slice(&b_frame);
+
+    let mut framer = MessageFramer::new();
+    framer.push(&bytes);
+    let (a_value, a_raw) = framer.next_frame().unwrap().unwrap();
+    assert_eq!(a_value, json!({ "zulu": 1, "alpha": 2 }));
+    assert_eq!(
+        a_raw,
+        &bytes[..a_frame_len],
+        "the first raw frame must stop exactly at its frame boundary"
+    );
+    let (b_value, b_raw) = framer.next_frame().unwrap().unwrap();
+    assert_eq!(b_value, b);
+    assert_eq!(b_raw, b_frame);
+    assert!(framer.next_frame().unwrap().is_none());
+}
+
 // ── DISCRIMINATING negative assertions ──
 
 #[test]

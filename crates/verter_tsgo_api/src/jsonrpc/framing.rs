@@ -68,6 +68,24 @@ impl MessageFramer {
     /// non-numeric length, or a body that fails JSON parsing) — the stream is
     /// then unrecoverable and the caller must fail closed.
     pub fn next_message(&mut self) -> TsgoApiResult<Option<serde_json::Value>> {
+        Ok(self.next_frame()?.map(|(value, _raw)| value))
+    }
+
+    /// Pull the next fully-received frame as BOTH the parsed JSON value and
+    /// the RAW frame bytes (`Content-Length` header + separator + body,
+    /// exactly as received), or `Ok(None)` when the buffer does not yet hold
+    /// a complete framed message.
+    ///
+    /// The raw bytes are captured BEFORE the frame is drained, so a
+    /// pass-through consumer (e.g. the [`crate::relay::LspRelay`] pumps) can
+    /// forward the original bytes byte-identically — re-encoding the parsed
+    /// [`serde_json::Value`] would reorder object keys and recompact
+    /// whitespace.
+    ///
+    /// Returns `Err` on a malformed frame (a header missing `Content-Length`,
+    /// a non-numeric length, or a body that fails JSON parsing) — the stream
+    /// is then unrecoverable and the caller must fail closed.
+    pub fn next_frame(&mut self) -> TsgoApiResult<Option<(serde_json::Value, Vec<u8>)>> {
         let Some(sep) = find_subslice(&self.buf, HEADER_SEPARATOR) else {
             // No complete header yet.
             return Ok(None);
@@ -75,16 +93,18 @@ impl MessageFramer {
         let header = &self.buf[..sep];
         let content_len = parse_content_length(header)?;
         let body_start = sep + HEADER_SEPARATOR.len();
-        if self.buf.len() < body_start + content_len {
+        let frame_end = body_start + content_len;
+        if self.buf.len() < frame_end {
             // Header complete, body still incoming.
             return Ok(None);
         }
-        let body = self.buf[body_start..body_start + content_len].to_vec();
-        // Drain the consumed frame (header + separator + body).
-        self.buf.drain(..body_start + content_len);
-        let value = serde_json::from_slice::<serde_json::Value>(&body)
+        // Capture the EXACT received frame bytes, then drain the consumed
+        // frame (header + separator + body).
+        let raw = self.buf[..frame_end].to_vec();
+        self.buf.drain(..frame_end);
+        let value = serde_json::from_slice::<serde_json::Value>(&raw[body_start..])
             .map_err(|e| TsgoApiError::Json(format!("jsonrpc body parse: {e}")))?;
-        Ok(Some(value))
+        Ok(Some((value, raw)))
     }
 }
 

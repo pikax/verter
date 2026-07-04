@@ -5,7 +5,8 @@
 //! ATTACHED to. Six non-owning invariants are load-bearing:
 //!
 //!   1. The NON-OWNING teardown (`TsgoAttach::detach`) retracts Verter's own
-//!      overlays (`textDocument/didClose`) and drops the `--api` pipe
+//!      overlays through the typed `did_close` op (which sends
+//!      `textDocument/didClose`) and drops the `--api` pipe
 //!      (`self.api.close`) — and NEVER sends `exit`, NEVER `start_kill`s, and
 //!      NEVER `wait`s a child. Verter must not terminate an engine it did not
 //!      spawn.
@@ -100,8 +101,15 @@ const OWNED_TEARDOWN_MARKERS: &[&str] = &["\"exit\"", "start_kill", ".wait("];
 /// contains NO engine-terminating marker. Returns failures (empty ⇒ pass).
 fn detach_failures(body: &str) -> Vec<String> {
     let mut failures = Vec::new();
-    if !body.contains("textDocument/didClose") {
-        failures.push("detach must retract overlays via `textDocument/didClose`".to_string());
+    // detach retracts Verter's overlays through the typed `did_close` lifecycle
+    // op (which sends `textDocument/didClose` AND threads the overlay tracker,
+    // so a non-owning teardown closes exactly the overlays Verter opened).
+    if !body.contains("did_close") {
+        failures.push(
+            "detach must retract overlays via the typed `did_close` \
+             (`textDocument/didClose`)"
+                .to_string(),
+        );
     }
     if !body.contains("self.api.close") {
         failures.push("detach must drop the `--api` pipe via `self.api.close`".to_string());
@@ -322,9 +330,9 @@ fn non_owning_attach_lifecycle_self_test_discriminates() {
     // A conforming detach body: didClose + api pipe drop, no termination.
     let good_detach = r#"
         let uris: Vec<String> = { self.open_overlays.lock().unwrap().iter().cloned().collect() };
+        let channel = self.injection_channel();
         for uri in uris {
-            let _ = self.lsp.conn.notify("textDocument/didClose",
-                serde_json::json!({ "textDocument": { "uri": uri } })).await;
+            let _ = channel.did_close(&uri).await;
         }
         let _ = self.api.close().await;
         Ok(())
@@ -337,7 +345,8 @@ fn non_owning_attach_lifecycle_self_test_discriminates() {
     // A violating detach body: same retraction, but it ALSO terminates the
     // engine (exit + start_kill + wait) — every termination marker must fire.
     let bad_detach = r#"
-        let _ = self.lsp.conn.notify("textDocument/didClose", params).await;
+        let channel = self.injection_channel();
+        let _ = channel.did_close(&uri).await;
         let _ = self.api.close().await;
         let _ = self.lsp.conn.notify("exit", serde_json::Value::Null).await;
         if let Some(mut child) = self.lsp.child.take() {

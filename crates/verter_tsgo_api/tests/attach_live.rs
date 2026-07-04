@@ -159,6 +159,7 @@ async fn attach_api_over_spawned_lsp_sees_didopen_overlay_carrier() {
     //    forces the server to register the overlay before --api updateSnapshot
     //    enumerates roots on the shared session — the two ride different transports).
     attach
+        .injection_channel()
         .did_open_synced(&carrier_uri, "typescript", 1, carrier_src)
         .await
         .expect("didOpen overlay + sync");
@@ -250,6 +251,7 @@ async fn one_process_serves_both_api_checker_and_lsp_feature() {
         .expect("attach establish");
 
     attach
+        .injection_channel()
         .did_open_synced(&carrier_uri, "typescript", 1, carrier_src)
         .await
         .expect("didOpen + sync");

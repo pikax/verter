@@ -30,5 +30,9 @@ mod resilient_single_writer_actor_shape;
 mod same_stem_svelte_component_rune_fails_closed;
 #[path = "g_extts/sealed_carrier_store_mutators_allowlist.rs"]
 mod sealed_carrier_store_mutators_allowlist;
+#[path = "g_extts/shared_mode_requires_full_ts_lsp_proxy.rs"]
+mod shared_mode_requires_full_ts_lsp_proxy;
 #[path = "g_extts/tsgo_capability_gate_on_version.rs"]
 mod tsgo_capability_gate_on_version;
+#[path = "g_extts/tsgo_shared_mode_carrier_injection.rs"]
+mod tsgo_shared_mode_carrier_injection;

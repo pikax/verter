@@ -42,19 +42,34 @@
 //!
 //! ## Teardown is ownership-dispatched
 //!
-//! [`TsgoAttach::teardown`] is the SOLE public teardown entry, dispatching on
-//! [`ConnectionOwnership`]: an OWNED engine gets the full private `shutdown`
-//! (`exit` + child kill); an editor-owned engine gets the NON-OWNING
-//! [`TsgoAttach::detach`] — retract Verter's own overlays via
-//! `textDocument/didClose` and drop the `--api` pipe, never
-//! `exit`/`shutdown`/kill. The teardown DISPATCH is structural: the
-//! `exit`-sending `shutdown` is private (reached only through `teardown`'s
-//! Owned arm) and a non-owning attach holds no child/exit handle, so no
-//! lifecycle/teardown path terminates an engine Verter did not spawn. Raw-wire
-//! write access to the `lsp()` feature-seam is NOT a teardown path and is gated
-//! by the interposition/relay layer, not here — see [`TsgoAttach::lsp`].
+//! `teardown` is the SOLE public teardown entry on each ownership: an OWNED
+//! engine gets the full private `shutdown` (`exit` + child kill); an
+//! editor-owned engine gets the NON-OWNING [`TsgoAttach::detach`] — retract
+//! Verter's own overlays via `textDocument/didClose` and drop the `--api`
+//! pipe, never `exit`/`shutdown`/kill. The teardown DISPATCH is structural:
+//! the `exit`-sending `shutdown` exists only on `TsgoAttach<Owned>` and is
+//! private, and a non-owning attach holds no child/exit handle, so no
+//! lifecycle/teardown path terminates an engine Verter did not spawn.
+//!
+//! ## The write surface is ownership-split
+//!
+//! [`TsgoAttach`] is generic over its [`AttachOwnership`] marker ([`Owned`] /
+//! [`NonOwning`]), mirroring the runtime [`ConnectionOwnership`] tag the
+//! constructors enforce. For non-owning/editor-owned attach handles, public
+//! carrier writes are available ONLY through [`CarrierInjectionChannel`]. The
+//! channel deny-by-default allowlist permits Verter overlay lifecycle
+//! notifications, the ordered sync-barrier request, and
+//! `custom/initializeAPISession` re-emission; ALL other methods are rejected
+//! before reaching the wire. Owned attach handles may expose the raw
+//! [`JsonRpcConnection`] (the raw accessor exists ONLY on
+//! `TsgoAttach<Owned>`); non-owning attach handles must not expose or clone
+//! it through public API. This layer does NOT claim read-side leak
+//! suppression, feature-read routing, mode selection, live editor
+//! attachment, or proof that injected carriers appear in the editor Program —
+//! those concerns are OUT of this layer's scope.
 
 use std::collections::HashSet;
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Mutex as StdMutex;
@@ -63,8 +78,48 @@ use crate::api_attach::{ApiAttachClient, AttachSnapshot};
 use crate::error::{TsgoApiError, TsgoApiResult};
 use crate::gate::{self, EngineVersionWitness, GateClearance, ObservedEngine};
 use crate::jsonrpc::JsonRpcConnection;
+use crate::relay::CarrierInjectionChannel;
 use crate::transport::pipe_attach::connect_attach_pipe;
 use crate::transport::spawn::discover_tsgo;
+
+/// Seals [`AttachOwnership`]: the ownership markers are a closed set — the
+/// owned/non-owning write-surface split is not extensible from outside.
+mod sealed {
+    pub trait Sealed {}
+    impl Sealed for super::Owned {}
+    impl Sealed for super::NonOwning {}
+}
+
+/// The compile-time ownership marker of a [`TsgoAttach`] handle. Mirrors the
+/// runtime [`ConnectionOwnership`] tag (which the constructors enforce) and
+/// selects the handle's PUBLIC write surface: only `TsgoAttach<Owned>`
+/// exposes the raw [`JsonRpcConnection`]; `TsgoAttach<NonOwning>` writes
+/// exclusively through the gated [`CarrierInjectionChannel`].
+pub trait AttachOwnership: sealed::Sealed + Send + Sync + 'static {
+    /// The runtime [`ConnectionOwnership`] tag this compile-time marker
+    /// mirrors — the structural link `TsgoAttach::from_parts` asserts, so a
+    /// type-state/runtime mismatch cannot be assembled silently.
+    fn expected_connection_ownership() -> ConnectionOwnership;
+}
+
+/// Marker: Verter spawned (and owns) the engine behind the attach.
+#[derive(Debug, Clone, Copy)]
+pub struct Owned;
+
+/// Marker: the attach rides an editor-owned engine Verter did not spawn.
+#[derive(Debug, Clone, Copy)]
+pub struct NonOwning;
+
+impl AttachOwnership for Owned {
+    fn expected_connection_ownership() -> ConnectionOwnership {
+        ConnectionOwnership::Owned
+    }
+}
+impl AttachOwnership for NonOwning {
+    fn expected_connection_ownership() -> ConnectionOwnership {
+        ConnectionOwnership::AttachedNonOwning
+    }
+}
 
 /// The LSP `custom/` method that asks a `tsgo --lsp` server to mint an `--api`
 /// session sharing its `project.Session`. Verified against the shipped rc
@@ -132,12 +187,6 @@ impl TsgoLspConnection {
     #[must_use]
     pub fn new_attached(conn: JsonRpcConnection) -> Self {
         Self::new(conn, None, ConnectionOwnership::AttachedNonOwning)
-    }
-
-    /// The underlying `--lsp` JSON-RPC connection.
-    #[must_use]
-    pub fn connection(&self) -> &JsonRpcConnection {
-        &self.conn
     }
 
     /// Whether Verter owns the engine behind this connection.
@@ -260,7 +309,12 @@ pub struct ApiSessionHandle {
 /// A live one-instance dual-surface attach: ONE `tsgo --lsp` connection + the
 /// `--api` checker attached over the minted pipe. Both surfaces ride the ONE
 /// process / ONE shared `project.Session`.
-pub struct TsgoAttach {
+///
+/// The [`AttachOwnership`] marker `O` selects the public write surface:
+/// `TsgoAttach<Owned>` (the default) exposes the raw connection via its
+/// owned-only raw accessor; `TsgoAttach<NonOwning>` writes ONLY through the
+/// gated [`TsgoAttach::injection_channel`].
+pub struct TsgoAttach<O: AttachOwnership = Owned> {
     lsp: TsgoLspConnection,
     api: ApiAttachClient,
     session: ApiSessionHandle,
@@ -269,14 +323,17 @@ pub struct TsgoAttach {
     observed_version: String,
     /// How that version was observed (in-band `serverInfo` vs a probe).
     witness: EngineVersionWitness,
-    /// The overlay URIs Verter itself opened via [`TsgoAttach::did_open`],
+    /// The overlay URIs Verter itself opened via
+    /// [`CarrierInjectionChannel::did_open`] on this attach's channel,
     /// tracked so a NON-OWNING [`TsgoAttach::detach`] can retract exactly
     /// them. A std Mutex: lock, mutate, drop the guard — NEVER held across an
     /// `.await`.
     open_overlays: StdMutex<HashSet<String>>,
+    /// The compile-time ownership marker (mirrors `lsp.ownership()`).
+    _own: PhantomData<O>,
 }
 
-impl std::fmt::Debug for TsgoAttach {
+impl<O: AttachOwnership> std::fmt::Debug for TsgoAttach<O> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TsgoAttach")
             .field("session_id", &self.session.session_id)
@@ -287,15 +344,27 @@ impl std::fmt::Debug for TsgoAttach {
     }
 }
 
-impl TsgoAttach {
+/// Ownership-agnostic surface: reads, the `--api` snapshot rail, the
+/// `--api` session mint, and the gated carrier-injection write channel.
+impl<O: AttachOwnership> TsgoAttach<O> {
     /// Assemble an attach from its parts, storing the gate clearance's
-    /// accepted version + witness and an empty overlay set.
+    /// accepted version + witness and an empty overlay set. Private: the
+    /// public constructors enforce that the runtime [`ConnectionOwnership`]
+    /// tag matches the compile-time marker, and the mirror is asserted
+    /// structurally here via
+    /// [`AttachOwnership::expected_connection_ownership`].
     fn from_parts(
         lsp: TsgoLspConnection,
         api: ApiAttachClient,
         session: ApiSessionHandle,
         clearance: GateClearance,
     ) -> Self {
+        debug_assert_eq!(
+            lsp.ownership(),
+            O::expected_connection_ownership(),
+            "the runtime ConnectionOwnership tag must mirror the compile-time \
+             AttachOwnership marker"
+        );
         Self {
             lsp,
             api,
@@ -303,9 +372,88 @@ impl TsgoAttach {
             observed_version: clearance.observed_version,
             witness: clearance.witness,
             open_overlays: StdMutex::new(HashSet::new()),
+            _own: PhantomData,
         }
     }
 
+    /// The connection-source-agnostic attach-half: mint the `--api` session
+    /// over an already-handshaken connection, connect the minted pipe,
+    /// construct + initialize the `--api` checker. Reusable for ANY connection
+    /// source (owned OR editor-owned).
+    async fn attach_api_session(
+        conn: &JsonRpcConnection,
+    ) -> TsgoApiResult<(ApiSessionHandle, ApiAttachClient)> {
+        let session = Self::initialize_api_session(conn).await?;
+        let (read, write) = connect_attach_pipe(&session.pipe).await?;
+        let api = ApiAttachClient::new(JsonRpcConnection::connect(read, write));
+        api.initialize().await?;
+        Ok((session, api))
+    }
+
+    /// Send `custom/initializeAPISession` over a `tsgo --lsp` connection and parse
+    /// the `{ sessionId, pipe }` result. The reusable attach handshake — usable for
+    /// ANY `tsgo --lsp` connection (owned OR editor-owned), which is why it
+    /// lives on the ownership-agnostic surface.
+    pub async fn initialize_api_session(
+        conn: &JsonRpcConnection,
+    ) -> TsgoApiResult<ApiSessionHandle> {
+        let value = conn
+            .request(INITIALIZE_API_SESSION_METHOD, serde_json::json!({}))
+            .await?;
+        parse_api_session_handle(&value)
+    }
+
+    /// The gated carrier-injection write surface over this attach's `--lsp`
+    /// connection: overlay lifecycle (`didOpen`/`didChange`/`didClose`), the
+    /// ordered sync barrier, and `custom/initializeAPISession` re-emission —
+    /// everything else is refused before the wire (deny-by-default). On a
+    /// non-owning attach this is the only public `--lsp` carrier-write
+    /// surface (the `--api` snapshot rail — `api()` / `update_snapshot()` —
+    /// is separate).
+    #[must_use]
+    pub fn injection_channel(&self) -> CarrierInjectionChannel<'_> {
+        CarrierInjectionChannel::new(&self.lsp.conn, &self.open_overlays)
+    }
+
+    /// The attached `--api` checker client (diagnostics + checker reflection).
+    #[must_use]
+    pub fn api(&self) -> &ApiAttachClient {
+        &self.api
+    }
+
+    /// The minted `--api` session handle.
+    #[must_use]
+    pub fn session(&self) -> &ApiSessionHandle {
+        &self.session
+    }
+
+    /// The engine version the wire gate accepted for this attach — the value
+    /// the `--api` `updateSnapshot` rail is driven with.
+    #[must_use]
+    pub fn observed_version(&self) -> &str {
+        &self.observed_version
+    }
+
+    /// How the accepted engine version was observed.
+    #[must_use]
+    pub fn witness(&self) -> EngineVersionWitness {
+        self.witness
+    }
+
+    /// Open / refresh the configured-project snapshot using the STORED
+    /// gate-accepted engine version (the in-band witness) — the convenience
+    /// over [`ApiAttachClient::update_snapshot_open_project`] so callers never
+    /// re-supply (or hardcode) the version the gate already validated.
+    pub async fn update_snapshot(&self, tsconfig_path: &str) -> TsgoApiResult<AttachSnapshot> {
+        self.api
+            .update_snapshot_open_project(tsconfig_path, &self.observed_version)
+            .await
+    }
+}
+
+/// OWNED-only surface: the handshake, the owned composer, the raw wire, and
+/// the engine-terminating teardown.
+impl TsgoAttach<Owned> {
     /// Establish the full OWNED attach from a connection source: obtain the
     /// `tsgo --lsp` connection, run the LSP handshake, attach the `--api`
     /// checker over the minted pipe, and initialize the checker.
@@ -353,20 +501,6 @@ impl TsgoAttach {
         Ok(clearance)
     }
 
-    /// The connection-source-agnostic attach-half: mint the `--api` session
-    /// over an already-handshaken connection, connect the minted pipe,
-    /// construct + initialize the `--api` checker. Reusable for ANY connection
-    /// source (owned OR editor-owned).
-    async fn attach_api_session(
-        conn: &JsonRpcConnection,
-    ) -> TsgoApiResult<(ApiSessionHandle, ApiAttachClient)> {
-        let session = Self::initialize_api_session(conn).await?;
-        let (read, write) = connect_attach_pipe(&session.pipe).await?;
-        let api = ApiAttachClient::new(JsonRpcConnection::connect(read, write));
-        api.initialize().await?;
-        Ok((session, api))
-    }
-
     /// The OWNED composer: given an OWNED, freshly-spawned `tsgo --lsp`
     /// connection, run the LSP handshake (gating the in-band
     /// `serverInfo.version`), then attach + initialize the `--api` checker.
@@ -387,6 +521,46 @@ impl TsgoAttach {
         Ok(Self::from_parts(lsp, api, session, clearance))
     }
 
+    /// The raw `--lsp` feature connection (hover/definition/references/…
+    /// requests) — OWNED ONLY. Verter spawned this engine, so unrestricted
+    /// raw-wire access cannot affect an engine it does not own. A non-owning
+    /// attach has NO raw accessor: its sole public write surface is the
+    /// deny-by-default [`TsgoAttach::injection_channel`].
+    #[must_use]
+    pub fn lsp(&self) -> &JsonRpcConnection {
+        &self.lsp.conn
+    }
+
+    /// OWNED full teardown — PRIVATE: reachable only through the owned
+    /// [`TsgoAttach::teardown`]. Sends `exit`, closes the connection, and
+    /// kills the child. Keeping this private (and owned-only) makes the
+    /// teardown DISPATCH structural: no lifecycle/teardown path sends `exit`
+    /// on an editor-owned connection.
+    async fn shutdown(mut self) -> TsgoApiResult<()> {
+        let _ = self.api.close().await;
+        let _ = self.lsp.conn.notify("exit", serde_json::Value::Null).await;
+        let _ = self.lsp.conn.close().await;
+        if let Some(mut child) = self.lsp.child.take() {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+        }
+        Ok(())
+    }
+
+    /// OWNED teardown: the full private `shutdown` (`exit` + child kill).
+    /// The private `shutdown` is the SOLE `exit`-sender, and it exists only
+    /// on `TsgoAttach<Owned>` — no teardown API terminates a non-owning
+    /// attach.
+    pub async fn teardown(self) -> TsgoApiResult<()> {
+        self.shutdown().await
+    }
+}
+
+/// NON-OWNING surface: the non-owning composer and the non-terminating
+/// teardown. NO raw-wire accessor exists here — public writes on a
+/// non-owning attach go exclusively through the gated
+/// [`TsgoAttach::injection_channel`].
+impl TsgoAttach<NonOwning> {
     /// Attach the `--api` checker to an editor-owned, ALREADY-initialized
     /// `--lsp` connection WITHOUT re-initializing it. The in-band
     /// `serverInfo.version` witness is supplied by the caller (a relay reads
@@ -419,224 +593,73 @@ impl TsgoAttach {
         Ok(Self::from_parts(lsp, api, session, clearance))
     }
 
-    /// Send `custom/initializeAPISession` over a `tsgo --lsp` connection and parse
-    /// the `{ sessionId, pipe }` result. The reusable attach handshake — usable for
-    /// ANY `tsgo --lsp` connection.
-    pub async fn initialize_api_session(
-        conn: &JsonRpcConnection,
-    ) -> TsgoApiResult<ApiSessionHandle> {
-        let value = conn
-            .request(INITIALIZE_API_SESSION_METHOD, serde_json::json!({}))
-            .await?;
-        let pipe = value
-            .get("pipe")
-            .and_then(|p| p.as_str())
-            .ok_or_else(|| {
-                TsgoApiError::Transport(format!(
-                    "{INITIALIZE_API_SESSION_METHOD} result missing `pipe`: {value}"
-                ))
-            })?
-            .to_string();
-        let session_id = value
-            .get("sessionId")
-            .and_then(|s| s.as_str())
-            .unwrap_or("")
-            .to_string();
-        Ok(ApiSessionHandle { session_id, pipe })
-    }
-
-    /// Inject an off-disk carrier as an LSP `textDocument/didOpen` overlay on the
-    /// `--lsp` connection. Because the `--api` session shares the server's
-    /// `project.Session`, the attached checker sees this overlay. The URI is
-    /// tracked so a NON-OWNING [`TsgoAttach::detach`] retracts exactly the
-    /// overlays Verter opened.
-    pub async fn did_open(
-        &self,
-        uri: &str,
-        language_id: &str,
-        version: i64,
-        text: &str,
-    ) -> TsgoApiResult<()> {
-        let params = serde_json::json!({
-            "textDocument": {
-                "uri": uri,
-                "languageId": language_id,
-                "version": version,
-                "text": text,
-            }
-        });
-        self.lsp.conn.notify("textDocument/didOpen", params).await?;
-        {
-            // Track only AFTER the notify succeeded — a failed open must not
-            // leave a phantom overlay for detach to retract. Lock, insert,
-            // drop the guard — never held across the await above.
-            let mut overlays = self.open_overlays.lock().unwrap();
-            overlays.insert(uri.to_string());
-        }
-        Ok(())
-    }
-
-    /// Update an open carrier overlay via `textDocument/didChange` (full content).
-    pub async fn did_change(&self, uri: &str, version: i64, text: &str) -> TsgoApiResult<()> {
-        let params = serde_json::json!({
-            "textDocument": { "uri": uri, "version": version },
-            "contentChanges": [{ "text": text }],
-        });
-        self.lsp.conn.notify("textDocument/didChange", params).await
-    }
-
-    /// Barrier: force the `--lsp` server to drain pending document notifications
-    /// (`didOpen` / `didChange`) BEFORE an `--api` `updateSnapshot` enumerates
-    /// roots on the shared `project.Session`.
-    ///
-    /// The two surfaces ride DIFFERENT transports (the `--lsp` stdio and the
-    /// `--api` pipe), so a fire-and-forget `didOpen` notification can otherwise
-    /// race behind an `updateSnapshot` on the pipe and the just-opened overlay
-    /// would not yet be a Program member. LSP processes messages in order ON ONE
-    /// connection, so awaiting a `--lsp` REQUEST for `uri` after the `didOpen`
-    /// guarantees the overlay is registered by the time it returns. The pull
-    /// `textDocument/diagnostic` request serves as that barrier (its result is
-    /// discarded — the OWNED diagnostics authority is the `--api` checker).
-    pub async fn sync_overlay(&self, uri: &str) -> TsgoApiResult<()> {
-        let params = serde_json::json!({ "textDocument": { "uri": uri } });
-        // The result is intentionally discarded; we only need the round-trip's
-        // ordering guarantee. A server that does not implement pull diagnostics
-        // still processes the queued didOpen before answering (or erroring) here.
-        let _ = self
-            .lsp
-            .conn
-            .request("textDocument/diagnostic", params)
-            .await;
-        Ok(())
-    }
-
-    /// Open an off-disk carrier overlay and synchronize it (the common path):
-    /// [`Self::did_open`] followed by [`Self::sync_overlay`], so a subsequent
-    /// `--api` `updateSnapshot` sees the carrier as a Program member.
-    pub async fn did_open_synced(
-        &self,
-        uri: &str,
-        language_id: &str,
-        version: i64,
-        text: &str,
-    ) -> TsgoApiResult<()> {
-        self.did_open(uri, language_id, version, text).await?;
-        self.sync_overlay(uri).await
-    }
-
-    /// The attached `--api` checker client (diagnostics + checker reflection).
-    #[must_use]
-    pub fn api(&self) -> &ApiAttachClient {
-        &self.api
-    }
-
-    /// The `--lsp` feature connection (hover/definition/references/… requests).
-    ///
-    /// This hands out the raw connection as the feature-request seam.
-    /// TODO: write-access gating for non-owning (editor-owned) connections
-    /// belongs at the editor/relay interposition boundary — a
-    /// lifecycle-filtered facade there, not on this raw accessor.
-    #[must_use]
-    pub fn lsp(&self) -> &JsonRpcConnection {
-        &self.lsp.conn
-    }
-
-    /// The minted `--api` session handle.
-    #[must_use]
-    pub fn session(&self) -> &ApiSessionHandle {
-        &self.session
-    }
-
-    /// The engine version the wire gate accepted for this attach — the value
-    /// the `--api` `updateSnapshot` rail is driven with.
-    #[must_use]
-    pub fn observed_version(&self) -> &str {
-        &self.observed_version
-    }
-
-    /// How the accepted engine version was observed.
-    #[must_use]
-    pub fn witness(&self) -> EngineVersionWitness {
-        self.witness
-    }
-
-    /// Open / refresh the configured-project snapshot using the STORED
-    /// gate-accepted engine version (the in-band witness) — the convenience
-    /// over [`ApiAttachClient::update_snapshot_open_project`] so callers never
-    /// re-supply (or hardcode) the version the gate already validated.
-    pub async fn update_snapshot(&self, tsconfig_path: &str) -> TsgoApiResult<AttachSnapshot> {
-        self.api
-            .update_snapshot_open_project(tsconfig_path, &self.observed_version)
-            .await
-    }
-
-    /// OWNED full teardown — PRIVATE: reachable only through
-    /// [`TsgoAttach::teardown`]'s [`ConnectionOwnership::Owned`] arm. Sends
-    /// `exit`, closes the connection, and kills the child. Keeping this
-    /// private makes the teardown DISPATCH structural: no lifecycle/teardown
-    /// path sends `exit` on an editor-owned connection (raw-wire access via
-    /// [`TsgoAttach::lsp`] is a separate, relay-gated seam, not a teardown path).
-    async fn shutdown(mut self) -> TsgoApiResult<()> {
-        let _ = self.api.close().await;
-        let _ = self.lsp.conn.notify("exit", serde_json::Value::Null).await;
-        let _ = self.lsp.conn.close().await;
-        if let Some(mut child) = self.lsp.child.take() {
-            let _ = child.start_kill();
-            let _ = child.wait().await;
-        }
-        Ok(())
-    }
-
-    /// NON-OWNING teardown: retract Verter's own overlays (`textDocument/didClose`)
-    /// and drop the `--api` pipe. NEVER sends `exit`/`shutdown` and NEVER kills the
+    /// NON-OWNING teardown: retract EXACTLY the carrier overlays Verter opened on
+    /// this attach — every one is tracked in `open_overlays` because
+    /// [`CarrierInjectionChannel::did_open`] (the only overlay-open path) records
+    /// it — via `textDocument/didClose`, and drop the `--api` pipe. NEVER sends
+    /// `exit`/`shutdown` and NEVER kills the
     /// process — the editor owns the engine's lifecycle. Leaves the `--lsp`
     /// connection otherwise untouched. (An [`ConnectionOwnership::AttachedNonOwning`]
     /// connection carries no child handle by construction, so no kill path is
-    /// reachable here even structurally.)
+    /// reachable here even structurally.) The retractions ride the gated
+    /// carrier-injection channel — the same deny-by-default write path as
+    /// every other non-owning write.
     ///
     /// The `didClose` retractions are best-effort BY DESIGN: the editor may
     /// have already closed the connection, and a non-owning teardown must not
     /// hard-fail on an unreachable peer. The guaranteed invariant is "issues
     /// no `exit`/`shutdown`/kill", not "guarantees didClose delivery".
     ///
-    /// The non-owning guarantee is about what Verter SENDS. The OS process
-    /// lifecycle belongs to the editor; dropping Verter's side of the
-    /// transport must not take the engine down with it.
-    /// TODO: the interposition/relay layer must supply a connection whose
-    /// Verter-side drop does not terminate the editor engine (e.g. a relay
-    /// socket, not the engine's own stdio).
+    /// The non-owning guarantee is about what Verter SENDS; the OS process
+    /// lifecycle belongs to the editor. Contract on the supplied connection:
+    /// a live editor attachment hands the non-owning composer a transport
+    /// whose Verter-side drop cannot terminate the editor engine — a
+    /// relay-interposed transport (see [`crate::relay::LspRelay`]), never
+    /// the engine's own stdio. Detach only stops Verter's use of that
+    /// transport; it cannot make a caller-supplied engine-fatal transport
+    /// safe.
     pub async fn detach(self) -> TsgoApiResult<()> {
         // Lock, snapshot, drop the guard — never held across the awaits below.
         let uris: Vec<String> = { self.open_overlays.lock().unwrap().iter().cloned().collect() };
+        let channel = self.injection_channel();
         for uri in uris {
-            let _ = self
-                .lsp
-                .conn
-                .notify(
-                    "textDocument/didClose",
-                    serde_json::json!({ "textDocument": { "uri": uri } }),
-                )
-                .await;
+            // Retract through the typed lifecycle op (the same deny-by-default
+            // gate); best-effort — a closed peer must not hard-fail teardown.
+            let _ = channel.did_close(&uri).await;
         }
         // Drop the --api pipe; the --lsp connection and the engine stay alive.
         let _ = self.api.close().await;
         Ok(())
     }
 
-    /// Teardown dispatched on ownership: an OWNED engine gets the full
-    /// private `shutdown` (`exit` + kill); an editor-owned engine gets the
-    /// NON-OWNING [`TsgoAttach::detach`]. The private `shutdown` is the SOLE
-    /// teardown-path `exit`-sender, so no lifecycle/teardown API terminates a
-    /// non-owning attach: this ownership-dispatched entry and the
-    /// (non-terminating) public [`TsgoAttach::detach`] are both safe on an
-    /// editor-owned connection. (The raw `lsp()` wire is not a teardown path;
-    /// its write-gating is the relay/interposition layer's responsibility.)
+    /// NON-OWNING teardown entry: [`TsgoAttach::detach`] — retract Verter's
+    /// own overlays and drop the `--api` pipe, never `exit`/`shutdown`/kill.
     pub async fn teardown(self) -> TsgoApiResult<()> {
-        match self.lsp.ownership() {
-            ConnectionOwnership::Owned => self.shutdown().await,
-            ConnectionOwnership::AttachedNonOwning => self.detach().await,
-        }
+        self.detach().await
     }
+}
+
+/// Parse a `custom/initializeAPISession` result value into its
+/// [`ApiSessionHandle`] — the ONE parse shared by the direct attach handshake
+/// and the gated channel's session re-emission.
+pub(crate) fn parse_api_session_handle(
+    value: &serde_json::Value,
+) -> TsgoApiResult<ApiSessionHandle> {
+    let pipe = value
+        .get("pipe")
+        .and_then(|p| p.as_str())
+        .ok_or_else(|| {
+            TsgoApiError::Transport(format!(
+                "{INITIALIZE_API_SESSION_METHOD} result missing `pipe`: {value}"
+            ))
+        })?
+        .to_string();
+    let session_id = value
+        .get("sessionId")
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .to_string();
+    Ok(ApiSessionHandle { session_id, pipe })
 }
 
 /// Discover the engine + cwd and build the OWNED spawn source in one step.

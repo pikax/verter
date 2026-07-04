@@ -22,6 +22,9 @@
 //! - [`jsonrpc`] — the vscode-jsonrpc transport the `--api` ATTACH path speaks
 //!   (`Content-Length` + JSON-RPC 2.0 over a server-minted pipe/UDS), reusing the
 //!   [`proto::types`] DTOs. Distinct from, and alongside, the standalone wire.
+//! - [`relay`] — the gated carrier-injection write surface
+//!   ([`relay::CarrierInjectionChannel`], deny-by-default) and the
+//!   bidirectional editor↔server `--lsp` frame relay ([`relay::LspRelay`]).
 //! - [`gate`] — the runtime fail-closed wire gate (refuses a diverged tsgo).
 //! - [`error`] — typed crate errors.
 
@@ -35,18 +38,21 @@ pub mod jsonrpc;
 pub mod lane;
 pub mod offset;
 pub mod proto;
+pub mod relay;
 pub mod snapshot;
 pub mod transport;
 
 pub use actor::{ClientHandle, RequestOptions};
 pub use api_attach::{ApiAttachClient, AttachSnapshot};
 pub use attach::{
-    ApiSessionHandle, SpawnOwnTsgoLsp, TsgoAttach, TsgoLspConnection, TsgoLspConnectionSource,
+    ApiSessionHandle, AttachOwnership, NonOwning, Owned, SpawnOwnTsgoLsp, TsgoAttach,
+    TsgoLspConnection, TsgoLspConnectionSource,
 };
 pub use client::TsgoClient;
 pub use error::{TsgoApiError, TsgoApiResult};
 pub use lane::Lane;
 pub use offset::{api_offset_to_byte, api_offset_to_line_col, diagnostic_byte_span};
+pub use relay::{CarrierInjectionChannel, LspRelay};
 pub use snapshot::{
     AccessibleEntries, OverlaySnapshot, OverlaySnapshotBuilder, ReadFileResult, RealDirSource,
 };

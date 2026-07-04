@@ -25,6 +25,16 @@ pub enum TsgoApiError {
     Cancelled,
     /// The client/actor was shut down and can no longer serve requests.
     Closed,
+    /// A write through the gated carrier-injection channel was refused
+    /// BEFORE reaching the wire: the `(method, kind)` pair is not admitted by
+    /// the deny-by-default allowlist — the method is not a carrier method, or
+    /// it was sent as the wrong JSON-RPC kind (a notification-only method as a
+    /// request, or a request-only method as a notification), or it is a
+    /// stateful overlay open/close reached outside `did_open`/`did_close`.
+    WriteGateDenied {
+        /// The refused JSON-RPC method name.
+        method: String,
+    },
 }
 
 impl fmt::Display for TsgoApiError {
@@ -39,6 +49,11 @@ impl fmt::Display for TsgoApiError {
             TsgoApiError::Transport(m) => write!(f, "tsgo transport error: {m}"),
             TsgoApiError::Cancelled => write!(f, "tsgo request cancelled"),
             TsgoApiError::Closed => write!(f, "tsgo client closed"),
+            TsgoApiError::WriteGateDenied { method } => write!(
+                f,
+                "carrier-injection write-gate denied method `{method}`: not \
+                 admitted by the deny-by-default allowlist"
+            ),
         }
     }
 }

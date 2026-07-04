@@ -59,7 +59,7 @@ async fn initialize_api_session_parses_session_and_pipe() {
     });
 
     let conn = JsonRpcConnection::connect(cr, cw);
-    let handle = TsgoAttach::initialize_api_session(&conn)
+    let handle = TsgoAttach::<Owned>::initialize_api_session(&conn)
         .await
         .expect("attach handshake ok");
     assert_eq!(handle.session_id, "api-session-1");
@@ -96,7 +96,7 @@ async fn initialize_api_session_missing_pipe_is_a_typed_error() {
     });
 
     let conn = JsonRpcConnection::connect(cr, cw);
-    let err = TsgoAttach::initialize_api_session(&conn)
+    let err = TsgoAttach::<Owned>::initialize_api_session(&conn)
         .await
         .expect_err("a result without `pipe` must fail");
     assert!(
@@ -426,10 +426,24 @@ async fn attach_to_initialized_refuses_owned_connection() {
 // terminate. Built via `from_parts` over duplexes (no real OS pipe).
 // ────────────────────────────────────────────────────────────────────────────
 
+/// Open the two invariant-pair overlays through the gated injection channel.
+async fn open_invariant_pair<O: AttachOwnership>(attach: &TsgoAttach<O>) {
+    let channel = attach.injection_channel();
+    channel
+        .did_open("file:///ws/A.vue.tsx", "typescriptreact", 1, "export {};")
+        .await
+        .unwrap();
+    channel
+        .did_open("file:///ws/B.vue.tsx", "typescriptreact", 1, "export {};")
+        .await
+        .unwrap();
+}
+
 /// Drive the IDENTICAL attach flow for the non-owning invariant A/B pair:
 /// same two overlays opened, torn down through the SAME public `teardown()`
-/// entry. The ONLY input difference between the pair is the connection
-/// OWNERSHIP, so every observed wire delta is attributable solely to it: the
+/// entry of each ownership. The ONLY input difference between the pair is
+/// the connection OWNERSHIP (the runtime tag plus its matching compile-time
+/// marker), so every observed wire delta is attributable solely to it: the
 /// load-bearing delta is the engine-terminating `exit` (present on OWNED,
 /// ABSENT on non-owning), while the non-owning arm instead retracts its
 /// overlays via `didClose`. Returns the completed `--lsp` and `--api` traces.
@@ -438,32 +452,36 @@ async fn teardown_flow_traces(ownership: ConnectionOwnership) -> (WireTrace, Wir
         spawn_fake_lsp_server(init_result_with_version("7.0.1-rc"));
     let (api_conn, api_trace, api_join) = spawn_fake_lsp_server(serde_json::Value::Null);
 
-    let lsp = match ownership {
-        // Owned WITHOUT a real child (None): ownership drives the dispatch;
-        // no process exists to kill, isolating the wire-visible teardown.
-        ConnectionOwnership::Owned => TsgoLspConnection::new_owned(lsp_conn.clone(), None),
+    match ownership {
+        // Owned WITHOUT a real child (None): ownership drives the teardown
+        // arm; no process exists to kill, isolating the wire-visible teardown.
+        ConnectionOwnership::Owned => {
+            let lsp = TsgoLspConnection::new_owned(lsp_conn.clone(), None);
+            assert_eq!(lsp.ownership(), ownership);
+            let attach = TsgoAttach::<Owned>::from_parts(
+                lsp,
+                ApiAttachClient::new(api_conn),
+                fake_session_handle(),
+                test_clearance(),
+            );
+            open_invariant_pair(&attach).await;
+            attach.teardown().await.expect("teardown returns Ok");
+        }
         // AttachedNonOwning carries NO child BY CONSTRUCTION (`new_attached`
         // takes no child handle), so no kill path is structurally reachable.
-        ConnectionOwnership::AttachedNonOwning => TsgoLspConnection::new_attached(lsp_conn.clone()),
-    };
-    assert_eq!(lsp.ownership(), ownership);
-    let attach = TsgoAttach::from_parts(
-        lsp,
-        ApiAttachClient::new(api_conn),
-        fake_session_handle(),
-        test_clearance(),
-    );
-
-    attach
-        .did_open("file:///ws/A.vue.tsx", "typescriptreact", 1, "export {};")
-        .await
-        .unwrap();
-    attach
-        .did_open("file:///ws/B.vue.tsx", "typescriptreact", 1, "export {};")
-        .await
-        .unwrap();
-
-    attach.teardown().await.expect("teardown returns Ok");
+        ConnectionOwnership::AttachedNonOwning => {
+            let lsp = TsgoLspConnection::new_attached(lsp_conn.clone());
+            assert_eq!(lsp.ownership(), ownership);
+            let attach = TsgoAttach::<NonOwning>::from_parts(
+                lsp,
+                ApiAttachClient::new(api_conn),
+                fake_session_handle(),
+                test_clearance(),
+            );
+            open_invariant_pair(&attach).await;
+            attach.teardown().await.expect("teardown returns Ok");
+        }
+    }
 
     // Complete the traces: the OWNED arm closed the --lsp connection itself;
     // the NON-OWNING arm leaves it open — end the writer via the retained
@@ -525,9 +543,10 @@ async fn owned_teardown_sends_exit() {
     );
 }
 
-/// `teardown()` dispatches on ownership: the AttachedNonOwning arm behaves as
-/// `detach` (didClose + NO exit). The Owned arm is proven by
-/// `owned_teardown_sends_exit` through the SAME `teardown()` entry point.
+/// `teardown()` dispatches on the ownership marker: on
+/// `TsgoAttach<NonOwning>` it behaves as `detach` (didClose + NO exit). The
+/// Owned arm is proven by `owned_teardown_sends_exit` through the same-named
+/// `teardown()` entry point.
 #[tokio::test]
 async fn teardown_dispatches_on_ownership() {
     let (lsp_conn, lsp_trace, lsp_join) =
@@ -535,13 +554,14 @@ async fn teardown_dispatches_on_ownership() {
     let (api_conn, _api_trace, api_join) = spawn_fake_lsp_server(serde_json::Value::Null);
 
     let lsp = TsgoLspConnection::new_attached(lsp_conn.clone());
-    let attach = TsgoAttach::from_parts(
+    let attach = TsgoAttach::<NonOwning>::from_parts(
         lsp,
         ApiAttachClient::new(api_conn),
         fake_session_handle(),
         test_clearance(),
     );
     attach
+        .injection_channel()
         .did_open("file:///ws/C.vue.tsx", "typescriptreact", 1, "export {};")
         .await
         .unwrap();
@@ -564,8 +584,9 @@ async fn teardown_dispatches_on_ownership() {
     );
 }
 
-/// Overlay-set correctness: `did_open` tracks DISTINCT URIs for retraction; a
-/// `did_change` on an already-open overlay must NOT add a duplicate.
+/// Overlay-set correctness: the channel's `did_open` tracks DISTINCT URIs for
+/// retraction; a `did_change` on an already-open overlay must NOT add a
+/// duplicate.
 #[tokio::test]
 async fn did_open_tracks_overlay_uris_for_retraction() {
     let (lsp_conn, lsp_trace, lsp_join) =
@@ -573,25 +594,28 @@ async fn did_open_tracks_overlay_uris_for_retraction() {
     let (api_conn, _api_trace, api_join) = spawn_fake_lsp_server(serde_json::Value::Null);
 
     let lsp = TsgoLspConnection::new_attached(lsp_conn.clone());
-    let attach = TsgoAttach::from_parts(
+    let attach = TsgoAttach::<NonOwning>::from_parts(
         lsp,
         ApiAttachClient::new(api_conn),
         fake_session_handle(),
         test_clearance(),
     );
 
-    attach
-        .did_open("file:///ws/A.vue.tsx", "typescriptreact", 1, "export {};")
-        .await
-        .unwrap();
-    attach
-        .did_open("file:///ws/B.vue.tsx", "typescriptreact", 1, "export {};")
-        .await
-        .unwrap();
-    attach
-        .did_change("file:///ws/A.vue.tsx", 2, "export const x = 1;")
-        .await
-        .unwrap();
+    {
+        let channel = attach.injection_channel();
+        channel
+            .did_open("file:///ws/A.vue.tsx", "typescriptreact", 1, "export {};")
+            .await
+            .unwrap();
+        channel
+            .did_open("file:///ws/B.vue.tsx", "typescriptreact", 1, "export {};")
+            .await
+            .unwrap();
+        channel
+            .did_change("file:///ws/A.vue.tsx", 2, "export const x = 1;")
+            .await
+            .unwrap();
+    }
 
     attach.detach().await.unwrap();
 
@@ -626,7 +650,7 @@ async fn did_open_failure_tracks_no_phantom_overlay() {
     let api_conn_keep = api_conn.clone();
 
     let lsp = TsgoLspConnection::new_attached(lsp_conn.clone());
-    let attach = TsgoAttach::from_parts(
+    let attach = TsgoAttach::<NonOwning>::from_parts(
         lsp,
         ApiAttachClient::new(api_conn),
         fake_session_handle(),
@@ -649,6 +673,7 @@ async fn did_open_failure_tracks_no_phantom_overlay() {
     }
 
     attach
+        .injection_channel()
         .did_open(
             "file:///ws/Phantom.vue.tsx",
             "typescriptreact",
