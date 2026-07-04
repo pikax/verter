@@ -23,7 +23,7 @@
 #[test]
 #[cfg_attr(
     not(feature = "compile-fail"),
-    ignore = "run with --features compile-fail (CI)"
+    ignore = "run with --features compile-fail"
 )]
 fn workspace_accessor_visibility() {
     let t = trybuild::TestCases::new();
@@ -37,7 +37,7 @@ fn workspace_accessor_visibility() {
 #[test]
 #[cfg_attr(
     not(feature = "compile-fail"),
-    ignore = "run with --features compile-fail (CI)"
+    ignore = "run with --features compile-fail"
 )]
 fn carrier_access_token_not_constructible_outside_verter_language() {
     let t = trybuild::TestCases::new();
@@ -54,7 +54,7 @@ fn carrier_access_token_not_constructible_outside_verter_language() {
 #[test]
 #[cfg_attr(
     not(feature = "compile-fail"),
-    ignore = "run with --features compile-fail (CI)"
+    ignore = "run with --features compile-fail"
 )]
 fn no_typeexpr_compile_fail() {
     let t = trybuild::TestCases::new();
@@ -76,7 +76,7 @@ fn no_typeexpr_compile_fail() {
 #[test]
 #[cfg_attr(
     not(feature = "compile-fail"),
-    ignore = "run with --features compile-fail (CI)"
+    ignore = "run with --features compile-fail"
 )]
 fn no_storedspan_compile_fail() {
     let t = trybuild::TestCases::new();
@@ -111,7 +111,7 @@ fn no_storedspan_compile_fail() {
 #[test]
 #[cfg_attr(
     not(feature = "compile-fail"),
-    ignore = "run with --features compile-fail (CI)"
+    ignore = "run with --features compile-fail"
 )]
 fn recursive_self_derive_escape_compile_fail() {
     let t = trybuild::TestCases::new();
@@ -136,7 +136,7 @@ fn recursive_self_derive_escape_compile_fail() {
 #[test]
 #[cfg_attr(
     not(feature = "compile-fail"),
-    ignore = "run with --features compile-fail (CI)"
+    ignore = "run with --features compile-fail"
 )]
 fn recursive_self_proof_trait_is_sealed_against_hand_impl() {
     let t = trybuild::TestCases::new();
@@ -154,7 +154,7 @@ fn recursive_self_proof_trait_is_sealed_against_hand_impl() {
 #[test]
 #[cfg_attr(
     not(feature = "compile-fail"),
-    ignore = "run with --features compile-fail (CI)"
+    ignore = "run with --features compile-fail"
 )]
 fn fact_and_key_substrate_compile_fail() {
     let t = trybuild::TestCases::new();
@@ -181,7 +181,7 @@ fn fact_and_key_substrate_compile_fail() {
 // `#[cfg_attr(...)]` continuation line.
 #[cfg_attr(
     not(feature = "compile-fail"),
-    ignore = "run with --features compile-fail (CI)"
+    ignore = "run with --features compile-fail"
 )]
 #[test]
 fn output_projector_non_owner_impl_is_compiler_sealed() {
@@ -201,7 +201,7 @@ fn output_projector_non_owner_impl_is_compiler_sealed() {
 #[test]
 #[cfg_attr(
     not(feature = "compile-fail"),
-    ignore = "run with --features compile-fail (CI)"
+    ignore = "run with --features compile-fail"
 )]
 fn locator_shape_ctx_is_sealed_against_the_reducing_lowerer() {
     let t = trybuild::TestCases::new();
@@ -223,7 +223,7 @@ fn locator_shape_ctx_is_sealed_against_the_reducing_lowerer() {
 #[test]
 #[cfg_attr(
     not(feature = "compile-fail"),
-    ignore = "run with --features compile-fail (CI)"
+    ignore = "run with --features compile-fail"
 )]
 fn member_role_stamps_are_not_mintable_without_a_witness() {
     let t = trybuild::TestCases::new();

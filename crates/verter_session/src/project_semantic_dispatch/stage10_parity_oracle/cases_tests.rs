@@ -373,15 +373,51 @@ defineProps<Pair<string, number>>()
         let meta = host
             .get_component_meta(self.entry())
             .expect("component meta must resolve (anti-vacuity)");
-        let names: Vec<&str> = meta.props.iter().map(|p| p.name.as_str()).collect();
+        // Substitution is SEMANTIC meaning: assert the instantiated member
+        // TYPES (A := string, B := number), not just the member names — a
+        // dropped/ swapped substitution env publishes the right names with
+        // the wrong types and must fail here.
+        let first = meta
+            .props
+            .iter()
+            .find(|p| p.name == "first")
+            .expect("instantiated generic prop `first` must publish");
         assert!(
-            names.contains(&"first") && names.contains(&"second"),
-            "instantiated generic props must publish first + second; got {names:?}"
+            matches!(
+                first.type_expr,
+                verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+            ),
+            "`first` must instantiate A := string; got {:?}",
+            first.type_expr
+        );
+        let second = meta
+            .props
+            .iter()
+            .find(|p| p.name == "second")
+            .expect("instantiated generic prop `second` must publish");
+        assert!(
+            matches!(
+                second.type_expr,
+                verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+            ),
+            "`second` must instantiate B := number; got {:?}",
+            second.type_expr
         );
         component_meta_envelope(Some(&meta))
     }
     fn assert_discriminating(&self, envelope: &OracleEnvelope) {
-        assert_json_has(envelope, &["\"first\"", "\"second\""], self.id());
+        assert_json_has(
+            envelope,
+            &[
+                "\"first\"",
+                "\"second\"",
+                // The instantiated member TYPES survive canonicalisation:
+                // both substituted primitives must appear in the envelope.
+                "{\"kind\":\"primitive\",\"name\":\"string\"}",
+                "{\"kind\":\"primitive\",\"name\":\"number\"}",
+            ],
+            self.id(),
+        );
     }
 }
 
@@ -490,17 +526,71 @@ defineProps<Props>()
         let meta = host
             .get_component_meta(self.entry())
             .expect("component meta must resolve (anti-vacuity)");
+        // The AUTHORED-intersection collision result: the arms INTERSECT —
+        // `dup` publishes as `number & string`, NOT the heritage-shadow
+        // outcome (a bare own-arm `string`) and NOT a first-arm `number`.
+        // This is the concrete shape that distinguishes the authored rule
+        // from heritage shadowing.
+        let dup = meta
+            .props
+            .iter()
+            .find(|p| p.name == "dup")
+            .expect("colliding authored-intersection prop must publish");
+        match &dup.type_expr {
+            verter_type_expr::TypeExpr::Intersection(arms) => {
+                assert_eq!(
+                    arms.len(),
+                    2,
+                    "authored-intersection `dup` must intersect exactly the \
+                     two colliding member types; got {arms:?}"
+                );
+                for prim in [
+                    verter_type_expr::PrimitiveName::Number,
+                    verter_type_expr::PrimitiveName::String,
+                ] {
+                    assert!(
+                        arms.contains(&verter_type_expr::TypeExpr::Primitive(prim)),
+                        "authored-intersection `dup` must carry the {prim:?} \
+                         arm; got {arms:?}"
+                    );
+                }
+            }
+            other => panic!(
+                "authored-intersection collision must publish `dup` as the \
+                 member-type intersection (never the heritage-shadow single \
+                 arm); got {other:?}"
+            ),
+        }
+        let from_base = meta
+            .props
+            .iter()
+            .find(|p| p.name == "fromBase")
+            .expect("non-colliding arm members must publish");
         assert!(
-            meta.props.iter().any(|p| p.name == "dup"),
-            "colliding authored-intersection prop must publish"
-        );
-        assert!(
-            meta.props.iter().any(|p| p.name == "fromBase"),
-            "non-colliding arm members must publish"
+            matches!(
+                from_base.type_expr,
+                verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean)
+            ),
+            "`fromBase` must keep its authored `boolean`; got {:?}",
+            from_base.type_expr
         );
         component_meta_envelope(Some(&meta))
     }
     fn assert_discriminating(&self, envelope: &OracleEnvelope) {
-        assert_json_has(envelope, &["\"dup\"", "\"fromBase\""], self.id());
+        assert_json_has(
+            envelope,
+            &[
+                "\"dup\"",
+                "\"fromBase\"",
+                // The collision result's concrete shape survives
+                // canonicalisation: an intersection carrying both primitive
+                // arms, plus the non-colliding boolean member.
+                "\"kind\":\"intersection\"",
+                "{\"kind\":\"primitive\",\"name\":\"number\"}",
+                "{\"kind\":\"primitive\",\"name\":\"string\"}",
+                "{\"kind\":\"primitive\",\"name\":\"boolean\"}",
+            ],
+            self.id(),
+        );
     }
 }
