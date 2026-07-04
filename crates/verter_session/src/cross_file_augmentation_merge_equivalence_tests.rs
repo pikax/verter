@@ -421,6 +421,125 @@ fn warm_parent_rejects_contributor_source_env_move_with_unchanged_content() {
     );
 }
 
+/// END-TO-END warm-parent source-env discriminator through the REAL memo
+/// warm-read path: warm a parent augmented `Instantiate` under a
+/// contributor, then serve the SAME demand under a view whose ONLY change
+/// is the contributor's source-env identity row (content / whole hash /
+/// augmenter-set untouched) — the warm parent must MISS and recompute
+/// through the genuine `MemoEntry` validation, not a hand-built
+/// store-view probe.
+///
+/// Discrimination: the cold parent build must RECORD the contributor
+/// `FileSourceEnv` observation (asserted from the traced production
+/// resolve), and the memo warm read must VALIDATE it strictly — if the
+/// observation were not recorded, or the strict source-env branch were not
+/// consulted on the live warm path, the moved-row view would warm-hit and
+/// the cold-build counter would stay flat, failing the final assertion.
+/// The store-view sibling test above pins the validation branch in
+/// isolation; this one drives it through the end-to-end warm-read rail.
+#[test]
+fn warm_parent_memo_rejects_contributor_source_env_move_end_to_end() {
+    use crate::locator_identity::ParseEnvHash;
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::resolver_core::{FactReadSetFinalise, FactVersionRef};
+    use crate::resolver_store::SourceEnvIdentity;
+    use crate::semantic_query::{
+        ProjectionReductionContext, QueryResult, SemanticQueryApi, SemanticQueryKey,
+        SemanticQueryOutput,
+    };
+
+    let host = make_host();
+    upsert_augmentation_fixture(&host);
+
+    // Recording half: the cold production resolve records ONE
+    // FileSourceEnv observation for the folded contributor.
+    let (resolved, read_set) = host.with_fact_tracer(|| {
+        host.resolve_named_symbol("/types.ts", "Foo", &[], Some(ProjectionMode::Expanded))
+    });
+    resolved.expect("augmented Foo must resolve");
+    let FactReadSetFinalise::Ok(signature) = read_set.finalise() else {
+        panic!("the traced resolve must seal a fact signature (no overflow)");
+    };
+    let (recorded_parse_env, recorded_parser_version, recorded_language) = signature
+        .iter()
+        .find_map(|fact| match fact {
+            FactVersionRef::FileSourceEnv {
+                canonical_id,
+                parse_env_hash,
+                parser_version,
+                file_language_id,
+            } if canonical_id == "/aug.ts" => {
+                Some((*parse_env_hash, *parser_version, file_language_id.clone()))
+            }
+            _ => None,
+        })
+        .expect(
+            "the parent fold must record one FileSourceEnv observation for the folded \
+             contributor /aug.ts",
+        );
+
+    // The identical parent demand, driven directly so the SAME query key
+    // executes under two views that differ ONLY in the contributor's
+    // source-env identity row.
+    let graph = host.project_type_store().semantic_graph();
+    let view = host.resolver_store_view_read().into_owned_view();
+    let demand = |view: &crate::resolver_store::HostStoreView| {
+        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let ctx = crate::resolver_core::HostResolverContext::new(&host, view, overlay);
+        let dispatch = ProjectSemanticDispatch::new(&ctx);
+        let key = SemanticQueryKey::Instantiate {
+            base: dispatch.type_slot_for(Arc::from("/types.ts"), Arc::from("Foo")),
+            args: Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
+            context: dispatch.instantiate_context_for(
+                "/types.ts",
+                ProjectionReductionContext::published(ProjectionMode::Expanded),
+            ),
+        };
+        match dispatch.execute_type_node(key) {
+            QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
+            other => panic!("the augmented parent demand must produce a value, got {other:?}"),
+        }
+    };
+
+    // Cold-or-warm baseline for THIS key, then the warm control: the same
+    // demand under the SAME view is a memo hit (no new parent build).
+    demand(&view);
+    let builds_after_first = graph.stats_snapshot().instantiate_count;
+    demand(&view);
+    assert_eq!(
+        graph.stats_snapshot().instantiate_count,
+        builds_after_first,
+        "control: re-serving the identical demand under the UNCHANGED view must be a \
+         memo hit (no new parent build)"
+    );
+
+    // The contributor source-env identity MOVE, in isolation: same content,
+    // same whole hashes, same augmenter set — only the /aug.ts identity row
+    // differs from the recorded one.
+    let moved_parse_env = ParseEnvHash::from_env_hash([0xA7u8; 16]);
+    assert_ne!(
+        moved_parse_env, recorded_parse_env,
+        "the moved parse env must differ from the recorded contributor identity"
+    );
+    let moved_view = view.with_replaced_source_env_for_tests(
+        "/aug.ts",
+        SourceEnvIdentity {
+            parse_env_hash: moved_parse_env,
+            parser_version: recorded_parser_version,
+            file_language_id: recorded_language,
+        },
+    );
+    demand(&moved_view);
+    assert_eq!(
+        graph.stats_snapshot().instantiate_count,
+        builds_after_first + 1,
+        "a contributor source-env identity move with unchanged content must REJECT \
+         the warm parent through the memo's strict FileSourceEnv validation and \
+         cold-recompute — a flat build count means the recorded observation was \
+         not validated on the live warm-read path"
+    );
+}
+
 /// Contributor version-root ⇒ source-env coupling: EVERY augmentation
 /// contributor the stitch version-roots on the parent (its `FileWholeHash`
 /// self-root fact) ALSO records its `FileSourceEnv` identity on the parent

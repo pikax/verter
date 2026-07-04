@@ -4421,6 +4421,27 @@ impl HostStoreView {
         }
     }
 
+    /// Test-only: a clone of this (fully-built) view with the ONE
+    /// per-canonical source-env identity row replaced — every other
+    /// snapshot dimension (whole hashes, facts, derived hashes, epoch,
+    /// token) preserved. Models a contributor SOURCE-ENV identity move
+    /// with unchanged content against the real memo warm-read path: the
+    /// only movable axis of the strict `FileSourceEnv` validation branch
+    /// is moved in isolation, so a warm candidate recorded under the
+    /// original identity must reject and recompute under this view.
+    pub(crate) fn with_replaced_source_env_for_tests(
+        &self,
+        canonical: &str,
+        identity: SourceEnvIdentity,
+    ) -> Self {
+        let mut snapshot = (*self.snapshot).clone();
+        snapshot.source_envs.insert(canonical.to_string(), identity);
+        Self {
+            snapshot: Arc::new(snapshot),
+            ..self.clone()
+        }
+    }
+
     /// Test-only: arm the mid-build panic knob on the CURRENT thread. The
     /// next `build_coherent` call on this thread panics partway through the
     /// build (after the [`StoreViewManager`] singleflight claim is taken).
