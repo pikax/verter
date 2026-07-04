@@ -102,7 +102,8 @@ fn connection_to_recording_server() -> (JsonRpcConnection, FrameTrace, tokio::ta
 async fn carrier_channel_refuses_exit_shutdown_initialize_and_arbitrary() {
     let (conn, trace, join) = connection_to_recording_server();
     let overlays = StdMutex::new(HashSet::new());
-    let channel = CarrierInjectionChannel::new(&conn, &overlays);
+    let taint = StdMutex::new(HashSet::new());
+    let channel = CarrierInjectionChannel::new(&conn, &overlays, &taint);
 
     for method in ["exit", "shutdown", "initialize", "anything/atAll"] {
         let err = channel
@@ -151,7 +152,8 @@ async fn carrier_channel_refuses_exit_shutdown_initialize_and_arbitrary() {
 async fn carrier_channel_allows_didopen_didchange_didclose_diagnostic_and_apisession() {
     let (conn, trace, join) = connection_to_recording_server();
     let overlays = StdMutex::new(HashSet::new());
-    let channel = CarrierInjectionChannel::new(&conn, &overlays);
+    let taint = StdMutex::new(HashSet::new());
+    let channel = CarrierInjectionChannel::new(&conn, &overlays, &taint);
 
     let uri = "file:///ws/C.vue.tsx";
     channel
@@ -218,7 +220,8 @@ async fn carrier_channel_allows_didopen_didchange_didclose_diagnostic_and_apises
 async fn carrier_channel_refuses_kind_mismatched_allowlisted_ops() {
     let (conn, trace, join) = connection_to_recording_server();
     let overlays = StdMutex::new(HashSet::new());
-    let channel = CarrierInjectionChannel::new(&conn, &overlays);
+    let taint = StdMutex::new(HashSet::new());
+    let channel = CarrierInjectionChannel::new(&conn, &overlays, &taint);
 
     // diagnostic is a REQUEST-only carrier op — sent as a NOTIFICATION it is a
     // kind mismatch and must be refused, though the method name is allowlisted.
@@ -323,7 +326,8 @@ async fn gated_notify_refuses_overlay_open_close_lifecycle() {
     // open_overlays bookkeeping) — no overlay is ever opened untracked.
     let (conn, trace, join) = connection_to_recording_server();
     let overlays = StdMutex::new(HashSet::new());
-    let channel = CarrierInjectionChannel::new(&conn, &overlays);
+    let taint = StdMutex::new(HashSet::new());
+    let channel = CarrierInjectionChannel::new(&conn, &overlays, &taint);
 
     for method in ["textDocument/didOpen", "textDocument/didClose"] {
         let err = channel
@@ -390,7 +394,8 @@ async fn sync_overlay_propagates_no_round_trip_failure() {
     let (cr, cw) = tokio::io::split(client);
     let conn = JsonRpcConnection::connect(cr, cw);
     let overlays = StdMutex::new(HashSet::new());
-    let channel = CarrierInjectionChannel::new(&conn, &overlays);
+    let taint = StdMutex::new(HashSet::new());
+    let channel = CarrierInjectionChannel::new(&conn, &overlays, &taint);
 
     let err = tokio::time::timeout(
         Duration::from_secs(5),
@@ -417,7 +422,8 @@ async fn did_open_synced_propagates_no_round_trip_failure() {
     let (cr, cw) = tokio::io::split(client);
     let conn = JsonRpcConnection::connect(cr, cw);
     let overlays = StdMutex::new(HashSet::new());
-    let channel = CarrierInjectionChannel::new(&conn, &overlays);
+    let taint = StdMutex::new(HashSet::new());
+    let channel = CarrierInjectionChannel::new(&conn, &overlays, &taint);
 
     let result = tokio::time::timeout(
         Duration::from_secs(5),
@@ -471,7 +477,8 @@ async fn sync_overlay_tolerates_jsonrpc_error_response() {
 
     let conn = JsonRpcConnection::connect(cr, cw);
     let overlays = StdMutex::new(HashSet::new());
-    let channel = CarrierInjectionChannel::new(&conn, &overlays);
+    let taint = StdMutex::new(HashSet::new());
+    let channel = CarrierInjectionChannel::new(&conn, &overlays, &taint);
     channel
         .sync_overlay("file:///ws/NoPull.vue.tsx")
         .await
@@ -899,6 +906,846 @@ async fn relay_reemits_api_session_request_and_parses_handle() {
 // BEFORE the sync-barrier request (the overlay is registered before any
 // `--api` updateSnapshot could enumerate roots).
 // ────────────────────────────────────────────────────────────────────────────
+
+// ────────────────────────────────────────────────────────────────────────────
+// Egress: the server→editor pump runs the deny-by-default carrier egress
+// policy AFTER the `verter:*` demux and BEFORE the raw forward. Carrier
+// authority is the relay's own overlay tracker (the URIs an injected
+// did_open recorded). Carrier-free frames still pass byte-identical.
+// ────────────────────────────────────────────────────────────────────────────
+
+/// The carrier overlay URI the egress wiring tests open through the relay's
+/// injection channel.
+const EGRESS_CARRIER: &str = "file:///ws/App.vue.tsx";
+
+/// Relay harness with a COLLECTED editor endpoint and RAW server endpoint
+/// halves the test drives frame-for-frame (the egress tests push arbitrary
+/// server→editor frames while observing exactly what the editor receives).
+fn relay_with_collected_editor_and_raw_server() -> (
+    FrameTrace,
+    tokio::io::WriteHalf<tokio::io::DuplexStream>,
+    tokio::io::ReadHalf<tokio::io::DuplexStream>,
+    tokio::io::WriteHalf<tokio::io::DuplexStream>,
+    LspRelay,
+) {
+    let (editor_endpoint, relay_editor_side) = tokio::io::duplex(64 * 1024);
+    let (server_endpoint, relay_server_side) = tokio::io::duplex(64 * 1024);
+    let (er, ew) = tokio::io::split(relay_editor_side);
+    let (sr, sw) = tokio::io::split(relay_server_side);
+    let relay = LspRelay::start(er, ew, sr, sw);
+    let (editor_read, editor_write) = tokio::io::split(editor_endpoint);
+    let editor_trace = spawn_editor_collector(editor_read);
+    let (server_read, server_write) = tokio::io::split(server_endpoint);
+    (editor_trace, editor_write, server_read, server_write, relay)
+}
+
+#[tokio::test]
+async fn relay_suppresses_carrier_publish_diagnostics_for_open_overlay() {
+    let (editor_trace, _editor_write, _server_read, mut server_write, relay) =
+        relay_with_collected_editor_and_raw_server();
+    relay
+        .injection_channel()
+        .did_open(EGRESS_CARRIER, "typescriptreact", 1, "export {};")
+        .await
+        .expect("the injected didOpen tracks the carrier overlay");
+
+    // The server pushes diagnostics for the CARRIER — a leak if forwarded.
+    write_frame(
+        &mut server_write,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/publishDiagnostics",
+            "params": {
+                "uri": EGRESS_CARRIER,
+                "diagnostics": [{ "message": "carrier-internal" }],
+            },
+        }),
+    )
+    .await;
+    // CONTROL, sent AFTER: a carrier-free notification on the SAME ordered
+    // pump — once it arrives, the earlier diagnostics frame was definitively
+    // dropped (not merely delayed), and the wire is proven live.
+    write_frame(
+        &mut server_write,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "window/logMessage",
+            "params": { "type": 3, "message": "control" },
+        }),
+    )
+    .await;
+    wait_for_trace(&editor_trace, |frames| {
+        frames
+            .iter()
+            .any(|f| f.get("method").and_then(|m| m.as_str()) == Some("window/logMessage"))
+    })
+    .await;
+
+    let frames = editor_trace.lock().unwrap().clone();
+    assert!(
+        !frames.iter().any(|f| {
+            f.get("method").and_then(|m| m.as_str()) == Some("textDocument/publishDiagnostics")
+        }),
+        "the editor must NEVER observe diagnostics for a carrier overlay: {frames:?}"
+    );
+    assert!(
+        !frames
+            .iter()
+            .any(|f| serde_json::to_string(f).unwrap().contains(EGRESS_CARRIER)),
+        "no forwarded frame may reference the carrier URI: {frames:?}"
+    );
+    assert_eq!(
+        relay.suppressed_egress(),
+        1,
+        "the dropped carrier frame must be recorded on the egress counter"
+    );
+    relay.shutdown().await;
+}
+
+#[tokio::test]
+async fn relay_suppresses_in_flight_carrier_frame_after_did_close() {
+    let (editor_trace, _editor_write, _server_read, mut server_write, relay) =
+        relay_with_collected_editor_and_raw_server();
+    let channel = relay.injection_channel();
+    channel
+        .did_open(EGRESS_CARRIER, "typescriptreact", 1, "export {};")
+        .await
+        .expect("the injected didOpen taints the carrier URI");
+    channel
+        .did_close(EGRESS_CARRIER)
+        .await
+        .expect("the injected didClose retracts the overlay");
+
+    // An IN-FLIGHT carrier frame the server emits about the just-closed
+    // overlay (e.g. diagnostics already queued when the didClose raced past
+    // the pump): egress taint is MONOTONIC, so the frame must still be
+    // suppressed — a retraction never fails open.
+    write_frame(
+        &mut server_write,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/publishDiagnostics",
+            "params": {
+                "uri": EGRESS_CARRIER,
+                "diagnostics": [{ "message": "carrier-internal, post-close" }],
+            },
+        }),
+    )
+    .await;
+    // CONTROL, sent AFTER: a carrier-FREE notification on the SAME ordered
+    // pump — once it arrives, the earlier carrier frame was definitively
+    // dropped (not merely delayed), and the wire is proven live (the taint
+    // suppresses exactly carrier frames, not everything).
+    write_frame(
+        &mut server_write,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "window/logMessage",
+            "params": { "type": 3, "message": "control-after-close" },
+        }),
+    )
+    .await;
+    wait_for_trace(&editor_trace, |frames| {
+        frames
+            .iter()
+            .any(|f| f.get("method").and_then(|m| m.as_str()) == Some("window/logMessage"))
+    })
+    .await;
+
+    let frames = editor_trace.lock().unwrap().clone();
+    assert!(
+        !frames.iter().any(|f| {
+            f.get("method").and_then(|m| m.as_str()) == Some("textDocument/publishDiagnostics")
+        }),
+        "an in-flight carrier frame emitted AFTER didClose must still be \
+         suppressed — the egress taint is monotonic, never removed on \
+         retraction: {frames:?}"
+    );
+    assert!(
+        !frames
+            .iter()
+            .any(|f| serde_json::to_string(f).unwrap().contains(EGRESS_CARRIER)),
+        "no forwarded frame may reference the closed carrier URI: {frames:?}"
+    );
+    assert_eq!(
+        frames.len(),
+        1,
+        "the editor receives ONLY the carrier-free control frame: {frames:?}"
+    );
+    assert_eq!(
+        relay.suppressed_egress(),
+        1,
+        "the post-close carrier frame must be recorded on the egress counter"
+    );
+    relay.shutdown().await;
+}
+
+#[tokio::test]
+async fn relay_strips_carrier_entries_from_mixed_workspace_symbol_response() {
+    let (editor_trace, _editor_write, _server_read, mut server_write, relay) =
+        relay_with_collected_editor_and_raw_server();
+    relay
+        .injection_channel()
+        .did_open(EGRESS_CARRIER, "typescriptreact", 1, "export {};")
+        .await
+        .expect("the injected didOpen tracks the carrier overlay");
+
+    // A workspace/symbol RESPONSE mixing a carrier symbol with a user
+    // symbol: the editor must receive the frame with ONLY the user symbol.
+    write_frame(
+        &mut server_write,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 41,
+            "result": [
+                { "name": "CarrierOnlySymbol", "kind": 12,
+                  "location": { "uri": EGRESS_CARRIER,
+                                "range": { "start": { "line": 0, "character": 0 },
+                                           "end": { "line": 0, "character": 1 } } } },
+                { "name": "UserSymbol", "kind": 12,
+                  "location": { "uri": "file:///ws/user.ts",
+                                "range": { "start": { "line": 0, "character": 0 },
+                                           "end": { "line": 0, "character": 1 } } } },
+            ],
+        }),
+    )
+    .await;
+    wait_for_trace(&editor_trace, |frames| {
+        frames
+            .iter()
+            .any(|f| f.get("id").and_then(serde_json::Value::as_i64) == Some(41))
+    })
+    .await;
+
+    let frames = editor_trace.lock().unwrap().clone();
+    let received = frames
+        .iter()
+        .find(|f| f.get("id").and_then(serde_json::Value::as_i64) == Some(41))
+        .expect("the (filtered) response must still reach the editor");
+    let text = serde_json::to_string(received).unwrap();
+    assert!(
+        !text.contains(EGRESS_CARRIER),
+        "the carrier URI must be ABSENT from the delivered response: {text}"
+    );
+    assert!(
+        !text.contains("CarrierOnlySymbol"),
+        "the carrier symbol entry must be ABSENT whole: {text}"
+    );
+    assert!(
+        text.contains("UserSymbol"),
+        "the USER symbol must SURVIVE (per-entry filter, not a whole-frame \
+         drop): {text}"
+    );
+    assert_eq!(
+        received["result"].as_array().map(|a| a.len()),
+        Some(1),
+        "exactly the carrier entry was stripped: {received:?}"
+    );
+    relay.shutdown().await;
+}
+
+#[tokio::test]
+async fn relay_forwards_carrier_free_frame_byte_identical_while_overlay_open() {
+    // CONTROL: with a carrier overlay OPEN, a carrier-free server frame with
+    // idiosyncratic key order + whitespace still reaches the editor
+    // BYTE-IDENTICAL — the egress policy re-encodes only carrier-contaminated
+    // frames (discriminates "suppressed/re-encoded" from "wire dead").
+    let (editor_endpoint, relay_editor_side) = tokio::io::duplex(64 * 1024);
+    let (server_endpoint, relay_server_side) = tokio::io::duplex(64 * 1024);
+    let (er, ew) = tokio::io::split(relay_editor_side);
+    let (sr, sw) = tokio::io::split(relay_server_side);
+    let relay = LspRelay::start(er, ew, sr, sw);
+    let (mut editor_read, _editor_write) = tokio::io::split(editor_endpoint);
+    let (_server_read, mut server_write) = tokio::io::split(server_endpoint);
+
+    relay
+        .injection_channel()
+        .did_open(EGRESS_CARRIER, "typescriptreact", 1, "export {};")
+        .await
+        .expect("the injected didOpen tracks the carrier overlay");
+
+    let server_body: &[u8] = br#"{"zulu": true, "method": "window/logMessage", "jsonrpc": "2.0", "params": {"omega": 1, "beta": 2}}"#;
+    let mut server_frame = format!("Content-Length: {}\r\n\r\n", server_body.len()).into_bytes();
+    server_frame.extend_from_slice(server_body);
+    server_write.write_all(&server_frame).await.unwrap();
+    server_write.flush().await.unwrap();
+    assert_eq!(
+        read_raw_frame(&mut editor_read).await,
+        server_frame,
+        "a carrier-FREE server→editor frame stays BYTE-IDENTICAL even while \
+         a carrier overlay is open (original key order + whitespace)"
+    );
+    assert_eq!(
+        relay.suppressed_egress(),
+        0,
+        "nothing was suppressed on the carrier-free path"
+    );
+    relay.shutdown().await;
+}
+
+#[tokio::test]
+async fn relay_answers_all_carrier_apply_edit_to_server_never_editor() {
+    let (editor_trace, _editor_write, server_read, mut server_write, relay) =
+        relay_with_collected_editor_and_raw_server();
+    // The collector is a generic frame recorder: over the server endpoint's
+    // read half it records every frame the RELAY writes toward the server.
+    let server_inbound = spawn_editor_collector(server_read);
+
+    relay
+        .injection_channel()
+        .did_open(EGRESS_CARRIER, "typescriptreact", 1, "export {};")
+        .await
+        .expect("the injected didOpen tracks the carrier overlay");
+
+    // The server asks the editor to apply an ALL-carrier edit: forwarding
+    // would leak the carrier, dropping would leave the server waiting
+    // forever — the relay must answer the SERVER `{applied:false}` under
+    // the ORIGINAL id, and the editor must receive nothing of it.
+    let mut only_carrier = serde_json::Map::new();
+    only_carrier.insert(
+        EGRESS_CARRIER.to_string(),
+        serde_json::json!([{
+            "range": { "start": { "line": 0, "character": 0 },
+                       "end": { "line": 0, "character": 1 } },
+            "newText": "x",
+        }]),
+    );
+    write_frame(
+        &mut server_write,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "apply-1",
+            "method": "workspace/applyEdit",
+            "params": { "edit": { "changes": only_carrier } },
+        }),
+    )
+    .await;
+
+    // The SERVER receives the synthesized negative response, matching id.
+    wait_for_trace(&server_inbound, |frames| {
+        frames.iter().any(|f| {
+            f.get("id").and_then(|v| v.as_str()) == Some("apply-1") && f.get("method").is_none()
+        })
+    })
+    .await;
+    let inbound = server_inbound.lock().unwrap().clone();
+    let answer = inbound
+        .iter()
+        .find(|f| {
+            f.get("id").and_then(|v| v.as_str()) == Some("apply-1") && f.get("method").is_none()
+        })
+        .expect("the server observes the synthesized response")
+        .clone();
+    assert_eq!(
+        answer["result"],
+        serde_json::json!({ "applied": false }),
+        "the relay answers the suppressed applyEdit on the editor's behalf \
+         with the negative ApplyWorkspaceEditResult: {answer}"
+    );
+
+    // CONTROL on the ordered server→editor pump: once a LATER carrier-free
+    // frame reaches the editor, the earlier applyEdit was definitively
+    // withheld (not merely delayed) and the wire is proven live.
+    write_frame(
+        &mut server_write,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "window/logMessage",
+            "params": { "type": 3, "message": "control" },
+        }),
+    )
+    .await;
+    wait_for_trace(&editor_trace, |frames| {
+        frames
+            .iter()
+            .any(|f| f.get("method").and_then(|m| m.as_str()) == Some("window/logMessage"))
+    })
+    .await;
+    let editor_frames = editor_trace.lock().unwrap().clone();
+    assert_eq!(
+        editor_frames.len(),
+        1,
+        "the editor receives ONLY the control frame — nothing of the \
+         all-carrier applyEdit: {editor_frames:?}"
+    );
+    assert!(
+        !editor_frames
+            .iter()
+            .any(|f| serde_json::to_string(f).unwrap().contains(EGRESS_CARRIER)),
+        "no editor-bound frame may reference the carrier URI: {editor_frames:?}"
+    );
+    assert_eq!(
+        relay.suppressed_egress(),
+        1,
+        "the answered server request counts as not-forwarded-to-editor"
+    );
+    relay.shutdown().await;
+}
+
+#[tokio::test]
+async fn relay_answers_mixed_apply_edit_to_server_never_editor() {
+    let (editor_trace, _editor_write, server_read, mut server_write, relay) =
+        relay_with_collected_editor_and_raw_server();
+    // The collector is a generic frame recorder: over the server endpoint's
+    // read half it records every frame the RELAY writes toward the server.
+    let server_inbound = spawn_editor_collector(server_read);
+
+    relay
+        .injection_channel()
+        .did_open(EGRESS_CARRIER, "typescriptreact", 1, "export {};")
+        .await
+        .expect("the injected didOpen taints the carrier overlay");
+
+    // The server asks the editor to apply a MIXED (carrier+user) edit: a
+    // filtered forward would be a partial-apply lie (the editor answers
+    // `applied:true` while the carrier part was silently dropped), and a
+    // raw forward would leak — the relay must answer the SERVER
+    // `{applied:false}` under the ORIGINAL id, and the editor must receive
+    // NOTHING of it (the user remainder is NOT delivered).
+    let mut mixed_changes = serde_json::Map::new();
+    mixed_changes.insert(
+        EGRESS_CARRIER.to_string(),
+        serde_json::json!([{
+            "range": { "start": { "line": 0, "character": 0 },
+                       "end": { "line": 0, "character": 1 } },
+            "newText": "x",
+        }]),
+    );
+    mixed_changes.insert(
+        "file:///ws/user.ts".to_string(),
+        serde_json::json!([{
+            "range": { "start": { "line": 0, "character": 0 },
+                       "end": { "line": 0, "character": 1 } },
+            "newText": "y",
+        }]),
+    );
+    write_frame(
+        &mut server_write,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "apply-mixed-1",
+            "method": "workspace/applyEdit",
+            "params": { "label": "refactor", "edit": { "changes": mixed_changes } },
+        }),
+    )
+    .await;
+
+    // The SERVER receives the synthesized negative response, matching id.
+    wait_for_trace(&server_inbound, |frames| {
+        frames.iter().any(|f| {
+            f.get("id").and_then(|v| v.as_str()) == Some("apply-mixed-1")
+                && f.get("method").is_none()
+        })
+    })
+    .await;
+    let inbound = server_inbound.lock().unwrap().clone();
+    let answer = inbound
+        .iter()
+        .find(|f| {
+            f.get("id").and_then(|v| v.as_str()) == Some("apply-mixed-1")
+                && f.get("method").is_none()
+        })
+        .expect("the server observes the synthesized response")
+        .clone();
+    assert_eq!(
+        answer["result"],
+        serde_json::json!({ "applied": false }),
+        "the relay answers the mixed applyEdit fail-closed on the editor's \
+         behalf with the negative ApplyWorkspaceEditResult: {answer}"
+    );
+
+    // CONTROL on the ordered server→editor pump: once a LATER carrier-free
+    // frame reaches the editor, the earlier applyEdit was definitively
+    // withheld (not merely delayed) and the wire is proven live.
+    write_frame(
+        &mut server_write,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "window/logMessage",
+            "params": { "type": 3, "message": "control" },
+        }),
+    )
+    .await;
+    wait_for_trace(&editor_trace, |frames| {
+        frames
+            .iter()
+            .any(|f| f.get("method").and_then(|m| m.as_str()) == Some("window/logMessage"))
+    })
+    .await;
+    let editor_frames = editor_trace.lock().unwrap().clone();
+    assert_eq!(
+        editor_frames.len(),
+        1,
+        "the editor receives ONLY the control frame — neither the mixed \
+         applyEdit nor its filtered user remainder: {editor_frames:?}"
+    );
+    assert!(
+        !editor_frames
+            .iter()
+            .any(|f| f.get("method").and_then(|m| m.as_str()) == Some("workspace/applyEdit")),
+        "no applyEdit request may be editor-routed: {editor_frames:?}"
+    );
+    assert!(
+        !editor_frames
+            .iter()
+            .any(|f| serde_json::to_string(f).unwrap().contains(EGRESS_CARRIER)),
+        "no editor-bound frame may reference the carrier URI: {editor_frames:?}"
+    );
+    assert_eq!(
+        relay.suppressed_egress(),
+        1,
+        "the answered server request counts as not-forwarded-to-editor"
+    );
+    relay.shutdown().await;
+}
+
+#[tokio::test]
+async fn relay_answers_reserved_id_server_request_to_server_never_editor() {
+    let (editor_trace, _editor_write, server_read, mut server_write, relay) =
+        relay_with_collected_editor_and_raw_server();
+    // The collector is a generic frame recorder: over the server endpoint's
+    // read half it records every frame the RELAY writes toward the server.
+    let server_inbound = spawn_editor_collector(server_read);
+
+    // The server emits a carrier-FREE server→client REQUEST whose id sits in
+    // the reserved `verter:*` namespace. Forwarding it would hang the
+    // server: the editor's answer would carry the same reserved id, and the
+    // editor→server pump drops ALL reserved-id editor frames (the namespace
+    // boundary) — the server's request would never resolve. The relay must
+    // answer the SERVER with a synthesized negative under the ORIGINAL id
+    // and keep the request from the editor entirely.
+    write_frame(
+        &mut server_write,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "verter:7",
+            "method": "window/showDocument",
+            "params": { "uri": "file:///ws/user.ts" },
+        }),
+    )
+    .await;
+
+    // The SERVER receives the synthesized negative response, matching id.
+    wait_for_trace(&server_inbound, |frames| {
+        frames.iter().any(|f| {
+            f.get("id").and_then(|v| v.as_str()) == Some("verter:7") && f.get("method").is_none()
+        })
+    })
+    .await;
+    let inbound = server_inbound.lock().unwrap().clone();
+    let answer = inbound
+        .iter()
+        .find(|f| {
+            f.get("id").and_then(|v| v.as_str()) == Some("verter:7") && f.get("method").is_none()
+        })
+        .expect("the server observes the synthesized negative response")
+        .clone();
+    assert_eq!(
+        answer["error"]["code"],
+        serde_json::json!(-32803),
+        "the reserved-id anomaly is answered with the sanitized RequestFailed \
+         error under the ORIGINAL id: {answer}"
+    );
+    assert!(
+        answer.get("result").is_none(),
+        "the synthesized anomaly answer is a plain ERROR response: {answer}"
+    );
+
+    // CONTROL on the ordered server→editor pump: once a LATER carrier-free
+    // frame reaches the editor, the earlier reserved-id request was
+    // definitively withheld (not merely delayed) and the wire is proven live.
+    write_frame(
+        &mut server_write,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "window/logMessage",
+            "params": { "type": 3, "message": "control" },
+        }),
+    )
+    .await;
+    wait_for_trace(&editor_trace, |frames| {
+        frames
+            .iter()
+            .any(|f| f.get("method").and_then(|m| m.as_str()) == Some("window/logMessage"))
+    })
+    .await;
+    let editor_frames = editor_trace.lock().unwrap().clone();
+    assert_eq!(
+        editor_frames.len(),
+        1,
+        "the editor receives ONLY the control frame — nothing of the \
+         reserved-id server request: {editor_frames:?}"
+    );
+    assert!(
+        !editor_frames.iter().any(|f| f
+            .get("id")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| s.starts_with("verter:"))),
+        "no editor-bound frame may carry a reserved `verter:*` id: {editor_frames:?}"
+    );
+    assert_eq!(
+        relay.suppressed_egress(),
+        1,
+        "the answered reserved-id anomaly counts as not-forwarded-to-editor"
+    );
+    relay.shutdown().await;
+}
+
+#[tokio::test]
+async fn relay_answers_editor_definition_with_neutral_when_carrier_only() {
+    let (editor_trace, mut editor_write, server_read, mut server_write, relay) =
+        relay_with_collected_editor_and_raw_server();
+    // The collector is a generic frame recorder: over the server endpoint's
+    // read half it records every frame the RELAY writes toward the server.
+    let server_inbound = spawn_editor_collector(server_read);
+
+    relay
+        .injection_channel()
+        .did_open(EGRESS_CARRIER, "typescriptreact", 1, "export {};")
+        .await
+        .expect("the injected didOpen taints the carrier overlay");
+
+    // The EDITOR asks for a definition (a carrier-free request — it forwards
+    // to the server untouched, and its id→method is tracked on ingress).
+    write_frame(
+        &mut editor_write,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "textDocument/definition",
+            "params": { "textDocument": { "uri": "file:///ws/user.ts" },
+                        "position": { "line": 1, "character": 2 } },
+        }),
+    )
+    .await;
+    // Wait until the request reached the server — by then the ingress pump
+    // has recorded the pending id→method (record happens before forward).
+    wait_for_trace(&server_inbound, |frames| {
+        frames
+            .iter()
+            .any(|f| f.get("method").and_then(|m| m.as_str()) == Some("textDocument/definition"))
+    })
+    .await;
+
+    // The server answers with a carrier-ONLY singleton Location — an
+    // unfilterable response shape (a bare Location object). Suppressing it
+    // whole would strand the editor's pending request; the relay must
+    // instead resolve it with the method-valid NEUTRAL `result: null` under
+    // the ORIGINAL id, carrying NO carrier data.
+    write_frame(
+        &mut server_write,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "result": { "uri": EGRESS_CARRIER,
+                        "range": { "start": { "line": 0, "character": 0 },
+                                   "end": { "line": 0, "character": 1 } } },
+        }),
+    )
+    .await;
+
+    wait_for_trace(&editor_trace, |frames| {
+        frames
+            .iter()
+            .any(|f| f.get("id").and_then(serde_json::Value::as_i64) == Some(5))
+    })
+    .await;
+    let frames = editor_trace.lock().unwrap().clone();
+    let received = frames
+        .iter()
+        .find(|f| f.get("id").and_then(serde_json::Value::as_i64) == Some(5))
+        .expect("the editor's pending request must RESOLVE (no strand)")
+        .clone();
+    assert_eq!(
+        received,
+        serde_json::json!({ "jsonrpc": "2.0", "id": 5, "result": null }),
+        "the synthesized neutral response carries the ORIGINAL id and a \
+         method-valid null result — nothing else: {received}"
+    );
+    assert!(
+        !frames
+            .iter()
+            .any(|f| serde_json::to_string(f).unwrap().contains(EGRESS_CARRIER)),
+        "no editor-bound frame may reference the carrier URI: {frames:?}"
+    );
+    assert_eq!(
+        relay.suppressed_egress(),
+        1,
+        "the carrier response was kept from the editor (replaced by the \
+         neutral) — recorded on the egress counter"
+    );
+    relay.shutdown().await;
+}
+
+#[tokio::test]
+async fn relay_prunes_pending_request_on_cancel_no_fabricated_reply() {
+    let (editor_trace, mut editor_write, server_read, mut server_write, relay) =
+        relay_with_collected_editor_and_raw_server();
+    // The collector is a generic frame recorder: over the server endpoint's
+    // read half it records every frame the RELAY writes toward the server.
+    let server_inbound = spawn_editor_collector(server_read);
+
+    relay
+        .injection_channel()
+        .did_open(EGRESS_CARRIER, "typescriptreact", 1, "export {};")
+        .await
+        .expect("the injected didOpen taints the carrier overlay");
+
+    // The EDITOR asks for a definition (tracked on ingress, id → method).
+    write_frame(
+        &mut editor_write,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "textDocument/definition",
+            "params": { "textDocument": { "uri": "file:///ws/user.ts" },
+                        "position": { "line": 1, "character": 2 } },
+        }),
+    )
+    .await;
+    wait_for_trace(&server_inbound, |frames| {
+        frames
+            .iter()
+            .any(|f| f.get("method").and_then(|m| m.as_str()) == Some("textDocument/definition"))
+    })
+    .await;
+
+    // The EDITOR cancels the request: the relay prunes the pending record
+    // (bounding the table even when a server never responds) AND still
+    // forwards the notification raw to the server.
+    write_frame(
+        &mut editor_write,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "$/cancelRequest",
+            "params": { "id": 7 },
+        }),
+    )
+    .await;
+    wait_for_trace(&server_inbound, |frames| {
+        frames
+            .iter()
+            .any(|f| f.get("method").and_then(|m| m.as_str()) == Some("$/cancelRequest"))
+    })
+    .await;
+
+    // The server STILL answers the cancelled request — with a carrier-ONLY
+    // unfilterable response. The pending entry was pruned, so the response
+    // correlates with NO tracked editor request: it suppresses whole,
+    // fail-closed — the relay never fabricates a reply for an id it no
+    // longer tracks.
+    write_frame(
+        &mut server_write,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "result": { "uri": EGRESS_CARRIER,
+                        "range": { "start": { "line": 0, "character": 0 },
+                                   "end": { "line": 0, "character": 1 } } },
+        }),
+    )
+    .await;
+
+    // CONTROL on the ordered server→editor pump: once a LATER carrier-free
+    // frame reaches the editor, the earlier id-7 response was definitively
+    // withheld (not merely delayed) and the wire is proven live.
+    write_frame(
+        &mut server_write,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "window/logMessage",
+            "params": { "type": 3, "message": "control" },
+        }),
+    )
+    .await;
+    wait_for_trace(&editor_trace, |frames| {
+        frames
+            .iter()
+            .any(|f| f.get("method").and_then(|m| m.as_str()) == Some("window/logMessage"))
+    })
+    .await;
+    let frames = editor_trace.lock().unwrap().clone();
+    assert!(
+        !frames
+            .iter()
+            .any(|f| f.get("id").and_then(serde_json::Value::as_i64) == Some(7)),
+        "the cancelled request's entry was pruned — the editor receives NO \
+         completion (neither a neutral nor an error) for id 7: {frames:?}"
+    );
+    assert!(
+        !frames
+            .iter()
+            .any(|f| serde_json::to_string(f).unwrap().contains(EGRESS_CARRIER)),
+        "no editor-bound frame may reference the carrier URI: {frames:?}"
+    );
+    assert_eq!(
+        relay.suppressed_egress(),
+        1,
+        "the untracked carrier-only response suppresses whole, fail-closed — \
+         recorded on the egress counter"
+    );
+    relay.shutdown().await;
+}
+
+#[tokio::test]
+async fn relay_demuxes_verter_response_before_egress_suppression() {
+    let (editor_trace, _editor_write, server_read, server_write, relay) =
+        relay_with_collected_editor_and_raw_server();
+
+    // A bespoke responder answering every request with a result that
+    // REFERENCES the carrier. The egress policy classifies such a
+    // carrier-referencing response as unfilterable (its result shape is not
+    // a recognized filter target once the top-level `uri` survives) — so if
+    // egress ran BEFORE the `verter:*` demux, the injected barrier's waiter
+    // would never resolve and the round-trip below would time out.
+    let mut server_read = server_read;
+    let mut server_write = server_write;
+    tokio::spawn(async move {
+        let mut framer = MessageFramer::new();
+        let mut chunk = [0u8; 8192];
+        loop {
+            let n = match server_read.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            framer.push(&chunk[..n]);
+            while let Ok(Some(msg)) = framer.next_message() {
+                let Some(id) = msg.get("id").filter(|v| !v.is_null()).cloned() else {
+                    continue;
+                };
+                let reply = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": { "uri": EGRESS_CARRIER, "items": [] },
+                });
+                let _ = server_write.write_all(&encode_message(&reply)).await;
+                let _ = server_write.flush().await;
+            }
+        }
+    });
+
+    let channel = relay.injection_channel();
+    channel
+        .did_open(EGRESS_CARRIER, "typescriptreact", 1, "export {};")
+        .await
+        .expect("the injected didOpen tracks the carrier overlay");
+    tokio::time::timeout(Duration::from_secs(5), channel.sync_overlay(EGRESS_CARRIER))
+        .await
+        .expect(
+            "the injected barrier must resolve — its carrier-referencing \
+             response demuxes to Verter BEFORE the egress policy runs",
+        )
+        .expect("the demuxed response completes the round-trip");
+
+    let frames = editor_trace.lock().unwrap().clone();
+    assert!(
+        !frames
+            .iter()
+            .any(|f| serde_json::to_string(f).unwrap().contains(EGRESS_CARRIER)),
+        "the demuxed `verter:*` response must never reach the editor: {frames:?}"
+    );
+    relay.shutdown().await;
+}
 
 #[tokio::test]
 async fn injected_didopen_precedes_sync_barrier() {

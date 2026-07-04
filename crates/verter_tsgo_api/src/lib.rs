@@ -25,6 +25,8 @@
 //! - [`relay`] — the gated carrier-injection write surface
 //!   ([`relay::CarrierInjectionChannel`], deny-by-default) and the
 //!   bidirectional editor↔server `--lsp` frame relay ([`relay::LspRelay`]).
+//! - `egress` (crate-private) — the deny-by-default server→editor carrier
+//!   egress policy the relay's server→editor pump enforces.
 //! - [`gate`] — the runtime fail-closed wire gate (refuses a diverged tsgo).
 //! - [`error`] — typed crate errors.
 
@@ -32,6 +34,7 @@ pub mod actor;
 pub mod api_attach;
 pub mod attach;
 pub mod client;
+mod egress;
 pub mod error;
 pub mod gate;
 pub mod jsonrpc;

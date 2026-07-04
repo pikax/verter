@@ -329,6 +329,13 @@ pub struct TsgoAttach<O: AttachOwnership = Owned> {
     /// them. A std Mutex: lock, mutate, drop the guard — NEVER held across an
     /// `.await`.
     open_overlays: StdMutex<HashSet<String>>,
+    /// The channel's monotonic egress-taint record (every URI `did_open`
+    /// ever attempted, inserted before the wire send and never removed) —
+    /// the uniform [`CarrierInjectionChannel`] bookkeeping. An attach has no
+    /// server→editor egress pump of its own (that consumer is
+    /// [`crate::relay::LspRelay`]); the record is kept so the channel's
+    /// taint-before-wire lifecycle is identical over every sink.
+    carrier_egress_taint: StdMutex<HashSet<String>>,
     /// The compile-time ownership marker (mirrors `lsp.ownership()`).
     _own: PhantomData<O>,
 }
@@ -372,6 +379,7 @@ impl<O: AttachOwnership> TsgoAttach<O> {
             observed_version: clearance.observed_version,
             witness: clearance.witness,
             open_overlays: StdMutex::new(HashSet::new()),
+            carrier_egress_taint: StdMutex::new(HashSet::new()),
             _own: PhantomData,
         }
     }
@@ -412,7 +420,11 @@ impl<O: AttachOwnership> TsgoAttach<O> {
     /// is separate).
     #[must_use]
     pub fn injection_channel(&self) -> CarrierInjectionChannel<'_> {
-        CarrierInjectionChannel::new(&self.lsp.conn, &self.open_overlays)
+        CarrierInjectionChannel::new(
+            &self.lsp.conn,
+            &self.open_overlays,
+            &self.carrier_egress_taint,
+        )
     }
 
     /// The attached `--api` checker client (diagnostics + checker reflection).
