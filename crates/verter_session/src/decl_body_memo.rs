@@ -520,15 +520,22 @@ impl DeclBodyMemo {
                 // (parse counted at lease acquisition); the LEASE-ONLY run
                 // below reuses it. A broken lease pin fails CLOSED to the
                 // empty env (the same value a fatal parse yields) — never
-                // a transient re-parse.
+                // a transient re-parse — and fails LOUD in debug/test
+                // builds so a lease-pin break cannot silently memoize an
+                // empty env.
                 self.ensure_lease();
-                let mut env = service
-                    .run_leased(&self.key, move |program| {
-                        program
-                            .map(|p| build_eval_env(p.borrow_dependent(), p.source_str()))
-                            .unwrap_or_default()
-                    })
-                    .unwrap_or_default();
+                let leased = service.run_leased(&self.key, move |program| {
+                    program
+                        .map(|p| build_eval_env(p.borrow_dependent(), p.source_str()))
+                        .unwrap_or_default()
+                });
+                debug_assert!(
+                    leased.is_some(),
+                    "decl-body lease pin broken: whole_env's lease-only run missed the \
+                     retained snapshot for {}",
+                    self.key.canonical
+                );
+                let mut env = leased.unwrap_or_default();
                 self.provenance
                     .eval_env_builds
                     .fetch_add(1, Ordering::Relaxed);
@@ -605,29 +612,36 @@ impl DeclBodyMemo {
                 let canonical = self.key.canonical.to_string();
                 let wanted = name.to_string();
                 // LEASE-ONLY run: a broken lease pin fails CLOSED to the
-                // empty capture — never a transient re-parse.
-                service
-                    .run_leased(&self.key, move |program| {
-                        let Some(program) = program else {
-                            return Vec::new();
-                        };
-                        let program = program.borrow_dependent();
-                        let captured: Vec<_> = contributors
-                            .iter()
-                            .filter_map(|index| program.body.get(*index as usize))
-                            .flat_map(capture_statement_surfaces)
-                            .collect();
-                        merge_overload_groups(captured)
-                            .into_iter()
-                            .filter(|c| c.name == wanted && c.symbol_space == space)
-                            .map(|c| {
-                                let mut surface = c.surface;
-                                surface.decl_canonical = canonical.clone();
-                                surface
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default()
+                // empty capture — never a transient re-parse — and fails
+                // LOUD in debug/test builds (assert below) so a lease-pin
+                // break cannot silently memoize an empty capture.
+                let leased = service.run_leased(&self.key, move |program| {
+                    let Some(program) = program else {
+                        return Vec::new();
+                    };
+                    let program = program.borrow_dependent();
+                    let captured: Vec<_> = contributors
+                        .iter()
+                        .filter_map(|index| program.body.get(*index as usize))
+                        .flat_map(capture_statement_surfaces)
+                        .collect();
+                    merge_overload_groups(captured)
+                        .into_iter()
+                        .filter(|c| c.name == wanted && c.symbol_space == space)
+                        .map(|c| {
+                            let mut surface = c.surface;
+                            surface.decl_canonical = canonical.clone();
+                            surface
+                        })
+                        .collect::<Vec<_>>()
+                });
+                debug_assert!(
+                    leased.is_some(),
+                    "decl-body lease pin broken: raw_surfaces_for's lease-only run missed \
+                     the retained snapshot for {}",
+                    self.key.canonical
+                );
+                leased.unwrap_or_default()
             } else {
                 Vec::new()
             };
@@ -641,8 +655,8 @@ impl DeclBodyMemo {
     /// Lower the demanded symbol's contributing statements through the
     /// retained snapshot, producing the owned per-symbol batch. `None`
     /// on a fatal parse — or on a broken lease pin (the LEASE-ONLY run
-    /// fails CLOSED to the lowering miss; it can never transiently
-    /// re-parse).
+    /// fails CLOSED to the lowering miss, loudly in debug/test builds;
+    /// it can never transiently re-parse).
     ///
     /// Unlike [`Self::whole_env`], this per-symbol path deliberately does
     /// NOT call `apply_sfc_script_setup_type_params`: a `<script setup
@@ -756,9 +770,20 @@ impl DeclBodyMemo {
             }
             Some(batch)
         });
-        // Outer `None` = a broken lease pin (fail CLOSED, nothing ran);
-        // inner `None` = a fatal parse. Both are the lowering miss.
-        let batch = outcome.flatten()?;
+        // Outer `None` = a broken lease pin (fail CLOSED, nothing ran —
+        // and LOUD in debug/test builds, so a lease-pin break cannot
+        // silently memoize the miss); inner `None` = a fatal parse. Both
+        // are the lowering miss.
+        let Some(inner) = outcome else {
+            debug_assert!(
+                false,
+                "decl-body lease pin broken: the demanded lowering's lease-only run \
+                 missed the retained snapshot for {}",
+                self.key.canonical
+            );
+            return None;
+        };
+        let batch = inner?;
         self.provenance
             .decl_bodies_lowered
             .fetch_add(batch.lowered_count as u64, Ordering::Relaxed);

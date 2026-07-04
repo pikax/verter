@@ -626,13 +626,19 @@ fn concurrent_type_and_value_demand_of_merged_name_does_not_deadlock() {
 
 /// The memo's demanded-lowering path is LEASE-ONLY: with the lease pin
 /// broken out-of-band (the invariant-violation scenario), a body demand
-/// must FAIL CLOSED — the lowering miss, with nothing lowered and no
-/// transient re-parse. A demanded-lowering path routed through the
-/// parse-capable `run` would silently re-parse the file and return a body
-/// here (and bump `decl_bodies_lowered`), violating the lease-only
-/// worker contract.
+/// fails CLOSED — nothing lowered, no transient re-parse — and fails
+/// LOUD in debug/test builds (the lease-miss `debug_assert!` fires), so
+/// a future lease-pin break cannot silently memoize misses. Release
+/// builds keep the quiet fail-closed lowering miss.
+///
+/// Discrimination, both regression classes: a demanded-lowering path
+/// routed through a parse-capable run would silently re-parse and
+/// return a body (a QUIET `Some` — no panic — failing the loudness
+/// assertion, and bumping `decl_bodies_lowered`, failing the
+/// work-counter assertion); a lease-miss arm that stays silent returns
+/// a QUIET `None` and fails the loudness assertion.
 #[test]
-fn broken_lease_body_demand_fails_closed_without_transient_parse() {
+fn broken_lease_body_demand_fails_loud_in_debug_and_lowers_nothing() {
     let (memo, provenance) = memo_for(FIVE_DECLS);
 
     // First demand pins the lease and lowers the demanded body.
@@ -649,13 +655,20 @@ fn broken_lease_body_demand_fails_closed_without_transient_parse() {
         .expect("a production memo has a service");
     service.release_retained_snapshot_for_test(&memo.key);
 
-    // Fail closed: the un-lowered sibling's demand must MISS — a
-    // `Some(body)` here means the service transiently re-parsed instead
-    // of running lease-only.
-    assert!(
-        memo.type_decl("Var1").is_none(),
-        "a body demand with a broken lease must fail CLOSED (lowering miss)"
-    );
+    // Loud: the un-lowered sibling's demand hits the lease-miss arm,
+    // whose debug_assert fires in this (debug_assertions) build.
+    let memo_ref = &memo;
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        memo_ref.type_decl("Var1").is_some()
+    }));
+    match outcome {
+        Err(_) => {} // the lease-miss debug_assert fired — loud, as required
+        Ok(returned_some) => panic!(
+            "a body demand with a broken lease must fail LOUD in a debug build \
+             (the lease-miss debug_assert); got a quiet return (some={returned_some}) — \
+             quiet Some means a transient re-parse, quiet None a silent memoized miss"
+        ),
+    }
     assert_eq!(
         bodies(&provenance),
         lowered_before,
@@ -663,7 +676,7 @@ fn broken_lease_body_demand_fails_closed_without_transient_parse() {
     );
     // The parse accounting rail stays flat: parses are counted at the
     // lease boundary, and the lease-only run path cannot parse at all
-    // (the pre-fix transient parse was additionally invisible to this
+    // (a transient parse would additionally be invisible to this
     // counter — the lowered-bodies assertion above is the work-counter
     // discriminator).
     assert_eq!(parses(&provenance), 1, "no re-parse is accounted");
