@@ -2849,7 +2849,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // produces, but with a deterministic trigger and WITHOUT emptying the
         // contribution set (so the resolved surface stays a real merged type,
         // isolating the `source_env_unobservable` fold from the unrelated
-        // import-miss suppress rail). Zero-cost `false` load in production.
+        // import-miss suppress rail). Gated
+        // `#[cfg(any(test, feature = "test-support"))]` so a production build
+        // has NO field and NO load on this augmentation-collection hot path.
+        #[cfg(any(test, feature = "test-support"))]
         if host
             .augmentation_force_source_env_unobservable
             .load(std::sync::atomic::Ordering::Relaxed)

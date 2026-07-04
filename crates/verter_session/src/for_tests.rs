@@ -311,6 +311,10 @@ impl Drop for RelationForceOverflowGuard<'_> {
 /// return an RAII guard that clears it on drop. Mirrors
 /// [`relation_force_overflow_observations_for_tests`] for the cross-file
 /// declaration-augmentation fold's `source_env_unobservable` no-warm rail.
+///
+/// Gated `#[cfg(any(test, feature = "test-support"))]` alongside the host field
+/// and the collection-side load: a production build carries no knob at all.
+#[cfg(any(test, feature = "test-support"))]
 pub fn augmentation_force_source_env_unobservable_for_tests(
     host: &crate::VerterHost,
     forced: bool,
@@ -328,10 +332,12 @@ pub fn augmentation_force_source_env_unobservable_for_tests(
 /// enclosing query's `QueryBuildOutput.cache_suppress` without a torn multi-file
 /// fixture. The knob is cleared on drop so a panicking test never leaks the
 /// forced state into a concurrent request on another host.
+#[cfg(any(test, feature = "test-support"))]
 pub struct AugmentationForceUnobservableGuard<'h> {
     host: &'h crate::VerterHost,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl<'h> AugmentationForceUnobservableGuard<'h> {
     /// Set `host`'s torn-contributor injection flag and return the guard.
     fn arm(host: &'h crate::VerterHost, forced: bool) -> Self {
@@ -341,6 +347,7 @@ impl<'h> AugmentationForceUnobservableGuard<'h> {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for AugmentationForceUnobservableGuard<'_> {
     fn drop(&mut self) {
         self.host

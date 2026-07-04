@@ -797,8 +797,12 @@ pub struct VerterHost {
     /// produces, with a deterministic trigger. Exercises the fold of the
     /// unobservable bit into the enclosing query's `QueryBuildOutput.cache_suppress`
     /// (relative and external augmentation) without a torn multi-file fixture.
-    /// Defaults `false` (zero-cost no-op in production); set only through the
-    /// `for_tests` RAII guard.
+    /// Set only through the `for_tests` RAII guard. Gated
+    /// `#[cfg(any(test, feature = "test-support"))]` so a production build
+    /// (release, no `test-support`) compiles to NO field and NO hot-path load —
+    /// the augmentation-collection fold carries zero residual atomic in
+    /// production.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) augmentation_force_source_env_unobservable: std::sync::atomic::AtomicBool,
     /// Per-host test-injection knob for the carrier-subject normalization
     /// prelude. When `true`, the traced carrier-normalization prelude
