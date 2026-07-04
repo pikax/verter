@@ -1,6 +1,7 @@
 //! The closed family of unsupported Svelte runtime surfaces + its diagnostic
 //! projection (the machine-stable diagnostic id, message, and span).
 
+use super::official_rule::OfficialRejection;
 use verter_span::Span;
 
 /// The closed family of Svelte runtime surfaces this backend does NOT yet emit.
@@ -274,6 +275,25 @@ pub enum UnsupportedSvelteRuntimeSurface {
         /// The source span.
         span: Span,
     },
+    /// A carrier for an OFFICIAL-reject detected MID-REWRITE. The fallible
+    /// expression rewriter's error channel is `UnsupportedSvelteRuntimeSurface`,
+    /// but some malformed inputs it detects (a `$$`-prefixed member of a
+    /// `$props()` rest / whole-object binding — official `props_illegal_name`) are
+    /// official COMPILE-ERRORS, not unsupported features. This variant carries the
+    /// typed [`OfficialRejection`] out of the rewriter; the
+    /// `From<UnsupportedSvelteRuntimeSurface> for ClientCompileError` conversion at
+    /// the compile boundary maps it to [`ClientCompileError::OfficialReject`], so it
+    /// NEVER surfaces as an `Unsupported` diagnostic. Its `diagnostic_code` /
+    /// `message` still delegate to the carried rule so any defensive surfacing stays
+    /// correct.
+    ///
+    /// [`ClientCompileError::OfficialReject`]: super::ClientCompileError::OfficialReject
+    OfficialReject {
+        /// The official-reject rule class + the exact official diagnostic code.
+        rejection: OfficialRejection,
+        /// The source span.
+        span: Span,
+    },
 }
 
 impl UnsupportedSvelteRuntimeSurface {
@@ -307,6 +327,11 @@ impl UnsupportedSvelteRuntimeSurface {
             Self::ParagraphAutoclose { .. } => "svelte-runtime-unsupported-paragraph-autoclose",
             Self::ConstFoldThrow { .. } => "svelte-runtime-unsupported-const-fold-throw",
             Self::ServerGenerate { .. } => "svelte-runtime-unsupported-server-generate",
+            // A transient official-reject carrier — delegate to the carried rule's
+            // official-reject diagnostic id (it is converted to
+            // `ClientCompileError::OfficialReject` at the boundary and never surfaces
+            // through the unsupported family).
+            Self::OfficialReject { rejection, .. } => rejection.rule.diagnostic_code(),
         }
     }
 
@@ -399,6 +424,11 @@ impl UnsupportedSvelteRuntimeSurface {
             Self::ServerGenerate { .. } => {
                 "server-side rendering (`generate: 'server'`)".to_string()
             }
+            // A transient official-reject carrier — surface the carried rule's
+            // official-reject message directly (NOT the "does not yet support …"
+            // wrapper below), since it mirrors an official COMPILE-ERROR, not a
+            // deferrable feature.
+            Self::OfficialReject { rejection, .. } => return rejection.rule.message(),
         };
         format!("Svelte client emission does not yet support {detail}.")
     }
@@ -432,7 +462,8 @@ impl UnsupportedSvelteRuntimeSurface {
             | Self::MagicIdentifier { span, .. }
             | Self::ParagraphAutoclose { span, .. }
             | Self::ConstFoldThrow { span, .. }
-            | Self::ServerGenerate { span } => *span,
+            | Self::ServerGenerate { span }
+            | Self::OfficialReject { span, .. } => *span,
         }
     }
 }

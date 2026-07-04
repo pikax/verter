@@ -280,10 +280,10 @@ fn negative_variable_declaration_sub_shapes_fail_closed() {
             "let undefined = $state(0); let s = $state(undefined);",
         ),
         // Props pattern shape. (A plain / `$bindable` DEFAULT is now the
-        // supported `$.prop` prop-source surface, pinned positively by the
-        // oracle-backed client tests — only the pattern shapes stay closed.)
-        ("props_rest", "let { a, ...rest } = $props();"),
-        ("props_whole_object", "let p = $props();"),
+        // supported `$.prop` prop-source surface, and the `{ …, ...rest }` rest +
+        // whole-object `let p = $props()` capture forms are now the supported
+        // `$.rest_props` surface — all pinned positively by the oracle-backed client
+        // tests — only a computed / numeric / nested key pattern stays closed.)
         ("props_computed_key", "let { [k]: a } = $props();"),
         // A bare `let el;` NOT used as a bind:this target (an unused/plain local).
         ("unused_bare_let", "let el;"),

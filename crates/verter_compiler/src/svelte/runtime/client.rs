@@ -25,6 +25,7 @@
 //! [`UnsupportedSvelteRuntimeSurface`] carrying its owning vertical — never a
 //! silent empty module, never a panic.
 
+use super::client_codegen_helpers::js_single_quoted;
 use super::client_effect::Memoizer;
 use super::client_event::emit_delegate_epilogue;
 use super::client_module_frame::{emit_imports, escape_template_literal};
@@ -240,58 +241,22 @@ pub(super) enum AccKind {
 
 impl<'a> ClientEmitter<'a> {
     fn new(plan: &'a ClientModulePlan<'a>) -> Self {
-        let mut used = rustc_hash::FxHashSet::default();
         // Reserve every user binding name + the runtime-magic identifiers so a generated
         // stem never collides with ANY user/template binding that can share an emitted JS
         // scope (matching the official `scope.generate`, which reserves ALL source
         // bindings). The GENERATED stems (`root`, `fragment`, tag names, `text`,
         // `binding_group`, `bind_get`/`bind_set`) are NOT pre-reserved — they are the names
         // we want to allocate; a user binding of the same name pushes the generated one to a
-        // `_N` suffix via `alloc_name`.
-        //
-        // The reservation set is the UNION of three complementary sources, none of which
-        // alone is complete:
-        //
-        // (1) `declared_roots` — the complete top-level SCRIPT binding set: imports, every
-        //     `let`/`const`/`var`, function / class declarations, and the `$props()`
-        //     destructure names across BOTH the module and instance scripts. This is the
-        //     authority for PLAIN non-rune script locals (`let fragment = 1`), which the
-        //     reactive binding table omits.
-        // (2) the complete binding TABLE — every name the analysis recorded for ANY
-        //     binding-introducing construct, including the TEMPLATE-SCOPE bindings that
-        //     share an emitted closure/body scope with a generated local: `{#each}`
-        //     item/index locals, `{#await}` then/catch bindings, `{#snippet}` names +
-        //     params, slot `let:` locals, and `{const}`/`{let}` / `{@const}` declaration-tag
-        //     locals. A `let:` / decl-tag local has no free-reference row when nothing reads
-        //     it, and is never a script root, so neither (1) nor (3) sees it.
-        // (3) every FREE template-expression reference (below).
-        //
-        // A plain script local that shares a generated stem (`let fragment` vs the multi-root
-        // clone frame, `let div` vs a `<div>` clone root) would emit a duplicate declaration
-        // (invalid JS); a template-scope local that shares a generated stem (a slot
-        // `let:bind_get` / `{const bind_get}` vs a function-pair `var bind_get`, an each-item
-        // `bind_get` vs a `var bind_get` in the each body) would emit a duplicate lexical
-        // declaration (invalid JS) or clobber a callback PARAM. Seeding the full union makes
-        // `alloc_name` rename the generated stem (→ `bind_get_1`) instead.
-        for name in &plan.build.declared_roots {
-            used.insert(name.clone());
-        }
-        for binding in plan.build.ir.analysis.bindings.all() {
-            used.insert(binding.name.clone());
-        }
-        // ALSO reserve every FREE template-expression reference (reads AND writes), so a
-        // generated DOM-var stem never collides with a free identifier the template emits.
-        // `<p {...p}>` would otherwise emit `var p` (the `<p>` element local) shadowing the
-        // `...p` spread payload — official renames the DOM local to `p_1`. The official
-        // `scope.generate` reserves referenced free identifiers generally; seeding them here
-        // makes `alloc_name` rename the synthesized stem (→ `p_1`) across ALL surfaces.
-        for analyzed in plan.build.ir.analysis.expressions.all() {
-            for reference in &analyzed.references {
-                used.insert(reference.name.clone());
-            }
-        }
-        for reserved in ["$", "$$anchor", "$$props", "$$value"] {
-            used.insert(reserved.to_string());
+        // `_N` suffix via `alloc_name`. The reservation UNION (top-level script bindings +
+        // the full binding table + free template-expression references + the runtime-magic
+        // reserved literals) is the shared `seed_reserved_names` — the SAME set the
+        // plan-time `rest_excludes` allocation seeds from, so the two allocators agree.
+        let mut used = super::client_plan::seed_reserved_names(&plan.build);
+        // The plan-time-allocated `rest_excludes` Set name is reserved so a later DOM-var
+        // stem never re-picks it (the official `scope.root.unique('rest_excludes')` name is
+        // reserved in the root scope every child scope generates against).
+        if let Some(rest) = &plan.build.rest_props {
+            used.insert(rest.set_name.clone());
         }
         let action_hosts = super::client_lifecycle::action_host_nodes(plan);
         let mut emitter = Self {
@@ -360,17 +325,7 @@ impl<'a> ClientEmitter<'a> {
     /// counter). `pub(super)` so the sibling bind-emission module can allocate the
     /// per-group `bind:group` accumulator names through the same seeded allocator.
     pub(super) fn alloc_name(&mut self, stem: &str) -> String {
-        if self.used.insert(stem.to_string()) {
-            return stem.to_string();
-        }
-        let mut n = 1;
-        loop {
-            let candidate = format!("{stem}_{n}");
-            if self.used.insert(candidate.clone()) {
-                return candidate;
-            }
-            n += 1;
-        }
+        super::client_plan::alloc_unique_name(&mut self.used, stem)
     }
 
     /// Emit the full client module.
@@ -409,6 +364,21 @@ impl<'a> ClientEmitter<'a> {
         for snippet in self.plan.module_snippets.clone() {
             self.emit_snippet_decl(&mut out, snippet);
             out.push('\n');
+        }
+        // (2b) The `$props()` rest / whole-object `rest_excludes` Set — module scope,
+        // after the imports / snippets, IMMEDIATELY before the `$.from_html` factories
+        // (the official `state.hoisted` slot). `var <name> = new Set([<quoted keys>]);`
+        // where the keys are the fixed prefix then each non-rest source key in source
+        // order (a whole-object capture carries the prefix only). The name was allocated
+        // ONCE at plan build; the body declarator references the same one.
+        if let Some(rest) = &self.plan.build.rest_props {
+            let keys = rest
+                .excludes
+                .iter()
+                .map(|k| js_single_quoted(k))
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push_str(&format!("var {} = new Set([{}]);\n", rest.set_name, keys));
         }
         out.push_str(&hoists);
         out.push('\n');

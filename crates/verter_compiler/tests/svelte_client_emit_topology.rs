@@ -148,6 +148,39 @@ const SUPPORTED_FIXTURES: &[&str] = &[
     // arrow: `$.delegated('click', button, () => { $.effect_tracking();
     // $.update(c2); })` — NO frame.
     "runes/effect_tracking_in_handler",
+    // ── 5g-e `$props()` rest + whole-object capture (`$.rest_props`) ──
+    // `let { a, b, ...rest } = $props()` — the module `rest_excludes` Set (prefix +
+    // source keys) + the `let rest = $.rest_props($$props, rest_excludes)` capture;
+    // bare named reads de-localize to `$$props.KEY`, NO frame.
+    "runes/props_rest_basic",
+    // A lone `let { ...rest } = $props()` — the prefix-only Set + `$.rest_props`, the
+    // `<div {...rest}>` element spread folds to `$.attribute_effect`, NO frame.
+    "runes/props_rest_lone",
+    // `let { a = 1, ...rest } = $props()` — composes the 5g-d `$.prop` default with
+    // the rest capture into ONE comma-joined `let`, rest LAST.
+    "runes/props_rest_default",
+    // Whole-object `let all = $props()` — the prefix-only Set + `let all =
+    // $.rest_props(...)`; the `{...all}` spread + bare `{all}` interpolation both stay
+    // the real local, NO frame.
+    "runes/props_whole_object",
+    // A NON-excluded rest MEMBER read in a state-write handler (`() => sink += rest.x`)
+    // — de-localizes to `$$props.x` AND opens the component frame ($.push/$.pop).
+    "runes/props_rest_member_handler",
+    // A NON-excluded rest MEMBER as the WHOLE RHS of a COMPOUND `+=` whose target is
+    // a $state MEMBER (`() => objS.p += rest.y`) — svelte does NOT pre-rewrite a
+    // member target, so the RHS stays the verbatim `rest.y` (the coarse
+    // Assignment-child guard). The read/write span sets must keep it local, NOT
+    // over-de-localize it to `$$props.y` (the signal-id target IS de-localized —
+    // see `props_rest_member_handler` above).
+    "runes/props_rest_member_compound",
+    // 5g-e REOPEN: OPTIONAL rest member reads preserve the `?.` — `rest?.x` →
+    // `$$props?.x`, `rest?.x.y` → `$$props?.x.y` (attr context, batched into one
+    // template_effect). De-localization replaces ONLY the object identifier, so the
+    // optional axis + downstream chain stay verbatim. Structurally RED at ff1ca89a1
+    // (whole-member replacement dropped the `?.` → `$$props.x`).
+    "runes/props_rest_member_optional",
+    // 5g-e REOPEN: the whole-object equivalent — `all?.x` → `$$props?.x`.
+    "runes/props_whole_object_optional",
 ];
 
 /// The SUPPORTED MATRIX — the exhaustive enumeration of supported client

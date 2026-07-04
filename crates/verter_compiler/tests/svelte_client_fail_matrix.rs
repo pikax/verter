@@ -298,16 +298,6 @@ const FAIL_MATRIX: &[FailRow] = &[
         code: "svelte-runtime-unsupported-advanced-rune",
     },
     FailRow {
-        name: "props_rest",
-        source: "<script>let { a, ...rest } = $props();</script>\n<p>{a}</p>\n",
-        code: "svelte-runtime-unsupported-advanced-rune",
-    },
-    FailRow {
-        name: "props_whole",
-        source: "<script>let p = $props();</script>\n<p>{p.a}</p>\n",
-        code: "svelte-runtime-unsupported-advanced-rune",
-    },
-    FailRow {
         name: "props_nested",
         source: "<script>let { a: { b } } = $props();</script>\n<p>{b}</p>\n",
         code: "svelte-runtime-unsupported-advanced-rune",
@@ -598,15 +588,6 @@ const FAIL_MATRIX: &[FailRow] = &[
         name: "form_control_value_attr",
         source: "<script>let v = $state('x');</script>\n<input onclick={() => v += '!'} value={v}>\n",
         code: "svelte-runtime-unsupported-binding",
-    },
-    FailRow {
-        // A `{...rest}` whose `rest` is a `$props()` REST destructure is the rest-props
-        // surface (`$.rest_props` + `rest_excludes`), which the script-shape gate rejects
-        // — an ADVANCED RUNE, NOT an element spread (an ordinary element spread is
-        // supported; the rest-props DESTRUCTURE in the script is the unsupported part).
-        name: "props_rest_spread",
-        source: "<script>let { a, ...rest } = $props()</script>\n<div {...rest}></div>\n",
-        code: "svelte-runtime-unsupported-advanced-rune",
     },
     FailRow {
         // An element spread CO-LOCATED with a (non-delegated) event handler. Official folds
@@ -1791,8 +1772,9 @@ fn generated_props_pattern_and_default_shapes_land_on_boundary() {
     // The finite grammar of a `$props()` destructure PATTERN + DEFAULT shape. A
     // basic destructure with identifier / string keys is supported WITH or
     // WITHOUT defaults — plain and `$bindable(...)` defaults lower through the
-    // shared `$.prop` prop-source path — while a rest / whole-object / computed /
-    // numeric / nested / duplicate form fails closed.
+    // shared `$.prop` prop-source path — and a rest (`{ …, ...rest }`) / whole-object
+    // (`let p = $props()`) capture is supported through the `$.rest_props` path, while
+    // a computed / numeric / nested / duplicate form fails closed.
     let variants: &[(&str, &str, Expected)] = &[
         // ── supported: no-default destructure ────────────────────────────────────
         ("plain", "let { a } = $props();", Expected::Supported),
@@ -1838,13 +1820,14 @@ fn generated_props_pattern_and_default_shapes_land_on_boundary() {
             "let { a = $bindable(0) } = $props();",
             Expected::Supported,
         ),
-        // ── demoted: out-of-boundary pattern shapes ──────────────────────────
+        // ── supported: the `$.rest_props` capture forms ──────────────────────
         (
             "rest",
             "let { a, ...rest } = $props();",
-            Expected::FailClosed,
+            Expected::Supported,
         ),
-        ("whole_object", "let p = $props();", Expected::FailClosed),
+        ("whole_object", "let p = $props();", Expected::Supported),
+        // ── demoted: out-of-boundary pattern shapes ──────────────────────────
         (
             "computed",
             "let k = 'x'; let { [k]: a } = $props();",
@@ -2543,11 +2526,16 @@ fn fail_matrix_covers_every_documented_sub_shape() {
     // (`{ a = [] }` → the lazy thunk), and `props_bindable`
     // (`{ value = $bindable(0) }` → the flag-11 prop source with the context
     // frame) — net −4 rows.
-    // With the effect-family remainder in place the matrix pins 181 rows.
+    // With the effect-family remainder in place the matrix pins 178 rows. The 5g-e
+    // `$props()` rest + whole-object capture vertical removed THREE rows now
+    // accepted-positive through the `$.rest_props` path (covered by the client-tests
+    // positives + the boundary matrix): `props_rest` (`{ a, ...rest }`), `props_whole`
+    // (`let p = $props()`), and `props_rest_spread` (`<div {...rest}>` element spread)
+    // — net −3 rows.
     assert_eq!(
         FAIL_MATRIX.len(),
-        181,
-        "the fail matrix pins 181 fail-closed rows — one documented \
+        178,
+        "the fail matrix pins 178 fail-closed rows — one documented \
          unsupported-feature sub-shape per row, EXCEPT the D-43 custom-element-host / \
          native-slotting rows, which are REPRESENTATIVE smoke probes for that \
          root-scoped over-refusal class (protected by the generic host-gate rows plus \

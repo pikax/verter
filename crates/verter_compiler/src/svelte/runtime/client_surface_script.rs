@@ -228,9 +228,12 @@ pub(super) fn classify_script_items(
     } else {
         Vec::new()
     };
-    // A non-basic `$props()` form (rest / whole-object / computed / numeric /
-    // nested destructure) is an advanced rune form that fails closed (defaults —
-    // plain and `$bindable` — are part of the basic prop-source surface).
+    // The `$props()` shape gate. A rest element (`{ …, ...rest }`) and a
+    // whole-object binding (`let all = $props()`) are BASIC — they lower through
+    // the `$.rest_props` capture path — alongside the named / aliased / string-key
+    // members and their plain / `$bindable` defaults. Only a genuinely non-basic
+    // form — a computed / numeric / nested-destructure member, over-arity args, or
+    // a duplicate `$props()` — is an advanced rune form that fails closed.
     if let Some(instance) = ir.analysis.scripts.instance_source {
         // A NON-`let` rune declarator (`var`/`const` `$state` / `$derived` /
         // `$props`) is a distinct official surface (`var` reads use `$.safe_get`; a

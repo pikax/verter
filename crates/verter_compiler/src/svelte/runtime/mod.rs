@@ -1407,6 +1407,25 @@ pub enum ClientCompileError {
     OfficialReject(OfficialRejection),
 }
 
+impl From<UnsupportedSvelteRuntimeSurface> for ClientCompileError {
+    /// Convert a REWRITER-CHANNEL refusal to the client compile error. The fallible
+    /// expression rewriter reports through `UnsupportedSvelteRuntimeSurface`, but a
+    /// [`UnsupportedSvelteRuntimeSurface::OfficialReject`] carrier is a mid-rewrite
+    /// OFFICIAL compile-error (a `$$`-member of a `$props()` rest / whole-object
+    /// binding → `props_illegal_name`), so it becomes a real
+    /// [`ClientCompileError::OfficialReject`] carrying the exact official code — NOT
+    /// the generic unsupported quadrant. Every other surface is a genuine
+    /// unsupported feature.
+    fn from(surface: UnsupportedSvelteRuntimeSurface) -> Self {
+        match surface {
+            UnsupportedSvelteRuntimeSurface::OfficialReject { rejection, .. } => {
+                ClientCompileError::OfficialReject(rejection)
+            }
+            other => ClientCompileError::Unsupported(other),
+        }
+    }
+}
+
 /// Compile a parsed Svelte component into the `svelte/internal/client` JS module
 /// (the carrier-facing entry).
 ///
@@ -1464,8 +1483,12 @@ pub fn compile_client<'a>(
     // interpolations are ACTUALLY reactive (a non-reactive one fails closed),
     // validates lvalues, and rewrites every script item + op through the FALLIBLE
     // rewriter into the NARROW `ClientModulePlan`.
+    // The rewriter reports through `UnsupportedSvelteRuntimeSurface`; the
+    // discriminating `From` conversion routes a mid-rewrite official-reject carrier
+    // (a `$$`-member of a rest / whole-object binding) to
+    // `ClientCompileError::OfficialReject`, everything else to `Unsupported`.
     let plan = client_plan::SupportedClientIr::build(&classified, &ir)
-        .map_err(ClientCompileError::Unsupported)?;
+        .map_err(ClientCompileError::from)?;
     // (5) Plan the static templates + topology, then emit from the NARROW plan only.
     let html_plan = plan_static_templates(&ir);
     let topology = plan_client_topology(&ir, &html_plan);

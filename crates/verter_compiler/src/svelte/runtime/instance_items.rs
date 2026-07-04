@@ -778,7 +778,8 @@ fn classify_instance_variable_decl(
         BindingPattern::ObjectPattern(_) => {
             // The ONLY supported destructure is a `$props()` call destructure.
             // The detailed member shape — plain and `$bindable(...)` defaults
-            // supported through the `$.prop` substrate; rest / computed /
+            // through the `$.prop` substrate, and a rest element
+            // (`{ …, ...rest }`) through the `$.rest_props` capture; computed /
             // numeric-key / nested patterns refused — is enforced by
             // `props_shape` upstream; here the declarator must be a `$props()`
             // call destructure.
@@ -847,14 +848,16 @@ fn classify_identifier_declarator(
                     init,
                 });
             }
-            // A `$derived` / `$props()` / other call init for an IDENTIFIER binding
-            // is not a supported shape (a `$derived` identifier is a deferral; a
-            // `$props()` identifier is a whole-object binding). Fail closed.
+            // A `$derived` identifier declarator init is a deferral. A `$props()`
+            // whole-object identifier binding (`let all = $props()`) is the
+            // prefix-only `$.rest_props` capture — it lowers through the SAME
+            // destructure path as an object pattern (the `props_shape` gate already
+            // accepted it as a basic shape).
             if is_derived_callee(&call.callee) {
                 return Err(refuse("$derived declarator"));
             }
             if is_props_callee(&call.callee) {
-                return Err(refuse("$props() whole-object"));
+                return Ok(SupportedInstanceScriptItem::PropsDestructure);
             }
             // A plain non-rune call init (`let x = makeIt()`) is not core. This is
             // also the CARRIER a `let s = $state.snapshot(c)` instance-script

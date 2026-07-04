@@ -12,7 +12,7 @@
 //!    binding-bearing read / reassign / update as a TYPED [`Occurrence`](plan::Occurrence) plus the
 //!    first unsupported expression form. Complete-by-construction: every override
 //!    delegates to `walk::walk_*`, so no subtree is dropped.
-//! 2. [`RewritePlanner`](plan::RewritePlanner) — turns the occurrences into [`CodeTransform`] edits, or a
+//! 2. [`RewritePlanner`](plan_planner::RewritePlanner) — turns the occurrences into [`CodeTransform`] edits, or a
 //!    refusal. A post-pass invariant asserts no resolved signal/prop occurrence was
 //!    left without a rewrite decision.
 //!
@@ -21,8 +21,9 @@
 //! handled STRUCTURALLY (never silently dropped, never mis-rewritten).
 //!
 //! It also owns the `$props()` READ-FORM vocabulary ([`PropRead`] / [`PropReads`])
-//! — the rewriter consumes it for a prop read, and the declaration lowering in
-//! [`super::expr_emit`] produces it (`collect_prop_reads`).
+//! — the rewriter consumes it for a prop read, and the unified
+//! [`PropsDeclaratorPlan`](super::expr_emit::PropsDeclaratorPlan) in
+//! [`super::expr_emit`] produces it.
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{Expression, Statement};
@@ -36,6 +37,8 @@ use rustc_hash::FxHashMap;
 use verter_span::Span as VerterSpan;
 
 mod plan;
+mod plan_planner;
+mod plan_render;
 
 /// A rewritten expression — the emitted client form of a template / handler /
 /// initializer expression. A thin wrapper around the emitted JS string; the
@@ -125,6 +128,21 @@ pub enum PropRead {
         /// The SOURCE prop key (the destructure key), which may differ from the
         /// local binding name under aliasing (`let { foo: bar }` → `foo`).
         source_key: String,
+    },
+    /// A `$props()` REST / WHOLE-OBJECT capture binding (`let { …, ...rest } =
+    /// $props()` / `let all = $props()`), declared `let <local> =
+    /// $.rest_props($$props, rest_excludes)`. A BARE read stays the verbatim real
+    /// local (`rest` / `all`); a MEMBER read is KEY-AWARE (owned by the member
+    /// visit, not the identifier leaf): `<local>.KEY` de-localizes to `$$props.KEY`
+    /// when KEY is NOT in `excludes`, else stays `<local>.KEY`.
+    RestBinding {
+        /// The exclude-key membership set (the fixed prefix + each non-rest source
+        /// key) — the SHARED set the unified [`super::expr_emit::PropsDeclaratorPlan`]
+        /// owns, carried as a cheap `Arc` clone so the hot member-visit exclude
+        /// lookup is O(1) and never clones the key `Vec`. (The ORDERED exclude Vec
+        /// for the emitted `new Set([…])` lives on the declarator plan / hoist, not
+        /// this read form.)
+        excludes: std::sync::Arc<rustc_hash::FxHashSet<String>>,
     },
 }
 

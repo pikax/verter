@@ -60,6 +60,18 @@ pub enum CoreOfficialValidationRule {
     /// objects are auto-injected legacy globals a runes-client reference would leave
     /// undefined).
     GlobalReferenceInvalid,
+    /// ACCESSING a prop whose NAME starts with `$$` on a `$props()` rest /
+    /// whole-object capture binding (`rest.$$slots` / `all.$$props` — a `$$`-prefixed
+    /// static MEMBER of the rest / whole-object binding) — official
+    /// `props_illegal_name` ("Declaring or accessing a prop starting with `$$` is
+    /// illegal (they are reserved for Svelte internals)"). Detected in the client
+    /// expression rewriter (`visit_static_member_expression`), where the rest/whole
+    /// binding resolves. DISTINCT from
+    /// [`DollarPrefixInvalid`](Self::DollarPrefixInvalid) (a `$$`-prefixed
+    /// DECLARATION name — `let { $$bad } = $props()`) and
+    /// [`GlobalReferenceInvalid`](Self::GlobalReferenceInvalid) (a bare
+    /// `$$props` / `$$restProps` reference) — neither reuses this code.
+    PropsIllegalName,
     /// A child element NESTED inside a same-or-disallowed ancestor that the browser
     /// would REPAIR (a `<button>` in a `<button>`, an `<a>` in an `<a>`, a heading in
     /// a heading) — official `node_invalid_placement`.
@@ -187,6 +199,7 @@ impl CoreOfficialValidationRule {
         CoreOfficialValidationRule::ScriptBodyParse,
         CoreOfficialValidationRule::DollarPrefixInvalid,
         CoreOfficialValidationRule::GlobalReferenceInvalid,
+        CoreOfficialValidationRule::PropsIllegalName,
         CoreOfficialValidationRule::NodeInvalidPlacement,
         CoreOfficialValidationRule::ElementInvalidClosingTagAutoclosed,
         CoreOfficialValidationRule::ElementUnclosed,
@@ -217,6 +230,7 @@ impl CoreOfficialValidationRule {
             Self::ScriptBodyParse => "ScriptBodyParse",
             Self::DollarPrefixInvalid => "DollarPrefixInvalid",
             Self::GlobalReferenceInvalid => "GlobalReferenceInvalid",
+            Self::PropsIllegalName => "PropsIllegalName",
             Self::NodeInvalidPlacement => "NodeInvalidPlacement",
             Self::ElementInvalidClosingTagAutoclosed => "ElementInvalidClosingTagAutoclosed",
             Self::ElementUnclosed => "ElementUnclosed",
@@ -263,6 +277,7 @@ impl CoreOfficialValidationRule {
             Self::ScriptBodyParse => "js_parse_error",
             Self::DollarPrefixInvalid => "dollar_prefix_invalid",
             Self::GlobalReferenceInvalid => "global_reference_invalid",
+            Self::PropsIllegalName => "props_illegal_name",
             Self::NodeInvalidPlacement => "node_invalid_placement",
             Self::ElementInvalidClosingTagAutoclosed => "element_invalid_closing_tag_autoclosed",
             Self::ElementUnclosed => "element_unclosed",
@@ -301,6 +316,7 @@ impl CoreOfficialValidationRule {
             Self::ScriptBodyParse => "svelte-official-reject-script-body-parse",
             Self::DollarPrefixInvalid => "svelte-official-reject-dollar-prefix-invalid",
             Self::GlobalReferenceInvalid => "svelte-official-reject-global-reference-invalid",
+            Self::PropsIllegalName => "svelte-official-reject-props-illegal-name",
             Self::NodeInvalidPlacement => "svelte-official-reject-node-invalid-placement",
             Self::ElementInvalidClosingTagAutoclosed => {
                 "svelte-official-reject-element-invalid-closing-tag-autoclosed"
@@ -344,6 +360,10 @@ impl CoreOfficialValidationRule {
             Self::DollarPrefixInvalid => "a `$`-prefixed binding name",
             Self::GlobalReferenceInvalid => {
                 "a global `$`-prefixed reference (an undeclared store-style `$foo`, a `$$foo`, or a reserved magic object)"
+            }
+            Self::PropsIllegalName => {
+                "declaring or accessing a prop whose name starts with `$$` (a `$$`-prefixed \
+                 member of a `$props()` rest / whole-object binding — reserved for Svelte internals)"
             }
             Self::NodeInvalidPlacement => {
                 "an invalid HTML placement (a nested `<a>` / `<button>`, or a heading inside a heading)"

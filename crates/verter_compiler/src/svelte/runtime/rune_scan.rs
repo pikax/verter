@@ -225,8 +225,11 @@ fn supported_rune_root_spans(program: &Program<'_>, is_instance: bool) -> FxHash
                         spans.insert(span);
                     }
                 }
-                // `$props()` in a DESTRUCTURE declarator position.
-                if is_destructure && is_props_callee(&call.callee) {
+                // `$props()` in a DESTRUCTURE declarator position OR a WHOLE-OBJECT
+                // IDENTIFIER capture (`let all = $props()`) — both lower through the
+                // `$.rest_props` / prop-read path (the shape gate already accepted
+                // the identifier form as a basic capture).
+                if (is_destructure || is_ident) && is_props_callee(&call.callee) {
                     if let Some(span) = rune_root_ident_span(&call.callee, "$props") {
                         spans.insert(span);
                     }

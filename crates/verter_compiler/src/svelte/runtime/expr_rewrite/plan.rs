@@ -26,7 +26,13 @@ use super::super::expr::{
     statement_position_user_effect_span, BindingRuntimeKind, BindingTable, EffectFamilyCallKind,
     ScopeGraph, ScopeId,
 };
+use super::super::official_rule::{CoreOfficialValidationRule, OfficialRejection};
 use super::super::unsupported::UnsupportedSvelteRuntimeSurface;
+use super::plan_planner::RewritePlanner;
+use super::plan_render::{
+    bare_member_rhs_verbatim_span, compound_base_operator, expression_contains_ts_only_syntax,
+    is_non_coercive_operator, props_member_access, state_snapshot_callee_span,
+};
 use super::{ClientLvalue, PropRead, PropReads, ProxyInitMap, RewriteRole};
 use rustc_hash::FxHashMap;
 use verter_span::Span as VerterSpan;
@@ -75,6 +81,8 @@ pub(super) fn plan_signal_edits(
         carrier_head_trivia,
         carrier_trivia_target,
         wrapper_heads: FxHashMap::default(),
+        member_write_target_spans: rustc_hash::FxHashSet::default(),
+        member_assign_rhs_verbatim_spans: rustc_hash::FxHashSet::default(),
     };
     // In the STATEMENT role the top-level expression IS the expression of a
     // statement (the effect-statement carrier), so a top-level user-effect call
@@ -95,13 +103,9 @@ pub(super) fn plan_signal_edits(
     // Pass 2 (RewritePlanner): every resolved signal/prop occurrence MUST carry a rewrite
     // decision (the post-pass invariant). Build the edits from the typed occurrences; a
     // `RewriteDecision::Refuse` returns the typed surface.
-    let mut planner = RewritePlanner {
-        edits: Vec::new(),
-        refusal: None,
-        unresolved: false,
-    };
+    let mut planner = RewritePlanner::new();
     planner.plan(&occurrences);
-    if let Some(surface) = planner.refusal {
+    if let Some(surface) = planner.take_refusal() {
         return Err(surface);
     }
     // POST-PASS ASSERTION: no resolved signal/prop occurrence may remain without a rewrite
@@ -109,15 +113,15 @@ pub(super) fn plan_signal_edits(
     // did not turn into an edit — a structural safeguard against a silent un-rewritten
     // signal read slipping through.
     debug_assert!(
-        !planner.unresolved,
+        !planner.unresolved(),
         "rewrite planner left a resolved signal/prop occurrence un-rewritten in `{source}`"
     );
-    if planner.unresolved {
+    if planner.unresolved() {
         return Err(UnsupportedSvelteRuntimeSurface::DestructuringWrite {
             span: VerterSpan::new(0, 0),
         });
     }
-    Ok(planner.edits)
+    Ok(planner.into_edits())
 }
 
 /// One mapped/unmapped edit the rewriter records over the wrapped expression
@@ -265,6 +269,25 @@ pub(super) struct BindingOccurrenceCollector<'s> {
     /// call-internal re-emission); the parens themselves stay in place. A call
     /// with no wrapper has no entry (the overwhelmingly common case).
     wrapper_heads: FxHashMap<(u32, u32), u32>,
+    /// The spans of the static-member expressions that are the DIRECT lvalue of
+    /// an assignment (`rest.x = 1`) or update (`rest.x++`) — the WRITE-LIKE
+    /// targets the `$props()` rest / whole-object member disposition keeps
+    /// VERBATIM. De-localization (`rest.KEY` → `$$props.KEY`) is READ-only, so a
+    /// direct member-write target stays local (oracle parity: the write mutates
+    /// the rest proxy, NOT the raw `$$props` bag). Recorded top-down (by
+    /// `record_assignment` / `record_update`) BEFORE the walk re-reaches the
+    /// member. A `delete rest.x` argument and a `for (rest.x of …)` left are
+    /// reference READS that DO de-localize (oracle-confirmed), so they are NOT
+    /// recorded here.
+    member_write_target_spans: rustc_hash::FxHashSet<(u32, u32)>,
+    /// The spans of the static-member READS that are the ENTIRE right-hand side of
+    /// a PLAIN `=` (`sink = rest.y`, paren-transparent) — kept VERBATIM alongside
+    /// the write targets. Official svelte@5.56.3 (`Identifier.js`) de-localizes
+    /// `rest.KEY` in every read position EXCEPT when its grand-parent is an
+    /// Assignment/Update (a COARSE position guard, NOT a read/write split); `=`
+    /// returns `right` unchanged, so a bare `rest.KEY` RHS stays local while `+=` /
+    /// `??=` / `rest.y.z` de-localize. LHS-agnostic; predicate in `record_assignment`.
+    member_assign_rhs_verbatim_spans: rustc_hash::FxHashSet<(u32, u32)>,
 }
 
 /// The end byte (EXCLUSIVE) of the opening `(` of an effect-family invocation
@@ -314,6 +337,21 @@ impl BindingOccurrenceCollector<'_> {
     /// Whether `name` resolves to a reactive SIGNAL (read via `$.get`).
     fn is_signal(&self, name: &str) -> bool {
         matches!(self.signal_kind(name), Some(k) if is_signal_kind(k))
+    }
+
+    /// The exclude-key membership set when `name` (UNSHADOWED) resolves to the
+    /// `$props()` rest / whole-object capture binding, else `None`. A local
+    /// shadowing the rest name is its own binding (`None`), so its member reads
+    /// are NOT key-rewritten. The set is the shared `Arc` the unified declarator
+    /// plan owns — the O(1) hot-path exclude lookup.
+    fn rest_binding_excludes(&self, name: &str) -> Option<&rustc_hash::FxHashSet<String>> {
+        if self.is_local(name) {
+            return None;
+        }
+        match self.ctx.prop_reads.get(name) {
+            Some(PropRead::RestBinding { excludes }) => Some(excludes),
+            _ => None,
+        }
     }
 
     /// Whether `name` resolves to a plain runes `$state` cell — a `StateSignal`
@@ -481,6 +519,29 @@ impl BindingOccurrenceCollector<'_> {
         }
     }
 
+    /// Record a static-member WRITE target's span (`rest.x` in `rest.x = 1` /
+    /// `rest.x++`) so the `$props()` rest / whole-object member disposition keeps
+    /// it VERBATIM — de-localization is READ-only. Called top-down (before the
+    /// walk re-reaches the member), so the span is set when
+    /// `visit_static_member_expression` fires for the target. Only the DIRECT
+    /// static-member lvalue matters; a computed / private-field target never hits
+    /// the static disposition, and a `delete` argument / for-in-of left is a
+    /// reference read that de-localizes (never recorded).
+    fn note_member_write_target(&mut self, object_member_span: oxc_span::Span) {
+        self.member_write_target_spans
+            .insert((object_member_span.start, object_member_span.end));
+    }
+
+    /// Record a static-member READ that is the ENTIRE RHS of a plain `=`
+    /// (`sink = rest.y`) so the rest / whole-object disposition keeps it VERBATIM
+    /// (oracle parity: the coarse Assignment-child guard keeps a bare `rest.KEY`
+    /// RHS local). The consumption site's rest-binding / exclude / `$$` gates decide
+    /// whether a recorded span is a rest member, so a non-rest span here is inert.
+    fn note_member_assign_rhs_verbatim(&mut self, member_span: oxc_span::Span) {
+        self.member_assign_rhs_verbatim_spans
+            .insert((member_span.start, member_span.end));
+    }
+
     /// Run the COMPLETE scope-aware walk over one expression node.
     fn rewrite_expr(&mut self, expr: &Expression<'_>) {
         self.visit_expression(expr);
@@ -580,19 +641,26 @@ impl BindingOccurrenceCollector<'_> {
             // zero-arg getter thunks defaulting to `$.noop`).
             Some(BindingRuntimeKind::SnippetParam) => Some(format!("{name}()")),
             Some(BindingRuntimeKind::Prop | BindingRuntimeKind::BindableProp) => {
-                Some(match self.ctx.prop_reads.get(name) {
+                match self.ctx.prop_reads.get(name) {
                     // A PROP-SOURCE member (default-bearing or written — declared
                     // via `$.prop`) reads as a getter call `name()`.
-                    Some(PropRead::Getter) => format!("{name}()"),
+                    Some(PropRead::Getter) => Some(format!("{name}()")),
                     // A non-source prop reads off the props object by its SOURCE
                     // key. A non-identifier-safe source key (`foo-bar`) reads via
                     // BRACKET access (`$$props['foo-bar']`); an identifier-safe key
                     // reads via dotted access (`$$props.foo`).
-                    Some(PropRead::PropsMember { source_key }) => props_member_access(source_key),
+                    Some(PropRead::PropsMember { source_key }) => {
+                        Some(props_member_access(source_key))
+                    }
+                    // A rest / whole-object capture binding: its BARE read stays
+                    // the verbatim real local (`let rest = $.rest_props(…)`). The
+                    // KEY-AWARE member read (`rest.KEY` → `$$props.KEY`) is owned by
+                    // the member-expression visit, NOT this identifier leaf.
+                    Some(PropRead::RestBinding { .. }) => None,
                     // No recorded read form — a plain props member by name (the
                     // binding name is always identifier-safe here).
-                    None => format!("$$props.{name}"),
-                })
+                    None => Some(format!("$$props.{name}")),
+                }
             }
             // A non-signal / shadowed identifier stays as the original source.
             _ => None,
@@ -657,7 +725,24 @@ impl BindingOccurrenceCollector<'_> {
     ///   TS-wrapped reactive write / a destructuring write).
     /// - A `Member` / `PlainIdent`: recurse both sides (no head rewrite).
     fn record_assignment(&mut self, assign: &AssignmentExpression<'_>) {
-        match self.classify_target(&assign.left) {
+        // A DIRECT static-member assignment target (`rest.x = 1`) is a WRITE — the
+        // rest / whole-object member disposition keeps it VERBATIM (READ-only
+        // de-localization). Record its span BEFORE the target is descended.
+        if let AssignmentTarget::StaticMemberExpression(m) = &assign.left {
+            self.note_member_write_target(m.span);
+        }
+        // A bare static `rest.KEY`/`all.KEY` WHOLE RHS stays VERBATIM under plain `=`
+        // (any target) OR a compound/logical `OP=` whose target is NOT a reassignable
+        // signal (svelte re-wraps `SignalIdent`/`PropSetter` → Binary → de-localizes).
+        let target = self.classify_target(&assign.left);
+        if assign.operator == AssignmentOperator::Assign
+            || matches!(target, ClientLvalue::PlainIdent | ClientLvalue::Member)
+        {
+            if let Some(span) = bare_member_rhs_verbatim_span(&assign.right) {
+                self.note_member_assign_rhs_verbatim(span);
+            }
+        }
+        match target {
             ClientLvalue::SignalIdent { name } => {
                 let left_start = assign.left.span().start;
                 let rhs_start = assign.right.span().start;
@@ -782,6 +867,12 @@ impl BindingOccurrenceCollector<'_> {
     /// - A `Member` / `PlainIdent`: recurse the object base (a `BareProxy` member
     ///   update stays plain).
     fn record_update(&mut self, update: &UpdateExpression<'_>) {
+        // A DIRECT static-member update target (`rest.x++`) is a WRITE — the rest /
+        // whole-object member disposition keeps it VERBATIM (READ-only
+        // de-localization). Record its span BEFORE the walk re-reaches the member.
+        if let SimpleAssignmentTarget::StaticMemberExpression(m) = &update.argument {
+            self.note_member_write_target(m.span);
+        }
         match self.classify_simple_target(&update.argument) {
             ClientLvalue::SignalIdent { name } => {
                 let helper = if update.prefix {
@@ -1204,6 +1295,85 @@ impl<'a> Visit<'a> for BindingOccurrenceCollector<'_> {
         walk::walk_expression_statement(self, it);
     }
 
+    fn visit_static_member_expression(&mut self, it: &oxc_ast::ast::StaticMemberExpression<'a>) {
+        // A KEY-AWARE `$props()` rest / whole-object MEMBER (`rest.KEY` / `all.KEY`).
+        // The bare-`rest` leaf is verbatim (its `RestBinding` read form is `None`),
+        // so the member is decided HERE, over the STATIC key. Author parens around
+        // the IMMEDIATE object are transparent (official's ESTree AST has no paren
+        // nodes), so `(rest).KEY` / `((rest)).KEY` peel to the same root — the peel
+        // is object-only and never descends a nested member chain, so `rest.x.y`
+        // still keys on its ROOT property `x` (the inner member visit de-localizes
+        // `x`), and a computed member (`rest['x']`) never reaches this static
+        // visitor (it stays verbatim). The disposition, in order:
+        //  - a `$$`-prefixed KEY is the reserved magic namespace — an OFFICIAL
+        //    compile error (`props_illegal_name`), fired regardless of excludes, of
+        //    parens, and of read/write position;
+        //  - a WRITE-LIKE target (`rest.KEY = …` / `rest.KEY++`) OR a bare `rest.KEY`
+        //    that is the entire RHS of a plain `=` (`sink = rest.KEY`) stays the
+        //    verbatim `rest.KEY` — the two span sets the oracle's coarse
+        //    Assignment/Update-child guard keeps local (de-localization is READ-only
+        //    for the write, position-suppressed for the plain-`=` read);
+        //  - a READ with a NON-excluded KEY de-localizes the OBJECT identifier
+        //    (`rest` / `all`) to `$$props`, replacing ONLY the object span so the
+        //    optional axis (`?.`), the property spelling, and any downstream chain
+        //    stay verbatim from source: `rest.x` → `$$props.x`, `rest?.x` →
+        //    `$$props?.x`, `rest?.x.y` → `$$props?.x.y`. Subtree NOT descended;
+        //  - a READ with an EXCLUDED KEY stays the verbatim `rest.KEY` (the rest
+        //    object owns that member) — record nothing, do not descend.
+        if let Expression::Identifier(root) = peel_parens(&it.object) {
+            if let Some(excludes) = self.rest_binding_excludes(root.name.as_str()) {
+                let key = it.property.name.as_str();
+                if key.starts_with("$$") {
+                    // A `$$`-prefixed member of a rest / whole-object binding is the
+                    // reserved magic namespace — an OFFICIAL compile error
+                    // (`props_illegal_name`), carried out through the rewriter's
+                    // official-reject channel (NOT the generic magic-identifier
+                    // unsupported surface). Fires regardless of excludes, of parens
+                    // (the peel above sees through them), and of read/write position.
+                    self.refuse(UnsupportedSvelteRuntimeSurface::OfficialReject {
+                        rejection: OfficialRejection::of(
+                            CoreOfficialValidationRule::PropsIllegalName,
+                        ),
+                        span: VerterSpan::new(it.span.start, it.span.end),
+                    });
+                    return;
+                }
+                // A WRITE-LIKE target OR a plain-`=` bare-member RHS stays verbatim
+                // (the coarse Assignment/Update-child guard — see the header above).
+                let span = (it.span.start, it.span.end);
+                if self.member_write_target_spans.contains(&span)
+                    || self.member_assign_rhs_verbatim_spans.contains(&span)
+                {
+                    return;
+                }
+                if !excludes.contains(key) {
+                    // Replace ONLY the OBJECT identifier span (`rest` / `all` →
+                    // `$$props`), NOT the whole member span, so the `?.` optional
+                    // axis, the property spelling, and any downstream chain stay
+                    // verbatim from source: `rest.x` → `$$props.x`, `rest?.x` →
+                    // `$$props?.x`, `rest?.x.y` → `$$props?.x.y`, `rest?.x?.y` →
+                    // `$$props?.x?.y`. For an ASCII-identifier key the non-optional
+                    // result is byte-identical to a dotted `props_member_access(key)`
+                    // (`$$props.KEY`); for a non-ASCII/Unicode static key the preserved
+                    // dotted spelling (`rest.café` → `$$props.café`) is official
+                    // svelte's form, whereas `props_member_access` — bracketing under
+                    // its ASCII-only `is_js_identifier` guard — emits `$$props['café']`.
+                    // (Numeric / hyphenated keys reach only the computed-member path,
+                    // never this static visitor, so Unicode is the sole non-ASCII
+                    // class here.) `it.object.span()` covers the whole object
+                    // subexpression (a peeled paren wrapper included), so `(rest).x`
+                    // → `$$props.x` exactly like official.
+                    self.occurrences.push(Occurrence::ReadRewrite {
+                        span: it.object.span(),
+                        text: "$$props".to_string(),
+                    });
+                }
+                return;
+            }
+        }
+        walk::walk_static_member_expression(self, it);
+    }
+
     fn visit_identifier_reference(&mut self, it: &IdentifierReference<'a>) {
         // An UNSHADOWED `$inspect` reference reaching a NON-elided position (a
         // concise arrow body `() => $inspect.trace()` — an official ERROR
@@ -1259,237 +1429,8 @@ impl<'a> Visit<'a> for BindingOccurrenceCollector<'_> {
     }
 }
 
-/// Pass 2: the rewrite PLANNER. It consumes the typed occurrences pass 1 recorded
-/// and emits the CodeTransform edits, OR records a refusal. A `MustRewrite`
-/// occurrence that the planner cannot turn into an edit sets `unresolved` — the
-/// post-pass invariant (no resolved signal/prop occurrence left un-rewritten).
-pub(super) struct RewritePlanner {
-    /// The emitted edits (disjoint, applied in record order).
-    edits: Vec<Edit>,
-    /// The first refusal, if any.
-    refusal: Option<UnsupportedSvelteRuntimeSurface>,
-    /// Set when an occurrence that MUST rewrite was left without an edit (the
-    /// post-pass safeguard).
-    unresolved: bool,
-}
-
-impl RewritePlanner {
-    /// Turn each occurrence into its edits. Every occurrence variant carries a
-    /// concrete rewrite decision, so the planner always emits the edits (the
-    /// `unresolved` flag stays false on the supported path) — it exists as the
-    /// structural seam the post-pass invariant asserts against.
-    fn plan(&mut self, occurrences: &[Occurrence]) {
-        for occ in occurrences {
-            match occ {
-                Occurrence::ReadRewrite { span, text } => {
-                    self.edits.push(Edit::Overwrite {
-                        start: span.start,
-                        end: span.end,
-                        text: text.clone(),
-                    });
-                }
-                Occurrence::SignalReassign {
-                    head_span,
-                    head_text,
-                    append_at,
-                    append_text,
-                } => {
-                    self.edits.push(Edit::Overwrite {
-                        start: head_span.start,
-                        end: head_span.end,
-                        text: head_text.clone(),
-                    });
-                    self.edits.push(Edit::Append {
-                        at: *append_at,
-                        text: append_text.clone(),
-                    });
-                }
-                Occurrence::SignalUpdate { span, text } => {
-                    self.edits.push(Edit::Overwrite {
-                        start: span.start,
-                        end: span.end,
-                        text: text.clone(),
-                    });
-                }
-                Occurrence::WrapCall {
-                    insert_at,
-                    head_text,
-                    append_at,
-                    append_text,
-                } => {
-                    self.edits.push(Edit::Insert {
-                        at: *insert_at,
-                        text: head_text.clone(),
-                    });
-                    self.edits.push(Edit::Append {
-                        at: *append_at,
-                        text: append_text.clone(),
-                    });
-                }
-                Occurrence::DropStatement { span }
-                | Occurrence::RelocatedWrapperComment { span } => {
-                    self.edits.push(Edit::Remove {
-                        start: span.start,
-                        end: span.end,
-                    });
-                }
-            }
-        }
-    }
-}
-
-/// Whether `expr` contains a TS-only wrapper expression (`x!` / `x as T` /
-/// `x satisfies T` / `<T>x` / `x<T>`) at ANY depth — the recursive
-/// computed-KEY half of the TS-wrapped prop-chain write gate
-/// ([`BindingOccurrenceCollector::member_lvalue_is_ts_wrapped_prop_chain`]).
-/// Structural over the parsed OXC nodes through the exhaustive `walk`
-/// traversal (every sub-expression — call arguments, nested members, arrow
-/// bodies — is reached; `String(k as any)` is found), never a text scan. The
-/// wrapper kinds are exactly the five the chain walk itself peels.
-fn expression_contains_ts_only_syntax(expr: &Expression<'_>) -> bool {
-    struct TsOnlySyntaxDetector {
-        found: bool,
-    }
-    impl<'a> Visit<'a> for TsOnlySyntaxDetector {
-        fn visit_expression(&mut self, it: &Expression<'a>) {
-            if self.found {
-                return;
-            }
-            if matches!(
-                it,
-                Expression::TSNonNullExpression(_)
-                    | Expression::TSAsExpression(_)
-                    | Expression::TSSatisfiesExpression(_)
-                    | Expression::TSTypeAssertion(_)
-                    | Expression::TSInstantiationExpression(_)
-            ) {
-                self.found = true;
-                return;
-            }
-            walk::walk_expression(self, it);
-        }
-    }
-    let mut detector = TsOnlySyntaxDetector { found: false };
-    detector.visit_expression(expr);
-    detector.found
-}
-
-/// Whether a call expression's callee is the `$state.snapshot` rune member — a
-/// CallExpression whose (paren-peeled) callee is the static `.snapshot` member on
-/// the (paren-peeled) bare `$state` identifier. BOTH callee paren positions are
-/// transparent (`($state).snapshot(x)`, `($state.snapshot)(x)`, doubled or
-/// combined) — official's ESTree AST has no paren nodes, and the rune-scan
-/// exemption peels the SAME way, so the scan model and this matcher agree.
-/// Returns the span of the WHOLE callee — paren-INCLUSIVE — so replacing it with
-/// the `$.snapshot` helper leaves no paren residue (a member-span-only overwrite
-/// would emit `($.snapshot)(x)`); on the paren-less spelling the callee span IS
-/// the member span. Shadowing (`$state` a local) is the CALLER's check (the
-/// collector consults its own local shadow frames). Driven from the typed OXC
-/// AST only.
-fn state_snapshot_callee_span(call: &CallExpression<'_>) -> Option<oxc_span::Span> {
-    let Expression::StaticMemberExpression(member) = peel_parens(&call.callee) else {
-        return None;
-    };
-    if member.property.name.as_str() != "snapshot" {
-        return None;
-    }
-    if matches!(peel_parens(&member.object), Expression::Identifier(id) if id.name.as_str() == "$state")
-    {
-        // Only the WELL-FORMED single-non-spread-arg form is the supported
-        // `$.snapshot(<expr>)` rewrite. Official rejects a zero-arg / >=2-arg call
-        // (`rune_invalid_arguments_length`) and a spread arg (`rune_invalid_spread`) —
-        // oracle-verified against `svelte@5.56.3` at every paren position. The
-        // rune-scan gate fails those closed upstream so this rewriter never runs on
-        // them; this arity/spread guard is defense-in-depth so the rewriter can NEVER
-        // emit a raw `$.snapshot()` / `$.snapshot(a, b)` / `$.snapshot(...o)` even if
-        // reached.
-        if call.arguments.len() != 1 || call.arguments[0].as_expression().is_none() {
-            return None;
-        }
-        Some(call.callee.span())
-    } else {
-        None
-    }
-}
-
-/// The base operator of a compound assignment (`+=` → `+`, `*=` → `*`, …).
-fn compound_base_operator(op: AssignmentOperator) -> &'static str {
-    match op {
-        AssignmentOperator::Addition => "+",
-        AssignmentOperator::Subtraction => "-",
-        AssignmentOperator::Multiplication => "*",
-        AssignmentOperator::Division => "/",
-        AssignmentOperator::Remainder => "%",
-        AssignmentOperator::Exponential => "**",
-        AssignmentOperator::ShiftLeft => "<<",
-        AssignmentOperator::ShiftRight => ">>",
-        AssignmentOperator::ShiftRightZeroFill => ">>>",
-        AssignmentOperator::BitwiseOR => "|",
-        AssignmentOperator::BitwiseXOR => "^",
-        AssignmentOperator::BitwiseAnd => "&",
-        AssignmentOperator::LogicalOr => "||",
-        AssignmentOperator::LogicalAnd => "&&",
-        AssignmentOperator::LogicalNullish => "??",
-        AssignmentOperator::Assign => "=",
-    }
-}
-
-/// Whether an assignment operator is NON-COERCIVE — the official
-/// `is_non_coercive_operator` set (`=`, `||=`, `&&=`, `??=`). Only these gate the
-/// proxy `, true` on a reassignment; a coercive compound (`+=`, `*=`, `<<=`, …)
-/// always evaluates to a primitive and never proxies.
-fn is_non_coercive_operator(op: AssignmentOperator) -> bool {
-    matches!(
-        op,
-        AssignmentOperator::Assign
-            | AssignmentOperator::LogicalOr
-            | AssignmentOperator::LogicalAnd
-            | AssignmentOperator::LogicalNullish
-    )
-}
-
-/// Build the `$$props` member access for a no-default prop's SOURCE key. An
-/// identifier-safe key reads via DOTTED access (`$$props.foo`); a key that is not
-/// a valid JS identifier (`foo-bar`, a numeric key, a key with quotes) reads via
-/// BRACKET access with a properly-escaped JS string literal (`$$props['foo-bar']`).
-fn props_member_access(source_key: &str) -> String {
-    if is_js_identifier(source_key) {
-        format!("$$props.{source_key}")
-    } else {
-        format!("$$props[{}]", js_string_literal(source_key))
-    }
-}
-
-/// Whether `name` is a valid plain JS identifier (so a `$$props.<name>` dotted
-/// access is valid). A `$state`-style `$`/`_`-prefixed name qualifies; a `foo-bar`
-/// / numeric-leading / empty name does not (it requires bracket access).
-fn is_js_identifier(name: &str) -> bool {
-    let mut chars = name.chars();
-    match chars.next() {
-        Some(c) if c.is_ascii_alphabetic() || c == '_' || c == '$' => {}
-        _ => return false,
-    }
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
-}
-
-/// Render `value` as a single-quoted JS string literal, escaping backslash, the
-/// single-quote delimiter, and the line terminators — so an arbitrary destructure
-/// key (`foo-bar`, `it's`, a key with a newline) interpolates into emitted JS
-/// SAFELY (no broken `'<key>'`).
-pub(super) fn js_string_literal(value: &str) -> String {
-    let mut out = String::with_capacity(value.len() + 2);
-    out.push('\'');
-    for c in value.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '\'' => out.push_str("\\'"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\u{2028}' => out.push_str("\\u2028"),
-            '\u{2029}' => out.push_str("\\u2029"),
-            _ => out.push(c),
-        }
-    }
-    out.push('\'');
-    out
-}
+// The leaf classification + rendering helpers the two passes consume —
+// `expression_contains_ts_only_syntax`, `state_snapshot_callee_span`, the
+// assignment-operator tables (`compound_base_operator` /
+// `is_non_coercive_operator`), and `props_member_access` — live in the sibling
+// [`super::plan_render`] module (imported at the top of this file).

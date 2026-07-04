@@ -99,13 +99,16 @@ pub(super) struct ClientModulePlan<'a> {
 ///    expression arena, resolved through each expression's own scope;
 /// 2. `$props()` DEFAULT expressions (a self write `{ a = (a = 1) }`, a sibling
 ///    write `{ a = (b.x++), b = {} }`, plain or `$bindable(...)`) — enumerated
-///    through the SAME typed member-plan authority the `$.prop` lowering
-///    consumes ([`expr_emit::props_member_plans`]) and harvested with the SAME
-///    shared reference collector the template arena uses
+///    through the SAME unified [`expr_emit::PropsDeclaratorPlan`] the `$.prop`
+///    lowering consumes (its member default spans, no separate re-scan) and
+///    harvested with the SAME shared reference collector the template arena uses
 ///    ([`super::expr::collect_expr_references`] — expression-local shadowers
 ///    such as an arrow param already excluded), resolved at the instance ROOT
 ///    scope (where the defaults lexically live).
-fn collect_prop_updated_locals(ir: &SvelteRuntimeIr) -> rustc_hash::FxHashSet<String> {
+fn collect_prop_updated_locals(
+    ir: &SvelteRuntimeIr,
+    decl_plan: Option<&expr_emit::PropsDeclaratorPlan>,
+) -> rustc_hash::FxHashSet<String> {
     let mut updated = rustc_hash::FxHashSet::default();
     let mark_prop_writes =
         |scope: ScopeId,
@@ -129,16 +132,15 @@ fn collect_prop_updated_locals(ir: &SvelteRuntimeIr) -> rustc_hash::FxHashSet<St
     for expr in ir.analysis.expressions.all() {
         mark_prop_writes(expr.scope, &expr.references, &mut updated);
     }
-    // (2) The `$props()` default expressions. A default that fails the wrapped
-    // reparse contributes nothing here — the same slice refuses the shared
-    // rewriter at lowering, so the component never emits with a missed mark.
-    if let Some(instance) = ir.analysis.scripts.instance_source {
-        let alloc = Allocator::default();
+    // (2) The `$props()` default expressions, read off the UNIFIED plan's member
+    // default spans (no separate declarator re-scan). A default that fails the
+    // wrapped reparse contributes nothing here — the same slice refuses the
+    // shared rewriter at lowering, so the component never emits with a missed
+    // mark.
+    if let (Some(instance), Some(plan)) = (ir.analysis.scripts.instance_source, decl_plan) {
         let root_scope = ir.root_scope().scope;
-        for plan in
-            expr_emit::props_member_plans(&alloc, instance, &rustc_hash::FxHashSet::default())
-        {
-            let Some(default) = &plan.default else {
+        for member in &plan.members {
+            let Some(default) = &member.default else {
                 continue;
             };
             let Some(src) = instance.get(default.span.0 as usize..default.span.1 as usize) else {
@@ -153,12 +155,79 @@ fn collect_prop_updated_locals(ir: &SvelteRuntimeIr) -> rustc_hash::FxHashSet<St
     updated
 }
 
+/// The resolved `$props()` rest / whole-object capture hoist facts: the ALLOCATED
+/// module-scope `rest_excludes` Set var name (collision-renamed through the SAME
+/// seeded uniquifier the emitter's DOM vars use — the official `scope.root.unique`
+/// equivalent), the ordered exclude keys the `new Set([…])` literal quotes, and
+/// the local binding name the `$.rest_props($$props, rest_excludes)` declarator
+/// binds. Resolved ONCE at plan build so the module hoist (emitter) and the body
+/// declarator (plan) reference the SAME allocated name — never two independently
+/// chosen names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct RestPropsHoist {
+    /// The rest / whole-object local binding name (`rest` / `all`).
+    pub(super) local: String,
+    /// The allocated module-scope `rest_excludes` Set var name.
+    pub(super) set_name: String,
+    /// The ordered exclude keys (the fixed prefix + each non-rest source key).
+    pub(super) excludes: Vec<String>,
+}
+
+/// Seed the reserved-name union an allocated stem must avoid — the UNION of every
+/// top-level script binding ([`SupportedClientIr::declared_roots`]), every recorded
+/// binding-table name (template-scope bindings included), every free
+/// template-expression reference, and the runtime-magic reserved literals. This is
+/// the official `scope.generate` reservation set; both the emitter's DOM-var
+/// allocator and the plan-time `rest_excludes` allocation seed from it so a
+/// generated stem never collides with a user/template binding.
+pub(super) fn seed_reserved_names(build: &SupportedClientIr<'_>) -> rustc_hash::FxHashSet<String> {
+    let mut used = rustc_hash::FxHashSet::default();
+    for name in &build.declared_roots {
+        used.insert(name.clone());
+    }
+    for binding in build.ir.analysis.bindings.all() {
+        used.insert(binding.name.clone());
+    }
+    for analyzed in build.ir.analysis.expressions.all() {
+        for reference in &analyzed.references {
+            used.insert(reference.name.clone());
+        }
+    }
+    for reserved in ["$", "$$anchor", "$$props", "$$value"] {
+        used.insert(reserved.to_string());
+    }
+    used
+}
+
+/// Allocate a deterministic variable name from a preferred stem, appending a `_N`
+/// suffix on collision (mirroring the official allocator's stem + counter). Shared
+/// by the plan-time `rest_excludes` allocation and the emitter's DOM-var allocator
+/// so both uniquify identically.
+pub(super) fn alloc_unique_name(used: &mut rustc_hash::FxHashSet<String>, stem: &str) -> String {
+    if used.insert(stem.to_string()) {
+        return stem.to_string();
+    }
+    let mut n = 1;
+    loop {
+        let candidate = format!("{stem}_{n}");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
 /// The semantic projection stage — it attaches the reactivity / lvalue / prop-read
 /// facts the narrow plan needs, then builds the [`ClientModulePlan`].
 pub(super) struct SupportedClientIr<'a> {
     /// The runtime IR (read for the structural template walk + the reactive-text
     /// rewrite at emit time).
     pub(super) ir: &'a SvelteRuntimeIr<'a>,
+    /// The UNIFIED `$props()` declarator plan — the SINGLE scan authority (built
+    /// ONCE in [`Self::build`]) that produces the prop-read forms, feeds the
+    /// prop-updated harvest, and drives the `$.prop` destructure lowering. `None`
+    /// for a component with no `$props()`.
+    pub(super) decl_plan: Option<expr_emit::PropsDeclaratorPlan>,
     /// The component's `$props()` read forms.
     pub(super) prop_reads: PropReads,
     /// The prop LOCAL names WRITTEN anywhere (a template-expression or
@@ -171,6 +240,12 @@ pub(super) struct SupportedClientIr<'a> {
     pub(super) proxy_inits: ProxyInitMap,
     /// The component-declared root names (the `has_call` memoizer `is_pure` input).
     pub(super) declared_roots: rustc_hash::FxHashSet<String>,
+    /// The resolved `$props()` rest / whole-object capture hoist (the allocated
+    /// `rest_excludes` Set name + ordered exclude keys + local binding name), or
+    /// `None` for a component with no rest / whole-object `$props()` capture. Read
+    /// by BOTH the body declarator ([`Self::lower_props_destructure`]) and the
+    /// emitter's module hoist so they reference the SAME allocated name.
+    pub(super) rest_props: Option<RestPropsHoist>,
     /// The accepted event-handler shape per (target node, event type, handler expr) —
     /// the classifier's typed FACT, keyed precisely so an element with multiple events
     /// resolves each to its own shape; the op projection carries it onto each
@@ -264,16 +339,25 @@ impl<'a> SupportedClientIr<'a> {
         ir: &'a SvelteRuntimeIr<'a>,
     ) -> Result<ClientModulePlan<'a>, UnsupportedSvelteRuntimeSurface> {
         let alloc = Allocator::default();
-        // The prop WRITE facts (a template-expression or `$props()`-default
-        // reassign / deep-mutate resolving to a prop binding) — the `updated` flag
-        // axis. Computed BEFORE the read forms so a written prop's reads flip to
-        // the getter (`is_prop_source`).
-        let prop_updated = collect_prop_updated_locals(ir);
-        let prop_reads = ir
+        // The UNIFIED `$props()` declarator plan — ONE scan of the accepted
+        // declarator, built here after upstream validation and threaded to EVERY
+        // consumer (the prop-updated harvest, the read forms, the `$.rest_props`
+        // hoist, and the `$.prop` destructure lowering). `None` when there is no
+        // `$props()`.
+        let decl_plan = ir
             .analysis
             .scripts
             .instance_source
-            .map(|src| expr_emit::collect_prop_reads(&alloc, src, &prop_updated))
+            .and_then(|src| expr_emit::PropsDeclaratorPlan::build(&alloc, src));
+        // The prop WRITE facts (a template-expression or `$props()`-default
+        // reassign / deep-mutate resolving to a prop binding) — the `updated` flag
+        // axis. Computed BEFORE the read forms so a written prop's reads flip to
+        // the getter (`is_prop_source`); harvested from the unified plan's member
+        // default spans.
+        let prop_updated = collect_prop_updated_locals(ir, decl_plan.as_ref());
+        let prop_reads = decl_plan
+            .as_ref()
+            .map(|plan| plan.prop_reads(&prop_updated))
             .unwrap_or_default();
         // The per-instance proxy-init map — threaded into the TEMPLATE-side rewrite
         // so a handler `o = primitiveVar` does NOT proxy (the one-hop follow).
@@ -291,10 +375,12 @@ impl<'a> SupportedClientIr<'a> {
         );
         let mut projection = SupportedClientIr {
             ir,
+            decl_plan,
             prop_reads,
             prop_updated,
             proxy_inits,
             declared_roots,
+            rest_props: None,
             event_shapes: classified.event_shapes.clone(),
             bind_shapes: classified.bind_shapes.clone(),
             group_values: classified.group_values.clone(),
@@ -348,6 +434,29 @@ impl<'a> SupportedClientIr<'a> {
                 });
             }
         }
+
+        // (0) Resolve the `$props()` rest / whole-object capture hoist BEFORE the
+        // body statements: allocate the module-scope `rest_excludes` Set name once
+        // through the seeded uniquifier (the official `scope.root.unique`
+        // equivalent), so the body declarator ([`lower_props_destructure`], reached
+        // through `build_script_items` next) and the emitter's module hoist
+        // reference the SAME name. The capture facts come from the UNIFIED plan (no
+        // re-scan); the owned `(local, excludes)` is lifted out first so the
+        // seed-reservation borrow of `projection` does not overlap the plan borrow.
+        let rest_capture = projection
+            .decl_plan
+            .as_ref()
+            .and_then(|plan| plan.rest.as_ref())
+            .map(|rest| (rest.local.clone(), rest.excludes.clone()));
+        projection.rest_props = rest_capture.map(|(local, excludes)| {
+            let mut used = seed_reserved_names(&projection);
+            let set_name = alloc_unique_name(&mut used, "rest_excludes");
+            RestPropsHoist {
+                local,
+                set_name,
+                excludes,
+            }
+        });
 
         // (1) The component-body statements from the TYPED instance-script item
         // allowlist (a `<script module>` / instance import is fail-closed upstream, so
@@ -545,33 +654,45 @@ impl<'a> SupportedClientIr<'a> {
         let Some(instance) = self.ir.analysis.scripts.instance_source else {
             return Ok(None);
         };
-        let alloc = Allocator::default();
-        let plans = expr_emit::props_member_plans(&alloc, instance, &self.prop_updated);
         let mut decls = Vec::new();
-        for plan in &plans {
-            if !plan.is_prop_source() {
+        // The named prop-source members, off the UNIFIED declarator plan (no
+        // re-scan). `is_prop_source` / the `UPDATED` flag consult the shared
+        // `prop_updated` set the same plan's default spans helped harvest.
+        for member in self.decl_plan.iter().flat_map(|plan| plan.members.iter()) {
+            if !member.is_prop_source(&self.prop_updated) {
                 continue;
             }
             // IMMUTABLE | RUNES — always set on Verter's runes-only surface.
             let mut flags = 3u8;
-            if plan.updated {
+            if self.prop_updated.contains(&member.local) {
                 flags |= 4;
             }
-            if plan.bindable {
+            if member.bindable {
                 flags |= 8;
             }
-            let arg = match &plan.default {
+            let arg = match &member.default {
                 None => None,
                 Some(facts) => {
-                    Some(self.lower_props_default(instance, plan, facts, &mut flags, root_scope)?)
+                    Some(self.lower_props_default(instance, member, facts, &mut flags, root_scope)?)
                 }
             };
-            let key = js_single_quoted(&plan.source_key);
+            let key = js_single_quoted(&member.source_key);
             let call = match arg {
                 Some(arg) => format!("$.prop($$props, {key}, {flags}, {arg})"),
                 None => format!("$.prop($$props, {key}, {flags})"),
             };
-            decls.push(format!("{} = {call}", plan.local));
+            decls.push(format!("{} = {call}", member.local));
+        }
+        // The `$.rest_props` capture declarator, at the rest pattern's SOURCE
+        // position (LAST, after the named prop-source decls): `<local> =
+        // $.rest_props($$props, <rest_excludes>)`. For a whole-object capture
+        // (`let all = $props()`) there are NO named prop-source decls, so this is
+        // the sole declarator (`let all = $.rest_props(…)`).
+        if let Some(rest) = &self.rest_props {
+            decls.push(format!(
+                "{} = $.rest_props($$props, {})",
+                rest.local, rest.set_name
+            ));
         }
         if decls.is_empty() {
             return Ok(None);

@@ -9,13 +9,15 @@
 //! source-derived payload routes through it) is the FALLIBLE two-pass rewriter in
 //! [`super::expr_rewrite`].
 
+use std::sync::Arc;
+
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{BindingPattern, CallExpression, Expression, Statement};
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::expr::{
     expr_is_proxiable, is_bindable_call, is_props_callee, peel_parens, reparse_module,
-    state_rune_call, BindingTable, StateLowering,
+    state_rune_call, BindingTable, ProxyInit, StateLowering,
 };
 use super::expr_rewrite::{PropRead, PropReads};
 
@@ -279,49 +281,197 @@ pub enum PropsShape {
     None,
     /// A basic destructure: `let { a, b = 1, c = $bindable(0) } = $props()` —
     /// named / aliased / string-key members, with optional defaults (including
-    /// `$bindable(...)` defaults). No rest, no whole-object binding, no
-    /// computed / numeric keys, no nested destructure.
+    /// `$bindable(...)` defaults). ALSO carries the `$.rest_props` capture forms:
+    /// a `{ …, ...rest }` rest element and a whole-object `let all = $props()`
+    /// identifier binding (both lower their `rest_excludes` Set + `$.rest_props`
+    /// declarator through the destructure path). No computed / numeric keys, no
+    /// nested destructure.
     BasicDestructure,
-    /// An advanced form that fails closed (a rest member, a whole-object
-    /// identifier binding, a computed / numeric key, or a nested destructure).
+    /// An advanced form that fails closed (a computed / numeric key, or a nested
+    /// destructure).
     Advanced {
         /// A short rune label for the diagnostic.
         rune: &'static str,
     },
 }
 
-/// Collect the per-name `$props()` read forms from the instance script through
-/// the SHARED member-plan authority ([`props_member_plans`]): a PROP-SOURCE
-/// member (a default-bearing OR written member — the official `is_prop_source`)
-/// is declared via `$.prop` and reads as a getter call (`name()`); a
-/// non-source member reads directly off the props object (`$$props.name`).
-/// `updated_locals` is the set of prop LOCAL names written anywhere (a
-/// template-expression or `$props()`-default reassign / deep-mutate). An empty
-/// map when there is no `$props()`.
-#[must_use]
-pub fn collect_prop_reads(
-    alloc: &Allocator,
-    instance_source: &str,
-    updated_locals: &FxHashSet<String>,
-) -> PropReads {
-    let mut reads = PropReads::default();
-    for plan in props_member_plans(alloc, instance_source, updated_locals) {
-        let read = if plan.is_prop_source() {
-            PropRead::Getter
-        } else {
-            PropRead::PropsMember {
-                source_key: plan.source_key.clone(),
+/// The UNIFIED `$props()` declarator facts — the SINGLE scan authority for a
+/// component's ONE accepted `$props()` declarator, built ONCE (after the
+/// malformed shapes are refused upstream) and threaded to every consumer: the
+/// prop-read forms ([`Self::prop_reads`]), the `$.rest_props` module hoist, and
+/// the `$.prop` destructure lowering. There is no second scan / second authority
+/// for the same declarator.
+///
+/// It carries the named member plans, the optional rest / whole-object capture,
+/// and (on the capture) BOTH the ordered exclude `Vec` (the emitted
+/// `new Set([…])` order) and a shared `Arc<FxHashSet>` membership set (the hot
+/// member-visit exclude lookup). The prop-source / read forms are computed on
+/// demand from the caller's `updated_locals` (which itself is derived from this
+/// plan's member default spans — the one input the read forms depend on).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PropsDeclaratorPlan {
+    /// The named / aliased / string-key member plans, in source order.
+    pub(super) members: Vec<PropsMemberPlan>,
+    /// The rest (`{ …, ...rest }`) / whole-object (`let all = $props()`) capture,
+    /// or `None` for a plain destructure with no rest and no whole-object binding.
+    pub(super) rest: Option<PropsRestCapture>,
+}
+
+impl PropsDeclaratorPlan {
+    /// Walk the instance script's single accepted `$props()` declarator ONCE into
+    /// the unified plan (the named member rows + the optional rest / whole-object
+    /// capture), or `None` when there is no `$props()`. The malformed shapes
+    /// (rest / computed keys / nested destructures / duplicate `$props()`) are
+    /// refused UPSTREAM ([`props_shape`] + the rune scan), so this walker only
+    /// classifies the accepted subset.
+    #[must_use]
+    pub(super) fn build(alloc: &Allocator, instance_source: &str) -> Option<PropsDeclaratorPlan> {
+        let program = reparse_module(alloc, instance_source)?;
+        let proxy_inits = super::state_scan::collect_proxy_inits(&program);
+        let mut members = Vec::new();
+        let mut rest: Option<PropsRestCapture> = None;
+        for stmt in &program.body {
+            let Statement::VariableDeclaration(decl) = stmt else {
+                continue;
+            };
+            for d in &decl.declarations {
+                let Some(Expression::CallExpression(call)) = &d.init else {
+                    continue;
+                };
+                if !is_props_callee(&call.callee) {
+                    continue;
+                }
+                match &d.id {
+                    // A whole-object capture (`let all = $props()`) — the exclude
+                    // Set carries ONLY the fixed prefix (every non-`$$` member read
+                    // de-localizes to `$$props.KEY`).
+                    BindingPattern::BindingIdentifier(id) => {
+                        rest.get_or_insert_with(|| build_rest_capture(id.name.to_string(), &[]));
+                    }
+                    BindingPattern::ObjectPattern(obj) => {
+                        for prop in &obj.properties {
+                            if let Some(member) = build_member_plan(prop, &proxy_inits) {
+                                members.push(member);
+                            }
+                        }
+                        // A `{ …, ...rest }` object pattern — the exclude Set is the
+                        // fixed prefix then each non-rest member's SOURCE key in
+                        // source order.
+                        if let Some(rest_el) = &obj.rest {
+                            if let Some(local) = single_ident(&rest_el.argument) {
+                                let source_keys: Vec<String> =
+                                    obj.properties.iter().map(prop_key_name).collect();
+                                rest.get_or_insert_with(|| {
+                                    build_rest_capture(local.to_string(), &source_keys)
+                                });
+                            }
+                        }
+                    }
+                    _ => {}
+                }
             }
-        };
-        reads.insert(plan.local, read);
+        }
+        Some(PropsDeclaratorPlan { members, rest })
     }
-    reads
+
+    /// Project the per-name `$props()` read forms: a PROP-SOURCE member (a
+    /// default-bearing OR written member — the official `is_prop_source`) is
+    /// declared via `$.prop` and reads as a getter call (`name()`); a non-source
+    /// member reads directly off the props object (`$$props.name`). The rest /
+    /// whole-object capture's BARE read stays the verbatim real local, and its
+    /// member reads de-localize key-awarely through the SHARED membership set
+    /// (carried as a cheap `Arc` clone, never a cloned key `Vec`).
+    #[must_use]
+    pub(super) fn prop_reads(&self, updated_locals: &FxHashSet<String>) -> PropReads {
+        let mut reads = PropReads::default();
+        for plan in &self.members {
+            let read = if plan.is_prop_source(updated_locals) {
+                PropRead::Getter
+            } else {
+                PropRead::PropsMember {
+                    source_key: plan.source_key.clone(),
+                }
+            };
+            reads.insert(plan.local.clone(), read);
+        }
+        if let Some(rest) = &self.rest {
+            reads.insert(
+                rest.local.clone(),
+                PropRead::RestBinding {
+                    excludes: rest.exclude_set.clone(),
+                },
+            );
+        }
+        reads
+    }
+}
+
+/// Build one member plan from a `$props()` destructure property (a plain
+/// identifier member OR an assignment-pattern member with a plain / `$bindable`
+/// default). A nested-destructure member is refused upstream ([`props_shape`]),
+/// so it yields no plan row here.
+fn build_member_plan(
+    prop: &oxc_ast::ast::BindingProperty<'_>,
+    proxy_inits: &FxHashMap<String, ProxyInit>,
+) -> Option<PropsMemberPlan> {
+    let source_key = prop_key_name(prop);
+    match &prop.value {
+        BindingPattern::BindingIdentifier(id) => Some(PropsMemberPlan {
+            source_key,
+            local: id.name.to_string(),
+            bindable: false,
+            default: None,
+        }),
+        BindingPattern::AssignmentPattern(assign) => {
+            let local = single_ident(&assign.left)
+                .unwrap_or(&source_key)
+                .to_string();
+            let bindable = is_bindable_call(&assign.right);
+            let default = if bindable {
+                let Expression::CallExpression(bc) = &assign.right else {
+                    unreachable!("a bindable default is a call expression");
+                };
+                bc.arguments
+                    .first()
+                    .and_then(|a| a.as_expression())
+                    .map(|arg| props_default_facts(arg, proxy_inits))
+            } else {
+                Some(props_default_facts(&assign.right, proxy_inits))
+            };
+            Some(PropsMemberPlan {
+                source_key,
+                local,
+                bindable,
+                default,
+            })
+        }
+        // A nested destructure member is refused upstream; no plan row.
+        _ => None,
+    }
+}
+
+/// Build a rest / whole-object [`PropsRestCapture`] from the local binding name
+/// and the ordered non-rest member SOURCE keys (empty for the whole-object
+/// form). The exclude keys are the fixed [`REST_EXCLUDE_PREFIX`] then each source
+/// key in source order; the membership `FxHashSet` is derived from the same keys
+/// and shared (`Arc`) into the read form.
+fn build_rest_capture(local: String, source_keys: &[String]) -> PropsRestCapture {
+    let mut excludes: Vec<String> = REST_EXCLUDE_PREFIX.iter().map(|k| k.to_string()).collect();
+    excludes.extend(source_keys.iter().cloned());
+    let exclude_set: FxHashSet<String> = excludes.iter().cloned().collect();
+    PropsRestCapture {
+        local,
+        excludes,
+        exclude_set: Arc::new(exclude_set),
+    }
 }
 
 /// One `$props()` destructure member's typed lowering facts — the SINGLE
-/// authority BOTH the prop-read projection ([`collect_prop_reads`]) and the
-/// `$.prop` declarator lowering consume, so the read form and the emitted
-/// declaration can never diverge.
+/// authority (on the [`PropsDeclaratorPlan`]) BOTH the prop-read projection and
+/// the `$.prop` declarator lowering consume, so the read form and the emitted
+/// declaration can never diverge. The `updated` axis is NOT stored here (it is
+/// derived per-consumer from the caller's `updated_locals`, which is itself
+/// harvested from these members' default spans).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct PropsMemberPlan {
     /// The SOURCE prop key (the destructure key; may differ from the local
@@ -336,18 +486,16 @@ pub(super) struct PropsMemberPlan {
     /// member the `$bindable(...)` ARGUMENT is the default, so a zero-arg
     /// `$bindable()` carries `None`).
     pub(super) default: Option<PropsDefaultFacts>,
-    /// Whether the local is WRITTEN anywhere (a template-expression or
-    /// `$props()`-default reassign / deep-mutate) — the official `updated`
-    /// axis (runes mode: `reassigned || mutated`).
-    pub(super) updated: bool,
 }
 
 impl PropsMemberPlan {
     /// The official `is_prop_source` predicate on Verter's runes-only surface:
-    /// the member has a default initial OR is updated. A non-source member
-    /// emits NO `$.prop` declaration and reads directly off `$$props`.
-    pub(super) fn is_prop_source(&self) -> bool {
-        self.default.is_some() || self.updated
+    /// the member has a default initial OR is UPDATED (its local written anywhere
+    /// — a template-expression or `$props()`-default reassign / deep-mutate,
+    /// runes-mode `reassigned || mutated`). A non-source member emits NO `$.prop`
+    /// declaration and reads directly off `$$props`.
+    pub(super) fn is_prop_source(&self, updated_locals: &FxHashSet<String>) -> bool {
+        self.default.is_some() || updated_locals.contains(&self.local)
     }
 }
 
@@ -397,85 +545,6 @@ pub(super) struct PropsDefaultFacts {
     /// consulted only for a BINDABLE default whose root identifier does not
     /// rewrite.
     pub(super) proxiable_by_shape: bool,
-}
-
-/// Walk the instance script's single `$props()` destructure into per-member
-/// [`PropsMemberPlan`] rows, in source order. Empty when there is no `$props()`
-/// destructure. `updated_locals` carries the write facts across BOTH accepted
-/// write surfaces — template expressions and `$props()` defaults (the
-/// `updated` axis). The malformed shapes (rest / computed keys / nested
-/// destructures / malformed `$bindable` calls) are refused UPSTREAM
-/// ([`props_shape`] + the rune scan), so this walker only classifies the
-/// accepted subset; a malformed `$bindable` argument list degrades to a
-/// no-default bindable here and never reaches emission (the scan already
-/// refused the component).
-pub(super) fn props_member_plans(
-    alloc: &Allocator,
-    instance_source: &str,
-    updated_locals: &FxHashSet<String>,
-) -> Vec<PropsMemberPlan> {
-    let mut plans = Vec::new();
-    let Some(program) = reparse_module(alloc, instance_source) else {
-        return plans;
-    };
-    let proxy_inits = super::state_scan::collect_proxy_inits(&program);
-    for stmt in &program.body {
-        let Statement::VariableDeclaration(decl) = stmt else {
-            continue;
-        };
-        for d in &decl.declarations {
-            let Some(Expression::CallExpression(call)) = &d.init else {
-                continue;
-            };
-            if !is_props_callee(&call.callee) {
-                continue;
-            }
-            let BindingPattern::ObjectPattern(obj) = &d.id else {
-                continue;
-            };
-            for prop in &obj.properties {
-                let source_key = prop_key_name(prop);
-                match &prop.value {
-                    BindingPattern::BindingIdentifier(id) => plans.push(PropsMemberPlan {
-                        source_key,
-                        local: id.name.to_string(),
-                        bindable: false,
-                        default: None,
-                        updated: updated_locals.contains(id.name.as_str()),
-                    }),
-                    BindingPattern::AssignmentPattern(assign) => {
-                        let local = single_ident(&assign.left)
-                            .unwrap_or(&source_key)
-                            .to_string();
-                        let bindable = is_bindable_call(&assign.right);
-                        let default = if bindable {
-                            let Expression::CallExpression(bc) = &assign.right else {
-                                unreachable!("a bindable default is a call expression");
-                            };
-                            bc.arguments
-                                .first()
-                                .and_then(|a| a.as_expression())
-                                .map(|arg| props_default_facts(arg, &proxy_inits))
-                        } else {
-                            Some(props_default_facts(&assign.right, &proxy_inits))
-                        };
-                        let updated = updated_locals.contains(local.as_str());
-                        plans.push(PropsMemberPlan {
-                            source_key,
-                            local,
-                            bindable,
-                            default,
-                            updated,
-                        });
-                    }
-                    // A nested destructure member is refused upstream
-                    // (`props_shape`); no plan row.
-                    _ => {}
-                }
-            }
-        }
-    }
-    plans
 }
 
 /// Compute the typed [`PropsDefaultFacts`] of one default initializer
@@ -574,9 +643,11 @@ fn simple_ident_leaves(expr: &Expression<'_>) -> Option<Vec<String>> {
 /// statement) — not just the first.
 ///
 /// The official compiler supports exactly ONE top-level `$props()` destructure: a
-/// second `$props()` call is `props_duplicate`, and any non-basic shape (a computed
-/// / numeric / nested key, a rest, a whole-object binding) is
-/// `props_invalid_pattern`. A member DEFAULT — plain or `$bindable(...)` — is part
+/// second `$props()` call is `props_duplicate`, and a non-basic shape (a computed
+/// / numeric / nested key) is `props_invalid_pattern`. A rest element
+/// (`{ …, ...rest }`) and a whole-object identifier binding (`let all = $props()`)
+/// are BASIC — they lower through the `$.rest_props` capture path. A member
+/// DEFAULT — plain or `$bindable(...)` — is part
 /// of the BASIC destructure (the shared `$.prop` prop-source path). Scanning ALL
 /// declarators is load-bearing: `let {a}=$props(), {[k]:b}=$props()` must fail
 /// closed on the SECOND (computed-key) declarator rather than classify on the
@@ -634,16 +705,15 @@ pub fn props_shape(instance_source: &str) -> PropsShape {
 /// Classify a `$props()` declarator pattern.
 fn classify_props_pattern(pattern: &BindingPattern<'_>) -> PropsShape {
     match pattern {
-        // A whole-object identifier binding (`let p = $props()`) is advanced.
-        BindingPattern::BindingIdentifier(_) => PropsShape::Advanced {
-            rune: "$props() whole-object",
-        },
+        // A whole-object identifier binding (`let all = $props()`) is the
+        // prefix-only `$.rest_props` capture — a basic shape (its `rest_excludes`
+        // Set + `$.rest_props` declarator lower through the destructure path).
+        BindingPattern::BindingIdentifier(_) => PropsShape::BasicDestructure,
         BindingPattern::ObjectPattern(obj) => {
-            if obj.rest.is_some() {
-                return PropsShape::Advanced {
-                    rune: "$props() rest",
-                };
-            }
+            // A `{ …, ...rest }` rest element is the `$.rest_props` capture — a
+            // basic shape. Its named siblings still validate below (a computed /
+            // numeric / nested sibling fails closed at the surviving arms); the
+            // rest binding itself lowers through the destructure path.
             for prop in &obj.properties {
                 // A COMPUTED key (`{ [k]: a }`) is rejected by official
                 // (`props_invalid_pattern`) — fail closed rather than read the
@@ -884,6 +954,36 @@ pub(super) fn state_primitive_decl(
         // authority).
         None => format!("let {name} = $.state({arg});"),
     }
+}
+
+/// The fixed leading `rest_excludes` keys the official compiler always prepends
+/// (in this order) before the source keys of the non-rest members — the
+/// auto-injected magic slots a `$.rest_props` object never surfaces.
+pub(super) const REST_EXCLUDE_PREFIX: [&str; 3] = ["$$slots", "$$events", "$$legacy"];
+
+/// The `$props()` rest / whole-object CAPTURE binding facts on the unified
+/// [`PropsDeclaratorPlan`]: the local binding name, the ORDERED exclude keys (the
+/// fixed [`REST_EXCLUDE_PREFIX`] then each non-rest member's SOURCE key in source
+/// order — empty for the whole-object form), and the shared membership
+/// `FxHashSet` (the O(1) hot member-visit exclude lookup, handed to the read form
+/// as an `Arc`).
+///
+/// Both the rest (`{ …, ...rest }`) and whole-object (`let all = $props()`) forms
+/// lower to `let <local> = $.rest_props($$props, rest_excludes)` and hoist a
+/// `var rest_excludes = new Set([<quoted excludes>])`; the ONLY difference is the
+/// exclude-key content (a whole-object capture excludes only the fixed prefix).
+/// The capture KIND is not carried — no consumer needs to distinguish rest from
+/// whole-object (both lower identically off the exclude keys).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PropsRestCapture {
+    /// The local binding name (`rest` / `all`).
+    pub(super) local: String,
+    /// The ORDERED exclude keys — the fixed prefix then each non-rest member's
+    /// SOURCE key, in source order (the emitted `new Set([…])` order).
+    pub(super) excludes: Vec<String>,
+    /// The exclude-key membership set, shared (`Arc`) into the read form so the
+    /// hot member-visit exclude lookup is O(1) and never clones the key `Vec`.
+    pub(super) exclude_set: Arc<FxHashSet<String>>,
 }
 
 /// The destructure key name of an object-pattern property.

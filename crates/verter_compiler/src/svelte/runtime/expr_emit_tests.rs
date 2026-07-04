@@ -275,22 +275,24 @@ fn props_shape_defaults_are_basic() {
 }
 
 #[test]
-fn props_shape_rest_is_advanced() {
+fn props_shape_rest_is_basic_capture() {
+    // A `{ …, ...rest }` rest element is now a BASIC shape — the `$.rest_props`
+    // capture path (was the deleted `$props() rest` advanced refusal). Its named
+    // siblings still validate; the rest binding lowers through the destructure path.
     assert_eq!(
         props_shape("let { name, ...rest } = $props();"),
-        PropsShape::Advanced {
-            rune: "$props() rest"
-        }
+        PropsShape::BasicDestructure
     );
 }
 
 #[test]
-fn props_shape_whole_object_is_advanced() {
+fn props_shape_whole_object_is_basic_capture() {
+    // A whole-object identifier binding (`let p = $props()`) is now a BASIC shape —
+    // the prefix-only `$.rest_props` capture (was the deleted `$props() whole-object`
+    // advanced refusal).
     assert_eq!(
         props_shape("let p = $props();"),
-        PropsShape::Advanced {
-            rune: "$props() whole-object"
-        }
+        PropsShape::BasicDestructure
     );
 }
 
@@ -1269,4 +1271,61 @@ fn shadowed_effect_local_is_not_rewritten_and_not_refused() {
         !out.contains("$.user_effect") && !out.contains("$.user_pre_effect"),
         "no helper rewrite fires under a shadowing local: {out}"
     );
+}
+
+#[test]
+fn rest_delete_target_delocalizes_as_a_read() {
+    // FIX-2 control (oracle svelte@5.56.3): a `delete rest.x` argument is a
+    // reference READ — NOT an assignment/update lvalue — so it de-localizes to
+    // `delete $$props.x`. This proves the write-verbatim gate is SCOPED to the
+    // assignment/update lvalue surface (it never records a `delete` argument as a
+    // write target). Exercised at the rewriter directly (a `delete` event handler
+    // is a separate NonDelegatedEvent surface). An EXCLUDED key stays verbatim.
+    use crate::svelte::runtime::expr::BindingTable;
+    use crate::svelte::runtime::expr_rewrite::{
+        rewrite_expression_with_props, PropRead, PropReads,
+    };
+    use std::sync::Arc;
+
+    let (scopes, root) = ScopeGraph::with_root();
+    let bindings = BindingTable::new();
+    let mut prop_reads = PropReads::default();
+    let excludes: rustc_hash::FxHashSet<String> = ["$$slots", "$$events", "$$legacy", "a"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    prop_reads.insert(
+        "rest".to_string(),
+        PropRead::RestBinding {
+            excludes: Arc::new(excludes),
+        },
+    );
+    let deloc = rewrite_expression_with_props(
+        "delete rest.x",
+        root,
+        &bindings,
+        &scopes,
+        &prop_reads,
+        RewriteRole::Value,
+    )
+    .expect("delete of a rest member is a supported rewrite")
+    .text;
+    assert_eq!(deloc, "delete $$props.x");
+    // NEGATIVE: never left verbatim.
+    assert!(
+        !deloc.contains("rest.x"),
+        "the delete arg must de-localize: {deloc}"
+    );
+    // An EXCLUDED member stays verbatim even under `delete` (the rest proxy owns it).
+    let excl = rewrite_expression_with_props(
+        "delete rest.a",
+        root,
+        &bindings,
+        &scopes,
+        &prop_reads,
+        RewriteRole::Value,
+    )
+    .expect("delete of an excluded rest member is supported")
+    .text;
+    assert_eq!(excl, "delete rest.a");
 }

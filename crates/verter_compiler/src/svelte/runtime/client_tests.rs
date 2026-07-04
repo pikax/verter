@@ -3454,31 +3454,35 @@ fn spread_and_html_compose_attribute_effect_then_html_then_reset() {
 }
 
 #[test]
-fn props_rest_spread_still_refuses_as_advanced_rune_not_the_deleted_spread_surface() {
-    // A `{...rest}` whose `rest` is a `$props()` REST destructure (`let { a, ...rest } =
-    // $props()`) is the advanced-rune rest-props surface (`$.rest_props` + `rest_excludes`), which
-    // the script-shape gate rejects BEFORE the template. It must STILL refuse — and the
-    // diagnostic must be the `$props() rest` AdvancedRune, NOT the now-deleted
-    // spread-or-html surface (a regression guard that element-spread acceptance did not
-    // leak into the rest-props destructure).
-    let err =
-        emit_result("<script>let { a, ...rest } = $props()</script>\n<div {...rest}></div>\n")
-            .expect_err("a $props() rest destructure must still refuse");
-    let ClientCompileError::Unsupported(surface) = err else {
-        panic!("expected an Unsupported refusal, got {err:?}");
-    };
-    assert!(
-        matches!(
-            surface,
-            UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if rune == "$props() rest"
-        ),
-        "a $props() rest destructure must refuse as the `$props() rest` AdvancedRune, \
-         got {surface:?}"
+fn props_rest_element_spread_lowers_to_attribute_effect() {
+    // REPLACED (was `props_rest_spread_still_refuses_as_advanced_rune_not_the_deleted_
+    // spread_surface`, which pinned the now-SUPPORTED rest surface): a `{...rest}`
+    // whose `rest` is a `$props()` REST capture (`let { a, ...rest } = $props()`) is
+    // the element-spread `$.attribute_effect(div, () => ({ ...rest }))` fold, with
+    // the hoisted `rest_excludes` Set (prefix + `a`). The bare `rest` flows through
+    // the spread verbatim (a real local), and an element SPREAD opens NO context
+    // frame. Verified against svelte@5.56.3.
+    let js = emit(
+        "<script>let { a, ...rest } = $props()</script>\n<div {...rest}></div>\n",
+        "App.svelte",
     );
-    assert_eq!(
-        surface.diagnostic_code(),
-        "svelte-runtime-unsupported-advanced-rune",
-        "the rest-props refusal carries the advanced-rune diagnostic, NOT spread-or-html"
+    assert!(
+        js.contains("var rest_excludes = new Set(['$$slots', '$$events', '$$legacy', 'a']);"),
+        "missing the hoisted rest_excludes Set:\n{js}"
+    );
+    assert!(
+        js.contains("$.attribute_effect(div, () => ({ ...rest }))"),
+        "missing the element-spread attribute_effect fold over the verbatim rest:\n{js}"
+    );
+    // NEGATIVE: the spread payload is the real local `rest`, never `$$props.rest`,
+    // and a bare-spread read opens NO context frame.
+    assert!(
+        !js.contains("$$props.rest"),
+        "the spread payload must be the real local `rest`:\n{js}"
+    );
+    assert!(
+        !js.contains("$.push($$props, true)"),
+        "an element spread must NOT open the component context frame:\n{js}"
     );
 }
 
@@ -7751,12 +7755,1201 @@ fn svelte_head_html_folded_state_title_emits_effect_and_html_body() {
 }
 
 #[test]
-fn props_rest_fails_closed_not_partial() {
-    // A `$props()` REST form fails closed — it must NOT partially emit.
-    assert_fail_closed(
+fn props_rest_basic_lowers_rest_props_capture_with_delocalized_named_read() {
+    // INVERTED (was `props_rest_fails_closed_not_partial`, which pinned the now-
+    // SUPPORTED rest surface): `let { name, ...rest } = $props()` lowers the module
+    // `rest_excludes` Set (fixed prefix + the source key `name`) + the instance
+    // `let rest = $.rest_props($$props, rest_excludes)` capture; the bare `{name}`
+    // read de-localizes to `$$props.name` and — being a BARE named read — opens NO
+    // component context frame. Verified against svelte@5.56.3.
+    let js = emit(
         "<script>let { name, ...rest } = $props();</script>\n<p>{name}</p>\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$props() rest"),
+        "App.svelte",
     );
+    assert!(
+        js.contains("var rest_excludes = new Set(['$$slots', '$$events', '$$legacy', 'name']);"),
+        "missing the hoisted rest_excludes Set (prefix + source key):\n{js}"
+    );
+    assert!(
+        js.contains("let rest = $.rest_props($$props, rest_excludes);"),
+        "missing the $.rest_props capture declarator:\n{js}"
+    );
+    assert!(
+        js.contains("$$props.name"),
+        "the bare named read must de-localize to $$props.name:\n{js}"
+    );
+    // NEGATIVE: a BARE named read opens NO context frame, and the rest name never
+    // mis-lowers to `$$props.rest` (the pre-classified `Prop` read-rewrite trap).
+    assert!(
+        !js.contains("$.push($$props, true)") && !js.contains("$.pop()"),
+        "a bare named read must NOT open the component context frame:\n{js}"
+    );
+    assert!(
+        !js.contains("$$props.rest"),
+        "the rest binding must stay the real local, never `$$props.rest`:\n{js}"
+    );
+}
+
+// ── 5g-e: native Svelte client `$props()` rest + whole-object capture ──
+// Emission POSITIVES (each pinned against svelte@5.56.3; discriminating with a
+// NEGATIVE assertion), then the §10a malformed-sibling fail-closed enumeration.
+
+#[test]
+fn props_rest_lone_lowers_prefix_only_set() {
+    // POSITIVE 1: a lone `{ ...rest }` (no named siblings) hoists the PREFIX-ONLY
+    // `rest_excludes` Set and lowers the `$.rest_props` capture. The bare `{...rest}`
+    // element spread opens NO context frame.
+    let js = emit(
+        "<script>let { ...rest } = $props();</script>\n<div {...rest}></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("var rest_excludes = new Set(['$$slots', '$$events', '$$legacy']);"),
+        "a lone rest hoists the prefix-only Set:\n{js}"
+    );
+    assert!(
+        js.contains("let rest = $.rest_props($$props, rest_excludes);"),
+        "missing the $.rest_props capture:\n{js}"
+    );
+    // NEGATIVE: no named source key leaked into the prefix-only Set, no context frame.
+    assert!(
+        !js.contains("'legacy', '"),
+        "a lone rest Set must carry NO named keys after the prefix:\n{js}"
+    );
+    assert!(
+        !js.contains("$.push($$props, true)"),
+        "a lone rest with only a spread opens NO context frame:\n{js}"
+    );
+}
+
+#[test]
+fn props_rest_named_siblings_delocalize_no_context() {
+    // POSITIVE 2: `{ a, b, ...rest }` with bare `{a}{b}` reads — the Set carries the
+    // prefix then the source keys `a`,`b` IN SOURCE ORDER; each bare named read
+    // de-localizes to `$$props.KEY`; a bare named read opens NO context frame.
+    let js = emit(
+        "<script>let { a, b, ...rest } = $props();</script>\n<p>{a}{b}</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("var rest_excludes = new Set(['$$slots', '$$events', '$$legacy', 'a', 'b']);"),
+        "the Set carries the source keys in source order:\n{js}"
+    );
+    assert!(
+        js.contains("let rest = $.rest_props($$props, rest_excludes);"),
+        "missing the $.rest_props capture:\n{js}"
+    );
+    assert!(
+        js.contains("$$props.a") && js.contains("$$props.b"),
+        "bare named reads de-localize to $$props.KEY:\n{js}"
+    );
+    // NEGATIVE: no $.prop declarations (no defaults/writes), no context frame.
+    assert!(
+        !js.contains("$.prop($$props"),
+        "no-default named siblings emit NO $.prop declaration:\n{js}"
+    );
+    assert!(
+        !js.contains("$.push($$props, true)"),
+        "bare named reads open NO context frame:\n{js}"
+    );
+}
+
+#[test]
+fn props_rest_alias_excludes_source_key() {
+    // POSITIVE 3: `{ a: local, ...rest }` — the exclude Set + the read both use the
+    // SOURCE key `a`, not the alias `local`.
+    let js = emit(
+        "<script>let { a: local, ...rest } = $props();</script>\n<p>{local}</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("var rest_excludes = new Set(['$$slots', '$$events', '$$legacy', 'a']);"),
+        "the alias exclude uses the SOURCE key `a`:\n{js}"
+    );
+    assert!(
+        js.contains("$$props.a"),
+        "the aliased read uses the source key `$$props.a`:\n{js}"
+    );
+    // NEGATIVE: never the alias local name in the Set or the read.
+    assert!(
+        !js.contains("'local'") && !js.contains("$$props.local"),
+        "the alias local name must NOT appear in the Set or the read:\n{js}"
+    );
+}
+
+#[test]
+fn props_rest_string_key_excludes_and_bracket_reads() {
+    // POSITIVE 4: `{ 'data-x': dx, ...rest }` — the exclude Set carries the string
+    // key `data-x` and the read is BRACKET access (`$$props['data-x']`, not dotted).
+    let js = emit(
+        "<script>let { 'data-x': dx, ...rest } = $props();</script>\n<p>{dx}</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("var rest_excludes = new Set(['$$slots', '$$events', '$$legacy', 'data-x']);"),
+        "the string key `data-x` is excluded:\n{js}"
+    );
+    assert!(
+        js.contains("$$props['data-x']"),
+        "a non-identifier source key reads via bracket access:\n{js}"
+    );
+    // NEGATIVE: never dotted access for a hyphenated key (invalid JS).
+    assert!(
+        !js.contains("$$props.data"),
+        "a hyphenated key must NOT read via dotted access:\n{js}"
+    );
+}
+
+#[test]
+fn props_rest_composes_with_default() {
+    // POSITIVE 5: `{ a = 1, ...rest }` composes the 5g-d `$.prop` default with the
+    // rest capture into ONE `let` — the default decl FIRST, the rest decl LAST (its
+    // source position), comma-joined.
+    let js = emit(
+        "<script>let { a = 1, ...rest } = $props();</script>\n<p>{a}</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains(
+            "let a = $.prop($$props, 'a', 3, 1), rest = $.rest_props($$props, rest_excludes);"
+        ),
+        "the default + rest compose into one comma-joined `let`, rest last:\n{js}"
+    );
+    assert!(
+        js.contains("var rest_excludes = new Set(['$$slots', '$$events', '$$legacy', 'a']);"),
+        "the defaulted key `a` is still excluded:\n{js}"
+    );
+    // NEGATIVE: a defaulted prop reads as the getter, never `$$props.a`.
+    assert!(
+        !js.contains("$$props.a"),
+        "a defaulted prop reads via the getter `a()`, never `$$props.a`:\n{js}"
+    );
+}
+
+#[test]
+fn props_rest_whole_read_stays_local_no_context() {
+    // POSITIVE 6: a WHOLE `rest` read — a bare template interpolation `{rest}` AND a
+    // bare state-write handler RHS (`() => sink = rest`) — stays the real local `rest`
+    // and opens NO context frame (only a MEMBER read through the binding does).
+    let js = emit(
+        "<script>let { ...rest } = $props(); let sink = $state(null);</script>\n<button onclick={() => sink = rest}>{rest}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.set_text(text, rest)"),
+        "a bare template read stays the real local `rest`:\n{js}"
+    );
+    assert!(
+        js.contains("$.set(sink, rest"),
+        "a bare handler-RHS read stays the real local `rest`:\n{js}"
+    );
+    // NEGATIVE: never `$$props.rest` (the pre-classified `Prop` read trap), and a
+    // whole read opens NO context frame.
+    assert!(
+        !js.contains("$$props.rest"),
+        "a whole read must stay `rest`, never `$$props.rest`:\n{js}"
+    );
+    assert!(
+        !js.contains("$.push($$props, true)"),
+        "a whole read opens NO context frame:\n{js}"
+    );
+}
+
+#[test]
+fn props_rest_component_spread_lowers_spread_props() {
+    // POSITIVE 8: a component spread `<Child {...rest} />` lowers to the bare-thunk
+    // `$.spread_props(() => rest)` (NOT the element `$.attribute_effect` fold).
+    let js = emit(
+        "<script>import Child from './Child.svelte'; let { a, ...rest } = $props();</script>\n<Child {...rest} />\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.spread_props(() => rest)"),
+        "a component spread lowers to $.spread_props(() => rest):\n{js}"
+    );
+    // NEGATIVE: never the element-spread fold, never `$$props.rest`.
+    assert!(
+        !js.contains("$.attribute_effect") && !js.contains("$$props.rest"),
+        "a component spread is NOT the element attribute_effect fold:\n{js}"
+    );
+}
+
+#[test]
+fn props_rest_nonexcluded_member_read_delocalizes_with_context() {
+    // POSITIVE 9: `{ a, ...rest }` with a NON-excluded member read `rest.x` (in a
+    // state-write handler — the rewriter path; a TEMPLATE member interpolation is the
+    // pre-existing reactive-text-completion deferral, not a 5g-e surface) —
+    // de-localizes to `$$props.x` AND opens the context frame (a member read through
+    // the rest binding). Oracle: `rest.member-in-handler`.
+    let js = emit(
+        "<script>let { a, ...rest } = $props(); let sink = $state(0);</script>\n<button onclick={() => sink += rest.x}>x</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$$props.x"),
+        "a non-excluded rest member de-localizes to $$props.x:\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true)") && js.contains("$.pop()"),
+        "a rest member read opens the context frame:\n{js}"
+    );
+    // NEGATIVE: the source member `rest.x` is REWRITTEN away (not left verbatim).
+    assert!(
+        !js.contains("rest.x"),
+        "a non-excluded rest member must NOT stay `rest.x`:\n{js}"
+    );
+}
+
+#[test]
+fn props_rest_excluded_member_read_stays_local_with_context() {
+    // POSITIVE 10: `{ a, ...rest }` with an EXCLUDED member read `rest.a` (state-write
+    // handler) — STAYS the verbatim `rest.a` (semantically `undefined` — the rest
+    // object excludes `a`) AND still opens the context frame. Oracle:
+    // `rest.named-member-via-rest`.
+    let js = emit(
+        "<script>let { a, ...rest } = $props(); let sink = $state(0);</script>\n<button onclick={() => sink += rest.a}>x</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("rest.a"),
+        "an excluded rest member stays the verbatim `rest.a`:\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true)") && js.contains("$.pop()"),
+        "a rest member read opens the context frame:\n{js}"
+    );
+    // NEGATIVE: an excluded key is NOT de-localized to `$$props.a`.
+    assert!(
+        !js.contains("$$props.a"),
+        "an excluded rest member must NOT de-localize to $$props.a:\n{js}"
+    );
+}
+
+#[test]
+fn props_named_members_and_rest_share_one_declarator_plan() {
+    // FIX-5 unification anchor: a `$props()` destructure with a DEFAULT-bearing
+    // named member (`a = 1` → prop source), a no-default named member (`b` →
+    // `$$props.b`), AND a rest binding drives ALL THREE consumers off the ONE
+    // `PropsDeclaratorPlan` — the read forms, the `$.rest_props` hoist (excludes
+    // derived from the SAME named members), and the `$.prop` destructure
+    // lowering — coherently. Behavior-preserving; oracle `svelte@5.56.3`:
+    // `new Set(['$$slots','$$events','$$legacy','a','b'])`, `let a = $.prop(...)`,
+    // `$$props.b`, `a()`, `rest.c` → `$$props.c`.
+    let js = emit(
+        "<script>let { a = 1, b, ...rest } = $props(); let sink = $state(0);</script>\n<button onclick={() => sink += a + b + rest.c}>x</button>\n",
+        "App.svelte",
+    );
+    // (1) The rest hoist excludes are the fixed prefix THEN each named source key
+    // in source order — derived from the same plan's members (single authority).
+    assert!(
+        js.contains("new Set(['$$slots', '$$events', '$$legacy', 'a', 'b'])"),
+        "the rest_excludes Set derives its keys from the named members:\n{js}"
+    );
+    // (2) The default-bearing named member is a prop source (`$.prop`, flag 3,
+    // default 1), read as the getter `a()`.
+    assert!(
+        js.contains("let a = $.prop($$props, 'a', 3, 1)") && js.contains("a()"),
+        "the default-bearing named member lowers to a $.prop source read as a getter:\n{js}"
+    );
+    // (3) The rest capture declarator rides the SAME hoisted Set name.
+    assert!(
+        js.contains("rest = $.rest_props($$props, rest_excludes)"),
+        "the rest capture declarator references the hoisted rest_excludes Set:\n{js}"
+    );
+    // (4) The no-default named member reads off `$$props`; the non-excluded rest
+    // member de-localizes to `$$props.c`.
+    assert!(
+        js.contains("$$props.b") && js.contains("$$props.c"),
+        "a no-default member reads $$props.b and a non-excluded rest member de-localizes to $$props.c:\n{js}"
+    );
+    // NEGATIVE: the non-excluded rest member is NOT left verbatim `rest.c`.
+    assert!(
+        !js.contains("rest.c"),
+        "a non-excluded rest member must de-localize, not stay verbatim `rest.c`:\n{js}"
+    );
+}
+
+#[test]
+fn props_whole_object_member_delocalizes_with_context() {
+    // POSITIVE 11a: whole-object capture `let all = $props()` with a member read
+    // `all.a` (state-write handler) — prefix-only Set + `let all = $.rest_props(...)` +
+    // the member de-localizes to `$$props.a` + context frame. (Prefix-only means EVERY
+    // non-`$$` key de-localizes.) Oracle: `baseline.whole-object` (member read).
+    let js = emit(
+        "<script>let all = $props(); let sink = $state(0);</script>\n<button onclick={() => sink += all.a}>x</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("var rest_excludes = new Set(['$$slots', '$$events', '$$legacy']);"),
+        "a whole-object capture hoists the prefix-only Set:\n{js}"
+    );
+    assert!(
+        js.contains("let all = $.rest_props($$props, rest_excludes);"),
+        "a whole-object capture lowers `let all = $.rest_props(...)`:\n{js}"
+    );
+    assert!(
+        js.contains("$$props.a"),
+        "a whole-object member de-localizes to $$props.a:\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true)") && js.contains("$.pop()"),
+        "a whole-object member read opens the context frame:\n{js}"
+    );
+    // NEGATIVE: the member `all.a` is rewritten away, and the bare-`all` read trap
+    // (`$$props.all`) never fires.
+    assert!(
+        !js.contains("all.a") && !js.contains("$$props.all"),
+        "a whole-object member must de-localize; the bare-read trap must not fire:\n{js}"
+    );
+}
+
+#[test]
+fn props_whole_object_spread_and_bare_read_stay_local_no_context() {
+    // POSITIVE 11b: whole-object capture bare + spread reads stay the real local
+    // `all` and open NO context frame (an element spread `{...all}` folds to
+    // `$.attribute_effect`; a bare interpolation `{all}` stays `all`).
+    let js = emit(
+        "<script>let all = $props();</script>\n<div {...all}></div>\n<p>{all}</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.attribute_effect(div, () => ({ ...all }))"),
+        "a whole-object element spread folds to attribute_effect over `all`:\n{js}"
+    );
+    assert!(
+        js.contains("$.set_text(text, all)"),
+        "a whole-object bare interpolation stays the real local `all`:\n{js}"
+    );
+    // NEGATIVE: never `$$props.all`, and spreads/bare reads open NO context frame.
+    assert!(
+        !js.contains("$$props.all"),
+        "a whole-object bare/spread read must stay `all`, never `$$props.all`:\n{js}"
+    );
+    assert!(
+        !js.contains("$.push($$props, true)"),
+        "whole-object spread + bare reads open NO context frame:\n{js}"
+    );
+}
+
+#[test]
+fn props_whole_object_component_spread_lowers_spread_props() {
+    // POSITIVE 11c: whole-object capture into a component spread `<Child {...all} />`
+    // → `$.spread_props(() => all)`.
+    let js = emit(
+        "<script>import Child from './Child.svelte'; let all = $props();</script>\n<Child {...all} />\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.spread_props(() => all)"),
+        "a whole-object component spread lowers to $.spread_props(() => all):\n{js}"
+    );
+    assert!(
+        !js.contains("$$props.all"),
+        "the spread payload is the real local `all`:\n{js}"
+    );
+}
+
+// ── §10a: malformed-sibling fail-closed enumeration (one discriminating test per
+// sibling; each fails if its refusal arm were removed). ──
+
+#[test]
+fn props_rest_call_with_arg_fails_closed() {
+    // `$props(x)` — the only accepted call shape is zero-arg. One arg is the
+    // surviving invalid-arguments arm.
+    assert_fail_closed(
+        "<script>let { a, ...rest } = $props(x);</script>\n<p>{a}</p>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$props() invalid arguments"),
+    );
+}
+
+#[test]
+fn props_rest_call_with_two_args_fails_closed() {
+    // `$props(x, y)` — invalid arguments (surviving arm).
+    assert_fail_closed(
+        "<script>let { a, ...rest } = $props(x, y);</script>\n<p>{a}</p>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$props() invalid arguments"),
+    );
+}
+
+#[test]
+fn props_rest_call_with_spread_arg_fails_closed() {
+    // `$props(...x)` — invalid arguments (surviving arm; a spread arg is non-empty).
+    assert_fail_closed(
+        "<script>let { a, ...rest } = $props(...x);</script>\n<p>{a}</p>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$props() invalid arguments"),
+    );
+}
+
+#[test]
+fn props_whole_object_computed_key_member_stays_local() {
+    // A COMPUTED member on the whole-object binding (`all['x']`, in a state-write
+    // handler) stays the verbatim real local — EXACT oracle svelte@5.56.3 parity,
+    // NOT a deferral: the key-aware de-localization is STATIC-member-only, and the
+    // oracle likewise keeps a computed member (`all['x']`) verbatim even with a
+    // static string-literal key (de-localizing a computed member would REGRESS
+    // against the oracle). The load-bearing invariant here is that it must NOT
+    // mis-fire the bare-read `$$props.all` trap (NUANCE-2), and still opens the
+    // context frame (a member expression rooted at the unsafe binding).
+    let js = emit(
+        "<script>let all = $props(); let sink = $state(0);</script>\n<button onclick={() => sink += all['x']}>x</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("all['x']") && js.contains("$.push($$props, true)"),
+        "a computed member stays `all['x']` with the context frame:\n{js}"
+    );
+    assert!(
+        !js.contains("$$props.all"),
+        "a computed member must not mis-lower to the bare-read `$$props.all`:\n{js}"
+    );
+}
+
+#[test]
+fn props_rest_parenthesized_member_read_delocalizes() {
+    // FIX-1: author parens around the IMMEDIATE member object are transparent —
+    // `(rest).x` / `((rest)).x` / `(all).a` de-localize to `$$props.KEY` exactly
+    // like the bare form. Oracle svelte@5.56.3: `$$props.x` / `$$props.a`. RED at
+    // c0c2ff2aa (the Identifier guard blocked the paren, leaving `(rest).x`).
+    let rest = emit(
+        "<script>let { a, ...rest } = $props(); let sink = $state(0);</script>\n<button onclick={() => sink += (rest).x + ((rest)).z}>x</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        rest.contains("$$props.x") && rest.contains("$$props.z"),
+        "a parenthesized rest member de-localizes to $$props.KEY:\n{rest}"
+    );
+    assert!(
+        !rest.contains("(rest).x") && !rest.contains("((rest)).z"),
+        "the parenthesized object must not survive verbatim:\n{rest}"
+    );
+    // Whole-object capture through parens.
+    let whole = emit(
+        "<script>let all = $props(); let sink = $state(0);</script>\n<button onclick={() => sink += (all).a}>x</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        whole.contains("$$props.a") && !whole.contains("(all).a"),
+        "a parenthesized whole-object member de-localizes to $$props.a:\n{whole}"
+    );
+}
+
+#[test]
+fn props_rest_parenthesized_member_does_not_rekey_nested_chain() {
+    // FIX-1 control: the paren-peel is OBJECT-ONLY — a nested chain `(rest).x.y`
+    // stays keyed on its ROOT property `x` (the inner member de-localizes `x`),
+    // never re-keyed to `y`. Oracle: `$$props.x.y`.
+    let js = emit(
+        "<script>let { a, ...rest } = $props(); let sink = $state(0);</script>\n<button onclick={() => sink += (rest).x.y}>x</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$$props.x.y"),
+        "a paren-wrapped nested chain keys on the root property x:\n{js}"
+    );
+    // NEGATIVE: never re-keyed to `y` alone, never left verbatim.
+    assert!(
+        !js.contains("$$props.y") && !js.contains("(rest).x.y"),
+        "the chain must not re-key to y nor stay verbatim:\n{js}"
+    );
+}
+
+#[test]
+fn props_rest_member_write_target_stays_verbatim() {
+    // FIX-2: de-localization is READ-only. A DIRECT member-write target — plain
+    // `=`, prefix/postfix `++`/`--`, compound `+=`, logical `??=` — stays the
+    // verbatim `rest.KEY`. RED at c0c2ff2aa (which de-localized the write LHS to
+    // `$$props.x = 1`).
+    //
+    // First-hand oracle re-probe (svelte@5.56.3): EVERY row is emitted FULLY
+    // verbatim, including the compound/logical forms:
+    //   `rest.x += 1` → `rest.x += 1`   `rest.x ??= 1` → `rest.x ??= 1`
+    // svelte's `build_assignment_value` pre-rewrite (`+=` → `rest.x = rest.x + 1`,
+    // which would de-localize the injected RHS read) fires ONLY when the target
+    // FORCES a transform (a signal / `$state` LHS). `rest` is a PLAIN local
+    // (`let rest = $.rest_props(...)`), so the assignment is left untouched and the
+    // `rest.x` grand-parent stays the AssignmentExpression → the coarse guard keeps
+    // BOTH sides local. There is NO injected `rest.x = $$props.x + 1`; the assertion
+    // below (full verbatim, no `$$props.x`) IS oracle parity — invalid-input write
+    // to a read-only rest prop, kept locally (never a silent `$$props` mutation).
+    for (label, stmt, verbatim) in [
+        ("assign", "rest.x = 1", "rest.x = 1"),
+        ("postfix", "rest.x++", "rest.x++"),
+        ("prefix", "++rest.x", "++rest.x"),
+        ("compound", "rest.x += 1", "rest.x += 1"),
+        ("logical", "rest.x ??= 1", "rest.x ??= 1"),
+    ] {
+        let src = format!(
+            "<script>let {{ a, ...rest }} = $props(); let sink = $state(0);</script>\n<button onclick={{() => {{ {stmt}; sink += 1; }}}}>x</button>\n"
+        );
+        let js = emit(&src, "App.svelte");
+        assert!(
+            js.contains(verbatim),
+            "[{label}] the member-write target stays verbatim `{verbatim}`:\n{js}"
+        );
+        // NEGATIVE: the write target never de-localizes to the raw `$$props` bag.
+        assert!(
+            !js.contains("$$props.x"),
+            "[{label}] a member-write target must NOT de-localize to $$props.x:\n{js}"
+        );
+    }
+}
+
+#[test]
+fn props_rest_paren_write_verbatim_but_paren_read_delocalizes() {
+    // FIX-1 + FIX-2 order-coupling: after the paren-peel exposes `(rest).x` to the
+    // disposition, a paren-wrapped WRITE target still stays verbatim while a
+    // paren-wrapped READ de-localizes — the read/write split fires THROUGH the
+    // paren. Oracle: write `(rest).x = 1` keeps the local; read `(rest).x` →
+    // `$$props.x`.
+    let js = emit(
+        "<script>let { a, ...rest } = $props(); let sink = $state(0);</script>\n<button onclick={() => { (rest).x = 1; sink += (rest).x; }}>x</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("(rest).x = 1"),
+        "the paren-wrapped write target stays local:\n{js}"
+    );
+    assert!(
+        js.contains("$$props.x"),
+        "the paren-wrapped read de-localizes to $$props.x:\n{js}"
+    );
+}
+
+#[test]
+fn props_rest_deep_lvalue_root_member_delocalizes() {
+    // FIX-2 deep lvalue: for `rest.x.y = 1` the DIRECT write target is `rest.x.y`
+    // (verbatim), but its ROOT member `rest.x` is a READ sub-expression that
+    // de-localizes — so the whole lvalue lowers to `$$props.x.y = 1`. Oracle
+    // svelte@5.56.3.
+    let js = emit(
+        "<script>let { a, ...rest } = $props(); let sink = $state(0);</script>\n<button onclick={() => { rest.x.y = 1; sink += 1; }}>x</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$$props.x.y = 1"),
+        "a deep lvalue de-localizes its root member: $$props.x.y = 1:\n{js}"
+    );
+    assert!(
+        !js.contains("rest.x.y = 1"),
+        "the deep lvalue root member must not stay verbatim:\n{js}"
+    );
+}
+
+#[test]
+fn props_rest_plain_assign_bare_member_rhs_stays_verbatim() {
+    // FIX-6: the oracle's `rest`→`$$props` de-localization is a COARSE,
+    // position-based guard (svelte@5.56.3 `Identifier.js`): the `rest` identifier
+    // rewrites to `$$props` only when `grand_parent.type !== 'AssignmentExpression'
+    // && grand_parent.type !== 'UpdateExpression'`. A single static `rest.KEY`
+    // that is the ENTIRE right-hand side of a PLAIN `=` therefore stays VERBATIM —
+    // the `=` operator returns `right` unchanged from `build_assignment_value`, so
+    // the member's grand-parent stays the AssignmentExpression and the guard fails.
+    // Paren-transparent (official ESTree has no paren node) and LHS-agnostic (the
+    // guard never inspects the target). First-hand oracle svelte@5.56.3:
+    // `sink = rest.y` → `$.set(sink, rest.y, true)`. RED at ba4af31bc (Verter's
+    // read/write split over-de-localized the bare-RHS READ to `$$props.y`).
+
+    // (1) Bare `rest.KEY` as the entire RHS of a plain `=` → verbatim `rest.y`.
+    let js = emit(
+        "<script>let { a, ...rest } = $props(); let sink = $state(0);</script>\n<button onclick={() => sink = rest.y}>x</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("rest.y"),
+        "a plain-`=` bare-member RHS must stay verbatim `rest.y`:\n{js}"
+    );
+    assert!(
+        !js.contains("$$props.y"),
+        "a plain-`=` bare-member RHS must NOT de-localize to `$$props.y`:\n{js}"
+    );
+
+    // (2) Paren-transparent — `sink = (rest.y)` is the SAME AST → verbatim.
+    let paren = emit(
+        "<script>let { a, ...rest } = $props(); let sink = $state(0);</script>\n<button onclick={() => sink = (rest.y)}>x</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        paren.contains("rest.y") && !paren.contains("$$props.y"),
+        "a paren-wrapped plain-`=` bare-member RHS stays verbatim:\n{paren}"
+    );
+
+    // (3) CONTROL — compound `+=` RHS. `sink` is a signal, so svelte pre-rewrites
+    // the assignment (`$.set(sink, $.get(sink) + rest.x)`), moving `rest.x` under a
+    // Binary node → the guard passes → de-localizes. First-hand oracle: `$$props.x`.
+    let compound = emit(
+        "<script>let { a, ...rest } = $props(); let sink = $state(0);</script>\n<button onclick={() => sink += rest.x}>x</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        compound.contains("$$props.x") && !compound.contains("rest.x"),
+        "a compound-`+=` RHS must de-localize to `$$props.x` (NOT verbatim):\n{compound}"
+    );
+
+    // (4) CONTROL — binary operand: `sink = rest.y + 1`. The member is under a
+    // Binary, NOT the direct RHS → de-localizes. First-hand oracle: `$$props.y + 1`.
+    let binary = emit(
+        "<script>let { a, ...rest } = $props(); let sink = $state(0);</script>\n<button onclick={() => sink = rest.y + 1}>x</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        binary.contains("$$props.y") && !binary.contains("rest.y"),
+        "a binary-operand RHS must de-localize to `$$props.y` (NOT verbatim):\n{binary}"
+    );
+
+    // (5) CONTROL — excluded key: `sink = rest.a` stays verbatim because `a` is a
+    // rest EXCLUDE (a distinct reason from the coarse Assignment-guard, same
+    // verbatim result). First-hand oracle: `rest.a`.
+    let excluded = emit(
+        "<script>let { a, ...rest } = $props(); let sink = $state(0);</script>\n<button onclick={() => sink = rest.a}>x</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        excluded.contains("rest.a") && !excluded.contains("$$props.a"),
+        "an excluded-key bare RHS stays verbatim `rest.a`:\n{excluded}"
+    );
+
+    // (6) whole-object equivalents — `all = $props()` behaves identically: the bare
+    // RHS stays verbatim, the binary operand de-localizes. First-hand oracle:
+    // `sink = all.a` → `$.set(sink, all.a, true)`; `sink = all.a + 1` → `$$props.a`.
+    let whole = emit(
+        "<script>let all = $props(); let sink = $state(0);</script>\n<button onclick={() => sink = all.a}>x</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        whole.contains("all.a") && !whole.contains("$$props.a"),
+        "a whole-object plain-`=` bare-member RHS stays verbatim `all.a`:\n{whole}"
+    );
+    let whole_binary = emit(
+        "<script>let all = $props(); let sink = $state(0);</script>\n<button onclick={() => sink = all.a + 1}>x</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        whole_binary.contains("$$props.a") && !whole_binary.contains("all.a"),
+        "a whole-object binary-operand RHS de-localizes to `$$props.a`:\n{whole_binary}"
+    );
+}
+
+// ── 5g-e REOPEN: optional-chain rest/whole member reads PRESERVE the `?.` ──
+// De-localization replaces ONLY the object identifier (`rest`/`all` → `$$props`),
+// never the whole member span, so the optional axis, property spelling, and any
+// downstream chain stay verbatim from source. Each correctness test is RED at
+// ff1ca89a1 (whole-member replacement dropped the `?.`) and GREEN after the fix.
+
+#[test]
+fn props_rest_optional_member_read_preserves_optional_chain() {
+    // Oracle svelte@5.56.3: `rest?.x` → `$$props?.x` (attr AND handler); the CONTROL
+    // `rest.x` → `$$props.x` (dotted). RED at ff1ca89a1: whole-member replacement
+    // emitted the `?.`-dropped `$$props.x` for the optional form.
+    let opt = emit(
+        "<script>let { a, ...rest } = $props();</script>\n<div title={rest?.x}></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        opt.contains("$$props?.x"),
+        "an optional rest member preserves `?.` → $$props?.x:\n{opt}"
+    );
+    // NEGATIVE (the pre-fix miscompile): the `?.`-dropped `$$props.x` must be ABSENT.
+    assert!(
+        !opt.contains("$$props.x"),
+        "the optional axis must NOT be dropped to `$$props.x`:\n{opt}"
+    );
+
+    // CONTROL — the non-optional `rest.x` is byte-identical to before (dotted).
+    let ctrl = emit(
+        "<script>let { a, ...rest } = $props();</script>\n<div title={rest.x}></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        ctrl.contains("$$props.x") && !ctrl.contains("$$props?.x"),
+        "the non-optional control stays the dotted `$$props.x`:\n{ctrl}"
+    );
+
+    // Handler context (`onclick={() => sink += rest?.x}`) — the same rewriter path.
+    let hdlr = emit(
+        "<script>let { a, ...rest } = $props(); let sink = $state(0);</script>\n<button onclick={() => sink += rest?.x}>x</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        hdlr.contains("$$props?.x") && !hdlr.contains("$$props.x"),
+        "an optional rest member in a handler preserves `?.`:\n{hdlr}"
+    );
+}
+
+#[test]
+fn props_whole_object_optional_member_preserves_optional_chain() {
+    // Whole-object capture `let all = $props()` behaves identically: `all?.x` →
+    // `$$props?.x`. Oracle svelte@5.56.3. RED at ff1ca89a1 (dropped to `$$props.x`).
+    let js = emit(
+        "<script>let all = $props();</script>\n<div title={all?.x}></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$$props?.x"),
+        "a whole-object optional member preserves `?.` → $$props?.x:\n{js}"
+    );
+    assert!(
+        !js.contains("$$props.x") && !js.contains("$$props.all"),
+        "the whole-object optional axis must not drop, nor fire the bare-read trap:\n{js}"
+    );
+    // Whole-object equivalent in a handler.
+    let hdlr = emit(
+        "<script>let all = $props(); let sink = $state(0);</script>\n<button onclick={() => sink += all?.x}>x</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        hdlr.contains("$$props?.x") && !hdlr.contains("$$props.x"),
+        "a whole-object optional member in a handler preserves `?.`:\n{hdlr}"
+    );
+}
+
+#[test]
+fn props_rest_optional_member_chain_preserves_every_optional_hop() {
+    // A downstream chain stays verbatim from source: `rest?.x.y` → `$$props?.x.y`
+    // (the inner `?.x` de-localizes the ROOT, `.y` verbatim); a CHAINED optional
+    // `rest?.x?.y` → `$$props?.x?.y` keeps BOTH `?.`. Oracle svelte@5.56.3. RED at
+    // ff1ca89a1 (dropped the first `?.`: `$$props.x.y` / `$$props.x?.y`).
+    let mixed = emit(
+        "<script>let { a, ...rest } = $props();</script>\n<div title={rest?.x.y}></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        mixed.contains("$$props?.x.y"),
+        "an optional-then-static chain preserves the head `?.`: $$props?.x.y:\n{mixed}"
+    );
+    assert!(
+        !mixed.contains("$$props.x.y"),
+        "the head `?.` must not drop to `$$props.x.y`:\n{mixed}"
+    );
+
+    let chained = emit(
+        "<script>let { a, ...rest } = $props();</script>\n<div title={rest?.x?.y}></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        chained.contains("$$props?.x?.y"),
+        "a chained optional preserves BOTH `?.`: $$props?.x?.y:\n{chained}"
+    );
+    // NEGATIVE: the pre-fix first-hop-dropped form `$$props.x?.y` must be absent.
+    assert!(
+        !chained.contains("$$props.x?.y"),
+        "the first `?.` must not drop to `$$props.x?.y`:\n{chained}"
+    );
+}
+
+#[test]
+fn props_rest_optional_receiver_call_preserves_optional_chain() {
+    // §10a sibling — an optional-RECEIVER call `rest?.x()` in ATTR context (the
+    // handler-statement form hits the pre-existing NonDelegatedEvent deferral, out of
+    // scope) de-localizes the callee to `$$props?.x()`. Oracle svelte@5.56.3:
+    // `$$props?.x()`. RED at ff1ca89a1 (emitted `$$props.x()`).
+    let js = emit(
+        "<script>let { a, ...rest } = $props();</script>\n<div title={rest?.x()}></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$$props?.x()"),
+        "an optional-receiver call preserves `?.`: $$props?.x():\n{js}"
+    );
+    assert!(
+        !js.contains("$$props.x()"),
+        "the optional-receiver `?.` must not drop to `$$props.x()`:\n{js}"
+    );
+}
+
+#[test]
+fn props_rest_optional_computed_member_stays_verbatim() {
+    // §10a boundary control — an OPTIONAL COMPUTED member `rest?.['x']` is NOT the
+    // static-member path (a distinct AST node), so it stays the verbatim real local,
+    // EXACTLY like the non-optional computed `rest['x']`. Oracle svelte@5.56.3:
+    // `rest?.['x']` verbatim. Guards the fix against leaking into the computed path.
+    let js = emit(
+        "<script>let { a, ...rest } = $props();</script>\n<div title={rest?.['x']}></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("rest?.['x']"),
+        "an optional computed member stays verbatim `rest?.['x']`:\n{js}"
+    );
+    // NEGATIVE: it must NOT de-localize to any `$$props`-rooted computed access.
+    assert!(
+        !js.contains("$$props?.['x']") && !js.contains("$$props['x']") && !js.contains("$$props.x"),
+        "an optional computed member must not de-localize:\n{js}"
+    );
+}
+
+#[test]
+fn props_rest_optional_excluded_member_stays_verbatim() {
+    // §10a boundary control — an EXCLUDED key under `?.` (`rest?.a` where `a` is a
+    // named prop the rest binding excludes) stays the verbatim `rest?.a` via the
+    // untouched `!excludes.contains(key)` guard. Oracle svelte@5.56.3: `rest?.a`.
+    let js = emit(
+        "<script>let { a, ...rest } = $props();</script>\n<div title={rest?.a}></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("rest?.a"),
+        "an excluded key under `?.` stays verbatim `rest?.a`:\n{js}"
+    );
+    assert!(
+        !js.contains("$$props?.a") && !js.contains("$$props.a"),
+        "an excluded key must not de-localize even under `?.`:\n{js}"
+    );
+}
+
+#[test]
+fn props_rest_optional_illegal_name_member_fails_closed() {
+    // §10a sibling — a `$$`-prefixed member under `?.` (`rest?.$$slots` / `all?.$$slots`)
+    // is the reserved magic namespace: an OFFICIAL compile error fired ABOVE the
+    // rewrite regardless of the optional axis. Oracle svelte@5.56.3: reject
+    // `props_illegal_name`. The `?.` does not relax the refuse.
+    for src in [
+        "<script>let { a, ...rest } = $props();</script>\n<div title={rest?.$$slots}></div>\n",
+        "<script>let all = $props();</script>\n<div title={all?.$$slots}></div>\n",
+    ] {
+        let err = emit_result(src).expect_err("an optional $$-member must fail closed");
+        assert!(
+            matches!(&err, ClientCompileError::OfficialReject(r)
+                if r.rule == CoreOfficialValidationRule::PropsIllegalName
+                && r.official_code == "props_illegal_name"),
+            "an optional $$-member is OfficialReject(props_illegal_name), got {err:?}"
+        );
+        // NEGATIVE: never a silently-emitted module, never the magic-identifier surface.
+        assert!(
+            !matches!(
+                &err,
+                ClientCompileError::Unsupported(
+                    UnsupportedSvelteRuntimeSurface::MagicIdentifier { .. }
+                )
+            ),
+            "an optional $$-member must not route through the magic-identifier surface: {err:?}"
+        );
+    }
+}
+
+#[test]
+fn props_rest_optional_write_target_fails_closed() {
+    // §10a sibling — an optional-chain expression is NOT a valid assignment target in
+    // JavaScript, so `rest?.x = 1` / `rest?.x += 1` are JS PARSE ERRORS that never
+    // reach the rewriter. Oracle svelte@5.56.3: `js_parse_error`. Verter fails closed
+    // through the template-expression parse channel (`svelte-runtime-expr-parse`),
+    // never a silent module.
+    for stmt in ["rest?.x = 1", "rest?.x += 1"] {
+        let src = format!(
+            "<script>let {{ a, ...rest }} = $props();</script>\n<div title={{{stmt}}}></div>\n"
+        );
+        match emit_result(&src) {
+            Err(ClientCompileError::Lowering(errs)) => {
+                assert!(
+                    errs.diagnostics
+                        .iter()
+                        .any(|d| d.code == "svelte-runtime-expr-parse"),
+                    "[{stmt}] an optional-chain assignment target must fail via the expr-parse channel:\n{errs:?}"
+                );
+            }
+            Ok(js) => panic!(
+                "[{stmt}] expected fail-closed for an optional-chain write, got a module:\n{js}"
+            ),
+            Err(other) => panic!("[{stmt}] expected an expr-parse lowering error, got: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn props_rest_compound_assign_nonsignal_target_stays_verbatim() {
+    // FIX-7 (class closure): the oracle's coarse Assignment-child guard keeps a bare
+    // `rest.KEY` / `all.KEY` that is the WHOLE RHS of an assignment VERBATIM unless
+    // svelte's own `AssignmentExpression` pre-rewrite re-parents the RHS under a
+    // Binary/Logical. That pre-rewrite (`build_assignment_value`) fires ONLY for a
+    // bare reassignable-SIGNAL-identifier compound target (`sig OP= rhs` →
+    // `$.set(sig, $.get(sig) OP rhs)`); a plain-local identifier, ANY object-member
+    // target (incl. `$state`), and a rest-member target are NOT pre-rewritten, so the
+    // `rest.KEY` grand-parent stays the AssignmentExpression → the guard keeps it
+    // verbatim. FIX-6 already covered plain `=` (target-agnostic); FIX-7 extends the
+    // verbatim record to a compound/logical `OP=` when `classify_target(left) ∈
+    // {PlainIdent, Member}`. RED at 82580a74a (Verter gated the verbatim record on
+    // `operator == Assign` ONLY, so it over-de-localized every compound/logical RHS to
+    // `$$props.KEY` regardless of target). First-hand oracle svelte@5.56.3 confirms
+    // every positive below stays verbatim and every control below de-localizes.
+
+    // (1) $state MEMBER target, compound `+=` — svelte does NOT re-wrap a member
+    // target → `objS.p += rest.y` stays verbatim. Oracle: `objS.p += rest.y`.
+    let member = emit(
+        "<script>let { a, ...rest } = $props(); let objS = $state({ p: 0 });</script>\n<button onclick={() => objS.p += rest.y}>x</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        member.contains("objS.p += rest.y") && !member.contains("$$props.y"),
+        "a compound `+=` to a $state MEMBER target keeps the RHS verbatim `rest.y`:\n{member}"
+    );
+
+    // (2) PLAIN-LOCAL identifier target (block-local in a `$effect`), compound `+=` —
+    // svelte early-returns (no re-wrap) → `m += rest.y` stays verbatim. Oracle:
+    // `m += rest.y`.
+    let plain_ident = emit(
+        "<script>let { a, ...rest } = $props(); $effect(() => { let m = 0; m += rest.y; console.log(m); });</script>\n<p>hi</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        plain_ident.contains("m += rest.y") && !plain_ident.contains("$$props.y"),
+        "a compound `+=` to a plain-local IDENT target keeps the RHS verbatim `rest.y`:\n{plain_ident}"
+    );
+
+    // (3) PLAIN-LOCAL identifier target, LOGICAL `??=` — same non-re-wrap path.
+    // Oracle: `m ??= rest.y`.
+    let logical = emit(
+        "<script>let { a, ...rest } = $props(); $effect(() => { let m = null; m ??= rest.y; console.log(m); });</script>\n<p>hi</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        logical.contains("m ??= rest.y") && !logical.contains("$$props.y"),
+        "a logical `??=` to a plain-local IDENT target keeps the RHS verbatim `rest.y`:\n{logical}"
+    );
+
+    // (4) PLAIN-LOCAL object-MEMBER target — a member target, never re-wrapped.
+    // Oracle: `obj.p += rest.y`.
+    let plain_member = emit(
+        "<script>let { a, ...rest } = $props(); $effect(() => { let obj = { p: 0 }; obj.p += rest.y; console.log(obj); });</script>\n<p>hi</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        plain_member.contains("obj.p += rest.y") && !plain_member.contains("$$props.y"),
+        "a compound `+=` to a plain-local object-MEMBER target keeps the RHS verbatim `rest.y`:\n{plain_member}"
+    );
+
+    // (5) whole-object `all.KEY` behaves identically — MEMBER target. Oracle:
+    // `objS.p += all.y`.
+    let whole_member = emit(
+        "<script>let all = $props(); let objS = $state({ p: 0 });</script>\n<button onclick={() => objS.p += all.y}>x</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        whole_member.contains("objS.p += all.y") && !whole_member.contains("$$props.y"),
+        "a whole-object compound `+=` to a $state MEMBER target keeps the RHS verbatim `all.y`:\n{whole_member}"
+    );
+
+    // (6) whole-object `all.KEY` — PLAIN-LOCAL ident target. Oracle: `m += all.y`.
+    let whole_ident = emit(
+        "<script>let all = $props(); $effect(() => { let m = 0; m += all.y; console.log(m); });</script>\n<p>hi</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        whole_ident.contains("m += all.y") && !whole_ident.contains("$$props.y"),
+        "a whole-object compound `+=` to a plain-local IDENT target keeps the RHS verbatim `all.y`:\n{whole_ident}"
+    );
+
+    // (7) CONTROL — a bare reassignable-SIGNAL identifier target ($state) MUST still
+    // de-localize: svelte pre-rewrites `sink += rest.y` → `$.set(sink, $.get(sink) +
+    // rhs)`, re-parenting the RHS under a Binary → the guard passes → `$$props.y`.
+    // Proves FIX-7 does NOT over-correct. Oracle: `$.set(sink, $.get(sink) + $$props.y)`.
+    let signal_compound = emit(
+        "<script>let { a, ...rest } = $props(); let sink = $state(0);</script>\n<button onclick={() => sink += rest.y}>x</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        signal_compound.contains("$$props.y") && !signal_compound.contains("rest.y"),
+        "a compound `+=` to a SIGNAL id target must still de-localize to `$$props.y`:\n{signal_compound}"
+    );
+
+    // (8) CONTROL — SIGNAL id target, LOGICAL `??=` — same re-wrap → de-localize.
+    // Oracle: `$.set(sink, $.get(sink) ?? $$props.y, true)`.
+    let signal_logical = emit(
+        "<script>let { a, ...rest } = $props(); let sink = $state(0);</script>\n<button onclick={() => sink ??= rest.y}>x</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        signal_logical.contains("$$props.y") && !signal_logical.contains("rest.y"),
+        "a logical `??=` to a SIGNAL id target must still de-localize to `$$props.y`:\n{signal_logical}"
+    );
+}
+
+#[test]
+fn props_rest_parenthesized_dollar_member_no_longer_fails_open() {
+    // FIX-1 closes the FAIL-OPEN: `(rest).$$slots` / `(all).$$slots` reached the
+    // verbatim leaf at c0c2ff2aa (emitted an undefined read, NO error). After the
+    // paren-peel the `$$`-member reject fires THROUGH the paren, so the component
+    // REJECTS. (The exact official code `props_illegal_name` is asserted by the
+    // FIX-3 negatives.)
+    assert!(
+        emit_result(
+            "<script>let { a, ...rest } = $props(); let sink = $state(0);</script>\n<button onclick={() => sink += (rest).$$slots}>x</button>\n"
+        )
+        .is_err(),
+        "a parenthesized rest $$-member must reject, not fail open"
+    );
+    assert!(
+        emit_result(
+            "<script>let all = $props(); let sink = $state(0);</script>\n<button onclick={() => sink += (all).$$slots}>x</button>\n"
+        )
+        .is_err(),
+        "a parenthesized whole-object $$-member must reject, not fail open"
+    );
+}
+
+#[test]
+fn props_rest_nested_pattern_fails_closed() {
+    // `{ a: { ...inner } }` — a nested destructure member is the surviving nested arm.
+    assert_fail_closed(
+        "<script>let { a: { ...inner } } = $props();</script>\n<p>x</p>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$props() nested destructure"),
+    );
+}
+
+#[test]
+fn props_rest_computed_sibling_fails_closed() {
+    // `{ [k]: v, ...rest }` — a computed-key sibling is the surviving computed arm.
+    assert_fail_closed(
+        "<script>let { [k]: v, ...rest } = $props();</script>\n<p>{v}</p>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$props() computed key"),
+    );
+}
+
+#[test]
+fn props_rest_dollar_member_fails_closed() {
+    // `rest.$$slots` (in a state-write handler — the rewriter path) — accessing a
+    // `$$`-prefixed member of the rest binding is an OFFICIAL compile error
+    // (`props_illegal_name`), NOT a deferrable unsupported feature. Verter fails
+    // closed carrying the exact official code through the official-reject quadrant.
+    // RED at c0c2ff2aa (which routed it as `Unsupported(MagicIdentifier)`).
+    let err = emit_result(
+        "<script>let { a, ...rest } = $props(); let sink = $state(0);</script>\n<button onclick={() => sink += rest.$$slots}>x</button>\n",
+    )
+    .expect_err("a $$-member of the rest binding must fail closed");
+    assert!(
+        matches!(&err, ClientCompileError::OfficialReject(r)
+            if r.rule == CoreOfficialValidationRule::PropsIllegalName
+            && r.official_code == "props_illegal_name"),
+        "a rest $$-member is OfficialReject(props_illegal_name), got {err:?}"
+    );
+    // NEGATIVE: no longer the internal magic-identifier unsupported surface.
+    assert!(
+        !matches!(
+            &err,
+            ClientCompileError::Unsupported(
+                UnsupportedSvelteRuntimeSurface::MagicIdentifier { .. }
+            )
+        ),
+        "the rest $$-member must NOT route through the magic-identifier surface: {err:?}"
+    );
+}
+
+#[test]
+fn props_whole_object_dollar_member_fails_closed() {
+    // `all.$$slots` (state-write handler) — same official `props_illegal_name`
+    // reject on the whole-object binding.
+    let err = emit_result(
+        "<script>let all = $props(); let sink = $state(0);</script>\n<button onclick={() => sink += all.$$slots}>x</button>\n",
+    )
+    .expect_err("a $$-member of the whole-object binding must fail closed");
+    assert!(
+        matches!(&err, ClientCompileError::OfficialReject(r)
+            if r.rule == CoreOfficialValidationRule::PropsIllegalName
+            && r.official_code == "props_illegal_name"),
+        "a whole-object $$-member is OfficialReject(props_illegal_name), got {err:?}"
+    );
+    assert!(
+        !matches!(
+            &err,
+            ClientCompileError::Unsupported(
+                UnsupportedSvelteRuntimeSurface::MagicIdentifier { .. }
+            )
+        ),
+        "the whole-object $$-member must NOT route through the magic-identifier surface: {err:?}"
+    );
+}
+
+#[test]
+fn props_rest_parenthesized_dollar_member_is_official_reject() {
+    // FIX-1 + FIX-3: the PAREN form `(rest).$$slots` / `(all).$$slots` — a FAIL-OPEN
+    // at c0c2ff2aa (emitted an undefined read, NO error) — now rejects THROUGH the
+    // paren-peel with the SAME official `props_illegal_name` code as the direct
+    // form. Closes the fail-open with the correct quadrant + code.
+    for src in [
+        "<script>let { a, ...rest } = $props(); let sink = $state(0);</script>\n<button onclick={() => sink += (rest).$$slots}>x</button>\n",
+        "<script>let all = $props(); let sink = $state(0);</script>\n<button onclick={() => sink += (all).$$slots}>x</button>\n",
+    ] {
+        let err = emit_result(src).expect_err("a parenthesized $$-member must fail closed");
+        assert!(
+            matches!(&err, ClientCompileError::OfficialReject(r)
+                if r.rule == CoreOfficialValidationRule::PropsIllegalName
+                && r.official_code == "props_illegal_name"),
+            "a parenthesized $$-member is OfficialReject(props_illegal_name), got {err:?}"
+        );
+    }
+}
+
+#[test]
+fn props_rest_authored_restprops_fails_closed() {
+    // Authored `$$restProps` (source, not generated) — the UNTOUCHED runes-mode
+    // official-reject gate (`legacy_rest_props_invalid`). Never relaxed by rest
+    // support (generated `$$props.KEY` reads never pass the authored-source scan).
+    let err =
+        emit_result("<script>let { a, ...rest } = $props();</script>\n<p>{$$restProps.x}</p>\n")
+            .expect_err("authored $$restProps must fail closed");
+    assert!(
+        matches!(&err, ClientCompileError::OfficialReject(r) if r.official_code == "legacy_rest_props_invalid"),
+        "authored $$restProps must fail closed with the runes-mode legacy_rest_props_invalid code, got {err:?}"
+    );
+}
+
+#[test]
+fn props_rest_dollar_prefixed_sibling_fails_closed() {
+    // `{ $$bad, ...rest }` — a `$$`-prefixed destructure NAME is the UNTOUCHED
+    // dollar-prefix official-reject gate.
+    let err = emit_result("<script>let { $$bad, ...rest } = $props();</script>\n<p>x</p>\n")
+        .expect_err("a $$-prefixed destructure name must fail closed");
+    assert!(
+        matches!(&err, ClientCompileError::OfficialReject(r) if r.official_code == "dollar_prefix_invalid"),
+        "a $$-prefixed sibling must fail closed at the untouched dollar-prefix gate, got {err:?}"
+    );
+}
+
+#[test]
+fn props_rest_malformed_patterns_fail_closed() {
+    // The parser-refused rest siblings — double rest, rest-with-default, and
+    // rest-not-last — are rejected by the JS parser (`js_parse_error`); each must
+    // fail closed (never a silently emitted module that drops the props).
+    for (label, src) in [
+        (
+            "double-rest",
+            "<script>let { ...a, ...b } = $props();</script>\n<p>x</p>\n",
+        ),
+        (
+            "rest-with-default",
+            "<script>let { ...rest = {} } = $props();</script>\n<p>x</p>\n",
+        ),
+        (
+            "rest-not-last",
+            "<script>let { ...rest, a } = $props();</script>\n<p>x</p>\n",
+        ),
+    ] {
+        assert!(
+            emit_result(src).is_err(),
+            "the malformed rest pattern [{label}] must fail closed, not emit a module",
+        );
+    }
+}
+
+#[test]
+fn props_uncalled_and_value_position_fail_closed() {
+    // Uncalled/bare `$props` (not a destructure binding) and a value-position
+    // `$props()` (not a declarator init) both fail closed — neither establishes the
+    // props capture, so neither may silently emit.
+    for (label, src) in [
+        (
+            "uncalled-bare",
+            "<script>let all = $props;</script>\n<p>x</p>\n",
+        ),
+        (
+            "value-position",
+            "<script>let x = 0;</script>\n<p>{$props()}</p>\n",
+        ),
+        ("bare-statement", "<script>$props();</script>\n<p>x</p>\n"),
+    ] {
+        assert!(
+            emit_result(src).is_err(),
+            "the non-destructure `$props` form [{label}] must fail closed",
+        );
+    }
 }
 
 #[test]
@@ -9136,12 +10329,13 @@ fn second_props_declarator_with_computed_key_fails_closed() {
 
 #[test]
 fn second_props_call_whole_object_fails_closed() {
-    // Two SEPARATE `$props()` statements where the second is a whole-object binding
-    // (`let p = $props()`) — the whole-object form fails closed even though a
-    // basic destructure preceded it. RED against scanning only the first.
+    // Two SEPARATE `$props()` statements (a basic destructure + a now-supported
+    // whole-object binding) — TWO `$props()` calls fail closed as `$props()
+    // duplicate` (the surviving duplicate arm), regardless of each call's individual
+    // (now-basic) shape. RED against scanning only the first.
     assert_fail_closed(
         "<script>let {a}=$props(); let p=$props();</script>\n<p>{a}</p>\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$props() whole-object"),
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$props() duplicate"),
     );
 }
 // ── StateProxy member bind setter — through the rewriter, not raw text ─────────
