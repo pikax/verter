@@ -2762,14 +2762,32 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
             let mut any_contribution = false;
             for spec in &matched_specs {
-                let Some(aug_prepared) = crate::resolver_core::prepare_augmentation_type_decl(
-                    augmenter_canonical.as_ref(),
-                    state,
-                    &AugmentationScopeKind::Module(spec.clone()),
-                    decl_name,
-                    dep_edges.as_deref(),
-                ) else {
-                    continue;
+                let aug_prepared = match
+                    crate::resolver_core::prepared_decl::prepare_augmentation_type_decl_outcome(
+                        augmenter_canonical.as_ref(),
+                        state,
+                        &AugmentationScopeKind::Module(spec.clone()),
+                        decl_name,
+                        dep_edges.as_deref(),
+                    )
+                {
+                    crate::resolver_core::prepared_decl::PreparedDeclOutcome::Ready(Some(
+                        prepared,
+                    )) => prepared,
+                    // Genuine absence: this augmenter has no contributor for the spec.
+                    crate::resolver_core::prepared_decl::PreparedDeclOutcome::Ready(None) => {
+                        continue
+                    }
+                    // A broken decl-body lease pin (the augmenter body demand
+                    // ReturnOnly'd): the augmenter's source-env is UNOBSERVABLE —
+                    // fold into the fold's no-warm rail so the enclosing query's
+                    // `cache_suppress` is set, rather than silently dropping the
+                    // contributor and warm-admitting an under-merged surface. A
+                    // later demand under a live lease recovers.
+                    crate::resolver_core::prepared_decl::PreparedDeclOutcome::LeaseMiss => {
+                        source_env_unobservable = true;
+                        continue;
+                    }
                 };
                 let mut aug_subs: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
                 // Demand the augmenter's RETAINED contribution body through

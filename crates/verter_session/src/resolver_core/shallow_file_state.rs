@@ -17,7 +17,7 @@ use std::sync::Arc;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::route_demand::RouteDemand;
-use crate::decl_body_memo::{LoweredTypeDecl, LoweredValueDecl};
+use crate::decl_body_memo::{DemandOutcome, LoweredTypeDecl, LoweredValueDecl};
 use verter_compiler::utils::oxc::script::type_surface::AnalyzedExternalTypeSource;
 use verter_semantic::analysis::decl_headers::{TypeDeclHeader, ValueDeclHeader};
 use verter_semantic::analysis::type_eval::{TypeDeclKind, ValueDeclKind};
@@ -551,6 +551,59 @@ impl ShallowFileState {
         state
     }
 
+    /// Test-only builder for a SERVICE-backed [`ShallowFileState`] — the
+    /// production lazy-memo shape whose declaration-body lease can be broken
+    /// out-of-band (via [`crate::decl_body_memo::DeclBodyMemo::release_retained_snapshot_for_test`])
+    /// to exercise the fail-closed no-warm rails. Unlike [`Self::from_analysis`]
+    /// (a SEEDED memo, which can never lease-miss), this wires a live
+    /// [`crate::decl_lowering::DeclLoweringService`], so a broken retained-
+    /// snapshot pin surfaces the typed `LeaseMiss` outcome instead of a
+    /// genuine miss. `#[cfg(test)]`-only: the sole callers are the inline
+    /// broken-lease no-warm regressions.
+    #[cfg(test)]
+    pub(crate) fn service_backed_for_test(source: &str) -> Arc<Self> {
+        let allocator = oxc_allocator::Allocator::default();
+        let parsed =
+            oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+        assert!(
+            !parsed.panicked,
+            "service_backed_for_test fixture must parse"
+        );
+        let header_index = Arc::new(
+            verter_semantic::analysis::decl_headers::build_decl_header_index(
+                &parsed.program,
+                source,
+            ),
+        );
+        let analysis = Arc::new(
+            verter_compiler::utils::oxc::script::type_surface::analyze_external_type_source(
+                source, &allocator,
+            ),
+        );
+        let eval_source: Arc<str> = Arc::from(source);
+        let memo = crate::decl_body_memo::DeclBodyMemo::new(
+            crate::decl_lowering::SnapshotKey {
+                canonical: Arc::from("/ws/fixture.ts"),
+                whole_hash: [7u8; 16],
+                parse_env_hash: [0u8; 16],
+            },
+            Arc::clone(&eval_source),
+            eval_source,
+            None,
+            oxc_span::SourceType::ts(),
+            Arc::new(crate::decl_lowering::DeclLoweringService::new()),
+            header_index,
+            Arc::new(crate::types::MetaProvenance::default()),
+            None,
+        );
+        Arc::new(Self::from_analysis_with_resolver(
+            Hash16::default(),
+            analysis,
+            Arc::new(memo),
+            &NullResolver,
+        ))
+    }
+
     /// Build from the header-only analysis + the lazy declaration-body
     /// memo, with a resolver that canonicalizes all cross-file edges.
     ///
@@ -1002,6 +1055,14 @@ impl ShallowFileState {
         self.decl_bodies.type_decl(name)
     }
 
+    /// Lease-aware counterpart of [`Self::type_decl`]: preserves the DISTINCT
+    /// `LeaseMiss` ReturnOnly outcome (a broken decl-body lease pin) so a
+    /// cache-admitting consumer refuses warm admission instead of persisting a
+    /// transient body-less result as genuine absence.
+    pub(crate) fn type_decl_outcome(&self, name: &str) -> DemandOutcome<LoweredTypeDecl> {
+        self.decl_bodies.type_decl_outcome(name)
+    }
+
     /// Demand the lowered BODY of a local VALUE symbol — eager
     /// synthesised `.vue`-default bodies first, then the lazy memo. A
     /// miss returns `None`.
@@ -1010,6 +1071,16 @@ impl ShallowFileState {
             return Some(Arc::clone(body));
         }
         self.decl_bodies.value_decl(name)
+    }
+
+    /// Lease-aware counterpart of [`Self::value_decl`]: an eager synthesised
+    /// `.vue`-default body is a genuine `Ready`, otherwise the memo's typed
+    /// outcome (preserving the `LeaseMiss` no-warm signal) flows through.
+    pub(crate) fn value_decl_outcome(&self, name: &str) -> DemandOutcome<LoweredValueDecl> {
+        if let Some(body) = self.synthesised_value_bodies.get(name) {
+            return DemandOutcome::Ready(Some(Arc::clone(body)));
+        }
+        self.decl_bodies.value_decl_outcome(name)
     }
 
     /// The per-contributor body surface for a file-scope TYPE symbol, as the
@@ -1122,10 +1193,31 @@ impl ShallowFileState {
         if let Some(hit) = self.type_deps_cache.get(name) {
             return hit.clone();
         }
-        let computed = self.classify_type_deps(name);
+        // A header-present symbol classifies to a genuine `Ready` under a live
+        // lease; a `LeaseMiss` here is a BROKEN decl-body lease pin (the
+        // demanded body lowering ReturnOnly'd). Fail CLOSED: do NOT cache the
+        // transient result as genuine absence — a cached wrong-empty would
+        // under-classify the symbol's dependency edges for the artifact's life
+        // (under-invalidation). A later demand under a live lease recovers.
+        match self.classify_type_deps(name) {
+            DemandOutcome::LeaseMiss => None,
+            DemandOutcome::Ready(computed) => {
+                self.type_deps_cache
+                    .insert(name.to_string(), computed.clone());
+                computed
+            }
+        }
+    }
+
+    /// Test observability: whether the `type_deps` classification cache holds a
+    /// COMMITTED `None` entry for `name`. A `None` cached for a header-present
+    /// symbol is a wrong-empty warm admission (a broken decl-body lease pin that
+    /// should have failed closed) — never a validity signal.
+    #[cfg(test)]
+    pub(crate) fn type_deps_cache_has_none_entry(&self, name: &str) -> bool {
         self.type_deps_cache
-            .insert(name.to_string(), computed.clone());
-        computed
+            .get(name)
+            .is_some_and(|entry| entry.is_none())
     }
 
     /// Demand the lowered BODY of an ambient-augmentation-scoped TYPE
@@ -1142,6 +1234,27 @@ impl ShallowFileState {
             .header_index()
             .augmentation_type_header(scope, name)?;
         self.decl_bodies.augmentation_type_decl(scope, name)
+    }
+
+    /// Lease-aware counterpart of [`Self::augmentation_type_decl`]: preserves
+    /// the DISTINCT `LeaseMiss` ReturnOnly outcome so the cross-file
+    /// augmentation stitch folds a broken-lease augmenter body into the
+    /// no-warm (`source_env_unobservable`) rail instead of silently dropping
+    /// the contributor as genuine absence (an under-merged warm result).
+    pub(crate) fn augmentation_type_decl_outcome(
+        &self,
+        scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+        name: &str,
+    ) -> DemandOutcome<LoweredTypeDecl> {
+        if self
+            .decl_bodies
+            .header_index()
+            .augmentation_type_header(scope, name)
+            .is_none()
+        {
+            return DemandOutcome::Ready(None);
+        }
+        self.decl_bodies.augmentation_type_decl_outcome(scope, name)
     }
 
     /// Value-space counterpart of [`Self::augmentation_type_decl`].
@@ -1161,8 +1274,15 @@ impl ShallowFileState {
     /// `typeof`-root import edges appended, deterministic ordering by
     /// final sort. Lowers the body through the memo to read its
     /// dependency-name roots; stores ONLY dependency edges.
-    fn classify_type_deps(&self, name: &str) -> Option<Arc<ClassifiedTypeDeps>> {
-        let lowered = self.decl_bodies.type_decl(name)?;
+    fn classify_type_deps(&self, name: &str) -> DemandOutcome<ClassifiedTypeDeps> {
+        let lowered = match self.decl_bodies.type_decl_outcome(name) {
+            // A broken decl-body lease pin: surface the DISTINCT no-warm signal
+            // so the caller declines to cache a transient empty classification.
+            DemandOutcome::LeaseMiss => return DemandOutcome::LeaseMiss,
+            // A genuine, cacheable miss (the header lowered to no type decl).
+            DemandOutcome::Ready(None) => return DemandOutcome::Ready(None),
+            DemandOutcome::Ready(Some(lowered)) => lowered,
+        };
 
         // LOCAL deps: dependency-name roots that are local type symbols
         // (analyzer name inventory — header data), never imports, never
@@ -1252,10 +1372,10 @@ impl ShallowFileState {
                 .then_with(|| left.imported_name.cmp(&right.imported_name))
         });
 
-        Some(Arc::new(ClassifiedTypeDeps {
+        DemandOutcome::Ready(Some(Arc::new(ClassifiedTypeDeps {
             local_deps,
             external_deps,
-        }))
+        })))
     }
 
     /// The transitive required-import closure of one local type — the

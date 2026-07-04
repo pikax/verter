@@ -10,12 +10,37 @@ use verter_semantic::analysis::type_solver::{
 
 use super::shallow_file_state::ClassifiedTypeDeps;
 use super::{ExportTarget, ShallowFileState};
-use crate::decl_body_memo::{LoweredTypeDecl, LoweredValueDecl};
+use crate::decl_body_memo::{DemandOutcome, LoweredTypeDecl, LoweredValueDecl};
 
 type PreparedTypeDeclSlot = Arc<OnceLock<Option<Arc<PreparedTypeDecl>>>>;
 type PreparedTypeDeclSlots = Arc<FxHashMap<String, PreparedTypeDeclSlot>>;
 type PreparedValueDeclSlot = Arc<OnceLock<Option<Arc<PreparedValueDecl>>>>;
 type PreparedValueDeclSlots = Arc<FxHashMap<String, PreparedValueDeclSlot>>;
+
+/// Outcome of a lease-aware prepared-decl build. A genuine `Ready(None)` (the
+/// symbol is not inventoried, is an import-local, or lowered to no decl) is a
+/// cacheable absence; a `LeaseMiss` (a broken decl-body lease pin — the
+/// demanded body lowering ReturnOnly'd, lowering NOTHING) is a TRANSIENT
+/// no-warm signal a cache-admitting consumer must NOT persist as absence, so a
+/// later demand under a live lease recovers. Never collapse the two at a
+/// warm-admission boundary (the write-once prepared-decl slot).
+pub(crate) enum PreparedDeclOutcome<T> {
+    Ready(Option<T>),
+    LeaseMiss,
+}
+
+impl<T> PreparedDeclOutcome<T> {
+    /// Collapse to the plain `Option` for direct/standalone callers
+    /// (`prepare_exported_*`, tests) that do NOT admit into the write-once
+    /// slot cache: a lease-miss reads as `None` there (they recompute on the
+    /// next call, warm-poisoning nothing).
+    fn into_option(self) -> Option<T> {
+        match self {
+            PreparedDeclOutcome::Ready(value) => value,
+            PreparedDeclOutcome::LeaseMiss => None,
+        }
+    }
+}
 
 /// Import binding: maps a local import name to its resolved target.
 /// Used by the declaration-scope solver host to resolve cross-file references.
@@ -145,6 +170,29 @@ pub fn prepare_local_type_decl(
     dep_edges: Option<&FxHashMap<String, String>>,
     import_canonicalization: &ImportCanonicalization,
 ) -> Option<PreparedTypeDecl> {
+    prepare_local_type_decl_outcome(
+        canonical_id,
+        state,
+        symbol_name,
+        dep_edges,
+        import_canonicalization,
+    )
+    .into_option()
+}
+
+/// Lease-aware variant of [`prepare_local_type_decl`]: distinguishes a genuine
+/// absence (`Ready(None)`, cacheable) from a broken decl-body lease pin
+/// (`LeaseMiss`, no-warm) so the write-once slot cache
+/// ([`PreparedTypeDeclCache::get`]) refuses to persist a transient body-less
+/// result as genuine declaration absence. `prepare_local_type_decl` collapses
+/// the two for direct/standalone callers that do not admit into that slot.
+pub(crate) fn prepare_local_type_decl_outcome(
+    canonical_id: &str,
+    state: &ShallowFileState,
+    symbol_name: &str,
+    dep_edges: Option<&FxHashMap<String, String>>,
+    import_canonicalization: &ImportCanonicalization,
+) -> PreparedDeclOutcome<PreparedTypeDecl> {
     use verter_semantic::analysis::type_eval::AugmentationScopeKind;
     // A name absent from the file surface but present in the file's own
     // `declare global { ... }` inventory resolves to the merged global
@@ -157,27 +205,30 @@ pub fn prepare_local_type_decl(
     // decl: a file-scope symbol (`None` origin → file-scope siblings) first,
     // then the global-augmentation fallback (`Global` origin → global
     // TYPE-augmentation siblings; the body carries no classified deps — it
-    // stitches onto another module's surface).
+    // stitches onto another module's surface). A broken-lease body demand
+    // surfaces the DISTINCT `LeaseMiss`, never collapsed into a cacheable miss.
     let global_scope = AugmentationScopeKind::Global;
-    let (lowered, deps, origin): (_, _, Option<&AugmentationScopeKind>) =
+    let (lowered, deps, origin): (Arc<LoweredTypeDecl>, _, Option<&AugmentationScopeKind>) =
         if state.has_type_symbol(symbol_name) {
-            (
-                state.type_decl(symbol_name)?,
-                state.type_deps(symbol_name),
-                None,
-            )
+            match state.type_decl_outcome(symbol_name) {
+                DemandOutcome::LeaseMiss => return PreparedDeclOutcome::LeaseMiss,
+                DemandOutcome::Ready(None) => return PreparedDeclOutcome::Ready(None),
+                DemandOutcome::Ready(Some(lowered)) => {
+                    (lowered, state.type_deps(symbol_name), None)
+                }
+            }
         } else {
-            (
-                state.augmentation_type_decl(&global_scope, symbol_name)?,
-                None,
-                Some(&global_scope),
-            )
+            match state.augmentation_type_decl_outcome(&global_scope, symbol_name) {
+                DemandOutcome::LeaseMiss => return PreparedDeclOutcome::LeaseMiss,
+                DemandOutcome::Ready(None) => return PreparedDeclOutcome::Ready(None),
+                DemandOutcome::Ready(Some(lowered)) => (lowered, None, Some(&global_scope)),
+            }
         };
     if state.is_import_local(symbol_name) {
-        return None;
+        return PreparedDeclOutcome::Ready(None);
     }
 
-    Some(prepare_type_decl_from_lowered(
+    PreparedDeclOutcome::Ready(Some(prepare_type_decl_from_lowered(
         canonical_id,
         state,
         symbol_name,
@@ -186,7 +237,7 @@ pub fn prepare_local_type_decl(
         dep_edges,
         origin,
         import_canonicalization,
-    ))
+    )))
 }
 
 /// Prepare a type declaration retained in an ambient-augmentation scope
@@ -208,11 +259,33 @@ pub fn prepare_augmentation_type_decl(
     symbol_name: &str,
     dep_edges: Option<&FxHashMap<String, String>>,
 ) -> Option<PreparedTypeDecl> {
-    let lowered = state.augmentation_type_decl(scope, symbol_name)?;
+    prepare_augmentation_type_decl_outcome(canonical_id, state, scope, symbol_name, dep_edges)
+        .into_option()
+}
+
+/// Lease-aware variant of [`prepare_augmentation_type_decl`]: the cross-file
+/// augmentation stitch uses this so a broken-lease augmenter body surfaces the
+/// DISTINCT `LeaseMiss` (folded into the fold's `source_env_unobservable`
+/// no-warm rail) instead of a silent skip that would warm-admit an
+/// under-merged surface. `prepare_augmentation_type_decl` collapses the two for
+/// the locator-shape anchor-scope caller (already protected by the preceding
+/// `deref_locator_body` lease-miss → `cache_suppress` rail).
+pub(crate) fn prepare_augmentation_type_decl_outcome(
+    canonical_id: &str,
+    state: &ShallowFileState,
+    scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+    symbol_name: &str,
+    dep_edges: Option<&FxHashMap<String, String>>,
+) -> PreparedDeclOutcome<PreparedTypeDecl> {
+    let lowered = match state.augmentation_type_decl_outcome(scope, symbol_name) {
+        DemandOutcome::LeaseMiss => return PreparedDeclOutcome::LeaseMiss,
+        DemandOutcome::Ready(None) => return PreparedDeclOutcome::Ready(None),
+        DemandOutcome::Ready(Some(lowered)) => lowered,
+    };
     // Augmentation-scope decls are off the barrel-final import path (their
     // bodies stitch onto another module's surface, not a re-export hop), so the
     // barrel fallback applies for any import they reference.
-    Some(prepare_type_decl_from_lowered(
+    PreparedDeclOutcome::Ready(Some(prepare_type_decl_from_lowered(
         canonical_id,
         state,
         symbol_name,
@@ -221,7 +294,7 @@ pub fn prepare_augmentation_type_decl(
         dep_edges,
         Some(scope),
         &ImportCanonicalization::default(),
-    ))
+    )))
 }
 
 /// Build a [`PreparedTypeDecl`] from an already-lowered
@@ -466,9 +539,34 @@ pub fn prepare_local_value_decl(
     dep_edges: Option<&FxHashMap<String, String>>,
     import_canonicalization: &ImportCanonicalization,
 ) -> Option<PreparedValueDecl> {
-    let lowered: Arc<LoweredValueDecl> = state.value_decl(symbol_name)?;
+    prepare_local_value_decl_outcome(
+        canonical_id,
+        state,
+        symbol_name,
+        dep_edges,
+        import_canonicalization,
+    )
+    .into_option()
+}
+
+/// Lease-aware variant of [`prepare_local_value_decl`] — see
+/// [`prepare_local_type_decl_outcome`] for the no-warm contract that keeps a
+/// broken-lease demand from committing a body-less value decl into the
+/// write-once slot cache ([`PreparedValueDeclCache::get`]).
+pub(crate) fn prepare_local_value_decl_outcome(
+    canonical_id: &str,
+    state: &ShallowFileState,
+    symbol_name: &str,
+    dep_edges: Option<&FxHashMap<String, String>>,
+    import_canonicalization: &ImportCanonicalization,
+) -> PreparedDeclOutcome<PreparedValueDecl> {
+    let lowered: Arc<LoweredValueDecl> = match state.value_decl_outcome(symbol_name) {
+        DemandOutcome::LeaseMiss => return PreparedDeclOutcome::LeaseMiss,
+        DemandOutcome::Ready(None) => return PreparedDeclOutcome::Ready(None),
+        DemandOutcome::Ready(Some(lowered)) => lowered,
+    };
     if state.is_import_local(symbol_name) {
-        return None;
+        return PreparedDeclOutcome::Ready(None);
     }
 
     let mut prepared = PreparedValueDecl::new(
@@ -514,7 +612,7 @@ pub fn prepare_local_value_decl(
     let hash_u64 = u64::from_le_bytes(state.whole_hash[..8].try_into().unwrap_or_default());
     prepared.cache_deps.defining_file = Some((canonical_id.to_string(), hash_u64));
 
-    Some(prepared)
+    PreparedDeclOutcome::Ready(Some(prepared))
 }
 
 /// Prepare a named exported value declaration after routing has selected the
@@ -581,17 +679,44 @@ impl PreparedTypeDeclCache {
 
     pub fn get(&self, symbol_name: &str) -> Option<Arc<PreparedTypeDecl>> {
         let slot = self.slots.get(symbol_name)?;
-        slot.get_or_init(|| {
-            prepare_local_type_decl(
-                self.canonical_id.as_ref(),
-                self.state.as_ref(),
-                symbol_name,
-                (!self.dep_edges.is_empty()).then_some(self.dep_edges.as_ref()),
-                &self.import_canonicalization,
-            )
-            .map(Arc::new)
-        })
-        .clone()
+        // Warm hit.
+        if let Some(cached) = slot.get() {
+            return cached.clone();
+        }
+        // Cold build. A broken decl-body lease pin surfaces the DISTINCT
+        // `LeaseMiss` — fail CLOSED via ReturnOnly: do NOT commit the write-once
+        // slot. Persisting `None` here would falsely warm a REAL symbol as
+        // genuine ABSENCE for the bundle's life (an entry the read-side fact
+        // rail cannot reject, since content did not change), and — write-once —
+        // a later demand under a live lease could never recover. Leaving the
+        // slot vacant lets the retry recompute. A genuine result (`Some`) or
+        // genuine absence (`Ready(None)`) is cacheable; commit it under
+        // write-once single-flight (a cold race loses harmlessly — the
+        // content-addressed input yields the identical value, first writer wins).
+        match prepare_local_type_decl_outcome(
+            self.canonical_id.as_ref(),
+            self.state.as_ref(),
+            symbol_name,
+            (!self.dep_edges.is_empty()).then_some(self.dep_edges.as_ref()),
+            &self.import_canonicalization,
+        ) {
+            PreparedDeclOutcome::LeaseMiss => None,
+            PreparedDeclOutcome::Ready(value) => {
+                let _ = slot.set(value.map(Arc::new));
+                slot.get().cloned().flatten()
+            }
+        }
+    }
+
+    /// Test observability: whether the write-once slot for `symbol_name` has a
+    /// COMMITTED entry (never a validity signal). A broken-lease demand must
+    /// leave the slot VACANT — no wrong-empty `None` warm-admitted for a real
+    /// symbol — so this returns `false` after a lease-miss.
+    #[cfg(test)]
+    pub(crate) fn slot_committed_for_test(&self, symbol_name: &str) -> bool {
+        self.slots
+            .get(symbol_name)
+            .is_some_and(|slot| slot.get().is_some())
     }
 }
 
@@ -619,17 +744,35 @@ impl PreparedValueDeclCache {
 
     pub fn get(&self, symbol_name: &str) -> Option<Arc<PreparedValueDecl>> {
         let slot = self.slots.get(symbol_name)?;
-        slot.get_or_init(|| {
-            prepare_local_value_decl(
-                self.canonical_id.as_ref(),
-                self.state.as_ref(),
-                symbol_name,
-                (!self.dep_edges.is_empty()).then_some(self.dep_edges.as_ref()),
-                &self.import_canonicalization,
-            )
-            .map(Arc::new)
-        })
-        .clone()
+        // Warm hit.
+        if let Some(cached) = slot.get() {
+            return cached.clone();
+        }
+        // Cold build with the same broken-lease no-warm rail as the type cache
+        // above: a `LeaseMiss` must NOT commit the write-once slot to `None`
+        // (a false-warm absence for a real symbol); only a genuine result or
+        // genuine absence is cacheable.
+        match prepare_local_value_decl_outcome(
+            self.canonical_id.as_ref(),
+            self.state.as_ref(),
+            symbol_name,
+            (!self.dep_edges.is_empty()).then_some(self.dep_edges.as_ref()),
+            &self.import_canonicalization,
+        ) {
+            PreparedDeclOutcome::LeaseMiss => None,
+            PreparedDeclOutcome::Ready(value) => {
+                let _ = slot.set(value.map(Arc::new));
+                slot.get().cloned().flatten()
+            }
+        }
+    }
+
+    /// Test observability — see [`PreparedTypeDeclCache::slot_committed_for_test`].
+    #[cfg(test)]
+    pub(crate) fn slot_committed_for_test(&self, symbol_name: &str) -> bool {
+        self.slots
+            .get(symbol_name)
+            .is_some_and(|slot| slot.get().is_some())
     }
 }
 
@@ -1133,6 +1276,151 @@ declare global { namespace JSX {
             !prepared.name_resolution.contains_key("VERSION"),
             "a non-consumable global-augmentation VALUE sibling must NOT be \
              bound into name_resolution"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Broken-lease no-warm rail at the CACHE-ADMITTING prepared-decl boundary.
+    //
+    // The locator-deref rail (`deref_locator_body` → `LocatorBodyDerefError::
+    // LeaseMiss` → `cache_suppress`) already refuses to warm a transient
+    // ReturnOnly. These tests pin the SAME no-warm contract on the OTHER
+    // body-consumer: a broken decl-body lease pin during a prepared-decl build
+    // must NOT commit the write-once slot (nor the `type_deps` classification
+    // cache) with a body-less result for a REAL symbol — a false-warm absence
+    // that (write-once) a later live-lease demand could never recover from.
+    // ---------------------------------------------------------------------
+
+    /// A broken-lease prepared-TYPE demand fails closed to `None` (ReturnOnly)
+    /// and — the discriminating no-warm assertion — leaves the write-once slot
+    /// for the REAL symbol VACANT. Pre-change (`get_or_init`) the slot committed
+    /// `None`; post-change the slot stays uncommitted so a retry recovers.
+    #[test]
+    fn broken_lease_prepared_type_decl_get_does_not_warm_admit_none_slot() {
+        let source = "export type Var0 = { v: 0 };\nexport type Var1 = { v: 1 };\n";
+        let state = ShallowFileState::service_backed_for_test(source);
+        let cache = build_prepared_type_decl_cache(
+            "/ws/fixture.ts",
+            Arc::clone(&state),
+            Arc::new(FxHashMap::default()),
+            Arc::new(ImportCanonicalization::default()),
+        );
+
+        // One successful demand pins the retained-snapshot lease and commits Var0.
+        assert!(
+            cache.get("Var0").is_some(),
+            "Var0 prepares under a live lease"
+        );
+        assert!(cache.slot_committed_for_test("Var0"));
+
+        // Break the retained snapshot out-of-band: every subsequent body demand
+        // now lease-misses (the unreachable-in-practice invariant-violation).
+        state.decl_bodies().release_retained_snapshot_for_test();
+
+        assert!(
+            cache.get("Var1").is_none(),
+            "a broken-lease prepared-type demand fails CLOSED to None (ReturnOnly)"
+        );
+        assert!(
+            !cache.slot_committed_for_test("Var1"),
+            "the broken-lease prepared-type demand must NOT commit the write-once \
+             slot to None — the false-warm absence the LowerLocator rail already \
+             refuses"
+        );
+    }
+
+    /// VALUE-space counterpart of the type-slot no-warm test.
+    #[test]
+    fn broken_lease_prepared_value_decl_get_does_not_warm_admit_none_slot() {
+        let source = "export const alpha = 1;\nexport const beta = 2;\n";
+        let state = ShallowFileState::service_backed_for_test(source);
+        let cache = build_prepared_value_decl_cache(
+            "/ws/fixture.ts",
+            Arc::clone(&state),
+            Arc::new(FxHashMap::default()),
+            Arc::new(ImportCanonicalization::default()),
+        );
+
+        assert!(
+            cache.get("alpha").is_some(),
+            "alpha prepares under a live lease"
+        );
+        assert!(cache.slot_committed_for_test("alpha"));
+
+        state.decl_bodies().release_retained_snapshot_for_test();
+
+        assert!(
+            cache.get("beta").is_none(),
+            "a broken-lease prepared-value demand fails CLOSED to None (ReturnOnly)"
+        );
+        assert!(
+            !cache.slot_committed_for_test("beta"),
+            "the broken-lease prepared-value demand must NOT commit the write-once \
+             slot to None"
+        );
+    }
+
+    /// A broken-lease `type_deps` classification fails closed to `None`
+    /// (ReturnOnly) and must NOT cache the transient `None` as genuine absence:
+    /// a cached wrong-empty would under-classify a REAL symbol's dependency
+    /// edges for the artifact's life (under-invalidation). Pre-change the `None`
+    /// was cached; post-change no entry is committed.
+    #[test]
+    fn broken_lease_type_deps_is_not_cached_as_absence() {
+        let source = "export type Var0 = { v: 0 };\nexport type Var1 = { v: 1 };\n";
+        let state = ShallowFileState::service_backed_for_test(source);
+
+        assert!(
+            state.type_deps("Var0").is_some(),
+            "Var0 classifies under a live lease"
+        );
+
+        state.decl_bodies().release_retained_snapshot_for_test();
+
+        assert!(
+            state.type_deps("Var1").is_none(),
+            "a broken-lease type_deps fails CLOSED to None (ReturnOnly)"
+        );
+        assert!(
+            !state.type_deps_cache_has_none_entry("Var1"),
+            "the broken-lease type_deps must NOT cache a None as genuine absence"
+        );
+    }
+
+    /// The augmentation-scope prepared build surfaces the DISTINCT `LeaseMiss`
+    /// outcome (never a collapsed `Ready(None)`) so the cross-file augmentation
+    /// stitch folds a broken-lease augmenter into the `source_env_unobservable`
+    /// no-warm rail instead of silently dropping the contributor. Discriminates
+    /// a correct implementation from one that collapses the lease-miss.
+    #[test]
+    fn broken_lease_augmentation_prepared_build_surfaces_lease_miss() {
+        use verter_semantic::analysis::type_eval::AugmentationScopeKind;
+
+        let source = "declare module \"ext\" { interface A { x: string } }\n\
+                      declare module \"ext\" { interface B { y: number } }\n";
+        let state = ShallowFileState::service_backed_for_test(source);
+        let scope = AugmentationScopeKind::Module("ext".to_string());
+
+        // Pin the augmenter memo's lease with one successful augmentation demand.
+        assert!(
+            matches!(
+                prepare_augmentation_type_decl_outcome("/ws/fixture.ts", &state, &scope, "A", None),
+                PreparedDeclOutcome::Ready(Some(_))
+            ),
+            "augmentation symbol A prepares under a live lease"
+        );
+
+        state.decl_bodies().release_retained_snapshot_for_test();
+
+        // A DIFFERENT, not-yet-lowered augmentation symbol now lease-misses: the
+        // outcome MUST be the distinct LeaseMiss, never a collapsed Ready(None).
+        assert!(
+            matches!(
+                prepare_augmentation_type_decl_outcome("/ws/fixture.ts", &state, &scope, "B", None),
+                PreparedDeclOutcome::LeaseMiss
+            ),
+            "a broken-lease augmentation prepare must surface the DISTINCT \
+             LeaseMiss, not a cacheable Ready(None)"
         );
     }
 }

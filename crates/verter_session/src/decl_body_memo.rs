@@ -132,7 +132,7 @@ enum DemandLower {
 /// - [`LeaseMiss`](Self::LeaseMiss) — the lease pin was broken: the demand
 ///   ran NOTHING and committed NOTHING (`ReturnOnly`). A caller must route
 ///   this to a no-warm signal, never treat it as a genuine miss.
-enum DemandOutcome<D> {
+pub(crate) enum DemandOutcome<D> {
     Ready(Option<Arc<D>>),
     LeaseMiss,
 }
@@ -388,7 +388,7 @@ impl DeclBodyMemo {
     /// lease-miss ReturnOnly outcome distinctly. The locator-deref path uses
     /// this so a broken-lease demand becomes a typed no-warm signal rather
     /// than collapsing into a cacheable genuine miss.
-    fn type_decl_outcome(&self, name: &str) -> DemandOutcome<LoweredTypeDecl> {
+    pub(crate) fn type_decl_outcome(&self, name: &str) -> DemandOutcome<LoweredTypeDecl> {
         let Some((contributors, from_jsdoc)) = self
             .header_index
             .type_header(name)
@@ -436,7 +436,7 @@ impl DeclBodyMemo {
 
     /// Demand the lowered body of one file-scope VALUE symbol, PRESERVING the
     /// lease-miss ReturnOnly outcome distinctly (locator-deref no-warm rail).
-    fn value_decl_outcome(&self, name: &str) -> DemandOutcome<LoweredValueDecl> {
+    pub(crate) fn value_decl_outcome(&self, name: &str) -> DemandOutcome<LoweredValueDecl> {
         let Some(contributors) = self
             .header_index
             .value_header(name)
@@ -505,7 +505,7 @@ impl DeclBodyMemo {
     /// Demand the lowered body of one augmentation-scoped TYPE symbol,
     /// PRESERVING the lease-miss ReturnOnly outcome distinctly (locator-deref
     /// no-warm rail).
-    fn augmentation_type_decl_outcome(
+    pub(crate) fn augmentation_type_decl_outcome(
         &self,
         scope: &AugmentationScopeKind,
         name: &str,
