@@ -135,22 +135,152 @@ const FAIL_MATRIX: &[FailRow] = &[
         source: "<script>let c = $state(0); var { a } = $props();</script>\n<button onclick={() => c++}>{a}{c}</button>\n",
         code: "svelte-runtime-unsupported-advanced-rune",
     },
-    // ── $effect advanced forms ───────────────────────────────────────────────
+    // ── $effect family fail-closed remainder ─────────────────────────────────
+    // (The supported family boundary is POSITION-SENSITIVE per member:
+    // `$effect(fn)` / `$effect.pre(fn)` are STATEMENT-ONLY — official rejects
+    // every value position with `effect_invalid_placement` — while
+    // `$effect.root(fn)` / `$effect.tracking()` are expression-valued
+    // (statement AND declarator-init positions both lower). The positive
+    // topology lives in the `runes/effect_*` + `matrix/effect_arrow`
+    // emit-corpus goldens and the `effect_*` client tests. The rows here
+    // enumerate the surviving fail-closed sub-shapes: the async re-home, the
+    // non-call / uncalled / malformed forms, the 5j member, and the
+    // VALUE-POSITION user-effect calls the statement gate refuses.)
     FailRow {
-        name: "effect_nested",
-        source: "<script>let c = $state(0); function f() { $effect(() => c); }</script>\n<button onclick={f}>{c}</button>\n",
-        code: "svelte-runtime-unsupported-advanced-rune",
-    },
-    FailRow {
-        name: "effect_pre",
-        source: "<script>let c = $state(0); $effect.pre(() => { c; });</script>\n<button onclick={() => c++}>{c}</button>\n",
-        code: "svelte-runtime-unsupported-advanced-rune",
-    },
-    FailRow {
-        // `$effect` is demoted entirely — refused before the async-rewrite gate.
+        // An AWAITING effect callback is the experimental-async surface (5j): the
+        // effect-statement carrier routes the body through the shared rewriter,
+        // whose `await` gate refuses — never a sync `$.user_effect(async …)` with
+        // a live `await` on the 5j boundary.
         name: "effect_async",
         source: "<script>let c = $state(0); $effect(async () => { await c; });</script>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-experimental-async",
+    },
+    FailRow {
+        // A TOP-LEVEL declarator-init `$effect(...)` (official
+        // `effect_invalid_placement` — the user-effect members are
+        // statement-only): the position gate refuses under the precise family
+        // label, no longer the incidental `const declaration` item refusal.
+        name: "effect_value_position_const_decl",
+        source: "<script>let c = $state(0); const e = $effect(() => { console.log(c) });</script>\n<button onclick={() => c++}>{c}</button>\n",
         code: "svelte-runtime-unsupported-advanced-rune",
+    },
+    FailRow {
+        // The `.pre` twin of the declarator-init value position.
+        name: "effect_pre_value_position_const_decl",
+        source: "<script>let c = $state(0); const p = $effect.pre(() => { console.log(c) });</script>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-advanced-rune",
+    },
+    FailRow {
+        // A value-position `$effect(...)` as an EXPRESSION-bodied handler arrow's
+        // concise body (official `effect_invalid_placement`).
+        name: "effect_value_position_handler_concise_body",
+        source: "<script>let c = $state(0);</script>\n<button onfocus={() => $effect(() => { console.log(c) })}>hi</button>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-advanced-rune",
+    },
+    FailRow {
+        // A value-position `$effect(...)` as a DECLARATOR INIT inside an accepted
+        // `$effect.root` callback body.
+        name: "effect_value_position_root_body_decl_init",
+        source: "<script>let c = $state(0); const stop = $effect.root(() => { const s2 = $effect(() => { console.log(c) }); return () => {}; });</script>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-advanced-rune",
+    },
+    FailRow {
+        // A value-position `$effect(...)` as a `return` ARGUMENT inside an
+        // accepted `$effect.root` callback body.
+        name: "effect_value_position_root_body_return",
+        source: "<script>let c = $state(0); const stop = $effect.root(() => { return $effect(() => {}); });</script>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-advanced-rune",
+    },
+    FailRow {
+        // A value-position `$effect.pre(...)` as a DECLARATOR INIT inside an
+        // accepted `$effect` body.
+        name: "effect_pre_value_position_effect_body_decl_init",
+        source: "<script>let c = $state(0); $effect(() => { const q = $effect.pre(() => {}); });</script>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-advanced-rune",
+    },
+    FailRow {
+        // An OPTIONAL-call user effect (`$effect?.(fn)`) — official rejects it
+        // with `effect_invalid_placement` (the `?.` chain sits between the call
+        // and its statement parent), oracle-verified. The optional forms of the
+        // statement-only members stay fail-closed; only `.root` / `.tracking`
+        // admit optional invocations (normalized, in the accept suite).
+        name: "effect_optional_call",
+        source: "<script>let c = $state(0); $effect?.(() => { console.log(c) });</script>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-advanced-rune",
+    },
+    FailRow {
+        // The `.pre` twin of the optional-call rejection (`$effect.pre?.(fn)` —
+        // official `effect_invalid_placement`, oracle-verified).
+        name: "effect_pre_optional_call",
+        source: "<script>let c = $state(0); $effect.pre?.(() => { console.log(c) });</script>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-advanced-rune",
+    },
+    FailRow {
+        // An OPTIONAL member receiver on a user-effect member (`$effect?.pre(fn)`
+        // — official `effect_invalid_placement`, oracle-verified).
+        name: "effect_optional_member_pre",
+        source: "<script>let c = $state(0); $effect?.pre(() => { console.log(c) });</script>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-advanced-rune",
+    },
+    FailRow {
+        // A NON-CALL `$effect` value reference has no supported position (only
+        // the called family forms lower).
+        name: "effect_bare_ref",
+        source: "<script>let c = $state(0); foo($effect);</script>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-advanced-rune",
+    },
+    FailRow {
+        // An UNCALLED family member reference (official `rune_missing_parentheses`).
+        name: "effect_uncalled_pre",
+        source: "<script>let c = $state(0); const f = $effect.pre;</script>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-advanced-rune",
+    },
+    FailRow {
+        // A MALFORMED family call (official `rune_invalid_arguments`): the
+        // zero-arg `$effect.tracking` contract rejects an argument.
+        name: "effect_tracking_with_arg",
+        source: "<script>let c = $state(0); const t = $effect.tracking(c);</script>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-advanced-rune",
+    },
+    FailRow {
+        // A TS TYPE-ARGUMENT on a family call in a PLAIN (non-TS) script.
+        // Official plain-script parsing reads `$effect<number>(fn)` as a
+        // COMPARISON chain (the rune reference is left uncalled) and rejects
+        // with `rune_missing_parentheses` — the shared family classifier
+        // treats ANY type-argumented family call as malformed, so Verter
+        // never TS-strips-and-emits a spelling official rejects.
+        name: "effect_type_args",
+        source: "<script>let c = $state(0); $effect<number>(() => { console.log(c) });</script>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-advanced-rune",
+    },
+    FailRow {
+        // The `.pre` twin of the type-argument rejection.
+        name: "effect_pre_type_args",
+        source: "<script>let c = $state(0); $effect.pre<number>(() => { console.log(c) });</script>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-advanced-rune",
+    },
+    FailRow {
+        // The `.root` STATEMENT twin of the type-argument rejection.
+        name: "effect_root_type_args_stmt",
+        source: "<script>let c = $state(0); $effect.root<number>(() => { return () => {}; });</script>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-advanced-rune",
+    },
+    FailRow {
+        // The `.root` DECLARATOR-INIT twin of the type-argument rejection.
+        // (`$effect.tracking<number>()` has NO row here: as plain JS it is a
+        // parse error — `… < number > ()` — so it fails closed at the
+        // OFFICIAL-reject rail (`js_parse_error`); its pin lives in the
+        // reject corpus, `rejects/block4_core/effect_tracking_type_args`.)
+        name: "effect_root_type_args_init",
+        source: "<script>let c = $state(0); const s = $effect.root<number>(() => { return () => {}; });</script>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-advanced-rune",
+    },
+    FailRow {
+        // `$effect.pending` is the experimental-async member (5j) — NOT part of
+        // the supported family; it must not ride the family call exemption.
+        name: "effect_pending",
+        source: "<script>let c = $state(0); const p = $effect.pending();</script>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-experimental-async",
     },
     // ── $props() advanced forms + bound ────────────────────────────
     FailRow {
@@ -1150,11 +1280,10 @@ const FAIL_MATRIX: &[FailRow] = &[
         source: "<script>let c = $state(0); let d = $derived(c + 1);</script>\n<button onclick={() => c++}>{d}</button>\n",
         code: "svelte-runtime-unsupported-advanced-rune",
     },
-    FailRow {
-        name: "effect_toplevel",
-        source: "<script>let c = $state(0); $effect(() => { c; });</script>\n<button onclick={() => c++}>{c}</button>\n",
-        code: "svelte-runtime-unsupported-advanced-rune",
-    },
+    // (`effect_toplevel` removed — a top-level `$effect(fn);` statement is now a
+    // supported instance-script item; its positive topology is pinned by the
+    // `matrix/effect_arrow` golden + the `effect_toplevel_statement_lowers_with_frame`
+    // client test, and by `generated_effect_shapes_land_on_boundary` below.)
     FailRow {
         name: "prop_read_instance_script",
         source: "<script>let { cb } = $props(); let c = $state(0); cb();</script>\n<button onclick={() => c++}>{c}</button>\n",
@@ -1606,34 +1735,71 @@ fn generated_event_handler_expression_kinds_land_on_boundary() {
 }
 
 #[test]
-fn generated_effect_shapes_all_fail_closed() {
-    // `$effect` is demoted ENTIRELY — it has NO supported position (the runes-mode
-    // effect topology is a deferral-ledger follow-up, advanced-rune). EVERY `$effect(arg)`
-    // shape (an arrow / function expression / identifier / call / member /
-    // conditional / async) fails closed. An async body's `await` would otherwise be
-    // the async surface, but the `$effect` position refusal wins first.
-    let variants: &[(&str, &str)] = &[
-        ("arrow_block", "$effect(() => { c; });"),
-        ("arrow_expr", "$effect(() => c);"),
-        ("function_expr", "$effect(function () { c; });"),
-        ("identifier", "$effect(f);"),
-        ("call", "$effect(f());"),
-        ("member", "$effect(o.m);"),
-        ("conditional", "$effect(c ? f : o.m);"),
-        ("async_arrow", "$effect(async () => { await c; });"),
+fn generated_effect_shapes_land_on_boundary() {
+    // INVERTED (was `generated_effect_shapes_all_fail_closed`): a WELL-FORMED
+    // top-level `$effect(arg)` statement is SUPPORTED for EVERY single-argument
+    // shape — oracle-verified against svelte@5.56.3: each accepts as
+    // `$.user_effect(<arg passthrough>)` (an identifier / call / member /
+    // conditional argument flows through verbatim modulo signal rewrites; the
+    // undeclared `f` / `o` are runtime globals official also passes through).
+    // Only the ASYNC+AWAIT body stays fail-closed — re-homed to the
+    // experimental-async surface (5j), asserted by exact code below.
+    let variants: &[(&str, &str, Expected)] = &[
+        ("arrow_block", "$effect(() => { c; });", Expected::Supported),
+        ("arrow_expr", "$effect(() => c);", Expected::Supported),
+        (
+            "function_expr",
+            "$effect(function () { c; });",
+            Expected::Supported,
+        ),
+        ("identifier", "$effect(f);", Expected::Supported),
+        ("call", "$effect(f());", Expected::Supported),
+        ("member", "$effect(o.m);", Expected::Supported),
+        ("conditional", "$effect(c ? f : o.m);", Expected::Supported),
+        // Oracle parity: an async callback with NO `await` accepts
+        // (`$.user_effect(async () => { $.get(c); })`) — the await gate fires on
+        // `await`, not on the `async` keyword.
+        (
+            "async_arrow_no_await",
+            "$effect(async () => { c; });",
+            Expected::Supported,
+        ),
+        (
+            "async_arrow",
+            "$effect(async () => { await c; });",
+            Expected::FailClosed,
+        ),
     ];
-    for (label, stmt) in variants {
-        // The `$effect(...)` statement under test is placed in the instance script with
-        // ONLY the supported `$state` signal (a `function f` / `const o` helper would
-        // itself fail closed at the instance-script-item gate). The `$effect` rune
-        // reference is refused by the rune-form/position scan before the generic
-        // item gate, so the refusal is the `$effect` position. The `f` / `o` referenced
-        // by some variants need not resolve — the rune-position refusal fires on the
-        // `$effect` callee regardless. A trailing reactive `{c}` read keeps it runes-mode.
+    for (label, stmt, expected) in variants {
         let source = format!(
             "<script>let c = $state(0); {stmt}</script>\n<button onclick={{() => c++}}>{{c}}</button>\n"
         );
-        assert_variant(&format!("effect::{label}"), &source, Expected::FailClosed);
+        assert_variant(&format!("effect::{label}"), &source, *expected);
+        if *expected == Expected::Supported {
+            // Every supported shape must actually mint the user-effect helper (a
+            // silently-dropped statement would still pass the Main check).
+            let js = compile(&source).expect("supported effect shape compiles");
+            assert!(
+                js.contains("$.user_effect("),
+                "effect::{label}: the effect statement lowers to `$.user_effect`:\n{js}"
+            );
+            assert!(
+                !js.contains("$effect"),
+                "effect::{label}: no raw `$effect` rune survives:\n{js}"
+            );
+        }
+    }
+    // The RE-HOMED async refusal: `$effect(async () => {{ await c; }})` fails
+    // closed on the experimental-async surface (5j) with the EXACT code — no
+    // longer the advanced-rune position refusal.
+    let async_source = "<script>let c = $state(0); $effect(async () => { await c; });</script>\n<button onclick={() => c++}>{c}</button>\n";
+    match compile(async_source) {
+        Err(ClientCompileError::Unsupported(surface)) => assert_eq!(
+            surface.diagnostic_code(),
+            "svelte-runtime-unsupported-experimental-async",
+            "the awaiting effect re-homes to the experimental-async refusal: {surface:?}"
+        ),
+        other => panic!("expected the experimental-async refusal, got {other:?}"),
     }
 }
 
@@ -2357,10 +2523,42 @@ fn fail_matrix_covers_every_documented_sub_shape() {
     // expression rune rewritten to `$.snapshot`) — net −5 rows, 174 → 169. The 5g-b
     // fix-cycle then ADDED TWO rows (`state_spread_argument` + `state_raw_spread_argument`
     // — the `rune_invalid_spread` fail-close) — net +2 rows, 169 → 171.
+    // ── 5g-c effect family ──────────────────────────────────────────────
+    // The effect-family fail-closed remainder holds 18 rows across five
+    // categories (the accepted call-position topology lives in the
+    // `runes/effect_*` + `matrix/effect_arrow` goldens, the `effect_*` client
+    // tests, and `generated_effect_shapes_land_on_boundary`):
+    // - the await-gate re-home: `effect_async` (an AWAITING callback is the
+    //   experimental-async surface — the await gate owns it, not the position
+    //   scan).
+    // - the non-call / uncalled / malformed forms plus the 5j member:
+    //   `effect_bare_ref`, `effect_uncalled_pre`, `effect_tracking_with_arg`,
+    //   `effect_pending`.
+    // - the VALUE-POSITION user-effect calls (official
+    //   `effect_invalid_placement`: `$effect` / `$effect.pre` are
+    //   statement-only; `.root` / `.tracking` are expression-valued):
+    //   `effect_value_position_const_decl`,
+    //   `effect_pre_value_position_const_decl`,
+    //   `effect_value_position_handler_concise_body`,
+    //   `effect_value_position_root_body_decl_init`,
+    //   `effect_value_position_root_body_return`,
+    //   `effect_pre_value_position_effect_body_decl_init`.
+    // - the OPTIONAL invocations of the statement-only members (official
+    //   `effect_invalid_placement` — the `?.` chain sits between the call and
+    //   its statement parent; the expression-valued members admit optional
+    //   invocations normalized, on the accept side): `effect_optional_call`,
+    //   `effect_pre_optional_call`, `effect_optional_member_pre`.
+    // - the plain-script TS TYPE-ARGUMENT forms (official plain-script parsing
+    //   reads `$effect<T>(fn)` as a comparison chain and rejects
+    //   `rune_missing_parentheses`): `effect_type_args`,
+    //   `effect_pre_type_args`, `effect_root_type_args_stmt`,
+    //   `effect_root_type_args_init` (the tracking spelling is a plain-JS
+    //   parse error pinned at the official-reject rail instead).
+    // With the effect-family remainder in place the matrix pins 185 rows.
     assert_eq!(
         FAIL_MATRIX.len(),
-        171,
-        "the fail matrix pins 171 fail-closed rows — one documented \
+        185,
+        "the fail matrix pins 185 fail-closed rows — one documented \
          unsupported-feature sub-shape per row, EXCEPT the D-43 custom-element-host / \
          native-slotting rows, which are REPRESENTATIVE smoke probes for that \
          root-scoped over-refusal class (protected by the generic host-gate rows plus \
@@ -2416,6 +2614,27 @@ fn fail_matrix_covers_every_documented_sub_shape() {
          (indeterminate on input; buffered / seekable / seeking / ended / readyState on \
          audio; videoWidth / videoHeight on video) that fail closed because the native \
          runtime does not emit them yet — naturalWidth / naturalHeight stay router-only \
-         since `<img>` is not allowlisted — +8 rows)"
+         since `<img>` is not allowlisted — +8 rows; the effect-family fail-closed \
+         remainder holds eighteen rows: the await-gate re-home `effect_async` (an \
+         awaiting callback is the experimental-async surface), the non-call / \
+         uncalled / malformed forms plus the 5j member `effect_bare_ref` / \
+         `effect_uncalled_pre` / `effect_tracking_with_arg` / `effect_pending`, \
+         the six value-position user-effect rows (official \
+         `effect_invalid_placement`: `$effect` / `$effect.pre` are \
+         statement-only, `.root` / `.tracking` expression-valued) \
+         `effect_value_position_const_decl` / \
+         `effect_pre_value_position_const_decl` / \
+         `effect_value_position_handler_concise_body` / \
+         `effect_value_position_root_body_decl_init` / \
+         `effect_value_position_root_body_return` / \
+         `effect_pre_value_position_effect_body_decl_init`, the three \
+         optional-invocation rows `effect_optional_call` / \
+         `effect_pre_optional_call` / `effect_optional_member_pre` (official \
+         `effect_invalid_placement` — the expression-valued members admit optional \
+         invocations normalized, in the accept suite), and the four plain-script \
+         TS-type-argument rows `effect_type_args` / `effect_pre_type_args` / \
+         `effect_root_type_args_stmt` / `effect_root_type_args_init` (official \
+         `rune_missing_parentheses` — the tracking spelling is a plain-JS parse \
+         error pinned at the official-reject rail))"
     );
 }

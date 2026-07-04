@@ -64,6 +64,63 @@ impl<'a> SupportedClientIr<'a> {
         .map(|r| r.text)
     }
 
+    /// Rewrite the EXPRESSION OF a top-level instance-script STATEMENT (the
+    /// effect-statement carrier's `$effect(...)` / `$effect.pre(...)` /
+    /// `$effect.root(...)` / `$effect.tracking()` call source) through the shared
+    /// FALLIBLE rewriter in the STATEMENT role
+    /// ([`rewrite_statement_expression_full`](expr_rewrite::rewrite_statement_expression_full)):
+    /// the top-level call is the expression of an `ExpressionStatement` — the ONE
+    /// official-legal position for the statement-only user-effect members
+    /// (`effect_invalid_placement`) — so it lowers instead of refusing as a value
+    /// position. `carrier_head_trivia` is the carrier's pre-rendered
+    /// transparent-wrapper head trivia, re-emitted inside the emitted helper
+    /// call (the canonical call-internal slot). Everything else (nested
+    /// statement admission, signal rewrites, the await gate) is identical to
+    /// [`rewrite_source`](Self::rewrite_source).
+    pub(super) fn rewrite_statement_source(
+        &self,
+        source: &str,
+        carrier_head_trivia: &str,
+        scope: ScopeId,
+    ) -> Result<String, UnsupportedSvelteRuntimeSurface> {
+        expr_rewrite::rewrite_statement_expression_full(
+            source,
+            carrier_head_trivia,
+            scope,
+            &self.ir.analysis.bindings,
+            &self.ir.analysis.scopes,
+            &self.prop_reads,
+            &self.proxy_inits,
+        )
+        .map(|r| r.text)
+    }
+
+    /// Rewrite the INIT of an instance-script effect-rune declarator (the
+    /// `$effect.root(fn)` / `$effect.tracking()` carrier payload) through the
+    /// shared FALLIBLE rewriter in the VALUE role
+    /// ([`rewrite_init_expression_full`](expr_rewrite::rewrite_init_expression_full)),
+    /// threading the carrier's pre-rendered transparent-wrapper head trivia
+    /// into the top-level family invocation-head rewrite (the canonical
+    /// call-internal slot). Everything else is identical to
+    /// [`rewrite_source`](Self::rewrite_source).
+    pub(super) fn rewrite_rune_init_source(
+        &self,
+        source: &str,
+        carrier_head_trivia: &str,
+        scope: ScopeId,
+    ) -> Result<String, UnsupportedSvelteRuntimeSurface> {
+        expr_rewrite::rewrite_init_expression_full(
+            source,
+            carrier_head_trivia,
+            scope,
+            &self.ir.analysis.bindings,
+            &self.ir.analysis.scopes,
+            &self.prop_reads,
+            &self.proxy_inits,
+        )
+        .map(|r| r.text)
+    }
+
     /// Rewrite a FUNCTION-PAIR bind element SOURCE STRING through the PLAIN-JS rewrite
     /// lane ([`rewrite_expression_plain_js`](expr_rewrite::rewrite_expression_plain_js)):
     /// the element is parsed as `SourceType::mjs()` and NOT TS-stripped, mirroring

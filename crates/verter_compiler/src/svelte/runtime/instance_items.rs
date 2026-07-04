@@ -15,10 +15,14 @@
 //! never a raw text scan.
 
 use oxc_allocator::Allocator;
-use oxc_ast::ast::{BindingPattern, Expression, Statement, VariableDeclarationKind};
+use oxc_ast::ast::{BindingPattern, Comment, Expression, Statement, VariableDeclarationKind};
+use oxc_span::GetSpan;
 
 use super::client::UnsupportedSvelteRuntimeSurface;
-use super::expr::{is_derived_callee, is_props_callee, reparse_module, state_rune_call};
+use super::expr::{
+    call_internal_comment_trivia, carrier_tail_comment_trivia, is_derived_callee, is_props_callee,
+    reparse_module, state_rune_call,
+};
 use verter_span::Span;
 
 // ---------------------------------------------------------------------------
@@ -107,19 +111,98 @@ pub(super) enum SupportedInstanceScriptItem {
     /// param) — that fact is owned by the [`super::reactive_analysis`]
     /// `needs_context` scan, not by this item (which records only the elision).
     InspectElided,
+    /// A top-level effect-family expression STATEMENT — a WELL-FORMED
+    /// `$effect(fn);` / `$effect.pre(fn);` user-effect call (the user-effect
+    /// members' ONLY official-legal position) OR an UNASSIGNED bare
+    /// `$effect.root(fn);` / `$effect.tracking();` (official accepts the
+    /// unassigned side-effect forms — no frame). The shared
+    /// [`effect_family_call_fact`](super::expr::effect_family_call_fact)
+    /// classifier proves the form. Carries the call-EXPRESSION source; the whole
+    /// expression lowers through the shared FALLIBLE rewriter at projection time
+    /// in the STATEMENT role (the callee → its registered helper, body signal
+    /// reads → `$.get`, an `await` inside the callback refuses as
+    /// experimental-async) — NEVER a string synthesis. The `$.push`/`$.pop`
+    /// frame fact is owned by the [`super::reactive_analysis`] `needs_context`
+    /// scan (only the user-effect members force it).
+    EffectStatement {
+        /// The effect-family call-expression source text.
+        source: String,
+        /// The pre-rendered CALL-INTERNAL trivia of the comments the carrier
+        /// slice would otherwise silently drop — the transparent-WRAPPER head
+        /// range between the statement-expression start and the call start
+        /// (`(/*#__PURE__*/ $effect(fn));`: the wrapper parens stay outside
+        /// the carried call span, but their interior head comments must
+        /// survive). The rewriter re-emits it INSIDE the emitted helper call,
+        /// immediately after the opening paren — the canonical call-internal
+        /// slot, never call-leading — ahead of the head's own trivia (source
+        /// order). Empty for the wrapper-less common case.
+        head_trivia: String,
+        /// The pre-rendered trivia of the carrier's LEXICAL TAIL
+        /// ([`carrier_tail_comment_trivia`](super::expr::carrier_tail_comment_trivia)):
+        /// the statement span's interior after the call end — a normalized
+        /// wrapper's interior (`($effect.root(fn) /*!license*/);`) and an
+        /// unwrapped call's pre-`;` trailing comments (`$effect.root(fn)
+        /// /*!license*/;`) — PLUS the same-line ASI extension of a
+        /// semicolon-less statement (`$effect.root(fn) /*!license*/`): a
+        /// license-class trailing comment stays in contract with or without
+        /// the explicit `;`. The projection re-emits it AFTER the rewritten
+        /// call payload, before the generated `;` (line comments keep their
+        /// newline terminator, so the `;` can never be commented out). Empty
+        /// for the trailing-comment-free common case.
+        tail_trivia: String,
+    },
+    /// A top-level `let`/`const` declarator whose init is a WELL-FORMED
+    /// assignable effect-family EXPRESSION rune — `$effect.root(fn)` (the result
+    /// is the teardown function) or `$effect.tracking()`. Carries the declaration
+    /// keyword, the binding name, and the INIT expression source; the init lowers
+    /// through the shared FALLIBLE rewriter at projection time (the callee →
+    /// `$.effect_root` / `$.effect_tracking`, nested effects and signal reads
+    /// rewrite recursively). A `var` declarator stays out of the carrier (the
+    /// official `var` read semantics are a distinct surface).
+    EffectRuneInit {
+        /// Whether the declaration is a `const` (else `let`) — preserved verbatim.
+        const_decl: bool,
+        /// The declared binding name.
+        name: String,
+        /// The declarator INIT expression source text.
+        init: String,
+        /// The pre-rendered CALL-INTERNAL trivia of the transparent-WRAPPER
+        /// head comments the init slice would otherwise silently drop
+        /// (`const stop = (/*#__PURE__*/ $effect.root(fn));`) — re-emitted by
+        /// the rewriter inside the emitted helper call, immediately after the
+        /// opening paren (never call-leading). Empty for the wrapper-less
+        /// common case.
+        head_trivia: String,
+        /// The pre-rendered trivia of the carrier's LEXICAL TAIL
+        /// ([`carrier_tail_comment_trivia`](super::expr::carrier_tail_comment_trivia)):
+        /// the declaration span's interior after the call end — a normalized
+        /// wrapper's interior (`const s = ($effect.root(fn) /*!license*/);`)
+        /// and an unwrapped init's pre-`;` trailing comments (`const s =
+        /// $effect.root(fn) /*!license*/;`) — PLUS the same-line ASI extension
+        /// of a semicolon-less declaration (`const s = $effect.root(fn)
+        /// /*!license*/`). The projection re-emits it AFTER the rewritten call
+        /// payload, before the generated `;`. Empty for the
+        /// trailing-comment-free common case.
+        tail_trivia: String,
+    },
 }
 
 /// Classify the instance script's TOP-LEVEL items into the strict finite
 /// [`SupportedInstanceScriptItem`] allowlist, or fail closed on the FIRST
 /// out-of-allowlist item.
 ///
-/// The five supported shapes are EXACTLY:
+/// The seven supported shapes are EXACTLY:
 /// 1. `let name = $state(<primitive literal>);`
 /// 2. a single no-default `$props()` destructure;
 /// 3. `let el;` used solely as a supported `bind:this` target;
 /// 4. `let v = <literal-only init>;` used solely as a DOM bind-TARGET lvalue root;
 /// 5. a production-ELIDED `$inspect(...);` / `$inspect(...).with(...);` statement
-///    (lowered to nothing).
+///    (lowered to nothing);
+/// 6. a well-formed effect-family statement — `$effect(fn);` / `$effect.pre(fn);`
+///    or an unassigned bare `$effect.root(fn);` / `$effect.tracking();` (lowered
+///    through the shared rewriter);
+/// 7. a `let`/`const` declarator whose init is a well-formed `$effect.root(fn)` /
+///    `$effect.tracking()` expression rune (lowered through the shared rewriter).
 ///
 /// `bind_this_targets` is the set of local names used as a supported `bind:this`
 /// target (from the accepted bind shapes) — a bare `let el;` is admitted ONLY when
@@ -174,6 +257,7 @@ pub(super) fn classify_supported_instance_items(
         items.push(classify_instance_statement(
             stmt,
             instance_source,
+            &program.comments,
             bind_this_targets,
             bind_lvalue_roots,
             bind_function_pair_names,
@@ -183,14 +267,19 @@ pub(super) fn classify_supported_instance_items(
 }
 
 /// Classify ONE top-level instance-script statement into its supported item, or
-/// fail closed. The supported statements are EXACTLY a `let`-variable declaration
-/// matching a `$state` / `$props()` / `bind:this` / plain-local bind shape, a named
-/// `function` declaration referenced by a DOM function-pair bind, OR a
-/// production-elided `$inspect(...);` / `$inspect(...).with(...);` statement; every
-/// other statement kind fails closed with a precise `construct` label.
+/// fail closed. The supported statements are EXACTLY a variable declaration
+/// matching a `$state` / `$props()` / `bind:this` / plain-local bind /
+/// effect-rune-init shape, a named `function` declaration referenced by a DOM
+/// function-pair bind, a production-elided `$inspect(...);` /
+/// `$inspect(...).with(...);` statement, OR a well-formed `$effect(fn);` /
+/// `$effect.pre(fn);` user-effect statement; every other statement kind fails
+/// closed with a precise `construct` label. `comments` is the instance parse's
+/// comment table — the effect-family carriers consult it so a transparent
+/// wrapper's head trivia rides the carrier instead of being sliced away.
 fn classify_instance_statement(
     stmt: &Statement<'_>,
     instance_source: &str,
+    comments: &[Comment],
     bind_this_targets: &[String],
     bind_lvalue_roots: &[String],
     bind_function_pair_names: &[String],
@@ -199,6 +288,7 @@ fn classify_instance_statement(
         Statement::VariableDeclaration(decl) => classify_instance_variable_decl(
             decl,
             instance_source,
+            comments,
             bind_this_targets,
             bind_lvalue_roots,
         ),
@@ -219,6 +309,30 @@ fn classify_instance_statement(
         // refused by the declarator gate, so the bare name here is the rune.)
         Statement::ExpressionStatement(stmt) if is_inspect_elision_expression(&stmt.expression) => {
             Ok(SupportedInstanceScriptItem::InspectElided)
+        }
+        // A top-level effect-family expression statement — a WELL-FORMED
+        // `$effect(fn);` / `$effect.pre(fn);` user-effect call OR an unassigned
+        // bare `$effect.root(fn);` / `$effect.tracking();` — admitted as the
+        // rewriter-backed effect-statement carrier. Classified from the TYPED
+        // OXC call shape via the shared family classifier; a malformed /
+        // uncalled statement form falls through to the generic refusal (the
+        // rune scan already failed the malformed forms closed upstream). (A
+        // top-level shadowing `let $effect` is a `$`-prefixed binding refused
+        // by the declarator gate, so the bare name here is the rune.)
+        Statement::ExpressionStatement(stmt) => {
+            if let Some(item) = classify_effect_statement(
+                &stmt.expression,
+                stmt.span.end,
+                instance_source,
+                comments,
+            ) {
+                Ok(item)
+            } else {
+                Err(UnsupportedSvelteRuntimeSurface::InstanceScriptItem {
+                    construct: "expression statement",
+                    span: Span::new(stmt.span.start, stmt.span.end),
+                })
+            }
         }
         // Every OTHER NON-variable top-level statement fails closed with its construct
         // label. The labels are precise so the completeness gate can pin each family.
@@ -258,6 +372,169 @@ fn is_inspect_elision_expression(expr: &Expression<'_>) -> bool {
 /// Whether a callee is the bare `$inspect` identifier.
 fn is_inspect_callee(callee: &Expression<'_>) -> bool {
     matches!(callee, Expression::Identifier(id) if id.name.as_str() == "$inspect")
+}
+
+/// Classify a top-level WELL-FORMED effect-family STATEMENT — `$effect(fn);` /
+/// `$effect.pre(fn);` (the user-effect members' ONLY official-legal position)
+/// or an UNASSIGNED bare `$effect.root(fn);` / `$effect.tracking();` (official
+/// accepts the unassigned side-effect forms exactly like the assigned
+/// declarator inits — oracle-verified, no frame) — into the
+/// [`SupportedInstanceScriptItem::EffectStatement`] carrier. `None` for every
+/// other expression, including every malformed form. Driven from the typed OXC
+/// AST via the SHARED family statement classifier — author parens around the
+/// call are transparent, and the slice is the CALL span, so the parens never
+/// enter the carrier (the emission stays normalized); comment trivia inside
+/// the peeled wrapper HEAD (`(/*#__PURE__*/ $effect(fn));` — between the
+/// statement-expression start and the call start) pre-renders into the
+/// carrier's `head_trivia`, and the carrier TAIL — the LEXICAL trailing
+/// region collected by [`carrier_tail_comment_trivia`]: the statement span's
+/// interior after the call end (a normalized wrapper's interior,
+/// `($effect.root(fn) /*!license*/);`, and an unwrapped call's pre-`;`
+/// trailing comments) PLUS the same-line ASI extension of a semicolon-less
+/// statement (`$effect.root(fn) /*!license*/` — the OXC statement span ends
+/// AT the call end, so the trailing comment lies outside every AST span) —
+/// into `tail_trivia`, so the carrier slice never silently drops either.
+fn classify_effect_statement(
+    expr: &Expression<'_>,
+    stmt_end: u32,
+    instance_source: &str,
+    comments: &[Comment],
+) -> Option<SupportedInstanceScriptItem> {
+    let fact = super::expr::effect_family_statement_fact(expr)?;
+    let source = instance_source
+        .get(fact.call_span.start as usize..fact.call_span.end as usize)?
+        .to_string();
+    let head_trivia = call_internal_comment_trivia(
+        instance_source,
+        comments,
+        expr.span().start,
+        fact.call_span.start,
+    );
+    let tail_trivia =
+        carrier_tail_comment_trivia(instance_source, comments, fact.call_span.end, stmt_end);
+    Some(SupportedInstanceScriptItem::EffectStatement {
+        source,
+        head_trivia,
+        tail_trivia,
+    })
+}
+
+/// The typed shape facts of a declaration matching the assignable
+/// effect-rune-init carrier SHAPE — the [`effect_rune_init_shape`] output.
+pub(super) struct EffectRuneInitShape {
+    /// Whether the declaration keyword is `const` (else `let`).
+    pub(super) const_decl: bool,
+    /// The declared (plain, non-`$`-prefixed) binding name.
+    pub(super) name: String,
+    /// Which assignable family member the init calls (`EffectRoot` /
+    /// `EffectTracking`).
+    pub(super) kind: super::expr::EffectFamilyCallKind,
+    /// The init CALL expression's span (for the carrier's source slice).
+    pub(super) call_span: oxc_span::Span,
+    /// The WHOLE init expression's span — transparent author-paren wrappers
+    /// included. The carrier slices only `call_span` (the wrapper parens
+    /// normalize away), so comments inside the peeled wrapper HEAD range
+    /// `[init_span.start, call_span.start)` pre-render into the carrier's
+    /// `head_trivia` instead of being sliced away.
+    pub(super) init_span: oxc_span::Span,
+}
+
+/// The SINGLE declaration-shape predicate of the assignable effect-rune-init
+/// carrier: a `let`/`const` declaration (a `var` keeps the var-declaration
+/// refusal) with exactly ONE declarator, a plain non-`$`-prefixed identifier
+/// binding, no TS annotation, and a WELL-FORMED `$effect.root(fn)` /
+/// `$effect.tracking()` call init (the shared family classifier proves the
+/// form). BOTH the item carrier ([`SupportedInstanceScriptItem::EffectRuneInit`]
+/// via `classify_effect_rune_init`) and the rune-binding fact minting
+/// ([`super::state_scan::collect_rune_bindings`]'s `EffectTrackingConst` arm)
+/// consult THIS predicate, so the minting can never be broader than the carrier
+/// — a declaration the carrier refuses mints no binding fact.
+pub(super) fn effect_rune_init_shape(
+    decl: &oxc_ast::ast::VariableDeclaration<'_>,
+) -> Option<EffectRuneInitShape> {
+    use super::expr::EffectFamilyCallKind;
+    let const_decl = match decl.kind {
+        VariableDeclarationKind::Const => true,
+        VariableDeclarationKind::Let => false,
+        _ => return None,
+    };
+    let [d] = decl.declarations.as_slice() else {
+        return None;
+    };
+    if d.type_annotation.is_some() || d.definite {
+        return None;
+    }
+    let BindingPattern::BindingIdentifier(id) = &d.id else {
+        return None;
+    };
+    if id.name.as_str().starts_with('$') {
+        return None;
+    }
+    // The init classifies through the SHARED expression-level family classifier
+    // (author parens around the whole init are transparent; the sliced span is
+    // the CALL span, so the parens never enter the carrier).
+    let init_expr = d.init.as_ref()?;
+    let fact = super::expr::effect_family_expression_fact(init_expr)?;
+    if !fact.well_formed
+        || !matches!(
+            fact.kind,
+            EffectFamilyCallKind::EffectRoot | EffectFamilyCallKind::EffectTracking
+        )
+    {
+        return None;
+    }
+    Some(EffectRuneInitShape {
+        const_decl,
+        name: id.name.to_string(),
+        kind: fact.kind,
+        call_span: fact.call_span,
+        init_span: init_expr.span(),
+    })
+}
+
+/// Classify a `let`/`const` declarator whose init is a WELL-FORMED assignable
+/// effect-family EXPRESSION rune (`$effect.root(fn)` / `$effect.tracking()`) into
+/// the [`SupportedInstanceScriptItem::EffectRuneInit`] carrier, or `None` when the
+/// declaration is not that shape (the caller falls through to the existing
+/// gates). The shape decision is the shared [`effect_rune_init_shape`] predicate;
+/// comment trivia inside a transparent wrapper's HEAD range (`= (/*c*/
+/// $effect.root(fn))`) pre-renders into the carrier's `head_trivia`, and the
+/// carrier TAIL — the LEXICAL trailing region collected by
+/// [`carrier_tail_comment_trivia`]: the declaration span's interior after the
+/// call end (a normalized wrapper's interior, `= ($effect.root(fn)
+/// /*!license*/);`, and an unwrapped init's pre-`;` trailing comments) PLUS
+/// the same-line ASI extension of a semicolon-less declaration (`const s =
+/// $effect.root(fn) /*!license*/` — the OXC declaration span ends AT the init
+/// end, so the trailing comment lies outside every AST span) — into
+/// `tail_trivia`, so the carrier slice never silently drops either.
+fn classify_effect_rune_init(
+    decl: &oxc_ast::ast::VariableDeclaration<'_>,
+    instance_source: &str,
+    comments: &[Comment],
+) -> Option<SupportedInstanceScriptItem> {
+    let shape = effect_rune_init_shape(decl)?;
+    let init = instance_source
+        .get(shape.call_span.start as usize..shape.call_span.end as usize)?
+        .to_string();
+    let head_trivia = call_internal_comment_trivia(
+        instance_source,
+        comments,
+        shape.init_span.start,
+        shape.call_span.start,
+    );
+    let tail_trivia = carrier_tail_comment_trivia(
+        instance_source,
+        comments,
+        shape.call_span.end,
+        decl.span.end,
+    );
+    Some(SupportedInstanceScriptItem::EffectRuneInit {
+        const_decl: shape.const_decl,
+        name: shape.name,
+        init,
+        head_trivia,
+        tail_trivia,
+    })
 }
 
 /// Classify a top-level `function name(...) {}` declaration into the
@@ -301,6 +578,7 @@ fn classify_function_declaration(
 fn classify_instance_variable_decl(
     decl: &oxc_ast::ast::VariableDeclaration<'_>,
     instance_source: &str,
+    comments: &[Comment],
     bind_this_targets: &[String],
     bind_lvalue_roots: &[String],
 ) -> Result<SupportedInstanceScriptItem, UnsupportedSvelteRuntimeSurface> {
@@ -308,6 +586,14 @@ fn classify_instance_variable_decl(
         construct,
         span: Span::new(decl.span.start, decl.span.end),
     };
+    // (0) An assignable effect-family EXPRESSION-rune init (`let`/`const name =
+    // $effect.root(fn)` / `= $effect.tracking()`) is its own rewriter-backed
+    // carrier — classified BEFORE the `let`-only gate because official accepts
+    // BOTH keywords for it (the emission preserves the keyword). A `var`
+    // declarator or any other shape falls through to the existing gates.
+    if let Some(item) = classify_effect_rune_init(decl, instance_source, comments) {
+        return Ok(item);
+    }
     // (1) `let` ONLY — a `const` / `var` declaration is a distinct official surface
     // (`var` reads use `$.safe_get`, a read-only `const $state` constant-folds), and
     // a plain `const`/`var` local is not core. Fail closed.

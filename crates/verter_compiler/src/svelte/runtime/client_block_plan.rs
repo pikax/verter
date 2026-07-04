@@ -15,8 +15,7 @@ use super::client_plan_types::{
     ClientAwait, ClientBlock, ClientDebugEntry, ClientDeclKeyword, ClientDeclaration, ClientEach,
     ClientEachKey, ClientIfBranch, ClientNode,
 };
-use super::expr::{BindingRuntimeKind, ExprRefKind};
-use super::expr_rewrite::is_signal_kind;
+use super::expr::{is_signal_kind, BindingRuntimeKind, ExprRefKind};
 use super::ir::{
     BindingId, BlockIr, DebugArg, DeclKind, ExprId, IfBranch, PatternId, SvelteMode,
     TemplateDeclarator, TemplateRune,

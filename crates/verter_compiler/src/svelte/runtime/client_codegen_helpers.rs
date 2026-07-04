@@ -5,11 +5,10 @@
 //! the `$.set_class` / `$.set_style` / dynamic-attribute call shapes from — the
 //! single-quoted JS-string escape, the backtick-template literal escape, the
 //! directive object-key quoting, the style-object literal builder, the trailing-arg
-//! trimmer, and the binding-kind / op-target predicates. They are typed-IR-only
+//! trimmer, and the op-target predicate. They are typed-IR-only
 //! (char loops, never `str::replace` / regex) so the carrier compiler path stays
 //! within the no-string-munge rule.
 
-use super::expr::BindingRuntimeKind;
 use super::ir::{EventTarget, NodeId, RuntimeOp};
 
 /// The DOM-node target of a runtime op (for the dead-options-attr skip). A
@@ -32,19 +31,6 @@ pub(super) fn op_target_node(op: &RuntimeOp) -> Option<NodeId> {
             _ => None,
         },
     }
-}
-
-/// Whether a binding kind is a reactive SIGNAL (read via `$.get`).
-pub(super) fn is_signal_kind(kind: BindingRuntimeKind) -> bool {
-    matches!(
-        kind,
-        BindingRuntimeKind::StateSignal { .. }
-            | BindingRuntimeKind::StateProxy
-            | BindingRuntimeKind::Derived
-            | BindingRuntimeKind::EachSignal
-            | BindingRuntimeKind::AwaitSignal
-            | BindingRuntimeKind::LegacyConstDerived
-    )
 }
 
 /// Trim trailing `None` entries from a call's argument list, then render each

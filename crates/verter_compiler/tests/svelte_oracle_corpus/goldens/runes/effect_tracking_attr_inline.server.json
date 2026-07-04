@@ -1,0 +1,40 @@
+{
+  "slug": "runes/effect_tracking_attr_inline.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "effect_tracking_attr_inline",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [
+    "attr",
+    "escape"
+  ],
+  "helperSet": [
+    "attr",
+    "escape"
+  ],
+  "helperCounts": {
+    "attr": 1,
+    "escape": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

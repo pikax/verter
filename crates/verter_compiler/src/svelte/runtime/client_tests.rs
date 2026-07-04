@@ -8238,14 +8238,39 @@ fn svelte_options_runes_only_is_supported_and_emits() {
 }
 
 #[test]
-fn effect_pre_fails_closed() {
-    // F4: `$effect.pre(...)` is an advanced rune — it must fail closed, not
-    // emit raw `$effect.pre` (a runtime ReferenceError). RED against the pre-fix
-    // path (which emitted raw).
-    assert_fail_closed(
+fn effect_pre_toplevel_lowers_with_frame() {
+    // INVERTED (was `effect_pre_fails_closed`): a top-level `$effect.pre(fn)`
+    // statement lowers to `$.user_pre_effect` and forces the runes frame
+    // (`$.push($$props, true)` / `$.pop()` + the `$$props` param), matching
+    // svelte@5.56.3.
+    let js = emit(
         "<script>let c = $state(0); $effect.pre(() => console.log(c));</script>\n<button onclick={() => c++}>{c}</button>\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$effect.pre"),
+        "App.svelte",
     );
+    assert!(
+        js.contains("$.user_pre_effect(() => console.log($.get(c)));"),
+        "the `$effect.pre` statement lowers with its body rewritten:\n{js}"
+    );
+    // The HELPER-RENAME discriminator: `.pre` must NOT lower to the plain
+    // `$.user_effect` (a re-label bug would still contain an effect helper).
+    assert!(
+        !js.contains("$.user_effect"),
+        "`$effect.pre` must lower to `$.user_pre_effect`, never `$.user_effect`:\n{js}"
+    );
+    assert!(
+        js.contains("export default function App($$anchor, $$props) {"),
+        "`$effect.pre` forces the `$$props` param:\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true);"),
+        "`$effect.pre` forces the runes frame open:\n{js}"
+    );
+    assert!(js.contains("$.pop();"), "the frame closes:\n{js}");
+    assert!(
+        !js.contains("$effect"),
+        "no raw `$effect.pre` rune survives:\n{js}"
+    );
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
 }
 
 #[test]
@@ -8464,18 +8489,34 @@ fn inspect_trace_first_statement_drops() {
     );
     assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
 
-    // (b)+(c) The OTHER owning function forms — a first-statement trace in an
-    // `$effect` arrow / a top-level `function` declaration body — must NOT reject
-    // as the placement error. Each fixture still fails closed on its own,
-    // ORTHOGONAL unsupported-FEATURE channel on this branch (`$effect` is a 5g
-    // deferral; a top-level `function` is out of the instance-item allowlist) —
+    // (b) INVERTED (the `$effect` arm was an orthogonal fail-closed fixture while
+    // `$effect` was refused wholesale): a first-statement trace in an `$effect`
+    // arrow body is the ONE legal trace position — oracle-verified
+    // (svelte@5.56.3, `dev:false`): the trace call is DROPPED in place and the
+    // surrounding effect is KEPT (`$.user_effect(() => { $.update(c); });`).
+    let js = emit(
+        "<script>let c = $state(0); $effect(() => { $inspect.trace(); c++; });</script>\n<p>{c}</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.user_effect(() => {"),
+        "the surrounding `$effect` lowers (not refused, not dropped):\n{js}"
+    );
+    assert!(
+        js.contains("$.update(c)"),
+        "the rest of the effect body is preserved:\n{js}"
+    );
+    assert!(!js.contains("inspect"), "the trace call is dropped:\n{js}");
+    assert!(!js.contains("trace"), "no trace token survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // (c) A first-statement trace in a top-level `function` declaration body must
+    // NOT reject as the placement error. The fixture still fails closed on its
+    // own, ORTHOGONAL unsupported-FEATURE channel (a top-level `function` not
+    // referenced by a function-pair bind is out of the instance-item allowlist) —
     // the discriminating fact is the refusal channel: a mis-firing placement scan
     // would surface `OfficialReject(InspectTraceInvalidPlacement)` instead. (The
     // gate-level `None` positives live in `official_reject_tests.rs`.)
-    assert_fail_closed(
-        "<script>let c = $state(0); $effect(() => { $inspect.trace(); c++; });</script>\n<p>{c}</p>\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$effect"),
-    );
     assert_fail_closed(
         "<script>let c = $state(0); function tick() { $inspect.trace(); c = c + 1; }</script>\n<button onclick={() => c++}>{c}</button>\n",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::InstanceScriptItem { construct, .. } if *construct == "function"),
@@ -8557,8 +8598,8 @@ fn inspect_trace_object_parenthesized_first_statement_drops() {
 fn inspect_trace_param_shadow_local_call_survives() {
     // A `$inspect` PARAMETER shadows the rune: `$inspect.trace()` under it is an
     // ORDINARY local method call. Official svelte@5.56.3 ACCEPTS
-    // `($inspect) => { c++; $inspect.trace(); }` and EMITS the call FAITHFULLY (verified
-    // via the pinned-oracle probe: `.trace(` survives in the official output). The
+    // `($inspect) => { c++; $inspect.trace(); }` and EMITS the call FAITHFULLY
+    // (oracle-verified: `.trace(` survives in the official output). The
     // scope-aware pipeline must NOT drop it as a production-elided rune trace, and must
     // NOT reject it as a misplaced rune trace. `onfocus` is a NON-delegated (DIRECT)
     // event, so the arrow lowers through the shared expression rewriter. RED before the
@@ -8686,14 +8727,51 @@ fn bare_props_in_call_arg_fails_closed() {
 }
 
 #[test]
-fn bare_effect_in_function_body_fails_closed() {
-    // An `$effect(fn)` NESTED in a function body is not a top-level instance-script
-    // statement (the supported `$effect` position) — fail closed, never emit
-    // raw `$effect(...)`. RED against the pre-fix scan.
+fn effect_in_function_body_is_position_exempt() {
+    // INVERTED (was `bare_effect_in_function_body_fails_closed`): a well-formed
+    // `$effect(fn)` call is a supported position at ANY depth — official lowers
+    // it in a nested function body, so the rune scan no longer refuses it there.
+    //
+    // (a) A plain top-level `function f` hosting the effect still fails closed —
+    // but at the instance-script-item gate (a function not referenced by a
+    // function-pair bind is out of the allowlist), NOT on the `$effect` rune
+    // basis. The disposition moving OFF the rune gate is the position-exemption
+    // proof.
     assert_fail_closed(
         "<script>let c=$state(0); function f(){ $effect(() => c); }</script>\n<p>hi</p>\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$effect"),
+        |s| {
+            !matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$effect"
+            ) && matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::InstanceScriptItem { construct, .. }
+                    if *construct == "function"
+            )
+        },
     );
+    // (b) The nested-fn body Verter DOES lower — a function-pair bind function —
+    // hosts the effect and EMITS the nested-function-body topology (oracle-verified:
+    // `function get() { $.user_effect(...); return $.get(v); }` + the frame from
+    // the nested `$effect`).
+    let js = emit(
+        "<script>\n\tlet v = $state('');\n\tfunction get() { $effect(() => console.log(v)); return v; }\n\tfunction set(x) { v = x; }\n</script>\n<input bind:value={get, set} />\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.user_effect(() => console.log($.get(v)))"),
+        "the nested-fn `$effect` lowers inside the function-pair body:\n{js}"
+    );
+    assert!(
+        js.contains("return $.get(v);"),
+        "the rest of the function body still rewrites:\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true);") && js.contains("$.pop();"),
+        "the nested `$effect` forces the runes frame:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
 }
 
 #[test]
@@ -13826,6 +13904,226 @@ fn state_snapshot_in_instance_script_call_initializer_fails_closed_as_carrier() 
 }
 
 #[test]
+fn paren_receiver_state_snapshot_wellformed_rewrites_to_dollar_snapshot() {
+    // Receiver parens are TRANSPARENT to official (its ESTree AST has no paren
+    // nodes): `($state).snapshot(o)` compiles to `$.snapshot(o)` exactly like the
+    // plain spelling (oracle-verified against svelte@5.56.3). The scan's
+    // well-formed-call exemption and the rewriter agree on the peeled receiver,
+    // and the rewrite overwrites the paren-INCLUSIVE callee member span, so no
+    // receiver-paren residue survives into the emission.
+    let js = emit(
+        "<script>let o = $state({ a: 1 });\nlet snap = $state(null);</script>\n<button onclick={() => snap = ($state).snapshot(o)}>x</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.snapshot(o)"),
+        "`($state).snapshot(o)` rewrites to `$.snapshot(o)`:\n{js}"
+    );
+    // NEGATIVE: no raw rune member and no receiver-paren residue.
+    assert!(
+        !js.contains("$state.snapshot") && !js.contains("($state)"),
+        "no raw `$state.snapshot` / `($state)` residue may remain:\n{js}"
+    );
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+}
+
+#[test]
+fn paren_receiver_state_snapshot_malformed_fails_closed_as_rune() {
+    // A MALFORMED `($state).snapshot(...)` call — zero args / two args (official
+    // `rune_invalid_arguments_length`, oracle-verified against svelte@5.56.3 for
+    // the parenthesized spelling too) or a spread argument (official
+    // `rune_invalid_spread`) — refuses under the SAME `$state.snapshot` label as
+    // the plain spellings, never the coarse bare-`$state` position refusal the
+    // receiver identifier would record on its own.
+    let cases: &[(&str, &str)] = &[
+        (
+            "paren_snapshot_zero_args",
+            "<script>let o = $state({ a: 1 });\nlet snap = $state(null);</script>\n<button onclick={() => snap = ($state).snapshot()}>x</button>\n",
+        ),
+        (
+            "paren_snapshot_two_args",
+            "<script>let o = $state({ a: 1 });\nlet snap = $state(null);</script>\n<button onclick={() => snap = ($state).snapshot(o, o)}>x</button>\n",
+        ),
+        (
+            "paren_snapshot_spread_arg",
+            "<script>let arr = $state([1]);\nlet snap = $state(null);</script>\n<button onclick={() => snap = ($state).snapshot(...arr)}>x</button>\n",
+        ),
+    ];
+    for (label, source) in cases {
+        assert_fail_closed_labeled(label, source, |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$state.snapshot"
+            )
+        });
+    }
+}
+
+#[test]
+fn paren_callee_state_snapshot_wellformed_rewrites_to_dollar_snapshot() {
+    // Whole-CALLEE parens are TRANSPARENT to official (its ESTree AST has no paren
+    // nodes): `($state.snapshot)(o)` compiles to `$.snapshot(o)` exactly like the
+    // plain spelling — oracle-verified against svelte@5.56.3 for every nesting:
+    // single, doubled, receiver-parens-inside-callee-parens, and a whole-call
+    // wrapper around the paren-callee call. The scan's well-formed-call exemption
+    // and the rewriter peel the SAME callee, and the rewrite overwrites the
+    // paren-INCLUSIVE whole-callee span, so no callee-paren residue survives.
+    let cases: &[(&str, &str)] = &[
+        (
+            "callee_paren",
+            "<script>let o = $state({ a: 1 });\nlet snap = $state(null);</script>\n<button onclick={() => snap = ($state.snapshot)(o)}>x</button>\n",
+        ),
+        (
+            "double_callee_paren",
+            "<script>let o = $state({ a: 1 });\nlet snap = $state(null);</script>\n<button onclick={() => snap = (($state.snapshot))(o)}>x</button>\n",
+        ),
+        (
+            "receiver_paren_inside_callee_paren",
+            "<script>let o = $state({ a: 1 });\nlet snap = $state(null);</script>\n<button onclick={() => snap = (($state).snapshot)(o)}>x</button>\n",
+        ),
+        (
+            "whole_call_around_paren_callee",
+            "<script>let o = $state({ a: 1 });\nlet snap = $state(null);</script>\n<button onclick={() => snap = (($state.snapshot)(o))}>x</button>\n",
+        ),
+    ];
+    for (label, source) in cases {
+        let js = emit(source, "App.svelte");
+        assert!(
+            js.contains("$.snapshot(o)"),
+            "[{label}] the paren-callee snapshot call rewrites to `$.snapshot(o)`:\n{js}"
+        );
+        // NEGATIVE: no raw rune text and no callee-paren residue around the helper
+        // (a callee-member-only overwrite would leave `($.snapshot)(o)`).
+        assert!(
+            !js.contains("$state") && !js.contains("($.snapshot)"),
+            "[{label}] no raw `$state` / `($.snapshot)` callee residue may remain:\n{js}"
+        );
+        assert!(
+            parses_as_js(&js),
+            "[{label}] emitted module must parse as JS:\n{js}"
+        );
+    }
+}
+
+#[test]
+fn double_paren_receiver_state_snapshot_wellformed_rewrites_to_dollar_snapshot() {
+    // DOUBLED receiver parens `(($state)).snapshot(o)` — the shared peel is a
+    // loop, so every nesting depth reports the same member surface as the plain
+    // spelling (oracle-verified accept against svelte@5.56.3: `$.snapshot(o)`).
+    let js = emit(
+        "<script>let o = $state({ a: 1 });\nlet snap = $state(null);</script>\n<button onclick={() => snap = (($state)).snapshot(o)}>x</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.snapshot(o)"),
+        "`(($state)).snapshot(o)` rewrites to `$.snapshot(o)`:\n{js}"
+    );
+    assert!(
+        !js.contains("$state") && !js.contains("($.snapshot)"),
+        "no raw `$state` / paren residue may remain:\n{js}"
+    );
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+}
+
+#[test]
+fn whole_call_paren_state_snapshot_stays_accepted() {
+    // Parens around the WHOLE call `($state.snapshot(o))` — the wrapper is a
+    // transparent expression the walk descends through, so the call exemption and
+    // the callee rewrite own the inner call unchanged (oracle-verified accept
+    // against svelte@5.56.3; official prints `$.snapshot(o)` — a surviving
+    // behavior-preserving wrapper paren is cosmetic, never contract).
+    let js = emit(
+        "<script>let o = $state({ a: 1 });\nlet snap = $state(null);</script>\n<button onclick={() => snap = ($state.snapshot(o))}>x</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.snapshot(o)"),
+        "`($state.snapshot(o))` keeps the `$.snapshot(o)` call topology:\n{js}"
+    );
+    assert!(
+        !js.contains("$state") && !js.contains("($.snapshot)"),
+        "no raw `$state` / callee-paren residue may remain:\n{js}"
+    );
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+}
+
+#[test]
+fn paren_callee_state_snapshot_malformed_fails_closed_as_rune() {
+    // A MALFORMED snapshot call at EVERY paren position — zero args / two args
+    // (official `rune_invalid_arguments_length`) or a spread argument (official
+    // `rune_invalid_spread`), oracle-verified against svelte@5.56.3 for the
+    // whole-callee-paren, doubled-receiver-paren, and whole-call-paren spellings —
+    // refuses under the SAME `$state.snapshot` label as the plain spellings; the
+    // paren transparency must never let a malformed form slip past the exemption
+    // into a raw `$.snapshot()` / `$.snapshot(o, o)` / `$.snapshot(...arr)`.
+    let cases: &[(&str, &str)] = &[
+        (
+            "callee_paren_zero_args",
+            "<script>let o = $state({ a: 1 });\nlet snap = $state(null);</script>\n<button onclick={() => snap = ($state.snapshot)()}>x</button>\n",
+        ),
+        (
+            "callee_paren_two_args",
+            "<script>let o = $state({ a: 1 });\nlet snap = $state(null);</script>\n<button onclick={() => snap = ($state.snapshot)(o, o)}>x</button>\n",
+        ),
+        (
+            "callee_paren_spread_arg",
+            "<script>let arr = $state([1]);\nlet snap = $state(null);</script>\n<button onclick={() => snap = ($state.snapshot)(...arr)}>x</button>\n",
+        ),
+        (
+            "double_receiver_paren_zero_args",
+            "<script>let o = $state({ a: 1 });\nlet snap = $state(null);</script>\n<button onclick={() => snap = (($state)).snapshot()}>x</button>\n",
+        ),
+        (
+            "double_receiver_paren_spread_arg",
+            "<script>let arr = $state([1]);\nlet snap = $state(null);</script>\n<button onclick={() => snap = (($state)).snapshot(...arr)}>x</button>\n",
+        ),
+        (
+            "whole_call_paren_zero_args",
+            "<script>let o = $state({ a: 1 });\nlet snap = $state(null);</script>\n<button onclick={() => snap = ($state.snapshot())}>x</button>\n",
+        ),
+        (
+            "whole_call_paren_spread_arg",
+            "<script>let arr = $state([1]);\nlet snap = $state(null);</script>\n<button onclick={() => snap = ($state.snapshot(...arr))}>x</button>\n",
+        ),
+    ];
+    for (label, source) in cases {
+        assert_fail_closed_labeled(label, source, |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$state.snapshot"
+            )
+        });
+    }
+}
+
+#[test]
+fn uncalled_paren_state_snapshot_value_position_fails_closed_as_rune() {
+    // An UNCALLED parenthesized `($state.snapshot)` / `(($state.snapshot))` in a
+    // VALUE position — official `rune_missing_parentheses` (oracle-verified against
+    // svelte@5.56.3). The wrapper parens are transparent: there is no enclosing
+    // call to exempt the member, so the member handler still owns the uncalled
+    // value position and records the precise `$state.snapshot` refusal.
+    let cases: &[(&str, &str)] = &[
+        (
+            "paren_uncalled",
+            "<script>let o = $state({ a: 1 });\nlet snap = $state(null);</script>\n<button onclick={() => snap = ($state.snapshot)}>x</button>\n",
+        ),
+        (
+            "double_paren_uncalled",
+            "<script>let o = $state({ a: 1 });\nlet snap = $state(null);</script>\n<button onclick={() => snap = (($state.snapshot))}>x</button>\n",
+        ),
+    ];
+    for (label, source) in cases {
+        assert_fail_closed_labeled(label, source, |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$state.snapshot"
+            )
+        });
+    }
+}
+
+#[test]
 fn raw_state_object_member_write_in_handler_emits_get_member_mutation() {
     // F4: a `$state.raw({ x: 0 })` reassigned is a raw SIGNAL. A delegated handler
     // mutating a MEMBER (`o.x++`) AND reassigning the root (`o = { x: 2 }`) must be
@@ -13957,4 +14255,2731 @@ fn state_over_plain_local_undefined_shadow_no_longer_fails_at_state_gate() {
             )
         },
     );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// The native effect family: plain `$effect` + `$effect.pre` + `$effect.root` +
+// `$effect.tracking` (position parity with svelte@5.56.3 — `$effect` /
+// `$effect.pre` are STATEMENT-ONLY (`effect_invalid_placement`), `.root` /
+// `.tracking` are expression-valued; non-call / malformed / unknown-member /
+// value-position forms stay fail-closed).
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn effect_in_direct_handler_lowers_with_frame() {
+    // A well-formed `$effect(fn)` call INSIDE a direct-host (`$.event`) handler
+    // arrow lowers through the shared rewriter (`$.user_effect`) and forces the
+    // component frame (`$.push($$props, true)` / `$.pop()` + the `$$props`
+    // param) — the official call-position parity for a handler closure.
+    // Oracle-verified: official lowers `$effect` wherever it appears in runes
+    // scope.
+    let js = emit(
+        "<script>let c = $state(0);</script>\n<button onclick={() => c++} onfocus={() => { $effect(() => console.log(c)); }}>{c}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.user_effect(() => console.log($.get(c)))"),
+        "the handler-nested `$effect` lowers to `$.user_effect` with the body rewritten:\n{js}"
+    );
+    assert!(
+        js.contains("export default function App($$anchor, $$props) {"),
+        "the `$effect` forces the `$$props` param:\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true);"),
+        "the `$effect` forces the runes frame open:\n{js}"
+    );
+    assert!(js.contains("$.pop();"), "the frame closes:\n{js}");
+    assert!(
+        !js.contains("$effect"),
+        "no raw `$effect` rune survives:\n{js}"
+    );
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+}
+
+#[test]
+fn effect_family_non_call_forms_fail_closed() {
+    // Non-call `$effect` value references and uncalled member references stay
+    // fail-closed (official emits the raw reference — a runtime ReferenceError —
+    // for some of these; Verter refuses instead, never emitting a raw rune).
+    let cases: &[(&str, &str, &str)] = &[
+        (
+            "bare_ref_arg",
+            "<script>let c = $state(0); foo($effect);</script>\n<button onclick={() => c++}>{c}</button>\n",
+            "$effect",
+        ),
+        (
+            "bare_statement",
+            "<script>let c = $state(0); $effect;</script>\n<button onclick={() => c++}>{c}</button>\n",
+            "$effect",
+        ),
+        (
+            "uncalled_pre_member",
+            "<script>let c = $state(0); const f = $effect.pre;</script>\n<button onclick={() => c++}>{c}</button>\n",
+            "$effect.pre",
+        ),
+        (
+            "uncalled_root_member",
+            "<script>let c = $state(0); const f = $effect.root;</script>\n<button onclick={() => c++}>{c}</button>\n",
+            "$effect.root",
+        ),
+        (
+            "uncalled_tracking_member",
+            "<script>let c = $state(0); const f = $effect.tracking;</script>\n<button onclick={() => c++}>{c}</button>\n",
+            "$effect.tracking",
+        ),
+    ];
+    for (label, source, rune_label) in cases {
+        assert_fail_closed_labeled(
+            label,
+            source,
+            |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if rune == rune_label),
+        );
+    }
+}
+
+#[test]
+fn effect_family_malformed_calls_fail_closed() {
+    // Malformed family calls — wrong arity (official `rune_invalid_arguments_length`
+    // / `rune_invalid_arguments`) or a spread argument (official
+    // `rune_invalid_spread`) — fail closed under the precise family label, never
+    // slipping past the call exemption into a raw `$.user_effect()` /
+    // `$.effect_tracking(x)` miscompile.
+    let cases: &[(&str, &str, &str)] = &[
+        (
+            "effect_zero_args",
+            "<script>let c = $state(0); $effect();</script>\n<button onclick={() => c++}>{c}</button>\n",
+            "$effect",
+        ),
+        (
+            "effect_two_args",
+            "<script>let c = $state(0); $effect(a, b);</script>\n<button onclick={() => c++}>{c}</button>\n",
+            "$effect",
+        ),
+        (
+            "effect_spread_arg",
+            "<script>let c = $state(0); $effect(...args);</script>\n<button onclick={() => c++}>{c}</button>\n",
+            "$effect",
+        ),
+        (
+            "pre_zero_args",
+            "<script>let c = $state(0); $effect.pre();</script>\n<button onclick={() => c++}>{c}</button>\n",
+            "$effect.pre",
+        ),
+        (
+            "tracking_with_arg",
+            "<script>let c = $state(0); const t = $effect.tracking(c);</script>\n<button onclick={() => c++}>{c}</button>\n",
+            "$effect.tracking",
+        ),
+        (
+            "root_zero_args",
+            "<script>let c = $state(0); const stop = $effect.root();</script>\n<button onclick={() => c++}>{c}</button>\n",
+            "$effect.root",
+        ),
+    ];
+    for (label, source, rune_label) in cases {
+        assert_fail_closed_labeled(
+            label,
+            source,
+            |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if rune == rune_label),
+        );
+    }
+}
+
+#[test]
+fn effect_unknown_member_still_fails_closed_via_generic_fallback() {
+    // `$effect.foo()` is not a family member — the generic `$effect.<member>`
+    // fallback owns it (official `rune_invalid_name`), unchanged by the family
+    // call exemption.
+    assert_fail_closed(
+        "<script>let c = $state(0); $effect.foo(() => {});</script>\n<button onclick={() => c++}>{c}</button>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$effect.<member>"),
+    );
+}
+
+#[test]
+fn effect_pending_still_fails_closed_experimental_async() {
+    // `$effect.pending` is the experimental-async member (5j) — it must NOT ride
+    // the family call exemption; both the called and uncalled forms stay on the
+    // `ExperimentalAsync` refusal.
+    assert_fail_closed(
+        "<script>let c = $state(0); const p = $effect.pending();</script>\n<button onclick={() => c++}>{c}</button>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::ExperimentalAsync { surface, .. } if *surface == "$effect.pending"),
+    );
+    assert_fail_closed(
+        "<script>let c = $state(0); const p = $effect.pending;</script>\n<button onclick={() => c++}>{c}</button>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::ExperimentalAsync { surface, .. } if *surface == "$effect.pending"),
+    );
+}
+
+#[test]
+fn paren_receiver_effect_pending_fails_closed_experimental_async() {
+    // Receiver parens are TRANSPARENT to official (its ESTree AST has no paren
+    // nodes), so `($effect).pending` is the SAME experimental-async member
+    // surface as `$effect.pending` — both the called and uncalled spellings
+    // refuse under the `ExperimentalAsync` label, never the coarse bare-`$effect`
+    // position refusal the receiver identifier would record on its own.
+    assert_fail_closed(
+        "<script>let c = $state(0); const p = ($effect).pending();</script>\n<button onclick={() => c++}>{c}</button>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::ExperimentalAsync { surface, .. } if *surface == "$effect.pending"),
+    );
+    assert_fail_closed(
+        "<script>let c = $state(0); const p = ($effect).pending;</script>\n<button onclick={() => c++}>{c}</button>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::ExperimentalAsync { surface, .. } if *surface == "$effect.pending"),
+    );
+}
+
+#[test]
+fn paren_receiver_effect_unknown_member_fails_closed_via_generic_fallback() {
+    // `($effect).foo()` is the same unknown member as `$effect.foo()` (official
+    // `rune_invalid_name` — oracle-verified against svelte@5.56.3 for the
+    // parenthesized spelling too): the generic `$effect.<member>` fallback owns
+    // it, not the coarse bare-`$effect` position refusal.
+    assert_fail_closed(
+        "<script>let c = $state(0); ($effect).foo(() => {});</script>\n<button onclick={() => c++}>{c}</button>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$effect.<member>"),
+    );
+}
+
+#[test]
+fn paren_receiver_effect_family_uncalled_members_fail_closed() {
+    // UNCALLED family members behind a parenthesized receiver refuse under the
+    // SAME precise member labels as the plain spellings (official
+    // `rune_missing_parentheses` for every one of them — oracle-verified against
+    // svelte@5.56.3), never the coarse bare-`$effect` position refusal.
+    let cases: &[(&str, &str, &str)] = &[
+        (
+            "paren_uncalled_pre_member",
+            "<script>let c = $state(0); const f = ($effect).pre;</script>\n<button onclick={() => c++}>{c}</button>\n",
+            "$effect.pre",
+        ),
+        (
+            "paren_uncalled_root_member",
+            "<script>let c = $state(0); const f = ($effect).root;</script>\n<button onclick={() => c++}>{c}</button>\n",
+            "$effect.root",
+        ),
+        (
+            "paren_uncalled_tracking_member",
+            "<script>let c = $state(0); const f = ($effect).tracking;</script>\n<button onclick={() => c++}>{c}</button>\n",
+            "$effect.tracking",
+        ),
+    ];
+    for (label, source, rune_label) in cases {
+        assert_fail_closed_labeled(
+            label,
+            source,
+            |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if rune == rune_label),
+        );
+    }
+}
+
+#[test]
+fn paren_receiver_advanced_root_member_fails_closed_via_generic_fallback() {
+    // A member access on a parenthesized ADVANCED-only rune root (`($host).foo`,
+    // `($bindable).foo`) refuses through the generic `$rune.<member>` fallback —
+    // exactly like the plain spellings (official `rune_invalid_name`,
+    // oracle-verified against svelte@5.56.3). These roots have no bare-position
+    // refusal of their own, so without the member-form classification the
+    // parenthesized spelling would slip the scan entirely.
+    let cases: &[(&str, &str)] = &[
+        (
+            "paren_host_member",
+            "<script>let c = $state(0); const h = ($host).foo;</script>\n<button onclick={() => c++}>{c}</button>\n",
+        ),
+        (
+            "paren_bindable_member",
+            "<script>let c = $state(0); const b = ($bindable).foo;</script>\n<button onclick={() => c++}>{c}</button>\n",
+        ),
+    ];
+    for (label, source) in cases {
+        assert_fail_closed_labeled(
+            label,
+            source,
+            |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$rune.<member>"),
+        );
+    }
+}
+
+#[test]
+fn paren_receiver_effect_pre_statement_call_still_accepts() {
+    // The ACCEPT control for the member-receiver paren transparency: a
+    // statement-position `($effect).pre(fn)` call is the SAME statement as
+    // `$effect.pre(fn)` to official (oracle-verified: svelte@5.56.3 emits
+    // `$.user_pre_effect` with the component frame) and must keep lowering —
+    // the member-form refusal classification owns ONLY uncalled references,
+    // never an admitted family call (whose callee the call visitor consumes).
+    let js = emit(
+        "<script>let c = $state(0); ($effect).pre(() => { console.log(c); });</script>\n<button onclick={() => c++}>{c}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.user_pre_effect(() => {"),
+        "the parenthesized-receiver `($effect).pre(fn)` statement lowers to `$.user_pre_effect`:\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true);") && js.contains("$.pop();"),
+        "the pre effect forces the component frame:\n{js}"
+    );
+    // NEGATIVE: the paren-inclusive callee span is overwritten — no raw rune and
+    // no receiver-paren residue survive.
+    assert!(
+        !js.contains("$effect") && !js.contains("($.user_pre_effect"),
+        "no raw `$effect` and no paren residue may remain:\n{js}"
+    );
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+}
+
+#[test]
+fn effect_value_positions_fail_closed_statement_gate() {
+    // Official svelte@5.56.3 rejects EVERY value-position `$effect(...)` /
+    // `$effect.pre(...)` with `effect_invalid_placement` ("`$effect()` can only
+    // be used as an expression statement") — the user-effect members are
+    // STATEMENT-ONLY. Each value position below must FAIL CLOSED under the
+    // precise family label: rewriting the callee there (`$.user_effect`) would
+    // be fail-open against an official compile error. Oracle-verified across
+    // the declarator-init, handler, root-body, and effect-body value positions.
+    let cases: &[(&str, &str, &str)] = &[
+        // An EXPRESSION-bodied handler arrow: the call is the arrow's concise
+        // body (an expression position), not a statement.
+        (
+            "handler_concise_arrow_body",
+            "<script>let x = $state(0);</script>\n<button onfocus={() => $effect(() => { console.log(x) })}>hi</button>\n<button onclick={() => x++}>{x}</button>\n",
+            "$effect",
+        ),
+        // A declarator INIT inside an accepted `$effect.root` callback.
+        (
+            "root_body_declarator_init",
+            "<script>let x = $state(0); const stop = $effect.root(() => { const s2 = $effect(() => { console.log(x) }); return () => {}; });</script>\n<button onclick={() => x++}>{x}</button>\n",
+            "$effect",
+        ),
+        // A `return` argument inside an accepted `$effect.root` callback.
+        (
+            "root_body_return_argument",
+            "<script>let x = $state(0); const stop = $effect.root(() => { return $effect(() => {}); });</script>\n<button onclick={() => x++}>{x}</button>\n",
+            "$effect",
+        ),
+        // A CALL argument inside a `$effect.root` callback body.
+        (
+            "root_body_call_argument",
+            "<script>let x = $state(0); $effect.root(() => { console.log($effect(() => {})); return () => {}; });</script>\n<button onclick={() => x++}>{x}</button>\n",
+            "$effect",
+        ),
+        // A declarator INIT inside an accepted `$effect` body (the `.pre` label).
+        (
+            "effect_body_declarator_init_pre",
+            "<script>let x = $state(0); $effect(() => { const q = $effect.pre(() => {}); });</script>\n<button onclick={() => x++}>{x}</button>\n",
+            "$effect.pre",
+        ),
+        // A TOP-LEVEL declarator init: the position gate owns the refusal (its
+        // precise family diagnostic wins over the generic `const declaration`
+        // item refusal that previously caught it incidentally).
+        (
+            "toplevel_const_declarator",
+            "<script>let x = $state(0); const e = $effect(() => { console.log(x) });</script>\n<button onclick={() => x++}>{x}</button>\n",
+            "$effect",
+        ),
+        (
+            "toplevel_const_declarator_pre",
+            "<script>let x = $state(0); const p = $effect.pre(() => { console.log(x) });</script>\n<button onclick={() => x++}>{x}</button>\n",
+            "$effect.pre",
+        ),
+        // A SEQUENCE expression statement: the call's parent is the sequence,
+        // not the statement (official rejects — the ESTree direct-parent rule).
+        (
+            "sequence_statement",
+            "<script>let x = $state(0); $effect(() => {}), x;</script>\n<button onclick={() => x++}>{x}</button>\n",
+            "$effect",
+        ),
+    ];
+    for (label, source, rune_label) in cases {
+        assert_fail_closed_labeled(
+            label,
+            source,
+            |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if rune == rune_label),
+        );
+    }
+}
+
+#[test]
+fn effect_root_bare_statement_lowers_without_frame() {
+    // An UNASSIGNED bare `$effect.root(...);` expression statement — official
+    // ACCEPTS it (oracle-verified): `$.effect_root(...)` as a bare statement, the
+    // callback body rewritten, NO component frame (sig `($$anchor)`, no
+    // `$.push` / `$.pop` — root alone never forces the frame). Verter's
+    // statement carrier admits it exactly like the assigned form.
+    let js = emit(
+        "<script>\n\tlet x = $state(0);\n\t$effect.root(() => {\n\t\tconsole.log(x);\n\t\treturn () => {};\n\t});\n</script>\n<button onclick={() => x++}>{x}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.effect_root(() => {"),
+        "the bare root statement lowers:\n{js}"
+    );
+    assert!(
+        js.contains("console.log($.get(x));"),
+        "the root body's signal read rewrites:\n{js}"
+    );
+    assert!(
+        js.contains("return () => {};"),
+        "the cleanup return flows through verbatim:\n{js}"
+    );
+    assert!(
+        js.contains("export default function App($$anchor) {"),
+        "root alone must NOT force the `$$props` param:\n{js}"
+    );
+    assert!(
+        !js.contains("$.push") && !js.contains("$.pop"),
+        "root alone must NOT force the frame:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+}
+
+#[test]
+fn effect_tracking_bare_statement_lowers_without_frame() {
+    // An UNASSIGNED bare `$effect.tracking();` expression statement — official
+    // ACCEPTS it (oracle-verified): `$.effect_tracking();` as a bare statement, NO
+    // component frame. Verter's statement carrier admits it exactly like the
+    // assigned declarator form.
+    let js = emit(
+        "<script>\n\tlet x = $state(0);\n\t$effect.tracking();\n</script>\n<button onclick={() => x++}>{x}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.effect_tracking();"),
+        "the bare tracking statement lowers:\n{js}"
+    );
+    assert!(
+        js.contains("export default function App($$anchor) {"),
+        "tracking alone must NOT force the `$$props` param:\n{js}"
+    );
+    assert!(
+        !js.contains("$.push") && !js.contains("$.pop"),
+        "tracking alone must NOT force the frame:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+}
+
+#[test]
+fn effect_tracking_carrier_rejected_declaration_shapes_fail_closed() {
+    // The declaration shapes the effect-rune-init carrier REJECTS — a `var`
+    // keyword, a multi-declarator declaration, a TS-annotated declarator — fail
+    // closed at their existing declaration gates AND mint no
+    // `EffectTrackingConst` binding fact (the minting shares the carrier's
+    // exact shape predicate; the no-fact half is pinned by the
+    // `state_scan::tests` minting unit test).
+    let cases: &[(&str, &str, &str)] = &[
+        (
+            "var_tracking_decl",
+            "<script>let c = $state(0); var t = $effect.tracking();</script>\n<button onclick={() => c++}>{c}</button>\n",
+            "var declaration",
+        ),
+        (
+            "multi_declarator_tracking",
+            "<script>let c = $state(0); let a = $effect.tracking(), b = 0;</script>\n<button onclick={() => c++}>{c}</button>\n",
+            "multi-declarator let",
+        ),
+    ];
+    for (label, source, construct_label) in cases {
+        assert_fail_closed_labeled(
+            label,
+            source,
+            |s| matches!(s, UnsupportedSvelteRuntimeSurface::InstanceScriptItem { construct, .. } if construct == construct_label),
+        );
+    }
+    // The TS-annotated form in a PLAIN `<script>` rejects even EARLIER — the
+    // official-reject parity gate (`js_parse_error`: official parses a plain
+    // script as JS, where a type annotation is a parse error) — still
+    // fail-closed, never a minted fact.
+    let err = emit_result(
+        "<script>let c = $state(0); let t: boolean = $effect.tracking();</script>\n<button onclick={() => c++}>{c}</button>\n",
+    )
+    .expect_err("a TS-annotated tracking declarator in a plain script must reject");
+    let ClientCompileError::OfficialReject(rejection) = err else {
+        panic!("expected the js_parse_error official reject, got {err:?}");
+    };
+    assert_eq!(
+        rejection.official_code, "js_parse_error",
+        "wrong official-reject code: {rejection:?}"
+    );
+}
+
+#[test]
+fn effect_tracking_const_attribute_read_joins_template_effect() {
+    // A tracking-CONST read in an ATTRIBUTE value (`disabled={t}`) — official
+    // wraps the property write in the template effect
+    // (`$.template_effect(() => input.disabled = t)`): a call-init const cannot
+    // be static-folded (`Identifier.js` `!is_known`), so its read is
+    // `has_state`. The read stays PLAIN (`t`, never `$.get`) — the same
+    // disposition the text path (`{t}`) already has. Oracle-verified against
+    // svelte@5.56.3.
+    let js = emit(
+        "<script>\n\tconst t = $effect.tracking();\n</script>\n<input disabled={t} />\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("const t = $.effect_tracking();"),
+        "the tracking const lowers:\n{js}"
+    );
+    assert!(
+        js.contains("$.template_effect(") && js.contains("input.disabled = t"),
+        "the const-read attribute write joins the template effect:\n{js}"
+    );
+    assert!(
+        !js.contains("$.get(t)"),
+        "the tracking const is NOT a signal read:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // The combined-effect variant (a reactive text sibling): the write joins the
+    // SAME region effect as the `$.set_text` — never a one-shot outside it.
+    let js = emit(
+        "<script>\n\tlet x = $state(0);\n\tconst t = $effect.tracking();\n</script>\n<input disabled={t} />\n<button onclick={() => x++}>{x}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("input.disabled = t"),
+        "the const-read property write is emitted:\n{js}"
+    );
+    let effect_start = js
+        .find("$.template_effect(")
+        .expect("a template effect exists");
+    let write_at = js.find("input.disabled = t").expect("the write exists");
+    assert!(
+        write_at > effect_start,
+        "the write lands INSIDE the template effect, not as a one-shot before it:\n{js}"
+    );
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+}
+
+#[test]
+fn effect_tracking_inline_attribute_memoizes_into_template_effect() {
+    // An INLINE `$effect.tracking()` call in an ATTRIBUTE value — official
+    // memoizes it into the deps-array template-effect form
+    // (`$.template_effect(($0) => input.disabled = $0, [() => $.effect_tracking()])`):
+    // `is_pure` explicitly special-cases `$effect.tracking` as IMPURE, so the
+    // call is `has_call` (and re-evaluates INSIDE the tracking context — a
+    // construction-time one-shot would return a DIFFERENT boolean, a SEMANTIC
+    // divergence, never acceptable). Oracle-verified against svelte@5.56.3.
+    let js = emit(
+        "<script>\n\tconst t = $effect.tracking();\n</script>\n<input disabled={$effect.tracking()} />\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.template_effect(") && js.contains("input.disabled = $0"),
+        "the inline tracking call memoizes into the deps-array effect slot:\n{js}"
+    );
+    // The dep thunk body may carry Verter's unconditional arrow-body paren wrap
+    // (`(EXPR)`) — a behavior-preserving redundant paren the structural
+    // comparator waives (cosmetic carrier formatting, not topology).
+    assert!(
+        js.contains("[() => $.effect_tracking()]") || js.contains("[() => ($.effect_tracking())]"),
+        "the memoized dep re-evaluates the tracking call inside the effect:\n{js}"
+    );
+    assert!(
+        !js.contains("input.disabled = $.effect_tracking()"),
+        "the inline tracking call is NEVER a construction-time one-shot (semantic divergence):\n{js}"
+    );
+    assert!(!js.contains("$effect."), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // The combined variant (a reactive text sibling): the memoized write and the
+    // `$.set_text` share ONE region effect with the deps array (oracle-verified).
+    let js = emit(
+        "<script>\n\tlet c = $state(0);\n</script>\n<input disabled={$effect.tracking()} />\n<button onclick={() => c++}>{c}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("input.disabled = $0")
+            && (js.contains("[() => $.effect_tracking()]")
+                || js.contains("[() => ($.effect_tracking())]")),
+        "the combined effect memoizes the tracking dep:\n{js}"
+    );
+    assert!(
+        !js.contains("input.disabled = $.effect_tracking()"),
+        "no construction-time one-shot in the combined form:\n{js}"
+    );
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+}
+
+#[test]
+fn effect_statement_positions_stay_accepted_paren_transparent() {
+    // The PARITY CONTROL for the statement-position gate: official ESTree has no
+    // parenthesized-expression nodes, so a paren-wrapped `($effect(fn));`
+    // statement inside an accepted `$effect.root` callback body IS the same
+    // expression statement (official's `effect_invalid_placement` is a
+    // direct-parent rule over the paren-free AST) — the gate must admit it, not
+    // refuse on the paren wrapper. (The bare block-bodied handler statement and
+    // the root-with-nested-effect controls are pinned by
+    // `effect_in_direct_handler_lowers_with_frame` and
+    // `effect_root_is_assignable_expression_with_nested_effects_and_cleanup`.)
+    let js = emit(
+        "<script>\n\tlet c = $state(0);\n\tconst stop = $effect.root(() => {\n\t\t($effect(() => console.log(c)));\n\t\treturn () => {};\n\t});\n</script>\n<button onclick={() => c++}>{c}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.user_effect(() => console.log($.get(c)))"),
+        "the paren-wrapped statement-position `$effect` still lowers:\n{js}"
+    );
+    assert!(
+        !js.contains("$effect"),
+        "no raw `$effect` rune survives:\n{js}"
+    );
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+}
+
+#[test]
+fn shadowed_effect_binding_is_not_the_rune() {
+    // A function-pair-bind function PARAM named `$effect` shadows the rune in an
+    // ACCEPTED context (the `FunctionDecl` carrier lowers the body through the
+    // shared rewriter). Official ACCEPTS the component (oracle-verified): the
+    // local call is emitted RAW (`$effect(() => {})`), NEVER rewritten to
+    // `$.user_effect`, and the shadowed call does NOT force the component frame
+    // (sig `($$anchor)`, no `$.push`). This is the discriminating shadow
+    // observable: if shadow handling broke (the rewriter or the `needs_context`
+    // scan treated the local as the rune), the emission would flip to
+    // `$.user_effect` and mint the frame.
+    let js = emit(
+        "<script>\n\tlet v = $state('');\n\tfunction get($effect) { $effect(() => {}); return v; }\n\tfunction set(x) { v = x; }\n</script>\n<input bind:value={get, set} />\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$effect(() => {});"),
+        "the shadowed local call is emitted RAW:\n{js}"
+    );
+    assert!(
+        !js.contains("$.user_effect"),
+        "the shadowed call is NOT rewritten to `$.user_effect`:\n{js}"
+    );
+    assert!(
+        js.contains("export default function App($$anchor) {") && !js.contains("$.push"),
+        "the shadowed call does NOT force the component frame:\n{js}"
+    );
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // The instance-script variant: a function PARAM named `$effect` inside a
+    // top-level `function` declaration — its calls are ordinary local calls, so
+    // the rune gate does NOT fire; the component fails closed at the
+    // instance-script-item gate (construct `function`), NOT on a rune basis
+    // (the same precedence the `$inspect` shadowing test pins).
+    assert_fail_closed(
+        "<script>\n\tlet c = $state(0);\n\tfunction f($effect) { $effect.pre(1); }\n</script>\n<button onclick={() => c++}>{c}</button>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::InstanceScriptItem { construct, .. } if *construct == "function"),
+    );
+}
+
+#[test]
+fn effect_toplevel_statement_lowers_with_frame() {
+    // A top-level `$effect(fn);` statement is a supported instance-script item:
+    // it lowers to `$.user_effect(fn)` with the body rewritten and forces the
+    // runes frame, matching svelte@5.56.3 (the `matrix/effect_arrow` topology).
+    let js = emit(
+        "<script>\n\tlet count = $state(0);\n\t$effect(() => { console.log(count); });\n</script>\n<button onclick={() => count++}>{count}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.user_effect(() => {"),
+        "the top-level `$effect` statement lowers:\n{js}"
+    );
+    assert!(
+        js.contains("console.log($.get(count));"),
+        "the effect body's signal read rewrites:\n{js}"
+    );
+    assert!(
+        js.contains("export default function App($$anchor, $$props) {")
+            && js.contains("$.push($$props, true);")
+            && js.contains("$.pop();"),
+        "the `$effect` forces the runes frame:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+}
+
+#[test]
+fn effect_root_is_assignable_expression_with_nested_effects_and_cleanup() {
+    // `$effect.root(fn)` is an EXPRESSION: `const stop = $effect.root(...)`
+    // preserves the `stop` binding; a nested `$effect` / `$effect.pre` inside the
+    // root callback lowers through the IDENTICAL callee rewrite (no separate
+    // root-recursion gate); the `return () => {};` cleanup flows through
+    // verbatim. Oracle-verified against svelte@5.56.3.
+    let js = emit(
+        "<script>\n\tlet c = $state(0);\n\tconst stop = $effect.root(() => {\n\t\t$effect(() => console.log(c));\n\t\treturn () => {};\n\t});\n</script>\n<button onclick={() => c++}>{c}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("const stop = $.effect_root(() => {"),
+        "the root call is an assignable expression with the `stop` binding preserved:\n{js}"
+    );
+    assert!(
+        js.contains("$.user_effect(() => console.log($.get(c)));"),
+        "the nested `$effect` lowers inside the root body:\n{js}"
+    );
+    assert!(
+        js.contains("return () => {};"),
+        "the cleanup return flows through verbatim:\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true);") && js.contains("$.pop();"),
+        "the NESTED `$effect` forces the frame:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // The nested-PRE variant: `$.user_pre_effect` inside the root body (and NOT
+    // the plain `$.user_effect` — the helper-rename discriminator).
+    let js = emit(
+        "<script>\n\tlet c = $state(0);\n\tconst stop = $effect.root(() => {\n\t\t$effect.pre(() => console.log(c));\n\t\treturn () => {};\n\t});\n</script>\n<button onclick={() => c++}>{c}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.user_pre_effect(() => console.log($.get(c)));"),
+        "the nested `$effect.pre` lowers inside the root body:\n{js}"
+    );
+    assert!(
+        !js.contains("$.user_effect("),
+        "the nested `.pre` must NOT lower to the plain `$.user_effect`:\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true);"),
+        "the nested `$effect.pre` forces the frame:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+}
+
+#[test]
+fn effect_tracking_const_reads_plain_in_template_effect() {
+    // The R4d topology: `const t = $effect.tracking();` + a template `{t}` read.
+    // The const lowers to `$.effect_tracking()`; the template reads the PLAIN
+    // const inside the region's `$.template_effect` (official cannot static-fold
+    // a call-init const) — NOT `$.get(t)`, NOT a second `$.effect_tracking()` in
+    // the template. NO frame: sig stays `($$anchor)`.
+    let js = emit(
+        "<script>\n\tconst t = $effect.tracking();\n</script>\n<p>{t}</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("const t = $.effect_tracking();"),
+        "the tracking const lowers:\n{js}"
+    );
+    assert!(
+        js.contains("$.template_effect(() => $.set_text(text, t));"),
+        "the template reads the plain const inside the template effect:\n{js}"
+    );
+    assert!(
+        !js.contains("$.get(t)"),
+        "the tracking const is NOT a signal read:\n{js}"
+    );
+    assert!(
+        js.contains("export default function App($$anchor) {"),
+        "tracking alone must NOT force the `$$props` param:\n{js}"
+    );
+    assert!(!js.contains("$.push"), "no frame open:\n{js}");
+    assert!(!js.contains("$.pop"), "no frame close:\n{js}");
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // The `let` declarator flavour is equally official-legal and preserves the
+    // keyword (`let t = $.effect_tracking();`).
+    let js = emit(
+        "<script>\n\tlet t = $effect.tracking();\n</script>\n<p>{t}</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("let t = $.effect_tracking();"),
+        "the let-declared tracking const preserves the keyword:\n{js}"
+    );
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+}
+
+#[test]
+fn effect_tracking_inside_effect_body_lowers() {
+    // `$effect.tracking()` inside an effect body rewrites through the same callee
+    // rewrite (oracle: `console.log($.effect_tracking(), $.get(c))`); the frame
+    // comes from the surrounding `$effect`.
+    let js = emit(
+        "<script>let c = $state(0); $effect(() => { console.log($effect.tracking(), c); });</script>\n<button onclick={() => c++}>{c}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("console.log($.effect_tracking(), $.get(c));"),
+        "the tracking call rewrites inside the effect body:\n{js}"
+    );
+    assert!(
+        js.contains("$.user_effect(() => {") && js.contains("$.push($$props, true);"),
+        "the surrounding effect lowers with the frame:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+}
+
+#[test]
+fn effect_tracking_inline_template_interpolation_fails_closed_at_carrier() {
+    // Inline `{$effect.tracking()}` rides the SAME interpolation expression path
+    // as any other call-bearing interpolation — which is the pre-existing
+    // ComplexInterpolation carrier boundary (the memoized-dep emission the
+    // official `$.template_effect(($0) => …, [() => $.effect_tracking()])` form
+    // needs is the interpolation-completion surface). It must FAIL CLOSED there —
+    // never a raw `$effect.tracking()` emission, never a mis-scoped plain read.
+    assert_fail_closed(
+        "<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n<p>{$effect.tracking()}</p>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::ComplexInterpolation { .. }),
+    );
+}
+
+#[test]
+fn effect_family_framing_matrix() {
+    // The five-row framing matrix (oracle-verified): only `$effect` /
+    // `$effect.pre` — at any depth, including nested inside a root callback —
+    // force the component frame; `$effect.root` / `$effect.tracking` alone never
+    // do. Negative assertions per row: a frameless row has NO `$.push`, NO
+    // `$.pop`, NO `$$props` param.
+    let framed: &[(&str, &str)] = &[
+        (
+            "plain_effect_only",
+            "<script>let c = $state(0); $effect(() => { console.log(c); });</script>\n<button onclick={() => c++}>{c}</button>\n",
+        ),
+        (
+            "pre_only",
+            "<script>let c = $state(0); $effect.pre(() => { console.log(c); });</script>\n<button onclick={() => c++}>{c}</button>\n",
+        ),
+        (
+            "root_with_nested_effect",
+            "<script>let c = $state(0); const stop = $effect.root(() => { $effect(() => console.log(c)); return () => {}; });</script>\n<button onclick={() => c++}>{c}</button>\n",
+        ),
+        (
+            "root_with_nested_pre",
+            "<script>let c = $state(0); const stop = $effect.root(() => { $effect.pre(() => console.log(c)); return () => {}; });</script>\n<button onclick={() => c++}>{c}</button>\n",
+        ),
+    ];
+    for (label, source) in framed {
+        let js = emit(source, "App.svelte");
+        assert!(
+            js.contains("export default function App($$anchor, $$props) {"),
+            "[{label}] the frame threads `$$props`:\n{js}"
+        );
+        assert!(
+            js.contains("$.push($$props, true);") && js.contains("$.pop();"),
+            "[{label}] the frame opens and closes:\n{js}"
+        );
+    }
+    let frameless: &[(&str, &str)] = &[
+        (
+            "root_only",
+            "<script>let c = $state(0); const stop = $effect.root(() => { console.log(c); return () => {}; });</script>\n<button onclick={() => c++}>{c}</button>\n",
+        ),
+        (
+            "tracking_only",
+            "<script>const t = $effect.tracking();</script>\n<p>{t}</p>\n",
+        ),
+    ];
+    for (label, source) in frameless {
+        let js = emit(source, "App.svelte");
+        assert!(
+            js.contains("export default function App($$anchor) {"),
+            "[{label}] no `$$props` param without a user effect:\n{js}"
+        );
+        assert!(
+            !js.contains("$.push") && !js.contains("$.pop"),
+            "[{label}] no frame without a user effect:\n{js}"
+        );
+        assert!(
+            !js.contains("$$props"),
+            "[{label}] no `$$props` threading at all:\n{js}"
+        );
+    }
+}
+
+#[test]
+fn effect_rune_init_var_declaration_still_fails_closed() {
+    // A `var`-declared effect-rune init stays OUT of the carrier (official `var`
+    // semantics — `$.safe_get` reads — are a distinct surface): the existing
+    // var-declaration refusal owns it.
+    assert_fail_closed(
+        "<script>let c = $state(0); var stop = $effect.root(() => { return () => {}; });</script>\n<button onclick={() => c++}>{c}</button>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::InstanceScriptItem { construct, .. } if *construct == "var declaration"),
+    );
+}
+
+#[test]
+fn effect_in_delegated_handler_lowers_with_frame() {
+    // The delegated-handler topology (oracle-verified): a well-formed user-effect
+    // call statement inside a DELEGATED onclick block arrow is admitted alongside
+    // the `$state` writes — `$.delegated('click', button, () => {
+    // $.user_effect(...); $.update(c); });` — and the `$effect` forces the frame.
+    let js = emit(
+        "<script>\n\tlet c = $state(0);\n</script>\n<button onclick={() => { $effect(() => console.log(c)); c++; }}>{c}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.delegated('click', button, () => {"),
+        "the handler stays on the delegated path:\n{js}"
+    );
+    assert!(
+        js.contains("$.user_effect(() => console.log($.get(c)));"),
+        "the handler-nested `$effect` lowers:\n{js}"
+    );
+    assert!(
+        js.contains("$.update(c);"),
+        "the state write beside the effect still lowers:\n{js}"
+    );
+    assert!(
+        js.contains("export default function App($$anchor, $$props) {")
+            && js.contains("$.push($$props, true);")
+            && js.contains("$.pop();"),
+        "the handler-nested `$effect` forces the frame:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // NEGATIVE (the boundary holds): a plain non-effect call statement in a
+    // delegated block arrow still fails closed — the admission is the well-formed
+    // user-effect family call, not "any call".
+    assert_fail_closed(
+        "<script>let c = $state(0);</script>\n<button onclick={() => { f(c); }}>{c}</button>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::NonDelegatedEvent { event_type, .. } if event_type == "click"),
+    );
+}
+
+#[test]
+fn effect_in_iife_and_effect_in_effect_lower_recursively() {
+    // An IIFE-hosted call position: a `$effect` nested inside an IIFE inside a lowered effect body
+    // rewrites through the same recursive callee rewrite (oracle-verified:
+    // `$.user_effect(() => { (() => { $.user_effect(...); })(); });`).
+    let js = emit(
+        "<script>let c = $state(0); $effect(() => { (() => { $effect(() => console.log(c)); })(); });</script>\n<button onclick={() => c++}>{c}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("(() => {") && js.contains("$.user_effect(() => console.log($.get(c)));"),
+        "the IIFE-nested `$effect` lowers:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // An effect-in-effect call position: an effect nested in an effect body (oracle-verified:
+    // `$.user_effect(() => { $.user_effect(() => console.log($.get(c))); });`).
+    let js = emit(
+        "<script>let c = $state(0); $effect(() => { $effect(() => console.log(c)); });</script>\n<button onclick={() => c++}>{c}</button>\n",
+        "App.svelte",
+    );
+    let effect_count = js.matches("$.user_effect(").count();
+    assert_eq!(
+        effect_count, 2,
+        "both the outer and the nested effect lower (found {effect_count}):\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+}
+
+#[test]
+fn effect_family_async_await_re_homes_to_experimental_async() {
+    // The awaiting effect callbacks fail closed on the EXPERIMENTAL-ASYNC surface
+    // (5j) — no longer the advanced-rune position refusal — in every carrier: the
+    // plain statement, the `.pre` statement, and the nested-in-root form.
+    let cases: &[(&str, &str)] = &[
+        (
+            "plain_async_await",
+            "<script>let c = $state(0); $effect(async () => { await c; });</script>\n<button onclick={() => c++}>{c}</button>\n",
+        ),
+        (
+            "pre_async_await",
+            "<script>let c = $state(0); $effect.pre(async () => { await c; });</script>\n<button onclick={() => c++}>{c}</button>\n",
+        ),
+        (
+            "root_nested_async_await",
+            "<script>let c = $state(0); const stop = $effect.root(() => { $effect(async () => { await c; }); });</script>\n<button onclick={() => c++}>{c}</button>\n",
+        ),
+    ];
+    for (label, source) in cases {
+        assert_fail_closed_labeled(label, source, |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::ExperimentalAsync {
+                    surface: "await",
+                    ..
+                }
+            )
+        });
+    }
+    // ORACLE-PARITY POSITIVE: an async callback with NO `await` accepts —
+    // official emits `$.user_effect(async () => { $.get(c); })`; the await gate
+    // fires on `await`, not on the `async` keyword.
+    let js = emit(
+        "<script>let c = $state(0); $effect(async () => { c; });</script>\n<button onclick={() => c++}>{c}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.user_effect(async () => {"),
+        "the async-no-await effect lowers (oracle parity):\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+}
+
+#[test]
+fn effect_family_paren_statement_forms_lower_normalized() {
+    // Official svelte@5.56.3 parses with an ESTree AST that has NO
+    // parenthesized-expression nodes, so author parens around a WHOLE
+    // effect-family call statement are transparent (oracle-verified: all four
+    // members accept) and the emitted helper call carries NO wrapping parens.
+    //
+    // Plain `$effect` — frame forced.
+    let js = emit(
+        "<script>let x = $state(0); ($effect(() => { console.log(x) }));</script>\n<button onclick={() => x++}>{x}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.user_effect(() => {"),
+        "the paren-wrapped `$effect` statement lowers:\n{js}"
+    );
+    assert!(
+        !js.contains("($.user_effect"),
+        "the source parens must NOT wrap the emitted helper call:\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true);") && js.contains("$.pop();"),
+        "the paren-wrapped `$effect` still forces the frame:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // `$effect.pre` — frame forced.
+    let js = emit(
+        "<script>let x = $state(0); ($effect.pre(() => { console.log(x) }));</script>\n<button onclick={() => x++}>{x}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.user_pre_effect(() => {"),
+        "the paren-wrapped `$effect.pre` statement lowers:\n{js}"
+    );
+    assert!(
+        !js.contains("($.user_pre_effect"),
+        "the source parens must NOT wrap the emitted helper call:\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true);"),
+        "the paren-wrapped `$effect.pre` still forces the frame:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // Bare `$effect.root(...)` statement — NO frame.
+    let js = emit(
+        "<script>($effect.root(() => { return () => {}; }));</script>\n<p>hi</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.effect_root(() => {"),
+        "the paren-wrapped bare `$effect.root` statement lowers:\n{js}"
+    );
+    assert!(
+        !js.contains("($.effect_root"),
+        "the source parens must NOT wrap the emitted helper call:\n{js}"
+    );
+    assert!(
+        js.contains("export default function App($$anchor) {") && !js.contains("$.push"),
+        "root alone must NOT force the frame:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // Bare `$effect.tracking()` statement — NO frame.
+    let js = emit(
+        "<script>($effect.tracking());</script>\n<p>hi</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.effect_tracking();"),
+        "the paren-wrapped bare `$effect.tracking` statement lowers:\n{js}"
+    );
+    assert!(
+        !js.contains("($.effect_tracking"),
+        "the source parens must NOT wrap the emitted helper call:\n{js}"
+    );
+    assert!(
+        !js.contains("$.push"),
+        "tracking alone must NOT force the frame:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+}
+
+#[test]
+fn effect_family_paren_declarator_inits_lower_normalized() {
+    // Author parens around a WHOLE root/tracking declarator INIT are transparent
+    // (oracle-verified accept) and the emitted init carries no wrapping parens.
+    let js = emit(
+        "<script>const stop = ($effect.root(() => { return () => {}; }));</script>\n<p>hi</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("const stop = $.effect_root(() => {"),
+        "the paren-wrapped root init lowers assigned:\n{js}"
+    );
+    assert!(
+        !js.contains("($.effect_root"),
+        "the source parens must NOT wrap the emitted helper call:\n{js}"
+    );
+    assert!(
+        js.contains("return () => {};"),
+        "the cleanup flows through verbatim:\n{js}"
+    );
+    assert!(
+        js.contains("export default function App($$anchor) {") && !js.contains("$.push"),
+        "root alone must NOT force the frame:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    let js = emit(
+        "<script>const t = ($effect.tracking());</script>\n<p>{t}</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("const t = $.effect_tracking();"),
+        "the paren-wrapped tracking init lowers assigned:\n{js}"
+    );
+    assert!(
+        !js.contains("($.effect_tracking"),
+        "the source parens must NOT wrap the emitted helper call:\n{js}"
+    );
+    assert!(
+        js.contains("$.template_effect(() => $.set_text(text, t));"),
+        "the tracking-const read joins the template effect (oracle topology):\n{js}"
+    );
+    assert!(
+        !js.contains("$.push"),
+        "tracking alone must NOT force the frame:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+}
+
+#[test]
+fn effect_family_paren_member_receivers_lower_normalized() {
+    // Author parens around the member RECEIVER (`($effect).pre(...)`) are
+    // transparent (oracle-verified: official accepts and normalizes) — the whole
+    // parenthesized callee is replaced by the helper, so no paren survives.
+    let js = emit(
+        "<script>let x = $state(0); ($effect).pre(() => { console.log(x) });</script>\n<button onclick={() => x++}>{x}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.user_pre_effect(() => {"),
+        "the paren-receiver `.pre` statement lowers:\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true);") && js.contains("$.pop();"),
+        "the paren-receiver `.pre` still forces the frame:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    let js = emit(
+        "<script>const stop = ($effect).root(() => { return () => {}; });</script>\n<p>hi</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("const stop = $.effect_root(() => {"),
+        "the paren-receiver `.root` init lowers assigned:\n{js}"
+    );
+    assert!(
+        js.contains("export default function App($$anchor) {") && !js.contains("$.push"),
+        "root alone must NOT force the frame:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    let js = emit(
+        "<script>const t = ($effect).tracking();</script>\n<p>{t}</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("const t = $.effect_tracking();"),
+        "the paren-receiver `.tracking` init lowers assigned:\n{js}"
+    );
+    assert!(
+        js.contains("$.template_effect(() => $.set_text(text, t));"),
+        "the tracking-const read joins the template effect:\n{js}"
+    );
+    assert!(
+        !js.contains("$.push"),
+        "tracking alone must NOT force the frame:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+}
+
+#[test]
+fn effect_family_paren_callee_forms_lower_normalized() {
+    // Author parens around the whole CALLEE (`($effect)(...)` /
+    // `($effect.root)(...)`) are transparent too (oracle-verified: official
+    // accepts all four members and normalizes the emission). The rewrite replaces
+    // the OUTERMOST callee span, so the parens never survive.
+    let js = emit(
+        "<script>let x = $state(0); ($effect)(() => { console.log(x) });</script>\n<button onclick={() => x++}>{x}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.user_effect(() => {") && !js.contains("($.user_effect"),
+        "the paren-callee `$effect` statement lowers normalized:\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true);"),
+        "the paren-callee `$effect` still forces the frame:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    let js = emit(
+        "<script>let x = $state(0); ($effect.pre)(() => { console.log(x) });</script>\n<button onclick={() => x++}>{x}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.user_pre_effect(() => {") && !js.contains("($.user_pre_effect"),
+        "the paren-callee `.pre` statement lowers normalized:\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true);"),
+        "the paren-callee `.pre` still forces the frame:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    let js = emit(
+        "<script>const stop = ($effect.root)(() => { return () => {}; });</script>\n<p>hi</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("const stop = $.effect_root(() => {") && !js.contains("($.effect_root"),
+        "the paren-callee `.root` init lowers normalized:\n{js}"
+    );
+    assert!(
+        !js.contains("$.push"),
+        "root alone must NOT force the frame:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    let js = emit(
+        "<script>const t = ($effect.tracking)();</script>\n<p>{t}</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("const t = $.effect_tracking();") && !js.contains("($.effect_tracking"),
+        "the paren-callee `.tracking` init lowers normalized:\n{js}"
+    );
+    assert!(
+        !js.contains("$.push"),
+        "tracking alone must NOT force the frame:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+}
+
+#[test]
+fn effect_paren_statement_in_delegated_handler_lowers() {
+    // A paren-wrapped `($effect(fn));` statement inside a DELEGATED handler block
+    // arrow is the same statement to official (paren-transparent direct-parent
+    // rule) — the handler statement gate must admit it, keep the delegated
+    // topology, and force the frame (oracle-verified).
+    let js = emit(
+        "<script>\n\tlet c2 = $state(0);\n</script>\n<button onclick={() => { ($effect(() => { console.log(c2) })); c2++; }}>{c2}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.delegated('click', button, () => {"),
+        "the handler stays on the delegated path:\n{js}"
+    );
+    assert!(
+        js.contains("$.user_effect(() => {"),
+        "the paren-wrapped handler-nested `$effect` lowers:\n{js}"
+    );
+    assert!(
+        js.contains("$.update(c2);"),
+        "the state write beside the effect still lowers:\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true);") && js.contains("$.pop();"),
+        "the handler-nested `$effect` forces the frame:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+}
+
+#[test]
+fn paren_wrapped_non_family_call_statements_stay_plain() {
+    // NEGATIVE CONTROL for the paren-transparent classifier: author parens around
+    // a NON-family call statement are not classified as an effect-family form —
+    // the call lowers as an ordinary rewritten statement (no helper rewrite), the
+    // author parens stay (a behavior-preserving cosmetic the comparator waives),
+    // and the component still compiles.
+    let js = emit(
+        "<script>let x = $state(0); $effect(() => { (console.log(x)); });</script>\n<button onclick={() => x++}>{x}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("(console.log($.get(x)));"),
+        "the paren-wrapped plain call stays a plain rewritten call:\n{js}"
+    );
+    assert_eq!(
+        js.matches("$.user_effect(").count(),
+        1,
+        "exactly the ONE authored effect lowers (the plain call is never classified):\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+}
+
+#[test]
+fn effect_family_optional_call_root_tracking_lower_normalized() {
+    // Official svelte@5.56.3 ACCEPTS an optional-CALL `$effect.root?.(...)` /
+    // `$effect.tracking?.()` in statement AND init positions and NORMALIZES the
+    // `?.` away (`$.effect_root(...)` / `$.effect_tracking()` — plain, no `?.`)
+    // — oracle-verified. A `$.effect_root?.(...)` emission would be a structural
+    // divergence, so the no-`?.` assertions are load-bearing.
+    //
+    // Statement forms.
+    let js = emit(
+        "<script>$effect.root?.(() => { return () => {}; });</script>\n<p>hi</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.effect_root(() => {"),
+        "the optional-call bare root statement lowers:\n{js}"
+    );
+    assert!(
+        !js.contains("?."),
+        "the optional-call head is normalized away (no `?.` in the emission):\n{js}"
+    );
+    assert!(
+        !js.contains("$.push"),
+        "root alone must NOT force the frame:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    let js = emit(
+        "<script>$effect.tracking?.();</script>\n<p>hi</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.effect_tracking();"),
+        "the optional-call bare tracking statement lowers:\n{js}"
+    );
+    assert!(
+        !js.contains("?."),
+        "the optional-call head is normalized away:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // Declarator-init forms.
+    let js = emit(
+        "<script>const s = $effect.root?.(() => { return () => {}; });</script>\n<p>hi</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("const s = $.effect_root(() => {"),
+        "the optional-call root init lowers assigned:\n{js}"
+    );
+    assert!(
+        !js.contains("?."),
+        "the optional-call head is normalized away:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    let js = emit(
+        "<script>const t = $effect.tracking?.();</script>\n<p>{t}</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("const t = $.effect_tracking();"),
+        "the optional-call tracking init lowers assigned:\n{js}"
+    );
+    assert!(
+        js.contains("$.template_effect(() => $.set_text(text, t));"),
+        "the tracking-const read joins the template effect:\n{js}"
+    );
+    assert!(
+        !js.contains("?."),
+        "the optional-call head is normalized away:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+}
+
+#[test]
+fn effect_family_optional_member_receivers_lower_normalized() {
+    // Official svelte@5.56.3 ACCEPTS the optional MEMBER receiver forms
+    // (`$effect?.root(...)` / `$effect?.tracking()`) for the expression-valued
+    // members and normalizes the `?.` away (oracle-verified) — the `?.` sits
+    // inside the replaced callee span. (The user-effect members REJECT every
+    // optional form — pinned in the fail matrix.)
+    let js = emit(
+        "<script>$effect?.root(() => { return () => {}; });</script>\n<p>hi</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.effect_root(() => {"),
+        "the optional-receiver bare root statement lowers:\n{js}"
+    );
+    assert!(
+        !js.contains("?."),
+        "the optional receiver is normalized away:\n{js}"
+    );
+    assert!(
+        !js.contains("$.push"),
+        "root alone must NOT force the frame:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    let js = emit(
+        "<script>const s = $effect?.root(() => { return () => {}; });</script>\n<p>hi</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("const s = $.effect_root(() => {"),
+        "the optional-receiver root init lowers assigned:\n{js}"
+    );
+    assert!(
+        !js.contains("?."),
+        "the optional receiver is normalized away:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    let js = emit(
+        "<script>const t = $effect?.tracking();</script>\n<p>{t}</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("const t = $.effect_tracking();"),
+        "the optional-receiver tracking init lowers assigned:\n{js}"
+    );
+    assert!(
+        js.contains("$.template_effect(() => $.set_text(text, t));"),
+        "the tracking-const read joins the template effect:\n{js}"
+    );
+    assert!(
+        !js.contains("?."),
+        "the optional receiver is normalized away:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // Author parens around the callee INSIDE an optional call
+    // (`($effect.tracking)?.()`) compose with the head normalization
+    // (oracle-verified accept).
+    let js = emit(
+        "<script>const t = ($effect.tracking)?.();</script>\n<p>{t}</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("const t = $.effect_tracking();"),
+        "the paren-callee optional-call tracking init lowers assigned:\n{js}"
+    );
+    assert!(
+        !js.contains("?.") && !js.contains("($.effect_tracking"),
+        "both the parens and the optional head normalize away:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+}
+
+#[test]
+fn effect_family_head_rewrites_preserve_comment_trivia() {
+    // The invocation-head rewrites are TRIVIA-PRESERVING with ONE canonical
+    // slot: comment trivia inside an overwritten head range re-emits INSIDE
+    // the emitted helper call, immediately after the opening paren — NEVER
+    // call-leading. Call-leading relocation is unsafe, not cosmetic: a leading
+    // `/*#__PURE__*/` would ANNOTATE the emitted helper call (a minifier may
+    // then drop the effect registration as pure), and a leading `//` line
+    // comment after `return` arms ASI against the emitted call. Official
+    // svelte@5.56.3 reattaches these comments to unrelated neighboring nodes
+    // (esrap trivia reattachment) — matching that placement would be
+    // cosmetic-carrier mimicry; INERT call-internal survival is the contract.
+    //
+    // Plain arg-leading: a comment already after `(` stays in place, exactly
+    // once (the head overwrite ends at the opening paren and re-emits only
+    // head-interior trivia — never a duplicate).
+    let js = emit(
+        "<script>let x = $state(0); $effect(/*#__PURE__*/ () => { console.log(x) });</script>\n<button onclick={() => x++}>{x}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.user_effect(/*#__PURE__*/ () => {"),
+        "a plain arg-leading annotation survives in place:\n{js}"
+    );
+    assert_eq!(
+        js.matches("/*#__PURE__*/").count(),
+        1,
+        "a plain arg-leading annotation is preserved exactly once:\n{js}"
+    );
+    assert!(
+        !js.contains("/*#__PURE__*/ $.user_effect"),
+        "the annotation is never call-leading:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // Callee-to-paren gap: `$effect /*KEEP*/ (fn)` — the head rewrite runs
+    // through the opening call paren, so the gap comment relocates into the
+    // helper call (neither call-leading nor stranded between helper and paren).
+    let js = emit(
+        "<script>let x = $state(0); $effect /*KEEP*/ (() => { console.log(x) });</script>\n<button onclick={() => x++}>{x}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.user_effect(/*KEEP*/ () => {"),
+        "a callee-to-paren gap comment relocates into the helper call:\n{js}"
+    );
+    assert!(
+        !js.contains("/*KEEP*/ $.user_effect") && !js.contains("$.user_effect /*KEEP*/"),
+        "the gap comment is neither call-leading nor left in the gap:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // Member-gap annotation: `$effect /*#__PURE__*/ .pre(fn)` — the annotation
+    // sits inside the replaced head range and must land INSIDE the helper
+    // parens (call-leading would pure-mark the pre-effect registration).
+    let js = emit(
+        "<script>let x = $state(0); $effect /*#__PURE__*/ .pre(() => { console.log(x) });</script>\n<button onclick={() => x++}>{x}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.user_pre_effect(/*#__PURE__*/ () => {"),
+        "a member-gap annotation relocates into the helper call:\n{js}"
+    );
+    assert!(
+        !js.contains("/*#__PURE__*/ $.user_pre_effect"),
+        "the annotation is never call-leading:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // Peeled callee parens: `(/*#__PURE__*/ $effect)(fn)` — the paren-inclusive
+    // callee span is replaced; its interior annotation lands inside the call.
+    let js = emit(
+        "<script>let x = $state(0); (/*#__PURE__*/ $effect)(() => { console.log(x) });</script>\n<button onclick={() => x++}>{x}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.user_effect(/*#__PURE__*/ () => {"),
+        "a callee-paren annotation relocates into the helper call:\n{js}"
+    );
+    assert!(
+        !js.contains("/*#__PURE__*/ $.user_effect") && !js.contains("($.user_effect"),
+        "the annotation is never call-leading and the callee parens normalize away:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // Optional-head arg-leading annotation:
+    // `$effect.root?.(/*#__PURE__*/ fn)` — the head overwrite ends at the
+    // opening paren, so the annotation survives in place ahead of the
+    // argument, exactly once (the head relocation never duplicates it).
+    let js = emit(
+        "<script>const s = $effect.root?.(/*#__PURE__*/ () => { return () => {}; });</script>\n<p>hi</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("const s = $.effect_root(/*#__PURE__*/ () => {"),
+        "an arg-leading annotation survives in place through the optional-head normalization:\n{js}"
+    );
+    assert_eq!(
+        js.matches("/*#__PURE__*/").count(),
+        1,
+        "an arg-leading annotation is preserved exactly once (never duplicated):\n{js}"
+    );
+    assert!(
+        !js.contains("?."),
+        "the optional-call head still normalizes away:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // Zero-arg optional tracking: the head overwrite ends AT the opening paren
+    // — never the whole call — so an annotation INSIDE the empty parens
+    // survives in place: `$effect.tracking?.(/*#__PURE__*/)` →
+    // `$.effect_tracking(/*#__PURE__*/)`.
+    let js = emit(
+        "<script>const t = $effect.tracking?.(/*#__PURE__*/);</script>\n<p>{t}</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("const t = $.effect_tracking(/*#__PURE__*/);"),
+        "a zero-arg interior annotation survives inside the empty helper parens:\n{js}"
+    );
+    assert!(
+        !js.contains("?."),
+        "the optional-call head still normalizes away:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // Return-position ASI safety: `return $effect //KEEP\n .root(fn)` must not
+    // emit `return //…` (ASI would return undefined and orphan the call) — the
+    // line comment relocates INSIDE the helper call, so the `return` keeps the
+    // helper call as its argument on the same line.
+    let js = emit(
+        "<script>const stop = $effect.root(() => { return $effect //KEEP\n .root(() => { return () => {}; }); });</script>\n<p>hi</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        !js.contains("return //"),
+        "a head line comment must never become a return-leading comment (ASI):\n{js}"
+    );
+    assert!(
+        js.contains("return $.effect_root(//KEEP\n"),
+        "the return keeps the helper call as its argument, comment inside the call:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // Paren-in-comment mask: the head-open-paren scan is comment-MASKED — a
+    // `(` INSIDE a gap comment is never the call-paren token. `$effect /*(*/
+    // (fn)` must rewrite through the REAL opening paren after the comment (an
+    // unmasked scan would end the head inside the comment and mangle the
+    // emission).
+    let js = emit(
+        "<script>let x = $state(0); $effect /*(*/ (() => { console.log(x) });</script>\n<button onclick={() => x++}>{x}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.user_effect(/*(*/ () => {"),
+        "a `(`-bearing gap comment is masked and relocates call-internal:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // The optional-call gap composes with the mask:
+    // `$effect.root ?./*(*/ (fn)` — the `(` inside the comment is not the
+    // paren token; the optional head normalizes plain with the comment
+    // call-internal.
+    let js = emit(
+        "<script>const s = $effect.root ?./*(*/ (() => { return () => {}; });</script>\n<p>hi</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("const s = $.effect_root(/*(*/ () => {"),
+        "the optional-gap `(`-bearing comment is masked and relocates call-internal:\n{js}"
+    );
+    assert!(
+        !js.contains("?."),
+        "the optional-call head still normalizes away:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // No-comment controls: the comment-free heads emit without trivia
+    // artifacts (no stray interior drift on either rewrite arm).
+    let js = emit(
+        "<script>let x = $state(0); $effect.pre(() => { console.log(x) });</script>\n<button onclick={() => x++}>{x}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.user_pre_effect(() => {") && !js.contains("/*KEEP*/"),
+        "a comment-free member head emits without trivia artifacts:\n{js}"
+    );
+    let js = emit(
+        "<script>const s = $effect.root?.(() => { return () => {}; });</script>\n<p>hi</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("const s = $.effect_root(() => {") && !js.contains("?."),
+        "a comment-free optional head emits without trivia artifacts:\n{js}"
+    );
+}
+
+#[test]
+fn effect_family_wrapper_paren_head_trivia_relocates_inertly() {
+    // A transparent author-paren WRAPPER around a carried effect-family call
+    // (`(/*#__PURE__*/ $effect(fn));`) is normalized away by the instance-item
+    // carrier slice (official's ESTree AST has no paren nodes), but its
+    // interior HEAD trivia must NOT be silently dropped with it: the carrier
+    // pre-collects the wrapper-head comments and the rewriter re-emits them
+    // INSIDE the emitted helper call — never call-leading (a leading
+    // `/*#__PURE__*/` would pure-mark the effect registration itself).
+    let js = emit(
+        "<script>let x = $state(0); (/*#__PURE__*/ $effect(() => { console.log(x) }));</script>\n<button onclick={() => x++}>{x}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.user_effect(/*#__PURE__*/ () => {"),
+        "the wrapper-head annotation relocates inertly into the helper call:\n{js}"
+    );
+    assert!(
+        !js.contains("/*#__PURE__*/ $.user_effect") && !js.contains("($.user_effect"),
+        "the annotation is never call-leading and the wrapper parens stay normalized away:\n{js}"
+    );
+    assert_eq!(
+        js.matches("/*#__PURE__*/").count(),
+        1,
+        "the wrapper-head annotation survives exactly once:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // The assignable declarator-init carrier normalizes the same wrapper shape
+    // (`const stop = (/*#__PURE__*/ $effect.root(fn));`) — same inert slot.
+    let js = emit(
+        "<script>const stop = (/*#__PURE__*/ $effect.root(() => { return () => {}; }));</script>\n<p>hi</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("const stop = $.effect_root(/*#__PURE__*/ () => {"),
+        "the init wrapper-head annotation relocates inertly into the helper call:\n{js}"
+    );
+    assert!(
+        !js.contains("/*#__PURE__*/ $.effect_root") && !js.contains("($.effect_root"),
+        "the annotation is never call-leading on the init carrier either:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+}
+
+#[test]
+fn effect_family_general_path_wrapper_head_trivia_relocates_inertly() {
+    // The GENERAL expression-rewrite path (handler bodies, nested function /
+    // effect / root bodies — everywhere OUTSIDE the top-level instance-item
+    // carriers) keeps a transparent author-paren WRAPPER around an
+    // effect-family call (behavior-preserving redundant parens are waived),
+    // but its wrapper-GAP comments must not stay in their source slot: left
+    // between the wrapper `(` and the rewritten helper call they would sit
+    // call-leading (a `/*#__PURE__*/` would pure-mark the effect registration
+    // — a minifier could then drop it). The gap comments are REMOVED from the
+    // gap and re-emitted INSIDE the emitted helper call, ahead of the head's
+    // own trivia (source order) — the same canonical call-internal slot the
+    // carriers use.
+    //
+    // Handler position: `(/*#__PURE__*/ $effect.root(fn));` inside a
+    // delegated onclick block arrow.
+    let js = emit(
+        "<script>let x = $state(0);</script>\n<button onclick={() => { (/*#__PURE__*/ $effect.root(() => { return () => {}; })); x++; }}>{x}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.effect_root(/*#__PURE__*/ () => {"),
+        "the handler wrapper-gap annotation relocates inertly into the helper call:\n{js}"
+    );
+    assert!(
+        !js.contains("/*#__PURE__*/ $.effect_root"),
+        "the annotation is never left call-leading inside the surviving wrapper:\n{js}"
+    );
+    assert_eq!(
+        js.matches("/*#__PURE__*/").count(),
+        1,
+        "the wrapper-gap annotation survives exactly once (never duplicated):\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // Nested-in-root-body occurrence: the wrapped user-effect statement inside
+    // an accepted `$effect.root` callback rides the SAME relocation (the root
+    // init is a carrier, but its BODY statements lower through the general
+    // rewriter path).
+    let js = emit(
+        "<script>const stop = $effect.root(() => { (/*#__PURE__*/ $effect(() => { console.log(1) })); return () => {}; });</script>\n<p>hi</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.user_effect(/*#__PURE__*/ () => {"),
+        "the nested wrapper-gap annotation relocates inertly into the nested helper call:\n{js}"
+    );
+    assert!(
+        !js.contains("/*#__PURE__*/ $.user_effect"),
+        "the nested annotation is never call-leading:\n{js}"
+    );
+    assert_eq!(
+        js.matches("/*#__PURE__*/").count(),
+        1,
+        "the nested wrapper-gap annotation survives exactly once:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // Nested wrappers: `(/*a*/ (/*b*/ $effect.root(fn)));` — every wrapper-gap
+    // comment collects, in source order, into the one call-internal slot.
+    let js = emit(
+        "<script>let x = $state(0);</script>\n<button onclick={() => { (/*a*/ (/*b*/ $effect.root(() => { return () => {}; }))); x++; }}>{x}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.effect_root(/*a*/ /*b*/ () => {"),
+        "nested wrapper-gap comments collect in source order into the helper call:\n{js}"
+    );
+    assert_eq!(
+        js.matches("/*a*/").count(),
+        1,
+        "the outer-gap comment survives exactly once:\n{js}"
+    );
+    assert_eq!(
+        js.matches("/*b*/").count(),
+        1,
+        "the inner-gap comment survives exactly once:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // Wrapper TAIL disposition on the general path: the wrapper parens
+    // SURVIVE here (no carrier normalization), so a comment between the call
+    // end and the wrapper `)` already sits inertly inside the parens — it
+    // stays in place, untouched and never duplicated.
+    let js = emit(
+        "<script>let x = $state(0);</script>\n<button onclick={() => { ($effect.root(() => { return () => {}; }) /*!tail*/); x++; }}>{x}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains(") /*!tail*/)"),
+        "a general-path wrapper TAIL comment stays in place inside the surviving parens:\n{js}"
+    );
+    assert_eq!(
+        js.matches("/*!tail*/").count(),
+        1,
+        "the tail comment survives exactly once (never duplicated):\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // COMBINED head + tail on one general-path wrapper: the two dispositions
+    // compose — the gap annotation relocates call-internal, the tail comment
+    // stays in place inside the surviving parens, each exactly once.
+    let js = emit(
+        "<script>let x = $state(0);</script>\n<button onclick={() => { (/*#__PURE__*/ $effect.root(() => { return () => {}; }) /*!lic*/); x++; }}>{x}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.effect_root(/*#__PURE__*/ () => {"),
+        "the combined wrapper's head annotation relocates call-internal:\n{js}"
+    );
+    assert!(
+        js.contains(") /*!lic*/)"),
+        "the combined wrapper's tail comment stays in place inside the surviving parens:\n{js}"
+    );
+    assert!(
+        !js.contains("/*#__PURE__*/ $.effect_root"),
+        "the combined head annotation is never left call-leading:\n{js}"
+    );
+    assert_eq!(
+        js.matches("/*#__PURE__*/").count(),
+        1,
+        "the combined head annotation survives exactly once:\n{js}"
+    );
+    assert_eq!(
+        js.matches("/*!lic*/").count(),
+        1,
+        "the combined tail comment survives exactly once:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // A LINE-comment wrapper gap (`(//w⏎ $effect.root(fn))`) relocates with
+    // its newline terminator, so the helper call's argument is never
+    // commented out.
+    let js = emit(
+        "<script>let x = $state(0);</script>\n<button onclick={() => { (//w\n$effect.root(() => { return () => {}; })); x++; }}>{x}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.effect_root(//w\n"),
+        "the line-comment wrapper gap relocates call-internal with its newline terminator:\n{js}"
+    );
+    assert_eq!(
+        js.matches("//w").count(),
+        1,
+        "the line-comment gap survives exactly once:\n{js}"
+    );
+    assert!(
+        js.contains("return () => {};"),
+        "the argument body still lowers live (never commented out):\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+}
+
+#[test]
+fn effect_family_carrier_wrapper_tail_trivia_survives() {
+    // The instance-item carriers normalize a transparent author-paren WRAPPER
+    // away (the carried slice is the CALL span), so a comment in the wrapper
+    // TAIL range — between the call end and the wrapper `)` — must not be
+    // silently dropped with the parens: `($effect.root(fn) /*!license*/);`
+    // carries a license-class comment, which stays in contract. The carrier
+    // pre-renders the tail trivia and the projection re-emits it AFTER the
+    // rewritten call payload, before the generated `;`.
+    //
+    // Statement carrier (bare unassigned root):
+    let js = emit(
+        "<script>($effect.root(() => { return () => {}; }) /*!license*/);</script>\n<p>hi</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains(") /*!license*/ ;"),
+        "the statement wrapper-tail license comment re-emits after the call payload, before the generated `;`:\n{js}"
+    );
+    assert_eq!(
+        js.matches("/*!license*/").count(),
+        1,
+        "the statement tail comment survives exactly once (never duplicated):\n{js}"
+    );
+    assert!(
+        js.contains("$.effect_root(() => {"),
+        "the wrapped root statement still lowers through the carrier:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // Declarator-init carrier: `const s = ($effect.root(fn) /*!license*/);`.
+    let js = emit(
+        "<script>const s = ($effect.root(() => { return () => {}; }) /*!license*/);</script>\n<p>hi</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("const s = $.effect_root(() => {"),
+        "the wrapped root init still lowers assigned through the carrier:\n{js}"
+    );
+    assert!(
+        js.contains(") /*!license*/ ;"),
+        "the init wrapper-tail license comment re-emits after the call payload, before the generated `;`:\n{js}"
+    );
+    assert_eq!(
+        js.matches("/*!license*/").count(),
+        1,
+        "the init tail comment survives exactly once (never duplicated):\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // A LINE-comment tail keeps its newline terminator, so the generated `;`
+    // can never be commented out: `($effect(fn) // note\n);`.
+    let js = emit(
+        "<script>let x = $state(0); ($effect(() => { console.log(x) }) // note\n);</script>\n<button onclick={() => x++}>{x}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("// note\n;"),
+        "a line-comment tail re-emits with its newline terminator ahead of the generated `;`:\n{js}"
+    );
+    assert_eq!(
+        js.matches("// note").count(),
+        1,
+        "the line-comment tail survives exactly once:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // Head + tail combined on one wrapper: the two ranges are disjoint — the
+    // head annotation relocates call-internal, the tail comment re-emits after
+    // the payload, neither duplicates.
+    let js = emit(
+        "<script>let x = $state(0); (/*#__PURE__*/ $effect(() => { console.log(x) }) /*!license*/);</script>\n<button onclick={() => x++}>{x}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.user_effect(/*#__PURE__*/ () => {"),
+        "the combined wrapper's head annotation still relocates call-internal:\n{js}"
+    );
+    assert!(
+        js.contains(") /*!license*/ ;"),
+        "the combined wrapper's tail comment still re-emits after the call payload:\n{js}"
+    );
+    assert_eq!(
+        js.matches("/*#__PURE__*/").count(),
+        1,
+        "the combined head annotation survives exactly once:\n{js}"
+    );
+    assert_eq!(
+        js.matches("/*!license*/").count(),
+        1,
+        "the combined tail comment survives exactly once:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+}
+
+#[test]
+fn effect_family_carrier_unwrapped_tail_trivia_survives() {
+    // The carrier TAIL range runs from the CALL end to the ENCLOSING statement
+    // end — NOT merely to a transparent wrapper's `)` — so a comment trailing
+    // an UNWRAPPED carried call (`$effect.root(fn) /*!license*/;`: between the
+    // call end and the statement `;`, no wrapper anywhere) survives exactly
+    // like the wrapped form's interior tail: pre-rendered by the carrier,
+    // re-emitted AFTER the rewritten call payload, before the generated `;`.
+    //
+    // Statement carrier (bare unassigned root, no wrapper):
+    let js = emit(
+        "<script>$effect.root(() => { return () => {}; }) /*!license*/;</script>\n<p>hi</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains(") /*!license*/ ;"),
+        "the unwrapped statement tail license comment re-emits after the call payload, before the generated `;`:\n{js}"
+    );
+    assert_eq!(
+        js.matches("/*!license*/").count(),
+        1,
+        "the unwrapped statement tail comment survives exactly once:\n{js}"
+    );
+    assert!(
+        js.contains("$.effect_root(() => {"),
+        "the unwrapped root statement still lowers through the carrier:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // Declarator-init carrier, no wrapper: `const s = $effect.root(fn) /*!license*/;`.
+    let js = emit(
+        "<script>const s = $effect.root(() => { return () => {}; }) /*!license*/;</script>\n<p>hi</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("const s = $.effect_root(() => {"),
+        "the unwrapped root init still lowers assigned through the carrier:\n{js}"
+    );
+    assert!(
+        js.contains(") /*!license*/ ;"),
+        "the unwrapped init tail license comment re-emits after the call payload, before the generated `;`:\n{js}"
+    );
+    assert_eq!(
+        js.matches("/*!license*/").count(),
+        1,
+        "the unwrapped init tail comment survives exactly once:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // An unwrapped LINE-comment tail (the `;` must sit on the NEXT source
+    // line — a same-line `;` would be inside the comment): the re-emission
+    // keeps the newline terminator, so the generated `;` is never commented
+    // out.
+    let js = emit(
+        "<script>let x = $state(0); $effect(() => { console.log(x) }) // note\n;</script>\n<button onclick={() => x++}>{x}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("// note\n;"),
+        "an unwrapped line-comment tail re-emits with its newline terminator ahead of the generated `;`:\n{js}"
+    );
+    assert_eq!(
+        js.matches("// note").count(),
+        1,
+        "the unwrapped line-comment tail survives exactly once:\n{js}"
+    );
+    assert!(
+        js.contains("$.user_effect(() => {"),
+        "the effect statement still lowers through the carrier:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // Wrapped CONTROL: ONE tail range covers the wrapper interior AND the
+    // post-wrapper segment uniformly — `($effect.root(fn) /*!in*/) /*!out*/;`
+    // re-emits BOTH, in source order, each exactly once (the wrapped form
+    // neither regresses nor duplicates).
+    let js = emit(
+        "<script>($effect.root(() => { return () => {}; }) /*!in*/) /*!out*/;</script>\n<p>hi</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains(") /*!in*/ /*!out*/ ;"),
+        "the wrapper-interior and post-wrapper tail comments re-emit in source order before the generated `;`:\n{js}"
+    );
+    assert_eq!(
+        js.matches("/*!in*/").count(),
+        1,
+        "the wrapper-interior tail comment survives exactly once (no duplication):\n{js}"
+    );
+    assert_eq!(
+        js.matches("/*!out*/").count(),
+        1,
+        "the post-wrapper tail comment survives exactly once:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+}
+
+#[test]
+fn effect_family_carrier_asi_tail_trivia_survives() {
+    // An ASI-TERMINATED (semicolon-less) carrier statement/declaration ends its
+    // OXC span AT the call/init end, so an AST-span-only tail bound sees an
+    // EMPTY tail range and a same-line trailing comment silently drops. The
+    // carrier tail is LEXICAL: same-line trailing comments after the call end
+    // collect up to an explicit `;`, an ASI line terminator, or EOF —
+    // license-class trailing comments stay in contract (oracle-verified:
+    // svelte@5.56.3 preserves every shape below).
+    //
+    // Statement carrier, ASI at EOF: `$effect.root(fn) /*!license*/`.
+    let js = emit(
+        "<script>$effect.root(() => { return () => {}; }) /*!license*/</script>\n<p>hi</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains(") /*!license*/ ;"),
+        "the ASI-terminated statement tail license comment re-emits after the call payload:\n{js}"
+    );
+    assert_eq!(
+        js.matches("/*!license*/").count(),
+        1,
+        "the ASI statement tail comment survives exactly once:\n{js}"
+    );
+    assert!(
+        js.contains("$.effect_root(() => {"),
+        "the semicolon-less root statement still lowers through the carrier:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // Declarator-init carrier, ASI at EOF: `const s = $effect.root(fn) /*!license*/`.
+    let js = emit(
+        "<script>const s = $effect.root(() => { return () => {}; }) /*!license*/</script>\n<p>hi</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("const s = $.effect_root(() => {"),
+        "the semicolon-less root init still lowers assigned through the carrier:\n{js}"
+    );
+    assert!(
+        js.contains(") /*!license*/ ;"),
+        "the ASI-terminated init tail license comment re-emits after the call payload:\n{js}"
+    );
+    assert_eq!(
+        js.matches("/*!license*/").count(),
+        1,
+        "the ASI init tail comment survives exactly once:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // ASI mid-script (a next statement follows on the next line): the same-line
+    // tail collects, the next statement still lowers on its own.
+    let js = emit(
+        "<script>let x = $state(0); $effect.root(() => { return () => {}; }) /*!license*/\n$effect(() => { console.log(x) });</script>\n<button onclick={() => x++}>{x}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains(") /*!license*/ ;"),
+        "the mid-script ASI statement tail comment re-emits after the call payload:\n{js}"
+    );
+    assert_eq!(
+        js.matches("/*!license*/").count(),
+        1,
+        "the mid-script ASI tail comment survives exactly once:\n{js}"
+    );
+    assert!(
+        js.contains("$.user_effect(() => {"),
+        "the next-line effect statement still lowers on its own:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // ASI line-comment tail at EOF: `$effect(fn) // note` — the re-emission
+    // keeps the newline terminator, so the generated `;` is never commented
+    // out.
+    let js = emit(
+        "<script>let x = $state(0); $effect(() => { console.log(x) }) // note</script>\n<button onclick={() => x++}>{x}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("// note\n;"),
+        "an ASI line-comment tail re-emits with its newline terminator ahead of the generated `;`:\n{js}"
+    );
+    assert_eq!(
+        js.matches("// note").count(),
+        1,
+        "the ASI line-comment tail survives exactly once:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // ASI post-wrapper tail: `($effect.root(fn)) /*!license*/` — the lexical
+    // tail is uniform across the wrapper boundary exactly like the explicit-`;`
+    // form.
+    let js = emit(
+        "<script>($effect.root(() => { return () => {}; })) /*!license*/</script>\n<p>hi</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains(") /*!license*/ ;"),
+        "the ASI post-wrapper tail comment re-emits after the call payload:\n{js}"
+    );
+    assert_eq!(
+        js.matches("/*!license*/").count(),
+        1,
+        "the ASI post-wrapper tail comment survives exactly once:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // Two same-line block comments, ASI at EOF: both collect, in source order,
+    // each exactly once.
+    let js = emit(
+        "<script>$effect.root(() => { return () => {}; }) /*a*/ /*b*/</script>\n<p>hi</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains(") /*a*/ /*b*/ ;"),
+        "both same-line ASI tail comments re-emit in source order:\n{js}"
+    );
+    assert_eq!(
+        js.matches("/*a*/").count(),
+        1,
+        "the first ASI tail comment survives exactly once:\n{js}"
+    );
+    assert_eq!(
+        js.matches("/*b*/").count(),
+        1,
+        "the second ASI tail comment survives exactly once:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+}
+
+#[test]
+fn effect_family_asi_tail_never_steals_next_statement_leading_trivia() {
+    // The lexical carrier tail collects SAME-LINE trailing comments only — a
+    // comment that begins after a line break is the NEXT statement's leading
+    // trivia and must never be stolen into the previous carrier's tail
+    // (oracle-verified: official attaches it ahead of the next statement).
+    //
+    // Unwrapped next-line lead: `$effect.root(fn)⏎ /*lead*/ $effect(...)` —
+    // the comment never lands in the root's tail slot.
+    let js = emit(
+        "<script>let x = $state(0); $effect.root(() => { return () => {}; })\n/*lead*/ $effect(() => { console.log(x) });</script>\n<button onclick={() => x++}>{x}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        !js.contains(") /*lead*/"),
+        "a next-line leading comment is never collected into the previous carrier's tail:\n{js}"
+    );
+    assert!(
+        js.contains("$.effect_root(() => {") && js.contains("$.user_effect(() => {"),
+        "both statements still lower on their own:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // Next-line comment INSIDE the next statement's call parens
+    // (`⏎$effect(/*lead*/ () => …);` — a `(`-headed next statement would NOT
+    // trigger ASI, so the comment rides inside the next CALL): it stays with
+    // the next statement — verbatim inside that carrier's call slice — and
+    // appears EXACTLY ONCE across the whole emission (a tail collector running
+    // past the line break would steal a second copy into the root's tail).
+    let js = emit(
+        "<script>let x = $state(0); $effect.root(() => { return () => {}; })\n$effect(/*lead*/ () => { console.log(x) });</script>\n<button onclick={() => x++}>{x}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.user_effect(/*lead*/"),
+        "the next statement's leading comment stays with the next statement (call-internal):\n{js}"
+    );
+    assert!(
+        !js.contains(") /*lead*/"),
+        "the next statement's leading comment never ALSO lands in the previous carrier's tail:\n{js}"
+    );
+    assert_eq!(
+        js.matches("/*lead*/").count(),
+        1,
+        "the next-statement leading comment survives exactly once across the whole emission:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // Explicit-`;` stop: a comment AFTER the statement's own `;` is beyond the
+    // carrier tail (next-region trivia) — the lexical collector stops at the
+    // explicit terminator.
+    let js = emit(
+        "<script>$effect.root(() => { return () => {}; }); /*after*/</script>\n<p>hi</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        !js.contains(") /*after*/"),
+        "a post-`;` trailing comment is never collected into the carrier tail:\n{js}"
+    );
+    assert!(
+        js.contains("$.effect_root(() => {"),
+        "the root statement still lowers through the carrier:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // In-span control: a comment INSIDE the statement's own AST extent — after
+    // a line break but before the explicit `;` (`$effect.root(fn)⏎ /*x*/;`) —
+    // is the statement's OWN trailing trivia (never next-statement trivia) and
+    // stays collected exactly as today (oracle-verified: official preserves
+    // it). The same-line rule bounds only the lexical extension BEYOND the AST
+    // span.
+    let js = emit(
+        "<script>$effect.root(() => { return () => {}; })\n/*x*/;</script>\n<p>hi</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains(") /*x*/ ;"),
+        "an in-span multi-line tail comment (before the explicit `;`) stays collected:\n{js}"
+    );
+    assert_eq!(
+        js.matches("/*x*/").count(),
+        1,
+        "the in-span multi-line tail comment survives exactly once:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+}
+
+#[test]
+fn effect_family_multiline_block_tail_never_steals_next_statement_lead_trivia() {
+    // A same-line BLOCK comment whose TEXT holds a line terminator
+    // (`/*tail⏎*/`) is ITSELF the statement's ASI terminator (ECMA-262: a
+    // multi-line comment containing a line terminator is a LineTerminator to
+    // the syntactic grammar) — it is the LAST tail comment: the statement
+    // ends AT it, and everything beyond it is the NEXT statement's territory.
+    // The next statement's tokens can sit newline-free on the terminator
+    // comment's closing line, so a walk inspecting only the GAPS between
+    // comments would run past the boundary and steal the next statement's
+    // trivia into the previous carrier's tail.
+    //
+    // Between-statements lead: `… /*tail⏎*/ /*lead*/ $effect(…)` — the lead
+    // comment never lands in the root's tail slot (the between-statements
+    // disposition then matches the newline-separated equivalent above:
+    // itemized carriers do not carry inter-statement trivia).
+    let js = emit(
+        "<script>let x = $state(0); $effect.root(() => { return () => {}; }) /*tail\n*/ /*lead*/ $effect(() => { console.log(x) });</script>\n<button onclick={() => x++}>{x}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains(") /*tail\n*/ ;"),
+        "the terminator-bearing block comment is itself the LAST collected tail comment:\n{js}"
+    );
+    assert!(
+        !js.contains("*/ /*lead*/"),
+        "the next statement's leading comment is never stolen into the previous carrier's tail:\n{js}"
+    );
+    assert!(
+        js.contains("$.effect_root(() => {") && js.contains("$.user_effect(() => {"),
+        "both statements still lower on their own:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // Call-head lead — the next statement's leading trivia in its
+    // carrier-preserved position (`… /*tail⏎*/ $effect(/*lead*/ …)`): the
+    // lead comment stays with the NEXT statement, exactly once across the
+    // whole emission (a walk running past the terminator comment steals a
+    // second copy into the root's tail).
+    let js = emit(
+        "<script>let x = $state(0); $effect.root(() => { return () => {}; }) /*tail\n*/ $effect(/*lead*/ () => { console.log(x) });</script>\n<button onclick={() => x++}>{x}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains(") /*tail\n*/ ;"),
+        "the root tail holds exactly the terminator-bearing comment:\n{js}"
+    );
+    assert!(
+        js.contains("$.user_effect(/*lead*/"),
+        "the next statement's leading comment stays with the next statement:\n{js}"
+    );
+    assert_eq!(
+        js.matches("/*lead*/").count(),
+        1,
+        "the next-statement leading comment survives exactly once across the whole emission:\n{js}"
+    );
+    assert!(
+        !js.contains("*/ /*lead*/"),
+        "the leading comment never ALSO lands in the previous carrier's tail:\n{js}"
+    );
+    assert_eq!(
+        js.matches("/*tail").count(),
+        1,
+        "the terminator-bearing tail comment itself survives exactly once:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+}
+
+#[test]
+fn effect_family_multiline_block_tail_never_steals_next_statement_call_internal_trivia() {
+    // Past a terminator-bearing block tail comment the following gaps hold
+    // the NEXT statement's TOKENS (` $effect(() => {` — newline-free), so a
+    // walk that only inspects gaps would reach INSIDE the next statement's
+    // call and steal its internal comments into the previous carrier's tail —
+    // DUPLICATING them (the next carrier's call slice carries them verbatim).
+    // The tail stops at the terminator comment; the internal comment lands
+    // call-internal in the NEXT statement's helper, exactly once.
+    //
+    // Statement carrier: `$effect.root(fn) /*tail⏎*/ $effect(() => { /*inner*/ … });`.
+    let js = emit(
+        "<script>let x = $state(0); $effect.root(() => { return () => {}; }) /*tail\n*/ $effect(() => { /*inner*/ console.log(x) });</script>\n<button onclick={() => x++}>{x}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains(") /*tail\n*/ ;"),
+        "the root tail holds exactly the terminator-bearing comment:\n{js}"
+    );
+    assert!(
+        js.contains("$.user_effect(() => { /*inner*/"),
+        "the internal comment lands call-internal in the NEXT statement's helper:\n{js}"
+    );
+    assert_eq!(
+        js.matches("/*inner*/").count(),
+        1,
+        "the call-internal comment survives exactly once across the whole emission:\n{js}"
+    );
+    assert!(
+        !js.contains("*/ /*inner*/"),
+        "the call-internal comment never lands in the previous carrier's tail:\n{js}"
+    );
+    assert_eq!(
+        js.matches("/*tail").count(),
+        1,
+        "the terminator-bearing tail comment itself survives exactly once:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // Declarator-init carrier, same boundary through the ONE shared
+    // collector: `const s = $effect.root(fn) /*tail⏎*/ $effect(() => { /*inner*/ … });`.
+    let js = emit(
+        "<script>let x = $state(0); const s = $effect.root(() => { return () => {}; }) /*tail\n*/ $effect(() => { /*inner*/ console.log(x) });</script>\n<button onclick={() => x++}>{x}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("const s = $.effect_root(() => {"),
+        "the semicolon-less root init still lowers assigned through the carrier:\n{js}"
+    );
+    assert!(
+        js.contains(") /*tail\n*/ ;"),
+        "the init tail holds exactly the terminator-bearing comment:\n{js}"
+    );
+    assert!(
+        js.contains("$.user_effect(() => { /*inner*/"),
+        "the internal comment lands call-internal in the NEXT statement's helper:\n{js}"
+    );
+    assert_eq!(
+        js.matches("/*inner*/").count(),
+        1,
+        "the call-internal comment survives exactly once across the whole emission:\n{js}"
+    );
+    assert!(
+        !js.contains("*/ /*inner*/"),
+        "the call-internal comment never lands in the previous carrier's tail:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+}
+
+#[test]
+fn effect_family_terminator_free_same_line_tail_chain_still_collects_whole() {
+    // CONTROL: only a comment that is ITSELF a statement terminator (a line
+    // comment, or a block comment whose text holds a line terminator) ends
+    // the lexical tail. A chain of terminator-FREE same-line block comments
+    // still collects WHOLE — the walk never stops early on an ordinary block
+    // comment — and the line break ahead of the next statement still bounds
+    // it exactly as before.
+    let js = emit(
+        "<script>let x = $state(0); $effect.root(() => { return () => {}; }) /*a*/ /*b*/\n$effect(() => { console.log(x) });</script>\n<button onclick={() => x++}>{x}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains(") /*a*/ /*b*/ ;"),
+        "the whole terminator-free same-line tail chain still collects in source order:\n{js}"
+    );
+    assert_eq!(
+        js.matches("/*a*/").count(),
+        1,
+        "the first tail comment survives exactly once:\n{js}"
+    );
+    assert_eq!(
+        js.matches("/*b*/").count(),
+        1,
+        "the second tail comment survives exactly once:\n{js}"
+    );
+    assert!(
+        js.contains("$.user_effect(() => {"),
+        "the next-line effect statement still lowers on its own:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+}
+
+#[test]
+fn effect_family_later_line_wrapper_close_asi_tail_trivia_survives() {
+    // A transparent author-paren wrapper whose close `)` sits on a LATER line
+    // than the call end (`($effect.root(fn)⏎) /*!license*/`) puts a line
+    // terminator INSIDE the carrier's own statement/declaration span — between
+    // the inner call `)` and the wrapper `)`. That interior newline is NOT an
+    // ASI statement terminator (the expression is not complete until the
+    // wrapper `)`), so a semicolon-less carrier's genuinely-trailing same-line
+    // comment AFTER the wrapper close must still collect into the tail —
+    // license-class comments stay in contract (oracle-verified: svelte@5.56.3
+    // emits `$.effect_root(…); /*!license*/`). Only a line terminator at or
+    // after the span end is a real ASI boundary.
+    //
+    // Statement carrier, ASI at EOF: `($effect.root(fn)⏎) /*!license*/`.
+    let js = emit(
+        "<script>($effect.root(() => { return () => {}; })\n) /*!license*/</script>\n<p>hi</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains(") /*!license*/ ;"),
+        "the later-line-wrapper-close statement tail license comment re-emits after the call payload:\n{js}"
+    );
+    assert_eq!(
+        js.matches("/*!license*/").count(),
+        1,
+        "the statement tail license comment survives exactly once:\n{js}"
+    );
+    assert!(
+        js.contains("$.effect_root(() => {"),
+        "the wrapped semicolon-less root statement still lowers through the carrier:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // Declarator-init carrier, ASI at EOF:
+    // `const s = ($effect.root(fn)⏎) /*!license*/`.
+    let js = emit(
+        "<script>const s = ($effect.root(() => { return () => {}; })\n) /*!license*/</script>\n<p>hi</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("const s = $.effect_root(() => {"),
+        "the wrapped semicolon-less root init still lowers assigned through the carrier:\n{js}"
+    );
+    assert!(
+        js.contains(") /*!license*/ ;"),
+        "the later-line-wrapper-close init tail license comment re-emits after the call payload:\n{js}"
+    );
+    assert_eq!(
+        js.matches("/*!license*/").count(),
+        1,
+        "the init tail license comment survives exactly once:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // NEXT-LINE guard: the ASI gate is relaxed ONLY for the wrapper interior,
+    // never past the span end — a comment on the NEXT line after the collected
+    // tail is the next statement's territory. `($effect.root(fn)⏎) /*!lic*/⏎
+    // $effect(/*lead*/ …);`: the tail holds exactly `/*!lic*/`, the next
+    // statement keeps `/*lead*/` call-internal, each exactly once.
+    let js = emit(
+        "<script>let x = $state(0); ($effect.root(() => { return () => {}; })\n) /*!lic*/\n$effect(/*lead*/ () => { console.log(x) });</script>\n<button onclick={() => x++}>{x}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains(") /*!lic*/ ;"),
+        "the later-line-wrapper-close tail comment still collects mid-script:\n{js}"
+    );
+    assert_eq!(
+        js.matches("/*!lic*/").count(),
+        1,
+        "the tail comment survives exactly once:\n{js}"
+    );
+    assert!(
+        js.contains("$.user_effect(/*lead*/"),
+        "the next statement's leading comment stays with the next statement (call-internal):\n{js}"
+    );
+    assert_eq!(
+        js.matches("/*lead*/").count(),
+        1,
+        "the next-statement leading comment survives exactly once across the whole emission:\n{js}"
+    );
+    assert!(
+        !js.contains("*/ /*lead*/"),
+        "the next statement's leading comment is never stolen into the previous carrier's tail:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // POST-`;` guard on the SAME wrapper shape (`($effect.root(fn)⏎);
+    // /*after*/`): the statement's own `;` sits INSIDE its OXC span, so a
+    // beyond-span scan that starts at the span end would skip it and steal
+    // the post-terminator comment — the explicit-`;` boundary holds over the
+    // WHOLE gap, interior included.
+    let js = emit(
+        "<script>($effect.root(() => { return () => {}; })\n); /*after*/</script>\n<p>hi</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        !js.contains(") /*after*/"),
+        "a post-`;` trailing comment is never collected into the later-line-wrapper-close carrier tail:\n{js}"
+    );
+    assert!(
+        js.contains("$.effect_root(() => {"),
+        "the wrapped root statement still lowers through the carrier:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // Explicit-`;` CONTROL (`($effect.root(fn)⏎) /*!license*/;`): the comment
+    // sits INSIDE the statement span (ahead of the `;`), collected by the
+    // unconditional interior branch — pinned to its exact emitted form, byte
+    // for byte, proving the interior semantics and the beyond-span ASI gate
+    // agree.
+    let js = emit(
+        "<script>($effect.root(() => { return () => {}; })\n) /*!license*/;</script>\n<p>hi</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("\t$.effect_root(() => { return () => {}; }) /*!license*/ ;\n"),
+        "the explicit-`;` sibling emits its pinned exact byte form:\n{js}"
+    );
+    assert_eq!(
+        js.matches("/*!license*/").count(),
+        1,
+        "the explicit-`;` tail license comment survives exactly once:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+}
+
+#[test]
+fn effect_tracking_optional_inline_attribute_memoizes_normalized() {
+    // The inline-attribute optional form `disabled={$effect.tracking?.()}` —
+    // official ACCEPTS and memoizes it exactly like the plain inline call
+    // (oracle-verified: `$.template_effect(($0) => button.disabled = $0,
+    // [() => $.effect_tracking()])` — no `?.` in the dep thunk). A
+    // `$.effect_tracking?.()` dep emission would be a structural divergence.
+    let js = emit(
+        "<script>\n\tconst t = $effect.tracking();\n</script>\n<input disabled={$effect.tracking?.()} />\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.template_effect(") && js.contains("input.disabled = $0"),
+        "the optional inline tracking call memoizes into the deps-array effect slot:\n{js}"
+    );
+    assert!(
+        js.contains("[() => $.effect_tracking()]") || js.contains("[() => ($.effect_tracking())]"),
+        "the memoized dep re-evaluates the tracking call inside the effect:\n{js}"
+    );
+    assert!(
+        !js.contains("?."),
+        "the optional-call head is normalized away in the dep thunk:\n{js}"
+    );
+    assert!(
+        !js.contains("input.disabled = $.effect_tracking()"),
+        "the inline tracking call is NEVER a construction-time one-shot:\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+}
+
+#[test]
+fn effect_root_in_delegated_handler_lowers_without_frame() {
+    // A well-formed `$effect.root(...)` STATEMENT inside a DELEGATED onclick
+    // block arrow — official lowers it in place inside the `$.delegated`
+    // closure with NO component frame (root alone never forces it),
+    // oracle-verified: `$.delegated('click', button, () => { $.effect_root(...);
+    // $.update(c2); });`.
+    let js = emit(
+        "<script>let c2 = $state(0);</script>\n<button onclick={() => { $effect.root(() => { return () => {}; }); c2++; }}>{c2}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.delegated('click', button, () => {"),
+        "the handler stays on the delegated path:\n{js}"
+    );
+    assert!(
+        js.contains("$.effect_root(() => {"),
+        "the handler-nested root statement lowers in place:\n{js}"
+    );
+    assert!(
+        js.contains("return () => {};"),
+        "the cleanup flows through verbatim:\n{js}"
+    );
+    assert!(
+        js.contains("$.update(c2);"),
+        "the state write beside the root still lowers:\n{js}"
+    );
+    assert!(
+        js.contains("export default function App($$anchor) {") && !js.contains("$.push"),
+        "root alone must NOT force the frame (sig `($$anchor)`, no `$.push`):\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // The paren-receiver spelling composes (`($effect).root(...)` — official
+    // accepts, same emission).
+    let js = emit(
+        "<script>let c2 = $state(0);</script>\n<button onclick={() => { ($effect).root(() => { return () => {}; }); c2++; }}>{c2}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.delegated('click', button, () => {") && js.contains("$.effect_root(() => {"),
+        "the paren-receiver root handler statement lowers delegated:\n{js}"
+    );
+    assert!(!js.contains("$.push"), "no frame from root:\n{js}");
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // The optional-call spelling composes (`$effect.root?.(...)` — official
+    // accepts and normalizes the `?.` away).
+    let js = emit(
+        "<script>let c2 = $state(0);</script>\n<button onclick={() => { $effect.root?.(() => { return () => {}; }); c2++; }}>{c2}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.delegated('click', button, () => {") && js.contains("$.effect_root(() => {"),
+        "the optional-call root handler statement lowers delegated:\n{js}"
+    );
+    assert!(
+        !js.contains("?."),
+        "the optional-call head is normalized away:\n{js}"
+    );
+    assert!(!js.contains("$.push"), "no frame from root:\n{js}");
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+}
+
+#[test]
+fn effect_tracking_in_delegated_handler_lowers_without_frame() {
+    // A well-formed `$effect.tracking();` STATEMENT inside a DELEGATED onclick
+    // block arrow — official lowers it in place inside the `$.delegated`
+    // closure with NO component frame (oracle-verified:
+    // `$.delegated('click', button, () => { $.effect_tracking(); $.update(c2); });`).
+    let js = emit(
+        "<script>let c2 = $state(0);</script>\n<button onclick={() => { $effect.tracking(); c2++; }}>{c2}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.delegated('click', button, () => {"),
+        "the handler stays on the delegated path:\n{js}"
+    );
+    assert!(
+        js.contains("$.effect_tracking();"),
+        "the handler-nested tracking statement lowers in place:\n{js}"
+    );
+    assert!(
+        js.contains("$.update(c2);"),
+        "the state write beside the tracking call still lowers:\n{js}"
+    );
+    assert!(
+        js.contains("export default function App($$anchor) {") && !js.contains("$.push"),
+        "tracking alone must NOT force the frame (sig `($$anchor)`, no `$.push`):\n{js}"
+    );
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
+
+    // The optional-call spelling composes (`$effect.tracking?.();` — official
+    // accepts and normalizes the `?.` away).
+    let js = emit(
+        "<script>let c2 = $state(0);</script>\n<button onclick={() => { $effect.tracking?.(); c2++; }}>{c2}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.delegated('click', button, () => {") && js.contains("$.effect_tracking();"),
+        "the optional-call tracking handler statement lowers delegated:\n{js}"
+    );
+    assert!(
+        !js.contains("?."),
+        "the optional-call head is normalized away:\n{js}"
+    );
+    assert!(!js.contains("$.push"), "no frame from tracking:\n{js}");
+    assert!(!js.contains("$effect"), "no raw rune survives:\n{js}");
+    assert!(parses_as_js(&js), "emitted module must parse as JS:\n{js}");
 }

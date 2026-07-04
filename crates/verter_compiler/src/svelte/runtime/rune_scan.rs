@@ -22,8 +22,9 @@ use verter_span::Span;
 use super::client::UnsupportedSvelteRuntimeSurface;
 use super::expr::{
     arrow_scope_names, block_scope_names, collect_direct_decls, collect_pattern_names,
-    collect_var_hoists, for_left_names, function_scope_names, is_props_callee, state_rune_call,
-    ShadowStack,
+    collect_var_hoists, effect_family_call_fact, for_left_names, function_scope_names,
+    is_props_callee, peel_parens, state_rune_call, statement_position_user_effect_span,
+    EffectFamilyCallKind, ShadowStack,
 };
 
 /// The Svelte 5 rune NAMES (`compiler/utils.js` `RUNES`, minus the `$state.snapshot`
@@ -174,18 +175,26 @@ impl<'a> Visit<'a> for ScopeAwareRuneDetector {
 ///   (`let { a } = $props()`); the shape's validity is enforced separately by
 ///   `props_shape`.
 ///
-/// `$derived` and `$effect` have NO supported position — they are deferral-ledger
-/// follow-ups (5g), so every `$derived` / `$effect` reference (in any position)
-/// fails closed at the position scan BY CONSTRUCTION.
+/// `$derived` has NO supported position — it is a deferral-ledger follow-up, so
+/// every `$derived` reference (in any position) fails closed at the position scan
+/// BY CONSTRUCTION. A bare `$effect` identifier likewise has no PRE-COLLECTED
+/// position here: its supported positions are the WELL-FORMED family CALL callee
+/// spans ([`super::expr::effect_family_call_fact`]), admitted into the same
+/// supported set DURING the walk by [`UnsupportedRuneScan::visit_call_expression`].
+/// The admission is position-checked per member: `$effect(fn)` / `$effect.pre(fn)`
+/// are STATEMENT-ONLY (official `effect_invalid_placement` rejects every value
+/// position), while `$effect.root(fn)` / `$effect.tracking()` are
+/// expression-valued at any depth. A non-callee `$effect` reference still
+/// refuses.
 ///
 // TODO(follow-up): lower `$derived(e)` / `$derived.by(fn)` → `$.derived(() => e)` /
-// `$.derived(fn)` read via `$.get`, and `$effect(fn)` → `$.user_effect(fn)` with the
-// `$.push`/`$.pop` component context (the runes effect topology), instead of failing
-// closed. Owned by the runes-completion block (5g).
+// `$.derived(fn)` read via `$.get`, instead of failing closed. Owned by the
+// runes-completion block (5g).
 ///
 /// `is_instance` is `false` for a `<script module>` program and for a wrapped
-/// template expression — neither hosts ANY supported rune position, so the set is
-/// empty there and every rune reference refuses. The returned spans are the OXC
+/// template expression — neither hosts ANY supported PRE-COLLECTED rune position,
+/// so the set starts empty there and every rune reference outside the walk-time
+/// effect-family call exemption refuses. The returned spans are the OXC
 /// callee/object IDENTIFIER spans, matched against an [`IdentifierReference`]'s
 /// span during the walk.
 fn supported_rune_root_spans(program: &Program<'_>, is_instance: bool) -> FxHashSet<(u32, u32)> {
@@ -278,22 +287,46 @@ pub(super) struct UnsupportedRuneScan {
     /// The active lexical-scope shadow stack.
     scopes: ShadowStack,
     /// The byte spans of the rune-root identifier references in a SUPPORTED
-    /// position (empty for a module-script / template-expression scan, so every
-    /// rune reference there refuses).
+    /// position. Seeded from the program's top-level structure (`$state` /
+    /// `$props()` declarator inits; empty for a template-expression scan) and
+    /// EXTENDED during the walk by the effect-family call exemption (a
+    /// well-formed STATEMENT-POSITION `$effect(fn)` callee is a supported
+    /// position at any depth).
     supported: FxHashSet<(u32, u32)>,
+    /// The call spans of STATEMENT-POSITION `$effect(...)` / `$effect.pre(...)`
+    /// calls — recorded by `visit_expression_statement` BEFORE the call visitor
+    /// reaches the call. The user-effect members are statement-ONLY (official
+    /// `effect_invalid_placement`); a family call whose span is NOT in this set
+    /// is a value position and refuses.
+    stmt_effect_spans: FxHashSet<(u32, u32)>,
+    /// Whether the PROGRAM-DIRECT statements are the SYNTHETIC wrapper of a
+    /// WRAPPED template-expression program (`({expr});`) — never authored
+    /// statement positions, so the program walk bypasses the statement-position
+    /// seed for EVERY program-direct statement (a handler value
+    /// `onclick={$effect(fn)}` must not read as a statement; a brace-matched
+    /// expression source that smuggles extra `);(`-separated statements past the
+    /// wrap stays a value position too). `false` for the instance program, whose
+    /// top-level statements are real.
+    synthetic_program_stmts: bool,
 }
 
 impl UnsupportedRuneScan {
     /// Build a scan whose supported-position set is derived from `program`.
     /// `is_instance` marks the instance-script program (the only program with
-    /// supported rune positions); a module-script / wrapped-template-expression
-    /// program passes `false`, so its supported set is empty and every rune
-    /// reference refuses.
+    /// supported rune positions, and the only one whose program-direct
+    /// statements are REAL statement positions); a wrapped-template-expression
+    /// program passes `false`, so its supported set is empty, every rune
+    /// reference outside the walk-time call exemptions refuses, and its
+    /// program-direct statements are the SYNTHETIC `({expr});` wrapper (never a
+    /// statement position). (A `<script module>` never reaches this scan — it is
+    /// refused upstream as the script-hoisting deferral.)
     pub(super) fn for_program(program: &Program<'_>, is_instance: bool) -> Self {
         Self {
             found: None,
             scopes: ShadowStack::default(),
             supported: supported_rune_root_spans(program, is_instance),
+            stmt_effect_spans: FxHashSet::default(),
+            synthetic_program_stmts: !is_instance,
         }
     }
 
@@ -340,16 +373,16 @@ impl UnsupportedRuneScan {
         self.record(UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, span });
     }
 
-    /// Classify a member expression whose object is an unshadowed rune root
-    /// (`$state.raw`, `$effect.pre`, `$props.id`, …). Returns `true` ONLY for
-    /// `$state.snapshot` — the one supported member form whose rune-root receiver
-    /// (`$state`) has NO declarator position of its own, so the caller must NOT descend
-    /// into it (the position scan would otherwise refuse the bare `$state` in an
-    /// expression context). Every OTHER form returns `false` (the caller descends): a
+    /// Classify a member expression whose (paren-peeled) object is an unshadowed
+    /// rune root (`$state.raw`, `$effect.pre`, `($effect).pending`, `$props.id`, …).
+    /// Returns `true` when the caller must NOT descend into the object — no current
+    /// form does: every classified form returns `false` and the caller descends. A
     /// supported form (`$derived.by`, `$state.raw`, `$inspect.*`) records nothing and
     /// lets the object be position-scanned (a `$state.raw` declarator's `$state` is in
     /// the supported-position set; a bare `$derived` is refused there, unchanged); an
-    /// unsupported form records the refusal.
+    /// unsupported form records the precise member refusal BEFORE the descent, so
+    /// first-found-wins keeps it over the coarser receiver position diagnostic the
+    /// descent may record.
     fn classify_rune_member(&mut self, root: &str, member: &str, span: Span) -> bool {
         let surface = match (root, member) {
             // `$state.snapshot` reaches this MEMBER handler ONLY in an UNCALLED
@@ -390,7 +423,17 @@ impl UnsupportedRuneScan {
                 surface: "$effect.pending",
                 span,
             },
-            // Advanced `$effect` / `$props` members (5g).
+            // The `$effect.pre` / `$effect.root` / `$effect.tracking` family
+            // members reach this MEMBER handler ONLY in an UNCALLED value position
+            // (`const f = $effect.pre;`, `foo($effect.tracking)`): the CALLED
+            // forms — well-formed AND malformed — are consumed upstream by
+            // `visit_call_expression` (which never descends into the callee
+            // member). Only the called well-formed form is supported (the client
+            // expression rewriter rewrites the callee to `$.user_pre_effect` /
+            // `$.effect_root` / `$.effect_tracking`); an uncalled member is an
+            // advanced rune the client backend does NOT emit — official errors on
+            // it (`rune_missing_parentheses`). Record the refusal (do NOT stop the
+            // descent) so it fails closed rather than emitting a raw rune member.
             ("$effect", "pre") => UnsupportedSvelteRuntimeSurface::AdvancedRune {
                 rune: "$effect.pre",
                 span,
@@ -403,6 +446,7 @@ impl UnsupportedRuneScan {
                 rune: "$effect.tracking",
                 span,
             },
+            // Advanced `$props` member (props block).
             ("$props", "id") => UnsupportedSvelteRuntimeSurface::AdvancedRune {
                 rune: "$props.id",
                 span,
@@ -454,7 +498,25 @@ impl<'a> Visit<'a> for UnsupportedRuneScan {
         collect_direct_decls(&it.body, &mut frame);
         collect_var_hoists(&it.body, &mut frame);
         self.scopes.push(frame);
-        walk::walk_program(self, it);
+        if self.synthetic_program_stmts {
+            // The program-direct statements of a WRAPPED template-expression
+            // program (`({expr});`) are the SYNTHETIC wrapper — never authored
+            // statement positions — so their INNER expressions are visited
+            // directly, bypassing the statement-position seed in
+            // `visit_expression_statement` (nested REAL statements inside the
+            // expression still seed normally). This holds for EVERY
+            // program-direct statement, so a brace-matched expression source
+            // that smuggles extra statements past the wrap never gains a
+            // statement position either.
+            for stmt in &it.body {
+                match stmt {
+                    Statement::ExpressionStatement(es) => self.visit_expression(&es.expression),
+                    other => self.visit_statement(other),
+                }
+            }
+        } else {
+            walk::walk_program(self, it);
+        }
         self.scopes.pop();
     }
 
@@ -466,8 +528,38 @@ impl<'a> Visit<'a> for UnsupportedRuneScan {
 
     fn visit_arrow_function_expression(&mut self, it: &ArrowFunctionExpression<'a>) {
         self.scopes.push(arrow_scope_names(it));
-        walk::walk_arrow_function_expression(self, it);
+        if it.r#expression {
+            // A CONCISE (expression-bodied) arrow: OXC models the body as ONE
+            // synthetic `ExpressionStatement`, but it is an EXPRESSION position —
+            // official rejects a user-effect call there
+            // (`effect_invalid_placement`). Visit the params and the body
+            // EXPRESSION directly so the statement admission below never fires
+            // on the synthetic statement (the same bypass the emission-grade
+            // occurrence collector uses).
+            self.visit_formal_parameters(&it.params);
+            if let [Statement::ExpressionStatement(stmt)] = it.body.statements.as_slice() {
+                self.visit_expression(&stmt.expression);
+            } else {
+                self.visit_function_body(&it.body);
+            }
+        } else {
+            walk::walk_arrow_function_expression(self, it);
+        }
         self.scopes.pop();
+    }
+
+    fn visit_expression_statement(&mut self, it: &oxc_ast::ast::ExpressionStatement<'a>) {
+        // A statement-position `$effect(...)` / `$effect.pre(...)` call — the ONE
+        // official-legal position for the user-effect members
+        // (`effect_invalid_placement` is a direct-parent rule; parens are
+        // transparent). Record the call span BEFORE the walk descends so the
+        // call visitor admits it. (The SYNTHETIC program-direct statements of a
+        // wrapped template expression never reach this visitor — the program
+        // walk visits their inner expressions directly.)
+        if let Some(span) = statement_position_user_effect_span(&it.expression) {
+            self.stmt_effect_spans.insert((span.start, span.end));
+        }
+        walk::walk_expression_statement(self, it);
     }
 
     fn visit_block_statement(&mut self, it: &BlockStatement<'a>) {
@@ -520,14 +612,17 @@ impl<'a> Visit<'a> for UnsupportedRuneScan {
         // A member access on an unshadowed rune root (`$state.raw`, `$effect.pre`,
         // `$props.id`, …) — classify the FORM (recorded BEFORE the walk descends into
         // the object identifier, so the form-specific diagnostic wins over the
-        // per-identifier position diagnostic). An UNCALLED `$state.snapshot` reaching
-        // here (a value position — the CALLED form is exempted at
-        // `visit_call_expression`) records the `$state.snapshot` refusal and descends
-        // normally (its `$state` receiver would ALSO refuse as an unsupported position,
-        // but the earlier `$state.snapshot` form diagnostic wins). Every other form
-        // descends normally.
+        // per-identifier position diagnostic). The RECEIVER is paren-transparent
+        // (official's ESTree AST has no paren nodes, so `($effect).pending` is the
+        // SAME member surface as `$effect.pending` — the shared peel keeps the full
+        // paren-inclusive member span on the diagnostic). An UNCALLED
+        // `$state.snapshot` reaching here (a value position — the CALLED form is
+        // exempted at `visit_call_expression`) records the `$state.snapshot` refusal
+        // and descends normally (its `$state` receiver would ALSO refuse as an
+        // unsupported position, but the earlier `$state.snapshot` form diagnostic
+        // wins). Every other form descends normally.
         if let MemberExpression::StaticMemberExpression(m) = it {
-            if let Expression::Identifier(obj) = &m.object {
+            if let Expression::Identifier(obj) = peel_parens(&m.object) {
                 let root = obj.name.as_str();
                 if self.is_unshadowed_rune(root)
                     && self.classify_rune_member(root, m.property.name.as_str(), to_span(m.span))
@@ -545,18 +640,25 @@ impl<'a> Visit<'a> for UnsupportedRuneScan {
         // `$.snapshot`): EXEMPT its callee member — do NOT let the walk descend into it
         // (which would refuse the `$state.snapshot` FORM as an uncalled advanced rune) —
         // but DO scan the ARGUMENT for a nested unsupported rune
-        // (`$state.snapshot($host())` still refuses). Only the CALLED form reaches here;
-        // an UNCALLED `$state.snapshot` (value position) has no enclosing call, so it
-        // reaches `visit_member_expression` and fails closed.
+        // (`$state.snapshot($host())` still refuses). BOTH callee paren positions are
+        // transparent — the RECEIVER (`($state).snapshot(x)`) and the WHOLE CALLEE
+        // (`($state.snapshot)(x)`), at any nesting depth — official's ESTree AST has
+        // no paren nodes, so every spelling is the same call (oracle-verified accepts
+        // against `svelte@5.56.3`), and the rewriter's callee matcher peels the SAME
+        // way, so the scan model and the `$.snapshot` rewrite agree. Only the CALLED
+        // form reaches here; an UNCALLED `$state.snapshot` (value position, however
+        // parenthesized) has no enclosing call, so it reaches
+        // `visit_member_expression` and fails closed.
         //
         // A MALFORMED call — ZERO args / >=2 args (official `rune_invalid_arguments_length`)
         // or a SPREAD arg (official `rune_invalid_spread`), both oracle-verified against
-        // `svelte@5.56.3` — must FAIL CLOSED as an advanced rune rather than slip past
-        // the exemption into a raw `$.snapshot()` / `$.snapshot(a, b)` / `$.snapshot(...o)`
-        // miscompile: record the `$state.snapshot` refusal (first-found wins, so it is
-        // the reported surface) and STILL scan the arguments for nested runes.
-        if let Expression::StaticMemberExpression(m) = &it.callee {
-            if let Expression::Identifier(obj) = &m.object {
+        // `svelte@5.56.3` at every paren position — must FAIL CLOSED as an advanced rune
+        // rather than slip past the exemption into a raw `$.snapshot()` / `$.snapshot(a, b)`
+        // / `$.snapshot(...o)` miscompile: record the `$state.snapshot` refusal
+        // (first-found wins, so it is the reported surface) and STILL scan the
+        // arguments for nested runes.
+        if let Expression::StaticMemberExpression(m) = peel_parens(&it.callee) {
+            if let Expression::Identifier(obj) = peel_parens(&m.object) {
                 if self.is_unshadowed_rune(obj.name.as_str())
                     && obj.name.as_str() == "$state"
                     && m.property.name.as_str() == "snapshot"
@@ -583,6 +685,77 @@ impl<'a> Visit<'a> for UnsupportedRuneScan {
                 }
             }
         }
+        // An effect-family rune CALL (`$effect(fn)` / `$effect.pre(fn)` /
+        // `$effect.root(fn)` / `$effect.tracking()`) on the unshadowed rune root.
+        // A WELL-FORMED call in a LEGAL POSITION is SUPPORTED at ANY depth. The
+        // user-effect members are STATEMENT-ONLY and NON-OPTIONAL — official
+        // rejects EVERY other position AND every optional invocation
+        // (`effect_invalid_placement`: a concise-arrow body, a declarator init,
+        // a `return` / call argument, a sequence element, a `$effect?.(fn)` /
+        // `$effect.pre?.(fn)` / `$effect?.pre(fn)` chain); the admissible
+        // statement-position call spans were recorded by
+        // `visit_expression_statement` before this visitor ran. `.root` /
+        // `.tracking` are expression-valued (no position requirement; optional
+        // invocations admit and the emission normalizes the `?.` away). The bare
+        // form's root-identifier span enters the supported set (its position
+        // check then admits it); a member form's callee is consumed here (the
+        // walk covers the ARGUMENTS only, so the uncalled-member arm in
+        // `classify_rune_member` never sees a called form). The scan still
+        // descends into the arguments, so a nested unsupported rune
+        // (`$effect($host())`) refuses. A MALFORMED call — wrong arity (official
+        // `rune_invalid_arguments_length` / `rune_invalid_arguments`) or a
+        // spread argument (official `rune_invalid_spread`) — or a VALUE-POSITION
+        // user-effect call fails closed under the precise family label.
+        // `$effect.pending` (the experimental-async member) and unknown
+        // `$effect.<member>` forms are NOT family calls (the fact classifier
+        // returns `None`), so their refusal arms are unchanged.
+        if self.is_unshadowed_rune("$effect") {
+            if let Some(fact) = effect_family_call_fact(it) {
+                let position_ok = match fact.kind {
+                    EffectFamilyCallKind::UserEffect | EffectFamilyCallKind::UserPreEffect => {
+                        !fact.optional
+                            && self
+                                .stmt_effect_spans
+                                .contains(&(it.span.start, it.span.end))
+                    }
+                    EffectFamilyCallKind::EffectRoot | EffectFamilyCallKind::EffectTracking => true,
+                };
+                if !fact.well_formed || !position_ok {
+                    self.record(UnsupportedSvelteRuntimeSurface::AdvancedRune {
+                        rune: fact.kind.rune_label(),
+                        span: to_span(it.span),
+                    });
+                }
+                match fact.kind {
+                    // The bare form falls through to the generic walk: the callee
+                    // identifier's position check consults the (now-extended)
+                    // supported set, and the arguments walk normally.
+                    EffectFamilyCallKind::UserEffect => {
+                        if fact.well_formed && position_ok {
+                            self.supported
+                                .insert((fact.root_ident_span.start, fact.root_ident_span.end));
+                        }
+                    }
+                    // A member form: consume the callee (the member handler owns
+                    // ONLY uncalled references) and scan the arguments.
+                    EffectFamilyCallKind::UserPreEffect
+                    | EffectFamilyCallKind::EffectRoot
+                    | EffectFamilyCallKind::EffectTracking => {
+                        for arg in &it.arguments {
+                            match arg.as_expression() {
+                                Some(expr) => self.visit_expression(expr),
+                                None => {
+                                    if let oxc_ast::ast::Argument::SpreadElement(s) = arg {
+                                        self.visit_expression(&s.argument);
+                                    }
+                                }
+                            }
+                        }
+                        return;
+                    }
+                }
+            }
+        }
         // A BARE rune call to an ADVANCED-only rune (`$host(...)`, a standalone
         // `$bindable(...)`) has no supported bare position at all — classify it
         // here (`$inspect(...)` is production-elided, never refused here). The
@@ -604,14 +777,15 @@ impl<'a> Visit<'a> for UnsupportedRuneScan {
     fn visit_identifier_reference(&mut self, it: &IdentifierReference<'a>) {
         // A POSITION-SENSITIVE rune reference: an unshadowed `$state` / `$derived` /
         // `$props` / `$effect` identifier is supported ONLY when its byte span is in
-        // the pre-collected supported-position set (a top-level instance-script
-        // declarator init for `$state` / `$derived`, the single top-level
-        // destructure for `$props()`, a top-level statement for `$effect`); a
-        // reference anywhere else (a default-param `$state(0)`, a call-arg
-        // `$props()`, a module-script rune, a bare-identifier `foo($state)`) fails
-        // closed. The advanced-only runes (`$bindable` / `$host`) are refused by
-        // the call / member handlers, never here; the production-elided `$inspect`
-        // family is owned by the instance-item classifier / the body rewriter.
+        // the supported-position set (a top-level instance-script declarator init
+        // for `$state`, the single top-level destructure for `$props()`, a
+        // well-formed `$effect(fn)` callee admitted by the walk-time call
+        // exemption); a reference anywhere else (a default-param `$state(0)`, a
+        // call-arg `$props()`, a module-script rune, a bare-identifier
+        // `foo($state)` / `foo($effect)`) fails closed. The advanced-only runes
+        // (`$bindable` / `$host`) are refused by the call / member handlers, never
+        // here; the production-elided `$inspect` family is owned by the
+        // instance-item classifier / the body rewriter.
         let name = it.name.as_str();
         if self.is_unshadowed_rune(name) {
             self.classify_rune_position(name, to_span(it.span));

@@ -12,7 +12,7 @@ use crate::svelte::runtime::expr::{
     ScopeGraph, ScopeId, StateClassification, StateLowering, StateRuneKind,
 };
 use crate::svelte::runtime::expr_emit::{
-    self, props_shape, state_decl_shape, PropsShape, StateDeclShape,
+    props_shape, state_decl_shape, PropsShape, StateDeclShape,
 };
 use crate::svelte::runtime::expr_rewrite::{rewrite_expression, RewriteRole};
 
@@ -1045,15 +1045,222 @@ fn state_init_nan_and_infinity_are_supported_proxiable_inits() {
     ));
 }
 
+// ---------------------------------------------------------------------------
+// The effect-family callee rewrites (`$effect` / `$effect.pre` / `$effect.root`
+// / `$effect.tracking`) at the shared expression-rewriter surface. Every accept
+// pins the REWRITTEN callee plus a negative (the raw rune callee is gone / the
+// wrong helper is absent); every refusal pins the typed fail-closed surface.
+// ---------------------------------------------------------------------------
+
+/// Rewrite `expr` against a single root-scope binding, returning the fallible
+/// result (the effect-family refusal tests assert the typed `Err` surface).
+fn rewrite_result_with(
+    expr: &str,
+    name: &str,
+    kind: BindingRuntimeKind,
+) -> Result<String, crate::svelte::runtime::UnsupportedSvelteRuntimeSurface> {
+    let (bindings, scopes, root) = single_binding(name, kind);
+    rewrite_expression(expr, root, &bindings, &scopes, RewriteRole::Value).map(|r| r.text)
+}
+
 #[test]
-fn script_uses_effect_detects_top_level_effect() {
-    let alloc = Allocator::default();
-    assert!(expr_emit::script_uses_effect(
-        &alloc,
-        "let c = $state(0); $effect(() => { console.log(c); });"
-    ));
+fn effect_callee_rewrites_to_user_effect() {
+    let out = rewrite_with(
+        "() => { $effect(() => { count; }); }",
+        "count",
+        BindingRuntimeKind::StateSignal { raw: false },
+    );
     assert!(
-        !expr_emit::script_uses_effect(&alloc, "let c = $state(0); let d = $derived(c * 2);"),
-        "a script with $derived but no $effect must not require push/pop"
+        out.contains("$.user_effect(() => {"),
+        "the `$effect` callee rewrites to `$.user_effect`: {out}"
+    );
+    assert!(
+        out.contains("$.get(count)"),
+        "the effect body's signal read rewrites: {out}"
+    );
+    assert!(!out.contains("$effect"), "no raw `$effect` survives: {out}");
+}
+
+#[test]
+fn effect_pre_callee_rewrites_to_user_pre_effect_not_user_effect() {
+    // The PRE helper-rename discriminator: `$effect.pre` must lower to
+    // `$.user_pre_effect`, NEVER to `$.user_effect` (a re-label bug would pass a
+    // naive "some effect helper appears" check).
+    let out = rewrite_with(
+        "() => { $effect.pre(() => count); }",
+        "count",
+        BindingRuntimeKind::StateSignal { raw: false },
+    );
+    assert!(
+        out.contains("$.user_pre_effect(() => $.get(count))"),
+        "`$effect.pre` rewrites to `$.user_pre_effect`: {out}"
+    );
+    assert!(
+        !out.contains("$.user_effect"),
+        "`$effect.pre` must NOT lower to the plain `$.user_effect`: {out}"
+    );
+    assert!(!out.contains("$effect"), "no raw rune survives: {out}");
+}
+
+#[test]
+fn effect_root_rewrites_recursively_with_cleanup_verbatim() {
+    // `$effect.root` is an EXPRESSION (result assignable); a nested `$effect` /
+    // `$effect.pre` inside its callback lowers through the IDENTICAL callee
+    // rewrite (no separate root-recursion gate), and the `return () => {};`
+    // cleanup flows through verbatim.
+    let out = rewrite_with(
+        "() => { const stop = $effect.root(() => { $effect(() => count); $effect.pre(() => count); return () => {}; }); }",
+        "count",
+        BindingRuntimeKind::StateSignal { raw: false },
+    );
+    assert!(
+        out.contains("const stop = $.effect_root(() => {"),
+        "the root call is an assignable expression: {out}"
+    );
+    assert!(
+        out.contains("$.user_effect(() => $.get(count))"),
+        "the nested `$effect` rewrites inside the root body: {out}"
+    );
+    assert!(
+        out.contains("$.user_pre_effect(() => $.get(count))"),
+        "the nested `$effect.pre` rewrites inside the root body: {out}"
+    );
+    assert!(
+        out.contains("return () => {};"),
+        "the cleanup return flows through verbatim: {out}"
+    );
+    assert!(!out.contains("$effect"), "no raw rune survives: {out}");
+}
+
+#[test]
+fn effect_tracking_zero_arg_rewrites() {
+    let out = rewrite_with(
+        "() => { $effect(() => { console.log($effect.tracking(), count); }); }",
+        "count",
+        BindingRuntimeKind::StateSignal { raw: false },
+    );
+    assert!(
+        out.contains("console.log($.effect_tracking(), $.get(count))"),
+        "`$effect.tracking()` rewrites inside the effect body: {out}"
+    );
+    assert!(!out.contains("$effect"), "no raw rune survives: {out}");
+}
+
+#[test]
+fn effect_rewrite_reaches_nested_fn_and_iife_bodies() {
+    // The callee rewrite is DEPTH-independent (scope-recursive): a
+    // statement-position `$effect` inside a nested function declaration and
+    // inside an IIFE block body both rewrite (the statement-only rule gates
+    // POSITION, not nesting depth).
+    let out = rewrite_with(
+        "() => { function make() { $effect(() => count); } (() => { $effect.pre(() => count); })(); }",
+        "count",
+        BindingRuntimeKind::StateSignal { raw: false },
+    );
+    assert!(
+        out.contains("function make() { $.user_effect(() => $.get(count)); }"),
+        "the nested-fn `$effect` rewrites: {out}"
+    );
+    assert!(
+        out.contains("(() => { $.user_pre_effect(() => $.get(count)); })()"),
+        "the IIFE `$effect.pre` rewrites: {out}"
+    );
+    assert!(!out.contains("$effect"), "no raw rune survives: {out}");
+}
+
+#[test]
+fn effect_async_await_fails_closed_through_await_gate() {
+    // The await gate protects every effect-family carrier: an `await` inside the
+    // effect callback is the 5j experimental-async surface.
+    for expr in [
+        "() => { $effect(async () => { await count; }); }",
+        "() => { $effect.pre(async () => { await count; }); }",
+        "() => { $effect.root(() => { $effect(async () => { await count; }); }); }",
+    ] {
+        let err = rewrite_result_with(
+            expr,
+            "count",
+            BindingRuntimeKind::StateSignal { raw: false },
+        )
+        .expect_err("an awaiting effect body must fail closed");
+        assert!(
+            matches!(
+                err,
+                crate::svelte::runtime::UnsupportedSvelteRuntimeSurface::ExperimentalAsync {
+                    surface: "await",
+                    ..
+                }
+            ),
+            "wrong refusal surface for `{expr}`: {err:?}"
+        );
+    }
+}
+
+#[test]
+fn effect_async_no_await_passes_through_as_official_parity() {
+    // Oracle-verified (svelte@5.56.3): `$effect(async () => { c; })` with NO
+    // `await` ACCEPTS as `$.user_effect(async () => { $.get(c); })` — the await
+    // gate only fires on `await`, so the async-no-await passthrough is parity.
+    let out = rewrite_with(
+        "() => { $effect(async () => { count; }); }",
+        "count",
+        BindingRuntimeKind::StateSignal { raw: false },
+    );
+    assert!(
+        out.contains("$.user_effect(async () => {"),
+        "the async-no-await effect lowers: {out}"
+    );
+    assert!(!out.contains("$effect"), "no raw rune survives: {out}");
+}
+
+#[test]
+fn effect_non_call_and_malformed_forms_fail_closed_at_rewriter() {
+    // The rewriter is the BACKSTOP behind the rune scan: an unshadowed `$effect`
+    // reference it did not consume through a well-formed family rewrite must
+    // fail closed (never a raw rune emission), mirroring the `$inspect` refusal.
+    let cases: &[(&str, &str)] = &[
+        ("() => { foo($effect); }", "$effect"),
+        ("() => { const f = $effect.pre; }", "$effect"),
+        ("() => { $effect(); }", "$effect"),
+        ("() => { $effect(count, count); }", "$effect"),
+        ("() => { $effect(...count); }", "$effect"),
+        ("() => { $effect.tracking(count); }", "$effect.tracking"),
+        ("() => { $effect.root(); }", "$effect.root"),
+        ("() => { $effect.foo(); }", "$effect"),
+    ];
+    for (expr, label) in cases {
+        let err = rewrite_result_with(
+            expr,
+            "count",
+            BindingRuntimeKind::StateSignal { raw: false },
+        )
+        .expect_err("a non-call / malformed effect form must fail closed");
+        assert!(
+            matches!(
+                &err,
+                crate::svelte::runtime::UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. }
+                    if *rune == *label
+            ),
+            "wrong refusal for `{expr}` (want AdvancedRune {label}): {err:?}"
+        );
+    }
+}
+
+#[test]
+fn shadowed_effect_local_is_not_rewritten_and_not_refused() {
+    // A local binding named `$effect` shadows the rune: its calls / member calls
+    // are ordinary locals — neither rewritten nor refused.
+    let out = rewrite_with(
+        "($effect) => { $effect(1); $effect.pre(count); }",
+        "count",
+        BindingRuntimeKind::StateSignal { raw: false },
+    );
+    assert!(
+        out.contains("$effect(1)") && out.contains("$effect.pre($.get(count))"),
+        "shadowed `$effect` calls stay plain local calls: {out}"
+    );
+    assert!(
+        !out.contains("$.user_effect") && !out.contains("$.user_pre_effect"),
+        "no helper rewrite fires under a shadowing local: {out}"
     );
 }

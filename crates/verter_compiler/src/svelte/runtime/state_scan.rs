@@ -60,8 +60,9 @@ pub fn collect_state_declarations<'a>(program: &Program<'a>) -> Vec<(String, Sta
     out
 }
 
-/// Collect the top-level `$derived` / `$props` / `$bindable` binding declarations
-/// of a script program, returning `(name, kind)` rows in source order.
+/// Collect the top-level `$derived` / `$props` / `$bindable` /
+/// `$effect.tracking` binding declarations of a script program, returning
+/// `(name, kind)` rows in source order.
 ///
 /// This is the non-`$state` rune binding classification (`$state` has its own
 /// write-gated lowering path via [`collect_state_declarations`]). The kinds are
@@ -73,18 +74,40 @@ pub fn collect_state_declarations<'a>(program: &Program<'a>) -> Vec<(String, Sta
 ///   [`BindingRuntimeKind::Prop`], EXCEPT a member with a `$bindable(…)` default,
 ///   which is [`BindingRuntimeKind::BindableProp`]; a rest and a whole-object
 ///   identifier are plain `Prop`s.
+/// - a declaration matching the item carrier's EXACT effect-rune-init shape
+///   (the shared [`super::instance_items::effect_rune_init_shape`] predicate:
+///   `let`/`const`, one plain non-`$`-prefixed identifier declarator, no TS
+///   annotation, a well-formed `$effect.tracking()` init) → the name is
+///   [`BindingRuntimeKind::EffectTrackingConst`] — a PLAIN one-shot value read
+///   bare (never `$.get`), whose template/attribute read joins the region's
+///   `$.template_effect` (official cannot static-fold a call-init const). A
+///   declaration the carrier REFUSES (`var`, multi-declarator, TS-annotated,
+///   `$`-prefixed, malformed call) mints NO fact — the minting is never broader
+///   than the carrier.
 ///
-/// Only DIRECT top-level `let`/`const`/`var` declarators whose initializer is one
-/// of these rune calls are returned (a shadowing local is excluded by the
-/// structural callee match; an each/snippet binding never reaches this top-level
-/// declarator scan).
+/// Only DIRECT top-level declarators whose initializer is one of these rune
+/// calls are returned (a shadowing local is excluded by the structural callee
+/// match; an each/snippet binding never reaches this top-level declarator scan).
 #[must_use]
 pub fn collect_rune_bindings<'a>(program: &Program<'a>) -> Vec<(String, BindingRuntimeKind)> {
+    use super::expr::EffectFamilyCallKind;
     let mut out = Vec::new();
     for stmt in &program.body {
         let Statement::VariableDeclaration(decl) = stmt else {
             continue;
         };
+        // The effect-rune-init shapes consult the item carrier's shared
+        // declaration-shape predicate, so a carrier-refused declaration mints no
+        // fact. A matching declaration has exactly one root/tracking-init
+        // declarator, so no other arm below can also apply to it. An
+        // `EffectRoot` init mints NO binding fact (the result local is a plain
+        // non-reactive teardown binding).
+        if let Some(shape) = super::instance_items::effect_rune_init_shape(decl) {
+            if shape.kind == EffectFamilyCallKind::EffectTracking {
+                out.push((shape.name, BindingRuntimeKind::EffectTrackingConst));
+            }
+            continue;
+        }
         for d in &decl.declarations {
             let Some(init) = &d.init else { continue };
             let Expression::CallExpression(call) = init else {
@@ -341,5 +364,58 @@ fn collect_props_binding_kinds(pattern: &BindingPattern<'_>, out: &mut Vec<(Stri
         BindingPattern::AssignmentPattern(assign) => {
             collect_props_binding_kinds(&assign.left, out);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oxc_allocator::Allocator;
+
+    /// The names minted as [`BindingRuntimeKind::EffectTrackingConst`] for an
+    /// instance-script `source`.
+    fn tracking_bindings(source: &str) -> Vec<String> {
+        let alloc = Allocator::default();
+        let program = reparse_module(&alloc, source).expect("test source parses");
+        collect_rune_bindings(&program)
+            .into_iter()
+            .filter(|(_, kind)| *kind == BindingRuntimeKind::EffectTrackingConst)
+            .map(|(name, _)| name)
+            .collect()
+    }
+
+    #[test]
+    fn tracking_const_minting_matches_the_item_carrier_shape() {
+        // The carrier-accepted declaration shapes mint the fact (both keywords).
+        assert_eq!(tracking_bindings("const t = $effect.tracking();"), ["t"]);
+        assert_eq!(tracking_bindings("let t = $effect.tracking();"), ["t"]);
+        // Every carrier-REJECTED declaration shape mints NO fact — the minting
+        // shares the item carrier's EXACT declaration-shape predicate
+        // (`effect_rune_init_shape`). A fact minted for a shape the carrier
+        // refuses would leave a half-classified binding behind the refusal
+        // (`var` read semantics, multi-declarator mixing, TS-annotated and
+        // `$`-prefixed declarators are all carrier refusals).
+        assert!(
+            tracking_bindings("var t = $effect.tracking();").is_empty(),
+            "a `var` declarator must mint no tracking fact"
+        );
+        assert!(
+            tracking_bindings("let a = $effect.tracking(), b = 0;").is_empty(),
+            "a multi-declarator declaration must mint no tracking fact"
+        );
+        assert!(
+            tracking_bindings("const t: boolean = $effect.tracking();").is_empty(),
+            "a TS-annotated declarator must mint no tracking fact"
+        );
+        assert!(
+            tracking_bindings("const $t = $effect.tracking();").is_empty(),
+            "a `$`-prefixed declarator must mint no tracking fact"
+        );
+        // A malformed init (the zero-arg contract rejects an argument) mints
+        // nothing either — form and shape are both carrier-shared.
+        assert!(
+            tracking_bindings("const t = $effect.tracking(1);").is_empty(),
+            "a malformed tracking call must mint no fact"
+        );
     }
 }

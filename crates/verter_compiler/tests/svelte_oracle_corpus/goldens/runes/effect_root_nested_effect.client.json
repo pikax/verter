@@ -1,0 +1,94 @@
+{
+  "slug": "runes/effect_root_nested_effect.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "effect_root_nested_effect",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "push",
+    "state",
+    "effect_root",
+    "user_effect",
+    "get",
+    "child",
+    "reset",
+    "template_effect",
+    "set_text",
+    "get",
+    "delegated",
+    "update",
+    "append",
+    "pop",
+    "delegate"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "delegate",
+    "delegated",
+    "effect_root",
+    "from_html",
+    "get",
+    "pop",
+    "push",
+    "reset",
+    "set_text",
+    "state",
+    "template_effect",
+    "update",
+    "user_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "push": 1,
+    "state": 1,
+    "effect_root": 1,
+    "user_effect": 1,
+    "get": 2,
+    "child": 1,
+    "reset": 1,
+    "template_effect": 1,
+    "set_text": 1,
+    "delegated": 1,
+    "update": 1,
+    "append": 1,
+    "pop": 1,
+    "delegate": 1
+  },
+  "delegatedEvents": [
+    "click"
+  ],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<button> </button>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<button> </button>`); export default function effect_root_nested_effect($$anchor, $$props) {$.push($$props, true); let c = $.state(0); const stop = $.effect_root(() => {$.user_effect(() => console.log($.get(c))); return () => {};}); var button = root(); var text = $.child(button, true); $.reset(button); $.template_effect(() => $.set_text(text, $.get(c))); $.delegated('click', button, () => $.update(c)); $.append($$anchor, button); $.pop();} $.delegate(['click']);",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

@@ -4,17 +4,16 @@
 //! This module owns the SCRIPT-side emission: lowering the instance script's
 //! top-level rune declarations (`$state` / `$derived` / `$effect` / basic
 //! `$props()`) into their emitted client forms, classifying the `$props()` shape
-//! (basic vs advanced) and the `$state` declarator shape, collecting the per-name
-//! `$props()` read forms, and detecting whether the script uses `$effect`. The
-//! per-expression rewriting it drives (every source-derived payload routes through
-//! it) is the FALLIBLE two-pass rewriter in [`super::expr_rewrite`].
+//! (basic vs advanced) and the `$state` declarator shape, and collecting the
+//! per-name `$props()` read forms. The per-expression rewriting it drives (every
+//! source-derived payload routes through it) is the FALLIBLE two-pass rewriter in
+//! [`super::expr_rewrite`].
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{BindingPattern, CallExpression, Expression, Statement};
 
 use super::expr::{
-    is_bindable_call, is_effect_callee, is_props_callee, reparse_module, state_rune_call,
-    BindingTable, StateLowering,
+    is_bindable_call, is_props_callee, reparse_module, state_rune_call, BindingTable, StateLowering,
 };
 use super::expr_rewrite::{PropRead, PropReads};
 
@@ -480,24 +479,6 @@ fn classify_props_pattern(pattern: &BindingPattern<'_>) -> PropsShape {
     }
 }
 
-/// Whether the instance script uses `$effect(...)` at the top level (drives
-/// `$.push`/`$.pop`). A SHADOWED `$effect` (a local of that name) does not count —
-/// but a top-level `$effect()` call statement is the supported form.
-#[must_use]
-pub fn script_uses_effect(alloc: &Allocator, instance_source: &str) -> bool {
-    let Some(program) = reparse_module(alloc, instance_source) else {
-        return false;
-    };
-    program.body.iter().any(|stmt| {
-        if let Statement::ExpressionStatement(es) = stmt {
-            if let Expression::CallExpression(call) = &es.expression {
-                return is_effect_callee(&call.callee);
-            }
-        }
-        false
-    })
-}
-
 /// The lowering of ONE supported instance-script item that needs NO expression
 /// rewriter — the simple declaration variants. Returns the emitted client-body
 /// statement, [`SimpleItemLowering::None`] for a variant that emits nothing (a
@@ -556,6 +537,14 @@ pub(super) fn lower_simple_instance_item(
         // residue Verter does not reproduce). The `.with` context-frame fact is
         // owned by the `needs_context` scan, not this lowering.
         Item::InspectElided => SimpleItemLowering::None,
+        // A `$effect(fn);` / `$effect.pre(fn);` statement and a `$effect.root(fn)`
+        // / `$effect.tracking()` declarator init lower their payload through the
+        // FALLIBLE rewriter (the callee → the registered helper, body signal reads
+        // → `$.get`, an `await` refuses) — the caller (which holds the rewriter)
+        // handles them.
+        Item::EffectStatement { .. } | Item::EffectRuneInit { .. } => {
+            SimpleItemLowering::NeedsRewriter
+        }
     }
 }
 
@@ -567,9 +556,9 @@ pub(super) enum SimpleItemLowering {
     /// The item emits no component-body declaration (a no-default props
     /// destructure, a production-elided `$inspect` statement).
     None,
-    /// The item is a `StatePrimitive` or `FunctionDecl` whose payload lowers through
-    /// the FALLIBLE expression rewriter — the caller (which holds the rewriter) handles
-    /// it.
+    /// The item is a `StatePrimitive` / `FunctionDecl` / `EffectStatement` /
+    /// `EffectRuneInit` whose payload lowers through the FALLIBLE expression
+    /// rewriter — the caller (which holds the rewriter) handles it.
     NeedsRewriter,
 }
 

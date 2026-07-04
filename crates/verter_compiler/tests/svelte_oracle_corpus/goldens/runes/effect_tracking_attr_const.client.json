@@ -1,0 +1,57 @@
+{
+  "slug": "runes/effect_tracking_attr_const.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "effect_tracking_attr_const",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "effect_tracking",
+    "template_effect",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "effect_tracking",
+    "from_html",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "effect_tracking": 1,
+    "template_effect": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<input/>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<input/>`); export default function effect_tracking_attr_const($$anchor) {const t = $.effect_tracking(); var input = root(); $.template_effect(() => input.disabled = t); $.append($$anchor, input);}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

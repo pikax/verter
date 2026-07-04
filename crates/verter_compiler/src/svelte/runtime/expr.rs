@@ -28,7 +28,7 @@
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
     ArrowFunctionExpression, AssignmentExpression, AssignmentTarget, BindingPattern,
-    BlockStatement, CallExpression, CatchClause, ChainElement, Expression, ForInStatement,
+    BlockStatement, CallExpression, CatchClause, ChainElement, Comment, Expression, ForInStatement,
     ForOfStatement, ForStatement, Function, FunctionType, IdentifierReference, Program,
     SimpleAssignmentTarget, Statement, UpdateExpression, VariableDeclarationKind,
 };
@@ -89,6 +89,24 @@ pub enum BindingRuntimeKind {
     /// component callee (`Child($$anchor, …)`); a read emits the bare name, NEVER
     /// `$.get`.
     ComponentImport,
+    /// A top-level `let`/`const` local initialized by a well-formed
+    /// `$effect.tracking()` call — a PLAIN one-shot runtime value (official reads
+    /// it bare, never `$.get`); its template read joins the region's
+    /// `$.template_effect` because official cannot static-fold a call-init const.
+    EffectTrackingConst,
+}
+
+/// Whether a binding kind is a reactive SIGNAL (read via `$.get`).
+pub(super) fn is_signal_kind(kind: BindingRuntimeKind) -> bool {
+    matches!(
+        kind,
+        BindingRuntimeKind::StateSignal { .. }
+            | BindingRuntimeKind::StateProxy
+            | BindingRuntimeKind::Derived
+            | BindingRuntimeKind::EachSignal
+            | BindingRuntimeKind::AwaitSignal
+            | BindingRuntimeKind::LegacyConstDerived
+    )
 }
 
 /// The declared `$state` rune flavour.
@@ -598,12 +616,436 @@ pub(super) fn is_props_callee(callee: &Expression<'_>) -> bool {
     matches!(callee, Expression::Identifier(id) if id.name.as_str() == "$props")
 }
 
-/// Whether a CALLEE expression is the bare `$effect` rune (`$effect(...)` — NOT
-/// `$effect.pre` / `$effect.root` / `$effect.tracking`, NOT a shadowing local). The
-/// SINGLE shared `$effect`-callee predicate.
+/// Peel every transparent `ParenthesizedExpression` layer off `expr`. Official
+/// svelte@5.56.3 parses with an ESTree AST that has NO parenthesized-expression
+/// nodes, so author parens are semantically transparent at every classification
+/// site — the shared classifiers peel them here, never per call site.
 #[must_use]
-pub(super) fn is_effect_callee(callee: &Expression<'_>) -> bool {
-    matches!(callee, Expression::Identifier(id) if id.name.as_str() == "$effect")
+pub(super) fn peel_parens<'a, 'b>(mut expr: &'b Expression<'a>) -> &'b Expression<'a> {
+    while let Expression::ParenthesizedExpression(p) = expr {
+        expr = &p.expression;
+    }
+    expr
+}
+
+/// Whether an expression is an unshadowed-CANDIDATE `$inspect.trace(...)` call —
+/// a CallExpression whose callee is the static `.trace` member on the bare
+/// `$inspect` identifier. A PARENTHESIZED wrapper (`($inspect.trace())`) is
+/// transparent — official treats it as the same statement — so parens are
+/// unwrapped (recursively) before the shape check. Shadowing is the CALLER's
+/// check (the collector consults its own local shadow frames). Driven from the
+/// typed OXC AST only. Shared with the delegated event-handler shape gate
+/// ([`super::client_shapes`]), which skips the statement the expression
+/// rewriter ([`super::expr_rewrite`]) later drops.
+pub(super) fn is_inspect_trace_call(expr: &Expression<'_>) -> bool {
+    let mut expr = expr;
+    while let Expression::ParenthesizedExpression(paren) = expr {
+        expr = &paren.expression;
+    }
+    let Expression::CallExpression(call) = expr else {
+        return false;
+    };
+    let Expression::StaticMemberExpression(member) = &call.callee else {
+        return false;
+    };
+    // The member OBJECT is likewise paren-transparent (`($inspect).trace()`) — official
+    // treats redundant parens around the `$inspect` receiver as transparent.
+    let mut object = &member.object;
+    while let Expression::ParenthesizedExpression(paren) = object {
+        object = &paren.expression;
+    }
+    member.property.name.as_str() == "trace"
+        && matches!(object, Expression::Identifier(id) if id.name.as_str() == "$inspect")
+}
+
+/// Render the comment trivia lying INSIDE `[start, end)` of `source` for the
+/// CALL-INTERNAL head slot of a rewritten effect-family emission — verbatim,
+/// in source order, delimiters included. The head slot is the canonical
+/// relocation target for head/wrapper-gap trivia an invocation-head rewrite
+/// would otherwise destroy or leave call-leading — INSIDE the emitted helper
+/// call, immediately after the opening `(`; a call-LEADING `/*#__PURE__*/`
+/// would ANNOTATE the emitted helper call so a minifier could drop the
+/// effect registration as pure, and a leading `//` line comment after
+/// `return` would arm ASI against the emitted call. (The carrier TAIL slot
+/// has its own collector, [`carrier_tail_comment_trivia`] — the tail's end
+/// bound is lexical, not a plain span range.) A block comment renders with a
+/// following space; a line comment keeps a newline terminator so the
+/// rendered run can never
+/// comment the following argument or statement terminator out. Empty when
+/// the range holds no comment (the overwhelmingly common case — the
+/// consuming text is then unchanged).
+#[must_use]
+pub(super) fn call_internal_comment_trivia(
+    source: &str,
+    comments: &[Comment],
+    start: u32,
+    end: u32,
+) -> String {
+    let mut trivia = String::new();
+    for c in comments {
+        if c.span.start >= start && c.span.end <= end {
+            if let Some(text) = source.get(c.span.start as usize..c.span.end as usize) {
+                trivia.push_str(text);
+                trivia.push(if c.is_line() { '\n' } else { ' ' });
+            }
+        }
+    }
+    trivia
+}
+
+/// Render the comment trivia of an effect-family CARRIER's TAIL — the
+/// trailing comments between the call end and the statement/declaration
+/// terminator, re-emitted after the rewritten payload before the generated
+/// `;`. The tail is the union of two regions, walked in one pass over the
+/// parse's comment table in source order:
+///
+/// - The AST-INTERIOR region `[call_end, node_end)` — trivia inside the
+///   enclosing statement/declaration span (a normalized wrapper's interior
+///   tail, comments ahead of an explicit `;`). Always the carrier's own —
+///   collected unconditionally, line position irrelevant (oracle-verified:
+///   official preserves an interior comment even on its own line).
+/// - The LEXICAL extension beyond `node_end` — an ASI-terminated
+///   (semicolon-less) statement/declaration ends its OXC span AT the
+///   call/init end, so its same-line trailing comments
+///   (`$effect.root(fn) /*!license*/`) lie OUTSIDE every AST span. A comment
+///   collects while the gap from the previous position holds neither an
+///   explicit `;` (anywhere in the gap — the statement's own terminator sits
+///   INSIDE the OXC span) nor a JS line terminator AT or AFTER `node_end`
+///   (EOF ends the walk naturally); a comment that begins after a
+///   beyond-span line break is the NEXT statement's leading trivia and is
+///   never stolen into the tail. A line terminator INSIDE the span — a
+///   transparent wrapper whose close `)` sits on a later line than the call
+///   (`($effect.root(fn)⏎) /*!license*/`) puts one between the call end and
+///   the wrapper `)` — does not terminate the statement, because the
+///   expression is not complete until the wrapper close; only a terminator
+///   truly beyond the span is a real ASI boundary. A collected comment that
+///   is
+///   ITSELF a statement terminator — a line comment, or a block comment
+///   whose text holds a line terminator (ECMA-262: a multi-line comment
+///   containing a line terminator is a LineTerminator to the syntactic
+///   grammar) — is the LAST tail comment: the ASI statement ends AT it, so
+///   the walk stops there. The gaps past such a comment belong to the NEXT
+///   statement, whose tokens can sit newline-free on the terminator
+///   comment's closing line (`$effect.root(fn) /*tail⏎*/ /*lead*/ next()`)
+///   — its leading and call-internal trivia is never stolen. Up to that
+///   stop the carrier shape guarantees the inspected gaps hold only wrapper
+///   `)`s and whitespace — any other same-line token would have continued
+///   the expression and the carrier would never have classified.
+///
+/// Rendering matches [`call_internal_comment_trivia`]: verbatim, in source
+/// order, a block comment with a following space, a line comment with its
+/// newline terminator so the generated `;` always lands on a live line.
+/// Empty when no comment trails the call (the overwhelmingly common case).
+#[must_use]
+pub(super) fn carrier_tail_comment_trivia(
+    source: &str,
+    comments: &[Comment],
+    call_end: u32,
+    node_end: u32,
+) -> String {
+    let mut trivia = String::new();
+    let mut pos = call_end as usize;
+    for c in comments {
+        if c.span.start < call_end {
+            continue;
+        }
+        let (start, end) = (c.span.start as usize, c.span.end as usize);
+        let beyond_span = c.span.end > node_end;
+        if beyond_span {
+            let Some(gap) = source.get(pos..start) else {
+                break;
+            };
+            // An explicit `;` ANYWHERE in the gap ends the tail — interior
+            // (the statement's own terminator, which the OXC span covers) or
+            // beyond (an empty statement's) — everything past it is
+            // next-region trivia.
+            if gap.contains(';') {
+                break;
+            }
+            // The ASI line-terminator boundary inspects ONLY the region truly
+            // beyond the carrier's own span: a line terminator inside the
+            // still-open transparent wrapper parens (interior, before the
+            // wrapper close `)`) does not end the statement — the expression
+            // is not complete until the wrapper close; only a terminator at
+            // or after `node_end` is a real ASI boundary.
+            let asi_start = pos.max(node_end as usize);
+            let Some(asi_gap) = source.get(asi_start..start) else {
+                break;
+            };
+            if asi_gap
+                .chars()
+                .any(|ch| matches!(ch, '\n' | '\r' | '\u{2028}' | '\u{2029}'))
+            {
+                break;
+            }
+        }
+        let Some(text) = source.get(start..end) else {
+            break;
+        };
+        trivia.push_str(text);
+        trivia.push(if c.is_line() { '\n' } else { ' ' });
+        pos = end;
+        // A beyond-span comment that is itself a statement terminator — a
+        // line comment, or a block comment whose text holds a line terminator
+        // — ends the ASI statement AT itself: it is the LAST tail comment,
+        // and the gaps past it are the NEXT statement's territory (its tokens
+        // can sit newline-free on the terminator comment's closing line).
+        if beyond_span
+            && (c.is_line()
+                || text
+                    .chars()
+                    .any(|ch| matches!(ch, '\n' | '\r' | '\u{2028}' | '\u{2029}')))
+        {
+            break;
+        }
+    }
+    trivia
+}
+
+/// Whether a CALL mints a USER effect — the bare `$effect` or the `$effect.pre`
+/// member callee (NOT `$effect.root` / `$effect.tracking`, NOT a shadowing
+/// local; the caller owns the shadow check on the `$effect` root). Author
+/// parens around the callee or the member receiver (`($effect)(...)`,
+/// `($effect).pre(...)`) are transparent — oracle-verified: official forces the
+/// frame for those forms too. A THIN derivation of the SINGLE shared family
+/// classifier ([`effect_family_call_fact`]) — the `needs_context` trigger: only
+/// the user-effect members force the `$.push($$props, true)` / `$.pop()`
+/// component frame (oracle-verified against svelte@5.56.3: `$effect.root` /
+/// `$effect.tracking` alone never do). The kind match is deliberately
+/// well-formedness-blind: a malformed / type-argumented / optional user-effect
+/// call fails the component closed on the scan/rewriter rails, so its frame
+/// answer is unobservable.
+#[must_use]
+pub(super) fn is_user_effect_family_call(call: &CallExpression<'_>) -> bool {
+    matches!(
+        effect_family_call_fact(call),
+        Some(fact) if matches!(
+            fact.kind,
+            EffectFamilyCallKind::UserEffect | EffectFamilyCallKind::UserPreEffect
+        )
+    )
+}
+
+/// The four SUPPORTED effect-family rune CALL forms — the closed vocabulary the
+/// client backend lowers. Each kind maps 1:1 onto its registered
+/// [`SvelteHelper`](super::helpers::SvelteHelper) family; there is no other
+/// effect-family emission route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum EffectFamilyCallKind {
+    /// `$effect(fn)` → `$.user_effect(fn)`.
+    UserEffect,
+    /// `$effect.pre(fn)` → `$.user_pre_effect(fn)`.
+    UserPreEffect,
+    /// `$effect.root(fn)` → `$.effect_root(fn)` — an EXPRESSION whose result
+    /// (the teardown function) is assignable.
+    EffectRoot,
+    /// `$effect.tracking()` → `$.effect_tracking()` (zero-arg).
+    EffectTracking,
+}
+
+impl EffectFamilyCallKind {
+    /// The registered runtime helper family this call kind lowers to.
+    pub(super) fn helper(self) -> super::helpers::SvelteHelper {
+        match self {
+            Self::UserEffect => super::helpers::SvelteHelper::UserEffect,
+            Self::UserPreEffect => super::helpers::SvelteHelper::UserPreEffect,
+            Self::EffectRoot => super::helpers::SvelteHelper::EffectRoot,
+            Self::EffectTracking => super::helpers::SvelteHelper::EffectTracking,
+        }
+    }
+
+    /// The rune label a MALFORMED call of this kind fails closed under.
+    pub(super) fn rune_label(self) -> &'static str {
+        match self {
+            Self::UserEffect => "$effect",
+            Self::UserPreEffect => "$effect.pre",
+            Self::EffectRoot => "$effect.root",
+            Self::EffectTracking => "$effect.tracking",
+        }
+    }
+}
+
+/// The structural fact of an effect-family rune CALL: which family member the
+/// callee names, whether the call is WELL-FORMED (the official arity — exactly
+/// one non-spread argument for `$effect` / `$effect.pre` / `$effect.root`, zero
+/// arguments for `$effect.tracking` — official `rune_invalid_arguments_length` /
+/// `rune_invalid_spread` / `rune_invalid_arguments` — and NO TS type-arguments:
+/// official plain-script parsing reads `$effect<T>(fn)` as a comparison chain
+/// and rejects `rune_missing_parentheses`), and the call/callee/root spans the
+/// scan / rewriter / carriers consume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct EffectFamilyCallFact {
+    /// Which family member the callee names.
+    pub(super) kind: EffectFamilyCallKind,
+    /// Whether the call carries the official arity with no spread argument and
+    /// no TS type-arguments.
+    pub(super) well_formed: bool,
+    /// Whether the invocation head carries ANY optional-chain operator — an
+    /// optional CALL (`$effect.root?.(fn)`) or an optional member RECEIVER
+    /// (`$effect?.root(fn)`). Official REJECTS every optional form of the
+    /// statement-only user-effect members (`effect_invalid_placement`: the `?.`
+    /// chain node sits between the call and its statement parent) and ACCEPTS
+    /// optional invocations of the expression-valued members with the `?.`
+    /// NORMALIZED away — both oracle-verified against svelte@5.56.3.
+    pub(super) optional: bool,
+    /// The whole CALL span — the source slice the instance-item carriers cut
+    /// (author parens around the call stay OUTSIDE this span, so a carrier
+    /// slice never carries them into the emission).
+    pub(super) call_span: oxc_span::Span,
+    /// The OUTERMOST callee span (`$effect` for the bare form, `$effect.pre` /
+    /// `$effect.root` / `$effect.tracking` for the member forms — INCLUDING any
+    /// author parens around the callee or the member receiver) — the span the
+    /// rewriter overwrites with the `$.` helper, so the parens never survive
+    /// into the emitted helper call.
+    pub(super) callee_span: oxc_span::Span,
+    /// The `$effect` ROOT identifier span — the span the position scan admits
+    /// into its supported set for the bare form.
+    pub(super) root_ident_span: oxc_span::Span,
+}
+
+/// Classify a CALL whose callee names an effect-family rune member (the bare
+/// `$effect`, or the static `.pre` / `.root` / `.tracking` member on the bare
+/// `$effect` identifier), or `None` for any other callee shape — including any
+/// OTHER `$effect.<member>` (`.pending` stays the experimental-async refusal; an
+/// unknown member stays the generic advanced-rune fallback) and a non-`$effect`
+/// callee. Author parens around the callee (`($effect)(...)`) and around the
+/// member RECEIVER (`($effect).pre(...)`) are TRANSPARENT (official's ESTree AST
+/// has no paren nodes — oracle-verified accepts); the returned `callee_span`
+/// stays the OUTERMOST (paren-inclusive) span so the helper rewrite drops them.
+/// Shadowing is the CALLER's check (the shared `ShadowStack` / local-frame
+/// models own it). The SINGLE shared effect-family call classifier — the rune
+/// scan, the expression rewriter, the instance-item classifier, and the
+/// handler-shape gate all consume this one fact; there is no per-module fork.
+#[must_use]
+pub(super) fn effect_family_call_fact(call: &CallExpression<'_>) -> Option<EffectFamilyCallFact> {
+    use oxc_span::GetSpan;
+    // The official arity: exactly one NON-SPREAD argument (`$effect` /
+    // `$effect.pre` / `$effect.root`), or zero arguments (`$effect.tracking`).
+    // A TS type-argument on ANY family call (`$effect<T>(fn)`, `$effect.pre<T>(fn)`,
+    // `$effect.root<T>(fn)`, `$effect.root?.<T>(fn)`) is NOT well-formed: official
+    // plain-script parsing reads the `<` as a COMPARISON (the rune reference is
+    // left uncalled) and rejects `rune_missing_parentheses`, so the TS-parsing
+    // analysis path must never strip-and-emit a spelling official rejects.
+    let one_plain_arg = call.arguments.len() == 1 && call.arguments[0].as_expression().is_some();
+    let has_type_args = call.type_arguments.is_some();
+    // The OUTERMOST callee span — paren-inclusive when the author wrapped the
+    // callee, so the helper rewrite replaces the parens too.
+    let callee_span = call.callee.span();
+    match peel_parens(&call.callee) {
+        // The bare `$effect(...)` form (`$effect?.(fn)` carries the optional bit).
+        Expression::Identifier(id) if id.name.as_str() == "$effect" => Some(EffectFamilyCallFact {
+            kind: EffectFamilyCallKind::UserEffect,
+            well_formed: one_plain_arg && !has_type_args,
+            optional: call.optional,
+            call_span: call.span,
+            callee_span,
+            root_ident_span: id.span,
+        }),
+        // The `$effect.pre(...)` / `$effect.root(...)` / `$effect.tracking()`
+        // member forms (the receiver is paren-transparent: `($effect).pre(...)`
+        // is the same callee to official; `$effect?.pre` carries the optional
+        // bit).
+        Expression::StaticMemberExpression(m) => {
+            let Expression::Identifier(obj) = peel_parens(&m.object) else {
+                return None;
+            };
+            if obj.name.as_str() != "$effect" {
+                return None;
+            }
+            let kind = match m.property.name.as_str() {
+                "pre" => EffectFamilyCallKind::UserPreEffect,
+                "root" => EffectFamilyCallKind::EffectRoot,
+                "tracking" => EffectFamilyCallKind::EffectTracking,
+                // `.pending` (the experimental-async surface) and unknown members
+                // are NOT family calls — their refusal arms own them.
+                _ => return None,
+            };
+            let well_formed = match kind {
+                EffectFamilyCallKind::EffectTracking => call.arguments.is_empty(),
+                _ => one_plain_arg,
+            } && !has_type_args;
+            Some(EffectFamilyCallFact {
+                kind,
+                well_formed,
+                optional: call.optional || m.optional,
+                call_span: call.span,
+                callee_span,
+                root_ident_span: obj.span,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Classify an EXPRESSION as an effect-family rune call, peeling the transparent
+/// author parens around the WHOLE call (`($effect(fn))` is the same call to
+/// official) and the `ChainExpression` carrier of an OPTIONAL invocation
+/// (`$effect.root?.(fn)` / `$effect?.tracking()` — the fact's `optional` bit
+/// records it). The expression-level entry the carriers and position predicates
+/// consume; the callee/receiver peeling lives in [`effect_family_call_fact`].
+#[must_use]
+pub(super) fn effect_family_expression_fact(expr: &Expression<'_>) -> Option<EffectFamilyCallFact> {
+    let call = match peel_parens(expr) {
+        Expression::CallExpression(call) => call,
+        // An optional invocation rides a `ChainExpression` wrapper; the chain
+        // element must itself be a CALL (an uncalled optional member
+        // `$effect?.root` is not a family call — the member refusal rails own
+        // it). Author parens may wrap the callee inside the chain.
+        Expression::ChainExpression(chain) => match &chain.expression {
+            oxc_ast::ast::ChainElement::CallExpression(call) => call,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    effect_family_call_fact(call)
+}
+
+/// Classify an expression as a WELL-FORMED effect-family call legal in STATEMENT
+/// position — the single statement-shape predicate the instance-item carrier,
+/// the handler statement gate, and the position seeds consume. Official
+/// svelte@5.56.3 accepts every family member as an expression statement: the
+/// user-effect members are statement-ONLY (`effect_invalid_placement` rejects
+/// every value position AND every OPTIONAL invocation — the `?.` chain node sits
+/// between the call and its statement parent), while `$effect.root(fn)` /
+/// `$effect.tracking()` are expression-valued and admit optional invocations
+/// (normalized at emission). Author parens are transparent throughout. A
+/// malformed call (wrong arity / spread) returns `None` — the caller's refusal
+/// rails own it. Shadowing is the CALLER's check.
+#[must_use]
+pub(super) fn effect_family_statement_fact(expr: &Expression<'_>) -> Option<EffectFamilyCallFact> {
+    let fact = effect_family_expression_fact(expr)?;
+    if !fact.well_formed {
+        return None;
+    }
+    match fact.kind {
+        // The statement-only members refuse every optional form (official
+        // `effect_invalid_placement`, oracle-verified).
+        EffectFamilyCallKind::UserEffect | EffectFamilyCallKind::UserPreEffect => {
+            (!fact.optional).then_some(fact)
+        }
+        EffectFamilyCallKind::EffectRoot | EffectFamilyCallKind::EffectTracking => Some(fact),
+    }
+}
+
+/// The CALL span of a STATEMENT-POSITION user-effect call — an expression
+/// statement whose expression is a WELL-FORMED `$effect(...)` /
+/// `$effect.pre(...)` family call. Official svelte@5.56.3 rejects the
+/// user-effect members in EVERY other position (`effect_invalid_placement`:
+/// "`$effect()` can only be used as an expression statement", checked against
+/// the call's DIRECT ESTree parent), so this is the single position predicate
+/// the scan and the rewriter admit the two members through. PARENS ARE
+/// TRANSPARENT (`($effect(fn));` is the same statement — oracle-verified
+/// accept). Returns `None` for the expression-valued members (`.root` /
+/// `.tracking` carry no position requirement) and for every non-family shape.
+/// Shadowing is the CALLER's check (the shared shadow-stack models own it).
+#[must_use]
+pub(super) fn statement_position_user_effect_span(expr: &Expression<'_>) -> Option<oxc_span::Span> {
+    let fact = effect_family_statement_fact(expr)?;
+    matches!(
+        fact.kind,
+        EffectFamilyCallKind::UserEffect | EffectFamilyCallKind::UserPreEffect
+    )
+    .then_some(fact.call_span)
 }
 
 /// Whether a CALLEE expression is a `$derived(...)` or `$derived.by(...)` rune — the

@@ -101,6 +101,53 @@ const SUPPORTED_FIXTURES: &[&str] = &[
     // `() => arr[$.get(i)]` / `($$value) => arr[$.get(i)] = $$value` (F9 — the
     // computed-index signal read `$.get(i)` is rewritten, the proxy root reads plain).
     "runes/bind_value_computed_member",
+    // ── 5g-c effect family ($effect / $effect.pre / $effect.root / $effect.tracking) ──
+    // A top-level `$effect.pre(fn);` statement → `$.user_pre_effect` + the runes
+    // frame (`$.push($$props, true)` / `$.pop()` + the `$$props` param).
+    "runes/effect_pre_toplevel",
+    // `const stop = $effect.root(() => { $effect(...); return () => {}; });` — the
+    // assignable `$.effect_root` expression, the NESTED `$.user_effect` recursion,
+    // the verbatim cleanup return, and the frame (from the NESTED effect).
+    "runes/effect_root_nested_effect",
+    // The nested-PRE variant: `$.user_pre_effect` inside the `$.effect_root` body.
+    "runes/effect_root_nested_pre",
+    // A root callback with NO nested user effect → NO frame (sig `($$anchor)`, no
+    // `$.push` / `$.pop`) — the negative golden for the frame policy.
+    "runes/effect_root_only",
+    // An UNASSIGNED bare `$effect.root(...);` statement (the unassigned
+    // side-effect form) → `$.effect_root(...)` as a bare statement, NO frame —
+    // the statement-carrier twin of the assigned declarator form.
+    "runes/effect_root_bare_statement",
+    // An UNASSIGNED bare `$effect.tracking();` statement → `$.effect_tracking();`,
+    // NO frame.
+    "runes/effect_tracking_bare_statement",
+    // `const t = $effect.tracking();` + a template `{t}` read → the plain-const
+    // read inside `$.template_effect(() => $.set_text(text, t))`, NO frame.
+    "runes/effect_tracking_const",
+    // `const t = $effect.tracking();` + an ATTRIBUTE read (`disabled={t}`) → the
+    // property write joins the template effect
+    // (`$.template_effect(() => input.disabled = t)`, plain const read) — the
+    // attribute-path twin of the text-read disposition (a call-init const cannot
+    // be static-folded, so its read is has_state).
+    "runes/effect_tracking_attr_const",
+    // An INLINE `$effect.tracking()` in an ATTRIBUTE value → the memoized
+    // deps-array form (`$.template_effect(($0) => input.disabled = $0,
+    // [() => $.effect_tracking()])` — official `is_pure` special-cases the
+    // tracking rune as impure ⇒ has_call, re-evaluated INSIDE the tracking
+    // context).
+    "runes/effect_tracking_attr_inline",
+    // A user effect INSIDE a delegated onclick block arrow:
+    // `$.delegated('click', button, () => { $.user_effect(...); $.update(c); })`
+    // + the frame.
+    "runes/effect_in_handler",
+    // A bare `$effect.root(...)` STATEMENT inside a delegated onclick block
+    // arrow: `$.delegated('click', button, () => { $.effect_root(...);
+    // $.update(c2); })` — NO frame (root alone never forces it).
+    "runes/effect_root_in_handler",
+    // A bare `$effect.tracking();` STATEMENT inside a delegated onclick block
+    // arrow: `$.delegated('click', button, () => { $.effect_tracking();
+    // $.update(c2); })` — NO frame.
+    "runes/effect_tracking_in_handler",
 ];
 
 /// The SUPPORTED MATRIX — the exhaustive enumeration of supported client
@@ -178,6 +225,9 @@ const SUPPORTED_MATRIX: &[&str] = &[
     "matrix/bind_group_radio_mixed",
     // a delegated onclick arrow with a $state-write body.
     "matrix/event_arrow",
+    // a top-level `$effect(fn);` statement — `$.user_effect` + the runes frame
+    // (`$.push($$props, true)` / `$.pop()` + the `$$props` param).
+    "matrix/effect_arrow",
     // reactive text (single / multi / mixed) — bare signal reads, simple-ASCII chunks.
     "matrix/text_single_read",
     "matrix/text_multi_read",
@@ -6480,13 +6530,14 @@ fn supported_matrix_enumerates_every_documented_sub_shape() {
     // row is dropped.
     assert_eq!(
         SUPPORTED_MATRIX.len(),
-        33,
-        "the supported matrix must enumerate all 33 documented supported sub-shapes \
+        34,
+        "the supported matrix must enumerate all 34 documented supported sub-shapes \
          (16 §1.2/rune/attr + the 11 5c DOM-hosted bind-family rows incl. radio group + \
          the 3 DOM bind TARGET-LVALUE rows: plain-local ident, plain-local member, and \
          the two-element function-pair `{{get, set}}` + the element `bind:this={{get, set}}` \
          function-pair row + the 2 F4 dynamic/mixed `bind:group` value rows: \
-         `bind_group_radio_dynamic` and `bind_group_radio_mixed`)"
+         `bind_group_radio_dynamic` and `bind_group_radio_mixed` + the `effect_arrow` \
+         top-level `$effect(fn);` statement row)"
     );
     // No duplicate slugs across the matrix.
     let mut seen = std::collections::BTreeSet::new();

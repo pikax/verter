@@ -13,13 +13,12 @@
 //! fails closed defensively.
 
 use super::client::UnsupportedSvelteRuntimeSurface;
-use super::client_codegen_helpers::is_signal_kind;
 use super::client_plan::SupportedClientIr;
 use super::client_plan_types::{
     ClientNodeId, ClientRuntimeOp, EventEmit, EventEmitTarget, EventMode, EventWrapper,
 };
 use super::client_shapes::ClientEventHandlerShape;
-use super::expr::ScopeId;
+use super::expr::{is_signal_kind, ScopeId};
 use super::ir::{
     AttrIr, BindOp, EventOp, EventTarget, ExprId, IrNode, MixedAttrPart, NodeId, SpecialKind,
 };

@@ -24,11 +24,10 @@ use oxc_span::SourceType;
 
 use super::expr::{
     arrow_scope_names, block_scope_names, collect_direct_decls, collect_pattern_names,
-    collect_var_hoists, for_left_names, function_scope_names, is_effect_callee, is_props_callee,
-    reparse_module, BindingRuntimeKind, BindingTable, ScopeGraph, ScopeId, ShadowStack,
-    UnwrappedRootKind,
+    collect_var_hoists, for_left_names, function_scope_names, is_props_callee, is_signal_kind,
+    is_user_effect_family_call, reparse_module, BindingRuntimeKind, BindingTable, ScopeGraph,
+    ScopeId, ShadowStack, UnwrappedRootKind,
 };
-use super::expr_rewrite::is_signal_kind;
 
 // ---------------------------------------------------------------------------
 // `has_call` — the reactive-text memoizer trigger
@@ -197,16 +196,22 @@ fn collect_program_top_level_names(program: &Program<'_>, out: &mut rustc_hash::
 
 /// Whether a template expression references any reactive STATE binding — a read
 /// resolving (scope-awarely) to either a reactive `$state` signal OR a `$props()`
-/// prop at `scope`. This is the official `metadata.expression.has_state` signal: a
-/// dynamic attribute / class / style value with `has_state` joins the combined
-/// `$.template_effect`; a value with no reactive read is a one-shot init (the
-/// `has_state ? update : init` split in `RegularElement.js`). A PROP read counts as
-/// state because props are reactive (`$$props.x` can change), matching the
-/// text-interpolation reactivity classifier (`NoDefaultPropRead` is reactive) and
-/// official. It also drives the `deps > 0` half of the reactive-text `has_call`
-/// memoize rule. Reuses the shared free-reference collector + the scope resolver, so
-/// a shadowing local is not counted; a prop is NOT a signal (it emits `$$props.x`,
-/// not `$.get`), so [`is_signal_kind`] stays prop-free.
+/// prop OR an `$effect.tracking()` const at `scope`. This is the official
+/// `metadata.expression.has_state` signal: a dynamic attribute / class / style
+/// value with `has_state` joins the combined `$.template_effect`; a value with no
+/// reactive read is a one-shot init (the `has_state ? update : init` split in
+/// `RegularElement.js`). A PROP read counts as state because props are reactive
+/// (`$$props.x` can change), matching the text-interpolation reactivity
+/// classifier (`NoDefaultPropRead` is reactive) and official. An
+/// `EffectTrackingConst` read counts as state because official cannot
+/// static-fold a call-init const (`Identifier.js`: `!scope.evaluate(node)
+/// .is_known` sets `has_state`), so `disabled={t}` joins the template effect
+/// while still reading the const PLAIN (never `$.get`) — the same disposition
+/// the text path (`EffectTrackingConstRead`) already has. It also drives the
+/// `deps > 0` half of the reactive-text `has_call` memoize rule. Reuses the
+/// shared free-reference collector + the scope resolver, so a shadowing local is
+/// not counted; a prop / tracking const is NOT a signal (it emits `$$props.x` /
+/// a plain read, not `$.get`), so [`is_signal_kind`] stays free of both.
 #[must_use]
 pub(super) fn expr_references_signal(
     source: &str,
@@ -220,7 +225,11 @@ pub(super) fn expr_references_signal(
     facts.references.iter().any(|r| {
         bindings
             .resolve_kind(scopes, scope, &r.name)
-            .is_some_and(|k| is_signal_kind(k) || k == BindingRuntimeKind::Prop)
+            .is_some_and(|k| {
+                is_signal_kind(k)
+                    || k == BindingRuntimeKind::Prop
+                    || k == BindingRuntimeKind::EffectTrackingConst
+            })
     })
 }
 
@@ -265,6 +274,12 @@ pub(super) fn prop_value_has_state(
                     is_signal_kind(k)
                         || k == BindingRuntimeKind::Prop
                         || k == BindingRuntimeKind::SnippetName
+                        // An `$effect.tracking()` const: a call-init const is not
+                        // statically known, so official marks its read `has_state`
+                        // (the same rule that puts `disabled={t}` in the template
+                        // effect) — a component-prop value reading it emits the
+                        // getter form.
+                        || k == BindingRuntimeKind::EffectTrackingConst
                 })
     }) || expr_has_binding_impurity(source, scope, bindings, scopes)
 }
@@ -985,12 +1000,34 @@ impl HasCallScan<'_> {
     /// iff its callee is NOT statically pure OR a dependency has accumulated so far
     /// (`!is_pure(callee) || dependencies.size > 0`). Descending first also finds a
     /// nested impure call inside the callee or an argument.
+    ///
+    /// A well-formed zero-arg `$effect.tracking()` call is has_call BY the official
+    /// `is_pure` rule itself (`2-analyze/visitors/shared/utils.js` explicitly
+    /// special-cases the `$effect.tracking` rune as IMPURE): the memoized dep
+    /// re-evaluates the call INSIDE the `$.template_effect` — a tracking context —
+    /// where a construction-time one-shot would return a DIFFERENT boolean (a
+    /// SEMANTIC divergence, not merely structural). A scope-resolved `$effect`
+    /// binding is not the rune (official `get_rune` returns null there), so the
+    /// special case is skipped for a shadowed name.
     fn visit_call(&mut self, call: &CallExpression<'_>) {
         self.visit_expr(&call.callee);
         for arg in &call.arguments {
             self.visit_argument(arg);
         }
         if self.found {
+            return;
+        }
+        if matches!(
+            super::expr::effect_family_call_fact(call),
+            Some(fact)
+                if fact.well_formed
+                    && fact.kind == super::expr::EffectFamilyCallKind::EffectTracking
+        ) && self
+            .bindings
+            .resolve_kind(self.scopes, self.scope, "$effect")
+            .is_none()
+        {
+            self.found = true;
             return;
         }
         if !self.callee_is_pure(&call.callee) || self.deps > 0 {
@@ -1067,7 +1104,10 @@ impl HasCallScan<'_> {
 ///   safe;
 /// - a member expression whose leftmost identifier resolves to such an unsafe
 ///   binding;
-/// - a `$effect(...)` rune (Svelte needs the runes-mode context for it);
+/// - a USER-effect rune call — `$effect(...)` or `$effect.pre(...)` (Svelte needs
+///   the runes-mode context for a user effect); `$effect.root(...)` /
+///   `$effect.tracking()` alone do NOT trigger (oracle-verified: root/tracking
+///   never force the frame — only a nested user effect inside them does);
 /// - a `$inspect(...).with(...)` chain (unshadowed `$inspect`) — the elided
 ///   `.with` statement still forces the official production frame
 ///   (`$.push($$props, true)` / `$.pop()` + the `$$props` param); plain
@@ -1301,8 +1341,12 @@ impl<'a> Visit<'a> for NeedsContextScan<'_> {
     }
 
     fn visit_call_expression(&mut self, it: &CallExpression<'a>) {
-        // A `$effect(...)` rune (unshadowed) needs the runes-mode context.
-        if is_effect_callee(&it.callee) && !self.scopes.is_shadowed("$effect") {
+        // A USER-effect rune call — `$effect(...)` / `$effect.pre(...)`
+        // (unshadowed) — needs the runes-mode context; `$effect.root` /
+        // `$effect.tracking` are excluded by the shared family classifier's
+        // kind match (oracle-verified: they never force the frame on their
+        // own).
+        if is_user_effect_family_call(it) && !self.scopes.is_shadowed("$effect") {
             self.found = true;
         } else if !is_rune_call(it) && self.root_is_unsafe(&it.callee) {
             // A NON-rune call whose callee roots at an unsafe binding (import / prop)

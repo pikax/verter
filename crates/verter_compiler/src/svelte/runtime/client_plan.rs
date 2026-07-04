@@ -367,10 +367,54 @@ impl<'a> SupportedClientIr<'a> {
                         Item::FunctionDecl { source, .. } => {
                             self.rewrite_source(source, root_scope)?
                         }
-                        // `NeedsRewriter` is produced ONLY for `StatePrimitive` /
-                        // `FunctionDecl`; any other item reaching here is a
-                        // classifier/lowering divergence.
-                        _ => unreachable!("only StatePrimitive and FunctionDecl need the rewriter"),
+                        // A `$effect(fn);` / `$effect.pre(fn);` / bare `$effect.root(fn);`
+                        // / `$effect.tracking();` statement: the whole call expression
+                        // lowers through the shared rewriter in the STATEMENT role (the
+                        // top-level call is the expression of a statement — the one
+                        // official-legal position for the statement-only user-effect
+                        // members). The callee → its registered helper, body signal
+                        // reads → `$.get`, nested family calls recurse, an `await`
+                        // inside the callback refuses as experimental-async; the
+                        // carrier's transparent-wrapper head trivia re-emits inside
+                        // the emitted helper call, and its carrier-TAIL trivia
+                        // (wrapper interior and unwrapped trailing comments alike)
+                        // after the rewritten payload, before the generated `;`.
+                        Item::EffectStatement {
+                            source,
+                            head_trivia,
+                            tail_trivia,
+                        } => {
+                            let rewritten =
+                                self.rewrite_statement_source(source, head_trivia, root_scope)?;
+                            let sep = if tail_trivia.is_empty() { "" } else { " " };
+                            format!("{rewritten}{sep}{tail_trivia};")
+                        }
+                        // A `$effect.root(fn)` / `$effect.tracking()` declarator init: the
+                        // INIT expression lowers through the shared rewriter (the callee →
+                        // `$.effect_root` / `$.effect_tracking`, nested effects rewrite
+                        // recursively, the carrier's wrapper-head trivia re-emits inside
+                        // the emitted helper call, its carrier-TAIL trivia after the
+                        // rewritten payload); the declaration keyword + binding
+                        // name are typed classification facts composed around the
+                        // rewritten payload.
+                        Item::EffectRuneInit {
+                            const_decl,
+                            name,
+                            init,
+                            head_trivia,
+                            tail_trivia,
+                        } => {
+                            let kw = if *const_decl { "const" } else { "let" };
+                            let rewritten =
+                                self.rewrite_rune_init_source(init, head_trivia, root_scope)?;
+                            let sep = if tail_trivia.is_empty() { "" } else { " " };
+                            format!("{kw} {name} = {rewritten}{sep}{tail_trivia};")
+                        }
+                        // `NeedsRewriter` is produced ONLY for the arms above; any other
+                        // item reaching here is a classifier/lowering divergence.
+                        _ => unreachable!(
+                            "only StatePrimitive, FunctionDecl, EffectStatement, and EffectRuneInit need the rewriter"
+                        ),
                     };
                     items.push(ClientScriptItem::BodyStatement { code });
                 }

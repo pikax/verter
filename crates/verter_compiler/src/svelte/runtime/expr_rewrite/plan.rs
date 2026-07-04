@@ -1,368 +1,65 @@
-//! The FALLIBLE AST-backed Svelte client EXPRESSION rewriter (the two-pass core).
+//! The TWO-PASS core of the fallible Svelte client expression rewriter
+//! ([`crate::svelte::runtime::expr_rewrite`]).
 //!
-//! This is the EMISSION-grade rewriter the client backend drives: a real walk of
-//! the OXC expression AST that resolves each identifier scope-awarely against the
-//! binding table and rewrites reads (`$.get`) / writes (`$.set` / `$.update`) /
-//! prop reads, REFUSING (a typed `Err`) on a parse failure or an unsupported form
-//! (an `await`, a destructuring write to a signal, a TS-wrapped reactive write
-//! target) — never verbatim output.
-//!
-//! Two passes:
-//! 1. [`BindingOccurrenceCollector`] — a COMPLETE scope-aware walk recording every
-//!    binding-bearing read / reassign / update as a TYPED [`Occurrence`] plus the
-//!    first unsupported expression form. Complete-by-construction: every override
-//!    delegates to `walk::walk_*`, so no subtree is dropped.
-//! 2. [`RewritePlanner`] — turns the occurrences into [`CodeTransform`] edits, or a
-//!    refusal. A post-pass invariant asserts no resolved signal/prop occurrence was
-//!    left without a rewrite decision.
-//!
-//! Assignment / update targets lower through the typed [`ClientLvalue`] classifier,
-//! so a TS-wrapped / private-field / computed-member / destructuring target is
-//! handled STRUCTURALLY (never silently dropped, never mis-rewritten).
-//!
-//! It also owns the `$props()` READ-FORM vocabulary ([`PropRead`] / [`PropReads`])
-//! — the rewriter consumes it for a prop read, and the declaration lowering in
-//! [`super::expr_emit`] produces it (`collect_prop_reads`).
+//! Pass 1 ([`BindingOccurrenceCollector`]) walks the parsed expression and
+//! records every binding-bearing read / reassign / update as a typed
+//! [`Occurrence`]; pass 2 ([`RewritePlanner`]) turns the occurrences into the
+//! typed [`Edit`]s the caller applies to its `CodeTransform`.
+//! [`plan_signal_edits`] is the single entry point. The leaf classification /
+//! rendering helpers the passes consume (the `$state.snapshot` callee matcher,
+//! the assignment-operator tables, the `$$props` member-access rendering) live
+//! here as well.
 
-use oxc_allocator::Allocator;
 use oxc_ast::ast::{
     ArrowFunctionExpression, AssignmentExpression, AssignmentOperator, AssignmentTarget,
-    BlockStatement, CallExpression, CatchClause, Expression, ForInStatement, ForOfStatement,
-    ForStatement, Function, IdentifierReference, Program, SimpleAssignmentTarget, Statement,
-    UpdateExpression, UpdateOperator, VariableDeclarationKind,
+    BlockStatement, CallExpression, CatchClause, Comment, Expression, ForInStatement,
+    ForOfStatement, ForStatement, Function, IdentifierReference, ParenthesizedExpression, Program,
+    SimpleAssignmentTarget, Statement, UpdateExpression, UpdateOperator, VariableDeclarationKind,
 };
 use oxc_ast_visit::{walk, Visit};
-use oxc_span::{GetSpan, SourceType};
+use oxc_span::GetSpan;
 
-use super::expr::{
-    arrow_scope_names, block_scope_names, collect_pattern_names, expr_is_proxiable, for_left_names,
-    function_scope_names, BindingRuntimeKind, BindingTable, ProxyInit, ScopeGraph, ScopeId,
+use super::super::expr::{
+    arrow_scope_names, block_scope_names, call_internal_comment_trivia, collect_pattern_names,
+    effect_family_call_fact, effect_family_expression_fact, expr_is_proxiable, for_left_names,
+    function_scope_names, is_inspect_trace_call, is_signal_kind, peel_parens,
+    statement_position_user_effect_span, BindingRuntimeKind, BindingTable, EffectFamilyCallKind,
+    ScopeGraph, ScopeId,
 };
-use super::unsupported::UnsupportedSvelteRuntimeSurface;
-use crate::code_transform::CodeTransform;
+use super::super::unsupported::UnsupportedSvelteRuntimeSurface;
+use super::{ClientLvalue, PropRead, PropReads, ProxyInitMap, RewriteRole};
 use rustc_hash::FxHashMap;
 use verter_span::Span as VerterSpan;
 
-/// A rewritten expression — the emitted client form of a template / handler /
-/// initializer expression. A thin wrapper around the emitted JS string; the
-/// CodeTransform that produced it owned the source-map authority, which is a
-/// deferral-ledger follow-up surface (the emitted runtime module carries no
-/// source map yet).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RewrittenExpr {
-    /// The emitted JS text.
-    pub text: String,
-}
-
-/// The typed classification of an assignment / update TARGET — the structural
-/// lvalue shape the rewriter consults to decide how (or whether) a write lowers.
-///
-/// This replaces a hand-enumerated target-kind switch: every assignment / update
-/// target lowers through this classifier, so a TS-wrapped (`(x as T) = …` /
-/// `x! = …`), private-field (`o.#x = …`), computed-member, or destructuring
-/// (`{ x } = …` / `[x] = …`) target is handled STRUCTURALLY (never silently
-/// dropped, never mis-rewritten).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum ClientLvalue {
-    /// A bare-identifier target that resolves to a reactive SIGNAL (`count = …` →
-    /// `$.set(count, …)`).
-    SignalIdent {
-        /// The signal binding name.
-        name: String,
-    },
-    /// A bare-identifier target that is NOT a signal (a plain local / global) —
-    /// the assignment passes through unchanged.
-    PlainIdent,
-    /// A member target (`o.a = …` / `o[i] = …`) — a deep write the rewriter passes
-    /// through (a `BareProxy` / `StateProxy` member write stays plain member
-    /// access; the object base is recursed for any nested signal read).
-    Member,
-    /// A target shape that COULD denote a reactive write but is outside the
-    /// supported lvalue subset (a TS-wrapped or otherwise non-plain identifier that
-    /// resolves to a signal) — the rewriter FAILS CLOSED rather than dropping the
-    /// rewrite (which would leave a raw write on the signal var).
-    UnsupportedReactiveTarget,
-    /// A destructuring assignment target (`{ x } = …` / `[x] = …`) — the official
-    /// compiler lowers it through a destructure closure; that lowering is a
-    /// deferral-ledger follow-up, so the rewriter FAILS CLOSED.
-    UnsupportedTarget,
-}
-
-/// The role a rewritten expression plays. The single value-position role; the
-/// enum exists so a future statement / pattern role can be added without changing
-/// the call sites.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RewriteRole {
-    /// A value-position expression (an interpolation, a handler body, a getter).
-    Value,
-}
-
-/// How a `$props()` member is READ at a reference site (the official two forms).
-///
-/// The READ is keyed on the LOCAL binding name (`let { foo: bar }` → `bar`), but a
-/// no-default prop reads off the props object by its SOURCE key (`$$props.foo`,
-/// NOT `$$props.bar`) — matching the official compiler. A default-bearing prop is
-/// declared `let bar = $.prop($$props, 'foo', …)` and read as the local getter
-/// `bar()`, so the source key lives in the declaration, not the read.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PropRead {
-    /// A default-bearing prop is declared via `$.prop(...)` and READ as a getter
-    /// call (`<local>()`).
-    Getter,
-    /// A no-default prop is NOT declared; it is READ directly off the props object
-    /// by its SOURCE key (`$$props.<source_key>`).
-    PropsMember {
-        /// The SOURCE prop key (the destructure key), which may differ from the
-        /// local binding name under aliasing (`let { foo: bar }` → `foo`).
-        source_key: String,
-    },
-}
-
-/// The per-name `$props()` read forms a component's instance script established.
-/// An empty map (no props) is the common case.
-pub type PropReads = rustc_hash::FxHashMap<String, PropRead>;
-
-/// Rewrite a template / handler EXPRESSION to its emitted client form.
-///
-/// Walks the OXC AST of `source` (the expression text), resolving each identifier
-/// scope-awarely against `scopes` rooted at `scope` (with a LOCAL shadow stack for
-/// the expression's own arrow/fn params + nested lets), and rewrites:
-///
-/// - a signal read (`StateSignal` / `StateProxy` / `Derived` / each / await /
-///   `{@const}`) → `$.get(x)`;
-/// - a `BareProxy` read → PLAIN access (`o`, `o.a`) — never `$.get`;
-/// - a signal reassign `x = rhs` → `$.set(x, rhs)` (`$.set(x, rhs, true)` for a
-///   `StateProxy`); a compound `x += y` → `$.set(x, $.get(x) + y)`; `x++` →
-///   `$.update(x)`, `x--` → `$.update(x, -1)`;
-/// - a `BareProxy` member write (`o.a++`, `o.push(...)`) → PLAIN (never `$.set`).
-///
-/// A shadowing local of the same name as a signal is its own binding and is left
-/// untouched. An expression that does NOT parse, or that uses a form outside the
-/// supported subset (a destructuring write target, an `await`, a TS-wrapped
-/// reactive write target), is a REFUSAL: it returns `Err(UnsupportedSvelteRuntimeSurface)`,
-/// NEVER verbatim output.
-pub fn rewrite_expression(
-    source: &str,
-    scope: ScopeId,
-    bindings: &BindingTable,
-    scopes: &ScopeGraph,
-    role: RewriteRole,
-) -> Result<RewrittenExpr, UnsupportedSvelteRuntimeSurface> {
-    rewrite_expression_with_props(source, scope, bindings, scopes, &PropReads::default(), role)
-}
-
-/// Like [`rewrite_expression`] but with the component's `$props()` read forms, so
-/// a default-bearing prop reads as `name()` and a no-default prop as
-/// `$$props.name`.
-pub fn rewrite_expression_with_props(
-    source: &str,
-    scope: ScopeId,
-    bindings: &BindingTable,
-    scopes: &ScopeGraph,
-    prop_reads: &PropReads,
-    role: RewriteRole,
-) -> Result<RewrittenExpr, UnsupportedSvelteRuntimeSurface> {
-    let _ = role;
-    rewrite_expression_full(
-        source,
-        scope,
-        bindings,
-        scopes,
-        prop_reads,
-        &ProxyInitMap::default(),
-    )
-}
-
-/// The per-script one-hop proxy-init map (`identifier name → ProxyInit`), the
-/// scope-aware input the `should_proxy` follow consults to decide the trailing
-/// `, true` on a `$.set(o, rhs[, true])`. An empty map means "no follow data" —
-/// every identifier RHS defaults to proxiable (the official predicate's
-/// default-true), matching the prior behaviour for call sites that have no script
-/// context.
-pub type ProxyInitMap = FxHashMap<String, ProxyInit>;
-
-/// The SOURCE DIALECT a rewrite parses + lowers in. The two surfaces differ ONLY in
-/// the parser source type and whether the TypeScript-strip pass runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExprDialect {
-    /// TS-lenient (`SourceType::tsx()`) parse, followed by the TypeScript-strip pass —
-    /// the default for template expressions, event handlers, lvalue thunks, and
-    /// instance-script `function` declarations (a `<script>` may carry TS syntax that
-    /// lowers stripped).
-    Tsx,
-    /// PLAIN Svelte JS (`SourceType::mjs()`) parse, with NO TypeScript-strip pass — the
-    /// FUNCTION-PAIR bind element lane ONLY. Official svelte@5.56.3 parses a binding
-    /// expression as plain JS (any TS construct is a parse error, refused upstream by
-    /// `parse_plain_svelte_function_pair`), so a valid-JS element that LOOKS like TS to
-    /// the TSX parser — e.g. ``tag<string>`x` `` (a relational compare, NOT a tagged
-    /// template with type arguments) — must be parsed as plain JS and NOT TS-stripped,
-    /// or the strip corrupts it (``tag`x` ``). Scoped to function-pair elements; do not
-    /// route other expression callers through this dialect.
-    PlainJs,
-}
-
-/// Like [`rewrite_expression_with_props`] but ALSO threading the per-script
-/// one-hop proxy-init map, so a `$.set(o, prim[, true])` reassignment matches the
-/// official scope-aware `should_proxy(rhs)` (a one-hop identifier follow to a
-/// non-proxiable primitive initializer does NOT proxy). Call sites that operate in
-/// a script scope build the map once via [`collect_proxy_inits`](super::state_scan::collect_proxy_inits)
-/// and pass it.
-///
-/// FALLIBLE: a parse failure or an unsupported expression form (a destructuring
-/// write target, an `await`, a TS-wrapped reactive write target) returns
-/// `Err(UnsupportedSvelteRuntimeSurface)` — never verbatim output.
-pub fn rewrite_expression_full(
-    source: &str,
-    scope: ScopeId,
-    bindings: &BindingTable,
-    scopes: &ScopeGraph,
-    prop_reads: &PropReads,
-    proxy_inits: &ProxyInitMap,
-) -> Result<RewrittenExpr, UnsupportedSvelteRuntimeSurface> {
-    rewrite_expression_dialect(
-        source,
-        scope,
-        bindings,
-        scopes,
-        prop_reads,
-        proxy_inits,
-        ExprDialect::Tsx,
-    )
-}
-
-/// Like [`rewrite_expression_full`] but in the PLAIN-JS ([`ExprDialect::PlainJs`])
-/// dialect — the FUNCTION-PAIR bind element lane. The source is parsed as
-/// `SourceType::mjs()` and the TypeScript-strip pass is OMITTED, so a valid-JS element
-/// that the TSX parser would reinterpret as TS (e.g. ``tag<string>`x` `` — a relational
-/// compare, not a tagged template with type arguments) is rewritten faithfully instead
-/// of being corrupted by the strip. The signal-rewrite collection is identical (signals
-/// are plain identifiers/calls, dialect-independent). Acceptance + element extraction is
-/// the caller's responsibility via the shared
-/// [`BindTargetFact::function_pair`](super::expr::BindTargetFact) slices, which already
-/// refused any TS-bearing element upstream; this lane only rewrites a known-clean element.
-pub fn rewrite_expression_plain_js(
-    source: &str,
-    scope: ScopeId,
-    bindings: &BindingTable,
-    scopes: &ScopeGraph,
-    prop_reads: &PropReads,
-    proxy_inits: &ProxyInitMap,
-) -> Result<RewrittenExpr, UnsupportedSvelteRuntimeSurface> {
-    rewrite_expression_dialect(
-        source,
-        scope,
-        bindings,
-        scopes,
-        prop_reads,
-        proxy_inits,
-        ExprDialect::PlainJs,
-    )
-}
-
-/// The shared source-preserving expression-rewrite core, parameterised by source
-/// [`ExprDialect`]. `Tsx` parses TS-lenient + strips TypeScript; `PlainJs` parses
-/// `mjs` + omits the strip. Everything else (the two-pass signal-rewrite, the
-/// CodeTransform composition, the inner-expression slice) is dialect-independent.
-fn rewrite_expression_dialect(
-    source: &str,
-    scope: ScopeId,
-    bindings: &BindingTable,
-    scopes: &ScopeGraph,
-    prop_reads: &PropReads,
-    proxy_inits: &ProxyInitMap,
-    dialect: ExprDialect,
-) -> Result<RewrittenExpr, UnsupportedSvelteRuntimeSurface> {
-    let alloc = Allocator::default();
-    // Wrap the expression in `(…)` so an arrow / object literal / sequence parses
-    // as a single expression statement. The single `(` prefix means an AST span
-    // `s` indexes `wrapped[s..]` directly.
-    let wrapped = format!("({source})");
-    let source_type = match dialect {
-        ExprDialect::Tsx => SourceType::tsx(),
-        ExprDialect::PlainJs => SourceType::mjs(),
-    };
-    let parsed = oxc_parser::Parser::new(&alloc, &wrapped, source_type).parse();
-    if parsed.panicked || !parsed.errors.is_empty() {
-        // A fragment that does not parse is a refusal — never emit it verbatim.
-        return Err(UnsupportedSvelteRuntimeSurface::DestructuringWrite {
-            span: VerterSpan::new(0, 0),
-        });
-    }
-    let Some(Statement::ExpressionStatement(stmt)) = parsed.program.body.first() else {
-        return Err(UnsupportedSvelteRuntimeSurface::DestructuringWrite {
-            span: VerterSpan::new(0, 0),
-        });
-    };
-    let inner = match &stmt.expression {
-        Expression::ParenthesizedExpression(p) => &p.expression,
-        other => other,
-    };
-
-    // Collect the binding-bearing read/write occurrences and plan them into the typed
-    // signal-rewrite edits (the shared two-pass core; a refusal returns the typed surface).
-    let edits = plan_signal_edits(
-        inner,
-        RewriteResolveCtx {
-            bindings,
-            scopes,
-            outer_scope: scope,
-            prop_reads,
-            proxy_inits,
-        },
-        source,
-    )?;
-
-    let ct_alloc = Allocator::default();
-    let mut ct = CodeTransform::new(&wrapped, &ct_alloc);
-    // (1) Strip TypeScript syntax through the dedicated machinery (the §F rule —
-    // `as`/`satisfies`/`!`/type assertions/instantiation type args), the SAME path
-    // the statement lowering uses. The strip and the signal-read rewrites are
-    // DISJOINT (a TS type span never overlaps a runtime read leaf), so they compose
-    // on one transform. SKIPPED in the `PlainJs` dialect: the element parsed as plain
-    // JS carries no TS nodes, and stripping would mis-handle a valid-JS form the TSX
-    // parser reinterprets as TS (the ``tag<string>`x` `` trap).
-    if dialect == ExprDialect::Tsx {
-        crate::strip_types::typescript::strip_typescript_from_expression(
-            inner, &mut ct, 0, &wrapped,
-        );
-    }
-    // (2) Apply the signal read/write rewrites + the elision drops.
-    for edit in &edits {
-        match edit {
-            Edit::Overwrite { start, end, text } => {
-                ct.overwrite(*start, *end, text);
-            }
-            Edit::Append { at, text } => {
-                ct.append_left(*at, text);
-            }
-            Edit::Remove { start, end } => {
-                ct.remove(*start, *end);
-            }
-        }
-    }
-    let built = ct.build_string();
-    // Slice the rewritten INNER expression back out of the built wrapped string.
-    // The leading `(` adds one byte; the build delta is uniform up to the inner
-    // start because no edit precedes it, so the inner expression begins at byte 1.
-    let body = built
-        .strip_prefix('(')
-        .and_then(|b| b.strip_suffix(')'))
-        .unwrap_or(&built);
-    Ok(RewrittenExpr {
-        text: body.to_string(),
-    })
-}
-
 /// Collect the binding-bearing read/write occurrences of one expression node and plan them
 /// into the typed signal-rewrite [`Edit`]s — the two-pass core of the source-preserving
-/// [`rewrite_expression_full`]. A refusal (an unsupported write target / `await` / TS-wrapped
+/// [`rewrite_expression_full`](super::rewrite_expression_full). A refusal (an unsupported write target / `await` / TS-wrapped
 /// reactive target, or a resolved occurrence left un-rewritten) returns the typed surface.
-/// `source` is the original expression text (for the debug assertion message only).
-fn plan_signal_edits(
+/// `source` is the original expression text (for the debug assertion message only);
+/// `wrapped` is the parsed `({source})` text the AST spans index, and `comments` is
+/// that parse's comment table (the invocation-head rewrites preserve comment trivia
+/// inside a replaced range instead of swallowing it). `carrier_head_trivia` is the
+/// pre-rendered wrapper-head trivia an instance-item carrier collected — re-emitted
+/// inside the carried expression's TOP-LEVEL family call head (call-internal slot).
+pub(super) fn plan_signal_edits(
     inner: &Expression<'_>,
     ctx: RewriteResolveCtx<'_>,
     source: &str,
+    role: RewriteRole,
+    wrapped: &str,
+    comments: &[Comment],
+    carrier_head_trivia: &str,
 ) -> Result<Vec<Edit>, UnsupportedSvelteRuntimeSurface> {
+    // The carrier trivia targets the TOP-LEVEL family call of the carried
+    // expression (each instance-item carrier slices exactly ONE family call —
+    // classifier-proven — so its head rewrite is where the wrapper trivia
+    // belongs). Resolved from the same parse the collector walks, so the
+    // injection is span-exact; empty carrier trivia resolves no target.
+    let carrier_trivia_target = if carrier_head_trivia.is_empty() {
+        None
+    } else {
+        effect_family_expression_fact(inner).map(|fact| (fact.call_span.start, fact.call_span.end))
+    };
     // Pass 1: a COMPLETE scope-aware AST walk records every binding-bearing occurrence
     // (read / reassign / update) as a TYPED occurrence plus any unsupported expression form.
     // The walk delegates to `walk::walk_*` after handling each node, so NO subtree is
@@ -372,7 +69,23 @@ fn plan_signal_edits(
         locals: Vec::new(),
         occurrences: Vec::new(),
         refusal: None,
+        stmt_effect_spans: rustc_hash::FxHashSet::default(),
+        wrapped,
+        comments,
+        carrier_head_trivia,
+        carrier_trivia_target,
+        wrapper_heads: FxHashMap::default(),
     };
+    // In the STATEMENT role the top-level expression IS the expression of a
+    // statement (the effect-statement carrier), so a top-level user-effect call
+    // is pre-admitted exactly as a nested statement-position call would be by
+    // `visit_expression_statement` (paren-transparent — official ESTree has no
+    // paren nodes, so `($effect(fn));` is the same statement).
+    if role == RewriteRole::Statement {
+        if let Some(span) = statement_position_user_effect_span(inner) {
+            collector.stmt_effect_spans.insert((span.start, span.end));
+        }
+    }
     collector.rewrite_expr(inner);
     if let Some(surface) = collector.refusal {
         return Err(surface);
@@ -411,7 +124,7 @@ fn plan_signal_edits(
 /// source. Edits are DISJOINT by construction (a structural rewrite never also
 /// carries a leaf edit inside the span it fully overwrites), so they compose
 /// cleanly on the `CodeTransform`.
-enum Edit {
+pub(super) enum Edit {
     /// Overwrite `[start, end)` with `text` (a signal-read leaf → `$.get(x)`, a
     /// prop read → `name()`, an assignment / update head). The text is inserted
     /// (unmapped synthesized scaffolding); surrounding source stays mapped.
@@ -420,9 +133,10 @@ enum Edit {
     /// wrap, placed after a sub-expression that keeps its own leaf edits).
     Append { at: u32, text: String },
     /// Remove `[start, end)` entirely (a production-elided `$inspect.trace(...)`
-    /// statement dropped in place). The dropped span carries no inner edits (the
-    /// walk never descends into a dropped statement), so the removal composes
-    /// disjointly with the leaf rewrites.
+    /// statement dropped in place, or a wrapper-gap comment relocated into a
+    /// rewritten invocation head). The removed span carries no inner edits (the
+    /// walk never descends into a dropped statement; a comment holds no AST
+    /// node), so the removal composes disjointly with the leaf rewrites.
     Remove { start: u32, end: u32 },
 }
 
@@ -430,22 +144,22 @@ enum Edit {
 /// read forms, proxy-init map). Bundled so the per-occurrence resolution is one
 /// borrow.
 #[derive(Clone, Copy)]
-struct RewriteResolveCtx<'s> {
-    bindings: &'s BindingTable,
-    scopes: &'s ScopeGraph,
+pub(super) struct RewriteResolveCtx<'s> {
+    pub(super) bindings: &'s BindingTable,
+    pub(super) scopes: &'s ScopeGraph,
     /// The outer (template / script) scope this expression evaluates in.
-    outer_scope: ScopeId,
+    pub(super) outer_scope: ScopeId,
     /// The component's `$props()` read forms (per prop name).
-    prop_reads: &'s PropReads,
+    pub(super) prop_reads: &'s PropReads,
     /// The per-script one-hop proxy-init map for the `should_proxy(rhs)` follow.
-    proxy_inits: &'s ProxyInitMap,
+    pub(super) proxy_inits: &'s ProxyInitMap,
 }
 
 /// One binding-bearing occurrence the [`BindingOccurrenceCollector`] records — a
 /// READ, a REASSIGN, or an UPDATE that resolves (scope-awarely) to a rune binding,
 /// already lowered to its TYPED rewrite decision. A non-binding occurrence (a
 /// global / shadowed local read) is NOT recorded at all.
-enum Occurrence {
+pub(super) enum Occurrence {
     /// A read leaf that must be rewritten (`$.get(x)` for a signal, `name()` /
     /// `$$props.x` for a prop). Carries the read span + the emitted text.
     ReadRewrite { span: oxc_span::Span, text: String },
@@ -467,6 +181,16 @@ enum Occurrence {
     /// preserved). Carries the whole-statement span; the walk never descends into
     /// it, so the span holds no other occurrence.
     DropStatement { span: oxc_span::Span },
+    /// A wrapper-GAP comment REMOVED from its source slot: the comment sits
+    /// between a transparent author-paren `(` and the effect-family call the
+    /// paren wraps (`(/*#__PURE__*/ $effect.root(fn))`), and the accepted
+    /// invocation-head rewrite re-emits it INSIDE the emitted helper call —
+    /// left in the gap it would sit call-leading before the rewritten helper
+    /// (PURE-activating). The wrapper parens themselves STAY (a
+    /// behavior-preserving redundant paren is waived); only the comment
+    /// moves. Carries the comment span; the re-emission rides the head
+    /// rewrite's replacement text.
+    RelocatedWrapperComment { span: oxc_span::Span },
 }
 
 /// Pass 1: the COMPLETE scope-aware occurrence collector. It walks the OXC
@@ -484,7 +208,7 @@ enum Occurrence {
 /// `$inspect.trace()` statement, whose whole span is removed so its subtree must
 /// record nothing). A LOCAL shadow stack (`locals`) models the expression's own
 /// nested scopes so a shadowing local of a signal name is NOT recorded.
-struct BindingOccurrenceCollector<'s> {
+pub(super) struct BindingOccurrenceCollector<'s> {
     ctx: RewriteResolveCtx<'s>,
     /// The active LOCAL shadow frames (innermost last).
     locals: Vec<rustc_hash::FxHashSet<String>>,
@@ -492,6 +216,67 @@ struct BindingOccurrenceCollector<'s> {
     occurrences: Vec<Occurrence>,
     /// The FIRST unsupported expression form found (a refusal), if any.
     refusal: Option<UnsupportedSvelteRuntimeSurface>,
+    /// The call spans of STATEMENT-POSITION `$effect(...)` / `$effect.pre(...)`
+    /// calls — recorded by `visit_expression_statement` (and the statement-role
+    /// entry seed) BEFORE the call visitor reaches the call. The user-effect
+    /// members are statement-ONLY (official `effect_invalid_placement`); a
+    /// family call whose span is NOT in this set is a value position and
+    /// refuses.
+    stmt_effect_spans: rustc_hash::FxHashSet<(u32, u32)>,
+    /// The parsed `({source})` text the AST spans index — the slice source for
+    /// re-emitting comment trivia a head rewrite would otherwise overwrite.
+    wrapped: &'s str,
+    /// The parse's comment table (spans index `wrapped`, delimiters included) —
+    /// the trivia authority for the invocation-head rewrites.
+    comments: &'s [Comment],
+    /// The pre-rendered CALL-INTERNAL trivia an instance-item carrier collected
+    /// from the transparent-wrapper head its slice normalized away
+    /// (`(/*#__PURE__*/ $effect(fn));` — the wrapper parens stay outside the
+    /// carried call span, but their interior head comments ride the carrier).
+    /// Re-emitted inside the TOP-LEVEL family call's rewritten head, ahead of
+    /// the head's own trivia (source order). Empty for every non-carrier entry.
+    carrier_head_trivia: &'s str,
+    /// The call span `(start, end)` the carrier trivia belongs to — the carried
+    /// expression's top-level family call, resolved from the same parse the
+    /// collector walks (span-exact injection). `None` when there is no carrier
+    /// trivia.
+    carrier_trivia_target: Option<(u32, u32)>,
+    /// Per effect-family call span, the start byte of the OUTERMOST transparent
+    /// author-paren wrapper around that call — recorded by
+    /// `visit_parenthesized_expression` (the walk reaches an ancestor paren
+    /// before the call it wraps, so the first insert is the outermost). The
+    /// accepted head rewrite relocates every wrapper-GAP comment in
+    /// `[wrapper_start, call_start)` into the emitted helper call (removal +
+    /// call-internal re-emission); the parens themselves stay in place. A call
+    /// with no wrapper has no entry (the overwhelmingly common case).
+    wrapper_heads: FxHashMap<(u32, u32), u32>,
+}
+
+/// The end byte (EXCLUSIVE) of the opening `(` of an effect-family invocation
+/// head — the first `(` token after the callee end, with comment trivia masked
+/// through the parse's comment table (a `(` inside a comment is not the paren
+/// token). The scan stops at `to` (the first argument start, or the call end
+/// for a zero-arg form). EVERY accepted head — plain, member,
+/// optional-receiver, optional-call — is rewritten THROUGH this byte, so
+/// everything after it (arg-leading trivia, a zero-arg `()` interior, the
+/// closing paren) survives in place, untouched and never duplicated. `None`
+/// only when the range holds no paren token — unreachable for a parsed call
+/// (the caller fails the family closed rather than emit a half-rewritten head).
+fn head_open_paren_end(wrapped: &str, comments: &[Comment], from: u32, to: u32) -> Option<u32> {
+    let bytes = wrapped.as_bytes();
+    let mut i = from as usize;
+    let end = (to as usize).min(bytes.len());
+    while i < end {
+        if let Some(c) = comments.iter().find(|c| c.span.start as usize == i) {
+            i = (c.span.end as usize).max(i + 1);
+            continue;
+        }
+        if bytes[i] == b'(' {
+            return Some(i as u32 + 1);
+        }
+        i += 1;
+    }
+    None
 }
 
 impl BindingOccurrenceCollector<'_> {
@@ -929,6 +714,25 @@ impl<'a> Visit<'a> for BindingOccurrenceCollector<'_> {
         walk::walk_object_property(self, it);
     }
 
+    fn visit_parenthesized_expression(&mut self, it: &ParenthesizedExpression<'a>) {
+        // A transparent author-paren WRAPPER around an effect-family call
+        // (`(/*#__PURE__*/ $effect.root(fn))` in a handler / nested body).
+        // Record the wrapper start against the (peeled) call span BEFORE the
+        // walk descends, so the accepted invocation-head rewrite can relocate
+        // the wrapper-GAP comments into the emitted helper call instead of
+        // leaving them call-leading. An ancestor paren is visited before the
+        // call it wraps, so the FIRST insert per call is the OUTERMOST wrapper
+        // — the gap range then covers every nested wrapper's comments in
+        // source order. Shadowing and acceptance are the call visitor's checks
+        // (an unused entry is inert); a non-family paren records nothing.
+        if let Some(fact) = effect_family_expression_fact(&it.expression) {
+            self.wrapper_heads
+                .entry((fact.call_span.start, fact.call_span.end))
+                .or_insert(it.span.start);
+        }
+        walk::walk_parenthesized_expression(self, it);
+    }
+
     fn visit_call_expression(&mut self, it: &CallExpression<'a>) {
         // A `$state.snapshot(x)` call rewrites its CALLEE member to the `$.snapshot`
         // helper (a SPAN-replacement over the `$state.snapshot` callee). The argument
@@ -941,6 +745,141 @@ impl<'a> Visit<'a> for BindingOccurrenceCollector<'_> {
                 self.occurrences.push(Occurrence::ReadRewrite {
                     span: callee_span,
                     text: "$.snapshot".to_string(),
+                });
+            }
+        }
+        // A WELL-FORMED effect-family rune call (`$effect(fn)` / `$effect.pre(fn)`
+        // / `$effect.root(fn)` / `$effect.tracking()`, unshadowed) in a LEGAL
+        // POSITION rewrites its invocation head to the registered runtime helper.
+        // The user-effect members are STATEMENT-ONLY and NON-OPTIONAL (official
+        // `effect_invalid_placement`: legal only as the expression of an
+        // `ExpressionStatement` — a concise-arrow body, a declarator init, a
+        // `return` / call argument, and EVERY optional invocation all REJECT);
+        // their admissible call spans were recorded by
+        // `visit_expression_statement` (or the statement-role entry seed) before
+        // this visitor ran. `.root` / `.tracking` are expression-valued (no
+        // position requirement; optional invocations admit). The callee is
+        // CONSUMED by the rewrite — the walk covers the ARGUMENTS only, so the
+        // `$effect` reference refusal below never fires on a consumed callee
+        // while a nested family call / signal read / `await` inside the argument
+        // still lowers (or refuses) recursively. A MALFORMED call (wrong arity,
+        // a spread argument) or a VALUE-POSITION / optional user-effect call
+        // records the precise family refusal — the rune scan fails these closed
+        // upstream; this arm is defense-in-depth so the rewriter can NEVER emit
+        // a raw or official-rejected effect-family rune.
+        if !self.is_local("$effect") {
+            if let Some(fact) = effect_family_call_fact(it) {
+                let position_ok = match fact.kind {
+                    EffectFamilyCallKind::UserEffect | EffectFamilyCallKind::UserPreEffect => {
+                        !fact.optional
+                            && self
+                                .stmt_effect_spans
+                                .contains(&(it.span.start, it.span.end))
+                    }
+                    EffectFamilyCallKind::EffectRoot | EffectFamilyCallKind::EffectTracking => true,
+                };
+                // ONE invocation-head rule for EVERY accepted family form —
+                // plain, member, optional-receiver, optional-call, zero-arg:
+                // overwrite `callee_start..open_paren_end` with
+                // `{helper}({relocated_trivia}`. The head is rewritten THROUGH
+                // the opening call paren, and comment trivia the overwrite
+                // destroys re-emits INSIDE the emitted helper call, immediately
+                // after the emitted `(` — the canonical call-internal slot
+                // ([`call_internal_comment_trivia`]). The head can never mint a
+                // call-LEADING prefix: a leading `/*#__PURE__*/` would annotate
+                // the helper call and a leading `//` line comment after
+                // `return` would arm ASI against the emitted call. Bytes after
+                // the opening paren stay in place, so arg-leading trivia and a
+                // zero-arg `()` interior (`$effect.tracking?.(/*c*/)`) survive
+                // untouched — never duplicated — and every `?.` head
+                // normalizes away (official emits the helper call PLAIN; a
+                // callee-span-only rewrite would leave a structural
+                // `$.effect_root?.(…)` divergence). The arguments keep their
+                // own spans, so nested edits stay disjoint. A parsed call
+                // always has its opening paren, so the not-found arm is
+                // unreachable and falls through to the fail-closed family
+                // refusal below (defense-in-depth — never a raw or
+                // half-rewritten emission).
+                let head_end = (fact.well_formed && position_ok)
+                    .then(|| {
+                        head_open_paren_end(
+                            self.wrapped,
+                            self.comments,
+                            fact.callee_span.end,
+                            it.arguments
+                                .first()
+                                .map_or(it.span.end, |arg| arg.span().start),
+                        )
+                    })
+                    .flatten();
+                if let Some(open_paren_end) = head_end {
+                    let helper = format!("$.{}", fact.kind.helper().ident());
+                    // Wrapper-head trivia the instance-item carrier pre-collected
+                    // for THIS call (the carrier slice normalizes transparent
+                    // author parens away; their interior head comments relocate
+                    // here, ahead of the head's own trivia — source order).
+                    let carrier_lead =
+                        if self.carrier_trivia_target == Some((it.span.start, it.span.end)) {
+                            self.carrier_head_trivia
+                        } else {
+                            ""
+                        };
+                    // Wrapper-GAP trivia of an IN-SOURCE transparent author-paren
+                    // wrapper around this call (`(/*#__PURE__*/ $effect.root(fn))`
+                    // in a handler / nested body — the general path keeps the
+                    // wrapper parens, but a gap comment left in place would sit
+                    // call-leading before the rewritten helper call,
+                    // PURE-activating). Each gap comment is removed from its
+                    // source slot and re-emitted inside the emitted helper call,
+                    // between the carrier trivia and the head's own trivia
+                    // (outermost-first source order).
+                    let wrapper_lead = match self
+                        .wrapper_heads
+                        .get(&(it.span.start, it.span.end))
+                        .copied()
+                    {
+                        Some(wrapper_start) => {
+                            let comments = self.comments;
+                            for c in comments {
+                                if c.span.start >= wrapper_start && c.span.end <= it.span.start {
+                                    self.occurrences
+                                        .push(Occurrence::RelocatedWrapperComment { span: c.span });
+                                }
+                            }
+                            call_internal_comment_trivia(
+                                self.wrapped,
+                                comments,
+                                wrapper_start,
+                                it.span.start,
+                            )
+                        }
+                        None => String::new(),
+                    };
+                    let lead = call_internal_comment_trivia(
+                        self.wrapped,
+                        self.comments,
+                        fact.callee_span.start,
+                        open_paren_end,
+                    );
+                    self.occurrences.push(Occurrence::ReadRewrite {
+                        span: oxc_span::Span::new(fact.callee_span.start, open_paren_end),
+                        text: format!("{helper}({carrier_lead}{wrapper_lead}{lead}"),
+                    });
+                    for arg in &it.arguments {
+                        match arg.as_expression() {
+                            Some(expr) => self.visit_expression(expr),
+                            None => {
+                                if let oxc_ast::ast::Argument::SpreadElement(s) = arg {
+                                    self.visit_expression(&s.argument);
+                                }
+                            }
+                        }
+                    }
+                    return;
+                }
+                self.refuse(UnsupportedSvelteRuntimeSurface::AdvancedRune {
+                    rune: fact.kind.rune_label(),
+                    span: VerterSpan::new(it.span.start, it.span.end),
                 });
             }
         }
@@ -959,6 +898,15 @@ impl<'a> Visit<'a> for BindingOccurrenceCollector<'_> {
                 .push(Occurrence::DropStatement { span: it.span });
             return;
         }
+        // A statement-position `$effect(...)` / `$effect.pre(...)` call — the ONE
+        // official-legal position for the user-effect members
+        // (`effect_invalid_placement` is a direct-parent rule; parens are
+        // transparent). Record the call span BEFORE the walk descends so the call
+        // visitor admits the callee rewrite; a shadowed `$effect` never consults
+        // the set (the call visitor's local check owns shadowing).
+        if let Some(span) = statement_position_user_effect_span(&it.expression) {
+            self.stmt_effect_spans.insert((span.start, span.end));
+        }
         walk::walk_expression_statement(self, it);
     }
 
@@ -975,6 +923,20 @@ impl<'a> Visit<'a> for BindingOccurrenceCollector<'_> {
         if it.name.as_str() == "$inspect" && !self.is_local("$inspect") {
             self.refuse(UnsupportedSvelteRuntimeSurface::AdvancedRune {
                 rune: "$inspect",
+                span: VerterSpan::new(it.span.start, it.span.end),
+            });
+        }
+        // An unshadowed `$effect` reference NOT consumed by an admitted family
+        // callee rewrite (a value reference `foo($effect)`, an uncalled member
+        // `const f = $effect.pre;`, the callee of a malformed or value-position
+        // user-effect call) is outside the supported effect-family surface —
+        // fail closed rather than emit a raw `$effect` reference (a runtime
+        // ReferenceError). The admitted family calls never reach here: their
+        // callee is consumed by the call visitor (which walks only the
+        // arguments).
+        if it.name.as_str() == "$effect" && !self.is_local("$effect") {
+            self.refuse(UnsupportedSvelteRuntimeSurface::AdvancedRune {
+                rune: "$effect",
                 span: VerterSpan::new(it.span.start, it.span.end),
             });
         }
@@ -1007,7 +969,7 @@ impl<'a> Visit<'a> for BindingOccurrenceCollector<'_> {
 /// and emits the CodeTransform edits, OR records a refusal. A `MustRewrite`
 /// occurrence that the planner cannot turn into an edit sets `unresolved` — the
 /// post-pass invariant (no resolved signal/prop occurrence left un-rewritten).
-struct RewritePlanner {
+pub(super) struct RewritePlanner {
     /// The emitted edits (disjoint, applied in record order).
     edits: Vec<Edit>,
     /// The first refusal, if any.
@@ -1055,7 +1017,8 @@ impl RewritePlanner {
                         text: text.clone(),
                     });
                 }
-                Occurrence::DropStatement { span } => {
+                Occurrence::DropStatement { span }
+                | Occurrence::RelocatedWrapperComment { span } => {
                     self.edits.push(Edit::Remove {
                         start: span.start,
                         end: span.end,
@@ -1067,68 +1030,41 @@ impl RewritePlanner {
 }
 
 /// Whether a call expression's callee is the `$state.snapshot` rune member — a
-/// CallExpression whose callee is the static `.snapshot` member on the bare `$state`
-/// identifier (paren-transparent on the `$state` receiver). Returns the callee
-/// member's span so the rewriter can replace `$state.snapshot` with the `$.snapshot`
-/// helper. Shadowing (`$state` a local) is the CALLER's check (the collector consults
-/// its own local shadow frames). Driven from the typed OXC AST only.
+/// CallExpression whose (paren-peeled) callee is the static `.snapshot` member on
+/// the (paren-peeled) bare `$state` identifier. BOTH callee paren positions are
+/// transparent (`($state).snapshot(x)`, `($state.snapshot)(x)`, doubled or
+/// combined) — official's ESTree AST has no paren nodes, and the rune-scan
+/// exemption peels the SAME way, so the scan model and this matcher agree.
+/// Returns the span of the WHOLE callee — paren-INCLUSIVE — so replacing it with
+/// the `$.snapshot` helper leaves no paren residue (a member-span-only overwrite
+/// would emit `($.snapshot)(x)`); on the paren-less spelling the callee span IS
+/// the member span. Shadowing (`$state` a local) is the CALLER's check (the
+/// collector consults its own local shadow frames). Driven from the typed OXC
+/// AST only.
 fn state_snapshot_callee_span(call: &CallExpression<'_>) -> Option<oxc_span::Span> {
-    let Expression::StaticMemberExpression(member) = &call.callee else {
+    let Expression::StaticMemberExpression(member) = peel_parens(&call.callee) else {
         return None;
     };
     if member.property.name.as_str() != "snapshot" {
         return None;
     }
-    // The member OBJECT is paren-transparent (`($state).snapshot()`).
-    let mut object = &member.object;
-    while let Expression::ParenthesizedExpression(paren) = object {
-        object = &paren.expression;
-    }
-    if matches!(object, Expression::Identifier(id) if id.name.as_str() == "$state") {
+    if matches!(peel_parens(&member.object), Expression::Identifier(id) if id.name.as_str() == "$state")
+    {
         // Only the WELL-FORMED single-non-spread-arg form is the supported
         // `$.snapshot(<expr>)` rewrite. Official rejects a zero-arg / >=2-arg call
         // (`rune_invalid_arguments_length`) and a spread arg (`rune_invalid_spread`) —
-        // oracle-verified against `svelte@5.56.3`. The rune-scan gate fails those closed
-        // upstream so this rewriter never runs on them; this arity/spread guard is
-        // defense-in-depth so the rewriter can NEVER emit a raw `$.snapshot()` /
-        // `$.snapshot(a, b)` / `$.snapshot(...o)` even if reached.
+        // oracle-verified against `svelte@5.56.3` at every paren position. The
+        // rune-scan gate fails those closed upstream so this rewriter never runs on
+        // them; this arity/spread guard is defense-in-depth so the rewriter can NEVER
+        // emit a raw `$.snapshot()` / `$.snapshot(a, b)` / `$.snapshot(...o)` even if
+        // reached.
         if call.arguments.len() != 1 || call.arguments[0].as_expression().is_none() {
             return None;
         }
-        Some(member.span)
+        Some(call.callee.span())
     } else {
         None
     }
-}
-
-/// Whether an expression is an unshadowed-CANDIDATE `$inspect.trace(...)` call —
-/// a CallExpression whose callee is the static `.trace` member on the bare
-/// `$inspect` identifier. A PARENTHESIZED wrapper (`($inspect.trace())`) is
-/// transparent — official treats it as the same statement — so parens are
-/// unwrapped (recursively) before the shape check. Shadowing is the CALLER's
-/// check (the collector consults its own local shadow frames). Driven from the
-/// typed OXC AST only. Shared with the delegated event-handler shape gate
-/// ([`super::client_shapes`]), which skips the statement this rewriter later
-/// drops.
-pub(super) fn is_inspect_trace_call(expr: &Expression<'_>) -> bool {
-    let mut expr = expr;
-    while let Expression::ParenthesizedExpression(paren) = expr {
-        expr = &paren.expression;
-    }
-    let Expression::CallExpression(call) = expr else {
-        return false;
-    };
-    let Expression::StaticMemberExpression(member) = &call.callee else {
-        return false;
-    };
-    // The member OBJECT is likewise paren-transparent (`($inspect).trace()`) — official
-    // treats redundant parens around the `$inspect` receiver as transparent.
-    let mut object = &member.object;
-    while let Expression::ParenthesizedExpression(paren) = object {
-        object = &paren.expression;
-    }
-    member.property.name.as_str() == "trace"
-        && matches!(object, Expression::Identifier(id) if id.name.as_str() == "$inspect")
 }
 
 /// The base operator of a compound assignment (`+=` → `+`, `*=` → `*`, …).
@@ -1211,17 +1147,4 @@ pub(super) fn js_string_literal(value: &str) -> String {
     }
     out.push('\'');
     out
-}
-
-/// Whether a binding kind is a reactive SIGNAL (read via `$.get`).
-pub(super) fn is_signal_kind(kind: BindingRuntimeKind) -> bool {
-    matches!(
-        kind,
-        BindingRuntimeKind::StateSignal { .. }
-            | BindingRuntimeKind::StateProxy
-            | BindingRuntimeKind::Derived
-            | BindingRuntimeKind::EachSignal
-            | BindingRuntimeKind::AwaitSignal
-            | BindingRuntimeKind::LegacyConstDerived
-    )
 }

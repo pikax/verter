@@ -139,18 +139,31 @@ pub(super) fn classify_event_handler_shape(
 }
 
 /// Whether an arrow handler's body is EXCLUSIVELY `$state` assignment / update
-/// statements (the supported §1.2-class onclick body). An EXPRESSION-bodied arrow
+/// statements — plus well-formed effect-family rune call statements — (the
+/// supported §1.2-class onclick body). An EXPRESSION-bodied arrow
 /// (`() => count += 1`) must have a `$state` assignment / update expression; a
-/// BLOCK-bodied arrow (`() => { a++; b++; }`) must have a non-empty body whose every
-/// statement is a `$state` assignment / update expression statement. A
-/// production-ELIDED `$inspect.trace(...)` statement is SKIPPED (the shared body
-/// rewriter drops it in place at projection time — official `dev:false` removes
-/// the call and still delegates the handler), but at least one real `$state`
-/// write must remain.
+/// BLOCK-bodied arrow (`() => { a++; b++; }`) must have a non-empty body whose
+/// every statement is a `$state` assignment / update expression statement OR a
+/// well-formed effect-family call statement (the SAME shared statement
+/// vocabulary as the top-level effect-statement carrier: `$effect(fn);` /
+/// `$effect.pre(fn);` / `$effect.root(fn);` / `$effect.tracking();` —
+/// oracle-verified: official lowers every family member inside a delegated
+/// handler closure, e.g. `$.delegated('click', button, () => {
+/// $.effect_root(...); })`, with root/tracking never forcing the component
+/// frame; the body lowers through the shared rewriter, so the callee rewrites
+/// there). A production-ELIDED `$inspect.trace(...)` statement is SKIPPED (the
+/// shared body rewriter drops it in place at projection time — official
+/// `dev:false` removes the call and still delegates the handler), but at least
+/// one real statement (a state write or a family call) must remain.
+///
+/// A top-level shadowing `let $effect` is a `$`-prefixed binding refused by the
+/// declarator gate, so the bare name in a handler body is the rune; the
+/// rewriter's own shadow-aware backstop still owns any locally-shadowed form.
 ///
 /// Decided structurally over the parsed arrow + the scope-aware binding table — a
-/// call, a declaration, an `if`, an update of a non-`$state` (a plain local / prop /
-/// derived), or an empty block all fail (drive the handler to the 5d wrapper form).
+/// plain call, a declaration, an `if`, an update of a non-`$state` (a plain local /
+/// prop / derived), or an empty block all fail (drive the handler to the 5d
+/// wrapper form).
 fn arrow_body_is_state_writes(
     arrow: &oxc_ast::ast::ArrowFunctionExpression<'_>,
     scope: ScopeId,
@@ -169,22 +182,28 @@ fn arrow_body_is_state_writes(
         return expr_is_state_write(&stmt.expression, scope, bindings, scopes);
     }
     // A block-bodied arrow: every statement is a `$state` assignment / update
-    // expression statement, with production-elided `$inspect.trace(...)`
-    // statements skipped; at least one real state write must remain.
-    let mut state_writes = 0usize;
+    // expression statement or a well-formed effect-family call statement (the
+    // shared statement predicate — statement-only rule preserved for plain/pre,
+    // root/tracking admitted as statements too), with production-elided
+    // `$inspect.trace(...)` statements skipped; at least one real admitted
+    // statement must remain.
+    let mut admitted = 0usize;
     for stmt in &arrow.body.statements {
         let Statement::ExpressionStatement(es) = stmt else {
             return false;
         };
-        if super::expr_rewrite::is_inspect_trace_call(&es.expression) {
+        if super::expr::is_inspect_trace_call(&es.expression) {
             continue;
         }
-        if !expr_is_state_write(&es.expression, scope, bindings, scopes) {
-            return false;
+        if super::expr::effect_family_statement_fact(&es.expression).is_some()
+            || expr_is_state_write(&es.expression, scope, bindings, scopes)
+        {
+            admitted += 1;
+            continue;
         }
-        state_writes += 1;
+        return false;
     }
-    state_writes > 0
+    admitted > 0
 }
 
 /// Whether an expression is a `$state` assignment / update — the DELEGATED narrow
@@ -306,6 +325,13 @@ fn update_write_target(
 // not yet ported here, so a binary / call / member / conditional interpolation fails closed
 // instead of lowering. That evaluator belongs to the reactive-text/interpolation completion
 // surface (the global interpolation-breadth owner), not this declaration-tag surface.
+// An INLINE `{$effect.tracking()}` interpolation is a sub-shape of this same
+// call-bearing-interpolation carrier debt: official lowers it through the memoized dep
+// form (`$.template_effect(($0) => $.set_text(text, $0), [() => $.effect_tracking()])`),
+// which needs the `has_call` deps-array evaluator above — until that carrier lands it
+// fails closed here (ComplexInterpolation), never a raw rune emission. The supported
+// tracking read is the script-const form (`const t = $effect.tracking();` + `{t}` →
+// `EffectTrackingConstRead`).
 // The `…Read` postfix is the semantically-meaningful shared trait of every variant (each
 // is a reactive READ form), not a naming accident — the lint is suppressed by design.
 #[allow(clippy::enum_variant_names)]
@@ -319,6 +345,11 @@ pub(super) enum ClientInterpolationShape {
     /// `x()` (the snippet receives its args as zero-arg getter thunks). Reactive (joins
     /// the slot/snippet body's `$.template_effect`).
     SnippetParamRead,
+    /// `{t}` where `t` resolves to a top-level `$effect.tracking()` const — read
+    /// PLAIN (`t`, never `$.get`) inside the region's `$.template_effect`
+    /// (official emits the template effect because a call-init const cannot be
+    /// static-folded; oracle-verified against svelte@5.56.3).
+    EffectTrackingConstRead,
 }
 
 /// Classify a reactive interpolation's expression into its accepted
@@ -373,6 +404,12 @@ pub(super) fn classify_interpolation_shape(
         // A `{#snippet}` parameter read → a thunk CALL `x()` (reactive — the value rides
         // the snippet arg). The rewrite emits `x()`; this shape is the acceptance proof.
         Some(BindingRuntimeKind::SnippetParam) => Ok(ClientInterpolationShape::SnippetParamRead),
+        // A `$effect.tracking()` const read → the PLAIN name inside the region's
+        // `$.template_effect` (official cannot static-fold a call-init const, so
+        // the read stays reactive; the rewriter leaves a non-signal read bare).
+        Some(BindingRuntimeKind::EffectTrackingConst) => {
+            Ok(ClientInterpolationShape::EffectTrackingConstRead)
+        }
         // A bare identifier resolving to a NON-reactive binding (a plain local, a
         // module const, a never-reassigned `$state` lowered to PlainLet) is a
         // compile-time constant — official static-folds it to a `textContent` write,

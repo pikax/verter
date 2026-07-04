@@ -64,6 +64,31 @@ fn state_lowering(ir: &super::ir::SvelteRuntimeIr, name: &str) -> Option<StateLo
 // ---------------------------------------------------------------------------
 
 #[test]
+fn effect_family_helpers_are_registered() {
+    // The four effect-family runtime helpers each map to the official
+    // `svelte/internal/client` export name. The three NEW family members
+    // (`user_pre_effect` / `effect_root` / `effect_tracking`) must be DISTINCT
+    // helper families (not re-labels of `user_effect`).
+    assert_eq!(SvelteHelper::UserEffect.ident(), "user_effect");
+    assert_eq!(SvelteHelper::UserPreEffect.ident(), "user_pre_effect");
+    assert_eq!(SvelteHelper::EffectRoot.ident(), "effect_root");
+    assert_eq!(SvelteHelper::EffectTracking.ident(), "effect_tracking");
+    // NEGATIVE: the four families are pairwise distinct mask bits (a shared bit
+    // would alias membership queries).
+    let helpers = [
+        SvelteHelper::UserEffect,
+        SvelteHelper::UserPreEffect,
+        SvelteHelper::EffectRoot,
+        SvelteHelper::EffectTracking,
+    ];
+    for (i, a) in helpers.iter().enumerate() {
+        for b in helpers.iter().skip(i + 1) {
+            assert_ne!(a.bit(), b.bit(), "{a:?} and {b:?} share a mask bit");
+        }
+    }
+}
+
+#[test]
 fn state_classification_is_four_way_plus_raw() {
     let alloc = Allocator::default();
 

@@ -128,6 +128,13 @@ pub enum SvelteHelper {
     RemoveInputDefaults,
     /// `$.user_effect` — a `$effect(fn)` user effect.
     UserEffect,
+    /// `$.user_pre_effect` — a `$effect.pre(fn)` pre-flush user effect.
+    UserPreEffect,
+    /// `$.effect_root` — a `$effect.root(fn)` non-tracked effect root (an
+    /// EXPRESSION whose result — the teardown function — is assignable).
+    EffectRoot,
+    /// `$.effect_tracking` — a `$effect.tracking()` tracking-context probe.
+    EffectTracking,
     /// `$.prop` — a `$props()` destructured prop accessor.
     Prop,
     /// `$.push` — open the component instance context (a component using
@@ -199,6 +206,9 @@ impl SvelteHelper {
             Self::Head => "head",
             Self::RemoveInputDefaults => "remove_input_defaults",
             Self::UserEffect => "user_effect",
+            Self::UserPreEffect => "user_pre_effect",
+            Self::EffectRoot => "effect_root",
+            Self::EffectTracking => "effect_tracking",
             Self::Prop => "prop",
             Self::Push => "push",
             Self::Pop => "pop",
