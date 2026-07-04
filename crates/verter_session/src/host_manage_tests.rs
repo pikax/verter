@@ -10333,6 +10333,94 @@ const emit = defineEmits<PackageEmits>()
     );
 }
 
+/// The legacy `ResolvedElements` engine (`resolve_external_type_from_loaded_files`,
+/// driven in production ONLY by [`HostExternalMacroTypeCollector`]) must NOT
+/// admit into the persistent host-owned `ResolvedTypeCacheDb`. A broken
+/// decl-body lease pin reaches this soon-deleted engine and would become a
+/// `ResolvedSymbol { body: None, status: Resolved }` written into the
+/// content-keyed cache as a FALSE-WARM "resolved but empty" entry the read-side
+/// fact rail cannot reject (a lease-miss never advances the key's
+/// `dep_source_hash`). Rather than thread a no-warm rail through soon-deleted
+/// code, the legacy path's persistent admission is disabled at the collector
+/// (`use_host_cache = false`); request-local caching stays.
+///
+/// Behavioral fail-closed guard: driving the PRODUCTION legacy collector for a
+/// macro type with `profile_hash = None` (the write-eligible arm) leaves the
+/// `ResolvedTypeCacheDb` EMPTY. Pre-fix the collector passed
+/// `use_host_cache = true` and a successful resolve wrote one entry
+/// (`is_empty()` FAILS → RED); post-fix no persistent entry is admitted (GREEN).
+/// Anti-vacuity: the resolve must actually succeed, else the write path is never
+/// reached.
+#[test]
+fn legacy_external_macro_collector_does_not_populate_persistent_resolved_type_cache() {
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        "/workspace/src/Consumer.vue",
+        r#"<script setup lang="ts">
+import type { Props } from './types'
+const props = defineProps<Props>()
+</script>
+<template><div /></template>"#,
+    );
+    ws.inject_file(
+        "/workspace/src/types.ts",
+        "export interface Props { label: string }\n",
+    );
+
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+    assert!(host.ensure_loaded("/workspace/src/Consumer.vue"));
+    host.set_import_dependencies(
+        "/workspace/src/Consumer.vue",
+        vec![exact_dependency("./types", "/workspace/src/types.ts")],
+    );
+
+    assert!(
+        host.resolved_type_cache().is_empty(),
+        "precondition: the persistent resolved-type cache starts empty",
+    );
+
+    let dep = verter_semantic::analysis::MacroTypeDep {
+        macro_index: 0,
+        import_source: "./types".to_string(),
+        type_name: "Props".to_string(),
+        macro_kind: verter_semantic::analysis::types::AnalyzedMacroKind::DefineProps,
+        macro_span: verter_span::Span::new(0, 0),
+    };
+    let import = verter_semantic::analysis::AnalyzedImport {
+        source: "./types".to_string(),
+        is_type_only: true,
+        bindings: Vec::new(),
+        span: verter_span::Span::new(0, 0),
+        resolved_canonical_id: None,
+    };
+
+    // `profile_hash = None` is the write-eligible arm of the legacy engine.
+    let (resolved, _diags, _tracked) = host.collect_external_types_from_loaded_files_for_test(
+        "/workspace/src/Consumer.vue",
+        std::slice::from_ref(&dep),
+        std::slice::from_ref(&import),
+        None,
+    );
+    assert!(
+        resolved.is_some(),
+        "the legacy collector must actually resolve the workspace macro surface \
+         (else the write path is never reached and this test is vacuous)",
+    );
+
+    assert!(
+        host.resolved_type_cache().is_empty(),
+        "the legacy ResolvedElements engine must NOT populate the persistent \
+         ResolvedTypeCacheDb — a lease-miss-derived empty result would otherwise \
+         become a false-warm 'resolved' entry the read-side fact rail cannot reject",
+    );
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn resolve_component_meta_macro_elements_skip_imported_declaration_builds() {

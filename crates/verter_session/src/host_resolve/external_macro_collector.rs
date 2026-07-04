@@ -47,7 +47,17 @@ impl crate::resolver_core::ExternalMacroTypeCollectorHost for HostExternalMacroT
             visiting,
             true,
             verter_workspace::ResolveRequestKind::TypeImport,
-            true,
+            // `use_host_cache = false`: the legacy `ResolvedElements` engine is
+            // a single-engine-rule violation slated for deletion. A broken
+            // decl-body lease pin reaches it and collapses to a
+            // `ResolvedSymbol { body: None }` that, admitted into the persistent
+            // content-keyed `ResolvedTypeCacheDb`, is a false-warm "resolved but
+            // empty" entry the read-side fact rail cannot reject (a lease-miss
+            // never advances the key's `dep_source_hash`). Rather than thread a
+            // no-warm rail through soon-deleted code, the persistent admission
+            // is disabled here; the request-local `cache` above still dedupes
+            // within one request.
+            false,
             profile_hash,
             0,
             self.view,

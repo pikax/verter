@@ -376,6 +376,34 @@ impl VerterHost {
         )
     }
 
+    /// Test-only driver that exercises the PRODUCTION external-macro collector
+    /// ([`HostExternalMacroTypeCollector`] — the sole legacy `ResolvedElements`
+    /// caller) through a bare-host ctx, so a behavioral test can assert the
+    /// legacy path's persistent `ResolvedTypeCacheDb` admission is disabled
+    /// without reaching for the full IDE virtual-file pipeline.
+    #[cfg(test)]
+    pub(crate) fn collect_external_types_from_loaded_files_for_test(
+        &self,
+        owner_canonical: &str,
+        macro_type_deps: &[verter_semantic::analysis::MacroTypeDep],
+        script_imports: &[verter_semantic::analysis::AnalyzedImport],
+        profile_hash: Option<u64>,
+    ) -> (
+        Option<ResolvedExternalTypes>,
+        Vec<HostDiagnostic>,
+        std::collections::BTreeSet<String>,
+    ) {
+        crate::resolver_core::with_bare_host_ctx_for_test(self, |ctx| {
+            self.collect_external_types_from_loaded_files(
+                ctx,
+                owner_canonical,
+                macro_type_deps,
+                script_imports,
+                profile_hash,
+            )
+        })
+    }
+
     /// View-aware variant of [`Self::collect_external_types_from_loaded_files`].
     ///
     /// Plumbs `view` into the [`HostExternalMacroTypeCollector`] so the
