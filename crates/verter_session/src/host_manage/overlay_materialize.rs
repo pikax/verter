@@ -632,11 +632,13 @@ impl VerterHost {
                 .eval_program_parses
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-        let outcome = self.decl_lowering.run(
+        // LEASE-ONLY run: `cold_lease` (acquired above) is held on this
+        // stack, so the retained snapshot is pinned for the whole flight
+        // and this cold-index job reuses it — the run cannot parse, per
+        // the lease-only worker contract.
+        let outcome = self.decl_lowering.run_leased(
             &snapshot_key,
-            &eval_source,
-            source_type,
-            move |program| {
+            move |program: Option<&crate::ParsedEvalProgram>| {
                 let (header_index, analysis) = match program {
                     Some(parsed) => {
                         let body = parsed.borrow_dependent();
@@ -707,8 +709,19 @@ impl VerterHost {
             },
         );
         // The parse was already counted at lease acquisition above; the
-        // cold-index run reuses the pinned snapshot.
-        let products = outcome.value;
+        // cold-index run reused the pinned snapshot. A lease miss is
+        // impossible by construction (`cold_lease` is held on this
+        // stack), so the `None` arm is an invariant break: fail CLOSED
+        // (no artifact) — loud in debug builds — never a transient
+        // re-parse.
+        let Some(products) = outcome else {
+            debug_assert!(
+                false,
+                "overlay cold-index run missed its own held lease pin for {}",
+                snapshot_key.canonical
+            );
+            return None;
+        };
         let snapshot = Arc::new(products.snapshot.unwrap_or_default());
         let external_type_analysis = Arc::new(products.analysis);
 

@@ -67,14 +67,16 @@ pub(crate) struct SnapshotKey {
 
 /// One lowering-service call's result: the job's owned value plus
 /// whether the service had to parse (vs. serving the retained snapshot).
+/// Test-only, like its sole producer [`DeclLoweringService::run`]:
+/// production accounts parses at the lease boundary
+/// ([`LeaseOutcome::parsed_now`]) and demands bodies through the
+/// lease-only `run_leased`.
+#[cfg(test)]
 pub(crate) struct LoweringOutcome<R> {
     pub value: R,
-    /// Whether this `run` had to parse. Production accounts parses at the
-    /// lease boundary ([`LeaseOutcome::parsed_now`]), so every production
-    /// `run` is lease-pinned and reports `false`; this field is the
-    /// reuse/transient discriminator the `decl_lowering` unit tests assert
-    /// on to prove the lease-pinning contract.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Whether this `run` had to parse — the reuse/transient
+    /// discriminator the `decl_lowering` unit tests assert on to prove
+    /// the lease-pinning retention contract.
     pub parsed_now: bool,
 }
 
@@ -196,6 +198,9 @@ impl SnapshotShard {
     /// Snapshot to run a job against: reuse the lease-pinned snapshot if
     /// one is retained for `key` (`parsed_now == false`), otherwise parse
     /// transiently and retain NOTHING (retention requires a lease).
+    /// Test-only, like its sole caller [`DeclLoweringService::run`] — the
+    /// parse-capable path exists only to exercise the retention contract.
+    #[cfg(test)]
     fn snapshot_for_run(
         &self,
         key: &SnapshotKey,
@@ -298,8 +303,9 @@ impl DeclLoweringService {
     }
 
     /// Acquire a [`SnapshotLease`] pinning the retained parse for `key`.
-    /// While the returned lease is live, [`Self::run`] calls for `key`
-    /// reuse the retained snapshot instead of re-parsing.
+    /// While the returned lease is live, [`Self::run_leased`] calls for
+    /// `key` serve the retained snapshot (and MISS, never parse, without
+    /// one).
     pub(crate) fn acquire_lease(
         self: &Arc<Self>,
         key: &SnapshotKey,
@@ -378,14 +384,15 @@ impl DeclLoweringService {
     /// lease BEFORE the run and the lowering arms only build typed IR, so a
     /// job never reaches back into the service.
     ///
-    /// PARSE-CAPABLE by design — and therefore NOT for memoized demand
-    /// paths: `DeclBodyMemo` routes every demand through the lease-only
-    /// [`Self::run_leased`], so this method currently has no production
-    /// caller; the unit tests below exercise the transient/retention
-    /// contract through it. TODO(follow-up): decide whether to delete it
-    /// or narrow it to a test-only helper once no future producer needs a
-    /// parse-capable run.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// PARSE-CAPABLE by design — and therefore TEST-ONLY: `DeclBodyMemo`
+    /// routes every production demand through the lease-only
+    /// [`Self::run_leased`], and gating this method `#[cfg(test)]` makes
+    /// the transient-parse hole structurally un-reopenable in production
+    /// builds. The unit tests below exercise the transient/retention
+    /// contract through it (a same-key run under a live lease reuses the
+    /// retained snapshot; without one it parses transiently and retains
+    /// nothing).
+    #[cfg(test)]
     pub(crate) fn run<R, F>(
         &self,
         key: &SnapshotKey,
@@ -462,7 +469,7 @@ impl DeclLoweringService {
     /// retained snapshot exists, `job` runs with `Some(&program)`
     /// (or `None` for a fatal parse) and the result is `Some(job_result)`.
     ///
-    /// Unlike [`Self::run`], this takes NO `source` — a lease miss cannot be
+    /// Unlike the test-only parse-capable `run`, this takes NO `source` — a lease miss cannot be
     /// papered over by re-parsing. `job` MUST still be a PURE lowering closure
     /// (no host / service re-entry), per the same worker-purity contract.
     pub(crate) fn run_leased<R, F>(&self, key: &SnapshotKey, job: F) -> Option<R>
