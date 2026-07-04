@@ -1015,3 +1015,11 @@ fn env_hashes_from_array(
         lib_env_hash: arr[3],
     }
 }
+
+impl std::fmt::Debug for VerterHost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VerterHost")
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
+}

@@ -838,14 +838,6 @@ pub struct VerterHost {
 }
 
 // Manual Debug impl because Arc<dyn WorkspaceAccess> doesn't implement Debug.
-impl std::fmt::Debug for VerterHost {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("VerterHost")
-            .field("config", &self.config)
-            .finish_non_exhaustive()
-    }
-}
-
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod lib_tests;
