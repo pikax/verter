@@ -51,11 +51,16 @@ oracle-gen = ["dep:verter_type_runtime", "dep:tokio", "dep:blake3", "dep:tempfil
 # the upstream nuxt-ui submodule) must gate themselves behind
 # `#[cfg(feature = "external-corpus")]`.
 external-corpus = []
-# Opt-in: enables the trybuild compile-fail driver
-# (`tests/g_compile/compile_fail.rs::workspace_accessor_visibility`). trybuild
-# spawns a full `cargo build` of a fixture crate linking `verter_session`
-# (~100s), so the test is `#[ignore]`d out of the default inner-loop run and
-# enabled in CI via `cargo nextest run -p verter_session --features compile-fail`.
+# Opt-in: enables the trybuild compile-fail SEAL fixtures
+# (`tests/cases/g_compile/compile_fail.rs` — workspace-accessor visibility,
+# the NoTypeExpr / NoStoredSpan marker seals, the sealed carrier/recursive-self
+# proof traits, etc). trybuild spawns a full `cargo build` of a fixture crate
+# linking `verter_session` (~100s), so each fixture is `#[ignore]`d unless this
+# feature is on. Run LOCALLY with `cargo nextest run -p verter_session
+# --features compile-fail` (or `cargo test`). It is NOT wired into the default
+# gate (`node scripts/gate.mjs`) or any CI workflow — the seals it asserts are
+# also enforced structurally by the normal build, so a broken seal fails the
+# ordinary compile.
 compile-fail = []
 # Phase 11b diagnosis benchmark: enables the corpus-driven
 # `repo_first_pass_diagnosis_corpus` integration test that the vitest

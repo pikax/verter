@@ -15,11 +15,15 @@
 //! the final state, not a pre/post discrimination.
 
 // trybuild spawns a full `cargo build` of the fixture crate (linking
-// `verter_session`), which dominates this test's ~100s runtime. It is gated
-// out of the default inner-loop run and runs in CI via
+// `verter_session`), which dominates this test's ~100s runtime. Every fixture
+// here is `#[ignore]`d unless the `compile-fail` feature is on, and that
+// feature is NOT wired into the default gate (`node scripts/gate.mjs`) or any
+// CI workflow — run it LOCALLY with
 // `cargo nextest run -p verter_session --features compile-fail`. The
-// visibility constraint is still enforced on every CI push — only local
-// `cargo nextest run` skips it.
+// underlying constraint is also enforced structurally by the normal build
+// (a private/`pub(crate)` accessor called from an external unit fails the
+// ordinary compile), so this fixture is a belt-and-braces assertion, not the
+// sole rail.
 #[test]
 #[cfg_attr(
     not(feature = "compile-fail"),
