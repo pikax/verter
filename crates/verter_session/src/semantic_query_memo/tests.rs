@@ -8977,3 +8977,137 @@ fn carrier_facts_reference_canonical_matches_file_source_env_contributor() {
         "an unrelated canonical must not match the contributor fact"
     );
 }
+
+/// Skeleton demand-slot isolation: a `StructuralTransit(Skeleton)` demand
+/// and a `Published(Skeleton)` demand never share a memo slot. The warm
+/// gates (`cached_satisfies` + `validate`) are demand-blind, so slot
+/// identity is the ONLY thing keeping a transit-Skeleton result (which
+/// materializes builtin bodies for the probe executors) from warm-serving
+/// a wire-reachable published-Skeleton read.
+mod skeleton_demand_slot_isolation {
+    use super::super::family::{context_to_slot, mode_to_slot, slot_domain_siblings};
+    use crate::semantic_query::{ProjectionMode, ProjectionReductionContext};
+
+    /// The slot derivation splits the two Skeleton demands, the transit
+    /// slot never appears in any publication slot's backfill/sibling
+    /// domain, and it backfills nothing itself.
+    #[test]
+    fn transit_skeleton_demand_never_shares_a_slot_with_published_skeleton() {
+        let published = context_to_slot(ProjectionReductionContext::published(
+            ProjectionMode::Skeleton,
+        ));
+        let transit = context_to_slot(ProjectionReductionContext::structural_transit_with_mode(
+            ProjectionMode::Skeleton,
+        ));
+        assert_ne!(
+            published, transit,
+            "StructuralTransit(Skeleton) and Published(Skeleton) must map to DISTINCT \
+             memo slots — a shared slot lets the transit probe's materialization \
+             policy warm-serve a published read"
+        );
+        // The transit slot is outside every publication slot's backfill
+        // domain (no publication slot may clone into it, and no publish
+        // into it may reach a publication slot).
+        for mode in [
+            ProjectionMode::Identity,
+            ProjectionMode::Navigate,
+            ProjectionMode::Shallow,
+            ProjectionMode::Expanded,
+            ProjectionMode::Skeleton,
+        ] {
+            let publication_slot = mode_to_slot(mode);
+            assert!(
+                !slot_domain_siblings(publication_slot).contains(&transit),
+                "the transit-Skeleton slot must not be a backfill target of the \
+                 {mode:?} publication slot"
+            );
+        }
+        assert!(
+            slot_domain_siblings(transit).is_empty(),
+            "the transit-Skeleton slot mirrors Skeleton: an independent evaluation \
+             with no backfill in either direction"
+        );
+    }
+}
+
+/// Cross-demand isolation through the REAL memo read path: warming the
+/// `StructuralTransit(Skeleton)` demand must not make the identical
+/// `Published(Skeleton)` request warm-serve it, and vice versa. The two
+/// keys differ ONLY in `ReductionDemand` (same family identity), so the
+/// slot split is the sole isolation axis under test.
+#[test]
+fn transit_skeleton_warm_does_not_serve_published_skeleton_request() {
+    let transit_context =
+        crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+            ProjectionMode::Skeleton,
+        );
+    let published_context =
+        crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Skeleton);
+    let key_for = |base: SemanticNodeId,
+                   context: crate::semantic_query::ProjectionReductionContext|
+     -> SemanticQueryKey {
+        SemanticQueryKey::ProjectPath {
+            base,
+            path: family_test_path(),
+            context,
+        }
+    };
+
+    let host = ctx_host();
+    let store = SemanticGraphStore::new();
+
+    // Direction 1: warm the TRANSIT demand; the PUBLISHED request must miss.
+    let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let value_id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let read = store.execute_cooperative(
+        &host,
+        key_for(base, transit_context),
+        || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+        || (QueryResult::Value(value_id), family_test_dep_signature()),
+    );
+    assert!(
+        matches!(read.value, QueryResult::Value(id) if id == value_id),
+        "the transit cold build must publish its value"
+    );
+    assert!(
+        store
+            .get_unvalidated(&key_for(base, transit_context))
+            .is_some(),
+        "the transit demand's own re-read is warm"
+    );
+    assert!(
+        store
+            .get_unvalidated(&key_for(base, published_context))
+            .is_none(),
+        "a Published(Skeleton) request must NOT warm-serve the \
+         StructuralTransit(Skeleton) result"
+    );
+
+    // Direction 2: warm the PUBLISHED demand on a fresh base; the TRANSIT
+    // request must miss.
+    let base2 = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+    let value2 = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let read2 = store.execute_cooperative(
+        &host,
+        key_for(base2, published_context),
+        || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+        || (QueryResult::Value(value2), family_test_dep_signature()),
+    );
+    assert!(
+        matches!(read2.value, QueryResult::Value(id) if id == value2),
+        "the published cold build must publish its value"
+    );
+    assert!(
+        store
+            .get_unvalidated(&key_for(base2, published_context))
+            .is_some(),
+        "the published demand's own re-read is warm"
+    );
+    assert!(
+        store
+            .get_unvalidated(&key_for(base2, transit_context))
+            .is_none(),
+        "a StructuralTransit(Skeleton) request must NOT warm-serve the \
+         Published(Skeleton) result"
+    );
+}

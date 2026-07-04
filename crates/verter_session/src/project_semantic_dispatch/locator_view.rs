@@ -1046,14 +1046,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // here — a mapper builtin materialised mid-transit would
                     // reach the peer-merge reducer as an own-surface Object
                     // and invert own-body-shadows-heritage). `Skeleton` is
-                    // exempt from the transit stop: the BFS / generic-helper
-                    // traversal (the open/closed enumeration-domain oracle in
-                    // particular) probes builtin bodies under
-                    // `StructuralTransit(Skeleton)` and must keep executing
-                    // them — carrier-stopping the probe makes the oracle
-                    // judge every closed utility source "unknown" and
-                    // over-broadens the L1 carrier-stop; Skeleton results
-                    // never publish.
+                    // exempt from the transit stop for the two genuine
+                    // Skeleton probe executors — the BFS cycle-guard probe
+                    // (`meta_resolve/graph_predicates.rs`) and the
+                    // slot-param symbolic probe
+                    // (`meta_resolve/slot_binding_graph.rs`) — which run
+                    // under `StructuralTransit(Skeleton)` and need
+                    // MATERIALIZED builtin bodies for their open/closed
+                    // judgment (the enumeration-domain oracle is NOT one of
+                    // them: it runs under Shallow transit). Carrier-stopping
+                    // the probes would judge every closed utility source
+                    // "unknown" and over-broaden the L1 carrier-stop. This
+                    // exemption's materialization policy can never corrupt a
+                    // published read: `Published(Skeleton)` IS wire-reachable
+                    // (projection mode 4, `typeinfo/request_validation.rs`),
+                    // but transit-Skeleton results live in the dedicated
+                    // `ModeSlot::TransitSkeleton` memo slot, isolated from
+                    // the `Published(Skeleton)` slot with no backfill in
+                    // either direction.
                     let build_carrier = (ctx.demand == ReductionDemand::StructuralTransit
                         && ctx.mode != ProjectionMode::Skeleton)
                         || ctx.mode == ProjectionMode::Shallow

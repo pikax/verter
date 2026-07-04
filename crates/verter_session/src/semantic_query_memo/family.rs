@@ -513,9 +513,9 @@ impl FamilyKey {
 /// `MappedType` families carry a [`ProjectionReductionContext`] in
 /// their key, not just a `ProjectionMode`. Their slots are picked from
 /// the `TransitShallow` / `TransitNavigate` / `TransitIdentity` /
-/// `TransitExpanded` set whenever the context's `demand` is
-/// `StructuralTransit`, keeping transit results from colliding with
-/// `Published` results on the same node.
+/// `TransitExpanded` / `TransitSkeleton` set whenever the context's
+/// `demand` is `StructuralTransit`, keeping transit results from
+/// colliding with `Published` results on the same node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum ModeSlot {
     Single,
@@ -536,6 +536,15 @@ pub(super) enum ModeSlot {
     TransitNavigate,
     TransitShallow,
     TransitExpanded,
+    /// `StructuralTransit` mirror of the `Skeleton` slot. The genuine
+    /// Skeleton probe executors (the BFS cycle-guard probe and the
+    /// slot-param symbolic probe) run under `StructuralTransit(Skeleton)`
+    /// with a builtin-gate exemption that MATERIALIZES builtin bodies;
+    /// `Published(Skeleton)` is wire-reachable (projection mode 4). The
+    /// warm gates are demand-blind, so this dedicated slot is what keeps
+    /// the probe results from warm-serving a published-Skeleton read.
+    /// Like `Skeleton`, it never backfills and is never backfilled.
+    TransitSkeleton,
     /// Vue macro object-surface publication slot.
     /// `ReductionDemand::MacroObjectSurface` at the Shallow macro
     /// publication boundary lands here — the empty-path Shallow surface
@@ -609,7 +618,7 @@ pub(super) struct FamilySlots {
     /// Skeleton mode slot. Independent from
     /// Navigate/Expanded; does NOT participate in backfill.
     skeleton: CandidateList,
-    /// `StructuralTransit` slot mirrors of the four publication slots —
+    /// `StructuralTransit` slot mirrors of the publication slots —
     /// demand-driven reducer spec. Independent from the publication slots. Transit
     /// backfill shares the SAME directional candidate ordering as the
     /// publication slots (`TransitExpanded → TransitShallow →
@@ -623,6 +632,10 @@ pub(super) struct FamilySlots {
     transit_navigate: CandidateList,
     transit_shallow: CandidateList,
     transit_expanded: CandidateList,
+    /// `StructuralTransit` mirror of the `skeleton` slot — the probe
+    /// executors' demand. Like `skeleton`, independent from every other
+    /// slot; no backfill in either direction.
+    transit_skeleton: CandidateList,
     /// Vue macro object-surface publication slot. Independent of
     /// the publication + transit slots; no backfill in either direction.
     macro_surface_shallow: CandidateList,
@@ -655,6 +668,7 @@ impl FamilySlots {
             ModeSlot::TransitNavigate => &self.transit_navigate,
             ModeSlot::TransitShallow => &self.transit_shallow,
             ModeSlot::TransitExpanded => &self.transit_expanded,
+            ModeSlot::TransitSkeleton => &self.transit_skeleton,
             ModeSlot::MacroSurfaceShallow => &self.macro_surface_shallow,
         }
     }
@@ -671,6 +685,7 @@ impl FamilySlots {
             ModeSlot::TransitNavigate => &mut self.transit_navigate,
             ModeSlot::TransitShallow => &mut self.transit_shallow,
             ModeSlot::TransitExpanded => &mut self.transit_expanded,
+            ModeSlot::TransitSkeleton => &mut self.transit_skeleton,
             ModeSlot::MacroSurfaceShallow => &mut self.macro_surface_shallow,
         }
     }
@@ -847,6 +862,7 @@ impl FamilySlots {
             &self.transit_navigate,
             &self.transit_shallow,
             &self.transit_expanded,
+            &self.transit_skeleton,
             &self.macro_surface_shallow,
         ]
         .iter()
@@ -902,6 +918,9 @@ impl FamilySlots {
         }
         if let Some(e) = self.transit_expanded.first() {
             out.push(("transit_expanded", e));
+        }
+        if let Some(e) = self.transit_skeleton.first() {
+            out.push(("transit_skeleton", e));
         }
         if let Some(e) = self.macro_surface_shallow.first() {
             out.push(("macro_surface_shallow", e));
@@ -969,6 +988,9 @@ impl FamilySlots {
         for e in &self.transit_expanded {
             out.push((ModeSlot::TransitExpanded, e));
         }
+        for e in &self.transit_skeleton {
+            out.push((ModeSlot::TransitSkeleton, e));
+        }
         for e in &self.macro_surface_shallow {
             out.push((ModeSlot::MacroSurfaceShallow, e));
         }
@@ -1022,8 +1044,8 @@ pub struct AuditEagerKeyRow {
 /// the `warm_publish_one` `debug_assert!` plus
 /// `super::tests::warm_publish_one_debug_asserts_against_sub_slot_mode_terminal`.
 ///
-/// `Skeleton`, `MacroSurfaceShallow`, and `Single` are independent
-/// evaluations with no backfill in either direction.
+/// `Skeleton`, `TransitSkeleton`, `MacroSurfaceShallow`, and `Single` are
+/// independent evaluations with no backfill in either direction.
 pub(super) fn slot_domain_siblings(slot: ModeSlot) -> &'static [ModeSlot] {
     match slot {
         ModeSlot::Single => &[],
@@ -1040,6 +1062,7 @@ pub(super) fn slot_domain_siblings(slot: ModeSlot) -> &'static [ModeSlot] {
             ModeSlot::TransitNavigate,
             ModeSlot::TransitIdentity,
         ],
+        ModeSlot::TransitSkeleton => &[],
         ModeSlot::MacroSurfaceShallow => &[],
     }
 }
@@ -1057,7 +1080,7 @@ fn mode_of_slot(slot: ModeSlot) -> Option<ProjectionMode> {
             Some(ProjectionMode::Shallow)
         }
         ModeSlot::Expanded | ModeSlot::TransitExpanded => Some(ProjectionMode::Expanded),
-        ModeSlot::Skeleton => Some(ProjectionMode::Skeleton),
+        ModeSlot::Skeleton | ModeSlot::TransitSkeleton => Some(ProjectionMode::Skeleton),
         // Modeless families (`ResolveDecl` / `Conditional` /
         // `Normalize*` / …) carry no projection demand; their satisfaction
         // is decided purely by `validate_with_self_roots`. Represent their
@@ -1104,10 +1127,13 @@ pub(super) fn context_to_slot(ctx: ProjectionReductionContext) -> ModeSlot {
             ProjectionMode::Navigate => ModeSlot::TransitNavigate,
             ProjectionMode::Shallow => ModeSlot::TransitShallow,
             ProjectionMode::Expanded => ModeSlot::TransitExpanded,
-            // Skeleton has its own slot — distinct semantics (open-
-            // generic preservation) that the demand-driven reducer leaves
-            // outside the reduction-demand axis.
-            ProjectionMode::Skeleton => ModeSlot::Skeleton,
+            // Skeleton mirrors the other transit modes: the probe
+            // executors' `StructuralTransit(Skeleton)` results (which
+            // materialize builtin bodies under the builtin-gate
+            // exemption) must never share a slot with the wire-reachable
+            // `Published(Skeleton)` demand — the warm gates are
+            // demand-blind, so the slot split is the isolation.
+            ProjectionMode::Skeleton => ModeSlot::TransitSkeleton,
         },
         // Vue macro object-surface publication. The macro
         // publication boundary always runs at Shallow mode (the
@@ -1533,5 +1559,6 @@ pub(super) const ALL_MODE_SLOTS: &[ModeSlot] = &[
     ModeSlot::TransitNavigate,
     ModeSlot::TransitShallow,
     ModeSlot::TransitExpanded,
+    ModeSlot::TransitSkeleton,
     ModeSlot::MacroSurfaceShallow,
 ];
