@@ -377,6 +377,15 @@ impl DeclLoweringService {
     /// The whole lazy-body design upholds this: `DeclBodyMemo` acquires its
     /// lease BEFORE the run and the lowering arms only build typed IR, so a
     /// job never reaches back into the service.
+    ///
+    /// PARSE-CAPABLE by design — and therefore NOT for memoized demand
+    /// paths: `DeclBodyMemo` routes every demand through the lease-only
+    /// [`Self::run_leased`], so this method currently has no production
+    /// caller; the unit tests below exercise the transient/retention
+    /// contract through it. TODO(follow-up): decide whether to delete it
+    /// or narrow it to a test-only helper once no future producer needs a
+    /// parse-capable run.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn run<R, F>(
         &self,
         key: &SnapshotKey,
@@ -435,11 +444,22 @@ impl DeclLoweringService {
         }
     }
 
+    /// Test-only out-of-band release of the retained snapshot pin for
+    /// `key`. Used to BREAK the lease invariant (the memo still holds its
+    /// `SnapshotLease`, but the worker-side retained entry is gone) and
+    /// prove the memo's demanded-lowering path fails CLOSED instead of
+    /// transiently re-parsing.
+    #[cfg(test)]
+    pub(crate) fn release_retained_snapshot_for_test(&self, key: &SnapshotKey) {
+        self.release_key(key);
+    }
+
     /// Run `job` against the LEASE-RETAINED eval program for `key`, WITHOUT ever
     /// parsing. On a lease MISS (no retained snapshot) returns `None` and `job`
     /// does NOT run — this path is structurally incapable of a transient parse,
-    /// so a caller on it (span recovery) can never violate the retained-parse
-    /// invariant. When a retained snapshot exists, `job` runs with `Some(&program)`
+    /// so a caller on it (span recovery, the decl-body memo's demanded
+    /// lowering) can never violate the retained-parse invariant. When a
+    /// retained snapshot exists, `job` runs with `Some(&program)`
     /// (or `None` for a fatal parse) and the result is `Some(job_result)`.
     ///
     /// Unlike [`Self::run`], this takes NO `source` — a lease miss cannot be

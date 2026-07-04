@@ -624,6 +624,51 @@ fn concurrent_type_and_value_demand_of_merged_name_does_not_deadlock() {
     }
 }
 
+/// The memo's demanded-lowering path is LEASE-ONLY: with the lease pin
+/// broken out-of-band (the invariant-violation scenario), a body demand
+/// must FAIL CLOSED — the lowering miss, with nothing lowered and no
+/// transient re-parse. A demanded-lowering path routed through the
+/// parse-capable `run` would silently re-parse the file and return a body
+/// here (and bump `decl_bodies_lowered`), violating the lease-only
+/// worker contract.
+#[test]
+fn broken_lease_body_demand_fails_closed_without_transient_parse() {
+    let (memo, provenance) = memo_for(FIVE_DECLS);
+
+    // First demand pins the lease and lowers the demanded body.
+    assert!(memo.type_decl("Var0").is_some());
+    assert_eq!(parses(&provenance), 1, "the lease acquisition parses once");
+    let lowered_before = bodies(&provenance);
+
+    // Break the lease pin out-of-band: the memo still HOLDS its
+    // `SnapshotLease` (so `ensure_lease` will not re-acquire), but the
+    // worker-side retained snapshot is released.
+    let service = memo
+        .service
+        .as_ref()
+        .expect("a production memo has a service");
+    service.release_retained_snapshot_for_test(&memo.key);
+
+    // Fail closed: the un-lowered sibling's demand must MISS — a
+    // `Some(body)` here means the service transiently re-parsed instead
+    // of running lease-only.
+    assert!(
+        memo.type_decl("Var1").is_none(),
+        "a body demand with a broken lease must fail CLOSED (lowering miss)"
+    );
+    assert_eq!(
+        bodies(&provenance),
+        lowered_before,
+        "the broken-lease demand must lower NOTHING"
+    );
+    // The parse accounting rail stays flat: parses are counted at the
+    // lease boundary, and the lease-only run path cannot parse at all
+    // (the pre-fix transient parse was additionally invisible to this
+    // counter — the lowered-bodies assertion above is the work-counter
+    // discriminator).
+    assert_eq!(parses(&provenance), 1, "no re-parse is accounted");
+}
+
 /// Backfill is coverage-gated: a statement batch that lowered only a
 /// SUBSET of a sibling symbol's contributors must NOT pre-fill that
 /// sibling's entry — a narrower result pretending broader coverage

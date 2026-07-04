@@ -312,8 +312,9 @@ impl DeclBodyMemo {
     /// service-backed run so the snapshot stays warm across every body /
     /// whole-env / raw-surface demand on this content generation — a live
     /// artifact never silently re-parses. The single eval-program parse
-    /// is counted HERE (the lease acquisition); subsequent `service.run`
-    /// calls reuse the pinned snapshot and report `parsed_now == false`.
+    /// is counted HERE (the lease acquisition); every subsequent demand
+    /// runs LEASE-ONLY (`run_leased`) against the pinned snapshot, so a
+    /// broken pin is a lowering MISS, never a transient re-parse.
     /// A seeded memo (no service) never acquires a lease.
     fn ensure_lease(&self) {
         let Some(service) = self.service.as_ref() else {
@@ -516,20 +517,18 @@ impl DeclBodyMemo {
                     return Arc::new(EvalEnv::default());
                 };
                 // Pin the retained snapshot for this memo's lifetime
-                // (parse counted at lease acquisition); the run below
-                // reuses it.
+                // (parse counted at lease acquisition); the LEASE-ONLY run
+                // below reuses it. A broken lease pin fails CLOSED to the
+                // empty env (the same value a fatal parse yields) — never
+                // a transient re-parse.
                 self.ensure_lease();
-                let outcome = service.run(
-                    &self.key,
-                    &self.eval_source,
-                    self.source_type,
-                    move |program| {
+                let mut env = service
+                    .run_leased(&self.key, move |program| {
                         program
                             .map(|p| build_eval_env(p.borrow_dependent(), p.source_str()))
                             .unwrap_or_default()
-                    },
-                );
-                let mut env = outcome.value;
+                    })
+                    .unwrap_or_default();
                 self.provenance
                     .eval_env_builds
                     .fetch_add(1, Ordering::Relaxed);
@@ -605,11 +604,10 @@ impl DeclBodyMemo {
                 self.ensure_lease();
                 let canonical = self.key.canonical.to_string();
                 let wanted = name.to_string();
-                let outcome = service.run(
-                    &self.key,
-                    &self.eval_source,
-                    self.source_type,
-                    move |program| {
+                // LEASE-ONLY run: a broken lease pin fails CLOSED to the
+                // empty capture — never a transient re-parse.
+                service
+                    .run_leased(&self.key, move |program| {
                         let Some(program) = program else {
                             return Vec::new();
                         };
@@ -628,9 +626,8 @@ impl DeclBodyMemo {
                                 surface
                             })
                             .collect::<Vec<_>>()
-                    },
-                );
-                outcome.value
+                    })
+                    .unwrap_or_default()
             } else {
                 Vec::new()
             };
@@ -643,7 +640,9 @@ impl DeclBodyMemo {
 
     /// Lower the demanded symbol's contributing statements through the
     /// retained snapshot, producing the owned per-symbol batch. `None`
-    /// on a fatal parse.
+    /// on a fatal parse — or on a broken lease pin (the LEASE-ONLY run
+    /// fails CLOSED to the lowering miss; it can never transiently
+    /// re-parse).
     ///
     /// Unlike [`Self::whole_env`], this per-symbol path deliberately does
     /// NOT call `apply_sfc_script_setup_type_params`: a `<script setup
@@ -664,106 +663,102 @@ impl DeclBodyMemo {
         self.ensure_lease();
         let contributors = contributors.to_vec();
         let name = name.to_string();
-        let outcome = service.run(
-            &self.key,
-            &self.eval_source,
-            self.source_type,
-            move |program| {
-                let program = program?;
-                let source = program.source_str();
-                let program = program.borrow_dependent();
+        let outcome = service.run_leased(&self.key, move |program| {
+            let program = program?;
+            let source = program.source_str();
+            let program = program.borrow_dependent();
 
-                let mut scratch = EvalEnv::new();
-                let mut dep_records: FxHashMap<String, (FxHashSet<String>, FxHashSet<String>)> =
-                    FxHashMap::default();
-                for index in &contributors {
-                    let Some(stmt) = program.body.get(*index as usize) else {
-                        continue;
-                    };
-                    lower_top_level_statement(stmt, source, &mut scratch);
-                    for (decl_name, deps) in collect_statement_dependency_names(stmt) {
-                        let entry = dep_records.entry(decl_name).or_default();
-                        entry.0.extend(deps.dependency_names);
-                        entry.1.extend(deps.structural_dependency_names);
-                    }
-                }
-                if from_jsdoc_typedef
-                    && lower_jsdoc_typedef_named(&program.comments, source, &name, &mut scratch)
-                {
-                    // A JSDoc `@typedef` is NOT a statement, so the statement
-                    // dep-collector never produces its reference edges. Derive
-                    // the dependency roots from the lowered JSDoc body so the
-                    // cached entry carries them (else the typedef caches with
-                    // EMPTY deps → under-resolution + under-invalidation).
-                    // Stored in BOTH the plain and structural sets: a typedef
-                    // is an alias carrier, so its roots are structural for the
-                    // required-import walk (conservative — never under-walks).
-                    if let Some(group) = scratch.type_symbols.get(&name) {
-                        let mut refs = Vec::new();
-                        for contributor in group.contributors() {
-                            collect_type_refs(&contributor.body, &mut refs);
-                        }
-                        let entry = dep_records.entry(name.clone()).or_default();
-                        for reference in refs {
-                            entry.0.insert(reference.clone());
-                            entry.1.insert(reference);
-                        }
-                    }
-                }
-
-                let lowered_count = scratch.total_decl_count();
-                let mut batch = LoweredStatementBatch {
-                    types: Vec::new(),
-                    values: Vec::new(),
-                    aug_types: Vec::new(),
-                    aug_values: Vec::new(),
-                    lowered_count,
+            let mut scratch = EvalEnv::new();
+            let mut dep_records: FxHashMap<String, (FxHashSet<String>, FxHashSet<String>)> =
+                FxHashMap::default();
+            for index in &contributors {
+                let Some(stmt) = program.body.get(*index as usize) else {
+                    continue;
                 };
-                for (decl_name, group) in &scratch.type_symbols {
-                    let (deps, structural) =
-                        dep_records.get(decl_name).cloned().unwrap_or_default();
-                    // An enum's type-space body is derived from its MERGED
-                    // value members (same name → matching value group), so the
-                    // type and value spaces never diverge.
-                    let enum_body = scratch
-                        .value_symbols
-                        .get(decl_name)
-                        .and_then(ValueDeclGroup::enum_type_union);
-                    batch.types.push((
-                        decl_name.clone(),
-                        lowered_type_decl_from_group(group, deps, structural, enum_body),
-                    ));
+                lower_top_level_statement(stmt, source, &mut scratch);
+                for (decl_name, deps) in collect_statement_dependency_names(stmt) {
+                    let entry = dep_records.entry(decl_name).or_default();
+                    entry.0.extend(deps.dependency_names);
+                    entry.1.extend(deps.structural_dependency_names);
                 }
-                for (decl_name, group) in &scratch.value_symbols {
-                    batch
-                        .values
-                        .push((decl_name.clone(), lowered_value_decl_from_group(group)));
+            }
+            if from_jsdoc_typedef
+                && lower_jsdoc_typedef_named(&program.comments, source, &name, &mut scratch)
+            {
+                // A JSDoc `@typedef` is NOT a statement, so the statement
+                // dep-collector never produces its reference edges. Derive
+                // the dependency roots from the lowered JSDoc body so the
+                // cached entry carries them (else the typedef caches with
+                // EMPTY deps → under-resolution + under-invalidation).
+                // Stored in BOTH the plain and structural sets: a typedef
+                // is an alias carrier, so its roots are structural for the
+                // required-import walk (conservative — never under-walks).
+                if let Some(group) = scratch.type_symbols.get(&name) {
+                    let mut refs = Vec::new();
+                    for contributor in group.contributors() {
+                        collect_type_refs(&contributor.body, &mut refs);
+                    }
+                    let entry = dep_records.entry(name.clone()).or_default();
+                    for reference in refs {
+                        entry.0.insert(reference.clone());
+                        entry.1.insert(reference);
+                    }
                 }
-                for ((scope, decl_name), group) in &scratch.augmentation_scopes {
-                    // Ambient augmentation blocks do not inventory enum
-                    // declarations, so no value-derived enum union applies here.
-                    batch.aug_types.push((
-                        scope.clone(),
-                        decl_name.clone(),
-                        lowered_type_decl_from_group(
-                            group,
-                            FxHashSet::default(),
-                            FxHashSet::default(),
-                            None,
-                        ),
-                    ));
-                }
-                for ((scope, decl_name), group) in &scratch.augmentation_value_scopes {
-                    batch.aug_values.push((
-                        scope.clone(),
-                        decl_name.clone(),
-                        lowered_value_decl_from_group(group),
-                    ));
-                }
-                Some(batch)
-            },
-        );
-        let batch = outcome.value?;
+            }
+
+            let lowered_count = scratch.total_decl_count();
+            let mut batch = LoweredStatementBatch {
+                types: Vec::new(),
+                values: Vec::new(),
+                aug_types: Vec::new(),
+                aug_values: Vec::new(),
+                lowered_count,
+            };
+            for (decl_name, group) in &scratch.type_symbols {
+                let (deps, structural) = dep_records.get(decl_name).cloned().unwrap_or_default();
+                // An enum's type-space body is derived from its MERGED
+                // value members (same name → matching value group), so the
+                // type and value spaces never diverge.
+                let enum_body = scratch
+                    .value_symbols
+                    .get(decl_name)
+                    .and_then(ValueDeclGroup::enum_type_union);
+                batch.types.push((
+                    decl_name.clone(),
+                    lowered_type_decl_from_group(group, deps, structural, enum_body),
+                ));
+            }
+            for (decl_name, group) in &scratch.value_symbols {
+                batch
+                    .values
+                    .push((decl_name.clone(), lowered_value_decl_from_group(group)));
+            }
+            for ((scope, decl_name), group) in &scratch.augmentation_scopes {
+                // Ambient augmentation blocks do not inventory enum
+                // declarations, so no value-derived enum union applies here.
+                batch.aug_types.push((
+                    scope.clone(),
+                    decl_name.clone(),
+                    lowered_type_decl_from_group(
+                        group,
+                        FxHashSet::default(),
+                        FxHashSet::default(),
+                        None,
+                    ),
+                ));
+            }
+            for ((scope, decl_name), group) in &scratch.augmentation_value_scopes {
+                batch.aug_values.push((
+                    scope.clone(),
+                    decl_name.clone(),
+                    lowered_value_decl_from_group(group),
+                ));
+            }
+            Some(batch)
+        });
+        // Outer `None` = a broken lease pin (fail CLOSED, nothing ran);
+        // inner `None` = a fatal parse. Both are the lowering miss.
+        let batch = outcome.flatten()?;
         self.provenance
             .decl_bodies_lowered
             .fetch_add(batch.lowered_count as u64, Ordering::Relaxed);
@@ -925,14 +920,16 @@ impl DeclBodyMemo {
     /// the retained snapshot sub-position named by the locator's
     /// producer-emitted origin path and return transient OWNED typed IR.
     ///
-    /// Lease-only purity: the lowering runs through
-    /// [`DeclLoweringService::run_leased`] against the memo's own retained
+    /// Lease-only purity: the deref serves through the memo's own lazy
+    /// demand cells (`type_decl` / `value_decl` / `augmentation_type_decl`),
+    /// whose demanded lowering (`lower_demanded`) runs through
+    /// [`DeclLoweringService::run_leased`] against the memo's retained
     /// snapshot (the lease is [`Self::ensure_lease`]-pinned for the memo's
-    /// lifetime) — NO transient parse, no host / dispatch / service
-    /// re-entry inside the job. Authored macro payloads reuse THIS memo
-    /// (the producing canonical's snapshot) — never a separate payload
-    /// memo. Every failure is a typed [`LocatorBodyDerefError`], never a
-    /// fabricated body.
+    /// lifetime) — NO transient parse (a broken lease pin is a lowering
+    /// MISS), no host / dispatch / service re-entry inside the job.
+    /// Authored macro payloads reuse THIS memo (the producing canonical's
+    /// snapshot) — never a separate payload memo. Every failure is a typed
+    /// [`LocatorBodyDerefError`], never a fabricated body.
     pub(crate) fn deref_locator_body(
         &self,
         locator: &AuthoredBodyLocator,
