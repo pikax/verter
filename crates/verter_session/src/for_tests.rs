@@ -307,6 +307,48 @@ impl Drop for RelationForceOverflowGuard<'_> {
     }
 }
 
+/// Arm the per-host augmentation-folder torn-contributor injection knob and
+/// return an RAII guard that clears it on drop. Mirrors
+/// [`relation_force_overflow_observations_for_tests`] for the cross-file
+/// declaration-augmentation fold's `source_env_unobservable` no-warm rail.
+pub fn augmentation_force_source_env_unobservable_for_tests(
+    host: &crate::VerterHost,
+    forced: bool,
+) -> AugmentationForceUnobservableGuard<'_> {
+    AugmentationForceUnobservableGuard::arm(host, forced)
+}
+
+/// Host-scoped RAII guard that arms and clears the per-host augmentation-folder
+/// torn-contributor injection knob
+/// [`crate::VerterHost::augmentation_force_source_env_unobservable`].
+///
+/// When armed, the shared augmenter-fold treats EVERY augmenter as an
+/// unobservable (torn / unhealable / unservable) contributor, so the collector
+/// yields the tainted state — exercising the fold of that no-warm bit into the
+/// enclosing query's `QueryBuildOutput.cache_suppress` without a torn multi-file
+/// fixture. The knob is cleared on drop so a panicking test never leaks the
+/// forced state into a concurrent request on another host.
+pub struct AugmentationForceUnobservableGuard<'h> {
+    host: &'h crate::VerterHost,
+}
+
+impl<'h> AugmentationForceUnobservableGuard<'h> {
+    /// Set `host`'s torn-contributor injection flag and return the guard.
+    fn arm(host: &'h crate::VerterHost, forced: bool) -> Self {
+        host.augmentation_force_source_env_unobservable
+            .store(forced, std::sync::atomic::Ordering::Relaxed);
+        Self { host }
+    }
+}
+
+impl Drop for AugmentationForceUnobservableGuard<'_> {
+    fn drop(&mut self) {
+        self.host
+            .augmentation_force_source_env_unobservable
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// Arm `host`'s compile-tier test-only fact-injection knob with `n`
 /// synthetic `FileWholeHash` observations per cold-compute call. When
 /// `n > FACT_SIGNATURE_CAP` (1024), the cold compute's installed fact

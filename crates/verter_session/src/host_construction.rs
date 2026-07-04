@@ -382,6 +382,7 @@ impl VerterHost {
                 false,
             ),
             relation_force_overflow_observations: std::sync::atomic::AtomicUsize::new(0),
+            augmentation_force_source_env_unobservable: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             carrier_normalization_force_fence_for_tests: std::sync::atomic::AtomicBool::new(false),
             compile_tier_prefetch_invocations: std::sync::atomic::AtomicUsize::new(0),

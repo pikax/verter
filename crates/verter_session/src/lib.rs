@@ -788,6 +788,18 @@ pub struct VerterHost {
     /// returned to the caller but refused memo admission). Set directly in
     /// the inline relation tests.
     pub(crate) relation_force_overflow_observations: std::sync::atomic::AtomicUsize,
+    /// Per-host test-injection knob for the cross-file declaration-augmentation
+    /// folder ([`crate::project_semantic_dispatch`]'s
+    /// `collect_augmentation_contributions`). When `true`, EVERY augmenter in
+    /// the target's augmenter set is treated as a torn / unobservable
+    /// contributor (skipped, `source_env_unobservable = true`) — the exact
+    /// no-warm state a torn/unhealable/unservable augmenter organically
+    /// produces, with a deterministic trigger. Exercises the fold of the
+    /// unobservable bit into the enclosing query's `QueryBuildOutput.cache_suppress`
+    /// (relative and external augmentation) without a torn multi-file fixture.
+    /// Defaults `false` (zero-cost no-op in production); set only through the
+    /// `for_tests` RAII guard.
+    pub(crate) augmentation_force_source_env_unobservable: std::sync::atomic::AtomicBool,
     /// Per-host test-injection knob for the carrier-subject normalization
     /// prelude. When `true`, the traced carrier-normalization prelude
     /// (`trace_carrier_subject_normalization_if_needed`) fans a synthetic

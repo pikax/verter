@@ -121,6 +121,36 @@ enum DemandLower {
     LeaseMiss,
 }
 
+/// Outcome of a per-symbol body DEMAND ([`DeclBodyMemo::demand_and_commit`])
+/// as seen by a caller that needs to DISTINGUISH the two `None`-shaped miss
+/// classes (the locator-deref path, which must not collapse a transient
+/// ReturnOnly into a cacheable resolution result):
+///
+/// - [`Ready`](Self::Ready) — the lease-only run completed. `Some` is the
+///   demanded decl; `None` is a GENUINE, cacheable miss (the symbol is not
+///   inventoried, or the run produced a fatal-parse empty).
+/// - [`LeaseMiss`](Self::LeaseMiss) — the lease pin was broken: the demand
+///   ran NOTHING and committed NOTHING (`ReturnOnly`). A caller must route
+///   this to a no-warm signal, never treat it as a genuine miss.
+enum DemandOutcome<D> {
+    Ready(Option<Arc<D>>),
+    LeaseMiss,
+}
+
+impl<D> DemandOutcome<D> {
+    /// Collapse to the plain `Option` API: a lease-miss reads as `None`. Used
+    /// by the broad `Option`-returning demand accessors whose consumers do
+    /// NOT distinguish the transient ReturnOnly from a genuine miss (the
+    /// per-symbol demand cell already fails closed by evicting the poisoned
+    /// cell, so a later demand under a live lease recovers).
+    fn into_option(self) -> Option<Arc<D>> {
+        match self {
+            DemandOutcome::Ready(value) => value,
+            DemandOutcome::LeaseMiss => None,
+        }
+    }
+}
+
 /// Owned product of one statement-batch lowering job: every symbol the
 /// demanded statements actually declared, ready for entry population.
 struct LoweredStatementBatch {
@@ -351,9 +381,22 @@ impl DeclBodyMemo {
 
     /// Demand the lowered body of one file-scope TYPE symbol.
     pub(crate) fn type_decl(&self, name: &str) -> Option<Arc<LoweredTypeDecl>> {
-        let (contributors, from_jsdoc) = {
-            let header = self.header_index.type_header(name)?;
-            (header.contributors.clone(), header.from_jsdoc_typedef)
+        self.type_decl_outcome(name).into_option()
+    }
+
+    /// Demand the lowered body of one file-scope TYPE symbol, PRESERVING the
+    /// lease-miss ReturnOnly outcome distinctly. The locator-deref path uses
+    /// this so a broken-lease demand becomes a typed no-warm signal rather
+    /// than collapsing into a cacheable genuine miss.
+    fn type_decl_outcome(&self, name: &str) -> DemandOutcome<LoweredTypeDecl> {
+        let Some((contributors, from_jsdoc)) = self
+            .header_index
+            .type_header(name)
+            .map(|header| (header.contributors.clone(), header.from_jsdoc_typedef))
+        else {
+            // Not inventoried: a genuine, cacheable absence — never a
+            // lease-miss.
+            return DemandOutcome::Ready(None);
         };
         let cell = self
             .type_entries
@@ -364,7 +407,7 @@ impl DeclBodyMemo {
         // initializing caller receives the batch and backfills siblings after
         // its own cell is committed; a lease-miss evicts the cell and commits
         // nothing.
-        let (result, batch) = self.demand_and_commit(
+        let (outcome, batch) = self.demand_and_commit(
             &cell,
             name,
             &contributors,
@@ -383,18 +426,30 @@ impl DeclBodyMemo {
         if let Some(batch) = batch {
             self.backfill(batch, &contributors, Some((SymbolSpace::Type, name)), None);
         }
-        result
+        outcome
     }
 
     /// Demand the lowered body of one file-scope VALUE symbol.
     pub(crate) fn value_decl(&self, name: &str) -> Option<Arc<LoweredValueDecl>> {
-        let contributors = self.header_index.value_header(name)?.contributors.clone();
+        self.value_decl_outcome(name).into_option()
+    }
+
+    /// Demand the lowered body of one file-scope VALUE symbol, PRESERVING the
+    /// lease-miss ReturnOnly outcome distinctly (locator-deref no-warm rail).
+    fn value_decl_outcome(&self, name: &str) -> DemandOutcome<LoweredValueDecl> {
+        let Some(contributors) = self
+            .header_index
+            .value_header(name)
+            .map(|header| header.contributors.clone())
+        else {
+            return DemandOutcome::Ready(None);
+        };
         let cell = self
             .value_entries
             .entry(name.to_string())
             .or_default()
             .clone();
-        let (result, batch) = self.demand_and_commit(
+        let (outcome, batch) = self.demand_and_commit(
             &cell,
             name,
             &contributors,
@@ -413,7 +468,7 @@ impl DeclBodyMemo {
         if let Some(batch) = batch {
             self.backfill(batch, &contributors, Some((SymbolSpace::Value, name)), None);
         }
-        result
+        outcome
     }
 
     /// The fingerprint hash INPUT for a file-scope TYPE symbol's body — the
@@ -443,17 +498,31 @@ impl DeclBodyMemo {
         scope: &AugmentationScopeKind,
         name: &str,
     ) -> Option<Arc<LoweredTypeDecl>> {
-        let contributors = self
+        self.augmentation_type_decl_outcome(scope, name)
+            .into_option()
+    }
+
+    /// Demand the lowered body of one augmentation-scoped TYPE symbol,
+    /// PRESERVING the lease-miss ReturnOnly outcome distinctly (locator-deref
+    /// no-warm rail).
+    fn augmentation_type_decl_outcome(
+        &self,
+        scope: &AugmentationScopeKind,
+        name: &str,
+    ) -> DemandOutcome<LoweredTypeDecl> {
+        let Some(contributors) = self
             .header_index
-            .augmentation_type_header(scope, name)?
-            .contributors
-            .clone();
+            .augmentation_type_header(scope, name)
+            .map(|header| header.contributors.clone())
+        else {
+            return DemandOutcome::Ready(None);
+        };
         let cell = self
             .aug_type_entries
             .entry((scope.clone(), name.to_string()))
             .or_default()
             .clone();
-        let (result, batch) = self.demand_and_commit(
+        let (outcome, batch) = self.demand_and_commit(
             &cell,
             name,
             &contributors,
@@ -478,7 +547,7 @@ impl DeclBodyMemo {
                 Some((scope, SymbolSpace::Type, name)),
             );
         }
-        result
+        outcome
     }
 
     /// Demand the lowered body of one augmentation-scoped VALUE symbol.
@@ -487,17 +556,31 @@ impl DeclBodyMemo {
         scope: &AugmentationScopeKind,
         name: &str,
     ) -> Option<Arc<LoweredValueDecl>> {
-        let contributors = self
+        self.augmentation_value_decl_outcome(scope, name)
+            .into_option()
+    }
+
+    /// Demand the lowered body of one augmentation-scoped VALUE symbol,
+    /// PRESERVING the lease-miss ReturnOnly outcome distinctly (locator-deref
+    /// no-warm rail).
+    fn augmentation_value_decl_outcome(
+        &self,
+        scope: &AugmentationScopeKind,
+        name: &str,
+    ) -> DemandOutcome<LoweredValueDecl> {
+        let Some(contributors) = self
             .header_index
-            .augmentation_value_header(scope, name)?
-            .contributors
-            .clone();
+            .augmentation_value_header(scope, name)
+            .map(|header| header.contributors.clone())
+        else {
+            return DemandOutcome::Ready(None);
+        };
         let cell = self
             .aug_value_entries
             .entry((scope.clone(), name.to_string()))
             .or_default()
             .clone();
-        let (result, batch) = self.demand_and_commit(
+        let (outcome, batch) = self.demand_and_commit(
             &cell,
             name,
             &contributors,
@@ -522,7 +605,7 @@ impl DeclBodyMemo {
                 Some((scope, SymbolSpace::Value, name)),
             );
         }
-        result
+        outcome
     }
 
     /// The whole-file eval environment — a DEMAND product for whole-file
@@ -614,6 +697,19 @@ impl DeclBodyMemo {
     #[cfg(test)]
     pub(crate) fn raw_surfaces_materialized(&self, name: &str, space: SymbolSpace) -> bool {
         self.raw_surfaces.contains_key(&(name.to_string(), space))
+    }
+
+    /// Break the memo's worker-retained parse snapshot so the NEXT body
+    /// demand lease-misses (test observability for the fail-closed ReturnOnly
+    /// rail). The memo still HOLDS its `SnapshotLease` (so `ensure_lease`
+    /// will not re-acquire), but the worker-side retained snapshot is
+    /// released — mirroring the invariant-violation scenario. No-op on a
+    /// seeded memo (no service).
+    #[cfg(test)]
+    pub(crate) fn release_retained_snapshot_for_test(&self) {
+        if let Some(service) = self.service.as_ref() {
+            service.release_retained_snapshot_for_test(&self.key);
+        }
     }
 
     /// Demand the parse-time `RawSourceSurface` contributor vector for
@@ -874,9 +970,9 @@ impl DeclBodyMemo {
         from_jsdoc: bool,
         extract: impl FnOnce(&LoweredStatementBatch) -> Option<Arc<D>>,
         on_lease_miss_evict: impl FnOnce(),
-    ) -> (Option<Arc<D>>, Option<LoweredStatementBatch>) {
+    ) -> (DemandOutcome<D>, Option<LoweredStatementBatch>) {
         if let Some(cached) = cell.get() {
-            return (cached.clone(), None);
+            return (DemandOutcome::Ready(cached.clone()), None);
         }
         let leftover: std::cell::Cell<Option<LoweredStatementBatch>> = std::cell::Cell::new(None);
         let lease_missed = std::cell::Cell::new(false);
@@ -898,11 +994,14 @@ impl DeclBodyMemo {
         if lease_missed.get() {
             // The cell transiently committed `None` under the init lock; drop
             // it from the owning map so it can never serve a wrong-empty warm
-            // entry and the next demand retries.
+            // entry and the next demand retries. Surface the DISTINCT
+            // `LeaseMiss` outcome so a caller that must not collapse this
+            // transient ReturnOnly into a cacheable genuine miss (the
+            // locator-deref path) can route it to a no-warm signal.
             on_lease_miss_evict();
-            return (None, None);
+            return (DemandOutcome::LeaseMiss, None);
         }
-        (result, leftover.take())
+        (DemandOutcome::Ready(result), leftover.take())
     }
 
     /// Populate sibling entries the demanded statements ALSO declared
@@ -1005,8 +1104,17 @@ impl DeclBodyMemo {
 /// body and NEVER falls back to a transient re-parse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LocatorBodyDerefError {
-    /// The locator anchor names no inventoried declaration.
+    /// The locator anchor names no inventoried declaration. This is a
+    /// GENUINE, cacheable resolution result (the symbol truly does not
+    /// exist) — DISTINCT from [`Self::LeaseMiss`].
     UnknownSymbol,
+    /// The demanded body lowering hit a BROKEN lease pin (`ReturnOnly`): the
+    /// lowering ran NOTHING and produced NOTHING. This is a transient no-warm
+    /// signal, NOT a cacheable resolution result — the enclosing
+    /// `LowerLocator` / `Instantiate` build must refuse warm admission
+    /// (`cache_suppress`) so a later demand under a live lease recovers.
+    /// Never collapsed into [`Self::UnknownSymbol`].
+    LeaseMiss,
     /// The producer-emitted path does not resolve against the authored
     /// body (a stale / out-of-range ordinal, or a shape mismatch).
     PathUnresolved,
@@ -1102,15 +1210,29 @@ impl DeclBodyMemo {
                         // symbol) regardless of which route demands it first.
                         // A file-scope miss falls through to the GLOBAL
                         // ambient inventory — the same file-scope-then-global
-                        // resolution order the prepared-decl route applies.
-                        let lowered = match self.type_decl(slot.anchor.symbol.as_ref()) {
-                            Some(lowered) => lowered,
-                            None => self
-                                .augmentation_type_decl(
+                        // resolution order the prepared-decl route applies. A
+                        // BROKEN-lease demand surfaces the DISTINCT `LeaseMiss`
+                        // (a transient no-warm ReturnOnly), never collapsed into
+                        // the cacheable `UnknownSymbol`.
+                        let lowered = match self.type_decl_outcome(slot.anchor.symbol.as_ref()) {
+                            DemandOutcome::LeaseMiss => {
+                                return Err(LocatorBodyDerefError::LeaseMiss)
+                            }
+                            DemandOutcome::Ready(Some(lowered)) => lowered,
+                            DemandOutcome::Ready(None) => {
+                                match self.augmentation_type_decl_outcome(
                                     &AugmentationScopeKind::Global,
                                     slot.anchor.symbol.as_ref(),
-                                )
-                                .ok_or(LocatorBodyDerefError::UnknownSymbol)?,
+                                ) {
+                                    DemandOutcome::LeaseMiss => {
+                                        return Err(LocatorBodyDerefError::LeaseMiss)
+                                    }
+                                    DemandOutcome::Ready(Some(lowered)) => lowered,
+                                    DemandOutcome::Ready(None) => {
+                                        return Err(LocatorBodyDerefError::UnknownSymbol)
+                                    }
+                                }
+                            }
                         };
                         let shape = navigate_type_body(lowered.body.clone(), &slot.path)?;
                         Ok(DerefedAuthoredBody {
@@ -1119,9 +1241,15 @@ impl DeclBodyMemo {
                         })
                     }
                     LocatorSymbolSpace::Value => {
-                        let lowered = self
-                            .value_decl(slot.anchor.symbol.as_ref())
-                            .ok_or(LocatorBodyDerefError::UnknownSymbol)?;
+                        let lowered = match self.value_decl_outcome(slot.anchor.symbol.as_ref()) {
+                            DemandOutcome::LeaseMiss => {
+                                return Err(LocatorBodyDerefError::LeaseMiss)
+                            }
+                            DemandOutcome::Ready(Some(lowered)) => lowered,
+                            DemandOutcome::Ready(None) => {
+                                return Err(LocatorBodyDerefError::UnknownSymbol)
+                            }
+                        };
                         let annotation = lowered
                             .type_annotation
                             .clone()
@@ -1155,10 +1283,20 @@ impl DeclBodyMemo {
                 match aug.anchor.space {
                     LocatorSymbolSpace::Type => {
                         // Serve through the memo's scoped lazy demand cell
-                        // (one lowering per (scope, symbol) per content).
-                        let lowered = self
-                            .augmentation_type_decl(&scope_kind, aug.anchor.symbol.as_ref())
-                            .ok_or(LocatorBodyDerefError::UnknownSymbol)?;
+                        // (one lowering per (scope, symbol) per content). A
+                        // broken-lease demand surfaces the DISTINCT `LeaseMiss`
+                        // no-warm signal, never a cacheable `UnknownSymbol`.
+                        let lowered = match self
+                            .augmentation_type_decl_outcome(&scope_kind, aug.anchor.symbol.as_ref())
+                        {
+                            DemandOutcome::LeaseMiss => {
+                                return Err(LocatorBodyDerefError::LeaseMiss)
+                            }
+                            DemandOutcome::Ready(Some(lowered)) => lowered,
+                            DemandOutcome::Ready(None) => {
+                                return Err(LocatorBodyDerefError::UnknownSymbol)
+                            }
+                        };
                         let shape = match lowered.body.clone() {
                             TypeDeclBody::Single(expr) => DerefedBodyShape::Single(expr),
                             TypeDeclBody::Merged(merged) => {

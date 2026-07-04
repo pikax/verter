@@ -403,6 +403,85 @@ fn lower_locator_rejects_macro_type_argument_payload() {
     );
 }
 
+/// A broken-lease `LowerLocator` deref is a TRANSIENT ReturnOnly, not a
+/// genuine miss: the child build SUPPRESSES admission (`cache_suppress`) so
+/// the enclosing `Instantiate` / `LowerLocator` query does NOT warm-publish
+/// the derived `Opaque(Miss)` as a false body. The prior fix proved only the
+/// `DeclBodyMemo` cell is left uncommitted; this pins the PARENT-query taint
+/// end-to-end through `deref_locator_body` → `build_lower_locator`.
+///
+/// Discrimination (RED against the pre-change tree, GREEN after): pre-change
+/// the deref collapsed the lease-miss into `UnknownSymbol` and
+/// `build_lower_locator` returned `Error(Miss)` WITHOUT `cache_suppress`, so
+/// the `LowerLocator` `CacheRead` reported `cache_suppress == false` — the
+/// universal read-boundary fold would then let the enclosing build warm-admit
+/// a result embedding the false `Opaque(Miss)`. Post-change the `LeaseMiss`
+/// sets `cache_suppress == true`.
+#[test]
+fn broken_lease_lower_locator_suppresses_parent_admission() {
+    use crate::locator_identity::{
+        semantic_space_for_locator_space, LocatorLoweringKey, ParseEnvHash, ResolveEnvHash,
+    };
+    use crate::semantic_query::{QueryError, SemanticQueryKey};
+
+    let host = host();
+    upsert_ts(&host, OWNER_ID, OWNER);
+
+    // Materialise the owner's IndexedReady + its DeclBodyMemo. Pin the lease
+    // with an UNRELATED body demand (never touches the `Base` LowerLocator
+    // memo), then break the memo's worker-retained snapshot so the next
+    // `Base` deref lease-misses — the memo still HOLDS its lease, so
+    // `ensure_lease` will not re-acquire.
+    let indexed = host
+        .ensure_indexed_ready(OWNER_ID)
+        .expect("owner must materialise");
+    let memo = indexed.shallow_state.decl_bodies();
+    assert!(
+        memo.type_decl("Wide").is_some(),
+        "the unrelated demand must pin the lease"
+    );
+    memo.release_retained_snapshot_for_test();
+
+    // Build the SAME LowerLocator key `lower_locator` builds for `Base`.
+    let locator = decl_body_locator(OWNER_ID, "Base");
+    let (canonical_id, symbol, space) = match &locator {
+        AuthoredBodyLocator::DeclBody(slot) => (
+            Arc::clone(&slot.anchor.canonical_id),
+            Arc::clone(&slot.anchor.symbol),
+            slot.anchor.space,
+        ),
+        _ => unreachable!("decl_body_locator builds a DeclBody locator"),
+    };
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let slot = dispatch
+        .type_slot_for(Arc::clone(&canonical_id), symbol)
+        .with_symbol_space(semantic_space_for_locator_space(space));
+    let env = host.host_view_env_hashes_for(canonical_id.as_ref());
+    let key = LocatorLoweringKey::new_unsubstituted(
+        slot,
+        locator,
+        ParseEnvHash::from_env_hash(env.parse_env_hash),
+        ResolveEnvHash::from_env_hash(env.resolve_env_hash),
+    )
+    .expect("the locator anchor names its own slot");
+
+    // A COLD LowerLocator demand (the `Base` shape was never lowered) runs
+    // `build_lower_locator`, whose deref now lease-misses.
+    let read = dispatch.execute_read(SemanticQueryKey::LowerLocator { key });
+    assert!(
+        matches!(read.value, QueryResult::Error(QueryError::Miss)),
+        "a broken-lease deref must fail closed to an Error(Miss), got {:?}",
+        read.value
+    );
+    assert!(
+        read.cache_suppress,
+        "a broken-lease LowerLocator child must SUPPRESS memo admission so the \
+         enclosing Instantiate/LowerLocator query does not warm-publish the \
+         derived Opaque(Miss) as a false body; cache_suppress == false means the \
+         transient ReturnOnly collapsed into a cacheable UnknownSymbol"
+    );
+}
+
 /// Reference heads resolve in the AUTHORED declaration's own lexical scope:
 /// a namespace member body's bare `Foo` binds the SHADOWING namespace
 /// sibling (`NS.Foo`) — the same identity the declaration's

@@ -711,6 +711,56 @@ fn broken_lease_body_demand_fails_closed_return_only_without_caching() {
     assert_eq!(parses(&provenance), 1, "no re-parse is accounted");
 }
 
+/// A broken-lease locator deref surfaces the DISTINCT `LeaseMiss` outcome —
+/// NOT a cacheable `UnknownSymbol`. The prior fix proved the local
+/// `DeclBodyMemo` cell is left uncommitted; this pins the TYPED no-warm signal
+/// that the enclosing `LowerLocator` / `Instantiate` build folds into
+/// `cache_suppress`, so a transient ReturnOnly can never be cached as a real
+/// resolution result.
+///
+/// Discrimination (RED against the pre-change tree, GREEN after): the
+/// pre-change deref collapsed the lease-miss `None` into
+/// `LocatorBodyDerefError::UnknownSymbol` (a genuine, cacheable resolution
+/// result) — the enclosing memo would then warm-publish the derived
+/// `Opaque(Miss)` as a false body. Post-change the deref returns the distinct
+/// `LeaseMiss`.
+#[test]
+fn broken_lease_locator_deref_returns_lease_miss_not_unknown_symbol() {
+    use verter_type_expr::locators::{AuthoredAnchor, TypeBodySlot};
+
+    let (memo, _) = memo_for(FIVE_DECLS);
+    // Pin the lease with one successful demand, then break the retained
+    // snapshot out-of-band so every subsequent demand lease-misses.
+    assert!(memo.type_decl("Var0").is_some());
+    memo.release_retained_snapshot_for_test();
+
+    // Deref a DIFFERENT, not-yet-lowered TYPE symbol so the demand actually
+    // runs and lease-misses (rather than hitting an already-committed cell).
+    let locator = AuthoredBodyLocator::DeclBody(TypeBodySlot {
+        anchor: AuthoredAnchor {
+            canonical_id: Arc::from("/ws/fixture.ts"),
+            symbol: Arc::from("Var1"),
+            space: LocatorSymbolSpace::Type,
+        },
+        path: Arc::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
+    });
+    let err = memo
+        .deref_locator_body(&locator)
+        .expect_err("a broken-lease deref must fail typed, never fabricate a body");
+    assert_eq!(
+        err,
+        LocatorBodyDerefError::LeaseMiss,
+        "a broken-lease locator deref must surface the DISTINCT ReturnOnly \
+         LeaseMiss, NOT a cacheable UnknownSymbol — collapsing them lets the \
+         enclosing memo warm-publish the derived Opaque(Miss) as a false body"
+    );
+    // The lease-miss deref committed NOTHING (fail-closed no-warm rail).
+    assert!(
+        !memo.type_entry_materialized("Var1"),
+        "the broken-lease deref must not memoize a body-less cell"
+    );
+}
+
 /// Backfill is coverage-gated: a statement batch that lowered only a
 /// SUBSET of a sibling symbol's contributors must NOT pre-fill that
 /// sibling's entry — a narrower result pretending broader coverage

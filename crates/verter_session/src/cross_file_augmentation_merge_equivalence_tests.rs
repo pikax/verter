@@ -920,3 +920,122 @@ fn external_module_augmentation_warm_parent_rejects_contributor_content_edit_end
          fold warm-served a torn/stale surface; got {edited_surface:?}"
     );
 }
+
+/// EXTERNAL (`declare module "<bare>"`) augmentation fold — a TORN /
+/// unobservable contributor (`source_env_unobservable`) must FOLD its no-warm
+/// bit into the enclosing `Instantiate` query's `QueryBuildOutput.cache_suppress`,
+/// NOT merely the request-materialisation sticky. The semantic `cache_suppress`
+/// rail is the one memo admission actually consults; before the fix the
+/// external path marked ONLY the request sticky (never `output.cache_suppress`)
+/// AND the collector's all-skipped early-`None` conflated "no augmentation"
+/// with "contributors existed but were unobservable", so the enclosing
+/// `/use.ts::U` parent could WARM-PUBLISH a torn / partial merged surface.
+///
+/// A torn/unhealable/unservable augmenter cannot be constructed through the
+/// public host API (the external path pre-loads every `known_canonicals()`
+/// before the `ExternalSpecifier` scan), so the torn state is driven
+/// deterministically through the `for_tests` injection knob — the same
+/// established pattern as the relation-overflow / materialize-overflow knobs.
+/// The knob taints a NON-EMPTY contribution set (both `Cfg` augmenters still
+/// resolve to a real merged surface), isolating the `source_env_unobservable`
+/// fold from the unrelated import-miss suppress rail: `Cfg` is NOT an
+/// unresolved import here, so the ONLY thing that can set `cache_suppress` is
+/// the fold under test.
+///
+/// This asserts the `cache_suppress` SIGNAL on the `/use.ts::U` `Instantiate`
+/// `CacheRead` directly (a warm/recompute build-count probe is not
+/// discriminating — a `/use.ts` self-root edit recomputes regardless of
+/// suppression). `execute_read` folds every nested read's suppress through the
+/// universal read boundary, so the enclosing `Instantiate` `CacheRead` carries
+/// the fold's `cache_suppress` whether `Cfg` resolves directly in this build or
+/// through a nested one.
+///
+/// Discrimination (RED against the pre-change tree, GREEN after):
+///   - TORN (knob armed): the cold `/use.ts::U` build routes through the torn
+///     external fold. Pre-fix the external path folded NOTHING into
+///     `output.cache_suppress` (sticky only), so the `Instantiate` `CacheRead`
+///     reported `cache_suppress == false` (assertion FAILS). Post-fix the fold
+///     sets it `true`.
+///   - CONTROL (knob cleared): a clean external fold must NOT trip the fold, so
+///     the same cold build reports `cache_suppress == false` — anti-vacuity
+///     that the `true` above is caused by the torn state, not the key itself.
+#[test]
+fn external_module_augmentation_torn_contributor_folds_cache_suppress() {
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::semantic_query::{ProjectionReductionContext, SemanticQueryKey};
+
+    let host = make_host();
+    // TWO external `declare module "ext-pkg"` peers (no base body) + a consumer
+    // aliasing the augmented `Cfg`.
+    upsert_ts(
+        host.as_ref(),
+        "/aug1.d.ts",
+        "declare module \"ext-pkg\" { interface Cfg { fromOne: string } }\n",
+    );
+    upsert_ts(
+        host.as_ref(),
+        "/aug2.d.ts",
+        "declare module \"ext-pkg\" { interface Cfg { fromTwo: number } }\n",
+    );
+    upsert_ts(
+        host.as_ref(),
+        "/use.ts",
+        "import type { Cfg } from \"ext-pkg\"\nexport type U = Cfg\n",
+    );
+
+    // COLD-build the `/use.ts::U` Instantiate under a fresh view and report the
+    // resulting `CacheRead.cache_suppress`. No warm-up: the first cold build
+    // populates the augmentation index (the external path pre-loads every
+    // `known_canonicals()`), so `Cfg` resolves through the external fold.
+    let suppress_of = |view: &crate::resolver_store::HostStoreView| -> bool {
+        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let ctx = crate::resolver_core::HostResolverContext::new(&host, view, overlay);
+        let dispatch = ProjectSemanticDispatch::new(&ctx);
+        let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+            dispatch.type_slot_for(Arc::from("/use.ts"), Arc::from("U")),
+            Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
+            dispatch.instantiate_context_for(
+                "/use.ts",
+                ProjectionReductionContext::published(ProjectionMode::Expanded),
+            ),
+        ));
+        dispatch.execute_read(key).cache_suppress
+    };
+
+    // TORN: arm the injection, then COLD-build `/use.ts::U`. `Cfg` resolves to
+    // the real `{ fromOne; fromTwo }` merged surface, but the collection is
+    // tainted, so the external fold must set `cache_suppress`.
+    let torn_suppress = {
+        let _torn = crate::for_tests::augmentation_force_source_env_unobservable_for_tests(
+            host.as_ref(),
+            true,
+        );
+        let torn_view = host.resolver_store_view_read().into_owned_view();
+        suppress_of(&torn_view)
+    };
+    assert!(
+        torn_suppress,
+        "a torn external augmenter (source_env_unobservable) must fold its no-warm bit \
+         into the `/use.ts::U` Instantiate build's `output.cache_suppress` — \
+         cache_suppress == false means the external path routed the torn state only \
+         through the request-materialisation sticky, never the semantic cache_suppress \
+         rail memo admission actually consults"
+    );
+
+    // CONTROL (anti-vacuity): knob cleared. The torn build above was suppressed
+    // (never admitted), so this cold-rebuilds a CLEAN external fold, which must
+    // NOT trip `cache_suppress`. Edit `/use.ts` to guarantee a fresh self-root
+    // even had the torn build somehow admitted.
+    upsert_ts(
+        host.as_ref(),
+        "/use.ts",
+        "import type { Cfg } from \"ext-pkg\"\nexport type U = Cfg\n// clean\n",
+    );
+    let clean_view = host.resolver_store_view_read().into_owned_view();
+    assert!(
+        !suppress_of(&clean_view),
+        "a CLEAN external fold (no torn contributor) must NOT set cache_suppress on the \
+         `/use.ts::U` Instantiate build — the `true` above is caused by the torn \
+         contributor, not an inherently non-cacheable key"
+    );
+}

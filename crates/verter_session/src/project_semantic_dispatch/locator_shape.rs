@@ -1035,14 +1035,30 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .deref_locator_body(key.locator())
         {
             Ok(derefed) => derefed,
-            // Every deref failure is a typed fail-closed non-result; an
-            // Error result is never warm-published.
-            Err(_) => {
-                let output: crate::project_semantic_dispatch::walk::QueryBuildOutput = (
+            // Every deref failure is a typed fail-closed non-result. A GENUINE
+            // deref miss (`UnknownSymbol`, `PathUnresolved`, an unrouted
+            // payload, …) is a real, cacheable resolution result — the
+            // `QueryResult::Error(Miss)` is never warm-published at this
+            // `LowerLocator` level (errors never promote to a warm entry), and
+            // the enclosing `Instantiate` may soundly cache the resulting
+            // `Opaque(Miss)`. A `LeaseMiss` is a TRANSIENT ReturnOnly (a broken
+            // lease pin): the enclosing query must NOT warm-publish the derived
+            // `Opaque(Miss)` as a false body — set `cache_suppress` so the
+            // universal read-boundary fold (`lower_locator`'s `execute_read`)
+            // taints the enclosing `LowerLocator` / `Instantiate` build, and a
+            // later demand under a live lease recovers.
+            Err(deref_error) => {
+                let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput = (
                     QueryResult::Error(QueryError::Miss),
                     self.project_generation_signature(),
                 )
                     .into();
+                if matches!(
+                    deref_error,
+                    crate::decl_body_memo::LocatorBodyDerefError::LeaseMiss
+                ) {
+                    output.cache_suppress = true;
+                }
                 return output.with_observed_self_roots(observed_self_roots);
             }
         };

@@ -2545,6 +2545,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
             source_env_unobservable,
         } = self.collect_augmentation_contributions(target, decl_name.as_ref(), context)?;
 
+        // Tainted-EMPTY collection: augmenters targeted this decl but every
+        // contribution was unobservable. Keep the base body UNCHANGED (no false
+        // single-contributor `MergedDecl` wrapper) but propagate the no-warm
+        // taint so the enclosing `instantiate_shell` sets
+        // `output.cache_suppress`. `source_env_unobservable` is `true` here (the
+        // collector returns `None` for a genuine no-augmentation empty).
+        if contributor_nodes.is_empty() {
+            return Some(AugmentationStitch {
+                merged: base_result,
+                contributor_roots: Vec::new(),
+                source_env_unobservable,
+            });
+        }
+
         // Build the single peer-merge carrier: base contributors ∪ augmenter
         // contributions. If the base body is itself a `MergedDecl` (same-file
         // merge), flatten its contributors so the augmenter peers merge AT THE
@@ -2811,6 +2825,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         }
 
+        // Test-injection: taint the (successfully-collected) contribution set as
+        // if one contributor's source-env identity were unobservable — the exact
+        // no-warm state a torn/unhealable/unservable augmenter organically
+        // produces, but with a deterministic trigger and WITHOUT emptying the
+        // contribution set (so the resolved surface stays a real merged type,
+        // isolating the `source_env_unobservable` fold from the unrelated
+        // import-miss suppress rail). Zero-cost `false` load in production.
+        if host
+            .augmentation_force_source_env_unobservable
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            source_env_unobservable = true;
+        }
+
         // Persist any healed exact keys back into the cached `AugmenterSet`.
         // The augmenter-set fingerprint folds `parse_stable_hash` (NOT
         // `content_hash`), and a stale key is healed only when the augmenter's
@@ -2839,6 +2867,27 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
 
         if contributor_nodes.is_empty() {
+            // DISTINGUISH the two empty outcomes (they are NOT the same):
+            //   - `source_env_unobservable == true`: augmenters targeted this
+            //     decl but EVERY contribution was unobservable (torn / unhealable
+            //     / unservable). This is NOT "no augmentation" — the merged
+            //     surface would be incomplete, so the caller must fold a no-warm
+            //     `cache_suppress` signal. Return a tainted-empty outcome (no
+            //     nodes, no roots, `source_env_unobservable = true`) so the
+            //     relative and external callers route it to the semantic
+            //     cache-suppress rail instead of publishing a base-only / miss
+            //     result warm.
+            //   - `source_env_unobservable == false`: genuinely no augmenter
+            //     contributes this decl — a real, cacheable no-augmentation
+            //     result. Return `None`; the caller keeps the base body unchanged
+            //     and warms normally.
+            if source_env_unobservable {
+                return Some(AugmentationContributions {
+                    contributor_nodes: Vec::new(),
+                    contributor_roots: Vec::new(),
+                    source_env_unobservable: true,
+                });
+            }
             return None;
         }
 
@@ -2982,18 +3031,33 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // parent through the strict per-contributor reject rail — proven
             // end-to-end by
             // `cross_file_augmentation_merge_equivalence_tests::external_module_augmentation_warm_parent_rejects_contributor_content_edit_end_to_end`.
-            // The residual torn-contributor SKIP (`source_env_unobservable`) is
-            // unreachable on a cold external fold: the caller pre-loads EVERY
-            // `known_canonicals()` before the `ExternalSpecifier` scan, so every
-            // augmenter is servable with a fresh artifact key.
             contributor_roots: _,
             source_env_unobservable,
         } = self.collect_augmentation_contributions(target, name, context)?;
-        // A torn contributor (unobservable source-env identity) is served
-        // but never warm-admitted: taint the surrounding request's
-        // materialisation admission.
+        // A torn contributor (unobservable source-env identity — a
+        // torn/unhealable/unservable augmenter) is SERVED but must NEVER be
+        // warm-admitted. This carrier is interned mid-reference-resolution and
+        // returned as a bare node, so it owns no `QueryBuildOutput` of its own;
+        // fold the no-warm signal into the ENCLOSING cold build's local taint
+        // frame — the SAME semantic `QueryBuildOutput.cache_suppress` rail the
+        // relative stitch uses (`instantiate_shell` sets `output.cache_suppress`
+        // from the collector's `source_env_unobservable`). That is the rail memo
+        // admission actually consults; the earlier request-materialisation
+        // sticky alone did NOT gate the enclosing `Instantiate` memo. The
+        // completion fence separately covers a mid-flight torn contributor
+        // (revalidate-before-publish). Also mark the request-materialisation
+        // sticky as a fail-closed backstop for the (unreachable-by-construction)
+        // case where no enclosing cold-build frame is active.
         if source_env_unobservable {
+            self.fold_into_top_build_local_taint(false, true);
             crate::request_context::mark_request_materialization_cache_suppress();
+        }
+        // A tainted-EMPTY collection (augmenters targeted the specifier but were
+        // all unobservable) produces no body: the taint is already folded, so
+        // fall through to the caller's `Opaque(Miss)` sentinel WITHOUT
+        // synthesising a false zero-contributor `MergedDecl`.
+        if contributor_nodes.is_empty() {
+            return None;
         }
 
         // Peer-merge carrier from the augmenter contributions ONLY (no base
