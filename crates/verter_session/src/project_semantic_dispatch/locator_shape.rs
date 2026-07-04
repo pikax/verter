@@ -35,11 +35,22 @@
 //!   unsubstituted; substituted demands route through `Instantiate { args }`);
 //! - the produced nodes are ROLE-FREE: object members carry the neutral
 //!   `MacroOwnBodyStamp::NEUTRAL` / `MergeRoleStamp::NEUTRAL` stamps — the
-//!   ONLY stamp values this path can construct. The stamp types' inner
-//!   fields are private (minting a non-neutral value requires a
-//!   `ProjectionReductionContext` / analyzed-macro-kind witness, neither of
-//!   which this path holds — the sealed context yields no reduction
-//!   context), so a role-stamped locator shape node is a COMPILE error, not
+//!   ONLY stamp values this path can construct. The stamp types' inner fields
+//!   are private, so minting a NON-neutral value requires either a
+//!   `ProjectionReductionContext` witness (`own_body_stamp` / `role_stamp` /
+//!   `stamp_role` / `with_merge_role`) or the analyzed-macro-kind witness
+//!   (`MacroOwnBodyStamp::from_macro_kind`). Those mint methods are `pub` and
+//!   witness-gated — NOT visibility-sealed (an in-crate OR downstream caller
+//!   holding a `ProjectionReductionContext`, e.g. via the `pub`
+//!   `ProjectionReductionContext::published`, can mint) — so the locator seal
+//!   is a THREADING seal, not a visibility one: the locator lowering entry
+//!   receives a sealed `LocatorShapeCtx` that neither IS nor YIELDS a
+//!   `ProjectionReductionContext`, and the path holds no analyzed macro kind,
+//!   so NEITHER witness is reachable here. A role-stamped locator shape node
+//!   is therefore a COMPILE error ON THIS PATH — pinned externally by the
+//!   `member_role_stamps_not_mintable_without_witness` compile-fail fixture
+//!   (E0308/E0423) and behaviorally by the
+//!   `locator_shape_nodes_exclude_caller_relative_stamps` discriminator — not
 //!   a convention. Caller-relative provenance / merge-role stamping is
 //!   projection-time work applied to the fetched shape — never shape-node
 //!   identity — so one reusable body-shape family exists per locator/env.
