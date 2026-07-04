@@ -1331,7 +1331,10 @@ const RESIDUAL_BODY_READERS: &[ReaderRow] = &[
         method_chain: false,
         required_hot_route: &[],
         reason: "reads prepared.body for the authored heritage extends/implements refs of a class \
-                 declaration body — authored-syntax-intrinsic",
+                 declaration body AND surfaces each base's prepared-body-derived `type_arguments` \
+                 (bare TypeExpr slice), which the ResolveClassSurface consumer LOWERS through the \
+                 reducing lowerer (`lower_class_heritage_args`) — not only ref reads; \
+                 authored-syntax-intrinsic",
     },
     ReaderRow {
         file: "src/project_semantic_dispatch/raise.rs",

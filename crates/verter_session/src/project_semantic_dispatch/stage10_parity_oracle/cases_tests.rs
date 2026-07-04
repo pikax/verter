@@ -97,10 +97,39 @@ defineEmits<{ update: [value: string] }>()
         let meta = host
             .get_component_meta(self.entry())
             .expect("component meta must resolve (anti-vacuity)");
-        let names: Vec<&str> = meta.props.iter().map(|p| p.name.as_str()).collect();
+        // Assert the cross-file member TYPES, not just the names: a resolver
+        // that published the right names with the wrong types (a dropped decl
+        // body, a swapped member) must fail here. `CardProps { msg: string;
+        // count?: number }`.
+        let msg = meta
+            .props
+            .iter()
+            .find(|p| p.name == "msg")
+            .expect("cross-file prop `msg` must publish");
         assert!(
-            names.contains(&"msg") && names.contains(&"count"),
-            "cross-file props must publish msg + count; got {names:?}"
+            matches!(
+                msg.type_expr,
+                verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+            ),
+            "`msg` must publish `string`; got {:?}",
+            msg.type_expr
+        );
+        let count = meta
+            .props
+            .iter()
+            .find(|p| p.name == "count")
+            .expect("cross-file prop `count` must publish");
+        assert!(
+            matches!(
+                count.type_expr,
+                verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+            ),
+            "`count` must publish `number`; got {:?}",
+            count.type_expr
+        );
+        assert!(
+            !count.required,
+            "`count?` must publish as optional (required == false)"
         );
         assert!(
             meta.events.iter().any(|e| e.name == "update"),
@@ -325,11 +354,35 @@ defineProps<AugTarget>()
         let meta = host
             .get_component_meta(self.entry())
             .expect("component meta must resolve (anti-vacuity)");
-        let names: Vec<&str> = meta.props.iter().map(|p| p.name.as_str()).collect();
+        // Assert the merged member TYPES, not just the names: a stitch that
+        // dropped the base body or mis-lowered the augmenter would publish the
+        // right names with the wrong types. `AugTarget { base: string }` ∪
+        // `declare module { AugTarget { fromAug: number } }`.
+        let base = meta
+            .props
+            .iter()
+            .find(|p| p.name == "base")
+            .expect("the base member `base` must publish");
         assert!(
-            names.contains(&"base") && names.contains(&"fromAug"),
-            "the augmented surface must publish both the base member and the \
-             augmenter member; got {names:?}"
+            matches!(
+                base.type_expr,
+                verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+            ),
+            "`base` must publish `string`; got {:?}",
+            base.type_expr
+        );
+        let from_aug = meta
+            .props
+            .iter()
+            .find(|p| p.name == "fromAug")
+            .expect("the augmenter member `fromAug` must publish");
+        assert!(
+            matches!(
+                from_aug.type_expr,
+                verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+            ),
+            "`fromAug` must publish `number`; got {:?}",
+            from_aug.type_expr
         );
         component_meta_envelope(Some(&meta))
     }
