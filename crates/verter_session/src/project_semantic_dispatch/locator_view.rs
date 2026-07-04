@@ -62,6 +62,27 @@ pub(super) enum AuthoredArmKind {
     WholeBody,
 }
 
+/// How a declaration-body REFERENCE arm (an `extends` heritage carrier / a
+/// non-object authored-intersection arm) evaluates during view projection.
+///
+/// The two consumers of a projected body have different arm contracts: a
+/// SINGLE declaration's `Intersection` body flows to the role-driven
+/// intersection surface merge (stamped merge roles classify members, so a
+/// reference arm may evaluate eagerly under the caller's demand), while a
+/// `MergedDecl` contributor flows to the TOPOLOGY-driven peer-merge reducer
+/// (`Intersection([heritage refs…, own Object])`, heritage arms preserved
+/// and resolved lazily under the heritage-overlay role) — an eagerly
+/// materialised heritage reference there is indistinguishable from an own
+/// `Object` arm and silently loses own-body-shadows-heritage precedence.
+#[derive(Debug, Clone, Copy)]
+enum ReferenceArmDemand {
+    /// Evaluate the reference arm under the caller's projection mode.
+    CallerMode,
+    /// Keep the reference arm a DEFERRED carrier (eager modes demote to
+    /// `Navigate`), preserving the arm topology for the peer-merge reducer.
+    Deferred,
+}
+
 impl ProjectionStamp {
     fn new(
         context: ProjectionReductionContext,
@@ -136,19 +157,31 @@ impl<'a> ProjectSemanticDispatch<'a> {
             Some(SemanticNodeData::MergedDecl { contributors }) => {
                 let contributors = contributors.clone();
                 drop(data);
-                let own = ProjectionStamp::new(
-                    context,
-                    MemberMergeRole::OwnBody,
-                    AuthoredArmKind::OwnBodyObject,
-                );
+                // Per-arm heritage discrimination applies INSIDE each merged
+                // contributor exactly as it does to a single declaration's
+                // body: a contributor shaped `Intersection([extends Ref…,
+                // own Object])` stamps its inline object arms as OWN-body
+                // and its reference (heritage) arms as HERITAGE — never a
+                // blanket own-body stamp over the whole contributor, which
+                // would materialise the heritage reference into an `Object`
+                // that the peer-merge reducer then mis-buckets as OWN
+                // surface, losing own-body-shadows-heritage precedence.
                 let ids: Vec<SemanticNodeId> = contributors
                     .iter()
                     .map(|contributor| {
-                        self.project_view_node(
+                        self.project_decl_body_arms(
                             *contributor,
-                            own.stamped_context(context),
+                            reference_arm_role,
+                            // The peer-merge reducer consumes contributor arms
+                            // by TOPOLOGY (`Intersection([heritage refs…, own
+                            // Object])`, heritage arms preserved for lazy
+                            // resolution under the heritage-overlay role) —
+                            // so a heritage reference must reach it as a
+                            // CARRIER, never eagerly materialised here.
+                            ReferenceArmDemand::Deferred,
                             inputs,
                             substitutions,
+                            context,
                             &mut memo,
                         )
                     })
@@ -160,41 +193,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     },
                 )
             }
-            Some(SemanticNodeData::Intersection(arms)) => {
-                let arms = arms.clone();
+            Some(SemanticNodeData::Intersection(_)) => {
                 drop(data);
-                let arm_ids: Vec<SemanticNodeId> = arms
-                    .iter()
-                    .map(|arm| {
-                        let arm_kind = match self.graph().node_data(*arm).as_deref() {
-                            Some(SemanticNodeData::Object(_)) => AuthoredArmKind::OwnBodyObject,
-                            _ => AuthoredArmKind::ReferenceArm,
-                        };
-                        let role = match arm_kind {
-                            AuthoredArmKind::OwnBodyObject => MemberMergeRole::OwnBody,
-                            _ => reference_arm_role,
-                        };
-                        let stamp = ProjectionStamp::new(context, role, arm_kind);
-                        self.project_view_node(
-                            *arm,
-                            stamp.stamped_context(context),
-                            inputs,
-                            substitutions,
-                            &mut memo,
-                        )
-                    })
-                    .collect();
-                if arm_ids.is_empty() {
-                    self.graph()
-                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never))
-                } else if arm_ids.len() == 1 {
-                    arm_ids[0]
-                } else {
-                    self.graph().intern_preserving_scope(
-                        shape,
-                        SemanticNodeData::Intersection(Arc::from(arm_ids.into_boxed_slice())),
-                    )
-                }
+                self.project_decl_body_arms(
+                    shape,
+                    reference_arm_role,
+                    // A single declaration's body flows to the role-driven
+                    // intersection surface merge, which classifies members by
+                    // their stamped merge role — reference arms may evaluate
+                    // under the caller's demand.
+                    ReferenceArmDemand::CallerMode,
+                    inputs,
+                    substitutions,
+                    context,
+                    &mut memo,
+                )
             }
             Some(SemanticNodeData::Object(_)) => {
                 drop(data);
@@ -221,6 +234,87 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     inputs,
                     substitutions,
                     &mut memo,
+                )
+            }
+        }
+    }
+
+    /// Project one declaration-body ROOT (a whole single body or one merged
+    /// contributor) applying the per-arm [`ProjectionStamp`] rule:
+    ///
+    /// - an `Intersection` body stamps inline object arms as own-body
+    ///   (caller provenance + `OwnBody` role) and reference arms as
+    ///   structural with the declaration-kind `reference_arm_role`
+    ///   (`Heritage` for an interface/class, `Authored` for an alias);
+    ///   reference arms evaluate per the caller's [`ReferenceArmDemand`];
+    /// - a whole `Object` body is its own own-body arm;
+    /// - any other shape projects as an own-body contributor surface.
+    #[allow(clippy::too_many_arguments)]
+    fn project_decl_body_arms(
+        &self,
+        body: SemanticNodeId,
+        reference_arm_role: MemberMergeRole,
+        reference_arm_demand: ReferenceArmDemand,
+        inputs: &LocatorViewInputs<'_>,
+        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
+        context: ProjectionReductionContext,
+        memo: &mut ViewMemo,
+    ) -> SemanticNodeId {
+        let data = self.graph().node_data(body);
+        match data.as_deref() {
+            Some(SemanticNodeData::Intersection(arms)) => {
+                let arms = arms.clone();
+                drop(data);
+                let arm_ids: Vec<SemanticNodeId> = arms
+                    .iter()
+                    .map(|arm| {
+                        let arm_kind = match self.graph().node_data(*arm).as_deref() {
+                            Some(SemanticNodeData::Object(_)) => AuthoredArmKind::OwnBodyObject,
+                            _ => AuthoredArmKind::ReferenceArm,
+                        };
+                        let role = match arm_kind {
+                            AuthoredArmKind::OwnBodyObject => MemberMergeRole::OwnBody,
+                            _ => reference_arm_role,
+                        };
+                        let stamp = ProjectionStamp::new(context, role, arm_kind);
+                        let mut arm_ctx = stamp.stamped_context(context);
+                        if matches!(arm_kind, AuthoredArmKind::ReferenceArm)
+                            && matches!(reference_arm_demand, ReferenceArmDemand::Deferred)
+                            && matches!(
+                                arm_ctx.mode,
+                                ProjectionMode::Expanded | ProjectionMode::Identity
+                            )
+                        {
+                            arm_ctx = arm_ctx.with_mode(ProjectionMode::Navigate);
+                        }
+                        self.project_view_node(*arm, arm_ctx, inputs, substitutions, memo)
+                    })
+                    .collect();
+                if arm_ids.is_empty() {
+                    self.graph()
+                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never))
+                } else if arm_ids.len() == 1 {
+                    arm_ids[0]
+                } else {
+                    self.graph().intern_preserving_scope(
+                        body,
+                        SemanticNodeData::Intersection(Arc::from(arm_ids.into_boxed_slice())),
+                    )
+                }
+            }
+            _ => {
+                drop(data);
+                let own = ProjectionStamp::new(
+                    context,
+                    MemberMergeRole::OwnBody,
+                    AuthoredArmKind::OwnBodyObject,
+                );
+                self.project_view_node(
+                    body,
+                    own.stamped_context(context),
+                    inputs,
+                    substitutions,
+                    memo,
                 )
             }
         }

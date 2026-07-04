@@ -268,7 +268,7 @@ fn locator_shape_nodes_exclude_caller_relative_stamps() {
 
     // NEW locator-shape entry: role-free.
     let binders: Vec<LocatorBinderFrame> = Vec::new();
-    let shape_ctx = LocatorShapeCtx::new(&scope, &binders);
+    let shape_ctx = LocatorShapeCtx::new(&scope, &binders, None, None);
     let role_free = dispatch.lower_type_expr_for_locator_shape(&expr, &shape_ctx);
 
     assert_ne!(
@@ -401,6 +401,48 @@ fn lower_locator_rejects_macro_type_argument_payload() {
         ),
         "the provider must surface the typed rejection as an honest Miss"
     );
+}
+
+/// Reference heads resolve in the AUTHORED declaration's own lexical scope:
+/// a namespace member body's bare `Foo` binds the SHADOWING namespace
+/// sibling (`NS.Foo`) — the same identity the declaration's
+/// `name_resolution` map (and therefore the reducing path) resolves — never
+/// the same-named top-level symbol a scope-less lookup would return. The
+/// cached `LowerLocator` shape carries the reference IDENTITY, so a
+/// wrong-scope resolution here poisons every downstream projection.
+#[test]
+fn locator_ref_head_resolves_shadowing_namespace_sibling_not_top_level() {
+    let host = host();
+    upsert_ts(
+        &host,
+        OWNER_ID,
+        "export interface Foo { top: string }\n\
+         export namespace NS {\n\
+             export interface Foo { nested: number }\n\
+             export interface Bar { field: Foo }\n\
+         }\n",
+    );
+
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let node = match dispatch.lower_locator(decl_body_locator(OWNER_ID, "NS.Bar")) {
+        QueryResult::Value(id) => id,
+        other => panic!("lower_locator must produce a value, got {other:?}"),
+    };
+    let graph = host.project_type_store().semantic_graph();
+    let surface = object_surface(&host, node);
+    match graph.node_data(member_value(&surface, "field")).as_deref() {
+        Some(SemanticNodeData::DeclRef { identity }) => {
+            assert_eq!(identity.canonical_id.as_ref(), OWNER_ID);
+            assert_eq!(
+                identity.decl_name.as_ref(),
+                "NS.Foo",
+                "inside `namespace NS`, the bare `Foo` binds the namespace \
+                 sibling (TS namespace scope) — the cached reference identity \
+                 must be the SHADOWING `NS.Foo`, not the top-level `Foo`"
+            );
+        }
+        other => panic!("the reference head must stay a DeclRef identity carrier, got {other:?}"),
+    }
 }
 
 /// A sub-position locator (a `TypeBodyPathStep` path) derefs and lowers

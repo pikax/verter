@@ -55,13 +55,39 @@ use crate::decl_body_memo::DerefedBodyShape;
 use crate::locator_identity::{
     semantic_space_for_locator_space, LocatorLoweringKey, ParseEnvHash, ResolveEnvHash,
 };
-use crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope;
+use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
+
+use crate::resolver_core::bare_name_resolve::{
+    resolve_bare_name_in_scope, DeclarationScopePayload,
+};
 use crate::semantic_query::{
     DeclIdentity, FunctionParam, HashValue, IndexKey, IndexSignature, MacroOwnBodyStamp, MapperKey,
     MapperKind, MergeRoleStamp, NodeScopeId, OptionalityMod, PrimitiveKind, QueryError,
     QueryResult, ReadonlyMod, ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
     SurfaceMember, SurfaceView, SyntheticBindingId, TupleElement, TypeParamDecl, ValueRootKey,
 };
+
+/// The anchor declaration's prepared source, held so its
+/// `name_resolution` map can be borrowed for the shape-lowering pass —
+/// whichever prepared family the locator anchor names (a cached type /
+/// value declaration, or an augmentation-scoped contribution prepared in
+/// the anchor file's own context, exactly as the augmentation stitch
+/// prepares it).
+enum AnchorPreparedDecl {
+    Type(Arc<verter_semantic::analysis::type_solver::PreparedTypeDecl>),
+    Value(Arc<verter_semantic::analysis::type_solver::PreparedValueDecl>),
+    Augmentation(Box<verter_semantic::analysis::type_solver::PreparedTypeDecl>),
+}
+
+impl AnchorPreparedDecl {
+    fn name_resolution(&self) -> &FxHashMap<String, ResolvedRootIdentity> {
+        match self {
+            Self::Type(prepared) => &prepared.name_resolution,
+            Self::Value(prepared) => &prepared.name_resolution,
+            Self::Augmentation(prepared) => &prepared.name_resolution,
+        }
+    }
+}
 
 /// One lexical binder frame of the locator-shape lowering: declared
 /// type-parameter / `infer` / mapped-binder names in scope at one nesting
@@ -83,7 +109,8 @@ impl LocatorBinderFrame {
 }
 
 /// The SEALED locator-shape lowering context: the authored position's
-/// lexical scope + type-parameter binder environment — and NOTHING else.
+/// lexical scope + type-parameter binder environment + the declaration's
+/// own bare-name resolution inputs — and NOTHING else.
 ///
 /// Fields are PRIVATE and construction is in-crate only
 /// ([`LocatorShapeCtx::new`]), so an outside unit can neither forge one nor
@@ -91,6 +118,15 @@ impl LocatorBinderFrame {
 /// key), and no conversion of any form to a
 /// [`ProjectionReductionContext`](crate::semantic_query::ProjectionReductionContext)
 /// — the non-reduction guarantee is encoded by TYPE/CAPABILITY.
+///
+/// `name_resolution` / `scope_payload` are IDENTITY inputs, not reduction
+/// capability: reference heads must carrier-resolve to the SAME
+/// `(canonical, symbol)` identity the reducing path resolves — the
+/// declaration's own import/namespace-aware `name_resolution` map first,
+/// then the payload-aware in-scope resolver — never a scope-less top-level
+/// lookup (a declaration-local / namespace / import binding shadowing a
+/// top-level symbol would otherwise cache the WRONG `DeclRef` /
+/// `InstantiationRef` identity under `LowerLocator`).
 #[derive(Debug, Clone, Copy)]
 pub struct LocatorShapeCtx<'a> {
     /// The authored position's lexical scope (owning canonical + content
@@ -99,13 +135,32 @@ pub struct LocatorShapeCtx<'a> {
     /// Innermost-last stack of binder frames; lookup scans from the top
     /// (last) frame outward so an inner binder shadows an outer one.
     binders: &'a [LocatorBinderFrame],
+    /// The declaration's own bare-name → root-identity map (import /
+    /// namespace-sibling aware) — the SAME fast path the reducing entry
+    /// consults first. `None` when no prepared declaration exists for the
+    /// anchor (the in-scope resolver below is then the whole authority).
+    name_resolution: Option<&'a FxHashMap<String, ResolvedRootIdentity>>,
+    /// The anchor scope's declaration-scope payload (scope-local names +
+    /// import bindings), threaded to the shared in-scope resolver.
+    scope_payload: Option<&'a DeclarationScopePayload>,
 }
 
 impl<'a> LocatorShapeCtx<'a> {
     /// Compose the sealed locator-shape context over the authored
-    /// position's lexical `scope` and its type-parameter binder frames.
-    pub(crate) fn new(scope: &'a NodeScopeId, binders: &'a [LocatorBinderFrame]) -> Self {
-        Self { scope, binders }
+    /// position's lexical `scope`, its type-parameter binder frames, and
+    /// the declaration's bare-name resolution inputs.
+    pub(crate) fn new(
+        scope: &'a NodeScopeId,
+        binders: &'a [LocatorBinderFrame],
+        name_resolution: Option<&'a FxHashMap<String, ResolvedRootIdentity>>,
+        scope_payload: Option<&'a DeclarationScopePayload>,
+    ) -> Self {
+        Self {
+            scope,
+            binders,
+            name_resolution,
+            scope_payload,
+        }
     }
 }
 
@@ -114,12 +169,14 @@ impl<'a> LocatorShapeCtx<'a> {
 struct ShapeLowerCtx<'a> {
     scope: &'a NodeScopeId,
     binders: &'a [LocatorBinderFrame],
+    name_resolution: Option<&'a FxHashMap<String, ResolvedRootIdentity>>,
+    scope_payload: Option<&'a DeclarationScopePayload>,
 }
 
 impl<'a> ShapeLowerCtx<'a> {
-    /// Swap the binder stack (the surrounding scope is preserved) — used
-    /// when a function's own generics / a mapper binder / an `infer` frame
-    /// extends the stack for a sub-position.
+    /// Swap the binder stack (the surrounding scope + resolution inputs are
+    /// preserved) — used when a function's own generics / a mapper binder /
+    /// an `infer` frame extends the stack for a sub-position.
     fn with_binders<'b>(&self, binders: &'b [LocatorBinderFrame]) -> ShapeLowerCtx<'b>
     where
         'a: 'b,
@@ -127,6 +184,8 @@ impl<'a> ShapeLowerCtx<'a> {
         ShapeLowerCtx {
             scope: self.scope,
             binders,
+            name_resolution: self.name_resolution,
+            scope_payload: self.scope_payload,
         }
     }
 
@@ -155,6 +214,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let work = ShapeLowerCtx {
             scope: ctx.scope,
             binders: ctx.binders,
+            name_resolution: ctx.name_resolution,
+            scope_payload: ctx.scope_payload,
         };
         self.lower_locator_shape_node(expr, &work)
     }
@@ -733,16 +794,70 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return self.opaque(QueryError::Miss);
         }
 
-        // Identity resolution through the ONE shared bare-name resolver —
-        // userland shadowing wins over the global lib heads below by
-        // resolution order. This resolves WHO the name is (a slot), never
-        // WHAT it means (no `ResolveDecl` / `Instantiate` execution).
-        let resolved = match scope {
-            NodeScopeId::File { canonical_id, .. } => {
-                resolve_bare_name_in_scope(self.ctx, canonical_id.as_ref(), None, name.as_ref())
-            }
-            NodeScopeId::Global => None,
-        };
+        // A script-setup generic parameter is NOT a declaration: its bare
+        // name stays a `BareRef` carrier so the view projection resolves it
+        // to the rich `TypeParam` shell from the scope payload's type
+        // bindings (mirrors the reducing entry's dedicated arm, which
+        // precedes the shared head resolver). Resolving it here would cache
+        // a bogus `DeclRef` identity in the shape.
+        if ctx
+            .scope_payload
+            .is_some_and(|payload| payload.scope_type_bindings.contains_key(name.as_ref()))
+        {
+            return graph.intern_node_with_scope(
+                SemanticNodeData::new_bare_ref(
+                    Arc::clone(name),
+                    scope.clone(),
+                    self.lower_locator_shape_args(type_arguments, ctx),
+                ),
+                scope.clone(),
+            );
+        }
+
+        // Identity resolution in the AUTHORED declaration's own lexical
+        // scope — the declaration's `name_resolution` map first (the same
+        // import / namespace-sibling-aware fast path the reducing entry
+        // consults, so a declaration-local / namespace / import binding
+        // shadowing a top-level symbol resolves to the SHADOWING identity),
+        // then the ONE shared payload-aware bare-name resolver. A map hit
+        // re-canonicalizes through `resolve_imported_type_root` to the
+        // FINAL defining identity (a bundle-fallback entry may carry the
+        // intermediate barrel hop — the same final-hop retry
+        // `resolve_prepared_type_decl_via_host` applies). Userland
+        // shadowing wins over the global lib heads below by resolution
+        // order. This resolves WHO the name is (a slot), never WHAT it
+        // means (no `ResolveDecl` / `Instantiate` execution).
+        let resolved = ctx
+            .name_resolution
+            .and_then(|map| map.get(name.as_ref()))
+            .and_then(|direct| {
+                // A map entry whose canonical does not name a live file is
+                // not a usable identity — e.g. an empty canonical, or an
+                // ambient string-literal module SPECIFIER the bundle
+                // canonicalization stored verbatim at prep time. Fall
+                // through to the full in-scope resolver, which resolves the
+                // specifier through the live dependency/ambient-module
+                // authority.
+                if direct.canonical_id.is_empty() {
+                    return None;
+                }
+                let (final_canonical, final_symbol) = self
+                    .ctx
+                    .resolve_imported_type_root(&direct.canonical_id, &direct.symbol_name);
+                if self.ctx.shallow_file_state(&final_canonical).is_none() {
+                    return None;
+                }
+                Some(ResolvedRootIdentity::new(final_canonical, final_symbol))
+            })
+            .or_else(|| match scope {
+                NodeScopeId::File { canonical_id, .. } => resolve_bare_name_in_scope(
+                    self.ctx,
+                    canonical_id.as_ref(),
+                    ctx.scope_payload,
+                    name.as_ref(),
+                ),
+                NodeScopeId::Global => None,
+            });
         if let Some(ri) = resolved {
             let canonical: Arc<str> = Arc::from(ri.canonical_id.as_str());
             let decl_name: Arc<str> = Arc::from(ri.symbol_name.as_str());
@@ -824,6 +939,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         scope: &NodeScopeId,
         owner_symbol: &Arc<str>,
         type_parameters: &[verter_type_expr::TypeParam],
+        name_resolution: Option<&FxHashMap<String, ResolvedRootIdentity>>,
+        scope_payload: Option<&DeclarationScopePayload>,
     ) -> (LocatorBinderFrame, Vec<(Arc<str>, SemanticNodeId)>) {
         let mut frame = LocatorBinderFrame::default();
         let mut bindings: Vec<(Arc<str>, SemanticNodeId)> =
@@ -832,7 +949,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let display_name: Arc<str> = Arc::from(param.name.as_str());
             let (constraint, default) = {
                 let head_frames = std::slice::from_ref(&frame);
-                let head_ctx = LocatorShapeCtx::new(scope, head_frames);
+                let head_ctx =
+                    LocatorShapeCtx::new(scope, head_frames, name_resolution, scope_payload);
                 (
                     param
                         .constraint
@@ -922,10 +1040,67 @@ impl<'a> ProjectSemanticDispatch<'a> {
             AuthoredBodyLocator::AugmentationBody(aug) => Arc::clone(&aug.anchor.symbol),
             AuthoredBodyLocator::MacroPayload(payload) => Arc::clone(&payload.anchor.symbol),
         };
-        let (frame, _bindings) =
-            self.locator_shape_binder_frame(&scope, &anchor_symbol, &derefed.type_parameters);
+
+        // Anchor-scope IDENTITY-resolution inputs — the SAME sources the
+        // reducing path threads to its reference-head resolution (the
+        // anchor declaration's import / namespace-sibling-aware
+        // `name_resolution` map plus the bundle's declaration-scope
+        // payload), so the cached `DeclRef` / `InstantiationRef` identities
+        // match the reducing path's under declaration-local / namespace /
+        // import shadowing. Absence (no prepared declaration for the
+        // anchor) degrades to the payload-aware in-scope resolver.
+        let bundle = self.ctx.prepared_decl_bundle(canonical.as_ref());
+        let scope_payload = bundle
+            .as_ref()
+            .map(|b| DeclarationScopePayload::from_bundle(b));
+        let dep_edges = bundle.as_ref().map(|b| Arc::clone(&b.dep_edges));
+        let prepared_anchor: Option<AnchorPreparedDecl> = match key.locator() {
+            AuthoredBodyLocator::DeclBody(slot) => match slot.anchor.space {
+                verter_type_expr::locators::LocatorSymbolSpace::Type => self
+                    .ctx
+                    .prepared_type_decl(canonical.as_ref(), anchor_symbol.as_ref())
+                    .map(AnchorPreparedDecl::Type),
+                verter_type_expr::locators::LocatorSymbolSpace::Value => self
+                    .ctx
+                    .prepared_value_decl(canonical.as_ref(), anchor_symbol.as_ref())
+                    .map(AnchorPreparedDecl::Value),
+                verter_type_expr::locators::LocatorSymbolSpace::Namespace => None,
+            },
+            AuthoredBodyLocator::AugmentationBody(aug) => {
+                use verter_semantic::analysis::type_eval::AugmentationScopeKind;
+                let scope_kind = match &aug.scope {
+                    verter_type_expr::locators::AuthoredAugmentationScope::Global => {
+                        AugmentationScopeKind::Global
+                    }
+                    verter_type_expr::locators::AuthoredAugmentationScope::Module { specifier } => {
+                        AugmentationScopeKind::Module(specifier.as_ref().to_string())
+                    }
+                };
+                crate::resolver_core::prepare_augmentation_type_decl(
+                    canonical.as_ref(),
+                    &indexed.shallow_state,
+                    &scope_kind,
+                    anchor_symbol.as_ref(),
+                    dep_edges.as_deref(),
+                )
+                .map(|prepared| AnchorPreparedDecl::Augmentation(Box::new(prepared)))
+            }
+            AuthoredBodyLocator::MacroPayload(_) => None,
+        };
+        let name_resolution = prepared_anchor
+            .as_ref()
+            .map(AnchorPreparedDecl::name_resolution);
+
+        let (frame, _bindings) = self.locator_shape_binder_frame(
+            &scope,
+            &anchor_symbol,
+            &derefed.type_parameters,
+            name_resolution,
+            scope_payload.as_ref(),
+        );
         let frames = [frame];
-        let shape_ctx = LocatorShapeCtx::new(&scope, &frames);
+        let shape_ctx =
+            LocatorShapeCtx::new(&scope, &frames, name_resolution, scope_payload.as_ref());
 
         let node = match derefed.shape {
             DerefedBodyShape::Single(expr) => {

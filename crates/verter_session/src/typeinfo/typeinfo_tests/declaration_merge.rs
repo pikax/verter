@@ -13,6 +13,7 @@
 //! assert unrelated symbols do NOT accidentally merge.
 
 use super::support::*;
+use crate::VerterHost;
 use verter_type_expr::{FunctionExpr, TypeExpr};
 
 const PATH: &str = "/fixtures/declaration_merge.ts";
@@ -333,6 +334,157 @@ fn merged_interface_own_member_shadows_heritage() {
         "merged `shared` must be present; got {names:?}"
     );
     // Own `shared: number` shadows the inherited `shared: string`.
+    assert_primitive(&props["shared"].ty, PrimitiveName::Number);
+}
+
+/// Resolve `name` to its declaration CARRIER and run the empty-path
+/// `ProjectPath` terminal-surface synthesiser in the EXPANDED demand — the
+/// role-consuming Expanded surface route (heritage arms materialise and the
+/// own-body-shadows-heritage merge fires), projecting the merged one-level
+/// surface to a [`TypeExpr`]. The Expanded sibling of
+/// [`shallow_surface_expr`].
+fn expanded_surface_expr(host: &VerterHost, canonical_id: &str, name: &str) -> TypeExpr {
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::semantic_query::{
+        ProjectionReductionContext, ResolveDeclKey, ScopeId, SemanticQueryApi, SemanticQueryKey,
+    };
+
+    let store_view = host.resolver_store_view_read().into_owned_view();
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+
+    let base = match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+        scope: ScopeId {
+            canonical_id: Arc::from(canonical_id),
+            local_scope: None,
+        },
+        name: Arc::from(name),
+    })) {
+        crate::semantic_query::QueryResult::Value(crate::semantic_query::SemanticQueryOutput {
+            value: node,
+            ..
+        }) => node,
+        other => panic!("{name} must resolve to a declaration carrier: {other:?}"),
+    };
+
+    let terminal = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
+        base,
+        path: Arc::from(Vec::new().into_boxed_slice()),
+        context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+    }) {
+        crate::semantic_query::QueryResult::Value(crate::semantic_query::SemanticQueryOutput {
+            value: node,
+            ..
+        }) => node,
+        other => panic!("empty-path Expanded projection of {name} failed: {other:?}"),
+    };
+    dispatch
+        .materialize_output_type_expr_for_test(terminal)
+        .unwrap_or_else(|| panic!("{name} empty-path Expanded surface must project to TypeExpr"))
+}
+
+/// Own members shadow inherited members through the EXPANDED route when the
+/// heritage base is GENERIC (`extends Base<string>` would materialise
+/// through `Instantiate` instead of staying a lazy declaration anchor):
+///
+/// 1. the Expanded-projected merged contributor keeps its heritage arm a
+///    REFERENCE carrier (per-arm heritage discrimination — never a blanket
+///    own-body stamp that eagerly materialises the heritage into an
+///    `Object` the peer-merge reducer then mis-buckets as OWN surface);
+/// 2. projecting the conflicting member through the shared walk applies
+///    own-body-shadows-heritage — `X['shared']` is the own `number`, not
+///    the inherited `string`.
+#[test]
+fn merged_interface_generic_heritage_own_member_shadows_expanded() {
+    use crate::semantic_query::SemanticNodeData;
+
+    let host = make_host_with_footprint();
+    upsert_ts(
+        &host,
+        PATH,
+        "export interface Base<T> { shared: T; inherited: boolean }\n\
+         export interface X extends Base<string> { shared: number }\n\
+         export interface X { extra: boolean }\n",
+    );
+
+    let node = host
+        .resolve_named_symbol(PATH, "X", &[], Some(ProjectionMode::Expanded))
+        .expect("merged X must resolve Expanded");
+    let graph = host.project_type_store().semantic_graph();
+
+    // 1. Carrier topology: the merged carrier survives, and the extending
+    //    contributor's heritage arm is still a REFERENCE carrier (the
+    //    peer-merge reducer classifies heritage arms by topology — an
+    //    eagerly-materialised heritage `Object` is indistinguishable from
+    //    the own body and silently steals member precedence).
+    let contributors = match graph.node_data(node).as_deref() {
+        Some(SemanticNodeData::MergedDecl { contributors }) => contributors.clone(),
+        other => panic!("merged X must stay a MergedDecl carrier, got {other:?}"),
+    };
+    assert_eq!(contributors.len(), 2, "two same-name contributors");
+    let heritage_arm_is_reference =
+        contributors.iter().any(
+            |contributor| match graph.node_data(*contributor).as_deref() {
+                Some(SemanticNodeData::Intersection(arms)) => arms.iter().any(|arm| {
+                    matches!(
+                        graph.node_data(*arm).as_deref(),
+                        Some(
+                            SemanticNodeData::InstantiationRef { .. }
+                                | SemanticNodeData::DeclRef { .. }
+                        )
+                    )
+                }),
+                _ => false,
+            },
+        );
+    assert!(
+        heritage_arm_is_reference,
+        "the `extends Base<string>` heritage arm must stay a reference \
+         carrier in the Expanded-projected contributor — an eagerly \
+         materialised heritage Object loses own-body-shadows-heritage"
+    );
+
+    // 2. Role-consuming surface merge: the complete surface reader applies
+    //    own-body-shadows-heritage over the preserved heritage carrier —
+    //    the own `shared: number` wins, the non-conflicting inherited
+    //    member surfaces, and the second contributor's member survives.
+    let surface = shallow_surface_expr(&host, PATH, "X");
+    let props = object_props(&surface);
+    let names = prop_names(&props);
+    assert!(
+        names.contains(&"inherited"),
+        "the non-conflicting inherited member must surface; got {names:?}"
+    );
+    assert!(
+        names.contains(&"extra"),
+        "the second contributor's own member must survive the merge; got {names:?}"
+    );
+    assert_primitive(&props["shared"].ty, PrimitiveName::Number);
+}
+
+/// The same own-body-shadows-heritage precedence through the EXPANDED
+/// surface route for a SINGLE (non-merged) interface with a GENERIC heritage
+/// base: the `extends Base<string>` reference arm is HERITAGE relative to
+/// `X`, so the own `shared: number` shadows the inherited `shared: string`.
+#[test]
+fn single_interface_generic_heritage_own_member_shadows_expanded() {
+    let host = make_host_with_footprint();
+    upsert_ts(
+        &host,
+        PATH,
+        "export interface Base<T> { shared: T; inherited: boolean }\n\
+         export interface X extends Base<string> { shared: number }\n",
+    );
+
+    let expr = expanded_surface_expr(&host, PATH, "X");
+    let props = object_props(&expr);
+    let names = prop_names(&props);
+
+    assert!(
+        names.contains(&"inherited"),
+        "the non-conflicting inherited member must surface; got {names:?}"
+    );
     assert_primitive(&props["shared"].ty, PrimitiveName::Number);
 }
 

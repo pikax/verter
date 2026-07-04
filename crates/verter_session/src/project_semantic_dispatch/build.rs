@@ -3148,7 +3148,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
         //    interning — the same ids the shape build bound). An unbound
         //    parameter substitutes the shared miss sentinel, mirroring the
         //    "unbound param propagates a miss through the body" rule.
-        let (_, bindings) = self.locator_shape_binder_frame(scope, &owner_symbol, type_parameters);
+        let (_, bindings) = self.locator_shape_binder_frame(
+            scope,
+            &owner_symbol,
+            type_parameters,
+            Some(name_resolution),
+            scope_payload,
+        );
         let mut substituted = shape;
         for (name, binder) in bindings {
             let bound = env.get(name.as_ref()).copied();
