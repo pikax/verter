@@ -796,7 +796,9 @@ fn broken_lease_body_demand_fails_closed_return_only_without_caching() {
 /// `LeaseMiss`.
 #[test]
 fn broken_lease_locator_deref_returns_lease_miss_not_unknown_symbol() {
-    use verter_type_expr::locators::{AuthoredAnchor, TypeBodySlot};
+    use verter_type_expr::locators::{
+        AuthoredAnchor, AuthoredBodyLocator, LocatorSymbolSpace, TypeBodyPathStep, TypeBodySlot,
+    };
 
     let (memo, _) = memo_for(FIVE_DECLS);
     // Pin the lease with one successful demand, then break the retained
