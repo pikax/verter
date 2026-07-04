@@ -783,10 +783,9 @@ fn warm_parent_rejects_contributor_live_parse_env_move_with_unchanged_content() 
 /// `/use.ts::U` memo), MUST reject the warm parent and cold-recompute the
 /// corrected merged surface.
 ///
-/// Adjudication (round-4 P1↔P3 split): the codex leg feared the discarded
-/// `contributor_roots` / materialisation-only suppress could warm-publish a
-/// torn external `MergedDecl`; the adversarial claude leg rated it sound
-/// because the per-contributor fact rail rejects on warm read. This is the
+/// Adjudication: a discarded `contributor_roots` / materialisation-only
+/// suppress could warm-publish a torn external `MergedDecl`; that concern is
+/// answered because the per-contributor fact rail rejects on warm read. This is the
 /// end-to-end proof of that rail for the external path. The residual
 /// torn-contributor skip (`source_env_unobservable`) is unreachable on a
 /// cold external fold: the external path pre-loads EVERY `known_canonicals()`
