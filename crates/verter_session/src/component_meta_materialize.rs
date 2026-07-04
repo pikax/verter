@@ -2683,7 +2683,9 @@ export type DotPathKeys<T> = T extends object ? GetItemKeys<T> : never
     /// is unchanged.
     #[test]
     fn instantiate_skeleton_mode_does_not_change_navigate_or_expanded_semantics() {
-        use crate::semantic_query::{ProjectionMode, SemanticQueryKey};
+        use crate::semantic_query::{
+            ProjectionMode, QueryError, QueryResult, SemanticNodeData, SemanticQueryKey,
+        };
 
         let project = a0_make_project();
         project
@@ -2693,37 +2695,60 @@ export type DotPathKeys<T> = T extends object ? GetItemKeys<T> : never
         let dispatch = ProjectSemanticDispatch::new(host);
         let id = a0_make_decl_identity(host, "/types.ts", "Identity");
 
-        // Navigate + args=[] still executes without panic (continue-skip path).
-        let navigate_read = dispatch.execute_read(SemanticQueryKey::Instantiate(
-            crate::semantic_query::InstantiateKey::new(
-                id.to_type_slot_unscoped(),
-                StdArc::from(Vec::new().into_boxed_slice()),
-                crate::semantic_query::InstantiateContext::non_file(
-                    crate::semantic_query::ProjectionReductionContext::published(
-                        ProjectionMode::Navigate,
+        // Resolve `Identity<T> = T` with args=[] under `mode` and return the
+        // resolved node data. Skeleton mode (the sibling test) synthesizes a
+        // `TypeParam` shell for the unbound `T`; Navigate / Expanded do NOT —
+        // the unbound `T` reference leaves the body unresolvable, so the read
+        // is an `Opaque(Miss)`. This helper is the discriminator: a mode that
+        // started synthesizing a `TypeParam` (or that failed to execute, or
+        // resolved `T` to a concrete node) would NOT be `Opaque(Miss)`.
+        let read_node_data = |mode: ProjectionMode| {
+            let read = dispatch.execute_read(SemanticQueryKey::Instantiate(
+                crate::semantic_query::InstantiateKey::new(
+                    id.to_type_slot_unscoped(),
+                    StdArc::from(Vec::new().into_boxed_slice()),
+                    crate::semantic_query::InstantiateContext::non_file(
+                        crate::semantic_query::ProjectionReductionContext::published(mode),
+                        Default::default(),
+                        crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
                     ),
-                    Default::default(),
-                    crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
                 ),
-            ),
-        ));
-        let _ = navigate_read; // confirms execution
+            ));
+            let node = match read.value {
+                QueryResult::Value(id) => id,
+                other => panic!("{mode:?} + args=[] must resolve to a Value, got {other:?}"),
+            };
+            host.project_type_store()
+                .semantic_graph()
+                .node_data(node)
+                .expect("resolved node must be interned")
+        };
 
-        // Expanded + args=[] still executes without panic (continue-skip path).
-        let expanded_read = dispatch.execute_read(SemanticQueryKey::Instantiate(
-            crate::semantic_query::InstantiateKey::new(
-                id.to_type_slot_unscoped(),
-                StdArc::from(Vec::new().into_boxed_slice()),
-                crate::semantic_query::InstantiateContext::non_file(
-                    crate::semantic_query::ProjectionReductionContext::published(
-                        ProjectionMode::Expanded,
-                    ),
-                    Default::default(),
-                    crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
-                ),
+        // Navigate + args=[]: unbound `T` stays unbound (existing semantics) —
+        // the `T` body reference is unresolvable, so the read is `Opaque(Miss)`,
+        // NOT a synthesized `TypeParam` (that is exclusively Skeleton's new
+        // behavior — asserted by the sibling
+        // `instantiate_skeleton_mode_synthesizes_typeparam_for_unbound_args`).
+        let navigate = read_node_data(ProjectionMode::Navigate);
+        assert!(
+            matches!(
+                navigate.as_ref(),
+                SemanticNodeData::Opaque(QueryError::Miss)
             ),
-        ));
-        let _ = expanded_read; // confirms execution
+            "Navigate + args=[] must leave `T` unbound (Opaque(Miss)) — a TypeParam \
+             shell would mean Skeleton's synthesis leaked into Navigate; got {navigate:?}"
+        );
+
+        // Expanded + args=[]: same existing semantics — unbound `T` is an
+        // `Opaque(Miss)`, unchanged by the Skeleton addition.
+        let expanded = read_node_data(ProjectionMode::Expanded);
+        assert!(
+            matches!(
+                expanded.as_ref(),
+                SemanticNodeData::Opaque(QueryError::Miss)
+            ),
+            "Expanded + args=[] must leave `T` unbound (Opaque(Miss)); got {expanded:?}"
+        );
     }
 
     /// Canonical nuxt-ui `DotPathKeys` shape exercising the
