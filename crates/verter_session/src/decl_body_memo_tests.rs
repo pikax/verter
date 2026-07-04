@@ -252,6 +252,76 @@ fn concurrent_first_touch_lowers_once() {
     );
 }
 
+/// The shared per-symbol demand cell carries the LeaseMiss outcome ITSELF,
+/// so EVERY concurrent waiter on one broken-lease demand observes the DISTINCT
+/// `LeaseMiss` — never a false `Ready(None)`. Pre-fix the cell committed a bare
+/// `None` (Ready-shaped) and the lease-miss lived in a THREAD-LOCAL flag: a
+/// joiner that blocked on the initializer's `get_or_init` read the committed
+/// `None` with its own flag unset and returned `Ready(None)` — the false
+/// genuine-miss a concurrent cache-admitting consumer could warm-admit as
+/// declaration absence. Post-fix the committed cell is `DemandCell::LeaseMiss`,
+/// visible to every waiter, and the poisoned cell is evicted so a retry
+/// recomputes under a live lease.
+///
+/// Discrimination (RED against the pre-change tree, GREEN after): under a
+/// broken lease, N threads demand ONE not-yet-lowered symbol simultaneously.
+/// The barrier makes them grab the same demand cell before the initializer
+/// evicts it, so most park as joiners. Pre-fix the joiners return `Ready(None)`
+/// (the false-miss count is nonzero); post-fix all N return `LeaseMiss`.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn concurrent_broken_lease_demand_every_waiter_sees_lease_miss() {
+    for _round in 0..4 {
+        let (memo, _provenance) = memo_for(FIVE_DECLS);
+        let memo = Arc::new(memo);
+
+        // Pin the lease with one successful demand, then break the retained
+        // snapshot out-of-band so every subsequent demand lease-misses.
+        assert!(memo.type_decl("Var0").is_some());
+        memo.release_retained_snapshot_for_test();
+
+        const THREADS: usize = 32;
+        let barrier = Arc::new(std::sync::Barrier::new(THREADS));
+        let mut handles = Vec::new();
+        for _ in 0..THREADS {
+            let memo = Arc::clone(&memo);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                // Demand a DIFFERENT, not-yet-lowered symbol so the demand
+                // actually runs and lease-misses (rather than a warm hit).
+                match memo.type_decl_outcome("Var1") {
+                    DemandOutcome::LeaseMiss => 0u8,
+                    DemandOutcome::Ready(None) => 1u8,
+                    DemandOutcome::Ready(Some(_)) => 2u8,
+                }
+            }));
+        }
+        let tags: Vec<u8> = handles
+            .into_iter()
+            .map(|h| h.join().expect("no waiter thread may panic"))
+            .collect();
+
+        let false_some = tags.iter().filter(|&&t| t == 2).count();
+        let false_miss = tags.iter().filter(|&&t| t == 1).count();
+        assert_eq!(
+            false_some, 0,
+            "no waiter may observe a resolved body under a broken lease"
+        );
+        assert_eq!(
+            false_miss, 0,
+            "every waiter on a broken-lease demand must observe the DISTINCT \
+             LeaseMiss; a `Ready(None)` here is the false genuine-miss a joiner \
+             would warm-admit as declaration absence (got {false_miss} of {THREADS})"
+        );
+        // No false-warm cell survives: the poisoned cell is evicted.
+        assert!(
+            !memo.type_entry_materialized("Var1"),
+            "a broken-lease demand must leave no committed cell for the real symbol"
+        );
+    }
+}
+
 #[test]
 fn whole_env_is_a_memoized_whole_file_demand() {
     let (memo, provenance) = memo_for(FIVE_DECLS);

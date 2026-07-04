@@ -100,8 +100,23 @@ pub struct LoweredValueDecl {
     pub enum_members: Option<Vec<(String, EnumMemberValue)>>,
 }
 
-type TypeCell = Arc<OnceLock<Option<Arc<LoweredTypeDecl>>>>;
-type ValueCell = Arc<OnceLock<Option<Arc<LoweredValueDecl>>>>;
+/// The committed value of one per-symbol demand cell.
+///
+/// The cell carries the [`LeaseMiss`](Self::LeaseMiss) outcome ITSELF (never a
+/// thread-local side flag) so EVERY waiter that joins the initializer's
+/// `get_or_init` observes the same outcome: a joiner can never read a
+/// [`Ready(None)`](Self::Ready) the initializer meant as a transient no-warm
+/// ReturnOnly. A `LeaseMiss` cell is EVICTED from its owning map (ptr-eq-guarded
+/// so a fresh cell a concurrent retry installed is untouched) — a later demand
+/// under a live lease recomputes; a `Ready(None)` is a genuine, cacheable
+/// absence retained warm.
+enum DemandCell<D> {
+    Ready(Option<Arc<D>>),
+    LeaseMiss,
+}
+
+type TypeCell = Arc<OnceLock<DemandCell<LoweredTypeDecl>>>;
+type ValueCell = Arc<OnceLock<DemandCell<LoweredValueDecl>>>;
 
 /// Outcome of a demanded per-symbol lowering ([`DeclBodyMemo::lower_demanded`]).
 ///
@@ -289,14 +304,14 @@ impl DeclBodyMemo {
             let lowered = lowered_type_decl_from_group(group, deps.0, deps.1, enum_body);
             memo.type_entries.insert(
                 name.clone(),
-                Arc::new(OnceLock::from(Some(Arc::new(lowered)))),
+                Arc::new(OnceLock::from(DemandCell::Ready(Some(Arc::new(lowered))))),
             );
         }
         for (name, group) in &env.value_symbols {
             let lowered = lowered_value_decl_from_group(group);
             memo.value_entries.insert(
                 name.clone(),
-                Arc::new(OnceLock::from(Some(Arc::new(lowered)))),
+                Arc::new(OnceLock::from(DemandCell::Ready(Some(Arc::new(lowered))))),
             );
         }
         for ((scope, name), group) in &env.augmentation_scopes {
@@ -308,14 +323,14 @@ impl DeclBodyMemo {
             );
             memo.aug_type_entries.insert(
                 (scope.clone(), name.clone()),
-                Arc::new(OnceLock::from(Some(Arc::new(lowered)))),
+                Arc::new(OnceLock::from(DemandCell::Ready(Some(Arc::new(lowered))))),
             );
         }
         for ((scope, name), group) in &env.augmentation_value_scopes {
             let lowered = lowered_value_decl_from_group(group);
             memo.aug_value_entries.insert(
                 (scope.clone(), name.clone()),
-                Arc::new(OnceLock::from(Some(Arc::new(lowered)))),
+                Arc::new(OnceLock::from(DemandCell::Ready(Some(Arc::new(lowered))))),
             );
         }
         let _ = memo.whole_env.set(Arc::new(env.clone()));
@@ -419,8 +434,9 @@ impl DeclBodyMemo {
                     .find(|(n, _)| n == name)
                     .map(|(_, decl)| Arc::new(decl.clone()))
             },
-            || {
-                self.type_entries.remove(name);
+            |poisoned| {
+                self.type_entries
+                    .remove_if(name, |_, existing| Arc::ptr_eq(existing, poisoned));
             },
         );
         if let Some(batch) = batch {
@@ -461,8 +477,9 @@ impl DeclBodyMemo {
                     .find(|(n, _)| n == name)
                     .map(|(_, decl)| Arc::new(decl.clone()))
             },
-            || {
-                self.value_entries.remove(name);
+            |poisoned| {
+                self.value_entries
+                    .remove_if(name, |_, existing| Arc::ptr_eq(existing, poisoned));
             },
         );
         if let Some(batch) = batch {
@@ -534,9 +551,11 @@ impl DeclBodyMemo {
                     .find(|(s, n, _)| s == scope && n == name)
                     .map(|(_, _, decl)| Arc::new(decl.clone()))
             },
-            || {
+            |poisoned| {
                 self.aug_type_entries
-                    .remove(&(scope.clone(), name.to_string()));
+                    .remove_if(&(scope.clone(), name.to_string()), |_, existing| {
+                        Arc::ptr_eq(existing, poisoned)
+                    });
             },
         );
         if let Some(batch) = batch {
@@ -592,9 +611,11 @@ impl DeclBodyMemo {
                     .find(|(s, n, _)| s == scope && n == name)
                     .map(|(_, _, decl)| Arc::new(decl.clone()))
             },
-            || {
+            |poisoned| {
                 self.aug_value_entries
-                    .remove(&(scope.clone(), name.to_string()));
+                    .remove_if(&(scope.clone(), name.to_string()), |_, existing| {
+                        Arc::ptr_eq(existing, poisoned)
+                    });
             },
         );
         if let Some(batch) = batch {
@@ -688,7 +709,7 @@ impl DeclBodyMemo {
     pub(crate) fn type_entry_materialized(&self, name: &str) -> bool {
         self.type_entries
             .get(name)
-            .is_some_and(|cell| cell.get().is_some())
+            .is_some_and(|cell| matches!(cell.get(), Some(DemandCell::Ready(_))))
     }
 
     /// Whether a `(name, space)` raw-surface capture has a COMMITTED entry
@@ -954,54 +975,62 @@ impl DeclBodyMemo {
     ///
     /// The demanded lowering runs INSIDE `get_or_init` so a symbol demanded
     /// concurrently lowers exactly ONCE (the hot-path single-flight contract).
-    /// A [`DemandLower::Ready`] commits the extracted decl and returns the batch
-    /// so the initializing caller can backfill siblings. A
-    /// [`DemandLower::LeaseMiss`] transiently commits `None` under the init lock
-    /// (unavoidable with a write-once `OnceLock`), then the caller's
-    /// `on_lease_miss_evict` DROPS the poisoned cell from its owning map — so no
-    /// future demand serves the wrong-empty warm entry and the next demand
-    /// retries under a live lease. Fail CLOSED via ReturnOnly, in DEBUG *and*
-    /// RELEASE.
+    /// The committed cell is a [`DemandCell`]: a [`DemandLower::Ready`] commits
+    /// [`DemandCell::Ready`] (with the extracted decl) and returns the batch so
+    /// the initializing caller can backfill siblings; a
+    /// [`DemandLower::LeaseMiss`] commits [`DemandCell::LeaseMiss`]. Because the
+    /// no-warm signal is carried by the committed cell itself — never a
+    /// thread-local side flag — EVERY waiter that joins the initializer's
+    /// `get_or_init` reads the same `LeaseMiss` (a joiner can no longer observe
+    /// the initializer's transient `None` as a false `Ready(None)`). Any
+    /// observer of a `LeaseMiss` cell (initializer, joiner, or a re-demand of a
+    /// not-yet-evicted poisoned cell) runs `on_lease_miss_evict`, which drops
+    /// the poisoned cell from its owning map ptr-eq-guarded — so no future
+    /// demand serves the wrong-empty warm entry and the next demand retries
+    /// under a live lease. Fail CLOSED via ReturnOnly, in DEBUG *and* RELEASE.
     fn demand_and_commit<D>(
         &self,
-        cell: &OnceLock<Option<Arc<D>>>,
+        cell: &Arc<OnceLock<DemandCell<D>>>,
         name: &str,
         contributors: &[u32],
         from_jsdoc: bool,
         extract: impl FnOnce(&LoweredStatementBatch) -> Option<Arc<D>>,
-        on_lease_miss_evict: impl FnOnce(),
+        on_lease_miss_evict: impl FnOnce(&Arc<OnceLock<DemandCell<D>>>),
     ) -> (DemandOutcome<D>, Option<LoweredStatementBatch>) {
-        if let Some(cached) = cell.get() {
-            return (DemandOutcome::Ready(cached.clone()), None);
+        // Warm / joiner-visible hit — the cell already carries a committed
+        // outcome (this thread lost the init race or re-demands a warm cell).
+        if let Some(committed) = cell.get() {
+            return match committed {
+                DemandCell::Ready(value) => (DemandOutcome::Ready(value.clone()), None),
+                DemandCell::LeaseMiss => {
+                    on_lease_miss_evict(cell);
+                    (DemandOutcome::LeaseMiss, None)
+                }
+            };
         }
         let leftover: std::cell::Cell<Option<LoweredStatementBatch>> = std::cell::Cell::new(None);
-        let lease_missed = std::cell::Cell::new(false);
-        let result = cell
-            .get_or_init(
+        let committed =
+            cell.get_or_init(
                 || match self.lower_demanded(name, contributors, from_jsdoc) {
                     DemandLower::Ready(maybe_batch) => {
                         let decl = maybe_batch.as_ref().and_then(extract);
                         leftover.set(maybe_batch);
-                        decl
+                        DemandCell::Ready(decl)
                     }
-                    DemandLower::LeaseMiss => {
-                        lease_missed.set(true);
-                        None
-                    }
+                    DemandLower::LeaseMiss => DemandCell::LeaseMiss,
                 },
-            )
-            .clone();
-        if lease_missed.get() {
-            // The cell transiently committed `None` under the init lock; drop
-            // it from the owning map so it can never serve a wrong-empty warm
-            // entry and the next demand retries. Surface the DISTINCT
-            // `LeaseMiss` outcome so a caller that must not collapse this
-            // transient ReturnOnly into a cacheable genuine miss (the
-            // locator-deref path) can route it to a no-warm signal.
-            on_lease_miss_evict();
-            return (DemandOutcome::LeaseMiss, None);
+            );
+        match committed {
+            DemandCell::Ready(value) => (DemandOutcome::Ready(value.clone()), leftover.take()),
+            // Surface the DISTINCT `LeaseMiss` outcome (so a caller that must
+            // not collapse this transient ReturnOnly into a cacheable genuine
+            // miss — the locator-deref path — routes it to a no-warm signal)
+            // and evict the poisoned cell so the next demand retries.
+            DemandCell::LeaseMiss => {
+                on_lease_miss_evict(cell);
+                (DemandOutcome::LeaseMiss, None)
+            }
         }
-        (DemandOutcome::Ready(result), leftover.take())
     }
 
     /// Populate sibling entries the demanded statements ALSO declared
@@ -1044,7 +1073,7 @@ impl DeclBodyMemo {
                 continue;
             }
             let cell = self.type_entries.entry(name).or_default().clone();
-            let _ = cell.set(Some(Arc::new(decl)));
+            let _ = cell.set(DemandCell::Ready(Some(Arc::new(decl))));
         }
         for (name, decl) in batch.values {
             if demanded_file_scope == Some((SymbolSpace::Value, name.as_str())) {
@@ -1058,7 +1087,7 @@ impl DeclBodyMemo {
                 continue;
             }
             let cell = self.value_entries.entry(name).or_default().clone();
-            let _ = cell.set(Some(Arc::new(decl)));
+            let _ = cell.set(DemandCell::Ready(Some(Arc::new(decl))));
         }
         for (scope, name, decl) in batch.aug_types {
             if demanded_augmentation == Some((&scope, SymbolSpace::Type, name.as_str())) {
@@ -1076,7 +1105,7 @@ impl DeclBodyMemo {
                 .entry((scope, name))
                 .or_default()
                 .clone();
-            let _ = cell.set(Some(Arc::new(decl)));
+            let _ = cell.set(DemandCell::Ready(Some(Arc::new(decl))));
         }
         for (scope, name, decl) in batch.aug_values {
             if demanded_augmentation == Some((&scope, SymbolSpace::Value, name.as_str())) {
@@ -1094,7 +1123,7 @@ impl DeclBodyMemo {
                 .entry((scope, name))
                 .or_default()
                 .clone();
-            let _ = cell.set(Some(Arc::new(decl)));
+            let _ = cell.set(DemandCell::Ready(Some(Arc::new(decl))));
         }
     }
 }
