@@ -430,7 +430,9 @@ fn negative_shadowed_magic_name_is_not_a_false_refusal() {
 
 #[test]
 fn negative_svelte_options_forms_fail_closed() {
-    // Every `<svelte:options>` form beyond absent-or-`runes={true}` fails closed.
+    // Every `<svelte:options>` form beyond the supported axes (absent, `runes={true}`,
+    // and a VALID `customElement` value — the custom-element accept surface owns the
+    // latter's positive coverage) fails closed.
     let rows: &[(&str, &str)] = &[
         // A non-boolean `runes` value.
         (
@@ -465,10 +467,9 @@ fn negative_svelte_options_forms_fail_closed() {
             "namespace_axis",
             "<svelte:options namespace=\"svg\" />\n<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n",
         ),
-        (
-            "custom_element_axis",
-            "<svelte:options customElement=\"x-y\" />\n<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n",
-        ),
+        // (a VALID `customElement` value is SUPPORTED — the custom-element emission
+        // tests + `options/` goldens own its positive coverage; the INVALID forms are
+        // exact-code official rejects covered by `svelte_parse_defect_exact_codes.rs`.)
         (
             "tag_axis",
             "<svelte:options tag=\"x-y\" />\n<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n",
@@ -615,6 +616,8 @@ fn guard_client_script_lowering_does_not_call_the_removed_broad_path() {
     // rewriter, NOT a broad statement path).
     for file in [
         "client_plan.rs",
+        "client_plan_script.rs",
+        "client_compile.rs",
         "client_surface.rs",
         "expr_emit.rs",
         "client_shapes.rs",
@@ -627,10 +630,10 @@ fn guard_client_script_lowering_does_not_call_the_removed_broad_path() {
         );
     }
     // The build_script_items consumer must lower from the typed allowlist.
-    let plan = read_runtime_file("client_plan.rs");
+    let plan = read_runtime_file("client_plan_script.rs");
     assert!(
         plan.contains("lower_simple_instance_item"),
-        "client_plan.rs must lower the instance script via `lower_simple_instance_item`"
+        "client_plan_script.rs must lower the instance script via `lower_simple_instance_item`"
     );
 }
 

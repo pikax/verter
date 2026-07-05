@@ -1244,3 +1244,128 @@ fn lang_scan_unterminated_comment_does_not_swallow_later_script_lang() {
         "an unterminated <!-- does not swallow a later <script lang=ts> — TS grammar",
     );
 }
+
+// ── `<svelte:options customElement={EXPR}>` probe RETENTION ──
+// The parser resolves the expression ONCE at options finalization (where upstream's
+// `read_options` runs) and RETAINS the typed outcome on the probe — the official-reject
+// gate consumes the `Err` side, the runtime lowering consumes the `Ok` side; neither
+// re-parses the expression span from raw source.
+
+#[test]
+fn options_custom_element_probe_retains_the_typed_descriptor() {
+    use super::options_custom_element::{
+        AcceptedCustomElementValue, CustomElementDescriptor, CustomElementProp, CustomElementShadow,
+    };
+    let parsed = parse_clean(
+        "<svelte:options customElement={{ tag: 'x-a', shadow: 'none', props: { count: { reflect: true, type: 'Number' } } }} />\n<p>hi</p>",
+    );
+    assert_eq!(
+        parsed.options_custom_element_probes.len(),
+        1,
+        "one expression-valued customElement attribute reserves one probe"
+    );
+    assert_eq!(
+        parsed.options_custom_element_probes[0].resolution,
+        Ok(AcceptedCustomElementValue::Descriptor(
+            CustomElementDescriptor {
+                tag: Some("x-a".to_string()),
+                shadow: CustomElementShadow::None,
+                props: vec![CustomElementProp {
+                    name: "count".to_string(),
+                    attribute: None,
+                    reflect: true,
+                    type_hint: Some("Number".to_string()),
+                }],
+                extend: None,
+                inject_styles: true,
+            }
+        )),
+        "the parser retains the typed descriptor extracted by the one validate+extract walk"
+    );
+}
+
+#[test]
+fn options_custom_element_probe_retains_the_null_skip() {
+    use super::options_custom_element::AcceptedCustomElementValue;
+    let parsed = parse_clean("<svelte:options customElement={null} />\n<p>hi</p>");
+    assert_eq!(
+        parsed.options_custom_element_probes[0].resolution,
+        Ok(AcceptedCustomElementValue::NullSkip),
+        "the null backwards-compat spelling retains the NullSkip marker (sets nothing)"
+    );
+}
+
+#[test]
+fn options_custom_element_probe_retains_the_exact_reject_codes() {
+    // A parseable-but-invalid expression retains the exact `read_options` code…
+    let parsed = parse_svelte("<svelte:options customElement={42} />\n<p>hi</p>");
+    assert_eq!(
+        parsed.options_custom_element_probes[0].resolution,
+        Err("svelte_options_invalid_customelement"),
+        "a non-object non-null expression retains the exact validation code"
+    );
+    // …and a syntactically-malformed one retains the parse-position code.
+    let parsed = parse_svelte("<svelte:options customElement={{ tag: }} />\n<p>hi</p>");
+    assert_eq!(
+        parsed.options_custom_element_probes[0].resolution,
+        Err("js_parse_error"),
+        "a malformed prefix expression retains the parse-position code"
+    );
+    // NEGATIVE: a component with NO expression-valued customElement reserves no probe.
+    let parsed = parse_clean("<svelte:options customElement=\"x-b\" />\n<p>hi</p>");
+    assert!(
+        parsed.options_custom_element_probes.is_empty(),
+        "a Text-valued customElement reserves no expression probe"
+    );
+}
+
+#[test]
+fn options_custom_element_text_tag_retains_the_resolved_descriptor() {
+    use super::options_custom_element::{CustomElementDescriptor, CustomElementShadow};
+    let source = "<svelte:options customElement=\"my-el\" />\n<p>hi</p>";
+    let parsed = parse_clean(source);
+    assert_eq!(
+        parsed.options_custom_element_text_tags.len(),
+        1,
+        "one accepted Text-valued customElement retains one descriptor"
+    );
+    let retained = &parsed.options_custom_element_text_tags[0];
+    assert_eq!(
+        &source[retained.text_span.start as usize..retained.text_span.end as usize],
+        "my-el",
+        "the retained entry is keyed by the attribute's text-value span"
+    );
+    assert_eq!(
+        retained.descriptor,
+        CustomElementDescriptor {
+            tag: Some("my-el".to_string()),
+            shadow: CustomElementShadow::Open,
+            props: Vec::new(),
+            extend: None,
+            inject_styles: true,
+        },
+        "the parser retains the RESOLVED string-tag descriptor at options finalization"
+    );
+}
+
+#[test]
+fn options_custom_element_text_tag_retention_negatives() {
+    // An INVALID text tag mints its reject fact and retains NOTHING.
+    let parsed = parse_svelte("<svelte:options customElement=\"nodash\" />\n<p>hi</p>");
+    assert!(
+        parsed.options_custom_element_text_tags.is_empty(),
+        "a rejected text tag retains no descriptor"
+    );
+    // An EXPRESSION-valued customElement rides the probe rail, not the text-tag rail.
+    let parsed = parse_clean("<svelte:options customElement={{ tag: 'x-a' }} />\n<p>hi</p>");
+    assert!(
+        parsed.options_custom_element_text_tags.is_empty(),
+        "an expression-valued customElement retains no text-tag descriptor"
+    );
+    // A component with no `<svelte:options>` retains nothing.
+    let parsed = parse_clean("<p>hi</p>");
+    assert!(
+        parsed.options_custom_element_text_tags.is_empty(),
+        "no options element retains no text-tag descriptor"
+    );
+}

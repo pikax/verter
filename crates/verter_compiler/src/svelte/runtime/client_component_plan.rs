@@ -816,12 +816,15 @@ impl<'a> SupportedClientIr<'a> {
     /// Whether the component needs a component context (`$.push`/`$.pop`) — the official
     /// `needs_context` analysis over the instance script + every template expression.
     pub(super) fn needs_context(&self, alloc: &Allocator) -> bool {
-        // A `{@render}` DYNAMIC callee (`children?.()` / `(cond ? a : b)()`) is a SNIPPET
-        // invocation — it never needs a component context, even though its callee is a
-        // call rooted at a prop. Exclude those callee expressions from the scan (the
-        // official `needs_context` counts `getContext` / `$effect` / lifecycle, never a
-        // snippet render); a render ARGUMENT still counts (it may call a context-using
-        // import).
+        // A `{@render}` DYNAMIC callee (`children?.()` / `$host().snip()`) is a SNIPPET
+        // invocation: the OUTER call is never an "unsafe call" trigger (official
+        // excludes the render call itself — a prop-rooted `children?.()` stays
+        // frame-free), but the CALLEE expression inside it scans NORMALLY — a
+        // member/call/`new`-rooted callee (`$host().snip`, `imported.snip`,
+        // `(new Date())`) opens the frame exactly as it would in a handler. Those
+        // expressions route through the peel-aware render-callee scan; a render
+        // ARGUMENT is its own analyzed expression and rides the normal template
+        // scan (it may call a context-using import).
         let render_callee_exprs: rustc_hash::FxHashSet<ExprId> = self
             .ir
             .nodes
@@ -834,20 +837,20 @@ impl<'a> SupportedClientIr<'a> {
                 _ => None,
             })
             .collect();
-        let template_expr_sources: Vec<&str> = self
-            .ir
-            .analysis
-            .expressions
-            .all()
-            .iter()
-            .enumerate()
-            .filter(|(idx, _)| !render_callee_exprs.contains(&ExprId(*idx as u32)))
-            .map(|(_, e)| e.source)
-            .collect();
+        let mut template_expr_sources: Vec<&str> = Vec::new();
+        let mut render_callee_sources: Vec<&str> = Vec::new();
+        for (idx, e) in self.ir.analysis.expressions.all().iter().enumerate() {
+            if render_callee_exprs.contains(&ExprId(idx as u32)) {
+                render_callee_sources.push(e.source);
+            } else {
+                template_expr_sources.push(e.source);
+            }
+        }
         super::reactive_analysis::needs_context(
             alloc,
             self.ir.analysis.scripts.instance_source,
             &template_expr_sources,
+            &render_callee_sources,
         )
     }
 }

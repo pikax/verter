@@ -17,6 +17,7 @@
 use verter_span::Span;
 
 use super::expr::{BindingTable, ExprArena, ScopeGraph, ScopeId, ScriptAnalysis};
+use crate::svelte::parser::CustomElementDescriptor;
 
 /// A node in the template-node arena.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -68,6 +69,16 @@ pub struct ComponentIr {
     pub filename: Option<String>,
     /// The reactivity mode.
     pub mode: SvelteMode,
+    /// The RESOLVED custom-element descriptor — `Some` iff the component compiles
+    /// as a custom element (a `<svelte:options customElement>` value, or the
+    /// `customElement: true` compile option; the options value WINS, and a
+    /// `customElement={null}` value falls back to the compile option — the
+    /// official `customElementOptions ?? customElement` precedence). `None`
+    /// compiles a plain component. The typed descriptor is PARSER-owned (the
+    /// parser retains it at options finalization, exactly as upstream retains
+    /// `AST.SvelteOptions['customElement']`); the lowering copies the retained
+    /// value here after the official-reject gate accepts the component.
+    pub custom_element: Option<CustomElementDescriptor>,
 }
 
 /// The component-wide analysis facts: the two scripts, the expression arena, the

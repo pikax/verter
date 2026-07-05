@@ -129,6 +129,19 @@ pub(super) struct ClassifiedClientSurface {
     /// SOURCE ORDER — the typed prelude carrier the plan emits above the component function.
     /// Empty for a component with no `.svelte` imports.
     pub(super) user_imports: Vec<UserImport>,
+    /// The `$host`-usage FACT the rune scan recorded: an ADMITTED zero-arg
+    /// `$host()` call in the instance script or any template expression (the
+    /// only accepted `$host` form — every other shape refused during the scan,
+    /// and admission requires an active custom element). The plan build gates
+    /// the `$$props`-parameter decision on this fact — the rewritten
+    /// `$$props.$$host` member must never reference an unbound `$$props`, so a
+    /// host use without an independent props-parameter trigger fails closed
+    /// there.
+    pub(super) uses_host: bool,
+    /// The span of the FIRST admitted `$host()` call (in the scanned program's
+    /// own coordinates — the same space the rune scan's refusal spans use),
+    /// for the plan build's degenerate-host refusal.
+    pub(super) first_host_span: Option<Span>,
 }
 
 impl ClientSyntaxSurface {
@@ -154,7 +167,10 @@ impl ClientSyntaxSurface {
         // component-callee subset, returned as the typed prelude carrier); every other
         // instance-script import form + a `<script module>` are the broad
         // static-import-prelude deferral (not yet supported) and fail closed here.
-        let user_imports = classify_script_items(ir)?;
+        // The returned facts also carry `uses_host` — the admitted zero-arg
+        // `$host()` usage the rune scan recorded (instance + template
+        // expressions), consumed by the plan build.
+        let script_facts = classify_script_items(ir)?;
 
         // (3) `$props()` USAGE: an INSTANCE-SCRIPT prop reference (outside the
         // `$props()` declaration itself) and a BOUND prop (official's 2-arg
@@ -293,7 +309,9 @@ impl ClientSyntaxSurface {
             spread_elements: facts.spread_elements,
             props_usage,
             script_items,
-            user_imports,
+            user_imports: script_facts.user_imports,
+            uses_host: script_facts.uses_host,
+            first_host_span: script_facts.first_host_span,
         })
     }
 }

@@ -323,9 +323,16 @@ impl PropsDeclaratorPlan {
     /// capture), or `None` when there is no `$props()`. The malformed shapes
     /// (rest / computed keys / nested destructures / duplicate `$props()`) are
     /// refused UPSTREAM ([`props_shape`] + the rune scan), so this walker only
-    /// classifies the accepted subset.
+    /// classifies the accepted subset. `custom_element` marks a component with a
+    /// resolved custom-element descriptor — its rest excludes carry the extra
+    /// `'$$host'` key (the official `if (analysis.custom_element)
+    /// seen.push('$$host')`).
     #[must_use]
-    pub(super) fn build(alloc: &Allocator, instance_source: &str) -> Option<PropsDeclaratorPlan> {
+    pub(super) fn build(
+        alloc: &Allocator,
+        instance_source: &str,
+        custom_element: bool,
+    ) -> Option<PropsDeclaratorPlan> {
         let program = reparse_module(alloc, instance_source)?;
         let proxy_inits = super::state_scan::collect_proxy_inits(&program);
         let mut members = Vec::new();
@@ -346,7 +353,9 @@ impl PropsDeclaratorPlan {
                     // Set carries ONLY the fixed prefix (every non-`$$` member read
                     // de-localizes to `$$props.KEY`).
                     BindingPattern::BindingIdentifier(id) => {
-                        rest.get_or_insert_with(|| build_rest_capture(id.name.to_string(), &[]));
+                        rest.get_or_insert_with(|| {
+                            build_rest_capture(id.name.to_string(), &[], custom_element)
+                        });
                     }
                     BindingPattern::ObjectPattern(obj) => {
                         for prop in &obj.properties {
@@ -362,7 +371,11 @@ impl PropsDeclaratorPlan {
                                 let source_keys: Vec<String> =
                                     obj.properties.iter().map(prop_key_name).collect();
                                 rest.get_or_insert_with(|| {
-                                    build_rest_capture(local.to_string(), &source_keys)
+                                    build_rest_capture(
+                                        local.to_string(),
+                                        &source_keys,
+                                        custom_element,
+                                    )
                                 });
                             }
                         }
@@ -375,17 +388,22 @@ impl PropsDeclaratorPlan {
     }
 
     /// Project the per-name `$props()` read forms: a PROP-SOURCE member (a
-    /// default-bearing OR written member — the official `is_prop_source`) is
-    /// declared via `$.prop` and reads as a getter call (`name()`); a non-source
-    /// member reads directly off the props object (`$$props.name`). The rest /
-    /// whole-object capture's BARE read stays the verbatim real local, and its
-    /// member reads de-localize key-awarely through the SHARED membership set
-    /// (carried as a cheap `Arc` clone, never a cloned key `Vec`).
+    /// default-bearing OR written member — the official `is_prop_source` — or
+    /// ANY member under `accessors`) is declared via `$.prop` and reads as a
+    /// getter call (`name()`); a non-source member reads directly off the props
+    /// object (`$$props.name`). The rest / whole-object capture's BARE read
+    /// stays the verbatim real local, and its member reads de-localize
+    /// key-awarely through the SHARED membership set (carried as a cheap `Arc`
+    /// clone, never a cloned key `Vec`).
     #[must_use]
-    pub(super) fn prop_reads(&self, updated_locals: &FxHashSet<String>) -> PropReads {
+    pub(super) fn prop_reads(
+        &self,
+        updated_locals: &FxHashSet<String>,
+        accessors: bool,
+    ) -> PropReads {
         let mut reads = PropReads::default();
         for plan in &self.members {
-            let read = if plan.is_prop_source(updated_locals) {
+            let read = if plan.is_prop_source(updated_locals, accessors) {
                 PropRead::Getter
             } else {
                 PropRead::PropsMember {
@@ -452,11 +470,21 @@ fn build_member_plan(
 
 /// Build a rest / whole-object [`PropsRestCapture`] from the local binding name
 /// and the ordered non-rest member SOURCE keys (empty for the whole-object
-/// form). The exclude keys are the fixed [`REST_EXCLUDE_PREFIX`] then each source
-/// key in source order; the membership `FxHashSet` is derived from the same keys
-/// and shared (`Arc`) into the read form.
-fn build_rest_capture(local: String, source_keys: &[String]) -> PropsRestCapture {
+/// form). The exclude keys are the fixed [`REST_EXCLUDE_PREFIX`] — plus
+/// `'$$host'` under a custom element (the official
+/// `if (analysis.custom_element) seen.push('$$host')`, so a rest spread never
+/// surfaces the host element) — then each source key in source order; the
+/// membership `FxHashSet` is derived from the same keys and shared (`Arc`) into
+/// the read form.
+fn build_rest_capture(
+    local: String,
+    source_keys: &[String],
+    custom_element: bool,
+) -> PropsRestCapture {
     let mut excludes: Vec<String> = REST_EXCLUDE_PREFIX.iter().map(|k| k.to_string()).collect();
+    if custom_element {
+        excludes.push("$$host".to_string());
+    }
     excludes.extend(source_keys.iter().cloned());
     let exclude_set: FxHashSet<String> = excludes.iter().cloned().collect();
     PropsRestCapture {
@@ -492,10 +520,17 @@ impl PropsMemberPlan {
     /// The official `is_prop_source` predicate on Verter's runes-only surface:
     /// the member has a default initial OR is UPDATED (its local written anywhere
     /// — a template-expression or `$props()`-default reassign / deep-mutate,
-    /// runes-mode `reassigned || mutated`). A non-source member emits NO `$.prop`
-    /// declaration and reads directly off `$$props`.
-    pub(super) fn is_prop_source(&self, updated_locals: &FxHashSet<String>) -> bool {
-        self.default.is_some() || updated_locals.contains(&self.local)
+    /// runes-mode `reassigned || mutated`) OR the component compiles with
+    /// `accessors` (a CUSTOM ELEMENT forces it — every prop is then a source, so
+    /// the `$$exports` get/set accessors have a getter/setter binding to drive).
+    /// A non-source member emits NO `$.prop` declaration and reads directly off
+    /// `$$props`.
+    pub(super) fn is_prop_source(
+        &self,
+        updated_locals: &FxHashSet<String>,
+        accessors: bool,
+    ) -> bool {
+        accessors || self.default.is_some() || updated_locals.contains(&self.local)
     }
 }
 
@@ -545,6 +580,10 @@ pub(super) struct PropsDefaultFacts {
     /// consulted only for a BINDABLE default whose root identifier does not
     /// rewrite.
     pub(super) proxiable_by_shape: bool,
+    /// Whether the peeled root is a BOOLEAN literal (`true` / `false`) — the
+    /// custom-element prop-definition type inference (a type-less explicit prop
+    /// def whose binding initial is a boolean literal infers `type: 'Boolean'`).
+    pub(super) boolean_literal: bool,
 }
 
 /// Compute the typed [`PropsDefaultFacts`] of one default initializer
@@ -585,6 +624,7 @@ fn props_default_facts(
         object_root: matches!(peeled, Expression::ObjectExpression(_)),
         sequence_root: matches!(peeled, Expression::SequenceExpression(_)),
         proxiable_by_shape: expr_is_proxiable(peeled, Some(proxy_inits)),
+        boolean_literal: matches!(peeled, Expression::BooleanLiteral(_)),
     }
 }
 

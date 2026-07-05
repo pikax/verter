@@ -200,15 +200,37 @@ impl<'a> oxc_ast_visit::Visit<'a> for PropRefScan<'_> {
     }
 }
 
+/// The accepted script-item facts [`classify_script_items`] returns: the admitted
+/// module-scope user imports, plus the `$host` FACTS the rune scan recorded
+/// (an admitted zero-arg `$host()` call in the instance script or any template
+/// expression, and its first span) — the plan build decides the
+/// `$$props`-parameter question from them, so no later stage re-parses source
+/// to re-discover the usage.
+pub(super) struct ClassifiedScriptItems {
+    /// The admitted module-scope USER imports (the `.svelte`-component-default
+    /// subset), in source order.
+    pub(super) user_imports: Vec<UserImport>,
+    /// Whether an ADMITTED `$host()` call was seen (instance script or any
+    /// template expression). Only meaningful under an active custom element —
+    /// every other `$host` shape refused during the scan.
+    pub(super) uses_host: bool,
+    /// The span of the FIRST admitted `$host()` call, in the coordinates of the
+    /// scanned program it was found in (the instance script, or the wrapped
+    /// `({expr});` template-expression program — the same coordinate space the
+    /// scan's own refusal spans use). Carried so the plan build's
+    /// degenerate-host refusal points at the offending call.
+    pub(super) first_host_span: Option<Span>,
+}
+
 /// Classify the instance + module script items, returning the admitted module-scope
-/// user imports (the `.svelte`-component-default subset). A `<script module>`,
-/// every NON-`.svelte`-default instance import (named / namespace / side-effect /
-/// mixed / default-non-`.svelte`), a non-basic / default-bearing `$props()` form, a
-/// destructured / non-primitive `$state`, or an advanced rune call/member fails closed
-/// (no wildcard accept).
+/// user imports (the `.svelte`-component-default subset) plus the `$host`-usage
+/// fact. A `<script module>`, every NON-`.svelte`-default instance import (named /
+/// namespace / side-effect / mixed / default-non-`.svelte`), a non-basic /
+/// default-bearing `$props()` form, a destructured / non-primitive `$state`, or an
+/// advanced rune call/member fails closed (no wildcard accept).
 pub(super) fn classify_script_items(
     ir: &SvelteRuntimeIr,
-) -> Result<Vec<UserImport>, UnsupportedSvelteRuntimeSurface> {
+) -> Result<ClassifiedScriptItems, UnsupportedSvelteRuntimeSurface> {
     // A `<script module>` is the broad static-import-prelude / module-item deferral —
     // fail closed BEFORE the rune-shape gates. (The component `.svelte` default import
     // is admitted below; every OTHER static import form — named / namespace /
@@ -275,12 +297,21 @@ pub(super) fn classify_script_items(
     // instance-item classifier / the body rewriter own the elision, and the
     // rewriter fails a non-statement-position reference closed). A SHADOWED rune
     // name is never refused. (A `<script module>` was already refused above as a
-    // script-hoisting deferral.)
+    // script-hoisting deferral.) The custom-element fact gates the `$host()`
+    // admission: the zero-arg call is supported only under an active
+    // custom-element descriptor — an admitted call records the `uses_host` FACT
+    // this classification returns.
+    let custom_element_active = ir.component.custom_element.is_some();
+    let mut uses_host = false;
+    let mut first_host_span: Option<Span> = None;
     let mut alloc = Allocator::default();
     if let Some(instance) = ir.analysis.scripts.instance_source {
-        if let Some(reason) = scan_unsupported_rune_forms(&alloc, instance, true) {
+        let scan = scan_unsupported_rune_forms(&alloc, instance, true, custom_element_active);
+        if let Some(reason) = scan.refusal {
             return Err(reason);
         }
+        uses_host |= scan.uses_host;
+        first_host_span = first_host_span.or(scan.first_host_span);
         alloc.reset();
     }
     // The SAME scan over every analyzed TEMPLATE expression (an interpolation /
@@ -289,9 +320,12 @@ pub(super) fn classify_script_items(
     // supported rune position (`is_instance = false`).
     for expr in ir.analysis.expressions.all() {
         let wrapped = format!("({});", expr.source);
-        if let Some(reason) = scan_unsupported_rune_forms(&alloc, &wrapped, false) {
+        let scan = scan_unsupported_rune_forms(&alloc, &wrapped, false, custom_element_active);
+        if let Some(reason) = scan.refusal {
             return Err(reason);
         }
+        uses_host |= scan.uses_host;
+        first_host_span = first_host_span.or(scan.first_host_span);
         alloc.reset();
     }
     // A compiler-MAGIC identifier (`$$slots` / `$$props` / `$$restProps`) is an
@@ -311,23 +345,55 @@ pub(super) fn classify_script_items(
             return Err(reason);
         }
     }
-    Ok(user_imports)
+    Ok(ClassifiedScriptItems {
+        user_imports,
+        uses_host,
+        first_host_span,
+    })
+}
+
+/// One program's rune-scan outcome: the first unsupported occurrence (if any)
+/// plus the `$host` facts the walk recorded.
+struct RuneScanOutcome {
+    /// The FIRST unsupported rune form / position found, or `None`.
+    refusal: Option<UnsupportedSvelteRuntimeSurface>,
+    /// Whether the walk admitted a zero-arg `$host()` call.
+    uses_host: bool,
+    /// The span of the first admitted `$host()` call (program-relative).
+    first_host_span: Option<Span>,
 }
 
 /// Scope-aware, POSITION-SENSITIVE scan of a script for an UNSUPPORTED rune form or
-/// position. Returns the FIRST unsupported occurrence, or `None`. `is_instance`
-/// marks the instance-script program — the only program with supported rune
-/// positions; a module-script / template-expression program passes `false`, so its
-/// supported-position set is empty and every rune reference refuses. A shadowed
-/// rune name is not a rune reference.
+/// position. Returns the FIRST unsupported occurrence plus the `$host`-usage fact.
+/// `is_instance` marks the instance-script program — the only program with
+/// supported rune positions; a module-script / template-expression program passes
+/// `false`, so its supported-position set is empty and every rune reference
+/// refuses. A shadowed rune name is not a rune reference. `custom_element_active`
+/// marks a component with a resolved custom-element descriptor — the only context
+/// whose zero-arg `$host()` call is admitted (and recorded as `uses_host`).
 fn scan_unsupported_rune_forms(
     alloc: &Allocator,
     source: &str,
     is_instance: bool,
-) -> Option<UnsupportedSvelteRuntimeSurface> {
-    let program = super::expr::reparse_module(alloc, source)?;
-    let mut scan = super::rune_scan::UnsupportedRuneScan::for_program(&program, is_instance);
+    custom_element_active: bool,
+) -> RuneScanOutcome {
+    let Some(program) = super::expr::reparse_module(alloc, source) else {
+        return RuneScanOutcome {
+            refusal: None,
+            uses_host: false,
+            first_host_span: None,
+        };
+    };
+    let mut scan = super::rune_scan::UnsupportedRuneScan::for_program(
+        &program,
+        is_instance,
+        custom_element_active,
+    );
     use oxc_ast_visit::Visit;
     scan.visit_program(&program);
-    scan.into_surface()
+    RuneScanOutcome {
+        uses_host: scan.uses_host(),
+        first_host_span: scan.first_host_span(),
+        refusal: scan.into_surface(),
+    }
 }

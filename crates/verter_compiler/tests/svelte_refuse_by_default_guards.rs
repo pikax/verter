@@ -247,7 +247,11 @@ fn has_accepting_wildcard_arm(code: &str) -> bool {
 
 #[test]
 fn no_emitting_wildcard_arm_in_client_emitter_or_classifier() {
-    for file in ["client_surface.rs", "client_plan.rs"] {
+    for file in [
+        "client_surface.rs",
+        "client_plan.rs",
+        "client_plan_script.rs",
+    ] {
         let code = read_runtime_file(file);
         assert!(
             !has_accepting_wildcard_arm(&code),

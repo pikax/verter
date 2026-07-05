@@ -20,6 +20,8 @@
 
 use verter_span::Span;
 
+use super::options_custom_element::{AcceptedCustomElementValue, CustomElementDescriptor};
+
 /// A parsed Svelte component.
 ///
 /// Carries the script region spans (instance + module), the component-level
@@ -89,13 +91,27 @@ pub struct ParsedSvelte {
     /// unsupported-style rail then wins). In discovery order; empty for a component with no
     /// top-level `<style>`.
     pub style_body_probes: Vec<StyleBodyProbe>,
-    /// The RESERVED `<svelte:options customElement={EXPR}>` validation slots — one per
+    /// The RESOLVED `<svelte:options customElement={EXPR}>` validation slots — one per
     /// expression-valued `customElement` attribute on the FIRST root `<svelte:options>` element,
-    /// each carrying its source-order `encounter_order` (among the options attributes) + the
-    /// expression span. The parser reserves the slot at the options-finalization position; the
-    /// official-reject gate fills it with OXC (the expression's AST decides the exact code). In
-    /// discovery order; empty for a component with no expression-valued `customElement` axis.
+    /// each carrying its source-order `encounter_order` (among the options attributes), the
+    /// expression span, and the RETAINED typed resolution (the parser runs the one
+    /// validate+extract engine at the options-finalization position — where upstream's
+    /// `read_options` runs — and retains the exact official reject code OR the accepted typed
+    /// value). The official-reject gate consumes the reject side at the reserved orders; the
+    /// runtime lowering consumes the accepted side. In discovery order; empty for a component
+    /// with no expression-valued `customElement` axis.
     pub options_custom_element_probes: Vec<OptionsCustomElementProbe>,
+    /// The RETAINED string-tag `<svelte:options customElement="my-el">` descriptors — the
+    /// Text-value counterpart of [`options_custom_element_probes`]: the parser VALIDATES the
+    /// text tag at the options-finalization position (`validate_custom_element_tag`) and, on
+    /// accept, retains the RESOLVED descriptor keyed by the attribute's text-value span. The
+    /// runtime lowering consumes ONLY this retained descriptor (the raw source is never
+    /// re-sliced at lowering); a rejected text tag mints its `OptionsInvalid` fact directly at
+    /// finalization and retains nothing. In attribute source order; empty for a component with
+    /// no accepted Text-valued `customElement` axis.
+    ///
+    /// [`options_custom_element_probes`]: Self::options_custom_element_probes
+    pub options_custom_element_text_tags: Vec<OptionsCustomElementTextTag>,
 }
 
 /// One RESERVED script-body-parse slot — the "reserved hole in the parse-reject stream" the
@@ -139,10 +155,15 @@ pub struct StyleBodyProbe {
     pub content_start: u32,
 }
 
-/// One RESERVED `<svelte:options customElement={EXPR}>` validation slot. The
+/// One RESOLVED `<svelte:options customElement={EXPR}>` validation slot. The
 /// EXPRESSION-VALUED `customElement` axis is the ONE options attribute whose disposition depends
-/// on the JS expression, which the byte parser does not parse. The gate fills it via OXC and the
-/// outcome falls into TWO upstream-distinct positions on the encounter timeline:
+/// on the JS expression. The parser RESOLVES it at options finalization — the position upstream's
+/// `read_options` runs — through the one validate+extract engine
+/// ([`resolve_custom_element_expr`]) and RETAINS the typed outcome on [`resolution`], exactly as
+/// upstream retains `AST.SvelteOptions['customElement']`. The official-reject gate consumes the
+/// `Err` side; the runtime lowering consumes the `Ok` side — the expression is never re-parsed
+/// from raw source. A reject falls into TWO upstream-distinct positions on the encounter
+/// timeline:
 ///
 /// - the expression FAILS as a parse-position fault (`js_parse_error` when the prefix expression
 ///   does not parse; `expected_token` when it parses but trailing non-trivia content leaves the
@@ -157,13 +178,15 @@ pub struct StyleBodyProbe {
 ///   [`encounter_order`] — the options-finalization position, after every walk fact, losing to ANY
 ///   template parse defect (matching upstream). A `null` / valid object is ACCEPT (no defect).
 ///
-/// So — like [`ScriptBodyProbe`] — the parser reserves the slot; the official-reject gate (which
-/// holds OXC) fills it by parsing the expression and reproducing upstream's exact code at the
-/// correct one of the two positions.
+/// The two reserved orders are the ARBITRATION positions the gate mints the retained code at —
+/// the parser resolves the value once; the gate only routes the retained code to the correct
+/// position.
 ///
 /// [`parse_encounter_order`]: Self::parse_encounter_order
 /// [`encounter_order`]: Self::encounter_order
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// [`resolution`]: Self::resolution
+/// [`resolve_custom_element_expr`]: super::options_custom_element::resolve_custom_element_expr
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OptionsCustomElementProbe {
     /// The monotonic discovery sequence for the `read_options` VALIDATION fault, drawn at the
     /// options-finalization position in attribute SOURCE ORDER (after every walk fact), so a
@@ -173,15 +196,40 @@ pub struct OptionsCustomElementProbe {
     pub encounter_order: u32,
     /// The monotonic discovery sequence for the attribute-expression PARSE-POSITION fault — drawn
     /// while parsing the `customElement` attribute IN THE OPEN-TAG ATTRIBUTE LOOP (the point
-    /// upstream's `read_expression` reaches the value), at that attribute's source position. The
-    /// gate fills it with either `js_parse_error` (the prefix expression does not parse) or
-    /// `expected_token` (it parses but trailing non-trivia content leaves the `}` missing), so a
+    /// upstream's `read_expression` reaches the value), at that attribute's source position. A
+    /// retained `js_parse_error` (the prefix expression does not parse) or `expected_token` (it
+    /// parses but trailing non-trivia content leaves the `}` missing) mints HERE, so a
     /// malformed-expression parse fault beats a LATER template defect and loses to an EARLIER one —
     /// exactly as upstream's during-parse acorn error does.
     pub parse_encounter_order: u32,
     /// The `{EXPR}` inner-expression `Span` (the bytes between the `customElement=` braces) the
-    /// gate parses with OXC. Also the REPORT anchor.
+    /// parser resolved. The REPORT anchor, and the lowering's key back to this probe (the
+    /// attribute value carries the same span).
     pub expr_span: Span,
+    /// The RETAINED typed resolution — the one validate+extract walk's outcome, resolved ONCE at
+    /// options finalization: `Err` carries the EXACT official reject code (the official-reject
+    /// gate's side); `Ok` carries the ACCEPTED value (the runtime lowering's side — the `null`
+    /// backwards-compat skip or the typed descriptor).
+    pub resolution: Result<AcceptedCustomElementValue, &'static str>,
+}
+
+/// One RETAINED string-tag `<svelte:options customElement="my-el">` descriptor — the Text-value
+/// counterpart of [`OptionsCustomElementProbe`]. The parser validates the text tag at the
+/// options-finalization position (`validate_custom_element_tag`, where upstream's `read_options`
+/// runs) and, on ACCEPT, resolves the descriptor ONCE and retains it here (exactly as upstream
+/// retains `AST.SvelteOptions['customElement']`); the runtime lowering consumes ONLY the retained
+/// descriptor — the tag text is never re-sliced from raw source at lowering. A REJECTED text tag
+/// (`svelte_options_invalid_tagname` / `svelte_options_reserved_tagname`) mints its fact directly
+/// at finalization and retains nothing — no reserved arbitration orders exist here because a Text
+/// value never takes the attribute-expression parse-fault rail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OptionsCustomElementTextTag {
+    /// The attribute's Text value `Span` (the bytes between the quotes) — the lowering's key
+    /// back to this retained descriptor (the attribute value carries the same span).
+    pub text_span: Span,
+    /// The RESOLVED descriptor: the validated tag plus the string-tag form's fixed axes (open
+    /// shadow, no explicit props, no extend, injected styles).
+    pub descriptor: CustomElementDescriptor,
 }
 
 /// The grammar a [`ScriptBodyProbe`] body is parsed under, mirroring upstream's

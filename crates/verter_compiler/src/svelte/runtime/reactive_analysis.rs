@@ -1121,20 +1121,33 @@ impl HasCallScan<'_> {
 /// the scan is scope-aware (a local shadowing an unsafe name is safe). This is the
 /// SOLE `$.push` determinant — keying it on `$effect` alone would under-push for
 /// imported / `new` / context calls.
+///
+/// `render_callee_sources` are the `{@render}` DYNAMIC-callee expressions (each
+/// the whole inner snippet call, `callee(args)`): the OUTER snippet call itself
+/// is NOT an unsafe-call trigger (official excludes the render call — a
+/// prop-rooted `{@render children?.()}` stays frame-free), so each is PEELED to
+/// its callee and only the callee expression is scanned
+/// ([`render_callee_needs_context`]). Render ARGUMENTS are separate analyzed
+/// expressions that ride `template_expr_sources` — they are never exempted.
 #[must_use]
 pub fn needs_context(
     alloc: &Allocator,
     instance_source: Option<&str>,
     template_expr_sources: &[&str],
+    render_callee_sources: &[&str],
 ) -> bool {
     let Some(instance) = instance_source else {
         // No instance script ⇒ no imports/props ⇒ a `new`/call in a template
         // handler is the only possible trigger, but with no unsafe roots a call is
         // safe; a `new X()` in a template handler still triggers. Scan the template
-        // expressions with an EMPTY unsafe-root set.
+        // expressions (and the peeled render callees) with an EMPTY unsafe-root set.
+        let empty_roots = rustc_hash::FxHashSet::default();
         return template_expr_sources
             .iter()
-            .any(|src| expr_needs_context(alloc, src, &rustc_hash::FxHashSet::default()));
+            .any(|src| expr_needs_context(alloc, src, &empty_roots))
+            || render_callee_sources
+                .iter()
+                .any(|src| render_callee_needs_context(alloc, src, &empty_roots));
     };
     let Some(program) = reparse_module(alloc, instance) else {
         return false;
@@ -1156,10 +1169,14 @@ pub fn needs_context(
     }
     // Scan every template expression (handler / interpolation / bind) with the same
     // unsafe-root set (a handler `onclick={() => f(count)}` reads the instance
-    // import `f`). Each is wrapped so it parses as a statement.
+    // import `f`). Each is wrapped so it parses as a statement. A `{@render}`
+    // dynamic callee scans through the peel instead (only its callee expression).
     template_expr_sources
         .iter()
         .any(|src| expr_needs_context(alloc, src, &unsafe_roots))
+        || render_callee_sources
+            .iter()
+            .any(|src| render_callee_needs_context(alloc, src, &unsafe_roots))
 }
 
 /// Whether a single (wrapped) template expression triggers `needs_context` under
@@ -1179,6 +1196,57 @@ fn expr_needs_context(
         scopes: ShadowStack::default(),
     };
     scan.visit_program(&program);
+    scan.found
+}
+
+/// Whether a `{@render}` DYNAMIC-callee expression (the whole inner snippet
+/// call, `callee(args)`) triggers `needs_context` under the given unsafe-root
+/// set.
+///
+/// The OUTER snippet call is NOT an unsafe-call trigger — official excludes the
+/// render call itself from the `is_safe_identifier` call check, so a prop-rooted
+/// `{@render children?.()}` / `{@render (cond ? a : b)()}` stays frame-free —
+/// but the CALLEE expression inside it scans NORMALLY: the terminal call is
+/// peeled (an AST descent through transparent parens and the optional-chain
+/// wrapper to `CallExpression.callee` — never a text slice) and only the peeled
+/// callee is visited. A member/call/`new`-rooted callee (`$host().snip`,
+/// `imported.snip`, `unsafeImport()`, `(new Date())`, `({ snip(){} }).snip`)
+/// still opens the frame; an identifier / safe-local-rooted callee stays safe.
+/// A source with no terminal call scans whole — the conservative fallback
+/// (unreachable for an emitted render: the projection refuses an uncalled
+/// render before the plan consults this scan).
+fn render_callee_needs_context(
+    alloc: &Allocator,
+    expr_src: &str,
+    unsafe_roots: &rustc_hash::FxHashSet<String>,
+) -> bool {
+    let wrapped = format!("({expr_src});");
+    let Some(program) = reparse_module(alloc, &wrapped) else {
+        return false;
+    };
+    let Some(Statement::ExpressionStatement(stmt)) = program.body.first() else {
+        return false;
+    };
+    let mut expr = &stmt.expression;
+    while let Expression::ParenthesizedExpression(p) = expr {
+        expr = &p.expression;
+    }
+    // Peel the terminal snippet call: a plain `CallExpression` or the
+    // `CallExpression` inside a `ChainExpression` (the optional `fn?.()` form).
+    let scanned: &Expression = match expr {
+        Expression::CallExpression(call) => &call.callee,
+        Expression::ChainExpression(chain) => match &chain.expression {
+            ChainElement::CallExpression(call) => &call.callee,
+            _ => expr,
+        },
+        _ => expr,
+    };
+    let mut scan = NeedsContextScan {
+        found: false,
+        unsafe_roots,
+        scopes: ShadowStack::default(),
+    };
+    scan.visit_expression(scanned);
     scan.found
 }
 

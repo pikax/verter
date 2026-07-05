@@ -856,6 +856,118 @@ fn options_clean_customelement_expr_lets_a_later_duplicate_attr_win() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// DUPLICATE `customElement` attributes: upstream reads each attribute's expression value
+//     DURING the open-tag loop — BEFORE that attribute's own duplicate check and AFTER every
+//     earlier attribute's — so each expression-valued `customElement`'s parse fault competes
+//     at ITS OWN attribute position. An `attribute_duplicate` minted BETWEEN two
+//     `customElement` attributes beats the LATER one's parse fault; a `customElement` parse
+//     fault still beats its OWN duplicate mint. (A single first-customElement parse-order
+//     latch WRONGLY rode every later customElement fault on the FIRST customElement's
+//     position, jumping ahead of duplicates minted between the two.) Every code below was
+//     verified FIRST-HAND against pinned svelte@5.56.3.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn duplicate_customelement_after_intervening_duplicate_foo_reports_attribute_duplicate() {
+    // `customElement={{}} foo foo customElement={1 2}` — the walk mints `attribute_duplicate`
+    // at the third attribute (`foo foo`), and the finalize scan SHORT-CIRCUITS at the unknown
+    // `foo` (its `svelte_options_unknown_attribute` candidate loses to the earlier walk-minted
+    // duplicate), so the fourth `customElement`'s `expected_token` probe is NEVER generated.
+    // This result is NOT decided by parse-fault-vs-duplicate arbitration — that axis is
+    // covered by `dup_axis_between_ces` / `three_ces_dup_beats_third_fault`. (Verified pinned:
+    // `attribute_duplicate`.)
+    assert_code(
+        "dup_ce_after_dup_foo",
+        &format!(
+            "<svelte:options customElement={{{{}}}} foo foo customElement={{1 2}} />\n{BUTTON}\n"
+        ),
+        "attribute_duplicate",
+    );
+}
+
+#[test]
+fn duplicate_text_customelement_after_clean_expression_reports_attribute_duplicate() {
+    // `customElement={{}} customElement="x-two"` — the second (Text-valued) `customElement`
+    // reads clean, so its duplicate check fires → `attribute_duplicate` (a Text value never
+    // takes the expression parse-fault rail). (Verified pinned: `attribute_duplicate`.)
+    assert_code(
+        "dup_ce_text_second",
+        &format!("<svelte:options customElement={{{{}}}} customElement=\"x-two\" />\n{BUTTON}\n"),
+        "attribute_duplicate",
+    );
+}
+
+#[test]
+fn duplicate_axis_between_two_customelements_beats_the_later_parse_fault() {
+    // `customElement={{}} runes={true} runes={true} customElement={1 2}` — the `runes runes`
+    // duplicate (minted at the third attribute) precedes the FOURTH attribute's
+    // `expected_token`, so `attribute_duplicate` wins. A single first-customElement latch
+    // WRONGLY rode the fourth attribute's fault on the FIRST customElement's position (before
+    // the duplicate) and reported `expected_token`. (Verified pinned: `attribute_duplicate`.)
+    assert_code(
+        "dup_axis_between_ces",
+        &format!(
+            "<svelte:options customElement={{{{}}}} runes={{true}} runes={{true}} customElement={{1 2}} />\n{BUTTON}\n"
+        ),
+        "attribute_duplicate",
+    );
+}
+
+#[test]
+fn earlier_duplicate_customelement_beats_the_third_customelements_parse_fault() {
+    // `customElement={{}} customElement={{}} customElement={1 2}` — the SECOND `customElement`
+    // reads clean and its duplicate check fires (second attribute), BEFORE the third
+    // attribute's `expected_token` → `attribute_duplicate`. The single latch WRONGLY rode the
+    // third fault on the first attribute's position. (Verified pinned: `attribute_duplicate`.)
+    assert_code(
+        "three_ces_dup_beats_third_fault",
+        &format!(
+            "<svelte:options customElement={{{{}}}} customElement={{{{}}}} customElement={{1 2}} />\n{BUTTON}\n"
+        ),
+        "attribute_duplicate",
+    );
+}
+
+#[test]
+fn second_customelement_parse_fault_beats_its_own_duplicate_mint() {
+    // `customElement={{}} customElement={1 2}` — upstream reads the second attribute's VALUE
+    // (throwing `expected_token`) BEFORE that same attribute's duplicate check, so the parse
+    // fault wins over the duplicate OF THE FAULTING ATTRIBUTE ITSELF. Guards against
+    // over-fixing to a "duplicate always wins" rule. (Verified pinned: `expected_token`.)
+    assert_code(
+        "second_ce_fault_beats_own_dup",
+        &format!("<svelte:options customElement={{{{}}}} customElement={{1 2}} />\n{BUTTON}\n"),
+        "expected_token",
+    );
+}
+
+#[test]
+fn text_customelement_then_malformed_expression_customelement_reports_expected_token() {
+    // `customElement="x-two" customElement={1 2}` — the first `customElement` is Text (never
+    // draws a parse order); the second's value read throws `expected_token` before its own
+    // duplicate check → `expected_token`. Pins that the parse order is drawn at the
+    // EXPRESSION-VALUED attribute's own position, not the first `customElement` occurrence.
+    // (Verified pinned: `expected_token`.)
+    assert_code(
+        "text_ce_then_malformed_ce",
+        &format!("<svelte:options customElement=\"x-two\" customElement={{1 2}} />\n{BUTTON}\n"),
+        "expected_token",
+    );
+}
+
+#[test]
+fn two_clean_duplicate_customelements_report_attribute_duplicate() {
+    // `customElement={{}} customElement={{}}` — both expressions read clean, so the second's
+    // duplicate check fires → `attribute_duplicate` (clean probes mint nothing).
+    // (Verified pinned: `attribute_duplicate`.)
+    assert_code(
+        "two_clean_dup_ces",
+        &format!("<svelte:options customElement={{{{}}}} customElement={{{{}}}} />\n{BUTTON}\n"),
+        "attribute_duplicate",
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // (4) Analyze scan order = module → instance → template. A module-script global reference
 //     is reported BEFORE an instance-script defect.
 // ─────────────────────────────────────────────────────────────────────────────

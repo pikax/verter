@@ -36,8 +36,10 @@ mod client_bind;
 mod client_block_emit;
 mod client_block_plan;
 mod client_codegen_helpers;
+mod client_compile;
 mod client_component_emit;
 mod client_component_plan;
+mod client_custom_element;
 mod client_effect;
 mod client_emit;
 mod client_event;
@@ -48,6 +50,7 @@ mod client_plan_attr_value;
 mod client_plan_bind;
 mod client_plan_element_ops;
 mod client_plan_rewrite;
+mod client_plan_script;
 mod client_plan_spread_html;
 mod client_plan_types;
 mod client_shapes;
@@ -63,6 +66,7 @@ mod client_svelte_element;
 mod client_svelte_head;
 mod client_walk;
 mod css_reject;
+mod custom_element;
 mod entity_decode;
 mod entity_table;
 mod events;
@@ -79,7 +83,6 @@ mod naming;
 mod official_reject;
 mod official_rule;
 mod ops;
-mod options_reject;
 mod parse_refusal;
 mod reactive_analysis;
 mod reactive_fold;
@@ -127,6 +130,7 @@ use state_scan::script_uses_runes;
 /// emission entry consumers use is [`compile_client`], which builds the narrow
 /// plan; the emitter never accepts the broad IR.)
 pub use client::{ClientModule, UnsupportedSvelteRuntimeSurface};
+pub use client_compile::{compile_client, ClientCompileError};
 pub use expr::StateLowering;
 pub use helpers::SvelteHelperMask;
 pub use html::{DynamicSlot, NodePathPlan, PathBase};
@@ -164,6 +168,13 @@ pub struct SvelteRuntimeOptions {
     /// `is_production` (which gates downstream stripping, not the dev-codegen axis):
     /// the dev-mode output shape is a distinct compiler mode the host opts into.
     pub dev_codegen: bool,
+    /// The `customElement: true` COMPILE OPTION: compile the component as a custom
+    /// element with NO registration (`$.create_custom_element(…)` is emitted, but
+    /// `customElements.define` is left to the user — there is no tag). An in-source
+    /// `<svelte:options customElement>` value WINS over this option (the official
+    /// `customElementOptions ?? customElement` precedence); a
+    /// `customElement={null}` options value falls back to it.
+    pub custom_element: bool,
 }
 
 /// A runtime-lowering diagnostic.
@@ -207,7 +218,6 @@ impl RuntimeLoweringErrors {
 }
 
 use naming::derive_component_name;
-use parse_refusal::parse_domain_gate;
 
 /// The lowering context: the source, the arenas being built, and the analysis
 /// state.
@@ -419,25 +429,23 @@ pub fn lower_parsed_svelte_to_ir<'a>(
     // `<svelte:options runes={…}>` override (Svelte's own forced-mode switch,
     // shared with the IDE projector via `forced_runes_option`); otherwise infer
     // from rune USAGE. `runes={true}` forces runes mode despite zero rune calls;
-    // `runes={false}` forces legacy mode even when a rune name is present. ---
+    // `runes={false}` forces legacy mode even when a rune name is present. The
+    // SCRIPT half of the usage inference runs here; the TEMPLATE half (a `$host`
+    // occurrence in a template expression is a runes indicator too) reads the
+    // per-expression free-reference facts the template lowering collects, so the
+    // final mode decision completes AFTER the lowering below — nothing between
+    // here and there consumes the mode. ---
     let instance_source = parsed.instance_content().map(|s| span_text(source, s));
     let module_source = parsed.module_content().map(|s| span_text(source, s));
-    let runes = opts
+    let explicit_runes = opts
         .runes
-        .or_else(|| forced_runes_option(source, &parsed.template))
-        .unwrap_or_else(|| {
-            instance_source
-                .map(|t| script_uses_runes(alloc, t))
-                .unwrap_or(false)
-                || module_source
-                    .map(|t| script_uses_runes(alloc, t))
-                    .unwrap_or(false)
-        });
-    let mode = if runes {
-        SvelteMode::Runes
-    } else {
-        SvelteMode::Legacy
-    };
+        .or_else(|| forced_runes_option(source, &parsed.template));
+    let script_runes = instance_source
+        .map(|t| script_uses_runes(alloc, t))
+        .unwrap_or(false)
+        || module_source
+            .map(|t| script_uses_runes(alloc, t))
+            .unwrap_or(false);
 
     // A MALFORMED instance / module script (a non-empty OXC error set, not just a
     // panic) yields a partial AST that must NOT silently feed rune / mode / state
@@ -592,14 +600,54 @@ pub fn lower_parsed_svelte_to_ir<'a>(
     // detected, attaching each op to its owning template scope.
     ops::populate_runtime_ops(&ctx.nodes, &mut ctx.template_scopes, &mut ctx.ops);
 
+    // Resolve the custom-element descriptor (the `<svelte:options customElement>`
+    // value, falling back to the `customElement: true` compile option). Runs after
+    // the official-reject gate, so the value is official-ACCEPTED; a shape the gate
+    // should have rejected is a loud lowering diagnostic, never a silent
+    // plain-component downgrade.
+    let custom_element = match custom_element::resolve_custom_element(parsed, opts.custom_element) {
+        Ok(descriptor) => descriptor,
+        Err(diagnostic) => {
+            ctx.errors
+                .push(diagnostic.code, diagnostic.message, diagnostic.span);
+            None
+        }
+    };
+
     if !ctx.errors.is_empty() {
         return Err(ctx.errors);
     }
+
+    // --- Mode-inference completion: a `$host` occurrence in a TEMPLATE
+    // expression (a handler, an interpolation, a bind) is a runes-mode
+    // indicator too — official treats every unresolved rune-name reference as
+    // the mode trigger, template positions included (a scriptless
+    // customElement whose only rune is a template `$host()` is runes mode).
+    // This reads the FREE-REFERENCE facts the lowering above already collected
+    // per analyzed expression (one parse, no re-scan): a `$host` bound by a
+    // local (an arrow param) is pruned from the free set, and a string /
+    // comment occurrence is never a reference. An EXPLICIT override — the
+    // compile option or `<svelte:options runes={…}>` — still wins in BOTH
+    // directions. Only `$host` is template-inferable here: every other rune
+    // name in a template expression without a script rune stays inert for the
+    // MODE (their unsupported forms are refused downstream by the rune scan).
+    let template_uses_host_rune = ctx
+        .expressions
+        .all()
+        .iter()
+        .any(|expr| expr.references.iter().any(|r| r.name == "$host"));
+    let runes = explicit_runes.unwrap_or(script_runes || template_uses_host_rune);
+    let mode = if runes {
+        SvelteMode::Runes
+    } else {
+        SvelteMode::Legacy
+    };
 
     let component = ComponentIr {
         name: derive_component_name(opts),
         filename: opts.filename.clone(),
         mode,
+        custom_element,
     };
     let analysis = RuntimeAnalysis {
         scripts: ScriptAnalysis {
@@ -1386,111 +1434,4 @@ fn resolve_render_callees(ctx: &mut LoweringCtx) {
 #[must_use]
 pub fn plan_static_templates(ir: &SvelteRuntimeIr) -> StaticTemplatePlan {
     html::plan_static_templates(ir)
-}
-
-/// The outcome of [`compile_client`] when the client module cannot be emitted.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ClientCompileError {
-    /// The runtime lowering itself failed (a malformed construct) — carries the
-    /// collected lowering diagnostics.
-    Lowering(RuntimeLoweringErrors),
-    /// The component uses a runtime surface this backend does not yet emit — fails
-    /// closed with the typed reason (never a silent empty module).
-    Unsupported(UnsupportedSvelteRuntimeSurface),
-    /// The component is MALFORMED Svelte the official `svelte@5.56.3` compiler also
-    /// COMPILE-ERRORS (a duplicate declaration, a `$`-prefixed binding, a duplicate /
-    /// mis-`context`-ed `<script>`, an invalid HTML placement, a global `$foo`
-    /// reference). Accepting it would change the observable contract from "compile
-    /// error, no module" to "module exists", so it fails closed with the typed
-    /// official-reject rejection (the rule class + its exact official code) — never a
-    /// `Main`. The official-reject parity quadrant.
-    OfficialReject(OfficialRejection),
-}
-
-impl From<UnsupportedSvelteRuntimeSurface> for ClientCompileError {
-    /// Convert a REWRITER-CHANNEL refusal to the client compile error. The fallible
-    /// expression rewriter reports through `UnsupportedSvelteRuntimeSurface`, but a
-    /// [`UnsupportedSvelteRuntimeSurface::OfficialReject`] carrier is a mid-rewrite
-    /// OFFICIAL compile-error (a `$$`-member of a `$props()` rest / whole-object
-    /// binding → `props_illegal_name`), so it becomes a real
-    /// [`ClientCompileError::OfficialReject`] carrying the exact official code — NOT
-    /// the generic unsupported quadrant. Every other surface is a genuine
-    /// unsupported feature.
-    fn from(surface: UnsupportedSvelteRuntimeSurface) -> Self {
-        match surface {
-            UnsupportedSvelteRuntimeSurface::OfficialReject { rejection, .. } => {
-                ClientCompileError::OfficialReject(rejection)
-            }
-            other => ClientCompileError::Unsupported(other),
-        }
-    }
-}
-
-/// Compile a parsed Svelte component into the `svelte/internal/client` JS module
-/// (the carrier-facing entry).
-///
-/// Runs the full pipeline — runtime lowering → static-template planning →
-/// client-topology planning → [`emit_client_module`] — and returns the emitted
-/// module, or a typed [`ClientCompileError`] (a lowering failure, or an
-/// unsupported surface that fails closed). `ssr` requests the server backend
-/// (fails closed until the server backend lands).
-pub fn compile_client<'a>(
-    source: &'a str,
-    parsed: &ParsedSvelte,
-    opts: &SvelteRuntimeOptions,
-    alloc: &'a Allocator,
-    ssr: bool,
-) -> Result<client::ClientModule, ClientCompileError> {
-    // The REFUSE-BY-DEFAULT pipeline. Each stage is a choke point: an unsupported
-    // surface fails closed BEFORE the next stage, so the narrow plan the emitter
-    // consumes can ONLY describe a fully-supported component — emit-by-default is
-    // structurally impossible.
-    //
-    // (0) SSR requests the server backend (fails closed until it lands).
-    if ssr {
-        return Err(ClientCompileError::Unsupported(
-            UnsupportedSvelteRuntimeSurface::ServerGenerate {
-                span: Span::new(0, 0),
-            },
-        ));
-    }
-    // (1) `official_reject_gate` — the OFFICIAL-REJECT parity gate. Refuse the
-    // MALFORMED-input classes official ALSO compile-errors (a duplicate / mis-context
-    // `<script>`, a `$`-prefixed binding, a duplicate accepted declaration, a global
-    // `$foo` / `$$foo` reference, an invalid HTML placement) FIRST, so a genuinely
-    // malformed component is rejected for being malformed — not later mis-attributed
-    // to an unsupported feature, and never accepted as a divergent `Main`.
-    if let Some(rejection) = official_reject::official_reject_gate(source, parsed) {
-        return Err(ClientCompileError::OfficialReject(rejection));
-    }
-    // (2) `parse_domain_gate` — refuse the PARSE-DOMAIN surfaces the runtime IR
-    // does not carry (a top-level `<style>` (5l), a `<svelte:options>` axis beyond
-    // runes (5m / 5h customElement), a dev-mode codegen request (5k)) BEFORE
-    // lowering, so a lossy lowering cannot hide them.
-    if let Some(surface) = parse_domain_gate(source, parsed, opts) {
-        return Err(ClientCompileError::Unsupported(surface));
-    }
-    // (2) Lower to the BROAD runtime IR (the shared substrate). The broad IR may
-    // exist; it just never reaches emission.
-    let ir = lower_parsed_svelte_to_ir(source, parsed, opts, alloc)
-        .map_err(ClientCompileError::Lowering)?;
-    // (3) `ClientSyntaxSurface::classify` — the DEFAULT-DENY classifier. It accepts
-    // ONLY when every node / attr / script-item is in the supported allowlist; the
-    // first unsupported surface fails closed (no wildcard accept arm).
-    let classified = client_surface::ClientSyntaxSurface::classify(&ir)
-        .map_err(ClientCompileError::Unsupported)?;
-    // (4) `SupportedClientIr::build` — the semantic projection. It decides which
-    // interpolations are ACTUALLY reactive (a non-reactive one fails closed),
-    // validates lvalues, and rewrites every script item + op through the FALLIBLE
-    // rewriter into the NARROW `ClientModulePlan`.
-    // The rewriter reports through `UnsupportedSvelteRuntimeSurface`; the
-    // discriminating `From` conversion routes a mid-rewrite official-reject carrier
-    // (a `$$`-member of a rest / whole-object binding) to
-    // `ClientCompileError::OfficialReject`, everything else to `Unsupported`.
-    let plan = client_plan::SupportedClientIr::build(&classified, &ir)
-        .map_err(ClientCompileError::from)?;
-    // (5) Plan the static templates + topology, then emit from the NARROW plan only.
-    let html_plan = plan_static_templates(&ir);
-    let topology = plan_client_topology(&ir, &html_plan);
-    Ok(client::emit_client_module(&plan, &html_plan, &topology))
 }

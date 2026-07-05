@@ -1422,6 +1422,343 @@ const FAIL_MATRIX: &[FailRow] = &[
         source: "<script>let { depth } = $props(); let x;</script>\n<svelte:self bind:this={x} />\n",
         code: "svelte-runtime-unsupported-component",
     },
+    // ── `$host` malformed / out-of-context forms ─────────────────────────────
+    // The ONLY supported `$host` form is the ZERO-ARG, NON-OPTIONAL, bare-callee
+    // `$host()` call inside an ACTIVE customElement component (it lowers to
+    // `$$props.$$host`). Every other spelling fails closed. The bare-reference and
+    // paren-callee rows use the RUNES two-button isolation form (a real `$state`
+    // puts the component in runes mode and the `$host` handler sits on its OWN
+    // element, isolated from other refusable surfaces); a template `$host`
+    // occurrence is itself a runes-mode indicator too (the scriptless runeless
+    // twins are pinned below as the template-`$host` inference rows), so the
+    // isolation here only keeps each row's refusal surface singular.
+    FailRow {
+        // An UNCALLED bare `$host` reference (official `rune_missing_parentheses`).
+        // All unshadowed rune roots fail closed outside a supported position; `$host`
+        // has NO supported bare position.
+        name: "host_bare_reference_runes_isolated",
+        source: "<script>let c = $state(0);</script>\n<button onfocus={() => $host}>hi</button>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-advanced-rune",
+    },
+    FailRow {
+        // A PARENTHESIZED-callee call `($host)()` (official `host_invalid_placement`
+        // outside a custom element; the strict supported spelling does not peel).
+        // The inner bare `$host` fails the position scan.
+        name: "host_paren_callee_call_runes_isolated",
+        source: "<script>let c = $state(0);</script>\n<button onfocus={() => ($host)()}>hi</button>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-advanced-rune",
+    },
+    FailRow {
+        // A well-formed `$host()` call OUTSIDE a customElement component (official
+        // `host_invalid_placement`) — stays the host/custom-element refusal.
+        name: "host_call_outside_custom_element",
+        source: "<script>let c = $state(0);</script>\n<button onfocus={() => $host()}>hi</button>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-host-custom-element",
+    },
+    FailRow {
+        // `$host(x)` — arity 1 (official `rune_invalid_arguments`), outside a
+        // customElement context.
+        name: "host_call_arity_one",
+        source: "<script>let c = $state(0);</script>\n<button onfocus={() => $host(1)}>hi</button>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-host-custom-element",
+    },
+    FailRow {
+        // `$host(x, y)` — arity 2+ (official `rune_invalid_arguments`).
+        name: "host_call_arity_two",
+        source: "<script>let c = $state(0);</script>\n<button onfocus={() => $host(1, 2)}>hi</button>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-host-custom-element",
+    },
+    FailRow {
+        // `$host(...a)` — a spread argument (official `rune_invalid_spread`).
+        name: "host_call_spread_argument",
+        source: "<script>let c = $state(0);</script>\n<button onfocus={() => $host(...[1])}>hi</button>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-host-custom-element",
+    },
+    FailRow {
+        // `$host?.()` — an OPTIONAL call is not the supported spelling.
+        name: "host_optional_call",
+        source: "<script>let c = $state(0);</script>\n<button onfocus={() => $host?.()}>hi</button>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-host-custom-element",
+    },
+    FailRow {
+        // `$host.x` — a member access on the rune root (official rejects; the
+        // member classifier's `$rune.<member>` arm).
+        name: "host_member_access",
+        source: "<script>let c = $state(0);</script>\n<button onfocus={() => $host.focus}>hi</button>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-advanced-rune",
+    },
+    FailRow {
+        // `$host?.x` — an OPTIONAL member access on the rune root.
+        name: "host_optional_member_access",
+        source: "<script>let c = $state(0);</script>\n<button onfocus={() => $host?.focus}>hi</button>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-advanced-rune",
+    },
+    FailRow {
+        // A bare `$host` in STATEMENT position inside a handler BLOCK body
+        // (`() => { $host; }`) — the position scan refuses the uncalled reference
+        // regardless of statement-vs-value position (the value-position twin is
+        // `host_bare_reference_runes_isolated`).
+        name: "host_bare_statement_position_in_handler",
+        source: "<script>let c = $state(0);</script>\n<button onfocus={() => { $host; }}>hi</button>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-advanced-rune",
+    },
+    FailRow {
+        // A bare `$host;` STATEMENT in the instance script — the instance-script
+        // position scan owns it (no supported bare position exists anywhere).
+        name: "host_bare_statement_in_instance_script",
+        source: "<script>let c = $state(0); $host;</script>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-advanced-rune",
+    },
+    FailRow {
+        // A bare `$host` as a DECLARATOR INIT (`const h = $host`) — the decl-init
+        // position is not a supported bare position either.
+        name: "host_bare_decl_init_in_instance_script",
+        source: "<script>let c = $state(0); const h = $host;</script>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-advanced-rune",
+    },
+    FailRow {
+        // PARAM-SHADOW invariant: `function f($host) { return $host; }` — the
+        // param genuinely shadows the rune, so the body reference is USER JS and
+        // is NOT rune-refused; the function itself stays the GENERIC
+        // instance-script-item refusal (any rune-coded refusal here would mean the
+        // shadow scope was ignored).
+        name: "host_param_shadow_function_stays_generic_refusal",
+        source: "<script>let c = $state(0); function f($host) { return $host; }</script>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-instance-script-item",
+    },
+    // ── `$host` malformed siblings INSIDE an active customElement ────────────
+    // The customElement descriptor ADMITS exactly the zero-arg, non-optional,
+    // bare-callee `$host()` call in a supported handler/template expression
+    // position; every malformed sibling fails closed IN CONTEXT too (the accept
+    // must not fail-open its own context).
+    FailRow {
+        // The uncalled bare reference inside the admitting context.
+        name: "host_bare_reference_inside_custom_element",
+        source: "<svelte:options customElement=\"x-m\" />\n<script>let c = $state(0);</script>\n<button onfocus={() => $host}>hi</button>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-advanced-rune",
+    },
+    FailRow {
+        // The parenthesized-callee spelling inside the admitting context — the
+        // strict supported spelling does not peel parens.
+        name: "host_paren_callee_call_inside_custom_element",
+        source: "<svelte:options customElement=\"x-m\" />\n<script>let c = $state(0);</script>\n<button onfocus={() => ($host)()}>hi</button>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-advanced-rune",
+    },
+    FailRow {
+        // `$host(1)` — arity 1 inside the admitting context (official
+        // `rune_invalid_arguments`).
+        name: "host_call_arity_one_inside_custom_element",
+        source: "<svelte:options customElement=\"x-m\" />\n<script>let c = $state(0);</script>\n<button onfocus={() => $host(1)}>hi</button>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-host-custom-element",
+    },
+    FailRow {
+        // `$host(1, 2)` — arity 2+ inside the admitting context.
+        name: "host_call_arity_two_inside_custom_element",
+        source: "<svelte:options customElement=\"x-m\" />\n<script>let c = $state(0);</script>\n<button onfocus={() => $host(1, 2)}>hi</button>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-host-custom-element",
+    },
+    FailRow {
+        // `$host(...a)` — a spread argument inside the admitting context
+        // (official `rune_invalid_spread`).
+        name: "host_call_spread_inside_custom_element",
+        source: "<svelte:options customElement=\"x-m\" />\n<script>let c = $state(0);</script>\n<button onfocus={() => $host(...[1])}>hi</button>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-host-custom-element",
+    },
+    FailRow {
+        // `$host?.()` — the OPTIONAL call is not the supported spelling, even in
+        // context.
+        name: "host_optional_call_inside_custom_element",
+        source: "<svelte:options customElement=\"x-m\" />\n<script>let c = $state(0);</script>\n<button onfocus={() => $host?.()}>hi</button>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-host-custom-element",
+    },
+    FailRow {
+        // `$host.x` — a member access on the rune root inside the admitting
+        // context (the `$rune.<member>` arm).
+        name: "host_member_access_inside_custom_element",
+        source: "<svelte:options customElement=\"x-m\" />\n<script>let c = $state(0);</script>\n<button onfocus={() => $host.focus}>hi</button>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-advanced-rune",
+    },
+    FailRow {
+        // `$host?.x` — the optional member twin.
+        name: "host_optional_member_inside_custom_element",
+        source: "<svelte:options customElement=\"x-m\" />\n<script>let c = $state(0);</script>\n<button onfocus={() => $host?.focus}>hi</button>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-advanced-rune",
+    },
+    FailRow {
+        // A WELL-FORMED `$host()` as a const-declarator init inside the admitting
+        // context (the unused instance-top form): the SCAN admits the call,
+        // but a const declaration is not an admitted instance item — the generic
+        // item refusal keeps it closed (official's own output for this form
+        // references `$$props` with NO binding — runtime-broken; Verter never
+        // emits it).
+        name: "host_call_const_decl_inside_custom_element",
+        source: "<svelte:options customElement=\"x-m\" />\n<script>let c = $state(0); const h = $host();</script>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-instance-script-item",
+    },
+    FailRow {
+        // A WELL-FORMED `$host();` bare STATEMENT in the instance script inside
+        // the admitting context — an expression statement is not an admitted
+        // instance item.
+        name: "host_call_bare_statement_inside_custom_element",
+        source: "<svelte:options customElement=\"x-m\" />\n<script>let c = $state(0); $host();</script>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-instance-script-item",
+    },
+    FailRow {
+        // A WELL-FORMED `$host()` in an INTERPOLATION (`<p>{$host()}</p>`) inside
+        // the admitting context — the interpolation position does not lower the
+        // host read today; it fails closed at the interpolation classifier
+        // (never a raw `$host` in emitted output).
+        name: "host_call_interpolation_inside_custom_element",
+        source: "<svelte:options customElement=\"x-m\" />\n<script>let c = $state(0);</script>\n<p>{$host()}</p>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-complex-interpolation",
+    },
+    // ── `$host` DEGENERATE-UNBOUND residue (well-formed, admitted, un-bound) ──
+    // Official `svelte@5.56.3` rewrites every ADMITTED `$host()` to
+    // `$$props.$$host`, but binds the `$$props` PARAMETER only when an
+    // independent props-parameter trigger exists: a REAL props binder
+    // (`$props()` / `$bindable(...)` / legacy prop) or a `needs_context`
+    // reason — a member on the `$host()` call result ITSELF (`$host().x`,
+    // `$host()?.x`, `$host()['x']`, `$host().m()`, a `{@render $host().snip()}`
+    // dynamic callee) IS such a reason (a call-result-rooted member is never a
+    // "safe identifier"). With NEITHER, official emits `function App($$anchor)`
+    // (NO `$$props` param) while the body still references `$$props.$$host` — a
+    // runtime `ReferenceError` residue. Verter refuses that degenerate class
+    // instead of silently repairing the binding:
+    // `refuse iff host_used && !props_param_bound`.
+    FailRow {
+        // The bare-RESULT handler (`() => $host()`): the call result is
+        // discarded — no binder, no context reason, no member access.
+        name: "host_bare_result_degenerate_inside_custom_element",
+        source: "<svelte:options customElement=\"x-m\" />\n<script>let c = $state(0);</script>\n<button onfocus={() => $host()}>hi</button>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-host-custom-element",
+    },
+    FailRow {
+        // The bare-STATEMENT handler (`() => { $host(); }`) — same degenerate
+        // class in statement position.
+        name: "host_bare_statement_degenerate_inside_custom_element",
+        source: "<svelte:options customElement=\"x-m\" />\n<script>let c = $state(0);</script>\n<button onfocus={() => { $host(); }}>hi</button>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-host-custom-element",
+    },
+    FailRow {
+        // ASSIGNED but never member-accessed (`const h = $host();` in a handler
+        // block): assignment alone binds nothing in official either.
+        name: "host_assigned_unused_degenerate_inside_custom_element",
+        source: "<svelte:options customElement=\"x-m\" />\n<script>let c = $state(0);</script>\n<button onfocus={() => { const h = $host(); }}>hi</button>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-host-custom-element",
+    },
+    FailRow {
+        // ALIAS-member (`const h = $host(); h.x;`) is NOT a binding trigger:
+        // official still emits the unbound `function App($$anchor)` degenerate
+        // for it (first-hand pinned probe) — member access binds ONLY on the
+        // `$host()` call result ITSELF, never through a local alias. The local
+        // `h` is a plain (safe) identifier for the context scan too, so no
+        // `needs_context` reason exists either.
+        name: "host_alias_member_degenerate_inside_custom_element",
+        source: "<svelte:options customElement=\"x-m\" />\n<script>let c = $state(0);</script>\n<button onfocus={() => { const h = $host(); h.x; }}>hi</button>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-host-custom-element",
+    },
+    FailRow {
+        // ARG-position (`() => sink($host())`): passing the host value to a
+        // SAFE (global) callee is not a member access and not a context
+        // reason — official stays degenerate-unbound.
+        name: "host_arg_position_degenerate_inside_custom_element",
+        source: "<svelte:options customElement=\"x-m\" />\n<script>let c = $state(0);</script>\n<button onfocus={() => sink($host())}>hi</button>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-host-custom-element",
+    },
+    FailRow {
+        // A customElement `props: {...}` DECLARATION alone is NOT a props
+        // binder (official binds only for `$props()` / `$bindable` / legacy
+        // props — the CE accessor declaration never binds `$$props`): a bare
+        // `$host()` beside it stays the degenerate refusal.
+        name: "host_ce_props_declaration_only_degenerate",
+        source: "<svelte:options customElement={{ tag: 'x-m', props: { count: { reflect: true } } }} />\n<script>let c = $state(0);</script>\n<button onfocus={() => $host()}>hi</button>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-host-custom-element",
+    },
+    FailRow {
+        // `$props.id()` is NOT a props binder (the id const is a plain one-shot
+        // local, not a `$$props`-parameter trigger) — a bare `$host()` beside
+        // it stays the degenerate refusal.
+        name: "host_props_id_only_degenerate_inside_custom_element",
+        source: "<svelte:options customElement=\"x-m\" />\n<script>let c = $state(0); const uid = $props.id();</script>\n<button onfocus={() => $host()}>hi</button>\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-host-custom-element",
+    },
+    // ── TEMPLATE-`$host` runes inference (no script rune to mask the mode) ───
+    // A `$host` occurrence in a TEMPLATE expression is a runes-mode indicator by
+    // itself (official `metadata.runes === true` for a scriptless template-only
+    // `$host()` component), so these RUNELESS forms reach the `$host` gates —
+    // NOT the legacy-mode gate.
+    FailRow {
+        // A well-formed template `$host()` with NO customElement and NO script:
+        // runes mode is inferred FROM the template `$host` reference, and the
+        // out-of-context call then refuses (official `host_invalid_placement`).
+        // (`onfocus` keeps the handler on the DIRECT `$.event` surface, the
+        // same isolation every `$host` row uses.)
+        name: "host_call_non_custom_element_template_runeless",
+        source: "<button onfocus={() => $host()}>go</button>\n",
+        code: "svelte-runtime-unsupported-host-custom-element",
+    },
+    FailRow {
+        // The scriptless template-only BARE `$host()` customElement: runes mode
+        // is inferred from the template `$host`, the call is admitted, and the
+        // component then has NO props-parameter trigger at all (no binder, no
+        // context reason, no member access) — official emits the
+        // degenerate-unbound `function App($$anchor)` residue; Verter refuses.
+        name: "host_template_only_bare_degenerate_inside_custom_element",
+        source: "<svelte:options customElement=\"x-m\" />\n<button onfocus={() => $host()}>go</button>\n",
+        code: "svelte-runtime-unsupported-host-custom-element",
+    },
+    // ── `{@render}` dynamic-callee `$host` MALFORMED SIBLINGS ────────────────
+    // The accepted form is `{@render $host().snip()}` (a well-formed zero-arg
+    // `$host()` member callee — it opens the context frame and binds `$$props`
+    // through `needs_context`). Every malformed sibling around that accept
+    // fails closed: a malformed INNER rune call (arity / spread / optional)
+    // refuses at the rune scan exactly as its handler-position twin does; an
+    // UNCALLED render reference and a BARE-SPREAD snippet argument refuse at
+    // the render projection (official `render_tag_invalid_expression` /
+    // `render_tag_invalid_spread_argument` parity).
+    FailRow {
+        // `{@render $host(1).snip()}` — inner-rune arity 1 (official
+        // `rune_invalid_arguments`) in render-callee position.
+        name: "render_callee_host_arity_one_inside_custom_element",
+        source: "<svelte:options customElement=\"x-m\" />\n<script>let c = $state(0);</script>\n{@render $host(1).snip()}\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-host-custom-element",
+    },
+    FailRow {
+        // `{@render $host(1, 2).snip()}` — inner-rune arity 2+.
+        name: "render_callee_host_arity_two_inside_custom_element",
+        source: "<svelte:options customElement=\"x-m\" />\n<script>let c = $state(0);</script>\n{@render $host(1, 2).snip()}\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-host-custom-element",
+    },
+    FailRow {
+        // `{@render $host(...[1]).snip()}` — inner-rune spread argument
+        // (official `rune_invalid_spread`).
+        name: "render_callee_host_spread_inside_custom_element",
+        source: "<svelte:options customElement=\"x-m\" />\n<script>let c = $state(0);</script>\n{@render $host(...[1]).snip()}\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-host-custom-element",
+    },
+    FailRow {
+        // `{@render $host?.().snip()}` — the OPTIONAL inner call is not the
+        // supported `$host` spelling, in render position either.
+        name: "render_callee_host_optional_call_inside_custom_element",
+        source: "<svelte:options customElement=\"x-m\" />\n<script>let c = $state(0);</script>\n{@render $host?.().snip()}\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-host-custom-element",
+    },
+    FailRow {
+        // `{@render $host().snip}` — an UNCALLED render reference (no terminal
+        // snippet call; official `render_tag_invalid_expression`): the render
+        // projection refuses the non-call expression.
+        name: "render_uncalled_host_member_reference_inside_custom_element",
+        source: "<svelte:options customElement=\"x-m\" />\n<script>let c = $state(0);</script>\n{@render $host().snip}\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-component",
+    },
+    FailRow {
+        // `{@render $host().snip(...[1])}` — a BARE SPREAD snippet argument
+        // (official `render_tag_invalid_spread_argument`) on the member-callee
+        // accept: the spread refusal fires regardless of the callee shape.
+        name: "render_host_member_callee_spread_snippet_arg_inside_custom_element",
+        source: "<svelte:options customElement=\"x-m\" />\n<script>let c = $state(0);</script>\n{@render $host().snip(...[1])}\n<button onclick={() => c++}>{c}</button>\n",
+        code: "svelte-runtime-unsupported-component",
+    },
 ];
 
 #[test]
@@ -2532,9 +2869,75 @@ fn fail_matrix_covers_every_documented_sub_shape() {
     // positives + the boundary matrix): `props_rest` (`{ a, ...rest }`), `props_whole`
     // (`let p = $props()`), and `props_rest_spread` (`<div {...rest}>` element spread)
     // — net −3 rows.
+    // ── `$host` malformed / out-of-context forms ─────────────────────────
+    // The `$host` fail-closed boundary adds NINE rows. TWO close a former
+    // FAIL-OPEN (both previously emitted a raw `$.event('focus', button, () =>
+    // $host…)` Main in runes mode): `host_bare_reference_runes_isolated` (the
+    // uncalled bare reference — official `rune_missing_parentheses`; all
+    // unshadowed rune roots now fail the position scan outside a supported
+    // position) and `host_paren_callee_call_runes_isolated` (the
+    // parenthesized-callee `($host)()` — official `host_invalid_placement`; the
+    // strict supported call spelling does not peel). SEVEN pin the surviving
+    // refusals around the supported zero-arg in-customElement `$host()` call:
+    // `host_call_outside_custom_element` (well-formed call, no customElement),
+    // `host_call_arity_one` / `host_call_arity_two` (official
+    // `rune_invalid_arguments`), `host_call_spread_argument` (official
+    // `rune_invalid_spread`), `host_optional_call` (`$host?.()`),
+    // `host_member_access` (`$host.x`) and `host_optional_member_access`
+    // (`$host?.x`, both the `$rune.<member>` arm) — +9 rows, 178 → 187.
+    // The customElement ACCEPT completes the `$host` sibling enumeration with
+    // FIFTEEN more rows: FOUR outside-context position/shadow rows —
+    // `host_bare_statement_position_in_handler` (`() => { $host; }`, closing the
+    // statement-position twin of the bare-reference fail-open),
+    // `host_bare_statement_in_instance_script` (`$host;`),
+    // `host_bare_decl_init_in_instance_script` (`const h = $host`), and
+    // `host_param_shadow_function_stays_generic_refusal` (the shadow invariant:
+    // generic item refusal, never rune-coded) — plus ELEVEN inside-customElement
+    // siblings of the admitted zero-arg call: the bare reference, the
+    // parenthesized callee, arity one / two, the spread argument, the optional
+    // call, the member / optional-member access, the const-decl init
+    // (`const h = $host()` — the instance-top form whose OFFICIAL output is
+    // runtime-broken), the bare `$host();` statement, and the interpolation
+    // position (`{$host()}`) — +15 rows, 187 → 202.
+    // The `$host` DEGENERATE-UNBOUND props-parameter gate adds SEVEN rows —
+    // the well-formed ADMITTED `$host()` whose component has NO
+    // props-parameter trigger (no real props binder, no `needs_context`
+    // reason, no member access on the `$host()` call result itself), which
+    // official emits as the runtime-broken `function App($$anchor)` +
+    // unbound `$$props.$$host` residue and Verter refuses:
+    // `host_bare_result_degenerate_inside_custom_element`,
+    // `host_bare_statement_degenerate_inside_custom_element`,
+    // `host_assigned_unused_degenerate_inside_custom_element`,
+    // `host_alias_member_degenerate_inside_custom_element` (an alias is NOT
+    // the call result itself), `host_arg_position_degenerate_inside_custom_element`,
+    // `host_ce_props_declaration_only_degenerate` (a CE `props: {...}`
+    // declaration is not a binder), and
+    // `host_props_id_only_degenerate_inside_custom_element` (`$props.id()` is
+    // not a binder) — +7 rows, 202 → 209.
+    // The TEMPLATE-`$host` runes-mode inference adds TWO runeless rows (a
+    // template `$host` occurrence flips the component to runes mode by itself,
+    // so these scriptless forms reach the `$host` gates, not the legacy-mode
+    // gate): `host_call_non_custom_element_template_runeless` (official
+    // `host_invalid_placement`) and
+    // `host_template_only_bare_degenerate_inside_custom_element` (the
+    // scriptless degenerate-unbound residue) — +2 rows, 209 → 211.
+    // The `{@render}` dynamic-callee `$host` accept (`{@render $host().snip()}`
+    // — the peeled callee opens the context frame and binds `$$props`) adds
+    // SIX malformed-sibling rows: the inner-rune arity one / two / spread /
+    // optional-call forms in render-callee position
+    // (`render_callee_host_arity_one_inside_custom_element`,
+    // `render_callee_host_arity_two_inside_custom_element`,
+    // `render_callee_host_spread_inside_custom_element`,
+    // `render_callee_host_optional_call_inside_custom_element`), the UNCALLED
+    // render reference
+    // (`render_uncalled_host_member_reference_inside_custom_element` —
+    // official `render_tag_invalid_expression`), and the bare-spread snippet
+    // argument on the member-callee accept
+    // (`render_host_member_callee_spread_snippet_arg_inside_custom_element` —
+    // official `render_tag_invalid_spread_argument`) — +6 rows, 211 → 217.
     assert_eq!(
         FAIL_MATRIX.len(),
-        178,
+        217,
         "the fail matrix pins 178 fail-closed rows — one documented \
          unsupported-feature sub-shape per row, EXCEPT the D-43 custom-element-host / \
          native-slotting rows, which are REPRESENTATIVE smoke probes for that \

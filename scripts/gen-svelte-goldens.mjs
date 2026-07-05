@@ -362,6 +362,19 @@ function componentNameFor(slug) {
   return /^[A-Za-z_$]/.test(sanitized) ? sanitized : `_${sanitized}`;
 }
 
+/**
+ * Per-fixture COMPILE OPTIONS — the few fixtures whose surface is a compile
+ * option rather than in-source syntax. Keyed by fixture slug; spread into the
+ * `compile()` options for BOTH backends. The Rust emitted-JS gate mirrors this
+ * map (`compile_options_for` in `svelte_client_emit_topology.rs`) so Verter
+ * compiles the fixture under the same options the golden was generated with.
+ */
+const FIXTURE_COMPILE_OPTIONS = {
+  // The `customElement: true` compile option (no `<svelte:options>` value) —
+  // the create-without-define custom-element form.
+  "options/custom_element_option_true.svelte": { customElement: true },
+};
+
 // ---------------------------------------------------------------------------
 // Normalization (topology, not bytes)
 // ---------------------------------------------------------------------------
@@ -444,6 +457,7 @@ function buildAllGoldens(compiler, goldensDir = GOLDENS_DIR) {
           generate: backend,
           filename: slug,
           name,
+          ...(FIXTURE_COMPILE_OPTIONS[slug] ?? {}),
         });
       } catch (err) {
         throw new Error(`svelte compile failed for ${slug} (${backend}): ${err.message}`);

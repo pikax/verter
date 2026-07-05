@@ -15,14 +15,15 @@
 
 use verter_span::Span;
 
+use super::options_custom_element::{CustomElementDescriptor, CustomElementShadow};
 use super::template_ast::{
     script_body_grammar_for_source, CloseTagViolation, CloseTagViolationKind,
-    OptionsCustomElementProbe, ParsedSvelte, ScriptBodyGrammar, ScriptBodyProbe, StyleBodyProbe,
-    SvelteAttribute, SvelteAttributeKind, SvelteAttributeValue, SvelteBlock, SvelteBlockClause,
-    SvelteBlockKind, SvelteClauseKind, SvelteDirective, SvelteDirectiveKind, SvelteElement,
-    SvelteElementKind, SvelteNode, SvelteParseDiagnostic, SvelteParseRejectFact,
-    SvelteParseRejectKind, SvelteScript, SvelteSpecialKind, SvelteStrictParseError,
-    SvelteStrictParseErrorKind, SvelteStyle, SvelteTag, SvelteTagKind,
+    OptionsCustomElementProbe, OptionsCustomElementTextTag, ParsedSvelte, ScriptBodyGrammar,
+    ScriptBodyProbe, StyleBodyProbe, SvelteAttribute, SvelteAttributeKind, SvelteAttributeValue,
+    SvelteBlock, SvelteBlockClause, SvelteBlockKind, SvelteClauseKind, SvelteDirective,
+    SvelteDirectiveKind, SvelteElement, SvelteElementKind, SvelteNode, SvelteParseDiagnostic,
+    SvelteParseRejectFact, SvelteParseRejectKind, SvelteScript, SvelteSpecialKind,
+    SvelteStrictParseError, SvelteStrictParseErrorKind, SvelteStyle, SvelteTag, SvelteTagKind,
 };
 use super::tokenizer_scan::{
     classify_element, declaration_tag_kind, duplicate_attribute_key, find_matching_brace_in,
@@ -106,13 +107,22 @@ pub(super) struct SvelteParser<'a> {
     /// `read_options` finalization at the options-attribute source-order position. The parser
     /// reserves the slot; the official-reject gate fills it with OXC.
     options_custom_element_probes: Vec<OptionsCustomElementProbe>,
-    /// The walk-time encounter order for the FIRST root `<svelte:options customElement={EXPR}>`
-    /// element's attribute-expression PARSE — drawn during the forward pass at the
-    /// `<svelte:options>` element's source position (where upstream's `read_expression` parses the
-    /// `customElement` value). `read_options_finalize` reads it when reserving the probe so a
-    /// malformed-expression `js_parse_error` rides the element's source position (beating a later
-    /// template defect), distinct from the finalization position the VALIDATION fault rides.
-    first_options_customelement_parse_order: Option<u32>,
+    /// The RETAINED string-tag `customElement="my-el"` descriptors — resolved at the
+    /// `read_options` finalization position when the text tag VALIDATES, keyed by the
+    /// attribute's text-value span. The runtime lowering consumes only these (never a raw
+    /// source re-slice); a rejected text tag mints its fact directly and retains nothing.
+    options_custom_element_text_tags: Vec<OptionsCustomElementTextTag>,
+    /// The walk-time encounter orders for the first root `<svelte:options>` element's
+    /// expression-valued `customElement` attributes' PARSE positions, keyed by each attribute's
+    /// expression span — one order PER attribute, drawn during the forward pass at THAT
+    /// attribute's position in the open-tag loop (where upstream's `read_expression` parses the
+    /// value). `read_options_finalize` reads the matching span's order when resolving the probe,
+    /// so a malformed-expression `js_parse_error` / `expected_token` rides its OWN attribute's
+    /// source position (beating a later template defect / duplicate, losing to an earlier one),
+    /// distinct from the finalization position the VALIDATION fault rides. Keyed per-expression
+    /// (not a single first-occurrence latch) so a duplicate `customElement`'s fault competes at
+    /// its own position and an `attribute_duplicate` minted between two occurrences wins.
+    options_ce_attr_parse_orders: Vec<(Span, u32)>,
     /// The root-only `<svelte:*>` meta tag names already encountered at the component root
     /// (`svelte:options` / `svelte:head` / `svelte:window` / `svelte:document` /
     /// `svelte:body`). A SECOND occurrence of the same name mints `svelte_meta_duplicate`,
@@ -155,7 +165,8 @@ impl<'a> SvelteParser<'a> {
             script_body_probes: Vec::new(),
             style_body_probes: Vec::new(),
             options_custom_element_probes: Vec::new(),
-            first_options_customelement_parse_order: None,
+            options_custom_element_text_tags: Vec::new(),
+            options_ce_attr_parse_orders: Vec::new(),
             root_meta_tags_seen: Vec::new(),
             open_stack: Vec::new(),
             next_defect_seq: 0,
@@ -201,6 +212,7 @@ impl<'a> SvelteParser<'a> {
             script_body_probes: self.script_body_probes,
             style_body_probes: self.style_body_probes,
             options_custom_element_probes: self.options_custom_element_probes,
+            options_custom_element_text_tags: self.options_custom_element_text_tags,
         }
     }
 
@@ -354,8 +366,12 @@ impl<'a> SvelteParser<'a> {
     /// - `tag` → `svelte_options_deprecated_tag` (always);
     /// - `customElement` boolean-shorthand → `svelte_options_invalid_customelement`; a Text value
     ///   → `validate_custom_element_tag` (`svelte_options_invalid_tagname` /
-    ///   `svelte_options_reserved_tagname`); an EXPRESSION value → a RESERVED
-    ///   [`OptionsCustomElementProbe`] the gate fills with OXC (the expression's AST decides);
+    ///   `svelte_options_reserved_tagname`), and an ACCEPTED text tag retains its RESOLVED
+    ///   descriptor as an [`OptionsCustomElementTextTag`] (the runtime lowering consumes only the
+    ///   retained descriptor, never a raw-source re-slice); an EXPRESSION value → a RESOLVED
+    ///   [`OptionsCustomElementProbe`] (the parser runs the one validate+extract engine HERE and
+    ///   retains the typed outcome; the gate mints the retained reject code at the reserved
+    ///   orders, the runtime lowering consumes the retained accepted value);
     /// - `namespace` not in {`html`, `svg`, `mathml`} → `svelte_options_invalid_attribute_value`;
     /// - `css` not `injected` → `svelte_options_invalid_attribute_value`;
     /// - any OTHER name → `svelte_options_unknown_attribute`;
@@ -365,10 +381,12 @@ impl<'a> SvelteParser<'a> {
     /// (all > every root-walk fact, since this runs after the walk), so the minimum-order fault
     /// wins — faithful to upstream throwing on the FIRST faulting attribute, then
     /// `disallow_children`. A DIRECTLY-classifiable fault STOPS the scan (upstream's throw); an
-    /// EXPRESSION-valued `customElement` reserves a probe and CONTINUES (its disposition is only
-    /// known after the gate parses it). An ACCEPTED axis (a valid `namespace="svg"`, a boolean
-    /// `runes={true}`, a valid `customElement="my-el"`, …) mints NOTHING — it is refused later as
-    /// an unsupported FEATURE, not an official reject.
+    /// EXPRESSION-valued `customElement` resolves its probe and CONTINUES (a retained reject only
+    /// mints once the gate arbitrates it, so a later attribute may still fault first). An
+    /// ACCEPTED axis mints NOTHING — a valid `customElement` value (Text tag / `null` / a
+    /// conforming object) is LOWERED by the native client path via the retained descriptor, and
+    /// the other accepted axes (a valid `namespace="svg"`, a boolean `runes={true}`, …) are
+    /// refused later as unsupported features, never an official reject.
     fn read_options_finalize(&mut self) {
         // Upstream `findIndex` over the ROOT fragment nodes for the first `SvelteOptions`. Only a
         // ROOT-level options participates (a nested one is `svelte_meta_invalid_placement`, minted
@@ -425,13 +443,32 @@ impl<'a> SvelteParser<'a> {
                                         self.record_options_invalid(code, attr.span);
                                         return;
                                     }
-                                    // a valid Text custom-element tag — accepted (5h feature).
+                                    // A VALID Text custom-element tag — accepted: resolve the
+                                    // descriptor ONCE here (the string-tag form's fixed axes)
+                                    // and RETAIN it, keyed by the text span, exactly as the
+                                    // expression arm retains its probe resolution. The runtime
+                                    // lowering consumes ONLY this retained descriptor — it
+                                    // never re-slices the tag from raw source.
+                                    self.options_custom_element_text_tags.push(
+                                        OptionsCustomElementTextTag {
+                                            text_span: *span,
+                                            descriptor: CustomElementDescriptor {
+                                                tag: Some(tag.to_string()),
+                                                shadow: CustomElementShadow::Open,
+                                                props: Vec::new(),
+                                                extend: None,
+                                                inject_styles: true,
+                                            },
+                                        },
+                                    );
                                 }
-                                // An EXPRESSION value → reserve a probe the gate fills with OXC.
+                                // An EXPRESSION value → resolve the probe HERE (the one
+                                // validate+extract engine; the typed outcome is retained on
+                                // the slot for the gate + the lowering).
                                 Some(SvelteAttributeValue::Expression(span)) => {
                                     self.record_options_custom_element_probe(*span);
-                                    // CONTINUE: the expression's disposition is only known after
-                                    // the gate parses it, so a later attribute may still fault.
+                                    // CONTINUE: a retained reject mints only when the gate
+                                    // arbitrates it, so a later attribute may still fault.
                                 }
                                 // A MIXED value (text + interpolation runs) is a multi-chunk
                                 // value, so `get_static_value` is `null`. Upstream branches on
@@ -536,23 +573,34 @@ impl<'a> SvelteParser<'a> {
         self.record_parse_reject(SvelteParseRejectKind::OptionsInvalid, official_code, span);
     }
 
-    /// Reserve an `<svelte:options customElement={EXPR}>` validation slot at the options-
-    /// finalization discovery point: draw the next monotonic `encounter_order` (for the VALIDATION
-    /// fault) and pair it with the walk-time `parse_encounter_order` stashed when the element was
-    /// parsed (for the attribute-expression `js_parse_error`). The gate fills the slot via OXC and
-    /// uses the parse-order for a `js_parse_error`, the finalization order for a `svelte_options_*`
-    /// validation fault. A missing stash (no walk-time order was drawn) falls back to the
-    /// finalization order — the conservative same-position default.
+    /// RESOLVE an `<svelte:options customElement={EXPR}>` validation slot at the options-
+    /// finalization discovery point — the position upstream's `read_options` runs. The expression
+    /// is parsed ONCE here through the one validate+extract engine
+    /// (`resolve_custom_element_expr`) and the typed outcome is RETAINED on the probe (exactly as
+    /// upstream retains `AST.SvelteOptions['customElement']`): the exact official reject code on
+    /// the `Err` side, the accepted typed value on the `Ok` side. The slot still draws BOTH
+    /// arbitration orders — the next monotonic `encounter_order` (for a `svelte_options_*`
+    /// VALIDATION fault) paired with the walk-time `parse_encounter_order` stashed for THIS
+    /// attribute's expression span when the element was parsed (for an attribute-expression
+    /// `js_parse_error` / `expected_token`) — and the official-reject gate mints the retained
+    /// code at the correct one. A missing stash (no walk-time order was drawn for this span)
+    /// falls back to the finalization order — the conservative same-position default.
     fn record_options_custom_element_probe(&mut self, expr_span: Span) {
         let encounter_order = self.next_defect_seq();
         let parse_encounter_order = self
-            .first_options_customelement_parse_order
+            .options_ce_attr_parse_orders
+            .iter()
+            .find(|(span, _)| *span == expr_span)
+            .map(|&(_, order)| order)
             .unwrap_or(encounter_order);
+        let expr_src = &self.text[expr_span.start as usize..expr_span.end as usize];
+        let resolution = super::options_custom_element::resolve_custom_element_expr(expr_src);
         self.options_custom_element_probes
             .push(OptionsCustomElementProbe {
                 encounter_order,
                 parse_encounter_order,
                 expr_span,
+                resolution,
             });
     }
 
@@ -562,20 +610,23 @@ impl<'a> SvelteParser<'a> {
     /// attribute is `customElement` with an EXPRESSION value. The order is drawn HERE (interleaved
     /// with the per-attribute duplicate tracker) so the customElement parse fault competes with
     /// later same-tag attribute defects by source position — beating a LATER duplicate `foo foo`
-    /// and losing to an EARLIER one — exactly as upstream's during-loop `read_expression` does. Only
-    /// the FIRST occurrence participates (`first_options_customelement_parse_order` latches), so a
-    /// second `customElement` attribute does not overwrite it.
+    /// and losing to an EARLIER one — exactly as upstream's during-loop `read_expression` does.
+    /// EVERY expression-valued occurrence draws its OWN order, keyed by its expression span: a
+    /// duplicate `customElement={EXPR}` attribute's parse fault competes at the DUPLICATE's
+    /// position (after every earlier attribute's duplicate mint, before its own), never riding
+    /// the first occurrence's earlier position.
     fn note_options_ce_attr_parse_order(&mut self, attr: &SvelteAttribute) {
-        if self.first_options_customelement_parse_order.is_some() {
+        let SvelteAttributeKind::Plain {
+            name,
+            value: Some(SvelteAttributeValue::Expression(expr_span)),
+            ..
+        } = &attr.kind
+        else {
             return;
-        }
-        let is_custom_element_expr = matches!(
-            &attr.kind,
-            SvelteAttributeKind::Plain { name, value: Some(SvelteAttributeValue::Expression(_)), .. }
-                if name == "customElement"
-        );
-        if is_custom_element_expr {
-            self.first_options_customelement_parse_order = Some(self.next_defect_seq());
+        };
+        if name == "customElement" {
+            let order = self.next_defect_seq();
+            self.options_ce_attr_parse_orders.push((*expr_span, order));
         }
     }
 
@@ -1121,16 +1172,16 @@ impl<'a> SvelteParser<'a> {
         let element_open_span_start = Span::new(start as u32, (start + 1 + name.len()) as u32);
         self.note_root_meta_tag(&name, at_root, element_open_span_start);
 
-        // The customElement attribute-expression PARSE encounter order rides the position upstream's
-        // `read_expression` reaches DURING the attribute loop, so it must be drawn at the
+        // The customElement attribute-expression PARSE encounter orders ride the positions
+        // upstream's `read_expression` reaches DURING the attribute loop, so each is drawn at its
         // `customElement` attribute's discovery point (interleaved with the open tag's duplicate
-        // tracker), NOT after the whole open tag. The gate to draw it is "the FIRST root
+        // tracker), NOT after the whole open tag. The gate to draw them is "the FIRST root
         // `<svelte:options>`": this open tag is at the root, classifies as the options special
-        // element, and no earlier options-customElement parse order has been latched yet. (Upstream's
+        // element, and no earlier options element drew any parse order yet. (Upstream's
         // `findIndex` over the root fragment picks the FIRST `<svelte:options>`.)
         let draw_options_ce_parse_order = at_root
             && matches!(kind, SvelteElementKind::Special(SvelteSpecialKind::Options))
-            && self.first_options_customelement_parse_order.is_none();
+            && self.options_ce_attr_parse_orders.is_empty();
         let facts_before_open = self.strict_parse_errors.len();
         let Some((attributes, open_end, self_closing)) =
             self.parse_open_tag_attributes_inner(p, false, draw_options_ce_parse_order)
@@ -1532,12 +1583,13 @@ impl<'a> SvelteParser<'a> {
     }
 
     /// The shared open-tag attribute loop, with `draw_options_ce_parse_order` selecting whether to
-    /// draw the FIRST root `<svelte:options customElement={EXPR}>`'s attribute-expression PARSE
-    /// encounter order AT the `customElement` attribute's discovery point in the loop. Drawing it
-    /// here (rather than after the whole open tag) interleaves the parse fault correctly with the
-    /// `attribute_duplicate` minted by `note_attribute_for_duplicate` for later attributes — so a
-    /// `customElement={}` / `customElement={1 2}` parse fault beats a LATER duplicate `foo foo` and
-    /// loses to an EARLIER one, exactly as upstream's during-loop `read_expression` does.
+    /// draw the first root `<svelte:options>` element's `customElement={EXPR}` attribute-expression
+    /// PARSE encounter orders — one per expression-valued occurrence, each AT its own attribute's
+    /// discovery point in the loop. Drawing them here (rather than after the whole open tag)
+    /// interleaves each parse fault correctly with the `attribute_duplicate` minted by
+    /// `note_attribute_for_duplicate` — so a `customElement={}` / `customElement={1 2}` parse fault
+    /// beats a LATER duplicate `foo foo` (and its OWN duplicate mint) and loses to an EARLIER one,
+    /// exactly as upstream's during-loop `read_expression` does.
     fn parse_open_tag_attributes_inner(
         &mut self,
         from: usize,
@@ -1591,9 +1643,11 @@ impl<'a> SvelteParser<'a> {
             let (attr, next) = self.parse_named_attribute(p, special_block);
             // Draw the customElement parse order BEFORE the duplicate-tracker for THIS attribute, so
             // the parse fault rides the position upstream's `read_expression` reaches first (the
-            // value is read during the attribute parse). The order between this and the duplicate
-            // mint for a SAME-named collision is moot — `customElement` is a single key, never a
-            // duplicate of itself.
+            // value is read during the attribute parse, BEFORE the attribute's own duplicate
+            // check). For a DUPLICATE `customElement={EXPR}` this ordering is load-bearing: the
+            // duplicate occurrence's parse fault beats its OWN `attribute_duplicate` mint (drawn
+            // one step later) while still losing to any duplicate minted at an EARLIER attribute
+            // — exactly upstream's read-value-then-check-duplicate per-attribute order.
             if draw_options_ce_parse_order {
                 self.note_options_ce_attr_parse_order(&attr);
             }

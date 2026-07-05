@@ -1119,6 +1119,35 @@ impl<'a> Visit<'a> for BindingOccurrenceCollector<'_> {
     }
 
     fn visit_call_expression(&mut self, it: &CallExpression<'a>) {
+        // A `$host()` call (unshadowed STRICT bare-identifier callee) lowers to the
+        // `$$props.$$host` member read — the official client CallExpression rewrite
+        // — replacing the WHOLE call span (there are no arguments to keep). Only
+        // the ZERO-ARG, NON-OPTIONAL spelling reaches this arm accepted: the rune
+        // scan admits exactly that form (and only inside an ACTIVE customElement
+        // component) before the plan is ever built, so an unshadowed `$host` call
+        // in ANY other shape here is a scan/rewriter divergence — refuse it
+        // (defense-in-depth: the rewriter can never emit a raw `$host`, which
+        // would be a runtime `ReferenceError`). A SHADOWED `$host` (a local of
+        // that name) is an ordinary user call and is left untouched.
+        if !self.is_local("$host") {
+            if let Expression::Identifier(id) = &it.callee {
+                if id.name.as_str() == "$host" {
+                    if !it.optional && it.arguments.is_empty() {
+                        self.occurrences.push(Occurrence::ReadRewrite {
+                            span: it.span,
+                            text: "$$props.$$host".to_string(),
+                        });
+                        // The whole call (callee + empty argument list) is
+                        // consumed by the rewrite — nothing left to walk.
+                        return;
+                    }
+                    self.refuse(UnsupportedSvelteRuntimeSurface::HostOrCustomElement {
+                        surface: "$host",
+                        span: VerterSpan::new(it.span.start, it.span.end),
+                    });
+                }
+            }
+        }
         // A `$state.snapshot(x)` call rewrites its CALLEE member to the `$.snapshot`
         // helper (a SPAN-replacement over the `$state.snapshot` callee). The argument
         // is recursed by the generic walk below, so a nested `$state.snapshot(...)`
@@ -1401,6 +1430,19 @@ impl<'a> Visit<'a> for BindingOccurrenceCollector<'_> {
         if it.name.as_str() == "$effect" && !self.is_local("$effect") {
             self.refuse(UnsupportedSvelteRuntimeSurface::AdvancedRune {
                 rune: "$effect",
+                span: VerterSpan::new(it.span.start, it.span.end),
+            });
+        }
+        // An unshadowed `$host` reference NOT consumed by the zero-arg call
+        // rewrite (an uncalled bare `$host`, the inner identifier of a
+        // parenthesized-callee `($host)()` spelling) is outside the supported
+        // host surface — the rune scan refuses these upstream, so this is
+        // defense-in-depth: the rewriter can never emit a raw `$host` reference
+        // (a runtime ReferenceError). The admitted call never reaches here (its
+        // whole span is consumed by the call visitor's rewrite).
+        if it.name.as_str() == "$host" && !self.is_local("$host") {
+            self.refuse(UnsupportedSvelteRuntimeSurface::AdvancedRune {
+                rune: "$host",
                 span: VerterSpan::new(it.span.start, it.span.end),
             });
         }

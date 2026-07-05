@@ -9481,13 +9481,1364 @@ fn regular_element_bind_focused_emits_unproxied_setter() {
 }
 
 #[test]
-fn svelte_options_custom_element_fails_closed() {
-    // F4: `<svelte:options customElement>` is the custom-element axis. RED
-    // against the pre-fix path (which refused it as the wrong vertical / accepted a
-    // Main).
-    assert_fail_closed(
+fn svelte_options_custom_element_string_tag_defines_custom_element() {
+    // `<svelte:options customElement="x-foo">` compiles the component as a
+    // custom element: the module epilogue registers it via
+    // `customElements.define(tag, $.create_custom_element(Cmp, {}, [], [],
+    // { mode: 'open' }))` (the 5-arg open-shadow default). The body frame is
+    // FACT-DRIVEN: a no-props component keeps the plain frame (no `$.push` /
+    // `$.pop`, no `$$exports`).
+    let js = emit_result(
         "<svelte:options customElement=\"x-foo\" />\n<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::HostOrCustomElement { .. }),
+    )
+    .expect("a valid string-tag customElement compiles");
+    assert!(
+        js.contains(
+            "customElements.define('x-foo', $.create_custom_element(App, {}, [], [], { mode: 'open' }));"
+        ),
+        "missing the define epilogue:\n{js}"
+    );
+    // NEGATIVE: the fact-driven frame — no props/exports ⇒ no component context.
+    assert!(!js.contains("$.push"), "no-props CE must not push:\n{js}");
+    assert!(!js.contains("$.pop"), "no-props CE must not pop:\n{js}");
+    assert!(
+        !js.contains("$$exports"),
+        "no-props CE carries no $$exports:\n{js}"
+    );
+    assert!(
+        js.contains("export default function App($$anchor) {"),
+        "no-props CE takes no $$props param:\n{js}"
+    );
+}
+
+#[test]
+fn custom_element_props_emit_the_exports_accessor_frame() {
+    // A customElement with an explicit `props` definition + a `$props()` member:
+    // the accessor frame is FACT-DRIVEN — `$.push($$props, true)` (runes flag
+    // `true`), the member becomes a prop SOURCE with the `UPDATED` flag (the
+    // official `analysis.accessors` force: flags 7 = IMMUTABLE|RUNES|UPDATED, no
+    // default), the `$$exports` get/set pair rides the body (setter param
+    // spelled `$$value`, `$.flush()` after the write), and the close returns it
+    // (`return $.pop($$exports)`). The define epilogue carries the explicit prop
+    // definition object in arg2; arg3/arg4 stay `[]` (accessors ride
+    // `$$exports`, never arg4).
+    let js = emit_result(
+        "<svelte:options customElement={{ tag: 'x-props', shadow: 'open', props: { count: { reflect: true, type: 'Number' } } }} />\n<script>\n\tlet { count } = $props();\n</script>\n\n<h1>{count}</h1>\n",
+    )
+    .expect("a customElement with props compiles");
+    assert!(
+        js.contains("export default function App($$anchor, $$props) {"),
+        "the props frame binds $$props:\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true);"),
+        "missing the runes context push:\n{js}"
+    );
+    assert!(
+        js.contains("let count = $.prop($$props, 'count', 7);"),
+        "the CE prop source carries flags 7 (IMMUTABLE|RUNES|UPDATED):\n{js}"
+    );
+    assert!(
+        js.contains(
+            "var $$exports = { get count() { return count(); }, set count($$value) { count($$value); $.flush(); } };"
+        ),
+        "missing the $$exports accessor pair:\n{js}"
+    );
+    assert!(
+        js.contains("return $.pop($$exports);"),
+        "the context close returns $$exports:\n{js}"
+    );
+    assert!(
+        js.contains(
+            "customElements.define('x-props', $.create_custom_element(App, { count: { reflect: true, type: 'Number' } }, [], [], { mode: 'open' }));"
+        ),
+        "missing the define epilogue with the explicit prop definition:\n{js}"
+    );
+    // NEGATIVE: the setter param is `$$value` (never `$$v`), and the reactive
+    // read goes through the getter (`count()`), not `$$props.count`.
+    assert!(!js.contains("$$v)"), "setter param is $$value:\n{js}");
+    assert!(
+        js.contains("$.set_text(text, count())"),
+        "the CE prop read is the getter call:\n{js}"
+    );
+    assert!(
+        !js.contains("$$props.count"),
+        "a CE prop source never reads off $$props:\n{js}"
+    );
+}
+
+#[test]
+fn custom_element_string_prop_key_quotes_prop_object_and_accessor_names() {
+    // A NON-identifier `$props()` source key under a customElement must emit
+    // QUOTED JS everywhere the key surfaces — the official `b.key(name)` rule
+    // (identifier-safe names stay bare, anything else becomes a string-literal
+    // key). Oracle-adjudicated against pinned `svelte@5.56.3`, which emits:
+    //   let dataId = $.prop($$props, 'data-id', 7);
+    //   var $$exports = { get 'data-id'() { … }, set 'data-id'($$value) { … } };
+    //   customElements.define('x-id', $.create_custom_element(App, { 'data-id': {} }, …));
+    // A RAW `data-id` key (`{ data-id: {} }` / `get data-id()`) is INVALID JS.
+    let js = emit_result(
+        "<svelte:options customElement={{ tag: 'x-id' }} />\n<script>\n\tlet { 'data-id': dataId } = $props();\n</script>\n\n<p>{dataId}</p>\n",
+    )
+    .expect("a customElement with a string-keyed $props() member compiles");
+    assert!(
+        js.contains("let dataId = $.prop($$props, 'data-id', 7);"),
+        "the prop source keys off the quoted source key:\n{js}"
+    );
+    assert!(
+        js.contains(
+            "var $$exports = { get 'data-id'() { return dataId(); }, set 'data-id'($$value) { dataId($$value); $.flush(); } };"
+        ),
+        "the $$exports accessor pair quotes the non-identifier accessor name:\n{js}"
+    );
+    assert!(
+        js.contains(
+            "customElements.define('x-id', $.create_custom_element(App, { 'data-id': {} }, [], [], { mode: 'open' }));"
+        ),
+        "the inferred prop-definition key is quoted in the create call:\n{js}"
+    );
+    // NEGATIVE: no RAW (unquoted) non-identifier key anywhere — each raw form is
+    // a JS syntax error.
+    assert!(
+        !js.contains("get data-id(") && !js.contains("set data-id("),
+        "no raw non-identifier accessor name:\n{js}"
+    );
+    assert!(
+        !js.contains("{ data-id:") && !js.contains(", data-id:"),
+        "no raw non-identifier prop-object key:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn custom_element_aliased_string_key_explicit_prop_quotes_both_entries() {
+    // An EXPLICIT descriptor entry matched by LOCAL name whose member is aliased
+    // to a NON-identifier source key: the explicit entry emits under the QUOTED
+    // source key, and the inferred remainder loop (which skips only members
+    // whose EMITTED key equals a RAW explicit-entry name — the official
+    // `if (ce_props[key]) continue`) appends the quoted inferred `{}` entry
+    // too. Pinned `svelte@5.56.3` emits BOTH (a valid ES2015+ duplicate-key
+    // object literal, last-wins at runtime):
+    //   { 'data-id': { reflect: true }, 'data-id': {} }
+    let js = emit_result(
+        "<svelte:options customElement={{ tag: 'x-alias-id', props: { dataId: { reflect: true } } }} />\n<script>\n\tlet { 'data-id': dataId } = $props();\n</script>\n\n<p>{dataId}</p>\n",
+    )
+    .expect("a customElement with an aliased string-keyed explicit prop compiles");
+    assert!(
+        js.contains(
+            "customElements.define('x-alias-id', $.create_custom_element(App, { 'data-id': { reflect: true }, 'data-id': {} }, [], [], { mode: 'open' }));"
+        ),
+        "the explicit + inferred entries both emit under the quoted source key (official parity):\n{js}"
+    );
+    assert!(
+        js.contains("get 'data-id'() { return dataId(); }"),
+        "the accessor name is the quoted source key:\n{js}"
+    );
+    // NEGATIVE: the explicit entry's LOCAL lookup name never leaks as a key, and
+    // no raw unquoted key survives.
+    assert!(
+        !js.contains("dataId: {"),
+        "the explicit entry emits under the member's source key, never the local name:\n{js}"
+    );
+    assert!(
+        !js.contains("{ data-id:") && !js.contains(", data-id:"),
+        "no raw non-identifier prop-object key:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn custom_element_aliased_explicit_prop_double_emits_like_official() {
+    // F2 adjudication (oracle-grounded): an explicit descriptor entry named by
+    // the LOCAL binding of an ALIASED member. Pinned `svelte@5.56.3` emits the
+    // explicit metadata under the SOURCE key AND the inferred `{}` remainder for
+    // the same key — the inferred loop checks the member's emitted key against
+    // the RAW explicit-entry names (`if (ce_props[key]) continue`), which the
+    // aliased key misses. The duplicate-key object literal is official parity
+    // (valid ES2015+; last entry wins at runtime), NOT a Verter defect —
+    // deduplicating here would diverge from the pinned oracle's behavior.
+    let js = emit_result(
+        "<svelte:options customElement={{ tag: 'x-alias', props: { foo: { reflect: true } } }} />\n<script>\n\tlet { bar: foo } = $props();\n</script>\n\n<p>{foo}</p>\n",
+    )
+    .expect("a customElement with an aliased explicit prop compiles");
+    assert!(
+        js.contains("let foo = $.prop($$props, 'bar', 7);"),
+        "the aliased member reads off its SOURCE key:\n{js}"
+    );
+    assert!(
+        js.contains(
+            "customElements.define('x-alias', $.create_custom_element(App, { bar: { reflect: true }, bar: {} }, [], [], { mode: 'open' }));"
+        ),
+        "explicit metadata + inferred `{{}}` both emit under the source key (official parity):\n{js}"
+    );
+    assert!(
+        js.contains(
+            "var $$exports = { get bar() { return foo(); }, set bar($$value) { foo($$value); $.flush(); } };"
+        ),
+        "the accessor pair keys the SOURCE key over the LOCAL binding:\n{js}"
+    );
+    // NEGATIVE: the explicit entry's lookup name (`foo`) never emits as a key,
+    // and the explicit metadata is emitted exactly once.
+    assert!(
+        !js.contains("foo: {"),
+        "the explicit entry surfaces under the source key, never the local name:\n{js}"
+    );
+    assert_eq!(
+        js.matches("bar: { reflect: true }").count(),
+        1,
+        "the explicit metadata emits exactly once:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn custom_element_explicit_raw_source_key_covers_the_aliased_member() {
+    // The dual of the aliased-explicit case: the explicit entry names the RAW
+    // SOURCE key (`bar`) of an aliased member (`let { bar: foo }`). No local
+    // binding `bar` exists, so the explicit entry emits under its own name; the
+    // inferred loop then SKIPS the member (its emitted key `bar` IS a raw
+    // explicit-entry name) — a SINGLE entry, official parity (oracle-verified
+    // against pinned `svelte@5.56.3`).
+    let js = emit_result(
+        "<svelte:options customElement={{ tag: 'x-raw', props: { bar: { reflect: true } } }} />\n<script>\n\tlet { bar: foo } = $props();\n</script>\n\n<p>{foo}</p>\n",
+    )
+    .expect("a customElement with a raw-source-key explicit prop compiles");
+    assert!(
+        js.contains(
+            "customElements.define('x-raw', $.create_custom_element(App, { bar: { reflect: true } }, [], [], { mode: 'open' }));"
+        ),
+        "the explicit entry covers the aliased member — a single `bar` entry:\n{js}"
+    );
+    // NEGATIVE: no inferred `bar: {}` duplicate — the member's emitted key
+    // matches the raw explicit-entry name, so the remainder loop skips it.
+    assert!(
+        !js.contains("bar: {}"),
+        "no inferred duplicate when the explicit entry names the raw source key:\n{js}"
+    );
+    assert!(
+        js.contains("get bar() { return foo(); }"),
+        "the accessor still rides the source key over the local:\n{js}"
+    );
+}
+
+#[test]
+fn custom_element_multi_entry_prop_object_preserves_source_order_alias_and_duplicates() {
+    // The prop-definition object is emitted in DESCRIPTOR SOURCE ORDER (never
+    // sorted, never deduplicated) with the alias + duplicate-key semantics
+    // intact — oracle-verified against pinned `svelte@5.56.3`, which emits
+    // exactly: `{ zb: { reflect: true }, aa: { type: 'Number' },
+    // bar: { attribute: 'f' }, bar: {}, mm: {} }` for this fixture:
+    //   - `zb` (no matching local) emits under its own name, FIRST (source
+    //     order — `zb` before `aa` proves no sorting);
+    //   - `aa` matches the local `aa` (source key `aa`);
+    //   - `foo` matches the ALIASED local (`let { bar: foo }`) and emits under
+    //     the SOURCE key `bar`;
+    //   - the inferred remainder appends in MEMBER order: `bar: {}` (the
+    //     aliased member's emitted key misses the RAW explicit-entry names —
+    //     the official duplicate-key parity) then `mm: {}`.
+    let js = emit_result(
+        "<svelte:options customElement={{ tag: 'x-order', props: { zb: { reflect: true }, aa: { type: 'Number' }, foo: { attribute: 'f' } } }} />\n<script>\n\tlet { aa, bar: foo, mm } = $props();\n</script>\n\n<p>{aa}{foo}{mm}</p>\n",
+    )
+    .expect("a customElement with a multi-entry props descriptor compiles");
+    assert!(
+        js.contains(
+            "customElements.define('x-order', $.create_custom_element(App, { zb: { reflect: true }, aa: { type: 'Number' }, bar: { attribute: 'f' }, bar: {}, mm: {} }, [], [], { mode: 'open' }));"
+        ),
+        "the prop object must keep descriptor source order + alias + duplicate keys:\n{js}"
+    );
+    // NEGATIVE: no sorted spelling (`aa` before `zb`) and no deduplicated
+    // single-`bar` spelling may appear.
+    assert!(
+        !js.contains("{ aa: { type: 'Number' }, zb:"),
+        "the entries must not be sorted:\n{js}"
+    );
+    assert_eq!(
+        js.matches("bar: {").count(),
+        2,
+        "the aliased explicit entry + the inferred remainder both emit (no dedupe):\n{js}"
+    );
+    // NEGATIVE: the explicit entry's LOCAL lookup name never leaks as a key.
+    assert!(
+        !js.contains("foo: {"),
+        "the aliased entry emits under the source key, never the local name:\n{js}"
+    );
+}
+
+#[test]
+fn custom_element_empty_attribute_string_omits_the_field() {
+    // An EMPTY `attribute: ""` descriptor value: pinned `svelte@5.56.3` emits
+    // `{ a: {} }` — the `attribute` field is OMITTED entirely (the official
+    // transform pushes the field only for a truthy string), never
+    // `attribute: ''`. Sibling fields on the same entry survive the omission
+    // (`{ attribute: "", reflect: true }` → `{ reflect: true }`,
+    // oracle-verified).
+    let js = emit_result(
+        "<svelte:options customElement={{ tag: 'x-empty', props: { a: { attribute: \"\" } } }} />\n<script>\n\tlet { a } = $props();\n</script>\n\n<p>{a}</p>\n",
+    )
+    .expect("a customElement with an empty attribute string compiles");
+    assert!(
+        js.contains(
+            "customElements.define('x-empty', $.create_custom_element(App, { a: {} }, [], [], { mode: 'open' }));"
+        ),
+        "an empty attribute string omits the field (official `{{ a: {{}} }}`):\n{js}"
+    );
+    // NEGATIVE: no empty-string attribute field anywhere.
+    assert!(
+        !js.contains("attribute: ''"),
+        "no `attribute: ''` field may be emitted for an empty string:\n{js}"
+    );
+    let js = emit_result(
+        "<svelte:options customElement={{ tag: 'x-em2', props: { a: { attribute: \"\", reflect: true } } }} />\n<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n",
+    )
+    .expect("a customElement with an empty attribute string + reflect compiles");
+    assert!(
+        js.contains(
+            "customElements.define('x-em2', $.create_custom_element(App, { a: { reflect: true } }, [], [], { mode: 'open' }));"
+        ),
+        "the sibling `reflect` field survives the empty-attribute omission:\n{js}"
+    );
+    assert!(
+        !js.contains("attribute:"),
+        "no attribute field survives an empty string:\n{js}"
+    );
+}
+
+#[test]
+fn custom_element_non_empty_attribute_string_still_emits() {
+    // The non-empty twin: `attribute: "foo"` KEEPS the field —
+    // `{ a: { attribute: 'foo' } }` (oracle-verified against pinned
+    // `svelte@5.56.3`). Locks the empty-attribute omission to the EMPTY
+    // string only.
+    let js = emit_result(
+        "<svelte:options customElement={{ tag: 'x-attr', props: { a: { attribute: \"foo\" } } }} />\n<script>\n\tlet { a } = $props();\n</script>\n\n<p>{a}</p>\n",
+    )
+    .expect("a customElement with a non-empty attribute string compiles");
+    assert!(
+        js.contains(
+            "customElements.define('x-attr', $.create_custom_element(App, { a: { attribute: 'foo' } }, [], [], { mode: 'open' }));"
+        ),
+        "a non-empty attribute string keeps the field:\n{js}"
+    );
+}
+
+#[test]
+fn custom_element_host_call_in_handler_lowers_to_props_host() {
+    // The FRAMED `$host()` handler form: the zero-arg call inside an active
+    // customElement lowers to `$$props.$$host` (the official CallExpression
+    // rewrite), the `new CustomEvent(…)` forces the component context
+    // (`$.push($$props, true)` … `$.pop()`, statement form — no `$$exports`
+    // without props), and `$$props` is BOUND wherever `$$props.$$host` is
+    // emitted. The `$host` handler rides a DIRECT (`$.event`) surface (`onfocus`
+    // — a non-delegatable type, the same isolation the fail-matrix rows use);
+    // the sibling button keeps the delegated reactive surface, so the define
+    // epilogue follows the `$.delegate` line.
+    let js = emit_result(
+        "<svelte:options customElement=\"x-host\" />\n<script>\n\tlet c = $state(0);\n</script>\n\n<button onfocus={() => $host().dispatchEvent(new CustomEvent('boop'))}>hi</button>\n<button onclick={() => c++}>{c}</button>\n",
+    )
+    .expect("a framed $host() handler inside a customElement compiles");
+    assert!(
+        js.contains("export default function App($$anchor, $$props) {"),
+        "$$props must be bound where $$props.$$host is emitted:\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true);"),
+        "missing the context push:\n{js}"
+    );
+    assert!(
+        js.contains("$.event('focus', button, () => $$props.$$host.dispatchEvent(new CustomEvent('boop')));"),
+        "the $host() call lowers to $$props.$$host inside the direct handler:\n{js}"
+    );
+    assert!(
+        js.contains("\t$.pop();\n"),
+        "a no-props CE frame closes with the statement pop:\n{js}"
+    );
+    assert!(
+        js.contains("$.delegate(['click']);\ncustomElements.define('x-host', $.create_custom_element(App, {}, [], [], { mode: 'open' }));"),
+        "the define epilogue follows the delegate line:\n{js}"
+    );
+    // NEGATIVE: no raw `$host` survives the rewrite (every `$host` byte-run in
+    // the module is the `$$props.$$host` member, never the rune), and no
+    // `$$exports` frame exists without props.
+    assert!(
+        !js.replace("$$host", "").contains("$host"),
+        "no raw $host in the module:\n{js}"
+    );
+    assert!(
+        !js.contains("$$exports"),
+        "no $$exports without props:\n{js}"
+    );
+}
+
+#[test]
+fn custom_element_bare_host_alone_fails_closed_as_official_degenerate() {
+    // ORACLE NOTE (pinned `svelte@5.56.3`, first-hand): a customElement whose
+    // SOLE `$host()` use is BARE (result discarded), with NO real props binder
+    // (`$props()` / `$bindable(...)` / legacy prop), NO `needs_context` reason,
+    // and NO member access on the `$host()` call result itself, emits the
+    // DEGENERATE-UNBOUND official output — the component signature DROPS the
+    // `$$props` parameter yet the body still references it:
+    //
+    //   export default function App($$anchor) {
+    //       ...
+    //       $.event('focus', button, () => $$props.$$host);
+    //   }
+    //
+    // (`$$props` is UNBOUND — a runtime `ReferenceError` when the handler
+    // fires.) Verter must NOT silently repair that output by force-binding the
+    // `$$props` parameter (a blanket `uses_props |= host_used` would): the
+    // degenerate residue fails closed BEFORE emission instead. The refusal
+    // fires iff `host_used && !props_param_bound`, where `props_param_bound =
+    // real_props_binder || needs_context` (a member on the `$host()` call
+    // result is itself a `needs_context` reason; the bare call here has none).
+    let err = emit_result(
+        "<svelte:options customElement=\"x-solo\" />\n<script>let c = $state(0);</script>\n<button onfocus={() => $host()}>hi</button>\n<button onclick={() => c++}>{c}</button>\n",
+    )
+    .expect_err("a bare-only $host() with no props-parameter binder fails closed");
+    let ClientCompileError::Unsupported(surface) = err else {
+        panic!("expected the typed unsupported surface, got: {err:?}");
+    };
+    assert!(
+        matches!(
+            &surface,
+            UnsupportedSvelteRuntimeSurface::HostOrCustomElement { surface, .. }
+                if *surface == "$host"
+        ),
+        "the degenerate bare host refuses through the $host surface: {surface:?}"
+    );
+    assert_eq!(
+        surface.diagnostic_code(),
+        "svelte-runtime-unsupported-host-custom-element",
+        "the refusal carries the host/custom-element diagnostic id"
+    );
+}
+
+#[test]
+fn custom_element_host_member_read_binds_props_and_context() {
+    // A DIRECT member read on the `$host()` call result (`$host().foo`) with no
+    // other binder: official BINDS `$$props` AND opens the component context
+    // (the member-on-call-result expression is not a "safe identifier", so
+    // `needs_context` fires). Pinned `svelte@5.56.3` emits
+    // `$.event('focus', button, () => $$props.$$host.foo);` under
+    // `function App($$anchor, $$props)` + `$.push($$props, true)`.
+    let js = emit_result(
+        "<svelte:options customElement=\"x-mr\" />\n<script>let c = $state(0);</script>\n<button onfocus={() => $host().foo}>hi</button>\n<button onclick={() => c++}>{c}</button>\n",
+    )
+    .expect("a direct member read on the $host() result compiles");
+    assert!(
+        js.contains("export default function App($$anchor, $$props) {"),
+        "the member-accessed host binds $$props:\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true);"),
+        "the member-on-call-result opens the context frame:\n{js}"
+    );
+    assert!(
+        js.contains("$.event('focus', button, () => $$props.$$host.foo);"),
+        "the member read lowers onto the rewritten host member:\n{js}"
+    );
+    assert!(
+        js.contains("\t$.pop();\n"),
+        "the no-props frame closes with the statement pop:\n{js}"
+    );
+    // NEGATIVE: no raw `$host` survives and no `$$exports` frame exists
+    // without props.
+    assert!(
+        !js.replace("$$host", "").contains("$host"),
+        "no raw $host in the module:\n{js}"
+    );
+    assert!(
+        !js.contains("$$exports"),
+        "no $$exports without props:\n{js}"
+    );
+}
+
+#[test]
+fn custom_element_host_optional_member_binds_props() {
+    // The OPTIONAL member form on the call result (`$host()?.foo`) is a direct
+    // member access too — official binds `$$props` and pushes the frame,
+    // emitting `() => $$props.$$host?.foo`.
+    let js = emit_result(
+        "<svelte:options customElement=\"x-om\" />\n<script>let c = $state(0);</script>\n<button onfocus={() => $host()?.foo}>hi</button>\n<button onclick={() => c++}>{c}</button>\n",
+    )
+    .expect("an optional member on the $host() result compiles");
+    assert!(
+        js.contains("export default function App($$anchor, $$props) {"),
+        "the optional-member host binds $$props:\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true);"),
+        "the member-on-call-result opens the context frame:\n{js}"
+    );
+    assert!(
+        js.contains("$.event('focus', button, () => $$props.$$host?.foo);"),
+        "the optional member lowers onto the rewritten host member:\n{js}"
+    );
+    assert!(
+        !js.replace("$$host", "").contains("$host"),
+        "no raw $host in the module:\n{js}"
+    );
+}
+
+#[test]
+fn custom_element_host_computed_member_binds_props() {
+    // The COMPUTED member form on the call result (`$host()['foo']`) is a
+    // direct member access — official binds `$$props` and pushes the frame,
+    // emitting `() => $$props.$$host['foo']`.
+    let js = emit_result(
+        "<svelte:options customElement=\"x-cm\" />\n<script>let c = $state(0);</script>\n<button onfocus={() => $host()['foo']}>hi</button>\n<button onclick={() => c++}>{c}</button>\n",
+    )
+    .expect("a computed member on the $host() result compiles");
+    assert!(
+        js.contains("export default function App($$anchor, $$props) {"),
+        "the computed-member host binds $$props:\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true);"),
+        "the member-on-call-result opens the context frame:\n{js}"
+    );
+    assert!(
+        js.contains("$.event('focus', button, () => $$props.$$host['foo']);"),
+        "the computed member lowers onto the rewritten host member:\n{js}"
+    );
+    assert!(
+        !js.replace("$$host", "").contains("$host"),
+        "no raw $host in the module:\n{js}"
+    );
+}
+
+#[test]
+fn custom_element_host_method_call_binds_props() {
+    // A METHOD call on the `$host()` result (`$host().focus()`) with NO `new`
+    // expression anywhere: the member access itself is the trigger — official
+    // binds `$$props` and pushes, emitting
+    // `() => $$props.$$host.focus()` (pinned `svelte@5.56.3`).
+    let js = emit_result(
+        "<svelte:options customElement=\"x-mc\" />\n<script>let c = $state(0);</script>\n<button onfocus={() => $host().focus()}>hi</button>\n<button onclick={() => c++}>{c}</button>\n",
+    )
+    .expect("a method call on the $host() result compiles");
+    assert!(
+        js.contains("export default function App($$anchor, $$props) {"),
+        "the method-called host binds $$props:\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true);"),
+        "the member-on-call-result opens the context frame:\n{js}"
+    );
+    assert!(
+        js.contains("$.event('focus', button, () => $$props.$$host.focus());"),
+        "the method call lowers onto the rewritten host member:\n{js}"
+    );
+    assert!(
+        !js.replace("$$host", "").contains("$host"),
+        "no raw $host in the module:\n{js}"
+    );
+}
+
+#[test]
+fn custom_element_mixed_bare_and_member_host_accepts_both() {
+    // ONE member-accessed host use ADMITS a sibling BARE host use (official
+    // parity: the member access binds the props parameter for the whole
+    // component, and the bare sibling rides the same bound `$$props.$$host`).
+    let js = emit_result(
+        "<svelte:options customElement=\"x-mix\" />\n<script>let c = $state(0);</script>\n<button onfocus={() => $host()}>a</button>\n<button onblur={() => $host().foo}>b</button>\n<button onclick={() => c++}>{c}</button>\n",
+    )
+    .expect("a bare host sibling of a member-accessed host compiles");
+    assert!(
+        js.contains("export default function App($$anchor, $$props) {"),
+        "the member-accessed sibling binds $$props for the component:\n{js}"
+    );
+    assert!(
+        js.contains("$.event('focus', button, () => $$props.$$host);"),
+        "the bare sibling lowers to the bound host read:\n{js}"
+    );
+    assert!(
+        js.contains("$.event('blur', button_1, () => $$props.$$host.foo);"),
+        "the member sibling lowers to the bound host member:\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true);"),
+        "the member-on-call-result opens the context frame:\n{js}"
+    );
+    assert!(
+        !js.replace("$$host", "").contains("$host"),
+        "no raw $host in the module:\n{js}"
+    );
+}
+
+#[test]
+fn custom_element_props_binder_admits_bare_host() {
+    // A REAL props binder (`$props()` destructure) admits a BARE `$host()`:
+    // official binds `$$props` (the binder is the trigger — the host use itself
+    // stays bare) and the CE accessor frame rides `$$exports`.
+    let js = emit_result(
+        "<svelte:options customElement=\"x-pb\" />\n<script>let { label } = $props();</script>\n<button onfocus={() => $host()}>hi</button>\n<p>{label}</p>\n",
+    )
+    .expect("a real $props() binder admits a bare $host()");
+    assert!(
+        js.contains("export default function App($$anchor, $$props) {"),
+        "the props binder binds $$props:\n{js}"
+    );
+    assert!(
+        js.contains("$.event('focus', button, () => $$props.$$host);"),
+        "the bare host lowers to the bound host read:\n{js}"
+    );
+    assert!(
+        js.contains("let label = $.prop($$props, 'label', 7);"),
+        "the CE prop source rides the accessor-forced flags:\n{js}"
+    );
+    assert!(
+        js.contains("return $.pop($$exports);"),
+        "the accessor frame closes through $$exports:\n{js}"
+    );
+    assert!(
+        !js.replace("$$host", "").contains("$host"),
+        "no raw $host in the module:\n{js}"
+    );
+}
+
+#[test]
+fn custom_element_bindable_binder_admits_bare_host() {
+    // A `$bindable(...)` member default is a REAL props binder too: a bare
+    // `$host()` sibling is admitted (official binds `$$props`; the bindable
+    // prop rides `$.prop($$props, 'v', 15, 0)` and the `$$exports` frame).
+    let js = emit_result(
+        "<svelte:options customElement=\"x-bb\" />\n<script>let { v = $bindable(0) } = $props();</script>\n<button onfocus={() => $host()}>hi</button>\n<p>{v}</p>\n",
+    )
+    .expect("a $bindable binder admits a bare $host()");
+    assert!(
+        js.contains("export default function App($$anchor, $$props) {"),
+        "the bindable binder binds $$props:\n{js}"
+    );
+    assert!(
+        js.contains("let v = $.prop($$props, 'v', 15, 0);"),
+        "the bindable prop source carries the bindable flags:\n{js}"
+    );
+    assert!(
+        js.contains("$.event('focus', button, () => $$props.$$host);"),
+        "the bare host lowers to the bound host read:\n{js}"
+    );
+    assert!(
+        !js.replace("$$host", "").contains("$host"),
+        "no raw $host in the module:\n{js}"
+    );
+}
+
+#[test]
+fn custom_element_bare_host_with_instance_effect_needs_context_accepts() {
+    // A BARE `$host();` statement inside a top-level `$effect(fn)` body: the
+    // user effect sets `needs_context` — that alone BINDS the props parameter
+    // (official: `function App($$anchor, $$props)` + `$.push($$props, true)` +
+    // `$.user_effect(() => { $$props.$$host; })`, first-hand pinned
+    // `svelte@5.56.3`). The bare host use itself is NOT the trigger.
+    let js = emit_result(
+        "<svelte:options customElement=\"x-fxb\" />\n<script>\n\tlet c = $state(0);\n\t$effect(() => { $host(); });\n</script>\n<button onclick={() => c++}>{c}</button>\n",
+    )
+    .expect("a bare $host() inside a user effect compiles via needs_context");
+    assert!(
+        js.contains("export default function App($$anchor, $$props) {"),
+        "needs_context binds $$props:\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true);"),
+        "the user effect opens the context frame:\n{js}"
+    );
+    assert!(
+        js.contains("$$props.$$host;"),
+        "the effect-body bare host lowers to the bound host read:\n{js}"
+    );
+    assert!(
+        js.contains("$.user_effect("),
+        "the effect rides the user-effect helper:\n{js}"
+    );
+    assert!(
+        !js.replace("$$host", "").contains("$host"),
+        "no raw $host in the module:\n{js}"
+    );
+}
+
+#[test]
+fn custom_element_inspect_with_admits_bare_host() {
+    // A `$inspect(c).with(() => {})` chain sets `needs_context` (the elided
+    // statement still forces the official production frame): a sibling BARE
+    // `$host()` handler is admitted through it — official binds `$$props` and
+    // pushes the frame while the handler stays the bare bound read.
+    let js = emit_result(
+        "<svelte:options customElement=\"x-iw\" />\n<script>\n\tlet c = $state(0);\n\t$inspect(c).with(() => {});\n</script>\n<button onfocus={() => $host()}>hi</button>\n<button onclick={() => c++}>{c}</button>\n",
+    )
+    .expect("an $inspect().with sibling admits a bare $host()");
+    assert!(
+        js.contains("export default function App($$anchor, $$props) {"),
+        "needs_context binds $$props:\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true);"),
+        "the inspect-with chain opens the context frame:\n{js}"
+    );
+    assert!(
+        js.contains("$.event('focus', button, () => $$props.$$host);"),
+        "the bare host lowers to the bound host read:\n{js}"
+    );
+    assert!(
+        !js.replace("$$host", "").contains("$host"),
+        "no raw $host in the module:\n{js}"
+    );
+}
+
+#[test]
+fn custom_element_template_only_host_member_infers_runes_and_binds_props() {
+    // MODE-INFERENCE completion: a customElement whose ONLY rune is a
+    // TEMPLATE-expression `$host()` (NO script at all — nothing masks the
+    // inference with a script rune). Official `svelte@5.56.3` treats the
+    // template `$host` reference as a runes-mode indicator
+    // (`metadata.runes === true`) and, because the host use is
+    // member-accessed, binds `$$props` and pushes the frame:
+    //
+    //   export default function App($$anchor, $$props) {
+    //       $.push($$props, true);
+    //       var button = root();
+    //       $.event('focus', button, () => $$props.$$host.dispatchEvent(new CustomEvent('boop')));
+    //       $.append($$anchor, button);
+    //       $.pop();
+    //   }
+    //
+    // A script-source-only runes inference misreads this component as LEGACY
+    // and over-refuses it with the legacy-mode surface — the WRONG reason.
+    // (The handler rides the DIRECT `$.event` surface — `onfocus`, a
+    // non-delegatable type — the same isolation every `$host` row uses.)
+    let js = emit_result(
+        "<svelte:options customElement=\"x-tmpl-host\" />\n\n<button onfocus={() => $host().dispatchEvent(new CustomEvent('boop'))}>go</button>\n",
+    )
+    .expect("a template-only $host() customElement infers runes and compiles");
+    assert!(
+        js.contains("export default function App($$anchor, $$props) {"),
+        "the member-accessed template host binds $$props:\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true);"),
+        "the member-on-call-result opens the context frame:\n{js}"
+    );
+    assert!(
+        js.contains(
+            "$.event('focus', button, () => $$props.$$host.dispatchEvent(new CustomEvent('boop')));"
+        ),
+        "the template host call lowers to the bound host member:\n{js}"
+    );
+    assert!(
+        js.contains(
+            "customElements.define('x-tmpl-host', $.create_custom_element(App, {}, [], [], { mode: 'open' }));"
+        ),
+        "the define epilogue rides the module tail:\n{js}"
+    );
+    // NEGATIVE: no raw `$host` survives, and the component is NOT the legacy
+    // lowering (no `$.mutable_source` legacy substrate).
+    assert!(
+        !js.replace("$$host", "").contains("$host"),
+        "no raw $host in the module:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn custom_element_host_in_instance_effect_binds_props() {
+    // The INSTANCE-SCRIPT `$host()` position: a zero-arg call inside a
+    // top-level `$effect(fn)` body. The `$host` usage FACT must come from the
+    // instance script too (not only template expressions): `$$props` is bound,
+    // and the effect body lowers the call to `$$props.$$host` (pinned
+    // `svelte@5.56.3` emits `$.user_effect(() => { $$props.$$host.dispatchEvent(…); })`
+    // with the `$$props` parameter present).
+    let js = emit_result(
+        "<svelte:options customElement=\"x-fx\" />\n<script>\n\tlet c = $state(0);\n\t$effect(() => { $host().dispatchEvent(new CustomEvent('tick')); });\n</script>\n<button onclick={() => c++}>{c}</button>\n",
+    )
+    .expect("a $host() call inside an instance $effect body compiles under a customElement");
+    assert!(
+        js.contains("export default function App($$anchor, $$props) {"),
+        "the instance-script $host usage forces the $$props parameter:\n{js}"
+    );
+    assert!(
+        js.contains("$$props.$$host.dispatchEvent(new CustomEvent('tick'));"),
+        "the effect-body $host() call lowers to $$props.$$host:\n{js}"
+    );
+    // NEGATIVE: no raw `$host` survives anywhere in the module.
+    assert!(
+        !js.replace("$$host", "").contains("$host"),
+        "no raw $host in the module:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+// ─── `{@render}` DYNAMIC-callee `needs_context` (the peeled-callee scan) ───
+//
+// The official `needs_context` analysis excludes the OUTER snippet call of a
+// `{@render}` dynamic callee from the "unsafe call" trigger (a prop-rooted
+// `children?.()` stays frame-free), but the CALLEE expression inside it scans
+// NORMALLY: a member/call/`new`-rooted callee (`$host().snip`, `imported.snip`,
+// `(new Date())`) opens the component context frame exactly as the same
+// expression would in a handler. Oracle-pinned first-hand against
+// `svelte@5.56.3`: UNSAFE render callees emit `$.push($$props, true)` …
+// `$.pop()` and bind the `$$props` parameter; SAFE callees (identifier /
+// ternary-of-identifiers / member rooted at a local) stay frame-free. These
+// e2e assertions live in THIS `*_tests.rs` sibling — not a scanner-pin module
+// beside `rune_scan.rs` — because a full `compile_client` topology pin
+// belongs beside the other client emission pins, and the sibling placement
+// keeps the carrier-codegen CodeTransform text-scan guard scoped to
+// production sources. Structural token checks over the built string only —
+// never a post-hoc munge of it.
+
+#[test]
+fn render_dynamic_callee_host_member_frames_and_binds_props() {
+    // `{@render $host().snip()}` under an active customElement: the peeled
+    // callee `$host().snip` is a member rooted at a call result — never a
+    // "safe identifier" — so `needs_context` fires: official
+    // `svelte@5.56.3` binds `$$props` AND opens the component context frame
+    // (`$.push($$props, true)` … `$.pop()`) around the snippet render.
+    let js = emit_result("<svelte:options customElement=\"x-rc\" />\n{@render $host().snip()}\n")
+        .expect("a render-dynamic-callee $host() member compiles");
+    assert!(
+        js.contains("export default function App($$anchor, $$props) {"),
+        "the $host() member in the render callee must bind $$props:\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true);"),
+        "the call-result-rooted render callee opens the context frame:\n{js}"
+    );
+    assert!(
+        js.contains("$.pop();"),
+        "the no-props frame closes with the statement pop:\n{js}"
+    );
+    assert!(
+        js.contains("$.snippet(node, () => $$props.$$host.snip);"),
+        "the render callee rewrites through $$props.$$host:\n{js}"
+    );
+    // NEGATIVE: no raw `$host()` rune survives the rewrite — a STRUCTURAL
+    // token check over the built string (never a post-hoc munge of it): a
+    // leaked rune spells the bare CALL `$host(`, which the emitted
+    // `$$props.$$host.snip` residue (asserted positively above) never does.
+    assert!(
+        !js.contains("$host("),
+        "no raw $host() rune survives the rewrite (only the $$host residue):\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn render_dynamic_callee_host_member_with_snippet_args_frames() {
+    // Snippet-call ARITY is not validated for a dynamic callee (official
+    // compiles any arg count): `{@render $host().snip(1, 2)}` keeps the frame
+    // AND thunks both arguments (`$.snippet(node, callee, () => 1, () => 2)`).
+    let js =
+        emit_result("<svelte:options customElement=\"x-ra\" />\n{@render $host().snip(1, 2)}\n")
+            .expect("a render-dynamic-callee $host() member with args compiles");
+    assert!(
+        js.contains("export default function App($$anchor, $$props) {"),
+        "the $host() member callee binds $$props:\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true);"),
+        "the call-result-rooted callee opens the context frame:\n{js}"
+    );
+    assert!(
+        js.contains("$.snippet(node, () => $$props.$$host.snip, () => 1, () => 2);"),
+        "both snippet args ride as thunks on the $.snippet call:\n{js}"
+    );
+    assert!(
+        !js.contains("$host("),
+        "no raw $host() rune survives the rewrite:\n{js}"
+    );
+}
+
+#[test]
+fn render_dynamic_callee_paren_wrapped_host_member_frames() {
+    // The PARENTHESIZED-callee spelling `{@render ($host().snip)()}`: author
+    // parens are transparent to the peel (official's estree AST has no paren
+    // nodes), so the member-rooted callee still opens the frame and binds
+    // `$$props`.
+    let js = emit_result("<svelte:options customElement=\"x-rp\" />\n{@render ($host().snip)()}\n")
+        .expect("a paren-wrapped render-dynamic-callee $host() member compiles");
+    assert!(
+        js.contains("export default function App($$anchor, $$props) {"),
+        "the paren-wrapped $host() member callee binds $$props:\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true);"),
+        "the paren-wrapped callee still opens the context frame:\n{js}"
+    );
+    assert!(
+        js.contains("$$props.$$host.snip"),
+        "the callee rewrites through $$props.$$host:\n{js}"
+    );
+    assert!(
+        !js.contains("$host("),
+        "no raw $host() rune survives the rewrite:\n{js}"
+    );
+}
+
+#[test]
+fn render_dynamic_callee_new_expression_frames_and_binds_props() {
+    // A NON-`$host` unsafe render callee, no customElement anywhere:
+    // `{@render (new Date())()}` — the peeled callee contains a
+    // `NewExpression`, the unconditional `needs_context` trigger. Official
+    // `svelte@5.56.3` binds `$$props` and opens the frame.
+    let js = emit_result(
+        "<script>let __r = $state(0);</script>\n{@render (new Date())()}\n<button onclick={() => __r++}>{__r}</button>\n",
+    )
+    .expect("a new-expression render callee compiles");
+    assert!(
+        js.contains("export default function App($$anchor, $$props) {"),
+        "the new-expression render callee must bind $$props:\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true);"),
+        "the new-expression render callee opens the context frame:\n{js}"
+    );
+    assert!(
+        js.contains("$.pop();"),
+        "the frame closes with the statement pop:\n{js}"
+    );
+    assert!(
+        js.contains("new Date()"),
+        "the callee expression survives into the snippet thunk:\n{js}"
+    );
+    assert!(
+        js.contains("$.snippet("),
+        "the dynamic render rides $.snippet:\n{js}"
+    );
+}
+
+#[test]
+fn render_dynamic_callee_imported_member_frames_and_binds_props() {
+    // A member callee rooted at an IMPORT (`{@render Snips.row()}` with
+    // `import Snips from './Snips.svelte'`): an import-rooted member is not a
+    // "safe identifier", so official binds `$$props` and opens the frame.
+    let js = emit_result(
+        "<script>\n\timport Snips from './Snips.svelte';\n\tlet __r = $state(0);\n</script>\n{@render Snips.row()}\n<button onclick={() => __r++}>{__r}</button>\n",
+    )
+    .expect("an imported-member render callee compiles");
+    assert!(
+        js.contains("export default function App($$anchor, $$props) {"),
+        "the import-rooted render callee must bind $$props:\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true);"),
+        "the import-rooted render callee opens the context frame:\n{js}"
+    );
+    assert!(
+        js.contains("$.snippet(node, () => Snips.row);"),
+        "the member callee rides the $.snippet thunk verbatim:\n{js}"
+    );
+}
+
+#[test]
+fn render_dynamic_callee_children_optional_stays_frame_free() {
+    // NEGATIVE (non-CE, so no `$$exports`/ce-accessor confound is possible):
+    // `{@render children?.()}` — the peeled callee is the bare identifier
+    // `children`; an identifier read is NEVER a `needs_context` trigger even
+    // though `children` is a prop (the OUTER snippet call is excluded from the
+    // unsafe-call check). Official `svelte@5.56.3` emits NO frame; `$$props`
+    // is bound by the REAL props binder alone.
+    let js = emit_result("<script>let { children } = $props();</script>\n{@render children?.()}\n")
+        .expect("an optional prop render callee compiles");
+    assert!(
+        js.contains("export default function App($$anchor, $$props) {"),
+        "the real props binder binds $$props:\n{js}"
+    );
+    assert!(
+        js.contains("$.snippet(node, () => $$props.children ?? $.noop);"),
+        "the optional prop callee rides the $.snippet + noop route:\n{js}"
+    );
+    assert!(
+        !js.contains("$.push("),
+        "a prop-identifier render callee must NOT open the context frame:\n{js}"
+    );
+    assert!(!js.contains("$.pop"), "no context frame pop:\n{js}");
+}
+
+#[test]
+fn render_dynamic_callee_ternary_stays_frame_free() {
+    // NEGATIVE: `{@render (cond ? a : b)()}` — the peeled callee is a ternary
+    // of bare identifiers (props + a local signal); identifier reads never
+    // trigger `needs_context`. Official emits NO frame.
+    let js = emit_result(
+        "<script>let { a, b } = $props(); let cond = $state(true);</script>\n{@render (cond ? a : b)()}\n",
+    )
+    .expect("a ternary render callee compiles");
+    assert!(
+        js.contains("export default function App($$anchor, $$props) {"),
+        "the real props binder binds $$props:\n{js}"
+    );
+    assert!(
+        !js.contains("$.push("),
+        "a ternary-of-identifiers render callee must NOT open the frame:\n{js}"
+    );
+    assert!(!js.contains("$.pop"), "no context frame pop:\n{js}");
+    assert!(
+        js.contains("$.snippet("),
+        "the dynamic render rides $.snippet:\n{js}"
+    );
+}
+
+#[test]
+fn render_dynamic_callee_safe_local_member_stays_frame_free() {
+    // NEGATIVE: `{@render o.snip()}` where `o` is a LOCAL (a snippet param) —
+    // a member rooted at a local/global-safe binding is a safe identifier, so
+    // no frame opens; with no props binder either, the component keeps the
+    // bare `($$anchor)` signature. (The outer arg `globalThis.snips` roots at
+    // a GLOBAL — safe too; the unused `$state` only keeps the component in
+    // runes mode, the same isolation `render_paren_callee` uses.)
+    let js = emit_result(
+        "<script>let __r = $state(0);</script>\n{#snippet wrap(o)}{@render o.snip()}{/snippet}\n{@render wrap(globalThis.snips)}\n",
+    )
+    .expect("a safe-local-member render callee compiles");
+    assert!(
+        js.contains("($$anchor) {"),
+        "no props binder and no context reason — the bare signature stays:\n{js}"
+    );
+    assert!(
+        !js.contains("$.push("),
+        "a local-rooted member render callee must NOT open the frame:\n{js}"
+    );
+    assert!(!js.contains("$.pop"), "no context frame pop:\n{js}");
+    assert!(
+        js.contains("() => o().snip"),
+        "the local-member callee rides its $.snippet thunk (the snippet param reads through its getter):\n{js}"
+    );
+}
+
+#[test]
+fn render_arg_arrow_param_shadowing_import_stays_frame_free() {
+    // SHADOW rail (render ARGUMENTS scan normally, scope-aware): an arrow
+    // param shadowing the import makes the arg's member SAFE — official emits
+    // NO frame. The unshadowed twin below proves the same member DOES frame,
+    // so this pair discriminates the shadow handling, not the member rule.
+    let js = emit_result(
+        "<script>import Child from './Child.svelte'; let __r = $state(0);</script>\n{#snippet s(cb)}<p>hi</p>{/snippet}\n{@render s((Child) => Child.x)}\n<button onclick={() => __r++}>{__r}</button>\n",
+    )
+    .expect("a shadowed-import render arg compiles");
+    assert!(
+        !js.contains("$.push("),
+        "a shadowed-import render arg must NOT open the frame:\n{js}"
+    );
+    assert!(!js.contains("$.pop"), "no context frame pop:\n{js}");
+}
+
+#[test]
+fn render_arg_unshadowed_import_member_frames() {
+    // The unshadowed twin: the arg arrow body reads `Child.x` with NO
+    // shadowing param — an import-rooted member — so `needs_context` fires
+    // through the ARGUMENT scan (args are never exempted). Official binds
+    // `$$props` and opens the frame.
+    let js = emit_result(
+        "<script>import Child from './Child.svelte'; let __r = $state(0);</script>\n{#snippet s(cb)}<p>hi</p>{/snippet}\n{@render s(() => Child.x)}\n<button onclick={() => __r++}>{__r}</button>\n",
+    )
+    .expect("an unshadowed-import render arg compiles");
+    assert!(
+        js.contains("export default function App($$anchor, $$props) {"),
+        "the import-rooted render arg binds $$props:\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true);"),
+        "the import-rooted render arg opens the context frame:\n{js}"
+    );
+}
+
+#[test]
+fn custom_element_rest_props_exclude_the_host_key() {
+    // A `$props()` REST capture inside a custom element: the official
+    // `rest_excludes` prefix appends `'$$host'` after `'$$legacy'` (the host
+    // element rides `$$props.$$host`, and a rest spread must never surface it) —
+    // BEFORE the member source keys.
+    let js = emit_result(
+        "<svelte:options customElement=\"x-rest\" />\n<script>let { a, ...rest } = $props();</script>\n<p>{a}</p>\n",
+    )
+    .expect("a customElement with a $props() rest capture compiles");
+    assert!(
+        js.contains(
+            "var rest_excludes = new Set(['$$slots', '$$events', '$$legacy', '$$host', 'a']);"
+        ),
+        "the CE rest excludes carry '$$host' in the official position:\n{js}"
+    );
+    // The rest of the CE surface stays intact around the rest capture: the `a`
+    // member is an accessor-forced prop source and the inferred `a: {{}}` rides
+    // the create call.
+    assert!(
+        js.contains("customElements.define('x-rest', $.create_custom_element(App, { a: {} }, [], [], { mode: 'open' }));"),
+        "the inferred `a: {{}}` prop definition rides the create call:\n{js}"
+    );
+    assert!(
+        js.contains("return $.pop($$exports);"),
+        "the accessor frame closes through $$exports:\n{js}"
+    );
+}
+
+#[test]
+fn non_custom_element_rest_props_do_not_exclude_the_host_key() {
+    // NEGATIVE twin: a plain (non-customElement) component's rest excludes stay
+    // the three-key official prefix — no `'$$host'`.
+    let js = emit_result("<script>let { a, ...rest } = $props();</script>\n<p>{a}</p>\n")
+        .expect("a plain $props() rest capture compiles");
+    assert!(
+        js.contains("var rest_excludes = new Set(['$$slots', '$$events', '$$legacy', 'a']);"),
+        "a plain component keeps the three-key exclude prefix:\n{js}"
+    );
+    assert!(
+        !js.contains("$$host"),
+        "no `$$host` surfaces outside a custom element:\n{js}"
+    );
+}
+
+#[test]
+fn custom_element_shadow_none_omits_the_shadow_argument() {
+    // `shadow: 'none'` with NO `extend`: arg5 is OMITTED entirely — the official
+    // 4-arg `create_custom_element` call.
+    let js = emit_result(
+        "<svelte:options customElement={{ tag: 'x-none', shadow: 'none' }} />\n<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n",
+    )
+    .expect("a shadow:'none' customElement compiles");
+    assert!(
+        js.contains("customElements.define('x-none', $.create_custom_element(App, {}, [], []));"),
+        "shadow:'none' emits the 4-arg call (arg5 omitted):\n{js}"
+    );
+    // NEGATIVE: no shadow-root init and no `void 0` placeholder.
+    assert!(!js.contains("{ mode: 'open' }"), "no shadow init:\n{js}");
+    assert!(
+        !js.contains("void 0"),
+        "no void-0 placeholder without arg6:\n{js}"
+    );
+}
+
+#[test]
+fn custom_element_extend_rides_arg6_with_void_0_shadow_placeholder() {
+    // `shadow: 'none'` WITH `extend`: arg5 is the `void 0` placeholder and the
+    // verbatim extend expression rides arg6 — the official 6-arg shape.
+    let js = emit_result(
+        "<svelte:options customElement={{ tag: 'x-ext', shadow: 'none', extend: (c) => c }} />\n<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n",
+    )
+    .expect("a shadow:'none' + extend customElement compiles");
+    assert!(
+        js.contains(
+            "customElements.define('x-ext', $.create_custom_element(App, {}, [], [], void 0, (c) => c));"
+        ),
+        "extend rides arg6 behind the void-0 arg5 placeholder:\n{js}"
+    );
+    assert!(
+        !js.contains("{ mode: 'open' }"),
+        "shadow:'none' never emits the open shadow init:\n{js}"
+    );
+}
+
+#[test]
+fn custom_element_object_shadow_passes_verbatim_as_arg5() {
+    // A `ShadowRootInit` OBJECT shadow passes through VERBATIM as arg5 (the
+    // official accepts rich shadow objects — it does not reject them).
+    let js = emit_result(
+        "<svelte:options customElement={{ tag: 'x-shadow', shadow: { mode: 'open', delegatesFocus: true } }} />\n<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n",
+    )
+    .expect("an object-shadow customElement compiles");
+    assert!(
+        js.contains(
+            "customElements.define('x-shadow', $.create_custom_element(App, {}, [], [], { mode: 'open', delegatesFocus: true }));"
+        ),
+        "the shadow object expression rides arg5 verbatim:\n{js}"
+    );
+}
+
+#[test]
+fn custom_element_no_tag_object_creates_without_define() {
+    // `customElement={{}}` (no tag): the bare `$.create_custom_element(…)`
+    // statement is emitted — registration is left to the user, so there is NO
+    // `customElements.define`.
+    let js = emit_result(
+        "<svelte:options customElement={{}} />\n<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n",
+    )
+    .expect("a no-tag object customElement compiles");
+    assert!(
+        js.contains("$.create_custom_element(App, {}, [], [], { mode: 'open' });"),
+        "the bare create statement is emitted:\n{js}"
+    );
+    assert!(
+        !js.contains("customElements.define"),
+        "a no-tag descriptor never defines:\n{js}"
+    );
+}
+
+#[test]
+fn custom_element_null_value_is_a_plain_component_no_op() {
+    // `customElement={null}` (the Svelte-3 backwards-compat spelling) sets
+    // NOTHING: with no compile option the component compiles PLAIN — no create,
+    // no define, no accessor frame.
+    let js = emit_result(
+        "<svelte:options customElement={null} />\n<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n",
+    )
+    .expect("a customElement={null} component compiles as a plain component");
+    assert!(
+        !js.contains("create_custom_element"),
+        "null customElement creates nothing:\n{js}"
+    );
+    assert!(
+        !js.contains("customElements.define"),
+        "null customElement defines nothing:\n{js}"
+    );
+    assert!(!js.contains("$$exports"), "no accessor frame:\n{js}");
+    assert!(
+        js.contains("export default function App($$anchor) {"),
+        "the plain component shape survives:\n{js}"
+    );
+}
+
+#[test]
+fn custom_element_compile_option_creates_without_define() {
+    // The `customElement: true` COMPILE OPTION (no `<svelte:options>` value):
+    // the component compiles as a custom element with NO registration — the bare
+    // create statement, no define (there is no tag).
+    let source = "<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n";
+    let alloc = Allocator::default();
+    let parsed = crate::svelte::parser::parse_svelte(source);
+    let opts = SvelteRuntimeOptions {
+        filename: Some("App.svelte".to_string()),
+        custom_element: true,
+        ..Default::default()
+    };
+    let js = compile_client(source, &parsed, &opts, &alloc, false)
+        .expect("the customElement compile option compiles")
+        .code;
+    assert!(
+        js.contains("$.create_custom_element(App, {}, [], [], { mode: 'open' });"),
+        "the compile option emits the bare create statement:\n{js}"
+    );
+    assert!(
+        !js.contains("customElements.define"),
+        "the compile option never defines (no tag):\n{js}"
+    );
+}
+
+#[test]
+fn custom_element_null_value_falls_back_to_the_compile_option() {
+    // `customElement={null}` + the `customElement: true` compile option: the
+    // null value sets NOTHING, so the official `customElementOptions ??
+    // customElement` precedence falls back to the option — create, no define.
+    let source = "<svelte:options customElement={null} />\n<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n";
+    let alloc = Allocator::default();
+    let parsed = crate::svelte::parser::parse_svelte(source);
+    let opts = SvelteRuntimeOptions {
+        filename: Some("App.svelte".to_string()),
+        custom_element: true,
+        ..Default::default()
+    };
+    let js = compile_client(source, &parsed, &opts, &alloc, false)
+        .expect("null customElement + compile option compiles")
+        .code;
+    assert!(
+        js.contains("$.create_custom_element(App, {}, [], [], { mode: 'open' });"),
+        "the null value falls back to the compile option:\n{js}"
+    );
+    assert!(
+        !js.contains("customElements.define"),
+        "no tag, no define:\n{js}"
+    );
+}
+
+#[test]
+fn custom_element_options_value_wins_over_the_compile_option() {
+    // An in-source `<svelte:options customElement>` value WINS over the compile
+    // option (the official `customElementOptions ?? customElement` precedence):
+    // the string tag defines, even with the option set.
+    let source = "<svelte:options customElement=\"x-wins\" />\n<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n";
+    let alloc = Allocator::default();
+    let parsed = crate::svelte::parser::parse_svelte(source);
+    let opts = SvelteRuntimeOptions {
+        filename: Some("App.svelte".to_string()),
+        custom_element: true,
+        ..Default::default()
+    };
+    let js = compile_client(source, &parsed, &opts, &alloc, false)
+        .expect("the options value + compile option compiles")
+        .code;
+    assert!(
+        js.contains("customElements.define('x-wins', $.create_custom_element(App, {}, [], [], { mode: 'open' }));"),
+        "the options tag wins and defines:\n{js}"
+    );
+}
+
+#[test]
+fn custom_element_param_shadowed_host_stays_user_js() {
+    // A handler PARAM shadowing `$host` inside an active customElement: the call
+    // is USER JS on the local binding — never rune-rewritten, no `$$props`
+    // forced. Official accepts and emits the verbatim handler; so does Verter.
+    let js = emit_result(
+        "<svelte:options customElement=\"x-m\" />\n<script>let c = $state(0);</script>\n<button onfocus={($host) => $host()}>hi</button>\n<button onclick={() => c++}>{c}</button>\n",
+    )
+    .expect("a param-shadowed $host handler compiles");
+    assert!(
+        js.contains("$.event('focus', button, ($host) => $host());"),
+        "the shadowed $host call stays verbatim user JS:\n{js}"
+    );
+    // NEGATIVE: the shadowed call is NOT rewritten to the host member, and the
+    // shadowed handler alone does not force the `$$props` binding.
+    assert!(
+        !js.contains("$$props.$$host"),
+        "a shadowed $host is never the rune:\n{js}"
+    );
+    assert!(
+        js.contains("export default function App($$anchor) {"),
+        "no $$props binding is forced by a shadowed $host:\n{js}"
+    );
+}
+
+#[test]
+fn custom_element_duplicate_descriptor_axis_takes_the_first_entry() {
+    // DUPLICATE descriptor keys (`{ tag: 'x-a', tag: 'x-b' }`): upstream's
+    // `read_options` reads each axis via `properties.find(...)` — the FIRST
+    // entry wins. The retained descriptor must come from the SAME single
+    // validate+extract walk the official-reject gate runs, so the emitted tag is
+    // `'x-a'` — a last-wins re-extraction would define `'x-b'`.
+    let js = emit_result(
+        "<svelte:options customElement={{ tag: 'x-a', tag: 'x-b' }} />\n<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n",
+    )
+    .expect("a duplicate-tag descriptor compiles");
+    assert!(
+        js.contains("customElements.define('x-a', $.create_custom_element(App, {}, [], [], { mode: 'open' }));"),
+        "the FIRST duplicate axis entry wins (official find-first):\n{js}"
+    );
+    assert!(
+        !js.contains("'x-b'"),
+        "the later duplicate entry never surfaces:\n{js}"
+    );
+}
+
+#[test]
+fn custom_element_records_the_injected_css_mode() {
+    // A custom element ALWAYS injects its styles (the official `inject_styles =
+    // css === 'injected' || is_custom_element`): the resolved descriptor RECORDS
+    // the mode for the style pipeline. Style compilation itself stays
+    // fail-closed until the CSS vertical lands — see
+    // `custom_element_with_style_block_still_fails_closed`.
+    let source = "<svelte:options customElement=\"x-css\" />\n<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n";
+    let alloc = Allocator::default();
+    let parsed = crate::svelte::parser::parse_svelte(source);
+    let opts = SvelteRuntimeOptions {
+        filename: Some("App.svelte".to_string()),
+        ..Default::default()
+    };
+    let ir = crate::svelte::runtime::lower_parsed_svelte_to_ir(source, &parsed, &opts, &alloc)
+        .expect("a customElement component lowers");
+    let descriptor = ir
+        .component
+        .custom_element
+        .as_ref()
+        .expect("the descriptor is retained");
+    assert!(
+        descriptor.inject_styles,
+        "the resolved customElement CSS mode records style injection"
+    );
+}
+
+#[test]
+fn custom_element_with_style_block_still_fails_closed() {
+    // The css-mode RECORDING does not open style compilation: a customElement
+    // with a `<style>` block still fails closed on the style rail (the CSS
+    // vertical owns compilation/scoping/injection).
+    assert_fail_closed(
+        "<svelte:options customElement=\"x-css\" />\n<script>let c = $state(0);</script>\n<style>p { color: red; }</style>\n<button onclick={() => c++}>{c}</button>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Style { .. }),
     );
 }
 

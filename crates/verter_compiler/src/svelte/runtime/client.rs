@@ -392,6 +392,22 @@ impl<'a> ClientEmitter<'a> {
             emit_delegate_epilogue(&mut out, topology.delegated_events.ordered());
         }
 
+        // (5) The custom-element epilogue — `customElements.define(tag,
+        // $.create_custom_element(…))` for a tagged descriptor, the bare
+        // `$.create_custom_element(…)` statement otherwise. Directly after the
+        // delegate epilogue (the official slot; a blank line separates it from
+        // the component function when there is no delegate line).
+        if let Some(ce) = &self.plan.custom_element {
+            if topology.delegated_events.is_empty() {
+                out.push('\n');
+            }
+            super::client_custom_element::emit_custom_element_epilogue(
+                &mut out,
+                &self.plan.component.name,
+                ce,
+            );
+        }
+
         ClientModule { code: out }
     }
 
@@ -456,13 +472,29 @@ impl<'a> ClientEmitter<'a> {
             out.push('\n');
         }
 
+        // The custom-element `$$exports` accessor object — AFTER the script
+        // statements, BEFORE the template body (the official
+        // `component_returned_object` slot). Emitted only when prop accessors
+        // exist (a no-props custom element omits `$$exports`; it may still
+        // carry the `$.push`/`$.pop` context frame via `needs_context`).
+        if !self.plan.ce_exports.is_empty() {
+            super::client_custom_element::emit_exports_object(out, &self.plan.ce_exports);
+        }
+
         // The ROOT region: its clone frame, walk (interleaving nested block calls),
         // reactive ops, and mount into `$$anchor` — recursively emitting every nested
         // block body region. (`emit_region` lives in `client_block_emit`.)
         self.emit_region(out, self.ir().root, "$$anchor");
 
         if needs_push {
-            out.push_str("\t$.pop();\n");
+            // A non-empty `$$exports` returns it through the context close
+            // (`return $.pop($$exports);` — the official component-returned-object
+            // form); otherwise the plain statement close.
+            if self.plan.ce_exports.is_empty() {
+                out.push_str("\t$.pop();\n");
+            } else {
+                out.push_str("\treturn $.pop($$exports);\n");
+            }
         }
         out.push_str("}\n");
     }

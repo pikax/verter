@@ -762,6 +762,16 @@ const SUPPORTED_COMPONENTS: &[&str] = &[
     // `{@render row?.(1)}` on a LOCAL snippet — the DIRECT optional call
     // `row?.($$anchor, () => 1)` (the official `b.maybe_call` form; no `?? $.noop`).
     "components/render_optional_local",
+    // `{@render Snips.row()}` with `import Snips from './Snips.svelte'` — an
+    // IMPORT-rooted member render callee is never a "safe identifier", so
+    // `needs_context` fires: official binds `$$props` and opens the frame
+    // (`$.push($$props, true)` … `$.pop()`) around `$.snippet(node, () =>
+    // Snips.row)`.
+    "components/render_imported_member",
+    // `{@render (new Date())()}` — a `new`-expression render callee: the
+    // unconditional `needs_context` trigger; official binds `$$props` and
+    // opens the frame around `$.snippet(node, () => new Date())`.
+    "components/render_new_expression",
     // The `Inner.svelte` leaf the slot-disposition fixtures import.
     "components/Inner",
     // ── The official `slot=` three-class disposition ──
@@ -1092,6 +1102,83 @@ const SUPPORTED_SPECIALS: &[&str] = &[
     "special/svelte_head_html",
 ];
 
+/// The native-client CUSTOM-ELEMENT corpus — the `options/custom_element_*`
+/// fixtures exercising the `<svelte:options customElement>` accept surface: the
+/// conditional 6-arg `$.create_custom_element(Cmp, props, slots, accessors,
+/// shadowRootInit, extend)` module epilogue, the `customElements.define`
+/// presence rule (string/`{tag}` define; `{}`/compile-option create-only;
+/// `{null}` no-op), the fact-driven body frame (`$.push($$props, true)` +
+/// `$$exports` get/set accessors + `return $.pop($$exports)` ONLY when prop
+/// accessors exist), and the `$host()` → `$$props.$$host` handler lowering.
+/// Each row runs the IDENTICAL compile + OXC-parse + full-module structural
+/// comparison as the corpora above — the committed
+/// `options/<slug>.client.json` is the pinned `svelte@5.56.3` oracle.
+const SUPPORTED_OPTIONS: &[&str] = &[
+    // A string tag (`customElement="my-el"`) — the 5-arg open-shadow default
+    // (`{ mode: 'open' }` arg5) + `customElements.define` AFTER the
+    // `$.delegate` epilogue; NO body frame (no props).
+    "options/custom_element_string_tag",
+    // `{ tag, shadow: 'none' }` — the arg5-OMITTED 4-arg call.
+    "options/custom_element_shadow_none",
+    // `{ tag, shadow: 'open', props: { count: { reflect, type } } }` + a
+    // defaulted `$props()` member — the explicit prop-definition object in
+    // arg2, the accessor-forced `$.prop($$props, 'count', 7, 7)` (flags 7 =
+    // IMMUTABLE|RUNES|UPDATED + the default), the `$$exports` get/set pair with
+    // the RAW setter default (`set count($$value = 7)`), and the
+    // `return $.pop($$exports)` close.
+    "options/custom_element_props",
+    // `{ tag: 'x-id' }` + a NON-identifier `$props()` source key
+    // (`let { 'data-id': dataId }`) — every surfaced key is QUOTED (the
+    // official `b.key(name)` rule): the arg2 inferred definition
+    // (`{ 'data-id': {} }`), the `$$exports` accessor names
+    // (`get 'data-id'()` / `set 'data-id'($$value)`), and the
+    // `$.prop($$props, 'data-id', 7)` source key. A raw unquoted key is
+    // invalid JS.
+    "options/custom_element_string_prop_key",
+    // `{ tag, props: { a: { attribute: "" } } }` — an EMPTY `attribute` string
+    // OMITS the field entirely (the official transform pushes `attribute` only
+    // for a truthy string): the arg2 definition is `{ a: {} }`, never
+    // `attribute: ''`.
+    "options/custom_element_empty_attribute",
+    // A SCRIPTLESS template-only `$host()` customElement (`onfocus={() =>
+    // $host().dispatchEvent(...)}`, no `<script>` at all): the template `$host`
+    // reference alone infers RUNES mode, and the member-accessed host binds
+    // `$$props` + pushes the frame (`$.event('focus', button, () =>
+    // $$props.$$host.dispatchEvent(new CustomEvent('boop')));`).
+    "options/custom_element_host_template_only",
+    // `{ tag, shadow: 'none', extend: (c) => c }` — the 6-arg call: arg5 is the
+    // `void 0` placeholder, arg6 the verbatim extend expression.
+    "options/custom_element_extend",
+    // `{}` (no tag) — the bare `$.create_custom_element(…)` statement, NO
+    // define (registration is the user's).
+    "options/custom_element_no_tag",
+    // `{null}` — the Svelte-3 backwards-compat NO-OP: a plain component (no
+    // create, no define).
+    "options/custom_element_null",
+    // The `customElement: true` COMPILE OPTION (see `compile_options_for` +
+    // `FIXTURE_COMPILE_OPTIONS` in `gen-svelte-goldens.mjs`) — create, no
+    // define.
+    "options/custom_element_option_true",
+    // The FRAMED `$host()` handler form: `$.push($$props, true)` + the
+    // `$$props.$$host.dispatchEvent(…)` lowering inside the direct `$.event`
+    // handler + the statement `$.pop();` close (no props ⇒ no `$$exports`).
+    "options/custom_element_host_handler",
+    // `{ tag, shadow: { mode: 'open', delegatesFocus: true } }` — the
+    // `ShadowRootInit` object expression passed VERBATIM as arg5.
+    "options/custom_element_shadow_object",
+    // `({ tag: 'x-paren' })` — the PARENTHESIZED descriptor object: upstream's
+    // `read_expression` returns `remove_parens(node)` before `read_options`, so
+    // author parens are transparent and the emission is identical to the
+    // unwrapped `{ tag }` spelling (define + 5-arg open-shadow default).
+    "options/custom_element_paren_object",
+    // `{@render $host().snip()}` — a `$host()`-member DYNAMIC render callee:
+    // the peeled callee is a call-result-rooted member (never a "safe
+    // identifier"), so `needs_context` fires — official binds `$$props` AND
+    // opens the frame (`$.push($$props, true)` … `$.pop()`) around the
+    // `$.snippet(node, () => $$props.$$host.snip)` render.
+    "options/custom_element_render_host_member",
+];
+
 /// The repository root (two levels up from this crate's `tests/` dir).
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1137,16 +1224,26 @@ fn component_name_for(slug: &str) -> String {
     }
 }
 
+/// The per-fixture COMPILE OPTIONS mirror of `FIXTURE_COMPILE_OPTIONS` in
+/// `scripts/gen-svelte-goldens.mjs` — the few fixtures whose surface is a
+/// compile option rather than in-source syntax compile under the SAME options
+/// the golden was generated with.
+fn compile_options_for(slug: &str) -> SvelteRuntimeOptions {
+    SvelteRuntimeOptions {
+        filename: Some(format!("{slug}.svelte")),
+        name: Some(component_name_for(slug)),
+        // The `customElement: true` compile-option fixture.
+        custom_element: slug == "options/custom_element_option_true",
+        ..Default::default()
+    }
+}
+
 /// Compile a fixture to its emitted client JS.
 fn emit(slug: &str) -> String {
     let source = fixture_source(slug);
     let alloc = Allocator::default();
     let parsed = parse_svelte(&source);
-    let opts = SvelteRuntimeOptions {
-        filename: Some(format!("{slug}.svelte")),
-        name: Some(component_name_for(slug)),
-        ..Default::default()
-    };
+    let opts = compile_options_for(slug);
     compile_client(&source, &parsed, &opts, &alloc, false)
         .unwrap_or_else(|e| panic!("client emission failed for {slug}: {e:?}"))
         .code
@@ -6141,9 +6238,10 @@ fn svelte_structural_conformance_discriminates_cosmetic_from_behavioral_diffs() 
 
 /// Every supported emission slug — the headline / robustness fixtures
 /// ([`SUPPORTED_FIXTURES`]), the exhaustive supported-sub-shape matrix
-/// ([`SUPPORTED_MATRIX`]), and the native-client attribute corpus
-/// ([`SUPPORTED_ATTRIBUTES`]). All three groups run through the identical compile +
-/// OXC-parse + full-module-comparison gate.
+/// ([`SUPPORTED_MATRIX`]), and the per-surface corpora (attributes, events,
+/// blocks, declaration tags, components, specials, lifecycle, custom-element
+/// options). Every group runs through the identical compile + OXC-parse +
+/// full-module-comparison gate.
 fn all_supported_slugs() -> Vec<&'static str> {
     SUPPORTED_FIXTURES
         .iter()
@@ -6155,6 +6253,7 @@ fn all_supported_slugs() -> Vec<&'static str> {
         .chain(SUPPORTED_COMPONENTS.iter())
         .chain(SUPPORTED_SPECIALS.iter())
         .chain(SUPPORTED_LIFECYCLE.iter())
+        .chain(SUPPORTED_OPTIONS.iter())
         .copied()
         .collect()
 }
@@ -6445,12 +6544,12 @@ fn supported_components_cover_the_full_component_corpus() {
     // dropped row is a coverage regression. This count gate fails LOUDLY if a row is dropped,
     // and the no-duplicate check guards against a typo. THREE `components/*` fixtures are
     // EXCLUDED — standalone_child (legacy-mode), snippet_capture_state (reactive-text
-    // const-fold) and child_and_snippet (array-$state / $.proxy) — so the count is the 51
+    // const-fold) and child_and_snippet (array-$state / $.proxy) — so the count is the 53
     // `components/*` fixtures minus 3.
     assert_eq!(
         SUPPORTED_COMPONENTS.len(),
-        48,
-        "the component corpus must enumerate the 48 runes-mode `components/*` 5f-a conformance \
+        50,
+        "the component corpus must enumerate the 50 runes-mode `components/*` 5f-a conformance \
          fixtures (Child / component_props / component_full / component_children_default / \
          component_snippet_children / component_bind_prop / component_bind_this / \
          component_bind_function / component_bind_function_multi / component_spread / \
@@ -6460,7 +6559,8 @@ fn supported_components_cover_the_full_component_corpus() {
          svelte_component / svelte_component_bind_this / svelte_component_import / svelte_self / \
          svelte_fragment / component_prop_hyphen / component_event_hyphen / fragment_slot_hyphen / \
          named_slot_span / named_slot_entity / fragment_slot_text_first / render_spread_arg / \
-         render_paren_callee / render_optional_local, plus the `slot=` disposition rows: Inner / \
+         render_paren_callee / render_optional_local / render_imported_member / \
+         render_new_expression, plus the `slot=` disposition rows: Inner / \
          slot_filler_component_child / slot_filler_svelte_component_child / \
          slot_filler_svelte_self_child / slot_filler_svelte_element_child / \
          slot_prop_component_top_level / slot_prop_component_nested / \
@@ -6538,6 +6638,49 @@ fn supported_events_cover_the_full_event_corpus() {
     let mut seen = std::collections::BTreeSet::new();
     for &slug in SUPPORTED_EVENTS {
         assert!(seen.insert(slug), "duplicate supported-event slug {slug}");
+    }
+}
+
+#[test]
+fn supported_options_cover_the_custom_element_corpus() {
+    // The custom-element corpus is the structural oracle for the
+    // `<svelte:options customElement>` accept surface (create/define topology,
+    // conditional shadow/extend args, the fact-driven frame, the `$host()`
+    // lowering); a dropped row is a coverage regression. Every
+    // `options/custom_element_*` fixture must be enumerated (the remaining
+    // `options/` fixture — `svelte_options_namespace` — is the fail-closed
+    // options-axis vertical, deliberately NOT a supported row).
+    assert_eq!(
+        SUPPORTED_OPTIONS.len(),
+        14,
+        "the custom-element corpus must enumerate all 14 `options/custom_element_*` fixtures"
+    );
+    let mut seen = std::collections::BTreeSet::new();
+    for &slug in SUPPORTED_OPTIONS {
+        assert!(
+            slug.starts_with("options/custom_element_"),
+            "supported-options slug {slug} must be an options/custom_element_* fixture"
+        );
+        assert!(seen.insert(slug), "duplicate supported-options slug {slug}");
+    }
+    // Directory coverage: every `options/custom_element_*` fixture on disk is
+    // enumerated — a new fixture cannot silently skip the gate.
+    let fixtures =
+        repo_root().join("crates/verter_compiler/tests/svelte_oracle_corpus/fixtures/options");
+    for entry in std::fs::read_dir(&fixtures).expect("read options fixtures") {
+        let name = entry.expect("dir entry").file_name();
+        let name = name.to_string_lossy().into_owned();
+        let Some(stem) = name.strip_suffix(".svelte") else {
+            continue;
+        };
+        if !stem.starts_with("custom_element_") {
+            continue;
+        }
+        let slug = format!("options/{stem}");
+        assert!(
+            seen.contains(slug.as_str()),
+            "options fixture {slug} is not enumerated in SUPPORTED_OPTIONS"
+        );
     }
 }
 

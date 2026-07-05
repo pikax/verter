@@ -1,9 +1,11 @@
 //! Fail-closed refusal of the PARSE-DOMAIN unsupported Svelte runtime surfaces
 //! (the ones not carried on the runtime IR): a DUPLICATE attribute / directive
 //! (5a, the official `attribute_duplicate` parse error), a top-level `<style>`
-//! (5l), a `<svelte:options>` axis beyond `runes` (5m — including `name`, which
-//! official rejects as an unknown attribute; 5h for `customElement`), and a
-//! dev-mode codegen request (5k).
+//! (5l), a `<svelte:options>` axis beyond `runes` / `customElement` (5m —
+//! including `name`, which official rejects as an unknown attribute), and a
+//! dev-mode codegen request (5k). A VALID `customElement` value is supported
+//! (the lowering resolves it into the custom-element descriptor); its invalid
+//! forms are exact-code official rejects caught before this gate.
 
 use verter_span::Span;
 
@@ -15,9 +17,9 @@ use crate::svelte::parser::{
 
 /// The PARSE-DOMAIN gate (choke point 1 of the refuse-by-default pipeline): refuse
 /// the unsupported surfaces the runtime IR does not carry (a top-level `<style>`
-/// (5l), a `<svelte:options>` axis beyond `runes` (5m, or 5h for `customElement`),
-/// and a dev-mode codegen request (5k)) BEFORE lowering. Returns the FIRST one
-/// found, or `None`.
+/// (5l), a `<svelte:options>` axis beyond `runes` / `customElement` (5m), and a
+/// dev-mode codegen request (5k)) BEFORE lowering. Returns the FIRST one found,
+/// or `None`.
 pub(super) fn parse_domain_gate(
     source: &str,
     parsed: &ParsedSvelte,
@@ -73,10 +75,11 @@ pub(super) fn parse_domain_gate(
         });
     }
     // The STRICT `<svelte:options>` gate: allow ONLY an ABSENT options element, or at
-    // most ONE top-level `<svelte:options runes={true} />` (shorthand `runes` ok). Fail
-    // closed on a duplicate / nested / non-root options element, a non-boolean / `false`
-    // `runes` value, any other axis (`customElement` → 5h, `namespace`/`css`/… → 5m),
-    // a spread / directive, or child content.
+    // most ONE top-level `<svelte:options>` carrying the supported axes
+    // (`runes={true}` / shorthand `runes`, and a VALID `customElement` value). Fail
+    // closed on a duplicate / nested / non-root options element, a non-boolean /
+    // `false` `runes` value, any other axis (`namespace`/`css`/… → 5m), a spread /
+    // directive, or child content.
     if let Some(surface) = refuse_unsupported_options(source, parsed) {
         return Some(surface);
     }
@@ -130,10 +133,12 @@ fn refuse_implicit_paragraph_autoclose(
 }
 
 /// The STRICT `<svelte:options>` gate. Allow ONLY: (i) NO options element (mode
-/// inferred from rune usage), or (ii) at most ONE TOP-LEVEL
-/// `<svelte:options runes={true} />` (the shorthand `runes` boolean is `true` too).
-/// Fail closed on EVERY other form. Returns the typed surface for the first
-/// violation, or `None` when the element is absent or is exactly the supported form.
+/// inferred from rune usage), or (ii) at most ONE TOP-LEVEL `<svelte:options>`
+/// carrying the supported axes — `runes={true}` (the shorthand `runes` boolean is
+/// `true` too) and a VALID `customElement` value (resolved into the
+/// custom-element descriptor at lowering). Fail closed on EVERY other form.
+/// Returns the typed surface for the first violation, or `None` when the element
+/// is absent or carries only supported axes.
 ///
 /// The strict rules (each a deliberate fail-closed):
 /// - a DUPLICATE `<svelte:options>` (two or more anywhere) — official `options_duplicate`;
@@ -141,8 +146,8 @@ fn refuse_implicit_paragraph_autoclose(
 /// - a non-boolean `runes` value (`runes={foo}` / `runes={1}` / `runes="true"`) — only
 ///   the boolean literal `true` (or shorthand) is the supported runes plumbing;
 /// - `runes={false}` — selects LEGACY mode, the legacy-mode vertical (5i) owner;
-/// - `customElement` / `tag` (5h) and every OTHER axis (`namespace`, `css`, `name`, …,
-///   a spread, a directive) (5m);
+/// - `tag` (always an official reject upstream; defensive here) and every OTHER
+///   axis (`namespace`, `css`, `name`, …, a spread, a directive) (5m);
 /// - child content (a `<svelte:options>` is a self-closing marker; content is invalid).
 fn refuse_unsupported_options(
     source: &str,
@@ -183,12 +188,11 @@ fn refuse_unsupported_options(
     // an invalid `customElement`, a spread/directive, child content — is an EXACT-CODE
     // `OptionsInvalid` parser fact the official-reject gate caught BEFORE this gate; see
     // `official_reject.rs` + the parser `read_options` finalization). So the only inputs reaching
-    // here are the officially-ACCEPTED options axes Verter does not yet support as a FEATURE: the
-    // ONLY supported axis is `runes={true}` (or shorthand); `runes={false}` is the legacy-mode
-    // owner (5i); a valid `customElement` is the host/custom-element vertical (5h); every OTHER
-    // accepted axis (a valid `namespace`/`css`, `immutable`/`accessors`/`preserveWhitespace`) is
-    // the 5m options vertical. The non-supported arms below stay as a defensive fail-closed for
-    // anything an upstream change might newly accept.
+    // here are the officially-ACCEPTED options axes: `runes={true}` (or shorthand) and a valid
+    // `customElement` value are SUPPORTED; `runes={false}` is the legacy-mode owner (5i); every
+    // OTHER accepted axis (a valid `namespace`/`css`, `immutable`/`accessors`/
+    // `preserveWhitespace`) is the 5m options vertical. The non-supported arms below stay as a
+    // defensive fail-closed for anything an upstream change might newly accept.
     for attr in &first.attributes {
         let name = options_attr_name(attr);
         match name.as_deref() {
@@ -209,9 +213,19 @@ fn refuse_unsupported_options(
                     });
                 }
             },
-            Some("customElement") | Some("tag") => {
-                return Some(UnsupportedSvelteRuntimeSurface::HostOrCustomElement {
-                    surface: "<svelte:options customElement>",
+            // A VALID `customElement` value is SUPPORTED: every invalid form
+            // (boolean shorthand, a bad tag, a malformed object, a non-object /
+            // non-`null` expression) is an EXACT-CODE `OptionsInvalid` parser fact
+            // the official-reject gate caught BEFORE this gate, so the value here
+            // is official-ACCEPTED and the lowering resolves it into the
+            // [`CustomElementDescriptor`](crate::svelte::parser::CustomElementDescriptor).
+            Some("customElement") => {}
+            // The deprecated `tag` axis is ALWAYS an official reject
+            // (`svelte_options_deprecated_tag`, minted by the parser and caught by
+            // the official-reject gate) — it never reaches this gate; the arm
+            // stays as a defensive fail-closed.
+            Some("tag") => {
+                return Some(UnsupportedSvelteRuntimeSurface::OptionsAxis {
                     span: first.open_span,
                 });
             }

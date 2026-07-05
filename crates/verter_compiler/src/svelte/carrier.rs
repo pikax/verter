@@ -384,6 +384,10 @@ impl CarrierCompiler for SvelteCarrierCompiler {
             // output axis (5k) is requested through a dedicated signal that lands
             // with that block; until then `dev_codegen` stays false.
             dev_codegen: false,
+            // The neutral options carry no `customElement` compile-option axis;
+            // an in-source `<svelte:options customElement>` still activates the
+            // custom-element output (its value wins over the option anyway).
+            custom_element: false,
         };
         match super::runtime::compile_client(source, parsed, &runtime_opts, alloc, opts.ssr) {
             Ok(module) => {

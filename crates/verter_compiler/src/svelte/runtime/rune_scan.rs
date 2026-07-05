@@ -378,6 +378,26 @@ pub(super) struct UnsupportedRuneScan {
     /// is NOT in this set is an invalid placement and refuses (official
     /// `props_id_invalid_placement`).
     props_id_positions: FxHashSet<(u32, u32)>,
+    /// Whether the component compiles as a CUSTOM ELEMENT (a resolved
+    /// `<svelte:options customElement>` / compile-option descriptor). The
+    /// zero-arg `$host()` call is supported ONLY under an active custom element
+    /// (official `host_invalid_placement` otherwise); the flag gates the call
+    /// visitor's `$host` admission.
+    custom_element_active: bool,
+    /// Whether an ADMITTED `$host()` call was seen — the zero-arg, non-optional
+    /// call under an active custom element (the ONLY accepted `$host` form; any
+    /// other `$host` shape records a refusal instead). The plan build consumes
+    /// this FACT to decide the `$$props`-parameter question (the rewritten
+    /// `$$props.$$host` member must never reference an unbound `$$props`, so a
+    /// host use without an independent props-parameter trigger fails closed) —
+    /// recorded here, in the one existing rune scan, so no later stage re-parses
+    /// source to re-discover the usage.
+    uses_host: bool,
+    /// The span of the FIRST admitted `$host()` call (in the coordinates of the
+    /// scanned program — the instance script or the wrapped template
+    /// expression), carried so the plan build's degenerate-host refusal points
+    /// at the offending call instead of a zero span.
+    first_host_span: Option<Span>,
     /// Whether a valid `$props.id()` use was already accepted — a SECOND valid
     /// use refuses (official `props_duplicate`).
     props_id_used: bool,
@@ -407,7 +427,13 @@ impl UnsupportedRuneScan {
     /// program-direct statements are the SYNTHETIC `({expr});` wrapper (never a
     /// statement position). (A `<script module>` never reaches this scan — it is
     /// refused upstream as the script-hoisting deferral.)
-    pub(super) fn for_program(program: &Program<'_>, is_instance: bool) -> Self {
+    /// `custom_element_active` marks a component with a resolved custom-element
+    /// descriptor — the only context whose zero-arg `$host()` call is admitted.
+    pub(super) fn for_program(
+        program: &Program<'_>,
+        is_instance: bool,
+        custom_element_active: bool,
+    ) -> Self {
         let props_rune_spans = supported_props_rune_call_spans(program, is_instance);
         Self {
             found: None,
@@ -418,12 +444,26 @@ impl UnsupportedRuneScan {
             props_id_used: false,
             bindable_positions: props_rune_spans.bindable,
             synthetic_program_stmts: !is_instance,
+            custom_element_active,
+            uses_host: false,
+            first_host_span: None,
         }
     }
 
     /// The unsupported surface found, if any.
     pub(super) fn into_surface(self) -> Option<UnsupportedSvelteRuntimeSurface> {
         self.found
+    }
+
+    /// Whether the walk admitted a `$host()` call (the zero-arg form under an
+    /// active custom element) — the `$host`-usage FACT the plan build consumes.
+    pub(super) fn uses_host(&self) -> bool {
+        self.uses_host
+    }
+
+    /// The span of the first admitted `$host()` call, if any (program-relative).
+    pub(super) fn first_host_span(&self) -> Option<Span> {
+        self.first_host_span
     }
 
     /// Whether `name` is an unshadowed rune root reference.
@@ -442,18 +482,25 @@ impl UnsupportedRuneScan {
     /// supported position (its span is in [`Self::supported`]) is fine; a reference
     /// anywhere else is an unsupported rune form (`$state` in a default-param, a
     /// module-script rune, `foo($state)`, …) and fails closed. The
-    /// position-sensitive runes (`$state` / `$derived` / `$props` / `$effect`) and
-    /// `$bindable` are classified here — `$bindable` has NO supported BARE
-    /// position at all (its CALLED form is consumed by the call visitor, so a
-    /// bare reference reaching here is the UNCALLED rune — official
+    /// position-sensitive runes (`$state` / `$derived` / `$props` / `$effect`),
+    /// `$bindable`, and `$host` are classified here — ALL unshadowed known rune
+    /// roots fail closed unless in a supported position. `$bindable` has NO
+    /// supported BARE position at all (its CALLED form is consumed by the call
+    /// visitor, so a bare reference reaching here is the UNCALLED rune — official
     /// `rune_missing_parentheses` — or a paren-wrapped callee spelling, both
-    /// fail-closed). `$host` is classified by [`Self::classify_rune_call`], and
-    /// the production-elided `$inspect` family is owned by the instance-item
-    /// classifier / the body rewriter.
+    /// fail-closed). `$host` likewise has NO supported bare position: its
+    /// supported form is the zero-arg CALL inside an active customElement
+    /// component, whose callee span the call visitor admits into the supported
+    /// set — an UNCALLED `$host` (official `rune_missing_parentheses`) and the
+    /// parenthesized-callee `($host)()` spelling (official
+    /// `host_invalid_placement`; the inner bare reference lands here) both fail
+    /// closed. The CALLED `$host(...)` forms are classified by
+    /// [`Self::classify_rune_call`], and the production-elided `$inspect` family
+    /// is owned by the instance-item classifier / the body rewriter.
     fn classify_rune_position(&mut self, root: &str, span: Span) {
         if !matches!(
             root,
-            "$state" | "$derived" | "$props" | "$effect" | "$bindable"
+            "$state" | "$derived" | "$props" | "$effect" | "$bindable" | "$host"
         ) {
             return;
         }
@@ -466,6 +513,7 @@ impl UnsupportedRuneScan {
             "$props" => "$props",
             "$effect" => "$effect",
             "$bindable" => "$bindable",
+            "$host" => "$host",
             _ => return,
         };
         self.record(UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, span });
@@ -575,15 +623,17 @@ impl UnsupportedRuneScan {
     }
 
     /// Classify a bare-rune-root reference used in a non-supported position (a
-    /// `$host()` call). The supported bare calls (`$state` / `$derived` /
-    /// `$props` / `$effect`) are skipped by the caller before reaching here, and
-    /// a `$bindable(...)` call is consumed by its POSITION-AWARE arm in
-    /// `visit_call_expression` (valid only as a `$props()` destructure-member
-    /// default). A `$inspect(...)` call is NOT refused: the `$inspect` family is
-    /// SUPPORTED as production ELISION (the statement-position forms are elided
-    /// by the instance-item classifier / the body rewriter; a
-    /// non-statement-position reference fails closed at the rewriter, never
-    /// emitted raw).
+    /// `$host(...)` call outside its one admitted form — the zero-arg,
+    /// non-optional call inside an ACTIVE customElement component, which the
+    /// call visitor admits into the supported set instead of routing here). The
+    /// supported bare calls (`$state` / `$derived` / `$props` / `$effect`) are
+    /// skipped by the caller before reaching here, and a `$bindable(...)` call
+    /// is consumed by its POSITION-AWARE arm in `visit_call_expression` (valid
+    /// only as a `$props()` destructure-member default). A `$inspect(...)` call
+    /// is NOT refused: the `$inspect` family is SUPPORTED as production ELISION
+    /// (the statement-position forms are elided by the instance-item classifier
+    /// / the body rewriter; a non-statement-position reference fails closed at
+    /// the rewriter, never emitted raw).
     fn classify_rune_call(&mut self, root: &str, span: Span) {
         let surface = match root {
             "$host" => UnsupportedSvelteRuntimeSurface::HostOrCustomElement {
@@ -944,9 +994,40 @@ impl<'a> Visit<'a> for UnsupportedRuneScan {
                 }
             }
         }
-        // A BARE rune call to an ADVANCED-only rune (`$host(...)`, a standalone
+        // A `$host(...)` CALL through the STRICT bare-identifier callee on the
+        // unshadowed root. Supported ONLY as the ZERO-ARG, NON-OPTIONAL call
+        // inside an ACTIVE customElement component (it lowers to
+        // `$$props.$$host`): on accept, the callee identifier span joins the
+        // supported set — exactly like the admitted `$effect(fn)` callee — so
+        // the position scan admits it when the walk descends, and the
+        // `uses_host` FACT plus the first admitted call span are recorded (the
+        // plan build gates the `$$props`-parameter decision on them). A
+        // malformed call (any argument — official `rune_invalid_arguments` — a
+        // spread, or an optional `$host?.()`) or ANY `$host(...)` call OUTSIDE
+        // a customElement component (official `host_invalid_placement`)
+        // records the host/custom-element refusal. A parenthesized callee
+        // (`($host)()`) never matches the strict spelling: its inner bare
+        // `$host` reaches the position scan and fails closed. The walk still
+        // descends into the arguments, so a nested unsupported rune inside a
+        // malformed call refuses too.
+        if let Expression::Identifier(id) = &it.callee {
+            if id.name.as_str() == "$host" && self.is_unshadowed_rune("$host") {
+                let well_formed = !it.optional && it.arguments.is_empty();
+                if well_formed && self.custom_element_active {
+                    self.supported.insert((id.span.start, id.span.end));
+                    self.uses_host = true;
+                    if self.first_host_span.is_none() {
+                        self.first_host_span = Some(to_span(it.span));
+                    }
+                } else {
+                    self.classify_rune_call("$host", to_span(it.span));
+                }
+            }
+        }
+        // A BARE rune call to an ADVANCED-only rune (a standalone
         // `$bindable(...)`) has no supported bare position at all — classify it
-        // here (`$inspect(...)` is production-elided, never refused here). The
+        // here (`$inspect(...)` is production-elided, never refused here; a
+        // `$host(...)` call was classified by its dedicated arm above). The
         // position-sensitive runes (`$state` / `$derived` / `$props` / `$effect`)
         // are classified per-identifier in `visit_identifier_reference` (a
         // supported position is exempt; everything else refuses), so a `$state(0)`
@@ -954,7 +1035,7 @@ impl<'a> Visit<'a> for UnsupportedRuneScan {
         if let Expression::Identifier(id) = &it.callee {
             let root = id.name.as_str();
             if self.is_unshadowed_rune(root)
-                && !matches!(root, "$state" | "$derived" | "$props" | "$effect")
+                && !matches!(root, "$state" | "$derived" | "$props" | "$effect" | "$host")
             {
                 self.classify_rune_call(root, to_span(it.span));
             }
@@ -974,9 +1055,15 @@ impl<'a> Visit<'a> for UnsupportedRuneScan {
         // identifier reaching here is UNCALLED (its called forms are consumed by
         // the call visitor) — official `rune_missing_parentheses` — or a
         // paren-wrapped callee spelling; both fail closed (no supported bare
-        // position exists). `$host` is refused by the call / member handlers,
-        // never here; the production-elided `$inspect` family is owned by the
-        // instance-item classifier / the body rewriter.
+        // position exists). `$host` splits the same way: an ADMITTED zero-arg
+        // `$host()` callee span was added to the supported set by the call
+        // visitor (exempt at the position check), a MALFORMED / out-of-context
+        // `$host(...)` call is refused by the call handler, and an UNCALLED
+        // bare `$host` reference (including the inner identifier of a
+        // parenthesized-callee `($host)()` spelling) fails closed HERE through
+        // the position scan — official `rune_missing_parentheses`. The
+        // production-elided `$inspect` family is owned by the instance-item
+        // classifier / the body rewriter.
         let name = it.name.as_str();
         if self.is_unshadowed_rune(name) {
             self.classify_rune_position(name, to_span(it.span));

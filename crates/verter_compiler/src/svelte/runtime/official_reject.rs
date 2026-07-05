@@ -658,19 +658,21 @@ fn select_parse_phase_defect(source: &str, parsed: &ParsedSvelte) -> Option<Offi
         }
     }
 
-    // FILL the RESERVED `<svelte:options customElement={EXPR}>` validation slots: parse each
-    // expression with OXC and run upstream's two checks. A SYNTACTIC attribute-expression PARSE
-    // fault — a malformed prefix (`js_parse_error`) OR a clean prefix with trailing junk before the
-    // `}` (`expected_token`) — mints AT THE PARSE POSITION (`parse_encounter_order` — upstream's
+    // ARBITRATE the RESOLVED `<svelte:options customElement={EXPR}>` validation slots: the
+    // parser already ran the one validate+extract engine at options finalization and RETAINED
+    // the typed outcome on each probe — this loop only routes a retained reject code to its
+    // upstream-faithful position (no re-parse). A SYNTACTIC attribute-expression PARSE fault — a
+    // malformed prefix (`js_parse_error`) OR a clean prefix with trailing junk before the `}`
+    // (`expected_token`) — mints AT THE PARSE POSITION (`parse_encounter_order` — upstream's
     // `read_expression` runs during the `<svelte:options>` attribute loop, so it beats a LATER
     // template defect / duplicate attribute and loses to an EARLIER one); a parseable-and-fully-
     // consumed-but-invalid expression mints the EXACT `svelte_options_*` code AT THE FINALIZATION
     // POSITION (`encounter_order` — upstream's `read_options` runs after the whole template parse,
-    // losing to ANY template parse defect). An expression upstream ACCEPTS (a `null` literal, a
-    // valid object) contributes NO defect (refused later as the unsupported `customElement` feature).
+    // losing to ANY template parse defect). A retained ACCEPT (a `null` literal, a valid object)
+    // contributes NO defect — the native client path lowers its retained descriptor.
     for probe in &parsed.options_custom_element_probes {
-        let expr_src = &source[probe.expr_span.start as usize..probe.expr_span.end as usize];
-        if let Some(code) = super::options_reject::options_custom_element_expr_error(expr_src) {
+        if let Err(code) = &probe.resolution {
+            let code = *code;
             let order = if is_options_ce_attribute_parse_fault(code) {
                 probe.parse_encounter_order
             } else {
