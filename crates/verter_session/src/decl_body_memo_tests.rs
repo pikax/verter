@@ -9,8 +9,90 @@ use std::sync::Arc;
 
 use super::*;
 use crate::decl_lowering::DeclLoweringService;
+use verter_type_expr::locators::{
+    AugmentationBodyLocator, AuthoredAnchor, AuthoredAugmentationScope, AuthoredBodyLocator,
+    LocatorSymbolSpace, TypeBodyPathStep, TypeBodySlot, TypeParamBoundPosition,
+};
+
+/// The canonical id every fixture memo in this module is keyed on.
+const FIXTURE_CANONICAL: &str = "/ws/fixture.ts";
+
+/// Build a TYPE-space decl-body locator anchored on this fixture's canonical.
+fn type_body_locator(symbol: &str, path: Vec<TypeBodyPathStep>) -> AuthoredBodyLocator {
+    type_body_locator_on(FIXTURE_CANONICAL, symbol, path)
+}
+
+/// Build a TYPE-space decl-body locator anchored on an explicit canonical.
+fn type_body_locator_on(
+    canonical: &str,
+    symbol: &str,
+    path: Vec<TypeBodyPathStep>,
+) -> AuthoredBodyLocator {
+    AuthoredBodyLocator::DeclBody(TypeBodySlot {
+        anchor: AuthoredAnchor {
+            canonical_id: Arc::from(canonical),
+            symbol: Arc::from(symbol),
+            space: LocatorSymbolSpace::Type,
+        },
+        path: Arc::from(path.into_boxed_slice()),
+    })
+}
+
+/// Build a VALUE-space decl-body locator anchored on this fixture's canonical.
+fn value_body_locator(symbol: &str, path: Vec<TypeBodyPathStep>) -> AuthoredBodyLocator {
+    AuthoredBodyLocator::DeclBody(TypeBodySlot {
+        anchor: AuthoredAnchor {
+            canonical_id: Arc::from(FIXTURE_CANONICAL),
+            symbol: Arc::from(symbol),
+            space: LocatorSymbolSpace::Value,
+        },
+        path: Arc::from(path.into_boxed_slice()),
+    })
+}
+
+/// Build a NAMESPACE-space decl-body locator anchored on this fixture's canonical.
+fn namespace_body_locator(symbol: &str, path: Vec<TypeBodyPathStep>) -> AuthoredBodyLocator {
+    AuthoredBodyLocator::DeclBody(TypeBodySlot {
+        anchor: AuthoredAnchor {
+            canonical_id: Arc::from(FIXTURE_CANONICAL),
+            symbol: Arc::from(symbol),
+            space: LocatorSymbolSpace::Namespace,
+        },
+        path: Arc::from(path.into_boxed_slice()),
+    })
+}
+
+/// Build a TYPE-space augmentation-scoped locator anchored on this fixture's
+/// canonical, in the given ambient augmentation scope.
+fn aug_type_locator(
+    symbol: &str,
+    scope: AuthoredAugmentationScope,
+    path: Vec<TypeBodyPathStep>,
+) -> AuthoredBodyLocator {
+    AuthoredBodyLocator::AugmentationBody(AugmentationBodyLocator {
+        anchor: AuthoredAnchor {
+            canonical_id: Arc::from(FIXTURE_CANONICAL),
+            symbol: Arc::from(symbol),
+            space: LocatorSymbolSpace::Type,
+        },
+        scope,
+        path: Arc::from(path.into_boxed_slice()),
+    })
+}
+
+/// The single derefed expression, or a panic naming the unexpected shape.
+fn single(body: &locator_deref::DerefedAuthoredBody) -> &TypeExpr {
+    match &body.shape {
+        DerefedBodyShape::Single(expr) => expr,
+        other => panic!("expected a single derefed body, got {other:?}"),
+    }
+}
 
 fn memo_for(source: &str) -> (DeclBodyMemo, Arc<MetaProvenance>) {
+    memo_for_canonical(FIXTURE_CANONICAL, source)
+}
+
+fn memo_for_canonical(canonical: &str, source: &str) -> (DeclBodyMemo, Arc<MetaProvenance>) {
     let eval_source: Arc<str> = Arc::from(source);
     let allocator = oxc_allocator::Allocator::default();
     let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
@@ -21,7 +103,7 @@ fn memo_for(source: &str) -> (DeclBodyMemo, Arc<MetaProvenance>) {
     let provenance = Arc::new(MetaProvenance::default());
     let memo = DeclBodyMemo::new(
         SnapshotKey {
-            canonical: Arc::from("/ws/fixture.ts"),
+            canonical: Arc::from(canonical),
             whole_hash: [7u8; 16],
             parse_env_hash: [0u8; 16],
         },
@@ -796,10 +878,6 @@ fn broken_lease_body_demand_fails_closed_return_only_without_caching() {
 /// `LeaseMiss`.
 #[test]
 fn broken_lease_locator_deref_returns_lease_miss_not_unknown_symbol() {
-    use verter_type_expr::locators::{
-        AuthoredAnchor, AuthoredBodyLocator, LocatorSymbolSpace, TypeBodyPathStep, TypeBodySlot,
-    };
-
     let (memo, _) = memo_for(FIVE_DECLS);
     // Pin the lease with one successful demand, then break the retained
     // snapshot out-of-band so every subsequent demand lease-misses.
@@ -808,14 +886,7 @@ fn broken_lease_locator_deref_returns_lease_miss_not_unknown_symbol() {
 
     // Deref a DIFFERENT, not-yet-lowered TYPE symbol so the demand actually
     // runs and lease-misses (rather than hitting an already-committed cell).
-    let locator = AuthoredBodyLocator::DeclBody(TypeBodySlot {
-        anchor: AuthoredAnchor {
-            canonical_id: Arc::from("/ws/fixture.ts"),
-            symbol: Arc::from("Var1"),
-            space: LocatorSymbolSpace::Type,
-        },
-        path: Arc::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
-    });
+    let locator = type_body_locator("Var1", Vec::new());
     let err = memo
         .deref_locator_body(&locator)
         .expect_err("a broken-lease deref must fail typed, never fabricate a body");
@@ -859,4 +930,671 @@ fn partial_contributor_batch_does_not_backfill_merged_sibling() {
         ty.body
     );
     assert_eq!(ty.body.contributors().len(), 2);
+}
+
+/// A locator into a type parameter's constraint slot derefs to the EXACT
+/// authored constraint body — not the decl body, not the default slot.
+#[test]
+fn locator_deref_reaches_type_param_constraint_body() {
+    let (memo, _) = memo_for("type Foo<T extends string> = { x: T };\n");
+    let derefed = memo
+        .deref_locator_body(&type_body_locator(
+            "Foo",
+            vec![TypeBodyPathStep::TypeParamBound {
+                ordinal: 0,
+                position: TypeParamBoundPosition::Constraint,
+            }],
+        ))
+        .expect("the ordinal-0 constraint body must deref");
+    assert!(
+        matches!(
+            single(&derefed),
+            TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+        ),
+        "the ordinal-0 constraint must deref to the `string` primitive (not the \
+         body, not the default); got {:?}",
+        derefed.shape
+    );
+}
+
+/// The constraint and default slots of one parameter are DISTINCT authored
+/// bodies; `position` selects between them.
+#[test]
+fn locator_deref_distinguishes_constraint_from_default_body() {
+    let (memo, _) = memo_for("type Foo<T extends string = number> = { x: T };\n");
+    let constraint = memo
+        .deref_locator_body(&type_body_locator(
+            "Foo",
+            vec![TypeBodyPathStep::TypeParamBound {
+                ordinal: 0,
+                position: TypeParamBoundPosition::Constraint,
+            }],
+        ))
+        .expect("constraint derefs");
+    let default = memo
+        .deref_locator_body(&type_body_locator(
+            "Foo",
+            vec![TypeBodyPathStep::TypeParamBound {
+                ordinal: 0,
+                position: TypeParamBoundPosition::Default,
+            }],
+        ))
+        .expect("default derefs");
+    assert!(
+        matches!(
+            single(&constraint),
+            TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+        ),
+        "constraint is `string`; got {:?}",
+        constraint.shape
+    );
+    assert!(
+        matches!(
+            single(&default),
+            TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        ),
+        "default is `number`; got {:?}",
+        default.shape
+    );
+    assert_ne!(
+        single(&constraint),
+        single(&default),
+        "constraint and default must be distinct authored bodies — an impl that \
+         ignores `position` collapses them"
+    );
+}
+
+/// The lexical env of a bound at ordinal `i` is the PREFIX of parameters
+/// declared BEFORE `i` — never the full list. `U extends keyof T` (U at
+/// ordinal 1) binds the prior sibling `T`, never `U` itself or later params.
+#[test]
+fn locator_deref_binds_only_prior_sibling_type_params() {
+    let (memo, _) = memo_for("type Foo<T, U extends keyof T> = { x: T; y: U };\n");
+    let derefed = memo
+        .deref_locator_body(&type_body_locator(
+            "Foo",
+            vec![TypeBodyPathStep::TypeParamBound {
+                ordinal: 1,
+                position: TypeParamBoundPosition::Constraint,
+            }],
+        ))
+        .expect("U's constraint `keyof T` derefs");
+    assert!(
+        matches!(single(&derefed), TypeExpr::KeyOf(_)),
+        "U's constraint is `keyof T`; got {:?}",
+        derefed.shape
+    );
+    assert_eq!(
+        derefed.type_parameters.len(),
+        1,
+        "the bound at ordinal 1 binds ONLY the prior sibling prefix `[T]` — a \
+         full-list env over-binds `U` itself (a soundness defect)"
+    );
+    assert_eq!(
+        derefed.type_parameters[0].name, "T",
+        "the sole bound param is the prior sibling `T`"
+    );
+}
+
+/// An ordinal beyond the parameter count fails closed with the typed
+/// out-of-range error — never a fabricated body.
+#[test]
+fn locator_deref_type_param_ordinal_out_of_range_fails_closed() {
+    let (memo, _) = memo_for("type Foo<T extends string> = { x: T };\n");
+    let err = memo
+        .deref_locator_body(&type_body_locator(
+            "Foo",
+            vec![TypeBodyPathStep::TypeParamBound {
+                ordinal: 5,
+                position: TypeParamBoundPosition::Constraint,
+            }],
+        ))
+        .expect_err("an out-of-range ordinal must fail closed");
+    assert_eq!(
+        err,
+        LocatorBodyDerefError::TypeParamOrdinalOutOfRange { ordinal: 5 }
+    );
+}
+
+/// A referenced parameter with no constraint fails closed with the typed
+/// absent-bound error (analogous to a missing value annotation).
+#[test]
+fn locator_deref_absent_type_param_bound_fails_closed() {
+    let (memo, _) = memo_for("type Foo<T> = { x: T };\n");
+    let err = memo
+        .deref_locator_body(&type_body_locator(
+            "Foo",
+            vec![TypeBodyPathStep::TypeParamBound {
+                ordinal: 0,
+                position: TypeParamBoundPosition::Constraint,
+            }],
+        ))
+        .expect_err("a param with no constraint must fail closed");
+    assert_eq!(
+        err,
+        LocatorBodyDerefError::TypeParamBoundAbsent {
+            ordinal: 0,
+            position: TypeParamBoundPosition::Constraint,
+        }
+    );
+}
+
+/// A bound step anywhere other than `path[0]` is misplaced — type parameters
+/// live on the header, not mid-body — and merged group-level type params are
+/// unioned (there is no per-contributor header param axis).
+#[test]
+fn locator_deref_misplaced_type_param_bound_step_fails_closed() {
+    // A bound step following a member step is misplaced.
+    let (memo, _) = memo_for("type Foo<T> = { a: string };\n");
+    let member_err = memo
+        .deref_locator_body(&type_body_locator(
+            "Foo",
+            vec![
+                TypeBodyPathStep::Member { ordinal: 0 },
+                TypeBodyPathStep::TypeParamBound {
+                    ordinal: 0,
+                    position: TypeParamBoundPosition::Constraint,
+                },
+            ],
+        ))
+        .expect_err("a mid-path bound step must fail closed");
+    assert_eq!(
+        member_err,
+        LocatorBodyDerefError::TypeParamBoundStepMisplaced
+    );
+
+    // A bound step following a merged-contributor step is misplaced: the
+    // contributor header carries no per-contributor type-param axis.
+    let (merged_memo, _) = memo_for("interface Bar { a: string }\ninterface Bar { b: number }\n");
+    let contributor_err = merged_memo
+        .deref_locator_body(&type_body_locator(
+            "Bar",
+            vec![
+                TypeBodyPathStep::MergedContributor { ordinal: 0 },
+                TypeBodyPathStep::TypeParamBound {
+                    ordinal: 0,
+                    position: TypeParamBoundPosition::Constraint,
+                },
+            ],
+        ))
+        .expect_err("a contributor-prefixed bound step must fail closed");
+    assert_eq!(
+        contributor_err,
+        LocatorBodyDerefError::TypeParamBoundStepMisplaced
+    );
+}
+
+/// A bound step on a VALUE-space anchor is misplaced: function / value-decl
+/// type parameters live on signatures, not on a value annotation position.
+#[test]
+fn locator_deref_value_space_type_param_bound_fails_closed() {
+    let (memo, _) = memo_for("const val: number = 1;\ntype Other = { o: 1 };\n");
+    let err = memo
+        .deref_locator_body(&value_body_locator(
+            "val",
+            vec![TypeBodyPathStep::TypeParamBound {
+                ordinal: 0,
+                position: TypeParamBoundPosition::Constraint,
+            }],
+        ))
+        .expect_err("a value-space bound step must fail closed");
+    assert_eq!(err, LocatorBodyDerefError::TypeParamBoundStepMisplaced);
+}
+
+/// After selecting a bound slot, the REMAINING path navigates over the selected
+/// bound expression — an object constraint's member value is reachable.
+#[test]
+fn locator_deref_descends_into_selected_type_param_bound() {
+    let (memo, _) = memo_for("type Foo<T extends { a: string }> = { x: T };\n");
+    let derefed = memo
+        .deref_locator_body(&type_body_locator(
+            "Foo",
+            vec![
+                TypeBodyPathStep::TypeParamBound {
+                    ordinal: 0,
+                    position: TypeParamBoundPosition::Constraint,
+                },
+                TypeBodyPathStep::Member { ordinal: 0 },
+                TypeBodyPathStep::MemberValue,
+            ],
+        ))
+        .expect("descent into the constraint object's member value must resolve");
+    assert!(
+        matches!(
+            single(&derefed),
+            TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+        ),
+        "the constraint object's member `a` value is `string`; got {:?}",
+        derefed.shape
+    );
+    assert!(
+        derefed.type_parameters.is_empty(),
+        "the ordinal-0 bound binds no prior sibling params (empty prefix)"
+    );
+}
+
+// ===========================================================================
+// Up-front structural misplacement validation.
+//
+// `TypeParamBound` placement is a SYNTACTIC invariant, validated over the WHOLE
+// path BEFORE any body demand — so the distinct `TypeParamBoundStepMisplaced`
+// error holds even when an earlier path step would ITSELF fail to resolve.
+// ===========================================================================
+
+/// A non-leading `TypeParamBound` behind an earlier step that ALSO does not
+/// resolve must still fail closed with `TypeParamBoundStepMisplaced` — the
+/// syntactic misplacement is decided up front, never swallowed as the generic
+/// `PathUnresolved` a mid-body navigation would return.
+///
+/// Discrimination: `[Member{99}, TypeParamBound{..}]` on a body with no member
+/// 99. WITHOUT the up-front pass the deref demands the body and navigates
+/// `Member{99}` first, returning `PathUnresolved` before the misplaced bound is
+/// ever reached; WITH it the misplaced bound is rejected first.
+#[test]
+fn deref_up_front_rejects_misplaced_bound_before_earlier_step_resolves() {
+    let (memo, _) = memo_for("type Foo<T extends string> = { a: string };\n");
+    let err = memo
+        .deref_locator_body(&type_body_locator(
+            "Foo",
+            vec![
+                TypeBodyPathStep::Member { ordinal: 99 },
+                TypeBodyPathStep::TypeParamBound {
+                    ordinal: 0,
+                    position: TypeParamBoundPosition::Constraint,
+                },
+            ],
+        ))
+        .expect_err("a misplaced bound behind an unresolvable step must fail closed");
+    assert_eq!(
+        err,
+        LocatorBodyDerefError::TypeParamBoundStepMisplaced,
+        "the misplaced bound must be rejected UP FRONT — never swallowed as \
+         PathUnresolved because the earlier `Member{{99}}` step also misses"
+    );
+}
+
+/// A `TypeParamBound` anywhere in a VALUE-space path is misplaced — value /
+/// function type parameters live on the signature, not on a value annotation
+/// position — and the whole path is validated up front.
+#[test]
+fn deref_value_space_non_leading_bound_is_misplaced() {
+    let (memo, _) = memo_for("const val: { a: string } = { a: '' };\ntype Other = { o: 1 };\n");
+    let err = memo
+        .deref_locator_body(&value_body_locator(
+            "val",
+            vec![
+                TypeBodyPathStep::Member { ordinal: 0 },
+                TypeBodyPathStep::TypeParamBound {
+                    ordinal: 0,
+                    position: TypeParamBoundPosition::Constraint,
+                },
+            ],
+        ))
+        .expect_err("a value-space bound step must fail closed");
+    assert_eq!(err, LocatorBodyDerefError::TypeParamBoundStepMisplaced);
+}
+
+/// A leading `TypeParamBound` on a NAMESPACE-space anchor is misplaced — a
+/// namespace has no header type-parameter axis — decided up front before the
+/// namespace-unrouted path.
+#[test]
+fn deref_namespace_space_leading_bound_is_misplaced() {
+    let (memo, _) = memo_for("namespace N { export type T = { a: 1 } }\n");
+    let err = memo
+        .deref_locator_body(&namespace_body_locator(
+            "N",
+            vec![TypeBodyPathStep::TypeParamBound {
+                ordinal: 0,
+                position: TypeParamBoundPosition::Constraint,
+            }],
+        ))
+        .expect_err("a namespace-space bound step must fail closed");
+    assert_eq!(err, LocatorBodyDerefError::TypeParamBoundStepMisplaced);
+}
+
+// ===========================================================================
+// Anchor-canonical coherence: a locator must deref through the memo of its OWN
+// producing canonical.
+// ===========================================================================
+
+/// Derefing a locator anchored at one canonical THROUGH a different memo fails
+/// closed with the typed `CanonicalMismatch` — and materialises no body cell.
+///
+/// Discrimination: both memos declare the same-named symbol. WITHOUT the
+/// top-level anchor check the wrong-memo deref demands and returns the OTHER
+/// memo's body (a wrong result); WITH it the mismatch is rejected before any
+/// demand.
+#[test]
+fn wrong_memo_deref_returns_canonical_mismatch() {
+    let (memo_a, _) = memo_for_canonical("/ws/a.ts", "type Shared = { a: 1 };\n");
+    let (memo_b, _) = memo_for_canonical("/ws/b.ts", "type Shared = { b: 2 };\n");
+    // Control: A resolves its own `Shared`.
+    assert!(
+        memo_a.type_decl("Shared").is_some(),
+        "memo A must declare the shared symbol"
+    );
+
+    // A locator anchored at A's canonical, derefed through B.
+    let locator = type_body_locator_on("/ws/a.ts", "Shared", Vec::new());
+    let err = memo_b
+        .deref_locator_body(&locator)
+        .expect_err("a cross-memo deref must fail typed, never return B's body");
+    assert_eq!(
+        err,
+        LocatorBodyDerefError::CanonicalMismatch,
+        "a locator anchored at A's canonical must not deref through B"
+    );
+    assert!(
+        !memo_b.type_entry_materialized("Shared"),
+        "the mismatched deref must materialise no body cell"
+    );
+}
+
+// ===========================================================================
+// Augmentation-scoped type-param bounds — addressable through the SAME path
+// vocabulary as top-level type decls (`declare module` + `declare global`).
+// ===========================================================================
+
+fn module_scope(specifier: &str) -> AuthoredAugmentationScope {
+    AuthoredAugmentationScope::Module {
+        specifier: Arc::from(specifier),
+    }
+}
+
+/// An augmentation-scoped `interface`'s type-param constraint derefs to the
+/// EXACT authored constraint body through the shared type-space navigator.
+#[test]
+fn aug_module_type_param_constraint_reached() {
+    let source = "declare module \"vue\" {\n  interface Foo<T extends string> { x: T }\n}\n";
+    let (memo, _) = memo_for(source);
+    let derefed = memo
+        .deref_locator_body(&aug_type_locator(
+            "Foo",
+            module_scope("vue"),
+            vec![TypeBodyPathStep::TypeParamBound {
+                ordinal: 0,
+                position: TypeParamBoundPosition::Constraint,
+            }],
+        ))
+        .expect("the augmentation interface's ordinal-0 constraint must deref");
+    assert!(
+        matches!(
+            single(&derefed),
+            TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+        ),
+        "the augmentation type-param constraint is `string`; got {:?}",
+        derefed.shape
+    );
+}
+
+/// The constraint and default slots of an augmentation-scoped parameter are
+/// DISTINCT authored bodies; `position` selects between them.
+#[test]
+fn aug_module_type_param_default_distinct_from_constraint() {
+    let source =
+        "declare module \"vue\" {\n  interface Foo<T extends string = number> { x: T }\n}\n";
+    let (memo, _) = memo_for(source);
+    let constraint = memo
+        .deref_locator_body(&aug_type_locator(
+            "Foo",
+            module_scope("vue"),
+            vec![TypeBodyPathStep::TypeParamBound {
+                ordinal: 0,
+                position: TypeParamBoundPosition::Constraint,
+            }],
+        ))
+        .expect("constraint derefs");
+    let default = memo
+        .deref_locator_body(&aug_type_locator(
+            "Foo",
+            module_scope("vue"),
+            vec![TypeBodyPathStep::TypeParamBound {
+                ordinal: 0,
+                position: TypeParamBoundPosition::Default,
+            }],
+        ))
+        .expect("default derefs");
+    assert!(
+        matches!(
+            single(&constraint),
+            TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+        ),
+        "constraint is `string`; got {:?}",
+        constraint.shape
+    );
+    assert!(
+        matches!(
+            single(&default),
+            TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        ),
+        "default is `number`; got {:?}",
+        default.shape
+    );
+    assert_ne!(single(&constraint), single(&default));
+}
+
+/// The lexical env of an augmentation-scoped bound at ordinal `i` is the
+/// PREFIX of parameters declared before it — `U extends keyof T` binds the
+/// prior sibling `T`, never `U` itself.
+#[test]
+fn aug_module_type_param_prefix_env_for_sibling_bound() {
+    let source =
+        "declare module \"vue\" {\n  interface Foo<T, U extends keyof T> { x: T; y: U }\n}\n";
+    let (memo, _) = memo_for(source);
+    let derefed = memo
+        .deref_locator_body(&aug_type_locator(
+            "Foo",
+            module_scope("vue"),
+            vec![TypeBodyPathStep::TypeParamBound {
+                ordinal: 1,
+                position: TypeParamBoundPosition::Constraint,
+            }],
+        ))
+        .expect("U's constraint `keyof T` derefs");
+    assert!(
+        matches!(single(&derefed), TypeExpr::KeyOf(_)),
+        "U's constraint is `keyof T`; got {:?}",
+        derefed.shape
+    );
+    assert_eq!(
+        derefed.type_parameters.len(),
+        1,
+        "the bound at ordinal 1 binds ONLY the prior sibling prefix `[T]`"
+    );
+    assert_eq!(derefed.type_parameters[0].name, "T");
+}
+
+/// After selecting an augmentation-scoped bound, the REMAINING path navigates
+/// over the selected bound expression.
+#[test]
+fn aug_module_type_param_post_bound_descent() {
+    let source = "declare module \"vue\" {\n  interface Foo<T extends { a: string }> { x: T }\n}\n";
+    let (memo, _) = memo_for(source);
+    let derefed = memo
+        .deref_locator_body(&aug_type_locator(
+            "Foo",
+            module_scope("vue"),
+            vec![
+                TypeBodyPathStep::TypeParamBound {
+                    ordinal: 0,
+                    position: TypeParamBoundPosition::Constraint,
+                },
+                TypeBodyPathStep::Member { ordinal: 0 },
+                TypeBodyPathStep::MemberValue,
+            ],
+        ))
+        .expect("descent into the augmentation constraint object's member value must resolve");
+    assert!(
+        matches!(
+            single(&derefed),
+            TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+        ),
+        "the constraint object's member `a` value is `string`; got {:?}",
+        derefed.shape
+    );
+}
+
+/// An EMPTY-path augmentation locator still derefs the WHOLE contribution body
+/// unchanged — for `declare module` AND `declare global`.
+#[test]
+fn aug_empty_path_derefs_whole_body_compat() {
+    let source = "declare module \"vue\" {\n  interface Mod { m: string }\n}\n\
+                  declare global {\n  interface Glob { g: number }\n}\n";
+    let (memo, _) = memo_for(source);
+
+    let module_body = memo
+        .deref_locator_body(&aug_type_locator("Mod", module_scope("vue"), Vec::new()))
+        .expect("the whole module-augmentation body derefs");
+    assert!(
+        matches!(
+            module_body.shape,
+            DerefedBodyShape::Single(TypeExpr::Object(_))
+        ),
+        "the whole module-augmentation body is the authored object; got {:?}",
+        module_body.shape
+    );
+
+    let global_body = memo
+        .deref_locator_body(&aug_type_locator(
+            "Glob",
+            AuthoredAugmentationScope::Global,
+            Vec::new(),
+        ))
+        .expect("the whole global-augmentation body derefs");
+    assert!(
+        matches!(
+            global_body.shape,
+            DerefedBodyShape::Single(TypeExpr::Object(_))
+        ),
+        "the whole global-augmentation body is the authored object; got {:?}",
+        global_body.shape
+    );
+}
+
+/// A `declare global` augmentation-scoped `interface`'s type-param constraint
+/// derefs through the SAME shared navigator.
+#[test]
+fn aug_global_type_param_constraint_reached() {
+    let source = "declare global {\n  interface G<T extends number> { x: T }\n}\n";
+    let (memo, _) = memo_for(source);
+    let derefed = memo
+        .deref_locator_body(&aug_type_locator(
+            "G",
+            AuthoredAugmentationScope::Global,
+            vec![TypeBodyPathStep::TypeParamBound {
+                ordinal: 0,
+                position: TypeParamBoundPosition::Constraint,
+            }],
+        ))
+        .expect("the global augmentation interface's ordinal-0 constraint must deref");
+    assert!(
+        matches!(
+            single(&derefed),
+            TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        ),
+        "the global augmentation type-param constraint is `number`; got {:?}",
+        derefed.shape
+    );
+}
+
+/// A mid-path `TypeParamBound` on an augmentation locator is misplaced —
+/// caught by the SAME up-front pass as the top-level decl path.
+#[test]
+fn aug_misplaced_non_leading_bound_fails_closed() {
+    let source = "declare module \"vue\" {\n  interface Foo<T> { a: string }\n}\n";
+    let (memo, _) = memo_for(source);
+    let err = memo
+        .deref_locator_body(&aug_type_locator(
+            "Foo",
+            module_scope("vue"),
+            vec![
+                TypeBodyPathStep::Member { ordinal: 0 },
+                TypeBodyPathStep::TypeParamBound {
+                    ordinal: 0,
+                    position: TypeParamBoundPosition::Constraint,
+                },
+            ],
+        ))
+        .expect_err("a mid-path augmentation bound step must fail closed");
+    assert_eq!(err, LocatorBodyDerefError::TypeParamBoundStepMisplaced);
+}
+
+// ===========================================================================
+// Symmetric bound-slot coverage.
+// ===========================================================================
+
+/// The DEFAULT slot of a parameter with a constraint but no default fails
+/// closed with the typed absent-bound error (the Default-position analogue of
+/// the constraint-absent case).
+#[test]
+fn deref_type_param_default_absent_fails_closed() {
+    let (memo, _) = memo_for("type Foo<T extends string> = { x: T };\n");
+    let err = memo
+        .deref_locator_body(&type_body_locator(
+            "Foo",
+            vec![TypeBodyPathStep::TypeParamBound {
+                ordinal: 0,
+                position: TypeParamBoundPosition::Default,
+            }],
+        ))
+        .expect_err("a param with no default must fail closed on the Default slot");
+    assert_eq!(
+        err,
+        LocatorBodyDerefError::TypeParamBoundAbsent {
+            ordinal: 0,
+            position: TypeParamBoundPosition::Default,
+        }
+    );
+}
+
+/// A merged same-name `interface` with type parameters exposes the ordinal-0
+/// constraint over the merged group through the leading-bound path.
+#[test]
+fn merged_interface_with_type_params_leading_bound() {
+    let (memo, _) =
+        memo_for("interface Bar<T extends string> { a: T }\ninterface Bar<T> { b: number }\n");
+    // Control: `Bar` is a merged decl.
+    let decl = memo.type_decl("Bar").expect("Bar exists");
+    assert!(decl.body.is_merged(), "two same-name interfaces merge");
+
+    let derefed = memo
+        .deref_locator_body(&type_body_locator(
+            "Bar",
+            vec![TypeBodyPathStep::TypeParamBound {
+                ordinal: 0,
+                position: TypeParamBoundPosition::Constraint,
+            }],
+        ))
+        .expect("the merged group's ordinal-0 constraint must deref");
+    assert!(
+        matches!(
+            single(&derefed),
+            TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)
+        ),
+        "the merged group's ordinal-0 constraint is `string`; got {:?}",
+        derefed.shape
+    );
+}
+
+/// A leading `TypeParamBound` on a NON-annotated value fails closed with
+/// `TypeParamBoundStepMisplaced` — the up-front placement check fires BEFORE
+/// the annotation-absent path, so a bound on a value never surfaces as
+/// `ValueAnnotationAbsent`.
+#[test]
+fn non_annotated_value_leading_bound_is_misplaced() {
+    let (memo, _) = memo_for("declare const val;\ntype Other = { o: 1 };\n");
+    let err = memo
+        .deref_locator_body(&value_body_locator(
+            "val",
+            vec![TypeBodyPathStep::TypeParamBound {
+                ordinal: 0,
+                position: TypeParamBoundPosition::Constraint,
+            }],
+        ))
+        .expect_err("a leading bound on a non-annotated value must fail closed");
+    assert_eq!(
+        err,
+        LocatorBodyDerefError::TypeParamBoundStepMisplaced,
+        "the up-front placement check must fire before the annotation-absent path"
+    );
 }

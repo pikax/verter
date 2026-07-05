@@ -10,7 +10,7 @@
 use verter_semantic::analysis::type_eval::{AugmentationScopeKind, TypeDeclBody};
 use verter_type_expr::locators::{
     AuthoredAugmentationScope, AuthoredBodyLocator, LocatorSymbolSpace, MacroPayloadPosition,
-    TypeBodyPathStep,
+    TypeBodyPathStep, TypeParamBoundPosition,
 };
 use verter_type_expr::{ObjectMember, TypeExpr, TypeParam};
 
@@ -21,6 +21,14 @@ use super::{DeclBodyMemo, DemandOutcome};
 /// body and NEVER falls back to a transient re-parse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LocatorBodyDerefError {
+    /// The locator anchor names a DIFFERENT producing canonical than the memo
+    /// serving the deref — a locator must deref through the memo of its OWN
+    /// producing canonical (`anchor.canonical_id == memo.key.canonical`). A
+    /// unit variant (no payload) keeps this hot error enum cheap; the invariant
+    /// is structural, so the identities are not needed on the failure path.
+    /// Checked up front for every arm, before any body demand — the typed,
+    /// release-present successor to the former branch-local `debug_assert_eq!`.
+    CanonicalMismatch,
     /// The locator anchor names no inventoried declaration. This is a
     /// GENUINE, cacheable resolution result (the symbol truly does not
     /// exist) — DISTINCT from [`Self::LeaseMiss`].
@@ -38,6 +46,24 @@ pub(crate) enum LocatorBodyDerefError {
     /// A VALUE anchor whose declaration carries no authored type
     /// annotation — there is no authored TYPE body at that position.
     ValueAnnotationAbsent,
+    /// A `TypeParamBound` step names a parameter ordinal past the owning
+    /// declaration's type-parameter list. Fail-closed, never a fabricated body.
+    TypeParamOrdinalOutOfRange { ordinal: u32 },
+    /// The referenced type parameter exists but carries no authored body at the
+    /// requested bound slot (no constraint for [`TypeParamBoundPosition::Constraint`],
+    /// no default for [`TypeParamBoundPosition::Default`]) — analogous to
+    /// [`Self::ValueAnnotationAbsent`].
+    TypeParamBoundAbsent {
+        ordinal: u32,
+        position: TypeParamBoundPosition,
+    },
+    /// A `TypeParamBound` step appears anywhere other than the first path step,
+    /// or on a non-type-space anchor. Type parameters live on the declaration
+    /// header, not inside the body expression and not on a value / namespace
+    /// annotation position, so the step is misplaced by definition. Merged
+    /// group-level type parameters are unioned, not per-contributor, so a
+    /// contributor-header bound axis does not exist either.
+    TypeParamBoundStepMisplaced,
     /// Namespace bodies are not inventoried by the decl-body memo; a
     /// namespace anchor has no memo-backed authored body to deref.
     NamespaceBodyUnrouted,
@@ -99,6 +125,34 @@ impl DeclBodyMemo {
         &self,
         locator: &AuthoredBodyLocator,
     ) -> Result<DerefedAuthoredBody, LocatorBodyDerefError> {
+        // One top-level anchor-canonical coherence gate for ALL arms: a
+        // locator MUST deref through the memo of its OWN producing canonical.
+        // Checked BEFORE any body demand — the typed, release-present successor
+        // to the former branch-local `debug_assert_eq!` (release-stripped).
+        let anchor = match locator {
+            AuthoredBodyLocator::MacroPayload(payload) => &payload.anchor,
+            AuthoredBodyLocator::DeclBody(slot) => &slot.anchor,
+            AuthoredBodyLocator::AugmentationBody(aug) => &aug.anchor,
+        };
+        if anchor.canonical_id.as_ref() != self.key.canonical.as_ref() {
+            return Err(LocatorBodyDerefError::CanonicalMismatch);
+        }
+
+        // `TypeParamBound` placement is a SYNTACTIC invariant — validate the
+        // WHOLE path UP FRONT, before any body demand/lowering, so a
+        // structurally-misplaced bound fails closed with the distinct error
+        // regardless of whether an earlier path step would resolve (and never
+        // lowers a body for a structurally-invalid path).
+        match locator {
+            AuthoredBodyLocator::DeclBody(slot) => {
+                validate_type_param_bound_placement(slot.anchor.space, &slot.path)?;
+            }
+            AuthoredBodyLocator::AugmentationBody(aug) => {
+                validate_type_param_bound_placement(aug.anchor.space, &aug.path)?;
+            }
+            AuthoredBodyLocator::MacroPayload(_) => {}
+        }
+
         match locator {
             AuthoredBodyLocator::MacroPayload(payload) => match payload.payload {
                 // The macro generic type argument keeps its sole sanctioned
@@ -115,11 +169,6 @@ impl DeclBodyMemo {
                 }
             },
             AuthoredBodyLocator::DeclBody(slot) => {
-                debug_assert_eq!(
-                    slot.anchor.canonical_id.as_ref(),
-                    self.key.canonical.as_ref(),
-                    "a locator must deref through the memo of its OWN producing canonical"
-                );
                 match slot.anchor.space {
                     LocatorSymbolSpace::Type => {
                         // Serve through the memo's OWN lazy demand cell so a
@@ -151,13 +200,27 @@ impl DeclBodyMemo {
                                 }
                             }
                         };
-                        let shape = navigate_type_body(lowered.body.clone(), &slot.path)?;
-                        Ok(DerefedAuthoredBody {
-                            shape,
-                            type_parameters: lowered.type_parameters.clone(),
-                        })
+                        // A type-decl-header type parameter's bound (leading
+                        // `TypeParamBound` step) plus any post-bound descent
+                        // route through the ONE shared type-space navigator,
+                        // exactly as the augmentation type-space branch does.
+                        navigate_type_space_body(
+                            lowered.body.clone(),
+                            &lowered.type_parameters,
+                            &slot.path,
+                        )
                     }
                     LocatorSymbolSpace::Value => {
+                        // A value-decl / function type parameter lives on the
+                        // signature, not on this annotation position, so a
+                        // leading `TypeParamBound` step is misplaced by
+                        // definition — fail closed without demanding a body.
+                        if matches!(
+                            slot.path.first(),
+                            Some(TypeBodyPathStep::TypeParamBound { .. })
+                        ) {
+                            return Err(LocatorBodyDerefError::TypeParamBoundStepMisplaced);
+                        }
                         let lowered = match self.value_decl_outcome(slot.anchor.symbol.as_ref()) {
                             DemandOutcome::LeaseMiss => {
                                 return Err(LocatorBodyDerefError::LeaseMiss)
@@ -181,16 +244,20 @@ impl DeclBodyMemo {
                         })
                     }
                     LocatorSymbolSpace::Namespace => {
+                        // A namespace decl has no memo-backed body and no
+                        // header type-parameter axis; a leading `TypeParamBound`
+                        // step is misplaced (not merely unrouted).
+                        if matches!(
+                            slot.path.first(),
+                            Some(TypeBodyPathStep::TypeParamBound { .. })
+                        ) {
+                            return Err(LocatorBodyDerefError::TypeParamBoundStepMisplaced);
+                        }
                         Err(LocatorBodyDerefError::NamespaceBodyUnrouted)
                     }
                 }
             }
             AuthoredBodyLocator::AugmentationBody(aug) => {
-                debug_assert_eq!(
-                    aug.anchor.canonical_id.as_ref(),
-                    self.key.canonical.as_ref(),
-                    "a locator must deref through the memo of its OWN producing canonical"
-                );
                 let scope_kind = match &aug.scope {
                     AuthoredAugmentationScope::Global => AugmentationScopeKind::Global,
                     AuthoredAugmentationScope::Module { specifier } => {
@@ -214,16 +281,17 @@ impl DeclBodyMemo {
                                 return Err(LocatorBodyDerefError::UnknownSymbol)
                             }
                         };
-                        let shape = match lowered.body.clone() {
-                            TypeDeclBody::Single(expr) => DerefedBodyShape::Single(expr),
-                            TypeDeclBody::Merged(merged) => {
-                                DerefedBodyShape::Merged(merged.contributors)
-                            }
-                        };
-                        Ok(DerefedAuthoredBody {
-                            shape,
-                            type_parameters: lowered.type_parameters.clone(),
-                        })
+                        // An augmentation-scoped `interface` / `type` decl is an
+                        // authored type-decl-header decl, so its type-param
+                        // bounds and body sub-positions navigate through the
+                        // SAME shared type-space navigator as a top-level decl.
+                        // An empty `path` preserves the whole-body Single/Merged
+                        // behavior unchanged.
+                        navigate_type_space_body(
+                            lowered.body.clone(),
+                            &lowered.type_parameters,
+                            &aug.path,
+                        )
                     }
                     LocatorSymbolSpace::Value | LocatorSymbolSpace::Namespace => {
                         Err(LocatorBodyDerefError::AugmentationBodySpaceUnrouted)
@@ -232,6 +300,92 @@ impl DeclBodyMemo {
             }
         }
     }
+}
+
+/// Up-front structural validation of `TypeParamBound` placement over a
+/// producer-emitted path, run BEFORE any body demand.
+///
+/// A `TypeParamBound` step addresses a type parameter on the type-declaration
+/// HEADER, so it is allowed ONLY as `path[0]` AND only on a TYPE-space anchor:
+///
+/// - any `TypeParamBound` at `path[1..]` (a mid-path bound) is misplaced —
+///   type parameters do not live inside the body expression;
+/// - any `TypeParamBound` anywhere in the path (including `path[0]`) on a
+///   VALUE / NAMESPACE anchor is misplaced — value / function type parameters
+///   live on the signature, and a namespace has no header type-parameter axis.
+///
+/// Enforcing this up front makes [`LocatorBodyDerefError::TypeParamBoundStepMisplaced`]
+/// hold regardless of whether an earlier path step would resolve (an in-body
+/// navigation would otherwise swallow it as a generic `PathUnresolved`).
+fn validate_type_param_bound_placement(
+    space: LocatorSymbolSpace,
+    path: &[TypeBodyPathStep],
+) -> Result<(), LocatorBodyDerefError> {
+    let is_bound =
+        |step: &TypeBodyPathStep| matches!(step, TypeBodyPathStep::TypeParamBound { .. });
+    if path.iter().skip(1).any(is_bound) {
+        return Err(LocatorBodyDerefError::TypeParamBoundStepMisplaced);
+    }
+    if !matches!(space, LocatorSymbolSpace::Type) && path.iter().any(is_bound) {
+        return Err(LocatorBodyDerefError::TypeParamBoundStepMisplaced);
+    }
+    Ok(())
+}
+
+/// The ONE shared type-space navigator over a lowered TYPE declaration body +
+/// its header type parameters. Used by BOTH the top-level decl-body and the
+/// ambient-augmentation type-space deref branches so the two never diverge
+/// into a second navigation engine.
+///
+/// A leading `TypeParamBound` step is served from the declaration's type
+/// parameters (which live on the header, not in the body expression): it
+/// selects the constraint / default bound of the parameter at `ordinal`, the
+/// remaining steps navigate over the selected bound, and the returned
+/// `type_parameters` are the LEXICAL-PREFIX env of that bound (the parameters
+/// declared BEFORE `ordinal`). Any other path navigates the body directly
+/// with the full header type-parameter env; an empty path yields the whole
+/// body (preserving the merged-contributor carrier).
+///
+/// Placement of a leading bound is presumed already validated by
+/// [`validate_type_param_bound_placement`]; a mid-path bound reaching
+/// [`navigate_expr`] still fails closed there as defense-in-depth.
+fn navigate_type_space_body(
+    body: TypeDeclBody,
+    type_parameters: &[TypeParam],
+    path: &[TypeBodyPathStep],
+) -> Result<DerefedAuthoredBody, LocatorBodyDerefError> {
+    if let Some(TypeBodyPathStep::TypeParamBound { ordinal, position }) = path.first() {
+        let ordinal = *ordinal;
+        let position = *position;
+        let tp = type_parameters
+            .get(ordinal as usize)
+            .ok_or(LocatorBodyDerefError::TypeParamOrdinalOutOfRange { ordinal })?;
+        let bound = match position {
+            TypeParamBoundPosition::Constraint => tp.constraint.as_ref(),
+            TypeParamBoundPosition::Default => tp.default.as_ref(),
+        }
+        .ok_or(LocatorBodyDerefError::TypeParamBoundAbsent { ordinal, position })?;
+        let expr = navigate_expr(bound.as_ref().clone(), &path[1..])?;
+        return Ok(DerefedAuthoredBody {
+            shape: DerefedBodyShape::Single(expr),
+            // Engine-current lexical type-parameter env of this bound: the
+            // prior-sibling prefix frame (`type_parameters[..ordinal]`) used by
+            // the binder-frame family for BOTH constraints and defaults. `T` at
+            // ordinal 0 sees an empty prefix; `U extends keyof T` (ordinal 1)
+            // binds `T` but not `U` itself or later params. This intentionally
+            // mirrors the existing engine convention; TS-exact constraint
+            // forward references (TypeScript lets a constraint reference later
+            // siblings, unlike a default) are a separate binder-frame policy
+            // concern, not handled here. `get` succeeded, so `ordinal < len`
+            // and the prefix slice is valid.
+            type_parameters: type_parameters[..ordinal as usize].to_vec(),
+        });
+    }
+    let shape = navigate_type_body(body, path)?;
+    Ok(DerefedAuthoredBody {
+        shape,
+        type_parameters: type_parameters.to_vec(),
+    })
 }
 
 /// Navigate a producer-emitted [`TypeBodyPathStep`] path over the OWNED
@@ -308,6 +462,13 @@ fn navigate_expr(
             }
             (NavigatePosition::Member(member), TypeBodyPathStep::MemberValue) => {
                 NavigatePosition::Expr(member_value_expr(member)?)
+            }
+            // A `TypeParamBound` step is valid ONLY as the first path step
+            // (served from the decl header before navigation begins); reaching
+            // one here means it appeared mid-path — fail closed with the
+            // distinct misplaced error rather than a generic path miss.
+            (_, TypeBodyPathStep::TypeParamBound { .. }) => {
+                return Err(LocatorBodyDerefError::TypeParamBoundStepMisplaced)
             }
             _ => return Err(LocatorBodyDerefError::PathUnresolved),
         };

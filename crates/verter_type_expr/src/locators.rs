@@ -40,6 +40,15 @@ pub struct AuthoredAnchor {
     pub space: LocatorSymbolSpace,
 }
 
+/// Which authored bound slot of a type parameter a locator addresses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
+pub enum TypeParamBoundPosition {
+    /// The constraint body (`T extends C`).
+    Constraint,
+    /// The default body (`T = D`).
+    Default,
+}
+
 /// A producer-emitted step from a decl body toward an authored sub-position.
 /// Named positions / small indices only — never a byte span, never a `TypeExpr`.
 /// The arm set is a closed schema; adding an arm is a reviewed schema event.
@@ -53,6 +62,15 @@ pub enum TypeBodyPathStep {
     Member { ordinal: u32 },
     /// Into the value-type surface of the current member.
     MemberValue,
+    /// Into the constraint / default body of the owning declaration's type
+    /// parameter at this ordinal (`T extends C` / `T = D`). The bound slot is
+    /// selected by `position`. Valid ONLY as the first path step (rooted at the
+    /// decl header): type parameters live on the declaration header, not inside
+    /// the body expression, so this step never appears mid-path.
+    TypeParamBound {
+        ordinal: u32,
+        position: TypeParamBoundPosition,
+    },
 }
 
 /// Locator for a whole authored declaration body OR a named sub-slot of it.
@@ -131,12 +149,21 @@ pub enum AuthoredAugmentationScope {
 /// declarations never enter file-scope symbol inventories, so the plain
 /// decl-body anchor cannot address them — the scope tag is part of the
 /// authored position's identity.
+///
+/// An augmentation-scoped `interface` / `type` declaration is an authored
+/// type-decl-header declaration, so its intra-body sub-positions — including
+/// its type-parameter constraint / default bounds — are addressable through
+/// the SAME `path` vocabulary as a top-level [`TypeBodySlot`]: `path` is empty
+/// for the whole augmentation body, or a named sub-slot otherwise.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
 pub struct AugmentationBodyLocator {
     /// The augmenter file + the augmented symbol name + its space.
     pub anchor: AuthoredAnchor,
     /// Which ambient augmentation block the contribution lives in.
     pub scope: AuthoredAugmentationScope,
+    /// Empty = the whole augmentation contribution body; non-empty = the
+    /// named sub-slot (mirrors [`TypeBodySlot::path`]).
+    pub path: Arc<[TypeBodyPathStep]>,
 }
 
 /// The cross-boundary CONTENT-FREE slot identity — a CLOSED sum over the authored

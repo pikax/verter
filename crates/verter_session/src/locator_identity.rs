@@ -61,7 +61,7 @@ use crate::semantic_query::{HashValue, ResolvedDeclSlotIdentity, SemanticSymbolS
 use verter_type_expr::locators::{
     AugmentationBodyLocator, AuthoredAnchor, AuthoredAugmentationScope, AuthoredBodyLocator,
     LocatorSymbolSpace, MacroPayloadLocator, MacroPayloadPosition, SymbolBodyLocator,
-    TypeArgLocator, TypeBodyPathStep, TypeBodySlot,
+    TypeArgLocator, TypeBodyPathStep, TypeBodySlot, TypeParamBoundPosition,
 };
 
 mod sealed {
@@ -342,6 +342,7 @@ impl_r6_key_safe!(
     TypeBodySlot => w_type_body_slot,
     SymbolBodyLocator => w_symbol_body_locator,
     TypeArgLocator => w_type_arg_locator,
+    TypeParamBoundPosition => w_type_param_bound_position,
     MacroPayloadPosition => w_macro_payload_position,
     MacroPayloadLocator => w_macro_payload_locator,
     AuthoredAugmentationScope => w_authored_augmentation_scope,
@@ -382,6 +383,16 @@ fn w_type_body_path_step(step: &TypeBodyPathStep) {
         | TypeBodyPathStep::IntersectionArm { ordinal }
         | TypeBodyPathStep::Member { ordinal } => key_safe(ordinal),
         TypeBodyPathStep::MemberValue => {}
+        TypeBodyPathStep::TypeParamBound { ordinal, position } => {
+            key_safe(ordinal);
+            key_safe(position);
+        }
+    }
+}
+
+fn w_type_param_bound_position(p: &TypeParamBoundPosition) {
+    match p {
+        TypeParamBoundPosition::Constraint | TypeParamBoundPosition::Default => {}
     }
 }
 
@@ -433,9 +444,14 @@ fn w_authored_augmentation_scope(s: &AuthoredAugmentationScope) {
 }
 
 fn w_augmentation_body_locator(l: &AugmentationBodyLocator) {
-    let AugmentationBodyLocator { anchor, scope } = l;
+    let AugmentationBodyLocator {
+        anchor,
+        scope,
+        path,
+    } = l;
     key_safe(anchor);
     key_safe(scope);
+    key_safe(path);
 }
 
 fn w_authored_body_locator(l: &AuthoredBodyLocator) {
@@ -742,6 +758,7 @@ mod tests {
         // bounds; that negative is proven by the trybuild compile-fail fixtures.)
         assert_r6_key_safe::<LocatorLoweringKey>();
         assert_r6_key_safe::<AuthoredBodyLocator>();
+        assert_r6_key_safe::<TypeParamBoundPosition>();
         assert_r6_key_safe::<ResolvedDeclSlotIdentity>();
         assert_r6_key_safe::<SlotEnvIdentity>();
         assert_r6_key_safe::<SessionDemandIdentity>();

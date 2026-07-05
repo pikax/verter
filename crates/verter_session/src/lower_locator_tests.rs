@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use verter_type_expr::locators::{
     AuthoredAnchor, AuthoredBodyLocator, LocatorSymbolSpace, MacroPayloadLocator,
-    MacroPayloadPosition, TypeBodyPathStep, TypeBodySlot,
+    MacroPayloadPosition, TypeBodyPathStep, TypeBodySlot, TypeParamBoundPosition,
 };
 use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, TypeExpr};
 
@@ -78,6 +78,26 @@ fn decl_body_locator(canonical: &str, symbol: &str) -> AuthoredBodyLocator {
             space: LocatorSymbolSpace::Type,
         },
         path: Arc::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
+    })
+}
+
+/// A locator into a top-level TYPE symbol's type-parameter constraint / default
+/// bound at `ordinal`.
+fn type_param_bound_locator(
+    canonical: &str,
+    symbol: &str,
+    ordinal: u32,
+    position: TypeParamBoundPosition,
+) -> AuthoredBodyLocator {
+    AuthoredBodyLocator::DeclBody(TypeBodySlot {
+        anchor: AuthoredAnchor {
+            canonical_id: Arc::from(canonical),
+            symbol: Arc::from(symbol),
+            space: LocatorSymbolSpace::Type,
+        },
+        path: Arc::from(
+            vec![TypeBodyPathStep::TypeParamBound { ordinal, position }].into_boxed_slice(),
+        ),
     })
 }
 
@@ -640,5 +660,84 @@ fn lower_locator_derefs_a_member_value_sub_position() {
             ))
         ),
         "the `Base` member-0 value position is the authored `string`"
+    );
+}
+
+/// A type-parameter bound lowered through the PRODUCTION `lower_locator` /
+/// dispatch path binds ONLY the prior-sibling prefix as `TypeParam` shells: the
+/// deref's lexical-prefix env flows through so a bound at ordinal `i` sees the
+/// params declared before it, never the full list.
+///
+/// Positive (`U extends keyof T`, ordinal 1): `keyof T` lowers to a deferred
+/// `KeyOf` whose base is the prior sibling `T` bound as a `TypeParam` shell.
+///
+/// Discriminating (`T extends U`, ordinal 0 — a forward reference): T's
+/// constraint `U` is an out-of-prefix reference. With the correct EMPTY prefix
+/// env it stays an unbound `BareRef` carrier; an over-binding deref that
+/// returned the FULL parameter list would bind `U` as a shell, flipping the
+/// node to a `TypeParam`. A non-`TypeParam` node here is the RED/GREEN
+/// discriminator that the prefix env — not the full list — reaches the graph.
+#[test]
+fn lower_locator_type_param_bound_binds_only_prior_sibling_prefix() {
+    let host = host();
+    upsert_ts(
+        &host,
+        OWNER_ID,
+        "export type Foo<T, U extends keyof T> = { x: T; y: U };\n\
+         export type Bar<T extends U, U> = { x: T; y: U };\n",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = host.project_type_store().semantic_graph();
+
+    // Positive: U's `keyof T` constraint binds the prior sibling `T` as a shell.
+    let foo_u = match dispatch.lower_locator(type_param_bound_locator(
+        OWNER_ID,
+        "Foo",
+        1,
+        TypeParamBoundPosition::Constraint,
+    )) {
+        QueryResult::Value(id) => id,
+        other => panic!("lower_locator must produce a value, got {other:?}"),
+    };
+    match graph.node_data(foo_u).as_deref() {
+        Some(SemanticNodeData::KeyOf { base }) => match graph.node_data(*base).as_deref() {
+            Some(SemanticNodeData::TypeParam { display_name, .. }) => {
+                assert_eq!(
+                    display_name.as_ref(),
+                    "T",
+                    "the KeyOf base must bind the prior sibling `T` as a shell"
+                );
+            }
+            other => panic!("the `keyof` base must be a TypeParam shell `T`, got {other:?}"),
+        },
+        other => panic!("U's constraint must lower to a deferred KeyOf carrier, got {other:?}"),
+    }
+
+    // Discriminating: T's `U` forward-reference constraint (ordinal 0) has an
+    // EMPTY prefix, so `U` is out of scope and must NOT bind as a shell.
+    let bar_t = match dispatch.lower_locator(type_param_bound_locator(
+        OWNER_ID,
+        "Bar",
+        0,
+        TypeParamBoundPosition::Constraint,
+    )) {
+        QueryResult::Value(id) => id,
+        other => panic!("lower_locator must produce a value, got {other:?}"),
+    };
+    let bar_t_data = graph.node_data(bar_t);
+    assert!(
+        !matches!(
+            bar_t_data.as_deref(),
+            Some(SemanticNodeData::TypeParam { .. })
+        ),
+        "T's constraint `U` (ordinal 0, EMPTY prefix) must NOT bind `U` as a \
+         TypeParam shell — an over-binding deref returning the full param list \
+         would, flipping this to a TypeParam; got {:?}",
+        bar_t_data.as_deref()
+    );
+    assert!(
+        matches!(bar_t_data.as_deref(), Some(SemanticNodeData::BareRef(_))),
+        "the out-of-prefix `U` must stay an unbound BareRef carrier; got {:?}",
+        bar_t_data.as_deref()
     );
 }

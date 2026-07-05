@@ -2806,6 +2806,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         scope: verter_type_expr::locators::AuthoredAugmentationScope::Module {
                             specifier: Arc::from(spec.as_str()),
                         },
+                        // The whole augmentation contribution body (no sub-slot).
+                        path: Arc::from(
+                            Vec::<verter_type_expr::locators::TypeBodyPathStep>::new()
+                                .into_boxed_slice(),
+                        ),
                     },
                 );
                 let node = self.lower_located_body_with_provenance(

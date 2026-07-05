@@ -43,6 +43,7 @@ macro_rules! assert_fact_carriers {
 assert_fact_carriers!(
     LocatorSymbolSpace,
     AuthoredAnchor,
+    TypeParamBoundPosition,
     TypeBodyPathStep,
     TypeBodySlot,
     SymbolBodyLocator,
@@ -318,6 +319,37 @@ fn tuple_element_label_optional_rest_participate_in_fact_identity() {
         "labelled vs unlabelled"
     );
     assert_eq!(base, tuple_element(Some("a"), false, false));
+}
+
+#[test]
+fn type_param_bound_position_and_ordinal_participate_in_locator_identity() {
+    // A type-parameter bound locator's identity spans BOTH axes: which
+    // parameter (`ordinal`) and which authored bound slot (`position`). Two
+    // slots differing on ONLY one axis must be distinct content-free identities,
+    // so a constraint locator can never alias its sibling default (or a
+    // different parameter's bound).
+    let bound = |ordinal: u32, position: TypeParamBoundPosition| TypeBodySlot {
+        anchor: anchor(),
+        path: std::sync::Arc::from(
+            vec![TypeBodyPathStep::TypeParamBound { ordinal, position }].into_boxed_slice(),
+        ),
+    };
+    let constraint0 = bound(0, TypeParamBoundPosition::Constraint);
+    let default0 = bound(0, TypeParamBoundPosition::Default);
+    let constraint1 = bound(1, TypeParamBoundPosition::Constraint);
+    assert_ne!(
+        constraint0, default0,
+        "constraint vs default must discriminate a bound locator"
+    );
+    assert_ne!(
+        constraint0, constraint1,
+        "the parameter ordinal must discriminate a bound locator"
+    );
+    assert_eq!(
+        constraint0,
+        bound(0, TypeParamBoundPosition::Constraint),
+        "two bound locators agreeing on both axes are the same identity"
+    );
 }
 
 #[test]
