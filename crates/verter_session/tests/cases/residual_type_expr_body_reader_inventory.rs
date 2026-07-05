@@ -4,6 +4,25 @@
 //! `TypeExpr` reads are an enumerated, curated, justified set while the
 //! genuinely-graph-backed readers route through the shared hot accessor.
 //!
+//! ## NOT the complete semantic-`TypeExpr` census (Stage-10 re-census pointer)
+//!
+//! This inventory covers ONLY declaration-BODY readers (the `<recv>.body` /
+//! `<recv>.body.<method>` shape). It is a SUBSET of the complete
+//! semantic-`TypeExpr` surface and structurally CANNOT see the query-time
+//! RESOLVED / GENERATED class — DTOs the resolver PRODUCES at query time
+//! (`type_expand`/`ExpandedField`, the `component_meta.rs *Analysis` carriers,
+//! the `html_intrinsics` catalog, `svelte_default_synth`, the
+//! `mapper_binder_registry` structural fingerprint, etc.). The COMPLETE
+//! Stage-10 terminal-completeness census (≈96 semantic surfaces; ≈24 that were
+//! unscoped before the re-census) lives in
+//! `docs/arch/stage10-typeexpr-terminal-removal-design.md` §3.6, and the
+//! `type_expand` three-surface handle-native sub-design is §5.7. That
+//! resolved/generated class is enforced STRUCTURALLY in its owning blocks
+//! (semantic `TypeExpr` field DELETION + `#[derive(NoTypeExpr)]` +
+//! sealed-output privacy), NOT by this body-reader scanner — adding
+//! name-keyed scanner rows for it here would violate the landed-scanner bar.
+//! This whole inventory file DELETES at the Stage-10 atomic landing (design §0).
+//!
 //! ## scanner records (durable guard-local record — Structural-Confinement-First)
 //!
 //! ```text

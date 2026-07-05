@@ -1,20 +1,20 @@
 # Stage 10 — B3–B7 execution plan + parallelization DAG (SEQUENCING AUTHORITY)
 
-**STATUS: DAG + forks DECIDED and triple-review-validated; the design residual census is MATERIALLY
-INCOMPLETE (§7), which couples into most blocks — only B5 + the TP0 prelude are cleanly dispatchable now.**
+**STATUS: GAP CLOSED — DAG + forks DECIDED and triple-review-validated; the §7 design re-census is COMPLETE and
+the `type_expand` sub-design is DECIDED. All blocks B3–B7 are now dispatchable (subject to their DAG edges).**
 The scoping pass VALIDATED the parallelization DAG, the FN5.2→B6 redraw, the boundary forks, and the four
-carrier/mechanism forks (all survived adversarial 3/3 review + a fix-cycle re-review). It ALSO discovered —
-via review + a code-verifying codex consult — that the binding design's residual census (§3, "39 semantic
-readers") is **materially incomplete**: an entire class of query-time resolved/generated `TypeExpr` surfaces is
-not scoped — `type_expand`/`ExpandedField` (the central component-meta resolved-field representation, ~40
-production files) is entirely uncensused (0 design mentions); `svelte_default_synth` is mentioned once in the
-design (§5.4) but not censused/scoped/assigned; `resolver_core::type_expansion` is source-verified present but
-absent from the design + field-maps entirely. That gap is NOT confined to
-B6/B7: B3's `Analyzed*` narrowing forces edits to the `type_expand` producer (`type_eval_build.rs`), and B4
-(which consumes B3's schema — the `B3 → B4` edge — and whose `build_typeof` carries synthesized-default logic)
-is entangled with both B3 and the svelte-synth surface. **So: only B5 and the TP0 prelude are cleanly
-dispatchable now; B3, B4, B6, B7 are all gated on the §7 design re-census + the `type_expand` sub-design
-(B4 transitively, via B3 + the synthesized-default entanglement).**
+carrier/mechanism forks (all survived adversarial 3/3 review + a fix-cycle re-review). It ALSO discovered — via
+review + a code-verifying codex consult — that the binding design's residual census (§3, "39 semantic readers")
+was materially INCOMPLETE (an entire class of query-time resolved/generated `TypeExpr` surfaces was unscoped).
+**That gap is now CLOSED (§7):** a systematic re-census (design §3.6) enumerated the COMPLETE ≈96-surface
+semantic-`TypeExpr` set (≈24 previously unscoped — dominated by the 15 `component_meta.rs *Analysis` carriers +
+the newly-found `html_intrinsics` catalog); the `type_expand`/`ExpandedField` THREE-surface sub-design is DECIDED
+(two unprimed codex legs + a code-verifying decider — design §5.7); the `svelte_default_synth` reassignment is
+ratified (semantic cut → B6; §7.2); the newly-found surfaces are assigned (design §3.6); the dead
+`resolver_core::type_expansion` is confirmed DELETE-in-B6; and the terminal bar (all semantic `TypeExpr` → 0 by
+B8) is **ACHIEVABLE with NO blocker** (no Stage-11/12 deferral). The DAG topology and all fork decisions are
+UNCHANGED — the re-census GREW several block scopes but PRESERVED Wave-1 `B3∥B5` and Wave-2 `B4∥B7`
+file-disjointness (§2.2, re-verified).
 
 This document sits UNDER the binding design
 [`stage10-typeexpr-terminal-removal-design.md`](./stage10-typeexpr-terminal-removal-design.md) (mechanism/
@@ -64,8 +64,8 @@ Wave 1  │  B3  ∥   B5    │   VALIDATED FF-safe (per-file disjoint; see §2
         └───────┬────────┘
                 │  (assemble slices on staging — no green-compile gate, atomic model)
         ┌───────┴────────┐
-Wave 2  │  B4  ∥   B7*   │   PROVISIONAL — safe for the ORIGINAL B7 surface, but B7 GREW (§7);
-        └───────┬────────┘   re-verify B4∩B7 = ∅ after the re-census reassigns svelte-synth (§7).
+Wave 2  │  B4  ∥   B7    │   VALIDATED FF-safe — §7 re-census RESOLVED: svelte-synth cut → B6, so
+        └───────┬────────┘   B4∩B7 = ∅ (B7 = output boundary + ComponentMetaResultDb split only).
                 │
 Wave 3        B6*             consumes B3 schema + B4 hot surface; owns FN5.2 + type_expand internal (§7)
                 │
@@ -90,12 +90,13 @@ Wave 3        B6*             consumes B3 schema + B4 hot surface; owns FN5.2 + 
   file INTERSECTION with B3 is still ∅ because B3 does not touch `hashing.rs`. The disjointness rests on the
   per-file lists in §2.1, not on a "B5 = verter_session only" crate claim (which is false). Residual risk:
   neither worktree edits the shared `verter_type_expr` type-param substrate — that is TP0, done first.
-- **Wave 2 `B4 ∥ B7` — PROVISIONAL.** For the ORIGINAL B7 surface (Svelte persisted facts + framework/output
-  DTOs), B4∩B7 = ∅. BUT the re-census (§7) grows B7 (svelte default synth, cache identity, more framework
-  consumers) and one newly-found surface (`svelte_default_synth`) is read at `project_semantic_dispatch/
-  build.rs:940`, a B4 file — so the grown B7 may collide with B4 on `build.rs`. **This pairing must be
-  re-verified after §7 reassigns the newly-found surfaces** (likely moving the svelte-synth semantic-carrier
-  cut into B6/Wave3, which already owns `build.rs`, leaving B7 output-boundary-only again).
+- **Wave 2 `B4 ∥ B7` — VALIDATED FF-safe (§7 re-census RESOLVED).** The §7 re-census risk — that the
+  `svelte_default_synth` cut at `project_semantic_dispatch/build.rs:940` (a B4 file) would grow B7 into a
+  same-wave `build.rs` collision with B4 — is DISSOLVED: the svelte-synth SEMANTIC-carrier cut was reassigned to
+  **B6 (Wave 3)**, which already owns `build.rs`. B7's grown scope is now output-boundary-only (Svelte persisted
+  facts + `SvelteScriptProvider::VERSION`/`stable_candidate_hash` + framework/output DTOs + the
+  `component_meta_result_db.rs` semantic/output snapshot split + vue `runtime_ctor`) — none a B4 file — so
+  B4∩B7 = ∅ holds. (§2.1 addendum + §2.2 build.rs row.)
 - **Wave 3 `B6`** runs alone; coupled to B3 (schema), B4 (`build.rs`), owns FN5.2 + the type_expand internal
   carrier. Running last removes remaining conflicts.
 
@@ -138,7 +139,7 @@ is the KNOWN scope; §7 adds surfaces the inventory itself omits.**
   test-only), `resolver_core/external_type_frontier.rs`, `host_manage/eval_env.rs` (typeof peel),
   `decl_body_memo.rs` (`compat_type_body_hash_input`), `fact_emission.rs`
   (`compat_value_body_hash_input`, `LazyBodyFactSource::compute`, `value_body_for_hash`),
-  `typeinfo/oracle_core/source_walk.rs::walk` (test-only).
+  the `typeinfo/oracle_core/**` subtree (`admission`/`normalize`/`source_walk`/`snapshot`/`hover_extract`/`identity`/`probe` — not just `source_walk::walk`) is ALREADY `#[cfg(any(test, feature = "oracle-gen"))]`-gated at `typeinfo/mod.rs:139` (never in the default build) → B5 only confirms/keeps the gating, no production conversion; and the imported-symbol dependency-closure walkers — `collect_type_expr_symbol_refs` defined in `host_manage.rs`, closure walkers in `host_manage/prepared_decl.rs` (§3.6 completeness model).
 - **`crates/verter_semantic/src/facts/hashing.rs`** — B5 ADDS a no-`TypeExpr` fingerprint-encoder entry point
   reusing the legacy byte grammar. The byte grammar to preserve is `compute_semantic_hash(body: &TypeExpr)`
   (`hashing.rs:186`) ONLY. `compute_display_hash` is NOT in this file and NOT part of the TypeExpr byte grammar:
@@ -158,8 +159,12 @@ is the KNOWN scope; §7 adds surfaces the inventory itself omits.**
   `project_semantic_dispatch/{raise,raise_sentinel,raise/shape_engine/*}.rs`, `host_manage/jsdoc_resolve.rs`, plus
   `Unknown{raw}` control-check consumers `meta_resolve/projectors/output_sink.rs`, `meta_resolve/materialize/field_types.rs`.
 - Session consumers of B3-owned narrowed `Projected*` facts.
-- **fork-b carried file:** `crates/verter_semantic/src/analysis/type_expand/request.rs` (`ExpandedNormalizedExpr`
-  — see fork b, §4, and §7 Surface 1).
+- **`type_expand/request.rs` (`verter_semantic`) — B3 owns the lower field narrowing** (§3.6 RESOLUTION / design §5.7):
+  the `Expanded*` `TypeExpr` field deletion → the `Expanded*Fact` NoTypeExpr family (incl. `ExpandedNormalizedExpr`)
+  lands in **B3**, alongside the rest of the lower fact family. **B6 CONSUMES** the narrowed facts through the session
+  `HotExpanded*` handle surface + the ~40 consumer rewrites; it does NOT own the lower-crate DTO edit. (Supersedes the
+  earlier "fork-b carried file → B6" framing — the two-legs-plus-decider ruling placed the lower `verter_semantic`
+  narrowing in B3; fork b's `FastShallowFieldExpr → HotTypeRef` session carrier remains a B6 session concern.)
 
 **B7 — framework/output boundary (FN5.2 REMOVED)**
 - `crates/verter_semantic/src/analysis/framework_facts/svelte.rs` (Svelte persisted facts + `SvelteScriptProvider::VERSION`
@@ -168,19 +173,42 @@ is the KNOWN scope; §7 adds surfaces the inventory itself omits.**
   `typeinfo/framework_surface/{executor.rs,mod.rs}`, `typeinfo/adapters/{vue,svelte}/adapter.rs`, and the framework
   stores (verify each compiles under the split DTO shape or is edited).
 
+**§3.6 re-census scope-growth addendum (verified file-disjoint — see §7 RESOLUTION):**
+- **B3 GAINS** (all `verter_semantic`, Wave 1): `analysis/type_expand/request.rs` (the `Expanded*` lower fact family),
+  `analysis/type_eval_build.rs` (the producer + `CollectedMacroTypeParams`), `analysis/component_meta.rs` (the 15
+  `*Analysis` lower fact carriers), `analysis/html_intrinsics.rs` (the lower `IntrinsicMemberFact` catalog). NONE is
+  B5's only `verter_semantic` file (`facts/hashing.rs`) → Wave-1 `B3∥B5` STILL disjoint.
+- **B5 GAINS** (Wave 1): `crates/verter_session/src/mapper_binder_registry.rs` (`hash_type_expr_structurally` → a
+  no-`TypeExpr` fingerprint encoder, fork-c sibling); plus the imported-symbol dependency-closure walkers
+  `host_manage/prepared_decl.rs` + `host_manage.rs` (`collect_type_expr_symbol_refs`, the dependency/fact-closure surface).
+  `verter_session` files, disjoint from B3's `verter_semantic` set.
+- **B6 GAINS** (Wave 3, runs alone): the session `HotExpanded*`/`HotComponentMetaAnalysis` surface + the ~40 `type_expand`
+  consumers (`host_manage/component_meta_extract.rs`, `meta_resolve/macro_member_walk.rs`, `meta_resolve/projectors/*`,
+  fallthrough); the framework-NEUTRAL synthesized-default semantic cut (`build.rs:940` + `insert_synthesised_value_default`
+  + BOTH `svelte_default_synth.rs` AND `vue_default_synth.rs`); the `ShapeSubject::TypeExpr`/`NonSyntheticTypeExpr`
+  cache-KEY conversion (`component_meta_caches.rs` → the sibling node-based `MemberValueNode` subject) + the
+  `meta_resolve/materialize/{utility_types,macro_shapes}.rs` L1 Pick/Omit + ref-name walkers;
+  `semantic_query_memo/synthetic_carrier_guard.rs`; `component_meta_registry.rs` resolved-body routing; and the DELETION
+  of `resolver_core/type_expansion{,_verter}.rs`.
+- **B7 GAINS** (Wave 2): the sealed `MaterializedExpanded*` output DTOs + the FULL `component_meta_result_db.rs` value
+  split (semantic snapshot + output snapshot — single-owner B7, NOT split with B6); `typeinfo/adapters/vue/runtime_ctor.rs`
+  (or delete). `component_meta_result_db.rs` does not intersect B4's `verter_session` files → Wave-2 `B4∥B7` STILL disjoint.
+
 ### 2.2 Cross-block shared-file map (known scope)
 
 | Shared file | Blocks (function) | Resolution |
 |---|---|---|
-| `project_semantic_dispatch/build.rs` | B4 `build_typeof` (W2) · B6 `class_heritage_bases` (W3) [· B2 done] [· §7 svelte-synth?] | serial across waves; §7 svelte-synth touch (`:940`) must land in a build.rs-owning block (B6). |
+| `project_semantic_dispatch/build.rs` | B4 `build_typeof` (W2) · B6 `class_heritage_bases` + §3.6 svelte-synth `build_vue_default_instance` `:940` (W3) [· B2 done] | serial across waves; RESOLVED — the svelte-synth `:940` cut lands in B6 (Wave 3), NOT B7 (Wave 2), so `build.rs` is B4(W2) then B6(W3), never two same-wave owners. |
 | `host_manage/eval_env.rs` | B5 typeof-peel (W1) · B4 `component_meta_binding_type_entries` (W2) · **B6 fork-b `fast_to_expansion`/`FastShallowFieldExpr` (W3)** | 3-block, serial across waves — no conflict, but all three touch it. |
 | `project_semantic_dispatch/raise.rs` | B6 closedness · FN5.2 (now B6) | single-owner (B6). |
 | `resolver_core/component_meta_query_engine/mod.rs` | B6 carriers · FN5.2 (now B6) | single-owner (B6). |
 | `verter_semantic/.../type_solver/query_engine.rs` | B3 `Projected*` def · B6 consumers (NOT this file) | def→B3 only. |
 | `resolver_core/prepared_decl.rs` | B2 done · B4 bundle | B4 owns forward. |
 
-After the FN5.2 redraw, no two CONCURRENT (same-wave) blocks share a file in the KNOWN scope. §7's additions
-must preserve this (esp. the svelte-synth/`build.rs` reassignment).
+After the FN5.2 redraw, no two CONCURRENT (same-wave) blocks share a file in the KNOWN scope. The §3.6 re-census
+additions PRESERVE this (verified — §7 RESOLUTION + the addendum in §2.1): the svelte-synth cut landed in B6 (Wave 3,
+not B7/Wave 2), and B3's new `verter_semantic` files do not touch B5's `facts/hashing.rs`. So Wave-1 `B3∥B5` and
+Wave-2 `B4∥B7` remain same-wave file-disjoint.
 
 ---
 
@@ -264,20 +292,23 @@ output seam emitting `Unknown{raw}` for display/JSDoc/raw-fallback only.
 
 ---
 
-## 5. Known-census assignment (complete for the 39-reader inventory; NOT terminal — see §7)
+## 5. Known-census assignment (complete for the 39-reader inventory; NOW terminal — the §7 re-census closed the gap)
 
 Within the design's KNOWN census, every residual is owned by exactly one block, none double- or unassigned:
 17 AuthoredShape → **B6**; 12 GraphFreeDto → **B5**; 6 GraphBackedPending → **B4**(3)+**B6**(3); the lower-crate
 `Prepared*`/`Analyzed*`/`Projected*` field removals → **B3**; `HotPrepared*`+`PreparedDeclBundle` → **B4**; orphan
-carriers → **B6** (+ `NamedTypeMember` output/Svelte facts → **B7**); hash trio → **B5** CONVERT; 2 oracle readers
-→ **B5** test-only; FN5.2 → **B6**.
+carriers → **B6** (+ `NamedTypeMember` output/Svelte facts → **B7**); hash trio → **B5** CONVERT; the 2 inventory oracle readers
+(and the whole `typeinfo/oracle_core/**` subtree the §3.6/§7 re-census expands them to) are already `#[cfg(test/oracle-gen)]`-gated (`typeinfo/mod.rs:139`, outside the default build) → **B5** confirms/keeps the gating, no production conversion; FN5.2 → **B6**.
 
 **No deferrals INSIDE the old 39-reader census** — every known-census fork is decided (fork c's byte-parity is an
 impl-time fixture proof against a decided architecture; fork b's downstream type_expand dependency is owned, not
-deferred). But §7 is an OPEN re-census/design gate: surfaces OUTSIDE the 39-reader inventory (the `type_expand`
-family, `svelte_default_synth`, `resolver_core::type_expansion`) are only partially scoped. **The plan does NOT
-currently guarantee zero semantic-`TypeExpr` residual by B8 — terminal-completeness is contingent on the §7
-re-census + the `type_expand` sub-design.**
+deferred). The §7 re-census gate is now CLOSED: the surfaces OUTSIDE the 39-reader inventory (the `type_expand`
+three-surface family + the 15 `*Analysis` carriers, `svelte_default_synth`, the newly-found `html_intrinsics` /
+`mapper_binder` / `synthetic_carrier_guard` / `CollectedMacroTypeParams` / vue `runtime_ctor` /
+`component_meta_registry` resolved-body, and the dead `resolver_core::type_expansion`) are ALL censused and assigned
+(design §3.6 / §5.7). **The plan now ESTABLISHES zero semantic-`TypeExpr` residual by B8 under the §3.6 ownership-by-rule +
+exhaustive-conversion proof — terminal-completeness is ACHIEVABLE with no blocker (design §3.6 verdict), no semantic-`TypeExpr`
+Stage-11/12 deferral (memo/perf compaction, e.g. the `whole_env` materialization teardown, may remain Stage-12).**
 
 ---
 
@@ -289,7 +320,7 @@ re-census + the `type_expand` sub-design.**
    with TP0-consuming B3 ONLY once B3 is unblocked (below). Assembling a WIP slice onto staging means cherry-pick
    WITHOUT a green-compile gate (atomic model; per-slice proof is the WIP parity oracle, not a green tree).
 
-**Gated on the §7 re-census + `type_expand` sub-design (do NOT dispatch until resolved):**
+**Now DISPATCHABLE — the §7 re-census gate is CLEARED (subject only to their DAG edges + scope growth below):**
 3. **B3** — its `Analyzed*`/`Prepared*` narrowing forces the `type_expand` producer (`type_eval_build.rs`) to change;
    the Analyzed* fact schema must be designed to feed `ExpandedField`'s no-`TypeExpr` replacement. Dispatch B3 in
    Wave 1 alongside B5 ONLY after the `type_expand` sub-design fixes that schema (B3∥B5 stays FF-safe per §2).
@@ -298,13 +329,23 @@ re-census + the `type_expand` sub-design.**
    `build.rs:575`) beside the neutral synthesized-default reader `build_vue_default_instance` (`build.rs:940`) that
    reads the `value_decl("default")` slot the svelte-synth surface populates. When B4 IS dispatched (after B3 + the
    re-census), it must NOT touch ANY synthesized-default logic in `build.rs` — B6 owns that migration.
-5. **B6** — Surface A + orphan carriers + FN5.2 + the `type_expand` internal carrier + (per §7.2) the svelte-synth
-   semantic cut. Gated on the re-census.
-6. **B7** — framework/output boundary; its scope grew (§7). Re-verify `B4 ∩ B7 = ∅` after the re-census reassigns
-   the svelte-synth semantic cut to B6.
+5. **B6** — Surface A + orphan carriers + FN5.2 + the `type_expand` SESSION cutover (`HotExpanded*`/`HotComponentMetaAnalysis`
+   + the ~40 consumers) + the svelte-synth semantic cut + `synthetic_carrier_guard` + `component_meta_registry` resolved-body
+   + the `resolver_core::type_expansion` deletion. Dispatchable (Wave 3, runs alone). NOTE: B6 owns the type_expand SESSION
+   surface + consumers; the lower `verter_semantic` `Expanded*Fact` family is B3 (§2.1 addendum).
+6. **B7** — framework/output boundary + persistence; scope grew (§3.6): the sealed `MaterializedExpanded*` output DTOs + the
+   FULL `ComponentMetaResultDb` semantic/output snapshot split + the typeinfo `TypeArgList` wire-input narrowing + vue
+   `runtime_ctor` (if retained). `B4 ∩ B7 = ∅` RE-VERIFIED disjoint (the svelte-synth semantic cut moved to B6; B7 is
+   output-boundary-only). Dispatchable.
 
-**Before ANY B3/B4/B6/B7 dispatch:** (a) amend the binding design for FN5.2→B6 (§3); (b) complete the §7 systematic
-re-census; (c) codex sub-design the `type_expand` handle-native migration; (d) ratify the svelte-synth reassignment.
+**Pre-dispatch prerequisites — ALL DONE:** (a) ✓ FN5.2→B6 formalized in the binding design (§5.6 + §3); (b) ✓ the §7
+systematic re-census complete (design §3.6); (c) ✓ the `type_expand` handle-native sub-design decided (design §5.7,
+three-surface split); (d) ✓ the svelte-synth reassignment ratified (semantic cut → B6). B3/B4/B6/B7 are now
+dispatchable; each B3/B6/B7 brief absorbs its §3.6 scope growth (B3: the lower `Expanded*Fact`/`ComponentMeta*Fact`
+family + 15 `*Analysis` + `html_intrinsics` lower catalog + `CollectedMacroTypeParams`; B6: session `HotExpanded*`/
+`HotComponentMetaAnalysis` + the ~40 consumers + `svelte_default_synth` cut + `synthetic_carrier_guard` +
+`component_meta_registry` resolved-body + the `type_expansion` deletion; B7: sealed `MaterializedExpanded*` +
+`ComponentMetaResultDb` split + vue `runtime_ctor`; B5: the `mapper_binder` fingerprint).
 
 **B8** — squash B1–B8; land §9 structural guards; delete the residual inventory + deferral docs; correct §3.5 stale
 prose. Every block is S-tier → full 3/3 + discrimination verification + independent confirm; the WIP parity oracle
@@ -312,7 +353,75 @@ runs across every slice.
 
 ---
 
-## 7. CRITICAL — design residual census is materially incomplete (GATES B3/B4/B6/B7)
+## 7. RESOLVED — design residual census completed + `type_expand` sub-design decided (was: materially incomplete, gated B3/B4/B6/B7)
+
+**RESOLUTION — this gap is CLOSED.** The re-census below is COMPLETE (design §3.6: ≈96 semantic surfaces, ≈24
+previously unscoped). Decisions landed into the binding design:
+
+- **`type_expand`/`ExpandedField` sub-design → DECIDED** (design §5.7): a THREE-surface split — **B3** owns the lower
+  `verter_semantic` NoTypeExpr fact family (`Expanded*Fact`/`ComponentMeta*Fact` + the 15 `component_meta.rs *Analysis`
+  carriers + the `type_eval_build.rs` producer + field deletion); **B6** owns the session `HotExpanded*` /
+  `HotComponentMetaAnalysis` surface + the ~40 consumer rewrites; **B7** owns the sealed `MaterializedExpanded*` output
+  DTOs + the full `ComponentMetaResultDb` semantic-snapshot / output-snapshot split. Two unprimed codex legs converged
+  on the design (E = three-surface split, rejecting hoist-to-session-`HotTypeRef` and scatter-per-consumer); a
+  code-verifying decider resolved the ONE divergence (lower fact family + `*Analysis`: B3, not B6 — the session
+  dependency is a sequencing artifact the atomic model dissolves).
+- **synthesized-default reassignment → RATIFIED** (§7.2 recommendation adopted): the framework-NEUTRAL semantic-carrier cut
+  (`project_semantic_dispatch/build.rs:940` `build_vue_default_instance` + `ShallowFileState::insert_synthesised_value_default`
+  + BOTH `svelte_default_synth.rs` AND the live Vue sibling `vue_default_synth.rs` — the shared `ComponentDefaultSynth` seam)
+  → **B6** (Wave 3, already owns `build.rs`); B7 retains the persisted `SvelteScriptFacts` +
+  `SvelteScriptProvider::VERSION`/`stable_candidate_hash` + framework output. This RESTORES Wave-2 `B4∥B7` disjointness
+  (no `build.rs` collision — the collision the §7.2 draft flagged is dissolved).
+- **Newly-found surfaces → ASSIGNED** (design §3.6 table): `html_intrinsics` → **B3** (lower `IntrinsicMemberFact`
+  static catalog, NOT an `AuthoredBodyLocator`) + **B6** (session consumers); `mapper_binder_registry` fingerprint → **B5**;
+  `synthetic_carrier_guard` → **B6**; `CollectedMacroTypeParams` → **B3** (currently callerless — delete/test-confine likely);
+  vue `runtime_ctor` → **B7** (or delete — no prod caller); `component_meta_registry` resolved-body → **B6**; the typeinfo
+  `resolve_named_symbol`/`TypeArgList` wire-input (`TypeArgList = &[Arc<TypeExpr>]`, lowers to `SemanticNodeId` at the host
+  boundary — a wire/producer boundary, not a semantic authority) → **B7** (narrow the session API off bare `Arc<TypeExpr>`);
+  `resolver_core::type_expansion{,_verter}` → **DELETE in B6** (verified dead: `.expand_type(` has zero production callers).
+  `ResolvedJsdocTag.resolved_type` (JSDoc-text-derived, output-projected to the verter_protocol wire graph + verter_ffi
+  only; VERIFIED no semantic reader) — is OUTPUT-class (no semantic conversion), BUT it is transitively PERSISTED on the
+  `ComponentMetaResultDb` value (`ResolutionTemplate.resolved_macros[].jsdoc.tags[].resolved_type`), so **B7** converts
+  the persisted form to the sealed output-snapshot node-id/display (never a bare persisted `TypeExpr`), as part of the
+  full `ComponentMetaResultDb` value split (design §5.7 / §4.1 item 10, pass-6 correction).
+- **Review-pass additions → FOLDED IN** (design §3.6 "Two further carriers" + "Completeness model"): the
+  `ShapeSubject::TypeExpr`/`NonSyntheticTypeExpr` cache-KEY (`component_meta_caches.rs:1076`) is RECLASSIFIED semantic
+  cache-identity (not an output value) → **B6** (narrow to the existing node-based `MemberValueNode` subject; the
+  `MaterializedOutputTypeExpr` VALUE stays OUT); `vue_default_synth` joins the framework-neutral B6 synth cut; the named
+  `&TypeExpr` param-walker tail (`meta_resolve/materialize/{utility_types,macro_shapes}.rs` → **B6**;
+  `host_manage/prepared_decl.rs`+`host_manage.rs` `collect_type_expr_symbol_refs` → **B5**; the `cycle_guard.rs`
+  `hash_type_expr`/`NormalizedTypeArgs` cache-identity walker → **B6**; the DEAD `owned_artifacts::OwnedTypeResolutionContext`
+  / `OwnedTypeExpr` arena → **B6 DELETE**, no production writer) travels with its owning subtree's block and is OWNED by
+  rule + CONVERTED (or deleted) per the design §3.6 Completeness model — the carrier-mechanical core + defense-in-depth
+  perimeter + §4.1 universal-scope, NOT a single §9 guard closing the walk surface.
+- **Pass-7 surface-class additions → FOLDED IN** (design §3.6 total-class ownership rule + named instances; the ownership
+  rule now ranges over FIVE surface classes — carrier field / free walker-reader-producer fn / retained memo-env / persisted
+  cache-value position / dead — not only struct fields): the RETAINED legacy eval-env carrier `DeclBodyMemo.whole_env:
+  OnceLock<Arc<EvalEnv>>` (`decl_body_memo.rs:202`) + its `EvalEnv` cluster (`type_eval.rs` `TypeDeclInfo.body`/
+  `MergedTypeBody.contributors`/`ValueDeclInfo.type_annotation`/`FunctionSignature.return_type`) — VALUE-authoritative on every
+  `get_component_meta` via `local_type_declaration_id`/`base_eval_env_arc` — → **B3** (lower-cluster field narrowing → a
+  `TypeExpr`-free `EvalEnv`, terminal-zero met regardless of memo survival) + **B6** consumer conversion: (a) re-point the
+  id/value consumers off `whole_env()` onto the EXISTING shallow-state-backed graph-native siblings
+  (`local_type_declaration_id_graph_native` etc., debug_assert-cross-checked, still `TypeExpr`-bearing until B3 narrows),
+  AND (b) convert the REMAINING fallthrough env-substitution surface (`fallthrough.rs:468` `base_eval_env_arc().clone()` →
+  the `Option<&EvalEnv>` node-domain evaluators `fallthrough_value_eval.rs:114+`) — MORE than a re-point. `whole_env`
+  SURVIVES B8 as a narrowed `TypeExpr`-free structure; its memo teardown is Stage-12 perf debt (retired-as-authority ≠ dead).
+  This REVERSES the stale design-§4.2 "whole-env not touched" exclusion (corrected). The lower-crate free-walker readers `verter_semantic/analysis/type_expr_refs.rs`
+  (`field_references_type_params` etc., called from `component_meta_query_engine/shallow_preserve.rs:91`) → **B3** schema +
+  **B6** callsite; the B6 policy walkers `component_meta_resolution_policy/{raw_restoration,slot_preservation}.rs`
+  (`raw_type_expr: Option<&TypeExpr>`) + `registry_materialize.rs` symbolic-preservation → **B6**; the DEAD walkers
+  `loop5_instrumentation.rs::{count_operator_nodes,record_outer_call_type_expr}` → **B6/B8 DELETE** (callerless in production).
+  Terminal bar stays ACHIEVABLE — all rule-1-owned and convertible/deletable; no un-convertible surface.
+- **Terminal bar → ACHIEVABLE by B8, NO blocker.** Every semantic `TypeExpr` carrier has a viable NoTypeExpr target
+  (fact / `AuthoredBodyLocator` / `HotTypeRef` / `SessionDemandIdentity` / sealed output). ZERO deferral to Stage 11/12.
+- **DAG → UNCHANGED and re-validated disjoint.** The re-census grew B3 (adds `type_expand/request.rs`,
+  `type_eval_build.rs`, `component_meta.rs`, `html_intrinsics.rs` — all `verter_semantic`, none touching B5's
+  `facts/hashing.rs`), B6 (session cutover, runs alone Wave 3), and B7 (cache split); Wave-1 `B3∥B5` and Wave-2 `B4∥B7`
+  remain file-disjoint (§2.2 updated).
+
+The original gap analysis follows, retained as the record. **(SUPERSEDED — every "gated" / "do NOT dispatch" / "only B5+TP0 dispatchable" statement below is the PRE-resolution framing; the RESOLUTION above is authoritative: all blocks are now dispatchable, the census is complete, terminal bar ACHIEVABLE.)**
+
+---
 
 A code-verifying codex consult (framed on review findings, verified first-hand) established that the binding
 design's residual census (§3.1 "39 semantic readers" + §3.2 orphan carriers) and the residual-inventory test
@@ -367,17 +476,18 @@ final.
    semantic path. Must be DELETED (if unused) or explicitly quarantined as protocol/output — not left an
    unclassified resolver-core `TypeExpr` API.
 
-**Required actions (design-owner + CTO, before B3/B4/B6/B7 dispatch):**
-- Run a SYSTEMATIC design re-census of query-time resolved/generated `TypeExpr` surfaces on the component-meta +
-  framework-surface hot paths (codex swept the obvious ones; more of this class may exist). Update design §3
-  census, §4.1 scope, and the residual-inventory test.
-- Codex sub-design the `type_expand` handle-native migration (30+ files) as a first-class Stage-10 surface.
-- Ratify the svelte_default_synth block reassignment (§7.2) and re-verify `B4 ∥ B7` disjointness afterward.
-- **Dispatch gating (per §6):** ONLY B5 + the TP0 prelude are CLEAN and dispatchable now; B3, B4, B6, B7 are all
-  GATED on the re-census + the `type_expand` sub-design (B4 transitively, via the `B3 → B4` edge + its `build_typeof`
-  synthesized-default logic — when dispatched it must not touch ANY synthesized-default logic in `build.rs`). The
-  DAG shape (Wave 1 `B3∥B5`, Wave 2 `B4∥B7`, Wave 3 `B6`) and all fork decisions remain valid once the gate clears
-  — the gap changes WHEN blocks dispatch, not the DAG topology or the forks.
+**Required actions — ALL COMPLETED (see RESOLUTION at the top of §7):**
+- ✓ SYSTEMATIC design re-census of query-time resolved/generated `TypeExpr` surfaces — DONE (design §3.6, ≈96
+  surfaces; design §3.1 pointer added; §4.1 scope bullet 10 added; the residual-inventory test's module doc records
+  the superseding census).
+- ✓ Codex sub-design the `type_expand` handle-native migration — DONE (design §5.7: three-surface split; two unprimed
+  legs + code-verifying decider).
+- ✓ Ratify the `svelte_default_synth` block reassignment (§7.2) and re-verify `B4∥B7` disjointness — DONE (semantic
+  cut → B6; `B4∥B7` re-verified disjoint).
+- ✓ **Dispatch gating CLEARED (per §6):** B5 + TP0 were always clean; B3, B4, B6, B7 are now ALL dispatchable. The
+  DAG shape (Wave 1 `B3∥B5`, Wave 2 `B4∥B7`, Wave 3 `B6`) and all fork decisions are UNCHANGED — the re-census grew
+  block scopes but preserved the topology and the same-wave file-disjointness. When B4 is dispatched it still must NOT
+  touch ANY synthesized-default logic in `build.rs` (B6 owns that migration, including the svelte-synth cut).
 
 ## 8. Carried obligations
 
