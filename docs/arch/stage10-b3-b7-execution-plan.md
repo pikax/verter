@@ -1,7 +1,7 @@
 # Stage 10 — B3–B7 execution plan + parallelization DAG (SEQUENCING AUTHORITY)
 
-**STATUS: GAP CLOSED — DAG + forks DECIDED and triple-review-validated; the §7 design re-census is COMPLETE and
-the `type_expand` sub-design is DECIDED. All blocks B3–B7 are now dispatchable (subject to their DAG edges).**
+**STATUS: SEMANTIC-`TypeExpr` GAP CLOSED — the SEMANTIC-`TypeExpr` DAG + forks DECIDED and triple-review-validated; the §7 design re-census is COMPLETE and
+the `type_expand` sub-design is DECIDED. ONE open fork remains on the SINGLE-ENGINE axis: the §9.3 firewall FORM is an open CTO decision (see the AMENDMENT note). All blocks B3–B7 are dispatchable on the SEMANTIC-`TypeExpr` axis (subject to their DAG edges) — EXCEPT that B6's SINGLE-ENGINE-axis landing, and therefore the B1–B8 atomic squash, are GATED on the §9.3 CTO firewall-form choice added by the AMENDMENT below (semantic-`TypeExpr` conversion has no blocker; the single-engine axis does).**
 The scoping pass VALIDATED the parallelization DAG, the FN5.2→B6 redraw, the boundary forks, and the four
 carrier/mechanism forks (all survived adversarial 3/3 review + a fix-cycle re-review). It ALSO discovered — via
 review + a code-verifying codex consult — that the binding design's residual census (§3, "39 semantic readers")
@@ -12,9 +12,42 @@ the newly-found `html_intrinsics` catalog); the `type_expand`/`ExpandedField` TH
 (two unprimed codex legs + a code-verifying decider — design §5.7); the `svelte_default_synth` reassignment is
 ratified (semantic cut → B6; §7.2); the newly-found surfaces are assigned (design §3.6); the dead
 `resolver_core::type_expansion` is confirmed DELETE-in-B6; and the terminal bar (all semantic `TypeExpr` → 0 by
-B8) is **ACHIEVABLE with NO blocker** (no Stage-11/12 deferral). The DAG topology and all fork decisions are
-UNCHANGED — the re-census GREW several block scopes but PRESERVED Wave-1 `B3∥B5` and Wave-2 `B4∥B7`
-file-disjointness (§2.2, re-verified).
+B8) is **ACHIEVABLE with NO semantic-`TypeExpr` blocker** (no Stage-11/12 deferral). The DAG topology and all fork
+decisions are UNCHANGED — the re-census GREW several block scopes but PRESERVED Wave-1 `B3∥B5` and Wave-2 `B4∥B7`
+file-disjointness (§2.2, re-verified). **(SCOPE CORRECTION — read with the AMENDMENT note below: this "NO blocker /
+UNCHANGED" is the SEMANTIC-`TypeExpr` axis; the AMENDMENT adds ONE open SINGLE-ENGINE-axis fork — the §9.3 firewall
+FORM — that GATES B6's single-engine-axis landing and therefore the B1–B8 atomic squash on a CTO choice, and whose
+form (a)/(c) can grow the B6 touch-set / DAG.)**
+
+**AMENDMENT (independent-confirm, below-`verter_semantic` `VueMacroElements` hole).** A post-land confirm found ONE
+semantic-`TypeExpr` surface the earlier `verter_session`/`verter_semantic`-only scope structurally omitted: the
+`verter_parser` `ResolvedProp`/`ResolvedNamedCallSignature.type_expr` carriers (embedded in `ResolvedElements`,
+persisted whole as `SemanticNodeData::VueMacroElements` AND in the SECOND `ProjectTypeStore` cache `ResolvedTypeCacheDb`,
+warm-cloned on the imported-`.vue` hot path). It is now OWNED by **B6** (design §3.6 rule-1 class (vi) / §5.4 / §9.3;
+execution-plan §2.1 B6 GAINS + §2.2) — ALL query-time holders (`VueMacroElements`, `ResolvedTypeCacheDb` [DELETED, not converted],
+and the session `ResolvedElements` resolver holders) convert to NoTypeExpr fact+locator DTOs that PROJECT through the ONE dispatch
+(the confirmed second engine — the parser `type_surface` structural expander + the session `frontier_engine` — is severed as
+their SEMANTIC AUTHORITY). The expander SURVIVES as a LIVE codegen/SFC structural pass = the **§9.3 recorded six-field
+single-engine deferral (codex-DEFER ruled, NOT a semantic-`TypeExpr` deferral)** — invariant-1 met for the query-time surface,
+NOT claimed complete for that producer. Terminal-`TypeExpr` bar STILL ACHIEVABLE on the SEMANTIC-`TypeExpr` axis (zero semantic
+`TypeExpr` persisted/warm-cloned on the query-time carriers). **SCOPE CORRECTION to the top-of-doc headline.** The headline's
+"ACHIEVABLE with NO blocker" and "all fork decisions are UNCHANGED" are scoped to the SEMANTIC-`TypeExpr` axis; this amendment
+ADDS exactly ONE open NON-semantic-`TypeExpr` fork on the SINGLE-ENGINE axis: the §9.3 structural callability-firewall FORM
+((a) query-time crate-slice + Cargo dep-graph guard + drop the `verter_compiler` re-export / (b) de-publicize+cap-gate every
+expander read AND write entrypoint / (c) full DTO-mediated consolidation) is a decision-ready CTO/governance escalation, and
+**B6's SINGLE-ENGINE-axis landing is BLOCKED until the CTO picks that form** (the SEMANTIC-`TypeExpr` terminal bar is achievable
+regardless of which form is chosen). §4.1 scope + §3.6 ownership-by-rule are WIDENED to cover below-`verter_semantic`
+graph-persisted payload DTOs (tightened to "a crate `verter_semantic` transitively depends on", excluding above-semantic output
+crates like `verter_protocol` → B7). DAG UNCHANGED under firewall form (b) landing IN PLACE — B6 runs alone in Wave 3, so its
+current touch-set additions are same-wave-disjoint by construction (`host_manage.rs` is a serial cross-wave B5(W1)/B6(W3) share;
+the frontier surface is B5 Surface-B territory, cross-wave serial; `verter_parser/.../type_surface/mod.rs` is a new crate no
+block claims); form (a) additionally touches `verter_compiler` (a crate NEW to the plan) and form (c) RE-SCOPES B6 to absorb the
+codegen/session-boundary consolidation (a new B6 scope/DAG amendment before dispatch/landing). The robust invariant is same-wave
+DISJOINTNESS — preserved under EVERY form because B6 is Wave-3-alone (any crate/file it touches is disjoint from concurrent
+blocks) — NOT a literal "DAG UNCHANGED": NO form is purely `verter_session`-in-place (form (b) too narrows the `verter_compiler`
+re-export + de-publicizes the parser expander, which its "cannot-NAME" guard requires), so only B6's touch-set SIZE varies by
+the CTO's form-choice, never the same-wave disjointness. The B7 `ComponentMetaResultDb` value split is clarified to name
+BOTH `ResolutionTemplate` and `CachedComponentMetaResult.analysis: ComponentMetaAnalysis`.
 
 This document sits UNDER the binding design
 [`stage10-typeexpr-terminal-removal-design.md`](./stage10-typeexpr-terminal-removal-design.md) (mechanism/
@@ -190,9 +223,21 @@ is the KNOWN scope; §7 adds surfaces the inventory itself omits.**
   `meta_resolve/materialize/{utility_types,macro_shapes}.rs` L1 Pick/Omit + ref-name walkers;
   `semantic_query_memo/synthetic_carrier_guard.rs`; `component_meta_registry.rs` resolved-body routing; and the DELETION
   of `resolver_core/type_expansion{,_verter}.rs`.
+- **B6 GAINS — the independent-confirm below-`verter_semantic` `VueMacroElements`/`ResolvedElements` carrier** (Wave 3, runs alone;
+  design §3.6 third-carrier row / rule-1 class (vi) / §5.4). Touch-set additions: **`crates/verter_parser/src/utils/oxc/script/type_surface/mod.rs`**
+  (`ResolvedProp.type_expr`/`ResolvedNamedCallSignature.type_expr` → NoTypeExpr fact+`AuthoredBodyLocator` DTO; `ResolvedElements` + the
+  transitive embeddings `ShallowResolvedElements`/`TypeResolutionContext.companion_types`, and `verter_compiler`'s `PreparedSetup.companion_types`/`external_types` construction sites),
+  **`crates/verter_session/src/semantic_query.rs`** (the `VueMacroElements` node re-cut as a NoTypeExpr projection + doc), **`crates/verter_session/src/semantic_query_memo/mod.rs`**
+  (`insert_/get_resolved_named_type` — intern NoTypeExpr, refcount-only warm read, no raw `TypeExpr`), and **`crates/verter_session/src/host_manage.rs`**
+  (the `HostNamedTypeCacheAdapter` `NamedTypeCache` `get`/`insert` at `:385`–`:427`), plus the already-listed `semantic_query_memo/synthetic_carrier_guard.rs`
+  (delete the `TypeExpr` walk → structural `NoTypeExpr` invariant) and `resolver_core/surface_projector.rs` (display via sealed output/dispatch handle, no `&TypeExpr` semantic read).
+  **Additional `ResolvedElements` holders (3/3-review addition — `VueMacroElements` is NOT the only persisted holder):** the SECOND persisted `ProjectTypeStore` cache **`ResolvedTypeCacheDb`** (`ResolvedTypeCacheEntry.resolved: Option<ResolvedElements>` — `crates/verter_session/src/types.rs:2531` + `crates/verter_session/src/project_type_store.rs:831`, **DELETED** not converted — query-time reuse rides the dispatch memo), plus session resolver holders/readers `resolver_core/symbol_resolver.rs` (`TypeShape`/`elements`), `resolver_core/external_type_body.rs`, `resolver_core/external_macro_types.rs`, `resolver_core/component_meta/mod.rs` (`elements: ResolvedElements`, `:82`), `host_resolve/frontier_helpers.rs`, `host_resolve/external_macro_collector.rs` (`:36`), `host_manage/jsdoc_resolve.rs` (`:450`), the write/read site `host_resolve/external_type_resolution.rs`, and the CROSS-WAVE `host_manage/prepared_decl.rs` (`ResolvedElements` returns `:2957`/`:2980` — already a B4(W2)/B5(W1) file, so the B6(W3) touch is cross-wave serial, no same-wave collision) — all hold/return the SAME `ResolvedElements` and convert with the single `NoTypeExpr`+`NoStoredSpan` type change, each an OWNED B6 site. **Audit/display consumers** `component_meta_audit/footprint_miner.rs` (`:1133` hashes `VueMacroElements` via `Debug`) + `semantic_query/display.rs` (`:429` reads the payload for display) get EXPLICIT stable-identity/display rules over the new NoTypeExpr shell (not incidental `Debug` formatting). The parser expander's SFC-extraction (`crates/verter_parser/.../vue/script/{bindings,setup}.rs`) + compiler-codegen consumers (`crates/verter_compiler/src/framework_common/vue_bridge.rs`, `host_resolve/virtual_file_pipeline.rs`) SURVIVE as a live codegen/SFC structural pass = the §9.3 recorded single-engine deferral (NOT owned/converted here, NOT dead code). The `host_resolve/{external_type_resolution,route_surface,frontier_engine}.rs` frontier surface is B5 Surface-B territory — routed by ownership-by-rule, cross-wave serial (B5 W1 / B6 W3), not a same-wave collision.
+  **Enforcement (design §9.3):** `ResolvedElements` SPLITS into a NEW query-owned NoTypeExpr+`NoStoredSpan` semantic shell (`SemanticMacroSurfaceShell`, dispatch-cap-minted, the only valid `VueMacroElements` payload) + a codegen-only `ResolvedElements` survivor (`type_expr`/`type_expr_scope` removed, spans retained); a `SemanticDispatchAuthorityCap` / `CodegenStructuralSurfaceCap` capability pair + compile-fail/trait guards + a behavioral disagreement fixture are NECESSARY barriers — but the code-verifying decider ruled them NOT SUFFICIENT (they close only the STORAGE + known-path axes; a query module can still NAME/CALL the `pub` expander and BRANCH on the result in-flight, and the parser `NamedTypeCache` WRITE adapter `HostNamedTypeCacheAdapter::insert` [`host_manage.rs:385`-`:427`] still WRITES expander-authored `ResolvedElements` into the graph). **A structural CALLABILITY FIREWALL is a HARD B6 landing precondition** (query-time semantic code must be structurally UNABLE to name/call/feed the `pub` expander — READ and WRITE entrypoints both): satisfiable by (a) crate extraction (`verter_session_query` with no parser/compiler/OXC dep, a compile-time Cargo dep-graph guard, + removing `verter_compiler`'s `pub use verter_parser::utils`), (b) de-publicizing/cap-gating EVERY expander read AND write entrypoint — the `CodegenStructuralSurfaceCap` counts ONLY if every old `pub`/cap-less callable API is removed or unreachable to query modules AND a compile-time / Cargo-dep-graph guard proves query-time code cannot NAME the expander, and the adapter WRITE path is re-owned by dispatch (dispatch produces the shell / adapter demoted to syntax-locator ingestion / bypass deleted), or (c) full DTO-mediated consolidation. Forms (a)/(b) PRESERVE the §9.3 codegen/SFC deferral; form (c) CLOSES it by RE-SCOPING B6 to absorb the codegen/session-boundary design (the "cannot be built now" work done PROPERLY, not the ad-hoc partial splice that section defers). **The REQUIREMENT is settled; the FORM is a decision-ready CTO/governance ESCALATION and B6's SINGLE-ENGINE-axis landing is BLOCKED until the CTO picks it** — MAJOR B6 scope growth (query-engine re-crateing and/or `verter_compiler` public-API change, or the (c) re-scope) exceeding this amendment's mandate + inconsistent with the plan's current single-engine posture. (The SEMANTIC-`TypeExpr` axis is unblocked regardless of form; only the single-engine axis is CTO-gated.) Codegen/SFC survivor migration also owns the direct `ResolvedElements` users on the codegen rail — `verter_compiler/src/tsc/script.rs:97`, `verter_parser/.../vue/script/macros.rs:23`, `bindings.rs`/`setup.rs`, `PreparedSetup.companion_types`/`external_types` — under a mechanical "all compiler/SFC `ResolvedElements` users migrate through the codegen DTO rail" rule (they read zero `.type_expr`, so dropping it from the survivor is clean). **Write-path + guard touch-set (single-engine WRITE severance — the firewall must close the WRITE bypass, not only READ/CALL):** the full write chain is the injection site `host_manage/eval_program.rs:466`/`:486` (`ctx.set_named_type_cache(Some(HostNamedTypeCacheAdapter { .. }))`), the parser cache trait `verter_parser/.../vue/script/named_type_keys.rs:56` (`NamedTypeCache::get`/`insert` traffic `Arc<ResolvedElements>` — a semantic payload across the parser boundary), the parser-ctx read/write `type_surface/mod.rs:973`-`:1023`, and the adapter `HostNamedTypeCacheAdapter::insert` (`host_manage.rs:385` impl / `insert` `:409`-`:427`) → `insert_resolved_named_type`. B6 removes or re-owns the `NamedTypeCache<ResolvedElements>` API as dispatch-owned syntax/locator ingestion (dispatch PRODUCES the shell). **Existing guards that currently ASSERT the old parser-write bypass MUST FLIP/DELETE in B6/B8** — `project_semantic_dispatch_invariants_tests.rs:1831`-`:1848` + `:2907`-`:2941` (assert `HostNamedTypeCacheAdapter` writes the graph via `insert_resolved_named_type` directly) and `architecture_guards.rs:17917`-`:17922` (asserts the ONLY production call site of `insert_resolved_named_type` is the adapter forwarding the parser `Arc<ResolvedElements>` UNCHANGED); leaving them green would let the parser-write path survive under a renamed adapter. Their disposition rides the §9.3 firewall form. **Full old-shape guard/test disposition (B6/B8 flip or delete EVERY assertion of the retired shape — the named sites are KNOWN HIGH-SIGNAL sites, NOT exhaustive; any old-shape assertion surfaced at impl flips by the SAME rule, else the retired `TypeExpr`-carrying model survives under renamed plumbing):** (i) the `VueMacroElements(Arc<ResolvedElements>)` payload / single-construction / `Debug` / direct `get`/`insert` / member-`type_expr` old-shape tests — `crates/verter_session/src/semantic_query_memo/tests.rs` (the `VueMacroElements`/`get_`/`insert_resolved_named_type` payload-shape cases ~`:128`/`:3491`/`:3568`/`:4738`/`:4883`/`:8641`), `crates/verter_session/tests/cases/g_block/u2_display_projection_guards.rs:1047`, the WHOLE `crates/verter_session/tests/cases/architecture_guards.rs:17917`-`:18224` block (it pins the old single-construction/`Debug`/`Arc<ResolvedElements>` model, not only `:17917`-`:17922`), the parser typed-form test class `crates/verter_parser/src/utils/oxc/script/type_surface_typed_form_tests.rs` (pins the `type_expr`/`type_expr_scope` member fields), and `crates/verter_session/src/project_global_cache_tests.rs` (pins `insert_resolved_named_type` synthetic-carrier rejection over member `type_expr`); (ii) the `ResolvedTypeCacheDb` DB-existence / reuse / boundedness / empty-cache / eviction / generation / cache-len fixtures for the DELETED cache — `crates/verter_session/src/project_type_store_tests.rs:47`/`:122`/`:941`/`:1054`, `crates/verter_session/src/meta_tests.rs:13243`/`:13284`, `crates/verter_session/src/host_manage_tests.rs:10355`, `crates/verter_session/tests/cases/g_cache/cache_reuse_invariants.rs:190`, `crates/verter_session/tests/cases/g_misc0/byte_identical_upsert_no_op.rs:77` — DELETED or rewritten to assert the dispatch-`Instantiate`/macro-payload-memo behavior that replaces the cache.
+  **DAG disjointness re-verified: B6 runs ALONE in Wave 3, so intra-wave file-disjointness is AUTOMATIC for all additions** — none is claimed by a same-wave concurrent block. This enumeration is the KNOWN scope, not an exhaustiveness claim — any further `ResolvedElements` holder surfaced at implementation is routed by §3.6 rule-1 class (vi) → B6 (session) or the frontier → B5, never an unowned gap or a same-wave collision (B6 is Wave 3 alone). (A CTO-ratified crate-slice firewall would additionally touch `verter_compiler` — a NEW crate to the plan — its blast radius is part of the routed enforcement-level decision, not assumed here.) Cross-wave overlaps (serial-safe under the one atomic squash): `host_manage.rs` is already a **B5 (Wave 1)** file (`collect_type_expr_symbol_refs`) — the B6 (Wave 3) touch is cross-wave serial, exactly like `host_manage/eval_env.rs` (§2.2), never two same-wave owners; `crates/verter_parser/.../type_surface/mod.rs` is a NEW crate to the plan — NO block touches `verter_parser` (B3 is `verter_semantic`-only; B4/B5/B7 are `verter_session`/output) so there is no collision; `semantic_query.rs` and `semantic_query_memo/mod.rs` are claimed by no Wave-1/Wave-2 concurrent block. Wave-1 `B3∥B5` and Wave-2 `B4∥B7` file-disjointness is UNCHANGED (B6 is Wave 3).
 - **B7 GAINS** (Wave 2): the sealed `MaterializedExpanded*` output DTOs + the FULL `component_meta_result_db.rs` value
-  split (semantic snapshot + output snapshot — single-owner B7, NOT split with B6); `typeinfo/adapters/vue/runtime_ctor.rs`
-  (or delete). `component_meta_result_db.rs` does not intersect B4's `verter_session` files → Wave-2 `B4∥B7` STILL disjoint.
+  split (semantic snapshot + output snapshot — single-owner B7, NOT split with B6), covering BOTH persisted value carriers —
+  `ResolutionTemplate` (`:146`) AND `CachedComponentMetaResult.analysis: ComponentMetaAnalysis` (`:173`/`:174`), not only `ResolutionTemplate`;
+  `typeinfo/adapters/vue/runtime_ctor.rs` (or delete). `component_meta_result_db.rs` does not intersect B4's `verter_session` files → Wave-2 `B4∥B7` STILL disjoint.
 
 ### 2.2 Cross-block shared-file map (known scope)
 
@@ -204,6 +249,12 @@ is the KNOWN scope; §7 adds surfaces the inventory itself omits.**
 | `resolver_core/component_meta_query_engine/mod.rs` | B6 carriers · FN5.2 (now B6) | single-owner (B6). |
 | `verter_semantic/.../type_solver/query_engine.rs` | B3 `Projected*` def · B6 consumers (NOT this file) | def→B3 only. |
 | `resolver_core/prepared_decl.rs` | B2 done · B4 bundle | B4 owns forward. |
+| `host_manage.rs` | B5 `collect_type_expr_symbol_refs` (W1) · **B6 `HostNamedTypeCacheAdapter` `NamedTypeCache` get/insert `:385`-`:427` (W3)** | serial across waves — like `host_manage/eval_env.rs`, both touch it but never same-wave. |
+| `semantic_query.rs` | **B6 `VueMacroElements` node re-cut (W3)** | single-owner (B6); no Wave-1/2 concurrent claim. |
+| `semantic_query_memo/mod.rs` | **B6 `insert_/get_resolved_named_type` (W3)** | single-owner (B6); sibling of the already-B6 `synthetic_carrier_guard.rs`; no Wave-1/2 concurrent claim. |
+| `verter_parser/.../type_surface/mod.rs` | **B6 `ResolvedProp`/`ResolvedNamedCallSignature.type_expr` + the `ResolvedElements` type-split (W3)** | single-owner (B6); NEW crate — no block touches `verter_parser`, so no collision. |
+| `host_resolve/external_type_resolution.rs` | B5 frontier (W1) · **B6 `ResolvedTypeCacheDb` deletion + read-site rewrite (W3)** | frontier surface = B5 Surface-B territory; cross-wave serial (B5 W1 / B6 W3), no same-wave collision. |
+| `host_resolve/frontier_engine.rs` | B5 frontier (W1) · **B6 `ResolvedElements` return/memo severance (W3)** | cross-wave serial (B5 W1 / B6 W3); frontier ownership routed by §3.6 rule → B5 for the frontier walk, B6 for the `ResolvedElements` payload cut. |
 
 After the FN5.2 redraw, no two CONCURRENT (same-wave) blocks share a file in the KNOWN scope. The §3.6 re-census
 additions PRESERVE this (verified — §7 RESOLUTION + the addendum in §2.1): the svelte-synth cut landed in B6 (Wave 3,
@@ -307,7 +358,7 @@ three-surface family + the 15 `*Analysis` carriers, `svelte_default_synth`, the 
 `mapper_binder` / `synthetic_carrier_guard` / `CollectedMacroTypeParams` / vue `runtime_ctor` /
 `component_meta_registry` resolved-body, and the dead `resolver_core::type_expansion`) are ALL censused and assigned
 (design §3.6 / §5.7). **The plan now ESTABLISHES zero semantic-`TypeExpr` residual by B8 under the §3.6 ownership-by-rule +
-exhaustive-conversion proof — terminal-completeness is ACHIEVABLE with no blocker (design §3.6 verdict), no semantic-`TypeExpr`
+exhaustive-conversion proof — terminal-completeness is ACHIEVABLE with no semantic-`TypeExpr` blocker (design §3.6 verdict), no semantic-`TypeExpr`
 Stage-11/12 deferral (memo/perf compaction, e.g. the `whole_env` materialization teardown, may remain Stage-12).**
 
 ---
@@ -320,7 +371,7 @@ Stage-11/12 deferral (memo/perf compaction, e.g. the `whole_env` materialization
    with TP0-consuming B3 ONLY once B3 is unblocked (below). Assembling a WIP slice onto staging means cherry-pick
    WITHOUT a green-compile gate (atomic model; per-slice proof is the WIP parity oracle, not a green tree).
 
-**Now DISPATCHABLE — the §7 re-census gate is CLEARED (subject only to their DAG edges + scope growth below):**
+**Now DISPATCHABLE on the SEMANTIC-`TypeExpr` axis — the §7 re-census gate is CLEARED (subject to their DAG edges + scope growth below, PLUS — for B6 only — the §9.3 SINGLE-ENGINE-axis firewall-form CTO gate: B6's single-engine-axis landing and therefore the B1–B8 atomic squash are NOT cleared to LAND until the CTO picks firewall form (a)/(b)/(c), AMENDMENT note + §9.3):**
 3. **B3** — its `Analyzed*`/`Prepared*` narrowing forces the `type_expand` producer (`type_eval_build.rs`) to change;
    the Analyzed* fact schema must be designed to feed `ExpandedField`'s no-`TypeExpr` replacement. Dispatch B3 in
    Wave 1 alongside B5 ONLY after the `type_expand` sub-design fixes that schema (B3∥B5 stays FF-safe per §2).
@@ -331,7 +382,7 @@ Stage-11/12 deferral (memo/perf compaction, e.g. the `whole_env` materialization
    re-census), it must NOT touch ANY synthesized-default logic in `build.rs` — B6 owns that migration.
 5. **B6** — Surface A + orphan carriers + FN5.2 + the `type_expand` SESSION cutover (`HotExpanded*`/`HotComponentMetaAnalysis`
    + the ~40 consumers) + the svelte-synth semantic cut + `synthetic_carrier_guard` + `component_meta_registry` resolved-body
-   + the `resolver_core::type_expansion` deletion. Dispatchable (Wave 3, runs alone). NOTE: B6 owns the type_expand SESSION
+   + the `resolver_core::type_expansion` deletion; AND the below-`verter_semantic` `VueMacroElements`/`ResolvedElements` carrier (§2.1 B6 GAINS). Dispatchable on the SEMANTIC-`TypeExpr` axis (Wave 3, runs alone); its SINGLE-ENGINE-axis landing is GATED on the §9.3 CTO firewall-form choice (a)/(b)/(c) — B6 is NOT cleared to LAND until the CTO picks the form (AMENDMENT note + §9.3). NOTE: B6 owns the type_expand SESSION
    surface + consumers; the lower `verter_semantic` `Expanded*Fact` family is B3 (§2.1 addendum).
 6. **B7** — framework/output boundary + persistence; scope grew (§3.6): the sealed `MaterializedExpanded*` output DTOs + the
    FULL `ComponentMetaResultDb` semantic/output snapshot split + the typeinfo `TypeArgList` wire-input narrowing + vue
@@ -340,8 +391,9 @@ Stage-11/12 deferral (memo/perf compaction, e.g. the `whole_env` materialization
 
 **Pre-dispatch prerequisites — ALL DONE:** (a) ✓ FN5.2→B6 formalized in the binding design (§5.6 + §3); (b) ✓ the §7
 systematic re-census complete (design §3.6); (c) ✓ the `type_expand` handle-native sub-design decided (design §5.7,
-three-surface split); (d) ✓ the svelte-synth reassignment ratified (semantic cut → B6). B3/B4/B6/B7 are now
-dispatchable; each B3/B6/B7 brief absorbs its §3.6 scope growth (B3: the lower `Expanded*Fact`/`ComponentMeta*Fact`
+three-surface split); (d) ✓ the svelte-synth reassignment ratified (semantic cut → B6). B3/B4/B6/B7 are
+dispatchable on the SEMANTIC-`TypeExpr` axis (B6's single-engine-axis landing + the atomic squash remain GATED on the
+§9.3 CTO firewall-form choice — AMENDMENT note); each B3/B6/B7 brief absorbs its §3.6 scope growth (B3: the lower `Expanded*Fact`/`ComponentMeta*Fact`
 family + 15 `*Analysis` + `html_intrinsics` lower catalog + `CollectedMacroTypeParams`; B6: session `HotExpanded*`/
 `HotComponentMetaAnalysis` + the ~40 consumers + `svelte_default_synth` cut + `synthetic_carrier_guard` +
 `component_meta_registry` resolved-body + the `type_expansion` deletion; B7: sealed `MaterializedExpanded*` +
@@ -412,14 +464,14 @@ previously unscoped). Decisions landed into the binding design:
   (`raw_type_expr: Option<&TypeExpr>`) + `registry_materialize.rs` symbolic-preservation → **B6**; the DEAD walkers
   `loop5_instrumentation.rs::{count_operator_nodes,record_outer_call_type_expr}` → **B6/B8 DELETE** (callerless in production).
   Terminal bar stays ACHIEVABLE — all rule-1-owned and convertible/deletable; no un-convertible surface.
-- **Terminal bar → ACHIEVABLE by B8, NO blocker.** Every semantic `TypeExpr` carrier has a viable NoTypeExpr target
-  (fact / `AuthoredBodyLocator` / `HotTypeRef` / `SessionDemandIdentity` / sealed output). ZERO deferral to Stage 11/12.
-- **DAG → UNCHANGED and re-validated disjoint.** The re-census grew B3 (adds `type_expand/request.rs`,
+- **Terminal bar → ACHIEVABLE by B8, NO semantic-`TypeExpr` blocker.** Every semantic `TypeExpr` carrier has a viable NoTypeExpr target
+  (fact / `AuthoredBodyLocator` / `HotTypeRef` / `SessionDemandIdentity` / sealed output). ZERO semantic-`TypeExpr` deferral to Stage 11/12. (The one open NON-semantic-`TypeExpr` item is the §9.3 single-engine-axis firewall-form CTO choice added by the AMENDMENT note — it gates B6 single-engine-axis landing + the atomic squash, not the terminal-`TypeExpr` bar.)
+- **DAG → same-wave DISJOINTNESS holds under EVERY §9.3 firewall form (B6 is Wave-3-alone, so any crate/file it touches is disjoint from concurrent blocks by construction); what VARIES by form is B6's touch-set SIZE — NO form is purely `verter_session`-in-place: form (b) also narrows the `verter_compiler` `pub use verter_parser::utils` re-export + de-publicizes the parser expander (its "cannot-NAME" guard requires it), form (a) adds a `verter_session_query` crate slice, form (c) re-scopes B6; the CTO's form-choice folds into the B6 touch-set (AMENDMENT note).** The re-census grew B3 (adds `type_expand/request.rs`,
   `type_eval_build.rs`, `component_meta.rs`, `html_intrinsics.rs` — all `verter_semantic`, none touching B5's
   `facts/hashing.rs`), B6 (session cutover, runs alone Wave 3), and B7 (cache split); Wave-1 `B3∥B5` and Wave-2 `B4∥B7`
   remain file-disjoint (§2.2 updated).
 
-The original gap analysis follows, retained as the record. **(SUPERSEDED — every "gated" / "do NOT dispatch" / "only B5+TP0 dispatchable" statement below is the PRE-resolution framing; the RESOLUTION above is authoritative: all blocks are now dispatchable, the census is complete, terminal bar ACHIEVABLE.)**
+The original gap analysis follows, retained as the record. **(SUPERSEDED — every "gated" / "do NOT dispatch" / "only B5+TP0 dispatchable" statement below is the PRE-resolution framing; the RESOLUTION above is authoritative: all blocks are dispatchable on the SEMANTIC-`TypeExpr` axis, the census is complete, terminal bar ACHIEVABLE — with the ONE post-resolution caveat added by the AMENDMENT note: B6's single-engine-axis landing + the atomic squash are GATED on the §9.3 CTO firewall-form choice.)**
 
 ---
 
@@ -484,9 +536,13 @@ final.
   legs + code-verifying decider).
 - ✓ Ratify the `svelte_default_synth` block reassignment (§7.2) and re-verify `B4∥B7` disjointness — DONE (semantic
   cut → B6; `B4∥B7` re-verified disjoint).
-- ✓ **Dispatch gating CLEARED (per §6):** B5 + TP0 were always clean; B3, B4, B6, B7 are now ALL dispatchable. The
-  DAG shape (Wave 1 `B3∥B5`, Wave 2 `B4∥B7`, Wave 3 `B6`) and all fork decisions are UNCHANGED — the re-census grew
-  block scopes but preserved the topology and the same-wave file-disjointness. When B4 is dispatched it still must NOT
+- ◑ **Dispatch gating CLEARED on the SEMANTIC-`TypeExpr` axis (per §6):** B5 + TP0 were always clean; B3, B4, B6, B7 are
+  dispatchable for their semantic-`TypeExpr` conversion. **ONE post-resolution gate remains (AMENDMENT note + §9.3):** B6's
+  SINGLE-ENGINE-axis landing — and therefore the B1–B8 atomic squash — are GATED on the CTO's §9.3 firewall-form choice
+  (a)/(b)/(c). The DAG shape (Wave 1 `B3∥B5`, Wave 2 `B4∥B7`, Wave 3 `B6`) and the fork decisions are UNCHANGED under
+  firewall form (b) landing in place; form (a) adds `verter_compiler` as a touched crate and form (c)
+  re-scopes B6 (a new B6 scope/DAG amendment before dispatch/landing) — either folds into the B6 touch-set on the CTO's choice. The re-census grew block scopes but preserved the
+  topology and the same-wave file-disjointness. When B4 is dispatched it still must NOT
   touch ANY synthesized-default logic in `build.rs` (B6 owns that migration, including the svelte-synth cut).
 
 ## 8. Carried obligations

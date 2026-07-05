@@ -12,9 +12,15 @@
 //! RESOLVED / GENERATED class — DTOs the resolver PRODUCES at query time
 //! (`type_expand`/`ExpandedField`, the `component_meta.rs *Analysis` carriers,
 //! the `html_intrinsics` catalog, `svelte_default_synth`, the
-//! `mapper_binder_registry` structural fingerprint, etc.). The COMPLETE
+//! `mapper_binder_registry` structural fingerprint, etc.) — NOR the
+//! BELOW-`verter_semantic` graph-persisted parser DTO class (the `verter_parser`
+//! `ResolvedProp`/`ResolvedNamedCallSignature.type_expr` carriers embedded in
+//! `ResolvedElements`, persisted whole as `SemanticNodeData::VueMacroElements`
+//! and warm-cloned on the imported-`.vue` hot path — an independent-confirm
+//! addition, owned by B6; see design §3.6 rule-1 class (vi) / §5.4). The COMPLETE
 //! Stage-10 terminal-completeness census (≈96 semantic surfaces; ≈24 that were
-//! unscoped before the re-census) lives in
+//! unscoped before the re-census, plus the below-`verter_semantic`
+//! `VueMacroElements` carrier the confirm added) lives in
 //! `docs/arch/stage10-typeexpr-terminal-removal-design.md` §3.6, and the
 //! `type_expand` three-surface handle-native sub-design is §5.7. That
 //! resolved/generated class is enforced STRUCTURALLY in its owning blocks
