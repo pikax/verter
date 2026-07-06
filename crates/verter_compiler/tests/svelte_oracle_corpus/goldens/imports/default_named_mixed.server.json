@@ -1,0 +1,47 @@
+{
+  "slug": "imports/default_named_mixed.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "./c.js",
+      "kind": "defaultAndNamed",
+      "names": [
+        "default:d,",
+        "n as m"
+      ]
+    },
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "default_named_mixed",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [
+    "escape",
+    "escape",
+    "escape"
+  ],
+  "helperSet": [
+    "escape"
+  ],
+  "helperCounts": {
+    "escape": 3
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

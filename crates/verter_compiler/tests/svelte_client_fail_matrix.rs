@@ -51,11 +51,12 @@ const FAIL_MATRIX: &[FailRow] = &[
         code: "svelte-runtime-unsupported-advanced-rune",
     },
     FailRow {
-        // A module script is demoted entirely (script-import) — refused before the
-        // module-rune shape gate.
+        // A module-scope `$state` declarator is a NON-import module item — the
+        // admitted `<script module>` is import-only, so it refuses with the precise
+        // module-item diagnostic before the module-rune shape gate.
         name: "state_module",
         source: "<script module>let c = $state(0);</script>\n<script>let d = $state(0);</script>\n<button onclick={() => d++}>{d}</button>\n",
-        code: "svelte-runtime-unsupported-script-import",
+        code: "svelte-runtime-unsupported-module-script-item",
     },
     FailRow {
         name: "state_nested_position",
@@ -353,12 +354,6 @@ const FAIL_MATRIX: &[FailRow] = &[
         source: "<script>let c = $state(0); let d = $derived({ x: c });</script>\n<input bind:value={d.x} />\n",
         code: "svelte-runtime-unsupported-advanced-rune",
     },
-    FailRow {
-        // An instance import is demoted — refused before the member-bind gate.
-        name: "bind_value_import_member",
-        source: "<script>import { store } from './s.js'; let c = $state(0);</script>\n<input bind:value={store.x} />\n<button onclick={() => c++}>{c}</button>\n",
-        code: "svelte-runtime-unsupported-script-import",
-    },
     // NOTE: a bare CALL `bind:value={f()}` (NOT a valid lvalue and NOT a two-element
     // `{get, set}` pair) now fails closed through the OFFICIAL-reject gate with the EXACT
     // code `bind_invalid_expression` (a bind-target SHAPE reject, the same class as
@@ -510,8 +505,8 @@ const FAIL_MATRIX: &[FailRow] = &[
         code: "svelte-runtime-unsupported-non-delegated-event",
     },
     FailRow {
-        // A bare-identifier handler (not an inline arrow) is the wrapper form; no
-        // import is used (imports are demoted), so the handler shape is the surface.
+        // A bare-identifier handler (not an inline arrow) is the wrapper form; the
+        // handler SHAPE is the surface (no import involved).
         name: "event_import_identifier",
         source: "<script>let c = $state(0);</script>\n<button onclick={handler}>{c}</button>\n",
         code: "svelte-runtime-unsupported-non-delegated-event",
@@ -1274,16 +1269,22 @@ const FAIL_MATRIX: &[FailRow] = &[
         source: "<script>let c = $state(0); function f(x) { return x; }</script>\n<button onclick={() => f(c)}>{c}</button>\n",
         code: "svelte-runtime-unsupported-non-delegated-event",
     },
-    // ── CONVERGENCE: script imports / module scripts ────────────────────────
+    // ── CONVERGENCE: module scripts (import-only admitted; items deferred) ───
     FailRow {
-        name: "instance_import",
-        source: "<script>import { x } from './x.js'; let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n",
-        code: "svelte-runtime-unsupported-script-import",
-    },
-    FailRow {
+        // A non-import module item (`const K = 1`) — an HONEST DEFERRAL, not
+        // official parity: official svelte@5.56.3 ACCEPTS a non-import
+        // `<script module>` item (an `export const K = 1;`, a plain statement, an
+        // empty statement — oracle-probed), while the admitted `<script module>` is
+        // IMPORT-ONLY here and everything else fails closed under
+        // `ModuleScriptItem` until module-item lowering lands (the script/module-item
+        // completion block; see the module-shape row in
+        // `docs/arch/svelte-native-compiler-plan.md`). Static imports themselves
+        // (both slots) are POSITIVE `imports/*` corpus rows now, and a module-item
+        // that COLLIDES with an official reject (a cross-script duplicate, a same-body
+        // duplicate) carries its exact official code instead of this surface.
         name: "module_script",
         source: "<script module>const K = 1;</script>\n<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n",
-        code: "svelte-runtime-unsupported-script-import",
+        code: "svelte-runtime-unsupported-module-script-item",
     },
     // ── CONVERGENCE: <script lang=ts> ───────────────────────────────────────
     FailRow {
@@ -1821,6 +1822,7 @@ fn fail_matrix_row_codes_are_known_unsupported_diagnostics() {
         "svelte-runtime-unsupported-root-text-region",
         "svelte-runtime-unsupported-complex-interpolation",
         "svelte-runtime-unsupported-script-import",
+        "svelte-runtime-unsupported-module-script-item",
         "svelte-runtime-unsupported-typescript",
         "svelte-runtime-unsupported-complex-text",
         "svelte-runtime-unsupported-element-name",
@@ -2297,10 +2299,20 @@ fn generated_bind_target_shapes_land_on_boundary() {
             "<input bind:value={d.x} />",
             Expected::FailClosed,
         ),
+        // A MEMBER rooted at an import is ACCEPTED (official emits the plain member
+        // closures + the context frame; only the BARE import root rejects).
         (
             "value_import_member",
             "import { store } from './s.js'; let c = $state(0);",
             "<input bind:value={store.x} />",
+            Expected::Supported,
+        ),
+        // The BARE import root stays rejected (non-writable root — official
+        // `constant_binding`, "Cannot bind to import").
+        (
+            "value_import_bare_root",
+            "import { store } from './s.js'; let c = $state(0);",
+            "<input bind:value={store} />",
             Expected::FailClosed,
         ),
         // ── out-of-boundary: non-lvalue / non-resolvable / wrong directive. A bare
@@ -2935,9 +2947,13 @@ fn fail_matrix_covers_every_documented_sub_shape() {
     // argument on the member-callee accept
     // (`render_host_member_callee_spread_snippet_arg_inside_custom_element` —
     // official `render_tag_invalid_spread_argument`) — +6 rows, 211 → 217.
+    // The static-import prelude removed TWO rows (now accepted-positive with
+    // `imports/*` oracle goldens): `instance_import` (every static import form is
+    // admitted) and `bind_value_import_member` (a member of an import is an accepted
+    // bind lvalue with the context frame) — 217 → 215.
     assert_eq!(
         FAIL_MATRIX.len(),
-        217,
+        215,
         "the fail matrix pins 178 fail-closed rows — one documented \
          unsupported-feature sub-shape per row, EXCEPT the D-43 custom-element-host / \
          native-slotting rows, which are REPRESENTATIVE smoke probes for that \

@@ -336,10 +336,10 @@ impl<'a> ClientEmitter<'a> {
     ) -> ClientModule {
         let mut out = String::new();
 
-        // (1) Module imports — disclose-version + flags + the runtime namespace, in
-        // official order, then the module-scope USER imports (the `.svelte`-component-default
-        // subset) in source order. (Every other import form is fail-closed upstream — the
-        // broad static-import prelude is not yet supported.)
+        // (1) Module imports — disclose-version + flags, the `<script module>` USER
+        // imports (source order), the runtime namespace, then the INSTANCE-script USER
+        // imports (source order) — the official two-slot prelude order. Every static
+        // import form rides the typed `UserImport` carriers.
         emit_imports(&mut out, &topology.imports, &self.plan.user_imports);
         out.push('\n');
 

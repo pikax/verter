@@ -90,6 +90,10 @@ pub struct ComponentIr {
 pub struct RuntimeAnalysis<'a> {
     /// The instance + module script analysis.
     pub scripts: ScriptAnalysis<'a>,
+    /// The per-slot static-import classification, computed ONCE at IR construction —
+    /// the single import authority BOTH the binding preparation and the surface
+    /// classifier consume (the classifier propagates a retained slot refusal).
+    pub(super) script_imports: super::client_surface_imports::ClassifiedScriptImports,
     /// The reparsed, scope-annotated template-expression arena.
     pub expressions: ExprArena<'a>,
     /// The lexical scope graph (script + expression-local + template scopes).

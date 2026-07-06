@@ -11,7 +11,7 @@
 use oxc_allocator::Allocator;
 
 use super::client::UnsupportedSvelteRuntimeSurface;
-use super::client_plan_types::UserImport;
+use super::client_imports::{UserImport, UserImportSlot};
 use super::client_shapes::{self, ClientPropsUsage};
 use super::expr::BindingRuntimeKind;
 use super::expr_emit::{self, PropsShape, StateDeclShape};
@@ -207,8 +207,9 @@ impl<'a> oxc_ast_visit::Visit<'a> for PropRefScan<'_> {
 /// `$$props`-parameter question from them, so no later stage re-parses source
 /// to re-discover the usage.
 pub(super) struct ClassifiedScriptItems {
-    /// The admitted module-scope USER imports (the `.svelte`-component-default
-    /// subset), in source order.
+    /// The admitted module-scope USER imports — every static import form, module
+    /// slot first, each slot in source order (the two-slot emission reads the slot
+    /// discriminant off each carrier).
     pub(super) user_imports: Vec<UserImport>,
     /// Whether an ADMITTED `$host()` call was seen (instance script or any
     /// template expression). Only meaningful under an active custom element —
@@ -223,33 +224,37 @@ pub(super) struct ClassifiedScriptItems {
 }
 
 /// Classify the instance + module script items, returning the admitted module-scope
-/// user imports (the `.svelte`-component-default subset) plus the `$host`-usage
-/// fact. A `<script module>`, every NON-`.svelte`-default instance import (named /
-/// namespace / side-effect / mixed / default-non-`.svelte`), a non-basic /
-/// default-bearing `$props()` form, a destructured / non-primitive `$state`, or an
-/// advanced rune call/member fails closed (no wildcard accept).
+/// user imports (every static import form, both script slots) plus the `$host`-usage
+/// fact. A `<script module>` is admitted IFF every top-level statement is a static
+/// `import` declaration — any non-import module item (a declaration, an export, an
+/// expression, control flow) is the module-item completion residual and fails closed
+/// with the precise [`ModuleScriptItem`](UnsupportedSvelteRuntimeSurface::ModuleScriptItem)
+/// diagnostic. On the instance side, a non-basic / default-bearing `$props()` form, a
+/// destructured / non-primitive `$state`, or an advanced rune call/member fails
+/// closed (no wildcard accept).
 pub(super) fn classify_script_items(
     ir: &SvelteRuntimeIr,
 ) -> Result<ClassifiedScriptItems, UnsupportedSvelteRuntimeSurface> {
-    // A `<script module>` is the broad static-import-prelude / module-item deferral —
-    // fail closed BEFORE the rune-shape gates. (The component `.svelte` default import
-    // is admitted below; every OTHER static import form — named / namespace /
-    // side-effect / non-`.svelte` default — plus arbitrary `<script module>` items stay
-    // closed until the broad script-import prelude is supported.)
+    // The `<script module>` IMPORT-ONLY admit predicate: every top-level statement
+    // must be an `ImportDeclaration`; the FIRST non-import statement refuses with the
+    // precise module-item diagnostic. (Arbitrary module statements + exports are the
+    // module-item completion surface, still fail-closed.)
     if let Some(module) = ir.analysis.scripts.module_source {
-        let _ = module;
-        return Err(UnsupportedSvelteRuntimeSurface::ScriptImport {
-            construct: "module script",
-            span: Span::new(0, 0),
-        });
+        refuse_first_non_import_module_item(module)?;
     }
-    // Instance-script imports: ADMIT a default `.svelte` component import (hoisted to
-    // module scope as the component callee), REFUSE every other form (not yet supported).
-    let user_imports = if let Some(instance) = ir.analysis.scripts.instance_source {
-        super::client_surface_imports::classify_instance_imports(instance)?
-    } else {
-        Vec::new()
-    };
+    // The RETAINED per-slot import classification (the single authority, computed
+    // ONCE at IR construction — the same carriers the binding preparation consumed):
+    // propagate a slot's retained refusal (the residual non-static forms — type-only /
+    // phase / `assert { … }` — fail closed here); collect the admitted carriers,
+    // module slot first so the prelude emits them BEFORE the runtime namespace, the
+    // instance slot after it.
+    let mut user_imports = Vec::new();
+    for slot in [UserImportSlot::Module, UserImportSlot::Instance] {
+        match ir.analysis.script_imports.slot(slot) {
+            Ok(imports) => user_imports.extend(imports.iter().cloned()),
+            Err(surface) => return Err(surface.clone()),
+        }
+    }
     // The `$props()` shape gate. A rest element (`{ …, ...rest }`) and a
     // whole-object binding (`let all = $props()`) are BASIC — they lower through
     // the `$.rest_props` capture path — alongside the named / aliased / string-key
@@ -296,11 +301,12 @@ pub(super) fn classify_script_items(
     // The `$inspect` family is NOT refused here — it is production-ELIDED (the
     // instance-item classifier / the body rewriter own the elision, and the
     // rewriter fails a non-statement-position reference closed). A SHADOWED rune
-    // name is never refused. (A `<script module>` was already refused above as a
-    // script-hoisting deferral.) The custom-element fact gates the `$host()`
-    // admission: the zero-arg call is supported only under an active
-    // custom-element descriptor — an admitted call records the `uses_host` FACT
-    // this classification returns.
+    // name is never refused. (An admitted `<script module>` is IMPORT-ONLY — import
+    // declarations host no rune positions, so it needs no rune scan; a module rune
+    // was already refused above as a non-import module item.) The custom-element
+    // fact gates the `$host()` admission: the zero-arg call is supported only under
+    // an active custom-element descriptor — an admitted call records the
+    // `uses_host` FACT this classification returns.
     let custom_element_active = ir.component.custom_element.is_some();
     let mut uses_host = false;
     let mut first_host_span: Option<Span> = None;
@@ -350,6 +356,50 @@ pub(super) fn classify_script_items(
         uses_host,
         first_host_span,
     })
+}
+
+/// Refuse the FIRST non-import top-level statement of a `<script module>` — the
+/// import-only admit predicate. Any other module item (a variable / function / class
+/// declaration, an export or re-export, an expression, control flow, a module rune)
+/// is the module-item completion residual: fail closed with the precise
+/// [`ModuleScriptItem`](UnsupportedSvelteRuntimeSurface::ModuleScriptItem) diagnostic
+/// carrying the statement family + its module-relative span. An unparseable module
+/// script yields no refusal here (the upstream script-parse diagnostic owns it).
+fn refuse_first_non_import_module_item(
+    module_source: &str,
+) -> Result<(), UnsupportedSvelteRuntimeSurface> {
+    let alloc = Allocator::default();
+    let Some(program) = super::expr::reparse_module(&alloc, module_source) else {
+        return Ok(());
+    };
+    for stmt in &program.body {
+        use oxc_ast::ast::Statement;
+        use oxc_span::GetSpan;
+        let construct: &'static str = match stmt {
+            Statement::ImportDeclaration(_) => continue,
+            Statement::VariableDeclaration(_) => "variable declaration",
+            Statement::FunctionDeclaration(_) => "function",
+            Statement::ClassDeclaration(_) => "class",
+            Statement::ExportNamedDeclaration(_)
+            | Statement::ExportAllDeclaration(_)
+            | Statement::ExportDefaultDeclaration(_) => "export",
+            Statement::ExpressionStatement(_) => "expression statement",
+            Statement::EmptyStatement(_) => "empty statement",
+            Statement::TSEnumDeclaration(_) => "enum",
+            Statement::TSModuleDeclaration(_) => "namespace",
+            Statement::TSInterfaceDeclaration(_) => "interface",
+            Statement::TSTypeAliasDeclaration(_) => "type alias",
+            Statement::TSImportEqualsDeclaration(_) => "import-equals",
+            Statement::LabeledStatement(_) => "labeled statement",
+            _ => "module statement",
+        };
+        let span = stmt.span();
+        return Err(UnsupportedSvelteRuntimeSurface::ModuleScriptItem {
+            construct,
+            span: Span::new(span.start, span.end),
+        });
+    }
+    Ok(())
 }
 
 /// One program's rune-scan outcome: the first unsupported occurrence (if any)

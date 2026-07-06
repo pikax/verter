@@ -31,12 +31,13 @@ use oxc_ast::ast::{
 };
 use rustc_hash::FxHashSet;
 
+use super::cross_slot_redeclaration;
 use super::expr::{collect_pattern_names, reparse_module, BindTargetFact, ShadowStack};
 use super::official_rule::{CoreOfficialValidationRule, OfficialRejection};
 use crate::svelte::bind_contract::{bind_target_policy, resolve_runtime_bind, BindTargetPolicy};
 use crate::svelte::parser::tokenizer_scan::find_matching_brace_in;
 use crate::svelte::parser::{
-    CloseTagViolationKind, ParsedSvelte, ScriptBodyGrammar, SvelteAttribute, SvelteAttributeKind,
+    CloseTagViolationKind, ParsedSvelte, SvelteAttribute, SvelteAttributeKind,
     SvelteAttributeValue, SvelteBlockKind, SvelteClauseKind, SvelteDirectiveKind, SvelteElement,
     SvelteElementKind, SvelteNode, SvelteParseRejectKind, SvelteSpecialKind,
 };
@@ -110,12 +111,31 @@ pub fn official_reject_gate(source: &str, parsed: &ParsedSvelte) -> Option<Offic
     // once for the reference scans.
     let declared = declared_top_level_locals(source, parsed);
 
-    // (b.1) Script name rules (`scope.js`): a `$`-prefixed declaration
-    // (`dollar_prefix_invalid`). Scanned over each script's top-level declarators. (A
-    // same-lexical-scope `let`/`const` redeclaration is a PARSE-phase `js_parse_error` owned by
-    // the body-probe slot, not an analyze rule, so it is not re-detected here.)
-    for script_src in script_sources(source, parsed) {
-        if let Some(rejection) = scan_script_declaration_rules(script_src) {
+    // (b.1) Script scope-creation rules (`scope.js` `declare`, fired by upstream's
+    // `create_scopes` in module-then-instance order): the binder's duplicate check +
+    // the `$`-prefix name validation (`dollar_prefix_invalid`), interleaved in SOURCE
+    // order within each script — official's `declare()` runs its duplicate check
+    // BEFORE `validate_identifier_name`. The MODULE pass carries no cross-script
+    // collision inventory (a same-scope duplicate binding is a PARSE-phase
+    // `js_parse_error` owned by the body-probe slot); the INSTANCE pass checks each
+    // VALUE import local against the retained module-slot bindings — the binder
+    // HOISTS an `import` declaration to the parent (module) scope, so an instance
+    // import colliding with a non-`var` module-slot binding is the scope-creation
+    // `declaration_duplicate` (oracle-probed, `DeclarationDuplicate`).
+    let module_bindings =
+        cross_slot_redeclaration::ModuleSlotBindings::collect(module_script_source(source, parsed));
+    if let Some(module_src) = module_script_source(source, parsed) {
+        if let Some(rejection) = cross_slot_redeclaration::scan_script_scope_creation(
+            module_src,
+            &cross_slot_redeclaration::ModuleSlotBindings::default(),
+        ) {
+            return Some(rejection);
+        }
+    }
+    if let Some(instance_src) = instance_script_source(source, parsed) {
+        if let Some(rejection) =
+            cross_slot_redeclaration::scan_script_scope_creation(instance_src, &module_bindings)
+        {
             return Some(rejection);
         }
     }
@@ -127,19 +147,24 @@ pub fn official_reject_gate(source: &str, parsed: &ParsedSvelte) -> Option<Offic
     // codes (`$$props` → `legacy_props_invalid`, `$$restProps` → `legacy_rest_props_invalid`).
     // This scan ALSO covers a `$`-prefixed `bind:this={$foo}` target (the directive value is
     // one of the scanned template expression sources). (`$$slots`, which official ACCEPTS, is
-    // a deferrable unsupported feature — never an official reject here.)
+    // a deferrable unsupported feature — never an official reject here.) Upstream throws
+    // these from the references pass at analyze START — after ALL scope creation (so the
+    // (b.1) scope-creation codes win) and before the visitor walks (so a global `$` ref
+    // beats every (b.3) walk-phase defect, oracle-probed in every source order).
     if let Some(rejection) = scan_global_dollar_references(source, parsed, &declared) {
         return Some(rejection);
     }
 
-    // (b.3) `$inspect.trace(...)` placement (`inspect_trace_invalid_placement`): the
-    // ONLY legal position is the first statement of a function body. Official throws
-    // this in the analyze-phase `CallExpression` visitor — the same walk as the scope
-    // checks above — so it is ordered with the script-scope family, after the binder /
-    // global-reference codes and before the template-walk attribute-name / placement
-    // scans. Scanned over every script AND template expression source (a misplaced
-    // trace in an interpolation / handler value is the same official hard error).
-    if let Some(rejection) = scan_inspect_trace_placement(source, parsed) {
+    // (b.3) The analyze-WALK script rules, in upstream's walk order ([module program,
+    // instance program, template]): a misplaced `$inspect.trace(...)`
+    // (`inspect_trace_invalid_placement`, the `CallExpression` visitor) and an instance
+    // variable declarator re-declaring a module-slot IMPORT local
+    // (`declaration_duplicate_module_import`, `ensure_no_module_import_conflict` in the
+    // `VariableDeclarator` visitor). Within the instance program the two arbitrate by
+    // span (walk order = source order, oracle-probed both ways); template expression
+    // sources carry trace placement only. Ordered after the binder / global-reference
+    // codes and before the template-walk attribute-name / placement scans.
+    if let Some(rejection) = scan_walk_phase_script_rules(source, parsed, &module_bindings) {
         return Some(rejection);
     }
 
@@ -627,7 +652,7 @@ fn select_parse_phase_defect(source: &str, parsed: &ParsedSvelte) -> Option<Offi
     // that parses CLEAN contributes NO defect.
     for probe in &parsed.script_body_probes {
         let body = &source[probe.body_span.start as usize..probe.body_span.end as usize];
-        if script_body_fails_to_parse(body, probe.grammar) {
+        if super::script_body_parse::script_body_fails_to_parse(body, probe.grammar) {
             consider(
                 probe.encounter_order,
                 OfficialRejection::with_code(
@@ -698,76 +723,6 @@ fn is_options_ce_attribute_parse_fault(code: &str) -> bool {
     matches!(code, "js_parse_error" | "expected_token")
 }
 
-/// Whether a `<script>` body FAILS to parse the way upstream's Acorn parse does — the
-/// body-probe fill. A plain `<script>` parses as JS (`SourceType::mjs()` — module JS, no TS,
-/// no JSX, the Acorn-equivalent: TS-only syntax in a plain script is a parse error); a
-/// `lang="ts"` body parses as TS (`SourceType::ts()`). A panic OR a non-empty parser error
-/// set is a failure (`js_parse_error`).
-///
-/// Plus the ONE parse-phase error OXC's PARSER defers to its binder but Acorn raises at parse:
-/// a same-scope LEXICAL (`let`/`const`) REDECLARATION (`let a; let a`). It is detected
-/// structurally on the parsed program's TOP-LEVEL declarators (the §1.2-core script surface is
-/// top-level `let`/`const`), so it stays a body-slot `js_parse_error` — never a later analyze
-/// fallback. Driven from the typed [`ScriptBodyProbe`] grammar + the typed AST, never a text
-/// heuristic.
-fn script_body_fails_to_parse(body: &str, grammar: ScriptBodyGrammar) -> bool {
-    let alloc = Allocator::default();
-    let source_type = match grammar {
-        ScriptBodyGrammar::Js => oxc_span::SourceType::mjs(),
-        ScriptBodyGrammar::Ts => oxc_span::SourceType::ts(),
-    };
-    let parsed = oxc_parser::Parser::new(&alloc, alloc.alloc_str(body), source_type).parse();
-    if parsed.panicked || !parsed.errors.is_empty() {
-        return true;
-    }
-    top_level_lexical_redeclaration(&parsed.program)
-}
-
-/// Whether the program's TOP-LEVEL declarations contain a same-scope LEXICAL redeclaration —
-/// a name bound by `let` / `const` that is also bound by ANOTHER top-level `let` / `const` /
-/// `var` declarator (the ECMAScript early SyntaxError Acorn raises at parse but OXC's parser
-/// defers to its binder). `var`/`var` re-binding of the same name (legal in JS) is NOT a
-/// redeclaration.
-///
-/// SCOPE (deliberate, NOT an over-claim): this detects ONLY the `let` / `const` redeclaration
-/// reachable in the §1.2-core SUPPORTED script surface (top-level `let` / `const` — `$state` /
-/// props-destructure / `bind:this` locals). A redeclaration involving a top-level FUNCTION /
-/// CLASS / IMPORT declaration (`function f(){} function f(){}`, `class A{} class A{}`,
-/// `import x; let x`) — which upstream also `js_parse_error`s — is NOT detected here and does not
-/// need to be: a top-level function / class / import is itself OUTSIDE the §1.2-core allowlist, so
-/// such a component fails closed as an unsupported FEATURE BEFORE this body-probe code matters. So
-/// no REACHABLE official-reject in the supported surface is missed (characterized by
-/// `redeclaration_scope_is_let_const_only_function_collisions_fail_closed`).
-fn top_level_lexical_redeclaration(program: &Program) -> bool {
-    use oxc_ast::ast::VariableDeclarationKind;
-    // (name, was_lexical) in source order across the top-level variable declarators.
-    let mut bound: Vec<(String, bool)> = Vec::new();
-    for stmt in &program.body {
-        let Statement::VariableDeclaration(decl) = stmt else {
-            continue;
-        };
-        let lexical = matches!(
-            decl.kind,
-            VariableDeclarationKind::Let | VariableDeclarationKind::Const
-        );
-        for d in &decl.declarations {
-            let mut names = Vec::new();
-            collect_pattern_names(&d.id, &mut names);
-            for name in names {
-                // A collision is a redeclaration error when EITHER the prior or the current
-                // binding is lexical (`let`/`const`); two `var`s of the same name are legal.
-                if let Some((_, prior_lexical)) = bound.iter().find(|(n, _)| *n == name) {
-                    if *prior_lexical || lexical {
-                        return true;
-                    }
-                }
-                bound.push((name, lexical));
-            }
-        }
-    }
-    false
-}
-
 /// The module + instance script content sources (the inner text of each `<script>`), in
 /// MODULE-then-INSTANCE order — matching upstream's analyze pass, which constructs the module
 /// scope before the instance scope (`phases/2-analyze/index.js`) and walks
@@ -785,72 +740,20 @@ fn script_sources<'a>(source: &'a str, parsed: &ParsedSvelte) -> Vec<&'a str> {
     out
 }
 
-/// Scan ONE script's top-level declarations for a `$` / `$$`-prefixed binding NAME (a
-/// declaration-position binding official's `validate_identifier_name` binder rejects —
-/// `dollar_prefix_invalid`; the official message names BOTH forms: "The $ prefix is
-/// reserved, and cannot be used for variables and imports"). Driven from the OXC AST of
-/// the reparsed script. Returns an [`OfficialRejection`], or `None`.
-///
-/// A SAME-lexical-scope duplicate declaration (`let a; let a`) is NOT detected here — it is a
-/// PARSE-phase error Acorn (and the OXC body-probe) rejects, owned by the body-probe
-/// `js_parse_error` slot (a clean body never reaches the analyze phase). So this scan is the
-/// `$`-prefix binder check only.
-fn scan_script_declaration_rules(script_source: &str) -> Option<OfficialRejection> {
-    use oxc_ast::ast::{ImportDeclarationSpecifier, ImportOrExportKind};
+/// The `<script module>` content source (the inner text), or `None` when absent —
+/// for the per-slot scans that treat the two scripts asymmetrically (the
+/// scope-creation collision inventory, the walk-phase arbitration).
+fn module_script_source<'a>(source: &'a str, parsed: &ParsedSvelte) -> Option<&'a str> {
+    parsed
+        .module_content()
+        .map(|content| &source[content.start as usize..content.end as usize])
+}
 
-    let alloc = Allocator::default();
-    let program = reparse_module(&alloc, script_source)?;
-
-    // The top-level binding names official's binder validates: every `let`/`const`/
-    // `var` declarator pattern name, plus every VALUE import specifier's LOCAL binding
-    // (default / named-`as` local / namespace), in source order. A type-only import
-    // (`import type …` / a per-specifier `type` modifier) binds no VALUE — the TS
-    // strip removes it — so it is not scanned.
-    let mut decl_names: Vec<String> = Vec::new();
-    for stmt in &program.body {
-        match stmt {
-            Statement::VariableDeclaration(decl) => {
-                for d in &decl.declarations {
-                    collect_pattern_names(&d.id, &mut decl_names);
-                }
-            }
-            Statement::ImportDeclaration(import) => {
-                if !matches!(import.import_kind, ImportOrExportKind::Value) {
-                    continue;
-                }
-                let Some(specifiers) = &import.specifiers else {
-                    continue;
-                };
-                for spec in specifiers {
-                    let local = match spec {
-                        ImportDeclarationSpecifier::ImportSpecifier(s) => {
-                            if matches!(s.import_kind, ImportOrExportKind::Type) {
-                                continue; // `import { type Foo as $x }` — type-only
-                            }
-                            &s.local
-                        }
-                        ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => &s.local,
-                        ImportDeclarationSpecifier::ImportNamespaceSpecifier(s) => &s.local,
-                    };
-                    decl_names.push(local.name.to_string());
-                }
-            }
-            _ => {}
-        }
-    }
-
-    // A `$` / `$$`-prefixed binding name in ANY top-level declarator pattern / import
-    // local position. Official `validate_identifier_name` errors at the binder for a
-    // `$`-prefixed binding at the top level (`dollar_prefix_invalid`). (A clean body
-    // that reaches here parses fine, so a same-scope redeclaration would already have
-    // failed the body-probe.)
-    if decl_names.iter().any(|n| n.starts_with('$')) {
-        return Some(OfficialRejection::of(
-            CoreOfficialValidationRule::DollarPrefixInvalid,
-        ));
-    }
-
-    None
+/// The instance `<script>` content source (the inner text), or `None` when absent.
+fn instance_script_source<'a>(source: &'a str, parsed: &ParsedSvelte) -> Option<&'a str> {
+    parsed
+        .instance_content()
+        .map(|content| &source[content.start as usize..content.end as usize])
 }
 
 /// Scan for a GLOBAL `$foo` / `$$foo` reference in any script or template expression
@@ -1012,54 +915,95 @@ impl<'a> oxc_ast_visit::Visit<'a> for DollarRefScan<'_> {
     }
 }
 
-/// Scan for a `$inspect.trace(...)` call OUTSIDE its single legal position — the
-/// official `inspect_trace_invalid_placement` hard error ("`$inspect.trace(...)` must
-/// be the first statement of a function body"). Covers every script source AND every
-/// template expression source (the same inputs the global-`$`-reference scan walks).
-/// Returns the rejection on the first violating source, or `None`.
-fn scan_inspect_trace_placement(source: &str, parsed: &ParsedSvelte) -> Option<OfficialRejection> {
-    let mut sources: Vec<String> = script_sources(source, parsed)
-        .into_iter()
-        .map(str::to_string)
-        .collect();
-    collect_template_expression_sources(source, &parsed.template, &mut sources);
+/// The analyze-WALK script rules, in upstream's walk order `[module program, instance
+/// program, template]`:
+/// - a misplaced `$inspect.trace(...)` (`inspect_trace_invalid_placement` — the
+///   `CallExpression` visitor) in ANY script or template expression source;
+/// - an INSTANCE top-level variable declarator re-declaring a MODULE-slot IMPORT
+///   local (`declaration_duplicate_module_import` —
+///   `ensure_no_module_import_conflict` in the `VariableDeclarator` visitor).
+///
+/// Both fire during the SAME analyze walk, so co-located defects arbitrate by walk
+/// position (oracle-probed): a module-script trace beats the instance conflict (the
+/// module program is walked first); within the instance program the earlier SPAN wins
+/// (walk order = source order); the instance conflict beats a template-expression
+/// trace (the template is walked last).
+fn scan_walk_phase_script_rules(
+    source: &str,
+    parsed: &ParsedSvelte,
+    module_bindings: &cross_slot_redeclaration::ModuleSlotBindings,
+) -> Option<OfficialRejection> {
+    let trace_rejection =
+        OfficialRejection::of(CoreOfficialValidationRule::InspectTraceInvalidPlacement);
 
-    for src in &sources {
-        if source_has_misplaced_inspect_trace(src) {
-            return Some(OfficialRejection::of(
-                CoreOfficialValidationRule::InspectTraceInvalidPlacement,
-            ));
+    // The module program is walked first — trace placement only (the module-import
+    // conflict rule is an INSTANCE-declarator rule).
+    if let Some(module_src) = module_script_source(source, parsed) {
+        if first_misplaced_inspect_trace(module_src).is_some() {
+            return Some(trace_rejection);
+        }
+    }
+
+    // The instance program: the module-import conflict vs a misplaced trace, earlier
+    // span first.
+    if let Some(instance_src) = instance_script_source(source, parsed) {
+        let conflict = cross_slot_redeclaration::first_instance_module_import_conflict(
+            instance_src,
+            module_bindings,
+        );
+        let trace = first_misplaced_inspect_trace(instance_src);
+        match (conflict, trace) {
+            (Some(conflict_at), Some(trace_at)) if trace_at < conflict_at => {
+                return Some(trace_rejection);
+            }
+            (Some(_), _) => {
+                return Some(OfficialRejection::with_code(
+                    CoreOfficialValidationRule::DeclarationDuplicate,
+                    "declaration_duplicate_module_import",
+                ));
+            }
+            (None, Some(_)) => return Some(trace_rejection),
+            (None, None) => {}
+        }
+    }
+
+    // The template expression sources are walked last — trace placement only.
+    let mut template_sources: Vec<String> = Vec::new();
+    collect_template_expression_sources(source, &parsed.template, &mut template_sources);
+    for src in &template_sources {
+        if first_misplaced_inspect_trace(src).is_some() {
+            return Some(trace_rejection);
         }
     }
     None
 }
 
-/// Whether ONE expression / statement source contains a `$inspect.trace(...)` call in
-/// an ILLEGAL position. Driven from the OXC AST: the walker records the span of every
-/// UNSHADOWED trace call plus an allow-set of the trace calls sitting in the ONE legal
-/// position (the `expression` of an `ExpressionStatement` that is `statements[0]` of a
-/// NON-generator function body — a declaration/expression `Function` or a BLOCK-bodied
-/// arrow); any trace span outside the allow-set is the violation. The scan is
-/// SCOPE-AWARE (it mirrors the [`DollarRefScan`] `ShadowStack`): a `$inspect`
-/// PARAMETER is VALID Svelte (`($inspect) => …` / `function get($inspect) { … }` are
-/// accepted by official — only a `const $inspect` LOCAL is `dollar_prefix_invalid`), so
-/// `$inspect.trace()` under a local `$inspect` binding is an ORDINARY method call and is
-/// ignored entirely.
-fn source_has_misplaced_inspect_trace(src: &str) -> bool {
+/// The FIRST `$inspect.trace(...)` call in an ILLEGAL position within ONE expression /
+/// statement source — its span START in walk order, or `None` for a clean source.
+/// Driven from the OXC AST: the walker records the span of every UNSHADOWED trace call
+/// plus an allow-set of the trace calls sitting in the ONE legal position (the
+/// `expression` of an `ExpressionStatement` that is `statements[0]` of a NON-generator
+/// function body — a declaration/expression `Function` or a BLOCK-bodied arrow); the
+/// first trace span outside the allow-set is the violation. The scan is SCOPE-AWARE
+/// (it mirrors the [`DollarRefScan`] `ShadowStack`): a `$inspect` PARAMETER is VALID
+/// Svelte (`($inspect) => …` / `function get($inspect) { … }` are accepted by official
+/// — only a `const $inspect` LOCAL is `dollar_prefix_invalid`), so `$inspect.trace()`
+/// under a local `$inspect` binding is an ORDINARY method call and is ignored
+/// entirely.
+fn first_misplaced_inspect_trace(src: &str) -> Option<u32> {
     let alloc = Allocator::default();
     // Parse as a statement source; a bare expression source is wrapped so it parses.
-    let Some(program) = reparse_module(&alloc, src).or_else(|| {
+    let program = reparse_module(&alloc, src).or_else(|| {
         let wrapped = format!("({src});");
         reparse_module(&alloc, &wrapped)
-    }) else {
-        return false;
-    };
+    })?;
     let mut scan = InspectTracePlacementScan::default();
     use oxc_ast_visit::Visit;
     scan.visit_program(&program);
     scan.trace_spans
         .iter()
-        .any(|span| !scan.legal_spans.contains(span))
+        .find(|span| !scan.legal_spans.contains(span))
+        .map(|span| span.0)
 }
 
 /// The placement-scan state: every UNSHADOWED `$inspect.trace(...)` call span, plus the

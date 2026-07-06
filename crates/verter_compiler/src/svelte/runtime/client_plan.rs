@@ -50,9 +50,10 @@ pub(super) struct ClientModulePlan<'a> {
     /// walk reads each named position's KIND / tag from here). Building it is also
     /// where the per-interpolation reactivity fail-closed decision is made.
     pub(super) nodes: Vec<ClientNode>,
-    /// The component-FUNCTION-BODY statements, in source order. (A `<script module>`
-    /// / instance import is fail-closed upstream, so there are no module-scope
-    /// imports / hoists — the body is the only script-item slot.)
+    /// The component-FUNCTION-BODY statements, in source order. (Static imports are
+    /// NOT here — every top-level import from either script slot hoists to module
+    /// scope on `user_imports`; the body carries the remaining instance script
+    /// items.)
     pub(super) body_statements: Vec<ClientScriptItem>,
     /// The hoisted `$props.id()` declaration (`const <name> = $.props_id();`) —
     /// emitted at the ABSOLUTE function-body top, ABOVE the `$.push` frame line
@@ -63,10 +64,14 @@ pub(super) struct ClientModulePlan<'a> {
     /// A block body's reactive surface is its OWN region: the emitter builds each region's
     /// combined `$.template_effect` + binds + events from its region's ops.
     pub(super) region_ops: Vec<RegionOps>,
-    /// The module-scope USER imports (the `.svelte`-component-default subset), in SOURCE
-    /// ORDER — emitted above the component function, immediately after the runtime namespace
-    /// import. Empty for a component with no `.svelte` imports.
-    pub(super) user_imports: Vec<super::client_plan_types::UserImport>,
+    /// The module-scope USER imports — EVERY top-level static import from BOTH script
+    /// slots on the shared [`UserImport`](super::client_imports::UserImport) carrier
+    /// (default / named / namespace / side-effect forms, `with { … }` attributes
+    /// preserved), each slot in source order. Emitted in the official TWO-SLOT order:
+    /// `<script module>` imports BEFORE the runtime namespace import (after
+    /// disclose-version/flags), instance-script imports AFTER it. Empty for a
+    /// component with no user imports.
+    pub(super) user_imports: Vec<super::client_imports::UserImport>,
     /// Top-level `{#snippet}` defs that CAN hoist (capture only their params) — emitted as
     /// MODULE-scope `const` declarations between the imports and the `$.from_html` hoists,
     /// in source order. The node ids index `nodes` / the IR.

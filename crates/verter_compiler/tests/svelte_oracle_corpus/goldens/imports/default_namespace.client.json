@@ -1,0 +1,103 @@
+{
+  "slug": "imports/default_namespace.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "./c.js",
+      "kind": "default",
+      "names": [
+        "default:d, * as ns"
+      ]
+    },
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "default_namespace",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "push",
+    "state",
+    "first_child",
+    "child",
+    "reset",
+    "sibling",
+    "child",
+    "reset",
+    "template_effect",
+    "set_text",
+    "set_text",
+    "get",
+    "delegated",
+    "update",
+    "append",
+    "pop",
+    "delegate"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "delegate",
+    "delegated",
+    "first_child",
+    "from_html",
+    "get",
+    "pop",
+    "push",
+    "reset",
+    "set_text",
+    "sibling",
+    "state",
+    "template_effect",
+    "update"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "push": 1,
+    "state": 1,
+    "first_child": 1,
+    "child": 2,
+    "reset": 2,
+    "sibling": 1,
+    "template_effect": 1,
+    "set_text": 2,
+    "get": 1,
+    "delegated": 1,
+    "update": 1,
+    "append": 1,
+    "pop": 1,
+    "delegate": 1
+  },
+  "delegatedEvents": [
+    "click"
+  ],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<p> </p> <button> </button>",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; import d, * as ns from './c.js'; var root = $.from_html(`<p> </p> <button> </button>`, 1); export default function default_namespace($$anchor, $$props) {$.push($$props, true); let c = $.state(0); var fragment = root(); var p = $.first_child(fragment); var text = $.child(p); $.reset(p); var button = $.sibling(p, 2); var text_1 = $.child(button, true); $.reset(button); $.template_effect(() => {$.set_text(text, `${d ?? ''} ${ns.k ?? ''}`); $.set_text(text_1, $.get(c));}); $.delegated('click', button, () => $.update(c)); $.append($$anchor, fragment); $.pop();} $.delegate(['click']);",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

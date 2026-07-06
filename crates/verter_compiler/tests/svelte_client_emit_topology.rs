@@ -275,6 +275,50 @@ const SUPPORTED_MATRIX: &[&str] = &[
     // is the in-element leading text (the §1.2 `<button>clicks: {count}</button>`),
     // which must NOT emit a pre-clone `$.next()` — covered by `runes/hello_input`.
     "matrix/root_leading_text",
+    // ── static script-import prelude (the broad top-level import breadth) ──
+    // A bare imported-ident read `{x}` is LIVE (`$.template_effect` + `$.set_text(text,
+    // x)`, plain — never `$.get`, never a static fold) with NO context frame.
+    "imports/bare_import_read_no_frame",
+    // `bind:value={x.k}` where `x` is an import: a MEMBER of an import is an ACCEPTED
+    // bind lvalue (`$.bind_value(input, () => x.k, ($$value) => x.k = $$value)`) and the
+    // member read opens the context frame (`$.push($$props, true)` / `$.pop()`). Only
+    // the BARE root `bind:value={x}` is rejected (non-writable import root).
+    "imports/bind_member_of_import",
+    // The `.svelte`-component default import consumed as a `<Child />` callee — the
+    // component-callee subset rides the SAME broadened carrier.
+    "imports/default_component_callee",
+    // A COMBINED default + named clause (`import d, { n as m }`) — one statement, two
+    // locals, both read live.
+    "imports/default_named_mixed",
+    // A COMBINED default + namespace clause (`import d, * as ns`) — one statement, the
+    // namespace member read frames.
+    "imports/default_namespace",
+    // Two imports from the SAME source stay TWO statements (official does not merge).
+    "imports/duplicate_source_unmerged",
+    // An EMPTY named clause (`import {} from …`) binds nothing — official emits the
+    // side-effect form (`import '…';`), captured as the golden.
+    "imports/empty_named_side_effect",
+    // `with { type: 'json' }` import attributes are preserved on emission.
+    "imports/import_attributes_json",
+    // Mixed default + named + namespace forms across sources, source order preserved.
+    "imports/mixed_import_forms",
+    // The two-slot ordering: `<script module>` imports emit BEFORE `import * as $`,
+    // instance imports AFTER it.
+    "imports/module_and_instance_slot_order",
+    // A module-slot namespace MEMBER read `{NS.z}` frames (`$.push($$props, true)`).
+    "imports/module_namespace_member_frames",
+    // An import-only `<script module>` is ADMITTED (side-effect + named, module slot).
+    "imports/module_script_import_only",
+    // Three imports from three sources keep source order.
+    "imports/multi_import_source_order",
+    // Named imports (`{ x, y }`).
+    "imports/named_import",
+    // A named-alias import (`{ a as b }`) — the LOCAL binds; reads emit the local.
+    "imports/named_import_alias",
+    // An instance namespace import with a member read `{NS.z}` — live + frames.
+    "imports/namespace_import",
+    // A side-effect import (`import './setup.js'`) — no bindings, instance slot.
+    "imports/side_effect_import",
 ];
 
 /// The native-client ATTRIBUTE corpus — the `attributes/*` fixtures exercising the
@@ -1635,16 +1679,27 @@ fn golden_client_module(golden: &serde_json::Value) -> String {
         .to_string()
 }
 
-/// Whether the emitted module carries the `import * as $ from
-/// 'svelte/internal/client'` namespace + the disclose-version side effect (the
-/// golden's import topology for a runes component).
+/// Whether the emitted module carries every side-effect import (`import 'src';` —
+/// the disclose-version / flag imports plus user side-effect imports) and every
+/// namespace import (`import * as LOCAL from 'src';` — the runtime `$` plus user
+/// namespace imports, each under the golden's recorded LOCAL name) the golden's
+/// import topology records. Named / default user imports are covered by the
+/// full-module AST-structural comparison (which signs the whole `ImportDeclaration`
+/// family, `with`-clause included).
 fn emitted_imports_ok(code: &str, golden: &serde_json::Value) -> bool {
     let imports = golden["imports"].as_array().unwrap();
     imports.iter().all(|imp| {
         let source = imp["source"].as_str().unwrap();
         match imp["kind"].as_str().unwrap() {
             "sideEffect" => code.contains(&format!("import '{source}';")),
-            "namespace" => code.contains(&format!("import * as $ from '{source}';")),
+            "namespace" => {
+                let local = imp["names"]
+                    .as_array()
+                    .and_then(|names| names.first())
+                    .and_then(|name| name.as_str())
+                    .unwrap_or("$");
+                code.contains(&format!("import * as {local} from '{source}';"))
+            }
             _ => true,
         }
     })
@@ -6706,14 +6761,20 @@ fn supported_matrix_enumerates_every_documented_sub_shape() {
     // row is dropped.
     assert_eq!(
         SUPPORTED_MATRIX.len(),
-        34,
-        "the supported matrix must enumerate all 34 documented supported sub-shapes \
+        51,
+        "the supported matrix must enumerate all 51 documented supported sub-shapes \
          (16 §1.2/rune/attr + the 11 5c DOM-hosted bind-family rows incl. radio group + \
          the 3 DOM bind TARGET-LVALUE rows: plain-local ident, plain-local member, and \
          the two-element function-pair `{{get, set}}` + the element `bind:this={{get, set}}` \
          function-pair row + the 2 F4 dynamic/mixed `bind:group` value rows: \
          `bind_group_radio_dynamic` and `bind_group_radio_mixed` + the `effect_arrow` \
-         top-level `$effect(fn);` statement row)"
+         top-level `$effect(fn);` statement row + the 17 `imports/*` static script-import \
+         prelude rows: bare/named/alias/namespace/side-effect/mixed/duplicate-unmerged/\
+         multi-source-order/import-attributes/default-component-callee, the combined-\
+         clause rows default_named_mixed/default_namespace, the empty-named side-effect \
+         row empty_named_side_effect, the module-slot rows module_script_import_only/\
+         module_and_instance_slot_order/module_namespace_member_frames, and the \
+         member-of-import bind row bind_member_of_import)"
     );
     // No duplicate slugs across the matrix.
     let mut seen = std::collections::BTreeSet::new();

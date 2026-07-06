@@ -182,47 +182,40 @@ pub fn prepare_rune_bindings(
     }
 }
 
-/// Declare every admitted default `.svelte`-COMPONENT import local (`import Child from
-/// './Child.svelte'`) as a NON-REACTIVE [`BindingRuntimeKind::ComponentImport`] binding in
-/// `root_scope`, so a `<Child/>` invocation's static callee RESOLVES to the import (and a
-/// template read of the component name emits the bare callee, never `$.get`). A capitalized
-/// tag naming no such binding is an unsupported component SOURCE the projection fails closed.
+/// Declare every ADMITTED top-level static import LOCAL of one slot as its typed
+/// NON-REACTIVE import binding in `scope` — a default `.svelte`-COMPONENT import as
+/// [`BindingRuntimeKind::ComponentImport`] (so a `<Child/>` invocation's static
+/// callee resolves to the import and reads emit the bare callee, never `$.get`),
+/// and every other imported local (named / aliased / namespace / non-`.svelte`
+/// default) as the non-writable [`BindingRuntimeKind::ImportedValue`].
 ///
-/// The admit predicate is the SHARED `.svelte`-component-import predicate the
-/// [`UserImport::ComponentDefault`](super::client_plan_types::UserImport) prelude carrier
-/// also consults, so the binding a callee resolves against is exactly the import the module
-/// prelude emits. Every OTHER import form contributes no binding (it fails closed at the
-/// import classifier); only the instance script is scanned (a `<script module>` is the broad
-/// module-item deferral, refused upstream).
-pub fn prepare_component_import_bindings(
-    instance_source: Option<&str>,
-    alloc: &Allocator,
-    root_scope: ScopeId,
+/// `imports` is the slot's ADMITTED slice of the SHARED per-component
+/// [`ClassifiedScriptImports`](super::client_surface_imports::ClassifiedScriptImports)
+/// carrier (classified ONCE at IR construction) — the same carriers the module
+/// prelude emits, so the bindings template reads resolve against are exactly the
+/// emitted imports; the kind mapping is the shared
+/// [`import_specifier_binding_kind`](super::client_surface_imports::import_specifier_binding_kind)
+/// rail. A slot whose classification was refused passes the EMPTY slice (no
+/// bindings) — the surface classifier propagates the retained refusal and the
+/// component fails closed before any binding is consumed. Called per slot: the
+/// module script declares into the MODULE scope, the instance script into the root
+/// scope.
+pub(super) fn prepare_import_bindings(
+    imports: &[super::client_imports::UserImport],
+    scope: ScopeId,
     scopes: &mut ScopeGraph,
     bindings: &mut BindingTable,
 ) {
-    let Some(text) = instance_source else {
-        return;
-    };
-    let Some(program) = reparse_module(alloc, text) else {
-        return;
-    };
-    for stmt in &program.body {
-        let Statement::ImportDeclaration(import) = stmt else {
-            continue;
-        };
-        let Some(local) =
-            super::client_surface_imports::admitted_svelte_component_import_local(import)
-        else {
-            continue;
-        };
-        let binding = bindings.push(BindingInfo {
-            name: local.to_string(),
-            scope: root_scope,
-            kind: BindingRuntimeKind::ComponentImport,
-            state: None,
-        });
-        scopes.declare(root_scope, local, binding);
+    for import in imports {
+        for (local, kind) in super::client_surface_imports::import_binding_entries(import) {
+            let binding = bindings.push(BindingInfo {
+                name: local.to_string(),
+                scope,
+                kind,
+                state: None,
+            });
+            scopes.declare(scope, local, binding);
+        }
     }
 }
 

@@ -846,9 +846,10 @@ impl<'a> SupportedClientIr<'a> {
                 template_expr_sources.push(e.source);
             }
         }
-        super::reactive_analysis::needs_context(
+        super::needs_context::needs_context(
             alloc,
             self.ir.analysis.scripts.instance_source,
+            self.ir.analysis.scripts.module_source,
             &template_expr_sources,
             &render_callee_sources,
         )

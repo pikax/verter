@@ -1,0 +1,53 @@
+{
+  "slug": "imports/duplicate_source_unmerged.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "./m.js",
+      "kind": "named",
+      "names": [
+        "a"
+      ]
+    },
+    {
+      "source": "./m.js",
+      "kind": "named",
+      "names": [
+        "b"
+      ]
+    },
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "duplicate_source_unmerged",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [
+    "escape",
+    "escape",
+    "escape"
+  ],
+  "helperSet": [
+    "escape"
+  ],
+  "helperCounts": {
+    "escape": 3
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

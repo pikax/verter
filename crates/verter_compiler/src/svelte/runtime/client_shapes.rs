@@ -347,7 +347,7 @@ fn update_write_target(
 // which needs the `has_call` deps-array evaluator above — until that carrier lands it
 // fails closed here (ComplexInterpolation), never a raw rune emission. The supported
 // tracking read is the script-const form (`const t = $effect.tracking();` + `{t}` →
-// `EffectTrackingConstRead`).
+// `PlainLiveIdentRead`).
 // The `…Read` postfix is the semantically-meaningful shared trait of every variant (each
 // is a reactive READ form), not a naming accident — the lint is suppressed by design.
 #[allow(clippy::enum_variant_names)]
@@ -364,12 +364,22 @@ pub(super) enum ClientInterpolationShape {
     /// `x()` (the snippet receives its args as zero-arg getter thunks). Reactive (joins
     /// the slot/snippet body's `$.template_effect`).
     SnippetParamRead,
-    /// `{t}` where `t` resolves to a top-level `$effect.tracking()` /
-    /// `$props.id()` const — read PLAIN (`t`, never `$.get`) inside the region's
-    /// `$.template_effect` (official emits the template effect because a
-    /// call-init const cannot be static-folded; oracle-verified against
-    /// svelte@5.56.3).
-    EffectTrackingConstRead,
+    /// `{t}` where `t` resolves to a PLAIN LIVE (non-signal, non-static-foldable)
+    /// binding — a top-level `$effect.tracking()` / `$props.id()` const, or an
+    /// IMPORTED local (any import form; imports are live bindings) — read PLAIN
+    /// (`t`, never `$.get`) inside the region's `$.template_effect` (official
+    /// emits the template effect because the value is not statically known;
+    /// oracle-verified against svelte@5.56.3).
+    PlainLiveIdentRead,
+    /// `{NS.z}` — a STATIC member chain whose leftmost ROOT resolves to an
+    /// imported local (a namespace / default / named import, instance or module
+    /// slot) — read PLAIN (`NS.z`, never `$.get`) inside the region's
+    /// `$.template_effect`; the member read opens the component context frame
+    /// (`$.push($$props, true)` / `$.pop()`) through the shared `needs_context`
+    /// analysis. A computed / optional / call-bearing chain, and a member rooted
+    /// at any NON-import binding, stay the fail-closed complex-interpolation
+    /// breadth.
+    ImportedMemberRead,
 }
 
 /// Classify a reactive interpolation's expression into its accepted
@@ -407,10 +417,32 @@ pub(super) fn classify_interpolation_shape(
     let [Statement::ExpressionStatement(stmt)] = program.body.as_slice() else {
         return Err(refuse_complex());
     };
-    // The interpolation must be a BARE identifier. A parenthesized / TS-wrapped /
-    // any other expression is the `build_template_chunk` breadth (the reactive-text/
-    // interpolation completion surface) — the wrappers are NOT unwrapped (a `{(x)}` /
-    // `{x!}` is a deferral, not the bare-read shape).
+    // A STATIC member chain (`NS.z` / `NS.a.b` — no computed keys, no optional
+    // chaining, no calls, no parens) whose leftmost ROOT resolves to an IMPORTED
+    // local is a supported plain LIVE member read (official reads it plain inside
+    // the `$.template_effect` and opens the context frame). A member rooted at any
+    // OTHER binding stays the fail-closed complex-interpolation breadth.
+    if let Expression::StaticMemberExpression(member) = &stmt.expression {
+        let mut object = &member.object;
+        loop {
+            match object {
+                Expression::StaticMemberExpression(inner) => object = &inner.object,
+                Expression::Identifier(root) => {
+                    return match bindings.resolve_kind(scopes, scope, root.name.as_str()) {
+                        Some(
+                            BindingRuntimeKind::ImportedValue | BindingRuntimeKind::ComponentImport,
+                        ) => Ok(ClientInterpolationShape::ImportedMemberRead),
+                        _ => Err(refuse_complex()),
+                    };
+                }
+                _ => return Err(refuse_complex()),
+            }
+        }
+    }
+    // The interpolation must otherwise be a BARE identifier. A parenthesized /
+    // TS-wrapped / any other expression is the `build_template_chunk` breadth (the
+    // reactive-text/ interpolation completion surface) — the wrappers are NOT
+    // unwrapped (a `{(x)}` / `{x!}` is a deferral, not the bare-read shape).
     let Expression::Identifier(id) = &stmt.expression else {
         return Err(refuse_complex());
     };
@@ -427,13 +459,17 @@ pub(super) fn classify_interpolation_shape(
         // A `{#snippet}` parameter read → a thunk CALL `x()` (reactive — the value rides
         // the snippet arg). The rewrite emits `x()`; this shape is the acceptance proof.
         Some(BindingRuntimeKind::SnippetParam) => Ok(ClientInterpolationShape::SnippetParamRead),
-        // A `$effect.tracking()` / `$props.id()` const read → the PLAIN name
-        // inside the region's `$.template_effect` (official cannot static-fold a
-        // call-init const, so the read stays reactive; the rewriter leaves a
-        // non-signal read bare).
-        Some(BindingRuntimeKind::EffectTrackingConst | BindingRuntimeKind::PropsIdConst) => {
-            Ok(ClientInterpolationShape::EffectTrackingConstRead)
-        }
+        // A `$effect.tracking()` / `$props.id()` const read, or an IMPORTED local
+        // read (any import form — imports are LIVE bindings) → the PLAIN name inside
+        // the region's `$.template_effect` (official cannot static-fold either, so
+        // the read stays reactive; the rewriter leaves a non-signal read bare —
+        // never `$.get`).
+        Some(
+            BindingRuntimeKind::EffectTrackingConst
+            | BindingRuntimeKind::PropsIdConst
+            | BindingRuntimeKind::ImportedValue
+            | BindingRuntimeKind::ComponentImport,
+        ) => Ok(ClientInterpolationShape::PlainLiveIdentRead),
         // A bare identifier resolving to a NON-reactive binding (a plain local, a
         // module const, a never-reassigned `$state` lowered to PlainLet) is a
         // compile-time constant — official static-folds it to a `textContent` write,
@@ -773,17 +809,18 @@ pub(super) fn classify_bind_shape(
 /// - a CLEAN (non-TS-wrapped) bare-identifier target whose binding is a reactive
 ///   `$state` signal (`$.set(name, $$value)`) OR a PLAIN local (`name = $$value`);
 /// - a CLEAN member target (`o.x` / `a[i]`) whose ROOT identifier is a reactive
-///   `$state` signal (`$.get(o).x = $$value`) OR a PLAIN local (`o.x = $$value`);
+///   `$state` signal (`$.get(o).x = $$value`), a PLAIN local (`o.x = $$value`), or an
+///   IMPORT (`x.k = $$value` — official accepts a member of an import with the
+///   identical plain-member closures and the `$.push($$props, true)` context frame);
 /// - a two-element FUNCTION-PAIR `{get, set}`, whose user-supplied get/set are passed
 ///   directly to the helper (signal-rewritten, no synthesized lvalue thunk).
 ///
-/// A `$props()` / `$bindable` / `$derived` / import root fails closed as a CONSERVATIVE
-/// boundary: a `$props()` / `$bindable` write IS a divergent protocol (a `$.prop` flag-7
-/// setter), but the IMPORT and `$derived`-member cases fail closed because their
-/// correctness depends on import / derived semantics not yet modelled in this vertical —
-/// NOT because official uses a divergent accessor (for an import root official emits the
-/// identical plain-member form, and a `$derived` member is a plain member write). 5c
-/// keeps these fail-closed until that semantics is owned. Object/array `$state`
+/// A BARE import root (`bind:value={x}` where `x` is an import) fails closed at the
+/// writable-root gate — official REJECTS it (`constant_binding`, "Cannot bind to
+/// import"); import bindings are not reassignable. A `$props()` / `$bindable` /
+/// `$derived` root (bare or member) stays fail-closed as a CONSERVATIVE boundary: a
+/// `$props()` / `$bindable` write IS a divergent protocol (a `$.prop` flag-7 setter),
+/// and the `$derived`-member case is not yet modelled in this vertical. Object/array `$state`
 /// (`BareProxy` / `StateProxy`) roots are not reachable here — the object/array `$state`
 /// DECLARATION fails closed upstream at the `$state()` non-primitive-init gate (its
 /// lowering is owned by the runes-completion vertical), so only PLAIN-local and
@@ -864,14 +901,21 @@ fn classify_dom_value_bind(
             }
         }
         // A member target (`o.x` / `a[i]`): accepted when its ROOT identifier is a
-        // reactive `$state` signal (`$.get(o).x = $$value`) OR a PLAIN local (`o.x =
-        // $$value`). A member rooted at a `$props()` / `$bindable` / `$derived` /
-        // import binding is a divergent official surface and fails closed.
+        // reactive `$state` signal (`$.get(o).x = $$value`), a PLAIN local (`o.x =
+        // $$value`), OR an IMPORT (`x.k = $$value` — official ACCEPTS a member of an
+        // import with the identical plain-member closures + the context frame; only
+        // the BARE import root is rejected). A member rooted at a `$props()` /
+        // `$bindable` / `$derived` binding is a divergent official surface and fails
+        // closed.
         Some(BindTargetKind::Member) => {
             let Some(root_name) = &fact.root_ident else {
                 return Err(refuse());
             };
-            if bind_root_is_writable_target(bindings, scopes, scope, root_name) {
+            let root_is_import = matches!(
+                bindings.resolve_kind(scopes, scope, root_name),
+                Some(k) if super::expr::is_import_binding(k)
+            );
+            if bind_root_is_writable_target(bindings, scopes, scope, root_name) || root_is_import {
                 accept(BindGetSetForm::TargetLvalue)
             } else {
                 Err(refuse())
@@ -929,14 +973,16 @@ fn classify_dom_value_bind(
 /// local (the setter assigns directly: `name = $$value` / `o.x = $$value`). These are
 /// the two roots whose plain-assignment setter is byte-correct against official.
 ///
-/// A `$props()` / `$bindable` / `$derived` / import root is NOT writable here as a
-/// CONSERVATIVE boundary: a `$props()` / `$bindable` write IS a divergent protocol (a
-/// `$.prop` flag-7 accessor), but the IMPORT and `$derived`-member cases fail closed
-/// because their correctness depends on import / derived semantics not yet modelled in
-/// this vertical — NOT because official uses a divergent accessor (an import root emits
-/// the identical plain-member form; a `$derived` member is a plain member write). An
-/// UNRESOLVED root (no binding row) likewise fails closed (a free / undeclared target is
-/// not an emittable lvalue here).
+/// A `$props()` / `$bindable` / `$derived` root is NOT writable here as a CONSERVATIVE
+/// boundary: a `$props()` / `$bindable` write IS a divergent protocol (a `$.prop`
+/// flag-7 accessor), and the `$derived`-member case is not yet modelled in this
+/// vertical. An IMPORT root (`ComponentImport` / `ImportedValue`) is NOT writable BY
+/// DESIGN, not as a deferral: ES import bindings are not reassignable, and official
+/// REJECTS the bare bind (`constant_binding`) and the reassignment
+/// (`constant_assignment`). A MEMBER rooted at an import is a separate, accepted
+/// surface (the member-bind arm admits it — the plain-member setter is official). An
+/// UNRESOLVED root (no binding row) likewise fails closed (a free / undeclared target
+/// is not an emittable lvalue here).
 ///
 /// SHARED by both the element DOM-bind classifier and the component-bind projection, so a
 /// component `bind:x={root}` consumes the SAME writable-root policy instead of synthesizing a
@@ -1245,249 +1291,5 @@ pub(super) fn classify_rune_declaration_kind(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::svelte::runtime::expr::BindingInfo;
-
-    /// A scope graph with a single root holding one `$state` signal binding named
-    /// `value` (the reactive-signal target a `bind:value` resolves to).
-    fn signal_value_env() -> (BindingTable, ScopeGraph, ScopeId) {
-        let (mut graph, root) = ScopeGraph::with_root();
-        let mut bindings = BindingTable::new();
-        let id = bindings.push(BindingInfo {
-            name: "value".to_string(),
-            scope: root,
-            kind: BindingRuntimeKind::StateSignal { raw: false },
-            state: None,
-        });
-        graph.declare(root, "value", id);
-        (bindings, graph, root)
-    }
-
-    /// Build a real [`AnalyzedExpr`] for `source` through the SAME single-parse analysis
-    /// path the runtime uses (so the test exercises the actual shared `BindTargetFact`,
-    /// not a synthetic stand-in).
-    fn analyzed_expr(source: &'static str, scope: ScopeId) -> AnalyzedExpr<'static> {
-        let facts = crate::svelte::runtime::expr::collect_expr_references(source)
-            .expect("test bind expression parses cleanly");
-        AnalyzedExpr::interned(source, scope, facts)
-    }
-
-    #[test]
-    fn classify_bind_value_requires_an_explicit_bound_expression_source() {
-        // ACCEPTED == EMITTABLE: a `bind:value` with NO bound-expression source
-        // (`expr_source: None`) must FAIL CLOSED. Runtime-op collection only emits
-        // `$.bind_value` for an `AttrIr::Bind { expr: Some(_) }`; a classifier that
-        // accepted a sourceless bind (the old `expr_source.unwrap_or("value")`
-        // fabrication) would record a bind shape the emitter then silently drops —
-        // an accept-then-drop divergence. The fix makes the absence of a bound
-        // expression a refusal at the classifier, so an accepted bind shape ALWAYS
-        // has an emittable expression.
-        let (bindings, scopes, root) = signal_value_env();
-        let locals = rustc_hash::FxHashSet::default();
-        let span = Span::new(0, 0);
-        let res = classify_bind_shape(
-            "value",
-            "input",
-            /* host_attrs = */ &[],
-            /* expr = */ None,
-            root,
-            &bindings,
-            &scopes,
-            &locals,
-            span,
-        );
-        assert!(
-            matches!(
-                res,
-                Err(UnsupportedSvelteRuntimeSurface::Binding { ref target, .. }) if target == "value"
-            ),
-            "a sourceless `bind:value` must fail closed as the `bind:value` surface, got {res:?}"
-        );
-        // NEGATIVE: it must NOT be accepted as any bind shape (the pre-fix
-        // `unwrap_or(\"value\")` accepted it as `ValueSignalIdent`).
-        assert!(
-            res.is_err(),
-            "a sourceless `bind:value` must NOT be accepted (accept-then-drop): {res:?}"
-        );
-    }
-
-    #[test]
-    fn classify_bind_value_accepts_an_explicit_signal_identifier_source() {
-        // The positive boundary: an EXPLICIT bound identifier resolving to a signal
-        // is accepted (the §1.2 surface + the synthesized-shorthand `value` source
-        // both reach the classifier as a `Some(_)` identifier source).
-        let (bindings, scopes, root) = signal_value_env();
-        let locals = rustc_hash::FxHashSet::default();
-        let span = Span::new(0, 0);
-        let value_expr = analyzed_expr("value", root);
-        let res = classify_bind_shape(
-            "value",
-            "input",
-            /* host_attrs = */ &[],
-            /* expr = */ Some(&value_expr),
-            root,
-            &bindings,
-            &scopes,
-            &locals,
-            span,
-        );
-        // An explicit `bind:value={value}` to a $state signal is accepted as a DOM
-        // value bind carrying the `$.bind_value` routing.
-        match res {
-            Ok(ClientBindShape::DomBind {
-                name,
-                routing,
-                getset,
-                group_key,
-            }) => {
-                assert_eq!(name, "value");
-                assert_eq!(
-                    routing.helper,
-                    crate::svelte::bind_contract::RuntimeHelper::Value
-                );
-                // A bare-identifier signal target synthesizes the lvalue thunks.
-                assert_eq!(getset, BindGetSetForm::TargetLvalue);
-                // NEGATIVE: a non-`group` DOM bind carries NO group key (the accumulator
-                // grouping is `bind:group`-only).
-                assert_eq!(group_key, None, "a bind:value carries no group key");
-            }
-            other => panic!("expected a DomBind(Value) shape, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn classify_bind_this_requires_a_declared_local_target() {
-        // A `bind:this={el}` where `el` IS a declared instance-script local is the
-        // supported shape-3 target (accepted); a FREE `bind:this={button}` (no declared
-        // local) fails closed (5c) — official accepts it but reserves a fresh local,
-        // whereas Verter's element-local allocation would collide with the synthesized
-        // DOM local, so the free target is refused to moot the collision.
-        let (bindings, scopes, root) = signal_value_env();
-        let span = Span::new(0, 0);
-        let mut locals = rustc_hash::FxHashSet::default();
-        locals.insert("el".to_string());
-
-        // DECLARED target `el` (a bare local, not a binding-table row) — accepted.
-        let el_expr = analyzed_expr("el", root);
-        let declared = classify_bind_shape(
-            "this",
-            "div",
-            /* host_attrs = */ &[],
-            Some(&el_expr),
-            root,
-            &bindings,
-            &scopes,
-            &locals,
-            span,
-        );
-        assert_eq!(
-            declared,
-            Ok(ClientBindShape::This {
-                getset: BindGetSetForm::TargetLvalue
-            }),
-            "a declared `let el;` bind:this target is the supported identifier shape-3"
-        );
-
-        // FREE target `button` (undeclared) — fails closed.
-        let button_expr = analyzed_expr("button", root);
-        let free = classify_bind_shape(
-            "this",
-            "button",
-            /* host_attrs = */ &[],
-            Some(&button_expr),
-            root,
-            &bindings,
-            &scopes,
-            &locals,
-            span,
-        );
-        assert!(
-            matches!(
-                free,
-                Err(UnsupportedSvelteRuntimeSurface::Binding { ref target, .. }) if target == "this"
-            ),
-            "a free / undeclared bind:this target must fail closed (5c): {free:?}"
-        );
-    }
-
-    /// A scope graph holding ONE binding of the given `kind` named `root` — so the
-    /// writability decision can be exercised for each binding-runtime kind.
-    fn env_with_root_kind(kind: BindingRuntimeKind) -> (BindingTable, ScopeGraph, ScopeId) {
-        let (mut graph, root) = ScopeGraph::with_root();
-        let mut bindings = BindingTable::new();
-        let id = bindings.push(BindingInfo {
-            name: "root".to_string(),
-            scope: root,
-            kind,
-            state: None,
-        });
-        graph.declare(root, "root", id);
-        (bindings, graph, root)
-    }
-
-    #[test]
-    fn bind_root_writability_admits_only_assignment_valid_kinds() {
-        // The WRITE decision (`bind_root_is_writable_target`) must admit ONLY the
-        // assignment-valid roots — a `$state` SIGNAL, a `$.state($.proxy)` reassignable
-        // proxy, and a PLAIN local — and must EXCLUDE the read-oriented signal kinds a
-        // bind cannot legally reassign: `$derived`, an `{#each}` item, an `{#await}`
-        // binding, and a `{@const}` derived. RED before the fix: the write decision reused
-        // the read-oriented `is_signal_binding`, which admits `Derived` / `EachSignal` /
-        // `AwaitSignal` / `LegacyConstDerived` — so a read-only root was wrongly treated as
-        // writable.
-        for kind in [
-            BindingRuntimeKind::StateSignal { raw: false },
-            BindingRuntimeKind::StateSignal { raw: true },
-            BindingRuntimeKind::StateProxy,
-            BindingRuntimeKind::PlainLocal,
-        ] {
-            let (bindings, scopes, root) = env_with_root_kind(kind);
-            assert!(
-                bind_root_is_writable_target(&bindings, &scopes, root, "root"),
-                "an assignment-valid root ({kind:?}) must be writable"
-            );
-        }
-        for kind in [
-            BindingRuntimeKind::Derived,
-            BindingRuntimeKind::EachSignal,
-            BindingRuntimeKind::AwaitSignal,
-            BindingRuntimeKind::LegacyConstDerived,
-        ] {
-            let (bindings, scopes, root) = env_with_root_kind(kind);
-            assert!(
-                !bind_root_is_writable_target(&bindings, &scopes, root, "root"),
-                "a read-only signal root ({kind:?}) must NOT be writable (no bind reassignment)"
-            );
-        }
-    }
-
-    #[test]
-    fn is_writable_bind_root_admits_only_assignment_valid_kinds() {
-        // The writable predicate admits EXACTLY the assignment-valid kinds (a `$state`
-        // signal, a reassignable proxy, a plain local) and EXCLUDES the read-oriented signal
-        // kinds the read classifier (`is_signal_binding`) admits — `Derived` / `EachSignal` /
-        // `AwaitSignal` / `LegacyConstDerived`. A signal being READABLE does not make it a
-        // valid bind WRITE target.
-        assert!(is_writable_bind_root(BindingRuntimeKind::StateSignal {
-            raw: false
-        }));
-        assert!(is_writable_bind_root(BindingRuntimeKind::StateSignal {
-            raw: true
-        }));
-        assert!(is_writable_bind_root(BindingRuntimeKind::StateProxy));
-        // A `BareProxy` is writable at a MEMBER bind target (`o.x = $$value` plain).
-        assert!(is_writable_bind_root(BindingRuntimeKind::BareProxy));
-        assert!(is_writable_bind_root(BindingRuntimeKind::PlainLocal));
-        assert!(!is_writable_bind_root(BindingRuntimeKind::Derived));
-        assert!(!is_writable_bind_root(BindingRuntimeKind::EachSignal));
-        assert!(!is_writable_bind_root(BindingRuntimeKind::AwaitSignal));
-        assert!(!is_writable_bind_root(
-            BindingRuntimeKind::LegacyConstDerived
-        ));
-        // Read-only signal kinds the read classifier admits are NOT writable — the explicit
-        // split this predicate enforces.
-        assert!(is_signal_binding(BindingRuntimeKind::Derived));
-        assert!(!is_writable_bind_root(BindingRuntimeKind::Derived));
-    }
-}
+#[path = "client_shapes_tests.rs"]
+mod tests;

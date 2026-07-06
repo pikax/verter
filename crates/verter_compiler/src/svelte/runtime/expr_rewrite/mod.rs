@@ -37,6 +37,7 @@ use rustc_hash::FxHashMap;
 use verter_span::Span as VerterSpan;
 
 mod plan;
+mod plan_lvalue;
 mod plan_planner;
 mod plan_render;
 
@@ -78,6 +79,13 @@ pub(super) enum ClientLvalue {
     /// A bare-identifier target that is NOT a signal (a plain local / global) —
     /// the assignment passes through unchanged.
     PlainIdent,
+    /// A bare-identifier target resolving to an ES `import` binding (a component
+    /// default or any other imported value). Import bindings are NOT reassignable —
+    /// official compile-errors the write (`constant_assignment`, "Cannot assign to
+    /// import") — so the rewriter REJECTS it through the official-reject channel
+    /// rather than passing a raw write through (a member write rooted at an import
+    /// stays a plain [`Member`](Self::Member) deep write).
+    ImportedBinding,
     /// A member target (`o.a = …` / `o[i] = …`) — a deep write the rewriter passes
     /// through (a `BareProxy` / `StateProxy` member write stays plain member
     /// access; the object base is recursed for any nested signal read).

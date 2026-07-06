@@ -2,20 +2,20 @@
 //! root-factory hoist, and the backtick-template escaper. Extracted from `client.rs` to
 //! keep the emitter module under the file-size guard.
 
-use super::client_codegen_helpers::js_single_quoted;
-use super::client_plan_types::UserImport;
+use super::client_imports::{UserImport, UserImportSlot};
 use super::helpers::{ImportPlan, RuntimeImport};
 use super::html::TemplateFlag;
 
-/// Emit the module imports from the import plan, then the USER imports in the official
-/// slot.
+/// Emit the module imports from the import plan, interleaving the USER imports in the
+/// official two-slot order.
 ///
-/// The official import order is: the `disclose-version` side-effect import (the leading
-/// byte), the flag side-effect imports, the `import * as $ from 'svelte/internal/client'`
-/// runtime namespace, and FINALLY — immediately after the runtime namespace — each
-/// module-scope user import (`import <local> from '<source>'`) in SOURCE ORDER. The
-/// admitted set is exactly the `.svelte`-component-default subset
-/// ([`UserImport::ComponentDefault`]); every other import form is fail-closed upstream.
+/// The official import order (pinned svelte@5.56.3) is: the `disclose-version`
+/// side-effect import (the leading byte), the flag side-effect imports, each
+/// `<script module>` user import in SOURCE ORDER, the `import * as $ from
+/// 'svelte/internal/client'` runtime namespace, then each INSTANCE-script user import
+/// in SOURCE ORDER. Duplicate imports from the same source stay separate statements
+/// (official does not merge them); `with { … }` attributes are preserved. Future
+/// NON-import module statements land AFTER the instance imports.
 pub(super) fn emit_imports(out: &mut String, imports: &ImportPlan, user_imports: &[UserImport]) {
     if imports.disclose_version {
         out.push_str("import 'svelte/internal/disclose-version';\n");
@@ -29,23 +29,23 @@ pub(super) fn emit_imports(out: &mut String, imports: &ImportPlan, user_imports:
     if imports.tracing_flag {
         out.push_str("import 'svelte/internal/flags/tracing';\n");
     }
+    // `<script module>` user imports, in source order, BEFORE the runtime namespace.
+    for import in user_imports {
+        if import.slot == UserImportSlot::Module {
+            out.push_str(&import.render_statement());
+            out.push('\n');
+        }
+    }
     let ns = match imports.runtime {
         RuntimeImport::Client => "svelte/internal/client",
         RuntimeImport::Server => "svelte/internal/server",
     };
     out.push_str(&format!("import * as $ from '{ns}';\n"));
-    // The user imports, in source order, immediately after the runtime namespace (the
-    // pinned svelte@5.56.3 slot — `import Child from './Child.svelte';`).
+    // Instance-script user imports, in source order, AFTER the runtime namespace.
     for import in user_imports {
-        match import {
-            UserImport::ComponentDefault { local, source, .. } => {
-                // The specifier routes through the JS single-quote serializer so a quote /
-                // backslash in the path stays one quote-safe, parseable string literal.
-                out.push_str(&format!(
-                    "import {local} from {};\n",
-                    js_single_quoted(source)
-                ));
-            }
+        if import.slot == UserImportSlot::Instance {
+            out.push_str(&import.render_statement());
+            out.push('\n');
         }
     }
 }
@@ -105,7 +105,7 @@ pub(super) fn escape_template_literal(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::svelte::runtime::client_plan_types::UserImport;
+    use crate::svelte::runtime::client_imports::UserImportSpecifier;
     use oxc_allocator::Allocator;
     use oxc_parser::Parser;
     use oxc_span::SourceType;
@@ -124,9 +124,13 @@ mod tests {
             tracing_flag: false,
             runtime: RuntimeImport::Client,
         };
-        let user_imports = vec![UserImport::ComponentDefault {
-            local: "Child".to_string(),
+        let user_imports = vec![UserImport {
+            slot: UserImportSlot::Instance,
             source: "./O'Bri\\en.svelte".to_string(),
+            specifiers: vec![UserImportSpecifier::Default {
+                local: "Child".to_string(),
+            }],
+            attributes: Vec::new(),
             span: Span::new(0, 0),
         }];
         let mut out = String::new();

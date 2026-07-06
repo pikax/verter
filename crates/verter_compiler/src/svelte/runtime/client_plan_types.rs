@@ -12,29 +12,6 @@ use super::client_allowlist::SupportedHtmlElement;
 use super::client_shapes::{ClientBindShape, ClientEventHandlerShape};
 use super::ir::{EventOrigin, ExprId, LetBinding, TemplateScopeId};
 
-/// A typed module-scope USER import the client module hoists ABOVE the component
-/// function — the general prelude/import carrier (`ClientModulePlan.user_imports`).
-///
-/// This is the SHARED carrier the broader script-import prelude (arbitrary named /
-/// namespace / side-effect imports and module-script items, not yet supported) will
-/// broaden, NOT a component-only side channel. The admitted set is exactly the FIRST
-/// variant — a default import of a `.svelte` component module — and every other import
-/// form stays fail-closed at the classifier.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum UserImport {
-    /// `import <local> from '<source>'` where `<source>` resolves to a `.svelte`
-    /// component module — the component callee for a `<Local … />` invocation. Emitted
-    /// in SOURCE ORDER immediately after the runtime namespace import (`import * as $`).
-    ComponentDefault {
-        /// The imported local binding name (the component callee, e.g. `Child`).
-        local: String,
-        /// The module specifier string (`'./Child.svelte'`), emitted verbatim.
-        source: String,
-        /// The import declaration's source span.
-        span: Span,
-    },
-}
-
 /// A node in the NARROW client node arena — the closed template-node vocabulary
 /// the emitter walks. Every supported [`IrNode`] projects to exactly one of these;
 /// the broad-IR variants (component / block / tag / non-options special) never

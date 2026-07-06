@@ -43,6 +43,7 @@ mod client_custom_element;
 mod client_effect;
 mod client_emit;
 mod client_event;
+mod client_imports;
 mod client_lifecycle;
 mod client_module_frame;
 mod client_plan;
@@ -65,6 +66,7 @@ mod client_svelte_boundary;
 mod client_svelte_element;
 mod client_svelte_head;
 mod client_walk;
+mod cross_slot_redeclaration;
 mod css_reject;
 mod custom_element;
 mod entity_decode;
@@ -80,6 +82,7 @@ mod instance_items;
 pub mod ir;
 mod lower_component;
 mod naming;
+mod needs_context;
 mod official_reject;
 mod official_rule;
 mod ops;
@@ -88,6 +91,7 @@ mod reactive_analysis;
 mod reactive_fold;
 mod reactive_fold_tristate;
 mod rune_scan;
+mod script_body_parse;
 mod state_prep;
 mod state_scan;
 pub mod topology;
@@ -523,14 +527,30 @@ pub fn lower_parsed_svelte_to_ir<'a>(
         &mut scopes,
         &mut bindings,
     );
-    // Declare every admitted `.svelte`-COMPONENT default-import local as a NON-reactive
-    // `ComponentImport` binding in the root scope, so a `<Child/>` static callee RESOLVES
-    // to the import (and a template read of the component name emits the bare callee, never
-    // `$.get`). An import name does not collide with a `$state`/rune/plain-local name in
-    // valid source, so the pass order relative to the local-binding passes is immaterial.
-    state_scan::prepare_component_import_bindings(
-        instance_source,
-        alloc,
+    // Classify BOTH slots' static imports ONCE — the single import authority. The
+    // binding preparation below consumes the admitted carriers; the surface
+    // classifier later propagates a retained slot refusal off this SAME carrier (a
+    // refused slot declares no bindings and the component fails closed before any
+    // binding is consumed).
+    let script_imports =
+        client_surface_imports::classify_script_imports(module_source, instance_source);
+    // Declare every top-level static import local as its typed NON-reactive import
+    // binding — a default `.svelte`-COMPONENT import as `ComponentImport` (so a
+    // `<Child/>` static callee RESOLVES to the import and reads emit the bare callee,
+    // never `$.get`), every other imported local as the non-writable `ImportedValue`.
+    // Module-script imports declare into the MODULE scope (the lexical parent), so an
+    // un-shadowed template read resolves up the chain; instance imports declare into
+    // the root scope. An import name does not collide with a `$state`/rune/plain-local
+    // name in valid source, so the pass order relative to the local-binding passes is
+    // immaterial.
+    state_scan::prepare_import_bindings(
+        script_imports.admitted(client_imports::UserImportSlot::Module),
+        module_scope_id,
+        &mut scopes,
+        &mut bindings,
+    );
+    state_scan::prepare_import_bindings(
+        script_imports.admitted(client_imports::UserImportSlot::Instance),
         root_scope_id,
         &mut scopes,
         &mut bindings,
@@ -654,6 +674,7 @@ pub fn lower_parsed_svelte_to_ir<'a>(
             instance_source,
             module_source,
         },
+        script_imports,
         expressions: ctx.expressions,
         scopes: ctx.scopes,
         bindings: ctx.bindings,

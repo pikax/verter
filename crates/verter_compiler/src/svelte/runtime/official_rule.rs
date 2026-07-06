@@ -48,6 +48,27 @@ pub enum CoreOfficialValidationRule {
     /// syntax in a plain (JS) `<script>` is `js_parse_error`. Driven from the parser's RESERVED
     /// [`ScriptBodyProbe`] slot, filled here by parsing the body once with OXC.
     ScriptBodyParse,
+    /// A CROSS-SCRIPT duplicate declaration — a binding declared in BOTH the
+    /// `<script module>` slot and the instance `<script>` slot in a combination
+    /// official's analyze phase rejects (both slots emit into ONE module; the instance
+    /// scope is a CHILD of the module scope). TWO official codes, both carried
+    /// site-specifically on [`OfficialRejection::official_code`]:
+    /// - `declaration_duplicate` — an INSTANCE import local colliding with a non-`var`
+    ///   module-slot binding: official's binder HOISTS an `import` declaration to the
+    ///   parent scope (`phases/scope.js` `declare`), so the instance import declares
+    ///   INTO the module scope, where the duplicate check fires at scope creation;
+    /// - `declaration_duplicate_module_import` — an INSTANCE top-level variable
+    ///   declarator re-declaring a module-slot IMPORT local: official's
+    ///   `ensure_no_module_import_conflict`, fired per `VariableDeclarator` in the
+    ///   analyze walk.
+    ///
+    /// The SAME-body duplicate is NOT this rule — Acorn raises it at parse, so it is
+    /// the [`ScriptBodyParse`](Self::ScriptBodyParse) `js_parse_error` slot. Official
+    /// ACCEPTS the shadowing combinations (a module lexical / `var` binding + an
+    /// instance value declaration, an instance `function` / `class` over a module
+    /// import, cross-script `var` + `var`, and every distinct-name pair) — the gate
+    /// must not over-reject those.
+    DeclarationDuplicate,
     /// A `$` / `$$`-prefixed binding NAME in a declaration position (an identifier
     /// declarator `let $foo`, a `$props()` destructure local `let { a: $foo } =
     /// $props()`, or a bare `let $foo` `bind:this` target) — official
@@ -175,6 +196,15 @@ pub enum CoreOfficialValidationRule {
     /// source-text scan; scanned AFTER the group-policy and paren scans so the more-specific
     /// codes win.
     BindInvalidExpression,
+    /// An ASSIGNMENT / UPDATE whose bare-identifier target resolves to an ES `import`
+    /// binding (`x = 1` / `x++` / a compound `x += 1` where `x` is an imported local)
+    /// — official `constant_assignment` ("Cannot assign to import"). Import bindings
+    /// are non-reassignable; a MEMBER write rooted at an import (`x.k = 1`) is a
+    /// plain member mutation and is NOT this reject. Detected in the client
+    /// expression rewriter's typed lvalue classification (the scope-aware binding
+    /// table resolves the target root; a local shadowing the import name is a plain
+    /// local), never a source-text scan.
+    ConstantAssignment,
     /// A `$inspect.trace(...)` call OUTSIDE its single legal position — official
     /// `inspect_trace_invalid_placement` ("`$inspect.trace(...)` must be the first
     /// statement of a function body"). The ONLY legal position is the `expression` of an
@@ -197,6 +227,7 @@ impl CoreOfficialValidationRule {
         CoreOfficialValidationRule::StyleBodyParse,
         CoreOfficialValidationRule::ScriptInvalidContext,
         CoreOfficialValidationRule::ScriptBodyParse,
+        CoreOfficialValidationRule::DeclarationDuplicate,
         CoreOfficialValidationRule::DollarPrefixInvalid,
         CoreOfficialValidationRule::GlobalReferenceInvalid,
         CoreOfficialValidationRule::PropsIllegalName,
@@ -216,6 +247,7 @@ impl CoreOfficialValidationRule {
         CoreOfficialValidationRule::BindGroupInvalidExpression,
         CoreOfficialValidationRule::BindInvalidParens,
         CoreOfficialValidationRule::BindInvalidExpression,
+        CoreOfficialValidationRule::ConstantAssignment,
         CoreOfficialValidationRule::InspectTraceInvalidPlacement,
     ];
 
@@ -228,6 +260,7 @@ impl CoreOfficialValidationRule {
             Self::StyleBodyParse => "StyleBodyParse",
             Self::ScriptInvalidContext => "ScriptInvalidContext",
             Self::ScriptBodyParse => "ScriptBodyParse",
+            Self::DeclarationDuplicate => "DeclarationDuplicate",
             Self::DollarPrefixInvalid => "DollarPrefixInvalid",
             Self::GlobalReferenceInvalid => "GlobalReferenceInvalid",
             Self::PropsIllegalName => "PropsIllegalName",
@@ -247,6 +280,7 @@ impl CoreOfficialValidationRule {
             Self::BindGroupInvalidExpression => "BindGroupInvalidExpression",
             Self::BindInvalidParens => "BindInvalidParens",
             Self::BindInvalidExpression => "BindInvalidExpression",
+            Self::ConstantAssignment => "ConstantAssignment",
             Self::InspectTraceInvalidPlacement => "InspectTraceInvalidPlacement",
         }
     }
@@ -275,6 +309,11 @@ impl CoreOfficialValidationRule {
             Self::StyleBodyParse => "css_expected_identifier",
             Self::ScriptInvalidContext => "script_invalid_context",
             Self::ScriptBodyParse => "js_parse_error",
+            // DeclarationDuplicate spans TWO official codes (`declaration_duplicate` /
+            // `declaration_duplicate_module_import`); the exact one is carried per-refusal
+            // on `OfficialRejection::official_code`. This is the canonical-code
+            // documentation hook only.
+            Self::DeclarationDuplicate => "declaration_duplicate",
             Self::DollarPrefixInvalid => "dollar_prefix_invalid",
             Self::GlobalReferenceInvalid => "global_reference_invalid",
             Self::PropsIllegalName => "props_illegal_name",
@@ -298,6 +337,7 @@ impl CoreOfficialValidationRule {
             Self::BindGroupInvalidExpression => "bind_group_invalid_expression",
             Self::BindInvalidParens => "bind_invalid_parens",
             Self::BindInvalidExpression => "bind_invalid_expression",
+            Self::ConstantAssignment => "constant_assignment",
             Self::InspectTraceInvalidPlacement => "inspect_trace_invalid_placement",
         }
     }
@@ -314,6 +354,7 @@ impl CoreOfficialValidationRule {
             Self::StyleBodyParse => "svelte-official-reject-style-body-parse",
             Self::ScriptInvalidContext => "svelte-official-reject-script-invalid-context",
             Self::ScriptBodyParse => "svelte-official-reject-script-body-parse",
+            Self::DeclarationDuplicate => "svelte-official-reject-declaration-duplicate",
             Self::DollarPrefixInvalid => "svelte-official-reject-dollar-prefix-invalid",
             Self::GlobalReferenceInvalid => "svelte-official-reject-global-reference-invalid",
             Self::PropsIllegalName => "svelte-official-reject-props-illegal-name",
@@ -339,6 +380,7 @@ impl CoreOfficialValidationRule {
             }
             Self::BindInvalidParens => "svelte-official-reject-bind-invalid-parens",
             Self::BindInvalidExpression => "svelte-official-reject-bind-invalid-expression",
+            Self::ConstantAssignment => "svelte-official-reject-constant-assignment",
             Self::InspectTraceInvalidPlacement => {
                 "svelte-official-reject-inspect-trace-invalid-placement"
             }
@@ -357,6 +399,11 @@ impl CoreOfficialValidationRule {
                 "a `<script>` with an invalid `context` value or a valued `module` attribute"
             }
             Self::ScriptBodyParse => "a `<script>` body that fails to parse",
+            Self::DeclarationDuplicate => {
+                "a binding declared in both the `<script module>` slot and the instance \
+                 `<script>` slot (an instance import colliding with a module-slot binding, \
+                 or an instance variable re-declaring a module-slot import)"
+            }
             Self::DollarPrefixInvalid => "a `$`-prefixed binding name",
             Self::GlobalReferenceInvalid => {
                 "a global `$`-prefixed reference (an undeclared store-style `$foo`, a `$$foo`, or a reserved magic object)"
@@ -408,6 +455,10 @@ impl CoreOfficialValidationRule {
                 "a `bind:` directive whose target is neither a valid lvalue \
                  (Identifier / MemberExpression) nor a two-element `{get, set}` pair \
                  (a call, a literal, a 3+-element sequence, or other non-assignable shape)"
+            }
+            Self::ConstantAssignment => {
+                "an assignment / update to an `import` binding (`x = 1` / `x++` where `x` \
+                 is an imported local — import bindings are not reassignable)"
             }
             Self::InspectTraceInvalidPlacement => {
                 "a `$inspect.trace()` call that is not the first statement of a function body"

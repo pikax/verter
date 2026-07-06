@@ -171,6 +171,13 @@ fn positive_supported_instance_script_shapes_emit_valid_main() {
             "bind_this_local",
             "<script>let v = $state(''); let el;</script>\n<input bind:value={v} /><div bind:this={el}></div>{v}\n",
         ),
+        // A top-level static `import` is NOT a body item — it hoists to the module
+        // import prelude (the static-import surface), so an import-bearing script
+        // stays a supported component.
+        (
+            "import_hoists_to_prelude",
+            "<script>import D from './d.js'; let n = $state(0);</script>\n<button onclick={() => n++}>{n}</button>\n",
+        ),
         // Options: absent (mode inferred from `$state` usage) — covered by every row
         // above. An explicit `runes={true}` (and the shorthand `runes`).
         (
@@ -217,7 +224,6 @@ fn negative_every_top_level_statement_family_fails_closed() {
         ("namespace", "namespace N {}"),
         ("interface", "interface I { x: number }"),
         ("type_alias", "type T = number;"),
-        ("import", "import D from './d.js';"),
         ("export_const", "export const X = 1;"),
         ("export_function", "export function h() {}"),
         ("reactive_label", "$: doubled = __c * 2;"),
@@ -559,37 +565,64 @@ fn duplicate_svelte_options_fails_as_official_reject() {
 }
 
 #[test]
-fn redeclaration_scope_is_let_const_only_function_collisions_fail_closed() {
-    // CHARACTERIZES the deliberate scope of the body-probe `top_level_lexical_redeclaration`
-    // detector (so it is not an over-claim): the SUPPORTED-surface `let`/`const` redeclaration is
-    // an EXACT-CODE `js_parse_error`, while a redeclaration involving a top-level FUNCTION / CLASS
-    // / IMPORT (which upstream ALSO `js_parse_error`s) is NOT exact-coded here because such a
-    // construct is itself OUTSIDE the §1.2-core allowlist — the component fails closed as an
-    // unsupported FEATURE first. So no REACHABLE official-reject in the supported surface is
-    // missed; the out-of-surface collisions still fail closed (no `Main`), never a silent accept.
+fn redeclaration_gate_covers_module_scope_bindings_with_official_parity() {
+    // CHARACTERIZES the body-probe `top_level_binding_redeclaration` detector: EVERY
+    // module-scope duplicate-binding early error upstream raises at parse ("Identifier
+    // 'x' has already been declared") is an EXACT-CODE `js_parse_error` OfficialReject —
+    // `let`/`const` redeclarations AND collisions involving a top-level IMPORT local /
+    // FUNCTION / CLASS (all lexical at module scope, oracle-confirmed vs the pinned
+    // compiler), INCLUDING the `export`-wrapped and named-`export default` declaration
+    // forms (the export wrapper does not change the binding). Only `var`/`var`
+    // re-binding is exempt (legal JS).
 
-    // (a) the supported-surface `let`/`const` redeclaration → exact-code OfficialReject.
-    let lexical = "<script>let c = $state(0); let c = $state(1);</script>\n<button onclick={() => c++}>{c}</button>\n";
-    match compile(lexical) {
-        Err(ClientCompileError::OfficialReject(rejection)) => assert_eq!(
-            rejection.official_code, "js_parse_error",
-            "a same-scope `let`/`const` redeclaration must carry `js_parse_error`"
-        ),
-        other => panic!("a `let`/`const` redeclaration must be an OfficialReject: {other:?}"),
-    }
-
-    // (b) out-of-surface collisions (function / class / import) — upstream `js_parse_error`s them,
-    //     but they carry an out-of-allowlist construct, so Verter fails closed (no `Main`) via the
-    //     unsupported channel. The REQUIREMENT is only "no accepted-invalid leak" — never a `Main`.
+    // (a) every duplicate-binding collision family → exact-code OfficialReject.
     for src in [
+        // `let`/`const` redeclaration (the original supported-surface family).
+        "<script>let c = $state(0); let c = $state(1);</script>\n<button onclick={() => c++}>{c}</button>\n",
+        // Function / class duplicates (lexical at module scope).
         "<script>function f(){} function f(){}</script>\n<button>x</button>\n",
         "<script>class A {} class A {}</script>\n<button>x</button>\n",
+        // Import-local collisions: import + `let`, import + `var`, import +
+        // `function`, and duplicate import locals across declarations.
         "<script>import x from 'y'; let x = 1;</script>\n<button>x</button>\n",
+        "<script>import { x } from 'y'; var x = 1;</script>\n<button>x</button>\n",
+        "<script>import { x } from 'y'; function x(){}</script>\n<button>x</button>\n",
+        "<script>import { x } from 'a'; import { x } from 'b';</script>\n<button>x</button>\n",
+        // `var` + `function` (a module-scope function declaration is lexical, so
+        // the collision is an early error even against `var`).
+        "<script>var x = 1; function x(){}</script>\n<button>x</button>\n",
+        // EXPORT-wrapped declarations bind the same names (oracle-confirmed:
+        // "Identifier 'x' has already been declared", `js_parse_error`) — the
+        // detector unwraps `export <decl>` and a NAMED `export default function` /
+        // `class` (an anonymous default export binds nothing).
+        "<script>export const x = 1; let x = 2;</script>\n<button>x</button>\n",
+        "<script>export function f() {} let f = 2;</script>\n<button>x</button>\n",
+        "<script>export default function x() {} let x = 2;</script>\n<button>x</button>\n",
+        "<script>export default class A {} class A {}</script>\n<button>x</button>\n",
+        // The module slot runs the same per-body probe.
+        "<script module>export const z = 1; const z = 2;</script>\n<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n",
     ] {
-        assert!(
-            compile(src).is_err(),
-            "an out-of-surface redeclaration must fail closed (no Main): {src}"
-        );
+        match compile(src) {
+            Err(ClientCompileError::OfficialReject(rejection)) => assert_eq!(
+                rejection.official_code, "js_parse_error",
+                "a module-scope duplicate binding must carry `js_parse_error`: {src}"
+            ),
+            other => panic!(
+                "a module-scope duplicate binding must be an OfficialReject: {other:?}\n{src}"
+            ),
+        }
+    }
+
+    // (b) NEGATIVE — `var`/`var` re-binding is legal JS (upstream accepts): the
+    // redeclaration gate must NOT fire. The component still fails closed (a `var`
+    // declaration is outside the instance-script allowlist), but through the
+    // unsupported-FEATURE channel, never a `js_parse_error` false-reject.
+    match compile("<script>var x = 1; var x = 2;</script>\n<button>x</button>\n") {
+        Err(ClientCompileError::Unsupported(_)) => {}
+        other => panic!(
+            "`var`/`var` re-binding must not trip the redeclaration gate (it is legal \
+             JS; the refusal stays the unsupported-feature channel): {other:?}"
+        ),
     }
 }
 
@@ -634,6 +667,81 @@ fn guard_client_script_lowering_does_not_call_the_removed_broad_path() {
     assert!(
         plan.contains("lower_simple_instance_item"),
         "client_plan_script.rs must lower the instance script via `lower_simple_instance_item`"
+    );
+}
+
+#[test]
+fn guard_import_classification_has_a_single_authority() {
+    // `classify_static_imports` is the ONE import classification/parse authority,
+    // private to its own module: the per-slot carriers are computed ONCE at IR
+    // construction (the shared-carrier entry `classify_script_imports`) and BOTH
+    // consumers — the binding preparation (`state_scan.rs`) and the surface
+    // classification (`client_surface_script.rs`) — read those SAME retained
+    // carriers. A second `classify_static_imports` call site is a second import
+    // authority; a fail-soft `unwrap_or_default()` on the classification result
+    // silently swallows the classifier's typed refusal. Both are forbidden.
+    for file in ["state_scan.rs", "client_surface_script.rs", "mod.rs"] {
+        let src = read_runtime_file(file);
+        assert!(
+            !src.contains("classify_static_imports"),
+            "{file}: import classification must flow through the shared \
+             `ClassifiedScriptImports` carriers, never a second `classify_static_imports` \
+             call site"
+        );
+    }
+    let scan = read_runtime_file("state_scan.rs");
+    assert!(
+        !scan.contains("unwrap_or_default"),
+        "state_scan.rs: the import-classification outcome must not be fail-soft \
+         swallowed — the retained refusal is the surface classifier's to propagate"
+    );
+    // The single classification entry: the shared-carrier constructor exists and the
+    // classifier fn is module-private (not `pub(super)`), so a second call site
+    // cannot compile.
+    let classifier = read_runtime_file("client_surface_imports.rs");
+    assert!(
+        classifier.contains("fn classify_script_imports"),
+        "client_surface_imports.rs must own the once-per-component shared-carrier \
+         classification entry"
+    );
+    assert!(
+        !classifier.contains("pub(super) fn classify_static_imports"),
+        "client_surface_imports.rs: `classify_static_imports` must be module-private \
+         (the shared-carrier entry is the sole caller)"
+    );
+    // The PUBLIC shared-carrier entry itself has exactly ONE production call site —
+    // the once-per-component IR construction in `mod.rs`. A second
+    // `classify_script_imports(` call anywhere in the runtime production sources is a
+    // second import classification authority (a consumer bypassing the retained
+    // carriers), even though the entry is `pub(super)`-visible across the runtime.
+    let mut call_sites: Vec<(String, usize)> = Vec::new();
+    for entry in std::fs::read_dir(runtime_dir()).expect("read the runtime source dir") {
+        let path = entry.expect("read a runtime dir entry").path();
+        if path.extension().is_none_or(|ext| ext != "rs") {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .expect("a runtime file name")
+            .to_string_lossy()
+            .into_owned();
+        if name.ends_with("_tests.rs") {
+            continue; // production call sites only
+        }
+        let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {name}: {e}"));
+        let calls = src.matches("classify_script_imports(").count()
+            - src.matches("fn classify_script_imports(").count();
+        if calls > 0 {
+            call_sites.push((name, calls));
+        }
+    }
+    call_sites.sort();
+    assert_eq!(
+        call_sites,
+        vec![("mod.rs".to_string(), 1)],
+        "`classify_script_imports` must have exactly ONE production call site (the \
+         IR-construction classification in mod.rs); every other consumer reads the \
+         shared `ClassifiedScriptImports` carriers"
     );
 }
 

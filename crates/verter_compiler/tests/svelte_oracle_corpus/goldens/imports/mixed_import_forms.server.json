@@ -1,0 +1,61 @@
+{
+  "slug": "imports/mixed_import_forms.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "./a.js",
+      "kind": "default",
+      "names": [
+        "default:d"
+      ]
+    },
+    {
+      "source": "./b.js",
+      "kind": "named",
+      "names": [
+        "n"
+      ]
+    },
+    {
+      "source": "./c.js",
+      "kind": "namespace",
+      "names": [
+        "NS"
+      ]
+    },
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "mixed_import_forms",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [
+    "escape",
+    "escape",
+    "escape",
+    "escape"
+  ],
+  "helperSet": [
+    "escape"
+  ],
+  "helperCounts": {
+    "escape": 4
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

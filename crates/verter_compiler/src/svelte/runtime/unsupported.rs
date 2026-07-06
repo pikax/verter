@@ -172,14 +172,34 @@ pub enum UnsupportedSvelteRuntimeSurface {
         /// The source span of the interpolation expression.
         span: Span,
     },
-    /// An instance-script `import` or a `<script module>` script. The official
-    /// compiler hoists an instance import to module scope and emits a module-script
-    /// statement; that script-hoisting lowering is a script-completion follow-up,
-    /// so an import / module script fails closed.
+    /// A residual NON-static import form the static-import prelude does not admit: a
+    /// TypeScript type-only import in a plain script (`import type …` /
+    /// `import { type T }` — an official parse error outside `lang="ts"`), an import
+    /// PHASE (`import defer …` / source-phase), or the deprecated `assert { … }`
+    /// attribute keyword (official parse-rejects it; only `with { … }` is preserved).
+    /// Every STATIC import form — default / named / aliased / namespace /
+    /// side-effect / mixed, instance or import-only module slot — is admitted and
+    /// hoisted through the typed [`UserImport`](super::client_imports::UserImport)
+    /// prelude carrier, so this surface no longer covers them.
     ScriptImport {
-        /// A short construct label (`import`, `module script`).
+        /// A short construct label (`type-only import`, `import phase`,
+        /// `import assertion`).
         construct: &'static str,
         /// The source span.
+        span: Span,
+    },
+    /// A NON-import top-level statement in a `<script module>`. The admitted module
+    /// script is IMPORT-ONLY: every top-level statement must be a static `import`
+    /// declaration. Arbitrary module items — a variable / function / class
+    /// declaration, an export or re-export (`export … from`), an expression
+    /// statement, control flow, or a module-scope rune (`$state` / `$derived` /
+    /// `$props.id()`) — are the module-item completion surface and fail closed here
+    /// with the offending statement family.
+    ModuleScriptItem {
+        /// A short construct label (`variable declaration`, `export`, `function`,
+        /// `expression statement`, …).
+        construct: &'static str,
+        /// The source span (module-script-relative).
         span: Span,
     },
     /// A `<script lang="ts">` / `<script lang="tsx">` (TypeScript) script. The
@@ -320,6 +340,7 @@ impl UnsupportedSvelteRuntimeSurface {
             Self::RootTextRegion { .. } => "svelte-runtime-unsupported-root-text-region",
             Self::ComplexInterpolation { .. } => "svelte-runtime-unsupported-complex-interpolation",
             Self::ScriptImport { .. } => "svelte-runtime-unsupported-script-import",
+            Self::ModuleScriptItem { .. } => "svelte-runtime-unsupported-module-script-item",
             Self::TypeScript { .. } => "svelte-runtime-unsupported-typescript",
             Self::ComplexTextChunk { .. } => "svelte-runtime-unsupported-complex-text",
             Self::InstanceScriptItem { .. } => "svelte-runtime-unsupported-instance-script-item",
@@ -387,8 +408,15 @@ impl UnsupportedSvelteRuntimeSurface {
                     .to_string()
             }
             Self::ScriptImport { construct, .. } => {
-                format!("a `{construct}` (the official compiler hoists it to module scope)")
+                format!(
+                    "a `{construct}` (only static value imports are admitted to the \
+                     module import prelude)"
+                )
             }
+            Self::ModuleScriptItem { construct, .. } => format!(
+                "the `<script module>` `{construct}` item (the admitted module script \
+                 is import-only; other module items are not yet lowered)"
+            ),
             Self::TypeScript { .. } => {
                 "a `<script lang=\"ts\">` TypeScript script (the official compiler strips \
                  the TS annotations before lowering)"
@@ -456,6 +484,7 @@ impl UnsupportedSvelteRuntimeSurface {
             | Self::RootTextRegion { span }
             | Self::ComplexInterpolation { span }
             | Self::ScriptImport { span, .. }
+            | Self::ModuleScriptItem { span, .. }
             | Self::TypeScript { span }
             | Self::ComplexTextChunk { span }
             | Self::InstanceScriptItem { span, .. }

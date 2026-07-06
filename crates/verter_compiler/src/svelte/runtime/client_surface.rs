@@ -23,7 +23,7 @@ use oxc_allocator::Allocator;
 
 use super::client::UnsupportedSvelteRuntimeSurface;
 use super::client_allowlist::{is_svelte_reserved_word, SupportedHtmlElement, SupportedStaticAttr};
-use super::client_plan_types::UserImport;
+use super::client_imports::UserImport;
 use super::client_shapes::{
     self, ClientBindShape, ClientDynamicAttrShape, ClientEventHandlerShape,
     ClientInterpolationShape, ClientPropsUsage,
@@ -125,9 +125,9 @@ pub(super) struct ClassifiedClientSurface {
     /// out-of-allowlist statement (a function / class / enum / `$:` label / plain
     /// local fails closed at the classifier, never reaches lowering).
     pub(super) script_items: Vec<SupportedInstanceScriptItem>,
-    /// The admitted module-scope USER imports (the `.svelte`-component-default subset), in
-    /// SOURCE ORDER — the typed prelude carrier the plan emits above the component function.
-    /// Empty for a component with no `.svelte` imports.
+    /// The admitted module-scope USER imports (every static import form, module slot
+    /// first, each slot in source order) — the typed prelude carrier the plan emits
+    /// above the component function. Empty for a component with no imports.
     pub(super) user_imports: Vec<UserImport>,
     /// The `$host`-usage FACT the rune scan recorded: an ADMITTED zero-arg
     /// `$host()` call in the instance script or any template expression (the
@@ -163,10 +163,11 @@ impl ClientSyntaxSurface {
         // declarator/statement for an unsupported shape. The basic no-default
         // `$props()` form, ALL primitive-literal `$state` declarators
         // (multi-declarator scanned), and the advanced rune forms are gated here
-        // BEFORE lowering. A default `.svelte` component import is ADMITTED (the
-        // component-callee subset, returned as the typed prelude carrier); every other
-        // instance-script import form + a `<script module>` are the broad
-        // static-import-prelude deferral (not yet supported) and fail closed here.
+        // BEFORE lowering. EVERY static import form is ADMITTED (returned as typed
+        // prelude carriers, module slot + instance slot); a `<script module>` is
+        // admitted IFF import-only — a non-import module item fails closed with the
+        // precise module-item diagnostic, and the residual non-static import forms
+        // (type-only / phase / `assert { … }`) fail closed at the import classifier.
         // The returned facts also carry `uses_host` — the admitted zero-arg
         // `$host()` usage the rune scan recorded (instance + template
         // expressions), consumed by the plan build.

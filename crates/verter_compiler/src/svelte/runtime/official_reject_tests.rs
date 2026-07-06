@@ -586,6 +586,447 @@ fn plain_named_declarations_are_not_dollar_prefix_invalid() {
         );
 }
 
+// ── DeclarationDuplicate (cross-script module-slot ↔ instance-slot collisions) ────
+
+/// A two-script component: the module-slot body + the instance-slot body + a `<p>`.
+fn two_scripts(module_body: &str, instance_body: &str) -> String {
+    format!(
+        "<script module>\n{module_body}\n</script>\n<script>\n{instance_body}\n</script>\n<p>hi</p>\n"
+    )
+}
+
+#[test]
+fn instance_value_decl_over_module_import_is_declaration_duplicate_module_import() {
+    // An instance top-level variable declarator re-declaring a MODULE-slot import
+    // local — official `declaration_duplicate_module_import` ("Cannot declare a
+    // variable with the same name as an import…", `ensure_no_module_import_conflict`,
+    // oracle-probed). Every module import form (default / named / namespace) and every
+    // instance declarator kind (`let` / `const` / `var`, `$state` or plain, a
+    // destructuring pattern, an `export`-wrapped declarator) rejects identically.
+    // RED before the fix: the gate validated one body at a time and ACCEPTED all of
+    // these (the cross-script fail-open).
+    for (label, module_body, instance_body) in [
+        (
+            "default-import + let-state",
+            "import x from './m.js';",
+            "let x = $state(0);",
+        ),
+        (
+            "named-import + let-state",
+            "import { x } from './m.js';",
+            "let x = $state(0);",
+        ),
+        (
+            "namespace-import + let-state",
+            "import * as x from './m.js';",
+            "let x = $state(0);",
+        ),
+        (
+            "named-import + plain-let",
+            "import { x } from './m.js';",
+            "let x = 1;\nlet s = $state(0);",
+        ),
+        (
+            "named-import + const",
+            "import { x } from './m.js';",
+            "const x = 1;\nlet s = $state(0);",
+        ),
+        (
+            "named-import + var",
+            "import { x } from './m.js';",
+            "var x = 1;\nlet s = $state(0);",
+        ),
+        (
+            "named-import + destructuring-pattern",
+            "import { x } from './m.js';",
+            "let { a: x } = { a: 1 };\nlet s = $state(0);",
+        ),
+        (
+            "named-import + export-wrapped-declarator",
+            "import { x } from './m.js';",
+            "export const x = 1;\nlet s = $state(0);",
+        ),
+    ] {
+        assert_eq!(
+            gate_full(&two_scripts(module_body, instance_body)),
+            Some(OfficialRejection::with_code(
+                CoreOfficialValidationRule::DeclarationDuplicate,
+                "declaration_duplicate_module_import",
+            )),
+            "[{label}] an instance value re-declaration of a module import must reject \
+             with the exact declaration_duplicate_module_import code"
+        );
+    }
+}
+
+#[test]
+fn instance_import_over_module_binding_is_declaration_duplicate() {
+    // An INSTANCE import local colliding with a non-`var` MODULE-slot binding —
+    // official `declaration_duplicate` ("`x` has already been declared"): the binder
+    // hoists an `import` declaration to the parent (module) scope, where the
+    // scope-creation duplicate check fires (oracle-probed). Covers import-vs-import
+    // (every instance import form) AND the module lexical kinds (`let` / `const` /
+    // `function` / `class`, including `export`-wrapped and `export default` named
+    // forms). RED before the fix: all ACCEPTED.
+    for (label, module_body, instance_body) in [
+        (
+            "module-named-import + instance-named-import",
+            "import { x } from './a.js';",
+            "import { x } from './b.js';\nlet s = $state(0);",
+        ),
+        (
+            "module-default-import + instance-named-import",
+            "import x from './a.js';",
+            "import { x } from './b.js';\nlet s = $state(0);",
+        ),
+        (
+            "module-named-import + instance-default-import",
+            "import { x } from './a.js';",
+            "import x from './b.js';\nlet s = $state(0);",
+        ),
+        (
+            "module-named-import + instance-namespace-import",
+            "import { x } from './a.js';",
+            "import * as x from './b.js';\nlet s = $state(0);",
+        ),
+        (
+            "module-let + instance-import",
+            "let x = 1;",
+            "import { x } from './b.js';\nlet s = $state(0);",
+        ),
+        (
+            "module-const + instance-import",
+            "const x = 1;",
+            "import { x } from './b.js';\nlet s = $state(0);",
+        ),
+        (
+            "module-function + instance-import",
+            "function x() {}",
+            "import { x } from './b.js';\nlet s = $state(0);",
+        ),
+        (
+            "module-class + instance-import",
+            "class x {}",
+            "import { x } from './b.js';\nlet s = $state(0);",
+        ),
+        (
+            "module-export-const + instance-import",
+            "export const x = 1;",
+            "import { x } from './b.js';\nlet s = $state(0);",
+        ),
+        (
+            "module-export-default-function + instance-import",
+            "export default function x() {}",
+            "import { x } from './b.js';\nlet s = $state(0);",
+        ),
+    ] {
+        assert_eq!(
+            gate_full(&two_scripts(module_body, instance_body)),
+            Some(OfficialRejection::with_code(
+                CoreOfficialValidationRule::DeclarationDuplicate,
+                "declaration_duplicate",
+            )),
+            "[{label}] an instance import colliding with a module-slot binding must \
+             reject with the exact declaration_duplicate code"
+        );
+    }
+}
+
+#[test]
+fn official_accepted_cross_script_combinations_pass_the_gate() {
+    // NEGATIVE (over-reject controls): every cross-script combination official
+    // ACCEPTS must pass the gate (oracle-probed vs pinned svelte@5.56.3):
+    // - distinct names (the plain two-slot import prelude surface),
+    // - a module lexical / `var` binding + an instance value declaration (the
+    //   instance scope is a CHILD scope — it shadows),
+    // - an instance `function` / `class` over a module import (shadows; official's
+    //   module-import conflict check covers only variable declarators),
+    // - cross-script `var` + `var` (a prior `var` never trips the binder's
+    //   duplicate check),
+    // - a module `var` + an instance import (the same `var` exemption),
+    // - a side-effect / empty-named module import (binds no local),
+    // - a nested (non-top-level) instance declaration (not an instance-scope binding),
+    // - an instance `export … from` re-export (binds no local).
+    for (label, module_body, instance_body) in [
+        (
+            "distinct names",
+            "import { x } from './m.js';",
+            "let y = $state(0);",
+        ),
+        (
+            "module-let + instance-let",
+            "let x = 1;",
+            "let x = $state(0);",
+        ),
+        (
+            "module-const + instance-const",
+            "const x = 1;",
+            "const x = 1;\nlet s = $state(0);",
+        ),
+        (
+            "module-function + instance-let",
+            "function x() {}",
+            "let x = $state(0);",
+        ),
+        (
+            "module-class + instance-let",
+            "class x {}",
+            "let x = $state(0);",
+        ),
+        (
+            "module-import + instance-function",
+            "import { x } from './m.js';",
+            "function x() {}\nlet s = $state(0);",
+        ),
+        (
+            "module-import + instance-class",
+            "import { x } from './m.js';",
+            "class x {}\nlet s = $state(0);",
+        ),
+        ("var + var", "var x = 1;", "var x = 2;\nlet s = $state(0);"),
+        (
+            "module-var + instance-import",
+            "var x = 1;",
+            "import { x } from './b.js';\nlet s = $state(0);",
+        ),
+        (
+            "module-export-var + instance-import",
+            "export var x = 1;",
+            "import { x } from './b.js';\nlet s = $state(0);",
+        ),
+        (
+            "side-effect module import",
+            "import './m.js';",
+            "let x = $state(0);",
+        ),
+        (
+            "empty-named module import",
+            "import {} from './m.js';",
+            "let x = $state(0);",
+        ),
+        (
+            "nested instance decl",
+            "import { x } from './m.js';",
+            "function f() { let x = 1; }\nlet s = $state(0);",
+        ),
+        (
+            "instance-export-from (no local binding)",
+            "let z = 1;",
+            "export { z } from './n.js';\nlet s = $state(0);",
+        ),
+    ] {
+        assert_eq!(
+            gate(&two_scripts(module_body, instance_body)),
+            None,
+            "[{label}] an official-accepted cross-script combination must pass the gate"
+        );
+    }
+}
+
+#[test]
+fn cross_script_scan_orders_match_the_official_phase_interleave() {
+    // The official first-error ordering for co-located defects (each oracle-probed):
+    // scope creation runs module-then-instance with the instance pass interleaving the
+    // import-hoist duplicate check and the `$`-prefix name validation in SOURCE order;
+    // the references pass (global `$` refs, script OR template) runs after ALL scope
+    // creation; the analyze walk (`declaration_duplicate_module_import`, misplaced
+    // `$inspect.trace`) runs last — module script first, then the instance script in
+    // source order.
+    // (a) instance `let $bad` BEFORE the colliding import → dollar_prefix_invalid.
+    assert_eq!(
+        gate_full(&two_scripts(
+            "let y = 1;",
+            "let $bad = 1;\nimport { y } from './n.js';\nlet s = $state(0);",
+        )),
+        Some(OfficialRejection::of(
+            CoreOfficialValidationRule::DollarPrefixInvalid
+        )),
+        "an earlier instance dollar-prefix declarator must beat a later import collision"
+    );
+    // (b) the colliding import BEFORE `let $bad` → declaration_duplicate.
+    assert_eq!(
+        gate_full(&two_scripts(
+            "let y = 1;",
+            "import { y } from './n.js';\nlet $bad = 1;\nlet s = $state(0);",
+        )),
+        Some(OfficialRejection::with_code(
+            CoreOfficialValidationRule::DeclarationDuplicate,
+            "declaration_duplicate",
+        )),
+        "an earlier import collision must beat a later instance dollar-prefix declarator"
+    );
+    // (b.2) per-SPECIFIER source order within one import statement.
+    assert_eq!(
+        gate_full(&two_scripts(
+            "let z = 1;",
+            "import { a as z, b as $bad } from './n.js';\nlet s = $state(0);",
+        )),
+        Some(OfficialRejection::with_code(
+            CoreOfficialValidationRule::DeclarationDuplicate,
+            "declaration_duplicate",
+        )),
+        "a colliding specifier before a dollar-prefixed one must win"
+    );
+    assert_eq!(
+        gate_full(&two_scripts(
+            "let z = 1;",
+            "import { b as $bad, a as z } from './n.js';\nlet s = $state(0);",
+        )),
+        Some(OfficialRejection::of(
+            CoreOfficialValidationRule::DollarPrefixInvalid
+        )),
+        "a dollar-prefixed specifier before a colliding one must win"
+    );
+    // (c) a MODULE-script dollar-prefix declarator beats the instance import collision
+    // (module scope creation completes first).
+    assert_eq!(
+        gate_full(&two_scripts(
+            "let y = 1;\nlet $bad = 1;",
+            "import { y } from './n.js';\nlet s = $state(0);",
+        )),
+        Some(OfficialRejection::of(
+            CoreOfficialValidationRule::DollarPrefixInvalid
+        )),
+        "a module-script dollar-prefix declarator must beat the instance import collision"
+    );
+    // (d) the import collision (scope creation) beats a MODULE-script global `$` ref
+    // (the references pass runs after all scope creation).
+    assert_eq!(
+        gate_full(&two_scripts(
+            "$modg;\nlet y = 1;",
+            "import { y } from './n.js';\nlet s = $state(0);",
+        )),
+        Some(OfficialRejection::with_code(
+            CoreOfficialValidationRule::DeclarationDuplicate,
+            "declaration_duplicate",
+        )),
+        "the scope-creation import collision must beat a module-script global $ ref"
+    );
+    // (e) a global `$` ref (references pass) beats the module-import-conflict
+    // declarator (analyze walk) in EVERY source order, script or template.
+    for (label, module_body, instance_body, template) in [
+        (
+            "instance $ref after the declarator",
+            "import { x } from './m.js';",
+            "let x = 1;\n$undecl;\nlet s = $state(0);",
+            "<p>hi</p>",
+        ),
+        (
+            "instance $ref before the declarator",
+            "import { x } from './m.js';",
+            "$undecl;\nlet x = 1;\nlet s = $state(0);",
+            "<p>hi</p>",
+        ),
+        (
+            "module-script $ref",
+            "import { x } from './m.js';\n$modg;",
+            "let x = 1;\nlet s = $state(0);",
+            "<p>hi</p>",
+        ),
+        (
+            "template $ref",
+            "import { x } from './m.js';",
+            "let x = 1;\nlet s = $state(0);",
+            "<p>{$tundecl}</p>",
+        ),
+    ] {
+        let src = format!(
+            "<script module>\n{module_body}\n</script>\n<script>\n{instance_body}\n</script>\n{template}\n"
+        );
+        assert_eq!(
+            gate_full(&src),
+            Some(OfficialRejection::with_code(
+                CoreOfficialValidationRule::GlobalReferenceInvalid,
+                "global_reference_invalid",
+            )),
+            "[{label}] a global $ ref must beat the module-import-conflict declarator"
+        );
+    }
+    // (f) the module-import-conflict declarator (analyze walk) beats a LATER
+    // misplaced `$inspect.trace` in the same walk, and loses to an EARLIER one —
+    // source order within the instance script; a MODULE-script trace always wins
+    // (the walk visits the module program first).
+    assert_eq!(
+        gate_full(&two_scripts(
+            "import { x } from './m.js';",
+            "let x = 1;\nfunction f() { let a = 1; $inspect.trace('t'); }\nlet s = $state(0);",
+        )),
+        Some(OfficialRejection::with_code(
+            CoreOfficialValidationRule::DeclarationDuplicate,
+            "declaration_duplicate_module_import",
+        )),
+        "an earlier conflicting declarator must beat a later misplaced trace"
+    );
+    assert_eq!(
+        gate_full(&two_scripts(
+            "import { x } from './m.js';",
+            "function f() { let a = 1; $inspect.trace('t'); }\nlet x = 1;\nlet s = $state(0);",
+        )),
+        Some(OfficialRejection::of(
+            CoreOfficialValidationRule::InspectTraceInvalidPlacement,
+        )),
+        "an earlier misplaced trace must beat a later conflicting declarator"
+    );
+    assert_eq!(
+        gate_full(&two_scripts(
+            "import { x } from './m.js';\nfunction f() { let a = 1; $inspect.trace('t'); }",
+            "let x = 1;\nlet s = $state(0);",
+        )),
+        Some(OfficialRejection::of(
+            CoreOfficialValidationRule::InspectTraceInvalidPlacement,
+        )),
+        "a module-script misplaced trace must beat the instance conflicting declarator"
+    );
+    // (g) a parse-phase same-body duplicate still beats every cross-script scan.
+    assert_eq!(
+        gate_full(&two_scripts(
+            "import { x } from './m.js';",
+            "let x = 1;\nlet q = 1;\nlet q = 2;\nlet s = $state(0);",
+        )),
+        Some(OfficialRejection::with_code(
+            CoreOfficialValidationRule::ScriptBodyParse,
+            "js_parse_error",
+        )),
+        "a same-body duplicate (parse phase) must beat the cross-script scans"
+    );
+}
+
+#[test]
+fn ts_only_cross_script_forms_do_not_mint_declaration_duplicate() {
+    // A TYPE-only module import binds no value — a same-name instance declaration is
+    // official-ACCEPTED (oracle-probed, lang="ts" both slots). The cross-script scans
+    // are JS-reparse-driven (a TS-only body skips them), so no DeclarationDuplicate is
+    // minted; the component stays owned by the TypeScript-script refusal downstream.
+    for (label, module_body, instance_body) in [
+        (
+            "decl-level type-only module import + instance let",
+            "import type { x } from './m.js';",
+            "let x = $state(0);",
+        ),
+        (
+            "per-specifier type-only module import + instance let",
+            "import { type x } from './m.js';",
+            "let x = $state(0);",
+        ),
+        (
+            "type-only instance import + module let",
+            "let y = 1;",
+            "import type { y } from './n.js';\nlet s = $state(0);",
+        ),
+    ] {
+        let src = format!(
+            "<script module lang=\"ts\">\n{module_body}\n</script>\n<script lang=\"ts\">\n{instance_body}\n</script>\n<p>hi</p>\n"
+        );
+        let got = gate(&src);
+        assert_ne!(
+            got,
+            Some(CoreOfficialValidationRule::DeclarationDuplicate),
+            "[{label}] a type-only cross-script form must not mint DeclarationDuplicate \
+             (got {got:?})"
+        );
+    }
+}
+
 // ── InspectTraceInvalidPlacement (`$inspect.trace()` placement) ──────────────
 
 #[test]

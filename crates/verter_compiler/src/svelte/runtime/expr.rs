@@ -89,6 +89,14 @@ pub enum BindingRuntimeKind {
     /// component callee (`Child($$anchor, …)`); a read emits the bare name, NEVER
     /// `$.get`.
     ComponentImport,
+    /// Any OTHER imported local (a named / aliased / namespace / non-`.svelte`
+    /// default import, instance or module slot) — a NON-WRITABLE imported VALUE
+    /// binding. ES import bindings are not reassignable, so it is never a writable
+    /// bind/assignment root (official rejects `constant_assignment` /
+    /// `constant_binding`); a MEMBER rooted at it stays a plain writable member
+    /// lvalue. Reads are LIVE (imports are live bindings): a template read joins the
+    /// region's `$.template_effect`, read PLAIN — never `$.get`, never static-folded.
+    ImportedValue,
     /// A top-level `let`/`const` local initialized by a well-formed
     /// `$effect.tracking()` call — a PLAIN one-shot runtime value (official reads
     /// it bare, never `$.get`); its template read joins the region's
@@ -100,6 +108,15 @@ pub enum BindingRuntimeKind {
     /// template read joins the region's `$.template_effect` because official
     /// cannot static-fold a call-init const.
     PropsIdConst,
+}
+
+/// Whether a binding kind is an IMPORTED local (a `.svelte`-component default or any
+/// other imported value) — a NON-writable root whose reads are LIVE plain reads.
+pub(super) fn is_import_binding(kind: BindingRuntimeKind) -> bool {
+    matches!(
+        kind,
+        BindingRuntimeKind::ComponentImport | BindingRuntimeKind::ImportedValue
+    )
 }
 
 /// Whether a binding kind is a reactive SIGNAL (read via `$.get`).

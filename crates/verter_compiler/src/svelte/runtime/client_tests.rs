@@ -5477,12 +5477,54 @@ fn bind_value_function_pair_tag_type_arg_is_not_ts_stripped() {
 }
 
 #[test]
-fn bind_value_import_member_fails_closed() {
-    // An instance `import` is demoted (script-import) — a component with an import
-    // fails at the script-hoist gate before the member-bind gate is reached.
-    assert_fail_closed(
+fn bind_value_member_of_import_admitted_with_frame() {
+    // A MEMBER of an import is an ACCEPTED bind lvalue — official svelte@5.56.3
+    // emits the plain member closures `$.bind_value(input, () => store.x,
+    // ($$value) => store.x = $$value)` AND the member read opens the component
+    // context frame (`$.push($$props, true)` / `$.pop()` + the `$$props` param).
+    // Only the BARE import root `bind:value={store}` is rejected (the
+    // non-writable-import-root gate; official `constant_binding`).
+    let js = emit(
         "<script>import { store } from './s.js'; let c = $state(0);</script>\n<input bind:value={store.x} />\n<button onclick={() => c++}>{c}</button>\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::ScriptImport { .. }),
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.bind_value(input, () => store.x, ($$value) => store.x = $$value)"),
+        "the member-of-import bind must emit the plain member closures:\n{js}"
+    );
+    assert!(
+        js.contains("import { store } from './s.js';"),
+        "the import must be hoisted to the module prelude:\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true)") && js.contains("$.pop()"),
+        "the imported-member read must open the component context frame:\n{js}"
+    );
+    assert!(
+        js.contains("($$anchor, $$props)"),
+        "the frame must bind the $$props parameter:\n{js}"
+    );
+    // NEGATIVE: the import binding is never a signal — no `$.get(store)`, and the
+    // setter is the plain member assignment, never `$.set`.
+    assert!(
+        !js.contains("$.get(store)"),
+        "an import read must stay plain (never `$.get`):\n{js}"
+    );
+    assert!(
+        !js.contains("$.set(store"),
+        "an import member setter must stay a plain member write (never `$.set`):\n{js}"
+    );
+}
+
+#[test]
+fn bind_value_bare_import_root_fails_closed_at_the_bind_lvalue_gate() {
+    // The BARE import root `bind:value={store}` REJECTS at the bind-lvalue-root
+    // gate (an import is a NON-writable root — official `constant_binding`,
+    // "Cannot bind to import"), NOT at the script gate: the import itself is
+    // admitted to the prelude, the bind target is the refusal.
+    assert_fail_closed(
+        "<script>import { store } from './s.js'; let c = $state(0);</script>\n<input bind:value={store} />\n<button onclick={() => c++}>{c}</button>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "value"),
     );
 }
 // ── form / value-bearing elements: allowlisted bind hosts whose special content /
@@ -5807,11 +5849,12 @@ fn component_function_binding_renames_past_user_bind_get_collision() {
 //    specials, and the COMPONENT-vs-ELEMENT `let:` split. ──
 
 #[test]
-fn svelte_default_import_admitted_other_import_forms_refuse() {
-    // The component-import subset: a DEFAULT import of a `.svelte` module is ADMITTED
-    // (hoisted to module scope as the component callee). Every OTHER import form stays the
-    // broad static-import prelude (not yet supported) and fails closed at the script-import
-    // gate.
+fn every_static_import_form_is_admitted_to_the_instance_prelude_slot() {
+    // The static-import prelude admits EVERY static import form. The `.svelte`
+    // component default stays the component-callee subset; named / aliased /
+    // namespace / side-effect / non-`.svelte` default / mixed forms are hoisted to
+    // the INSTANCE slot of the module prelude (AFTER `import * as $`), each emitted
+    // verbatim in source order.
     let ok = emit_result(
         "<script>import Child from './Child.svelte'; let { p } = $props();</script>\n<Child />\n{p}\n",
     )
@@ -5820,28 +5863,580 @@ fn svelte_default_import_admitted_other_import_forms_refuse() {
         ok.contains("import Child from './Child.svelte';"),
         "the default .svelte import must be hoisted to module scope:\n{ok}"
     );
-    // NEGATIVE: named / namespace / side-effect / default-NON-`.svelte` imports refuse.
-    for (label, src) in [
-        ("named", "import { Child } from './Child.svelte';"),
-        ("namespace", "import * as C from './Child.svelte';"),
-        ("side-effect", "import './setup.js';"),
-        ("default-non-svelte", "import helper from './helper.js';"),
+    for (label, import_stmt, expected) in [
+        (
+            "named",
+            "import { helper } from './helpers.js';",
+            "import { helper } from './helpers.js';",
+        ),
+        (
+            "named-alias",
+            "import { a as b } from './helpers.js';",
+            "import { a as b } from './helpers.js';",
+        ),
+        (
+            "namespace",
+            "import * as NS from './ns.js';",
+            "import * as NS from './ns.js';",
+        ),
+        (
+            "side-effect",
+            "import './setup.js';",
+            "import './setup.js';",
+        ),
+        (
+            "default-non-svelte",
+            "import helper from './helper.js';",
+            "import helper from './helper.js';",
+        ),
         (
             "mixed-default-named",
             "import Child, { x } from './Child.svelte';",
+            "import Child, { x } from './Child.svelte';",
         ),
     ] {
-        let src = format!("<script>{src} let __r = $state(0);</script>\n<p>{{__r}}</p>\n");
-        assert_fail_closed_labeled(label, &src, |s| {
+        let src = format!(
+            "<script>{import_stmt} let __r = $state(0);</script>\n<button onclick={{() => __r++}}>{{__r}}</button>\n"
+        );
+        let js = emit_result(&src)
+            .unwrap_or_else(|e| panic!("[{label}] a static import form must be admitted: {e:?}"));
+        // The import lands in the INSTANCE slot: after the runtime namespace import.
+        let ns_at = js
+            .find("import * as $ from 'svelte/internal/client';")
+            .unwrap_or_else(|| panic!("[{label}] missing the runtime namespace:\n{js}"));
+        let user_at = js
+            .find(expected)
+            .unwrap_or_else(|| panic!("[{label}] missing the hoisted user import:\n{js}"));
+        assert!(
+            user_at > ns_at,
+            "[{label}] an instance import must emit AFTER the runtime namespace:\n{js}"
+        );
+        // NEGATIVE: the admitted form must not leak the old script-import refusal
+        // diagnostic anywhere (it compiled), and the import is module-scope — before
+        // the component function.
+        assert!(
+            user_at < js.find("export default function").unwrap(),
+            "[{label}] the user import must be module-scope (above the component fn):\n{js}"
+        );
+    }
+}
+
+// ── static-import malformed/adjacent siblings — every accepted import/bind/read
+//    form's siblings either fail closed or take their own correct path ──
+
+#[test]
+fn import_assert_attribute_keyword_rejects_with_official_parse_parity() {
+    // The deprecated `assert { type: 'json' }` attribute keyword is an OFFICIAL
+    // acorn parse-REJECT in a plain script (`js_parse_error` "Unexpected token",
+    // oracle-probed; acorn has no `assert` clause) — only `with { … }` is
+    // admitted+preserved. The body probe carries the EXACT official code (OXC itself
+    // is assert-lenient, so the probe discriminates the keyword structurally);
+    // Verter must not emit — and must not silently normalize `assert` to `with`.
+    for (label, src) in [
+        (
+            "instance slot",
+            "<script>import data from './d.json' assert { type: 'json' }; let c = $state(0);</script>\n<p>{data}</p>\n<button onclick={() => c++}>{c}</button>\n",
+        ),
+        (
+            "module slot",
+            "<script module>import data from './d.json' assert { type: 'json' };</script>\n<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n",
+        ),
+    ] {
+        let err =
+            emit_result(src).expect_err("an `assert { … }` import attribute must fail closed");
+        assert!(
+            matches!(
+                &err,
+                ClientCompileError::OfficialReject(r)
+                    if r.rule == CoreOfficialValidationRule::ScriptBodyParse
+                        && r.official_code == "js_parse_error"
+            ),
+            "[{label}] expected the exact js_parse_error parse-parity reject for the \
+             `assert` keyword, got {err:?}"
+        );
+    }
+    // CONTROL: a `lang=\"ts\"` script parses `assert` fine (official ACCEPTS it there,
+    // oracle-probed — the TS grammar keeps the legacy clause), so the Js-grammar
+    // parse-parity rule must NOT fire; the component stays owned by the
+    // TypeScript-script refusal (fail-closed, non-official-code channel).
+    let err = emit_result(
+        "<script lang=\"ts\">import data from './d.json' assert { type: 'json' }; let c = $state(0);</script>\n<p>{data}</p>\n<button onclick={() => c++}>{c}</button>\n",
+    )
+    .expect_err("a lang=ts script stays fail-closed");
+    assert!(
+        !matches!(&err, ClientCompileError::OfficialReject(_)),
+        "a ts-grammar `assert` clause must not mint an official parse reject \
+         (official accepts it; the TS refusal owns the script), got {err:?}"
+    );
+}
+
+#[test]
+fn type_only_and_phase_imports_reject_with_official_parse_parity() {
+    // A TypeScript TYPE-ONLY import in a PLAIN script (decl-level or
+    // per-specifier) and an import PHASE (`import defer * as ns`) are official
+    // acorn PARSE errors (`js_parse_error`, oracle-probed) — Verter's
+    // parse-parity gate rejects each with the EXACT official code BEFORE the
+    // import classifier runs (the classifier's type-only / phase arms stay a
+    // defense-in-depth stop behind it). Never a Main, never an emitted
+    // `import type` / phase statement.
+    for (label, import_stmt) in [
+        ("type-only-decl", "import type { T } from './t.js';"),
+        ("type-only-specifier", "import { type T, x } from './t.js';"),
+    ] {
+        let src = format!(
+            "<script>{import_stmt} let c = $state(0);</script>\n<button onclick={{() => c++}}>{{c}}</button>\n"
+        );
+        let err = emit_result(&src).expect_err("a type-only import must not compile to a Main");
+        assert!(
+            matches!(&err, ClientCompileError::OfficialReject(r) if r.official_code == "js_parse_error"),
+            "[{label}] expected the js_parse_error parse-parity reject, got {err:?}"
+        );
+    }
+    // An import PHASE (`import defer * as ns`) parses under the TS-lenient shared
+    // reparse (OXC supports the import-phase proposal), so the parse-parity gate
+    // does not see it — the
+    // import classifier's phase arm refuses it fail-closed (official also rejects,
+    // `js_parse_error`; the exact-code parity for phase syntax is the parse-parity
+    // surface's breadth, not the import prelude's).
+    assert_fail_closed(
+        "<script>import defer * as NS from './m.js'; let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n",
+        |s| {
             matches!(
                 s,
                 UnsupportedSvelteRuntimeSurface::ScriptImport {
-                    construct: "import",
+                    construct: "import phase",
                     ..
                 }
             )
+        },
+    );
+}
+
+#[test]
+fn import_with_attribute_is_preserved_verbatim() {
+    // The accepted sibling: `with { type: 'json' }` is official-accepted and MUST
+    // survive onto the emitted import statement (dropping it changes module-load
+    // semantics for JSON/CSS modules).
+    let js = emit(
+        "<script>import data from './d.json' with { type: 'json' }; let c = $state(0);</script>\n<p>{data}</p>\n<button onclick={() => c++}>{c}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("import data from './d.json' with { type: 'json' };"),
+        "the `with` import attributes must be preserved verbatim:\n{js}"
+    );
+    // NEGATIVE: never rewritten to the deprecated `assert` spelling.
+    assert!(
+        !js.contains("assert {"),
+        "the `with` clause must not be emitted as `assert`:\n{js}"
+    );
+}
+
+#[test]
+fn dynamic_import_expression_is_not_a_static_import_and_keeps_its_own_path() {
+    // A DYNAMIC `import('./x.js')` expression is NOT a static import declaration —
+    // it must not route through the static-import prelude. It rides the unchanged
+    // handler-shape path (a call-bearing arrow body is that surface's own
+    // fail-closed breadth today), and the refusal is NOT a script-import /
+    // module-item diagnostic.
+    let err = emit_result(
+        "<script>let c = $state(0);</script>\n<button onclick={() => import('./x.js')}>{c}</button>\n",
+    )
+    .expect_err("a dynamic import() handler body is not yet an emittable handler shape");
+    match err {
+        ClientCompileError::Unsupported(surface) => {
+            assert!(
+                !matches!(
+                    surface,
+                    UnsupportedSvelteRuntimeSurface::ScriptImport { .. }
+                        | UnsupportedSvelteRuntimeSurface::ModuleScriptItem { .. }
+                ),
+                "a dynamic import() must not classify as a static script import: {surface:?}"
+            );
+        }
+        other => panic!("expected an unsupported-surface refusal, got {other:?}"),
+    }
+}
+
+#[test]
+fn duplicate_same_source_imports_stay_two_statements() {
+    // Official does NOT merge two imports from the same source — the prelude keeps
+    // TWO statements in source order.
+    let js = emit(
+        "<script>import { a } from './m.js'; import { b } from './m.js'; let c = $state(0);</script>\n<p>{a} {b}</p>\n<button onclick={() => c++}>{c}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("import { a } from './m.js';") && js.contains("import { b } from './m.js';"),
+        "both same-source imports must emit:\n{js}"
+    );
+    // NEGATIVE: never merged into one statement.
+    assert!(
+        !js.contains("import { a, b }"),
+        "same-source imports must stay UNMERGED (two statements):\n{js}"
+    );
+}
+
+#[test]
+fn import_redeclaration_rejects_with_official_parse_parity() {
+    // An import local that COLLIDES with another top-level binding of the same
+    // script is an official acorn PARSE error ("Identifier 'x' has already been
+    // declared", `js_parse_error`, oracle-confirmed vs the pinned compiler) — the
+    // module-scope duplicate-binding early error. Every collision family must
+    // reject with the EXACT official code, never compile to a Main:
+    //   - import + `let` (default and named locals),
+    //   - duplicate import locals across two declarations,
+    //   - import + `var` (an import binds lexically, so the `var`/`var` exemption
+    //     does not apply),
+    //   - import + `function` (a module-scope function declaration binds lexically).
+    for (label, script) in [
+        (
+            "default-import-then-let",
+            "import x from './m.js'; let x = $state(0);",
+        ),
+        (
+            "named-import-then-let",
+            "import { x } from './m.js'; let x = $state(0);",
+        ),
+        (
+            "duplicate-import-locals",
+            "import { x } from './a.js'; import { x } from './b.js'; let s = $state(0);",
+        ),
+        (
+            "import-then-var",
+            "import { x } from './m.js'; var x = 1; let s = $state(0);",
+        ),
+        (
+            "import-then-function",
+            "import { x } from './m.js'; function x() {} let s = $state(0);",
+        ),
+    ] {
+        let src = format!("<script>{script}</script>\n<p>hi</p>\n");
+        let err =
+            emit_result(&src).expect_err("an import redeclaration must not compile to a Main");
+        assert!(
+            matches!(&err, ClientCompileError::OfficialReject(r) if r.official_code == "js_parse_error"),
+            "[{label}] expected the js_parse_error parse-parity reject, got {err:?}"
+        );
+    }
+    // The MODULE slot rejects identically — each script body runs its own
+    // duplicate-binding probe.
+    let err = emit_result(
+        "<script module>import { x } from './a.js'; import { x } from './b.js';</script>\n<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n",
+    )
+    .expect_err("a module-slot import redeclaration must not compile to a Main");
+    assert!(
+        matches!(&err, ClientCompileError::OfficialReject(r) if r.official_code == "js_parse_error"),
+        "a module-slot duplicate import local is the same js_parse_error reject, got {err:?}"
+    );
+    // CONTROL (no false-reject): a DISTINCT import local + `let` name compiles, and
+    // the import statement survives onto the module prelude.
+    let js = emit(
+        "<script>import { x } from './m.js'; let y = $state(0);</script>\n<p>hi</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("import { x } from './m.js';"),
+        "the distinct-name control must keep compiling with its import:\n{js}"
+    );
+}
+
+#[test]
+fn cross_script_redeclaration_rejects_with_exact_official_codes() {
+    // A binding declared in BOTH `<script>` slots — the per-body parse probe cannot
+    // see it (each body parses clean alone), so it is the component-level
+    // DeclarationDuplicate scan's. Official svelte@5.56.3 rejects each with an EXACT
+    // code (oracle-probed): an instance value declaration over a MODULE import is
+    // `declaration_duplicate_module_import`; an instance import colliding with a
+    // module-slot binding is `declaration_duplicate` (the binder hoists the instance
+    // import into the module scope). RED before the fix: every one of these compiled
+    // to a Main (the cross-script fail-open).
+    for (label, source, expected_code) in [
+        (
+            "module-default-import + instance-let-state",
+            "<script module>import x from './m.js';</script>\n<script>let x = $state(0);</script>\n<p>hi</p>\n",
+            "declaration_duplicate_module_import",
+        ),
+        (
+            "module-named-import + instance-import",
+            "<script module>import { x } from './m.js';</script>\n<script>import { x } from './n.js';\nlet s = $state(0);</script>\n<p>{s}</p>\n",
+            "declaration_duplicate",
+        ),
+        (
+            "module-named-import + instance-let-state",
+            "<script module>import { x } from './m.js';</script>\n<script>let x = $state(0);</script>\n<p>hi</p>\n",
+            "declaration_duplicate_module_import",
+        ),
+    ] {
+        let err = emit_result(source)
+            .expect_err("a cross-script redeclaration must not compile to a Main");
+        assert!(
+            matches!(
+                &err,
+                ClientCompileError::OfficialReject(r)
+                    if r.rule == CoreOfficialValidationRule::DeclarationDuplicate
+                        && r.official_code == expected_code
+            ),
+            "[{label}] expected the exact {expected_code} cross-script reject, got {err:?}"
+        );
+    }
+    // SAME-body regression: a within-body duplicate stays the parse-phase
+    // `js_parse_error` (the body probe), never re-attributed to the cross-script scan.
+    let err = emit_result(
+        "<script>import { x } from './a.js'; import { x } from './b.js'; let s = $state(0);</script>\n<p>hi</p>\n",
+    )
+    .expect_err("a same-body duplicate must not compile to a Main");
+    assert!(
+        matches!(
+            &err,
+            ClientCompileError::OfficialReject(r)
+                if r.rule == CoreOfficialValidationRule::ScriptBodyParse
+                    && r.official_code == "js_parse_error"
+        ),
+        "a same-body duplicate must stay the js_parse_error parse-parity reject, got {err:?}"
+    );
+    // CONTROLS (no over-reject; oracle-probed ACCEPTs):
+    // (a) distinct names across the two slots keep compiling — the module import emits.
+    let js = emit(
+        "<script module>import { x } from './m.js';</script>\n<script>let y = $state(0);</script>\n<button onclick={() => y++}>{y}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("import { x } from './m.js';"),
+        "the distinct-name cross-script control must keep compiling with its module import:\n{js}"
+    );
+    // (b) cross-script `var`/`var` and a module `var` + instance import are official-
+    // ACCEPTED (a prior `var` never trips the binder's duplicate check) — they must
+    // NOT reject as DeclarationDuplicate. (A module `var` statement itself stays
+    // fail-closed as an unsupported module-script item — an honest deferral, so the
+    // control asserts the refusal CHANNEL, not an emission.)
+    for (label, source) in [
+        (
+            "var + var",
+            "<script module>var x = 1;</script>\n<script>var x = 2;\nlet s = $state(0);</script>\n<p>{s}</p>\n",
+        ),
+        (
+            "module-var + instance-import",
+            "<script module>var x = 1;</script>\n<script>import { x } from './b.js';\nlet s = $state(0);</script>\n<p>{s}</p>\n",
+        ),
+    ] {
+        let err = emit_result(source).expect_err("a module `var` item stays fail-closed");
+        assert!(
+            !matches!(
+                &err,
+                ClientCompileError::OfficialReject(r)
+                    if r.rule == CoreOfficialValidationRule::DeclarationDuplicate
+            ),
+            "[{label}] an official-accepted `var` combination must not be over-rejected \
+             as DeclarationDuplicate, got {err:?}"
+        );
+    }
+}
+
+#[test]
+fn import_reassignment_rejects_constant_assignment() {
+    // A handler ASSIGNMENT to an import binding is the official
+    // `constant_assignment` compile error ("Cannot assign to import") — carried
+    // through the rewriter's official-reject channel, never a raw plain write.
+    for (label, handler) in [("assign", "() => x = 1"), ("update", "() => x++")] {
+        // A DIRECT (non-delegated) event routes the arrow body through the shared
+        // rewriter — the write refusal is the rewriter's, not the delegated-shape
+        // gate's (which admits only `$state`-write arrows and would mask it).
+        let err = emit_result(&format!(
+            "<script>import {{ x }} from './m.js'; let c = $state(0);</script>\n<button onmouseenter={{{handler}}} onclick={{() => c++}}>{{c}}</button>\n"
+        ))
+        .expect_err("a write to an import binding must fail closed");
+        let ClientCompileError::OfficialReject(rejection) = err else {
+            panic!("[{label}] expected the constant_assignment official reject, got {err:?}");
+        };
+        assert_eq!(
+            rejection.official_code, "constant_assignment",
+            "[{label}] the exact official code"
+        );
+    }
+    // A MODULE-slot import write from an instance handler rejects identically (the
+    // import resolves up the lexical chain).
+    let err = emit_result(
+        "<script module>import { m } from './base.js';</script>\n<script>let c = $state(0);</script>\n<button onmouseenter={() => m = 1} onclick={() => c++}>{c}</button>\n",
+    )
+    .expect_err("a write to a module-slot import must fail closed");
+    assert!(
+        matches!(&err, ClientCompileError::OfficialReject(r) if r.official_code == "constant_assignment"),
+        "a module-import write is the same constant_assignment reject, got {err:?}"
+    );
+}
+
+#[test]
+fn import_member_write_in_handler_is_a_plain_member_write_with_frame() {
+    // The accepted write sibling: a MEMBER write rooted at an import (`x.k = c`) is
+    // a plain member mutation — official accepts it (the import binding itself is
+    // untouched) and the member access opens the context frame.
+    let js = emit(
+        "<script>import { x } from './m.js'; let c = $state(0);</script>\n<button onmouseenter={() => x.k = c} onclick={() => c++}>{c}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.event('mouseenter', button, () => x.k = $.get(c))"),
+        "the member write stays plain with the signal RHS rewritten (the official \
+         direct-event form):\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true)"),
+        "the imported-member access must open the context frame:\n{js}"
+    );
+}
+
+#[test]
+fn bare_import_read_is_live_and_frame_free() {
+    // A BARE imported-ident read `{x}` is LIVE — it joins the region's
+    // `$.template_effect`, read PLAIN — and does NOT open the context frame
+    // (official: only a member/call rooted at an import frames).
+    let js = emit(
+        "<script>import { x } from './m.js'; let c = $state(0);</script>\n<p>{x}</p>\n<button onclick={() => c++}>{c}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.set_text(text, x)"),
+        "the bare import read must be a live plain read inside the template effect:\n{js}"
+    );
+    assert!(
+        js.contains("$.template_effect"),
+        "the import read must join a template effect (never static-folded):\n{js}"
+    );
+    // NEGATIVES: never `$.get`, never a static `textContent` fold, and NO frame.
+    assert!(
+        !js.contains("$.get(x)"),
+        "an import read must stay plain (never `$.get`):\n{js}"
+    );
+    assert!(
+        !js.contains("textContent"),
+        "an import read must not static-fold:\n{js}"
+    );
+    assert!(
+        !js.contains("$.push"),
+        "a bare import read must NOT open the context frame:\n{js}"
+    );
+}
+
+#[test]
+fn instance_namespace_member_read_frames_and_stays_plain() {
+    // An INSTANCE-slot namespace MEMBER read `{NS.z}` is live + plain AND opens the
+    // context frame (`$.push($$props, true)` / `$.pop()` + the `$$props` param).
+    let js = emit(
+        "<script>import * as NS from './m.js'; let c = $state(0);</script>\n<p>{NS.z}</p>\n<button onclick={() => c++}>{c}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.set_text(text, NS.z)"),
+        "the member read must stay the plain member expression:\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, true)") && js.contains("$.pop()"),
+        "the imported-member read must open the context frame:\n{js}"
+    );
+}
+
+#[test]
+fn module_namespace_member_read_frames_like_the_instance_slot() {
+    // The MODULE-slot twin: `<script module>import * as NS …</script>` + `{NS.z}`
+    // frames identically (module imports are unsafe roots for the shared
+    // `needs_context` analysis, resolving up the lexical chain).
+    let js = emit(
+        "<script module>import * as NS from './m.js';</script>\n<script>let c = $state(0);</script>\n<p>{NS.z}</p>\n<button onclick={() => c++}>{c}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.set_text(text, NS.z)") && js.contains("$.push($$props, true)"),
+        "the module-slot member read must frame like the instance slot:\n{js}"
+    );
+    // The module import emits BEFORE the runtime namespace (the module slot).
+    let module_at = js.find("import * as NS from './m.js';").unwrap();
+    let ns_at = js
+        .find("import * as $ from 'svelte/internal/client';")
+        .unwrap();
+    assert!(
+        module_at < ns_at,
+        "a module-slot import must emit BEFORE the runtime namespace:\n{js}"
+    );
+}
+
+#[test]
+fn non_static_member_chains_on_imports_stay_fail_closed() {
+    // The narrow member admit covers STATIC member chains rooted at an import ONLY.
+    // A computed member, an optional chain, and a member rooted at a PLAIN local
+    // all stay the fail-closed complex-interpolation breadth — the import widening
+    // must not leak into the general member-interpolation surface.
+    for (label, interp) in [
+        ("computed", "{NS['z']}"),
+        ("optional", "{NS?.z}"),
+        ("call", "{NS.z()}"),
+    ] {
+        let src = format!(
+            "<script>import * as NS from './m.js'; let c = $state(0);</script>\n<p>{interp}</p>\n<button onclick={{() => c++}}>{{c}}</button>\n"
+        );
+        assert_fail_closed_labeled(label, &src, |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::ComplexInterpolation { .. }
+            )
         });
     }
+    // A static member rooted at a PLAIN LOCAL is untouched by the import widening.
+    assert_fail_closed(
+        "<script>let d = 1; let c = $state(0);</script>\n<p>{d.x}</p>\n<button onclick={() => c++}>{c}</button>\n",
+        |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::ComplexInterpolation { .. }
+                    | UnsupportedSvelteRuntimeSurface::InstanceScriptItem { .. }
+            )
+        },
+    );
+}
+
+#[test]
+fn component_prop_value_from_import_emits_the_getter_form() {
+    // A component-prop value reading an IMPORT (`b={x}`) `has_state` (imports are
+    // live bindings, not statically known), so official emits the GETTER accessor
+    // `get b() { return x; }` — never the plain init `b: x` (oracle-verified
+    // against svelte@5.56.3).
+    let js = emit(
+        "<script>import Child from './Child.svelte'; import { x } from './m.js'; let c = $state(0);</script>\n<Child b={x} />\n<button onclick={() => c++}>{c}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("get b() {") && js.contains("return x;"),
+        "an import-valued component prop must emit the getter accessor:\n{js}"
+    );
+    assert!(
+        !js.contains("b: x"),
+        "an import-valued component prop must NOT emit the plain init form:\n{js}"
+    );
+}
+
+#[test]
+fn dynamic_attr_from_import_joins_the_template_effect() {
+    // `disabled={x}` from an import is REACTIVE (imports are live bindings): the
+    // property write joins the `$.template_effect`, read plain — never a one-shot
+    // init, never `$.get` (oracle-verified against svelte@5.56.3).
+    let js = emit(
+        "<script>import { x } from './m.js'; let c = $state(0);</script>\n<button disabled={x} onclick={() => c++}>{c}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("button.disabled = x"),
+        "the import-valued property write must read plain:\n{js}"
+    );
+    let effect_at = js.find("$.template_effect").unwrap_or(usize::MAX);
+    let write_at = js.find("button.disabled = x").unwrap_or(0);
+    assert!(
+        effect_at < write_at,
+        "the import-valued property write must join the template effect:\n{js}"
+    );
+    assert!(
+        !js.contains("$.get(x)"),
+        "an import read must stay plain (never `$.get`):\n{js}"
+    );
 }
 
 #[test]
@@ -11436,16 +12031,46 @@ fn bare_rune_identifier_reference_fails_closed() {
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. } if *rune == "$state"),
     );
 }
-// ── Module scripts (`<script module>`) — demoted entirely ─────────────────
+// ── Module scripts (`<script module>`) — import-only admitted ─────────────
 
 #[test]
-fn module_script_fails_closed_script_import() {
-    // A `<script module>` is demoted ENTIRELY (script-import) — the module-script
-    // hoist is a script-completion follow-up, refused before any module-rune scan.
-    // Covers a module `$state` / `$derived` / `$props()` and a rune-free module body
-    // (all fail at the same script-hoist gate, regardless of the module content). An
-    // instance `$state` keeps the component runes-mode (so the refusal is the
-    // module-script gate, not the legacy-mode gate).
+fn module_script_import_only_is_admitted_to_the_module_prelude_slot() {
+    // An IMPORT-ONLY `<script module>` is ADMITTED: its imports hoist to the MODULE
+    // slot of the prelude — BEFORE `import * as $` (the official two-slot order) —
+    // while an instance import stays AFTER it. The instance `$state` keeps the
+    // component runes-mode (an import-only component is legacy mode).
+    let js = emit(
+        "<script module>import { m } from './base.js';</script>\n<script>import { i } from './inst.js'; let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n",
+        "App.svelte",
+    );
+    let module_at = js
+        .find("import { m } from './base.js';")
+        .unwrap_or_else(|| panic!("missing the module-slot import:\n{js}"));
+    let ns_at = js
+        .find("import * as $ from 'svelte/internal/client';")
+        .unwrap_or_else(|| panic!("missing the runtime namespace:\n{js}"));
+    let instance_at = js
+        .find("import { i } from './inst.js';")
+        .unwrap_or_else(|| panic!("missing the instance-slot import:\n{js}"));
+    assert!(
+        module_at < ns_at && ns_at < instance_at,
+        "the two-slot order is module imports → `import * as $` → instance imports:\n{js}"
+    );
+    // NEGATIVE: no module-script refusal diagnostic — the component compiled.
+    assert!(
+        js.contains("export default function"),
+        "the import-only module script must compile to a Main:\n{js}"
+    );
+}
+
+#[test]
+fn module_script_non_import_item_fails_closed_module_script_item() {
+    // A NON-import top-level module statement is the module-item completion
+    // residual — refused with the precise `ModuleScriptItem` diagnostic (NOT the
+    // retired blanket script-import demotion). Covers a module `$state` /
+    // `$derived` / `$props()` and a rune-free module body; an instance `$state`
+    // keeps the component runes-mode (so the refusal is the module-item gate, not
+    // the legacy-mode gate).
     for module_body in [
         "let x=$state(0)",
         "let x=$state(0); let y=$derived(x)",
@@ -11456,9 +12081,42 @@ fn module_script_fails_closed_script_import() {
             "<script module>{module_body}</script>\n<script>let c = $state(0);</script>\n<button onclick={{() => c++}}>{{c}}</button>\n"
         );
         assert_fail_closed(&src, |s| {
-            matches!(s, UnsupportedSvelteRuntimeSurface::ScriptImport { .. })
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::ModuleScriptItem {
+                    construct: "variable declaration",
+                    ..
+                }
+            )
         });
     }
+    // A module statement MIXED AFTER an admitted import still refuses (the
+    // import-only predicate is whole-script), and an `export … from` re-export is
+    // the module-item residual too.
+    assert_fail_closed(
+        "<script module>import { m } from './base.js'; const K = 1;</script>\n<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n",
+        |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::ModuleScriptItem {
+                    construct: "variable declaration",
+                    ..
+                }
+            )
+        },
+    );
+    assert_fail_closed(
+        "<script module>export { m } from './base.js';</script>\n<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n",
+        |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::ModuleScriptItem {
+                    construct: "export",
+                    ..
+                }
+            )
+        },
+    );
 }
 
 #[test]
@@ -19776,11 +20434,14 @@ fn props_id_function_body_position_fails_closed() {
 
 #[test]
 fn props_id_module_script_fails_closed() {
-    // Module-script placement — the `<script module>` surface is itself
-    // fail-closed (the script-hoisting deferral owns the refusal).
+    // Module-script placement — a `$props.id()` declarator is a NON-import module
+    // item, refused by the import-only module-script gate with the precise
+    // `ModuleScriptItem` diagnostic (official `props_id_invalid_placement` rejects
+    // it too; Verter's residual module-item gate owns the refusal until non-import
+    // module items lower).
     assert_fail_closed(
         "<script module>const uid = $props.id();</script>\n<script>let c = $state(0);</script>\n<p>{c}</p>\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::ScriptImport { construct, .. } if *construct == "module script"),
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::ModuleScriptItem { construct, .. } if *construct == "variable declaration"),
     );
 }
 
