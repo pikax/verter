@@ -224,6 +224,105 @@ pub fn discover_tsconfigs(root: &Path) -> Vec<TsConfigEntry> {
     entries
 }
 
+/// Directories the bounded spawn precondition [`has_configured_ts_project_anywhere`]
+/// prunes at descent. Because a spawn precondition must err toward SPAWNING — a
+/// false refusal reintroduces the "OWNED refuses to spawn" bug, while a
+/// spawned-but-unused OWNED process is only a minor cost, and the per-query
+/// `BoundProject` gate is the real authority — the set is deliberately NARROW and
+/// prunes ONLY names that CANNOT be an authored package a carrier would bind to:
+///
+///   * `node_modules` — package-manager output (huge, and its dependency tsconfigs are
+///     never the workspace's authored projects); its PNPM symlink farm also never
+///     terminates in practice.
+///   * `.git` — VCS metadata, never contains a tsconfig.
+///   * framework-GENERATED dot-dirs (`.next` / `.nuxt` / `.output` / `.svelte-kit` /
+///     `.turbo` / `.cache`) — dot-prefixed generated names no user authors a source
+///     package as.
+///
+/// It NEVER prunes an AMBIGUOUS authored-source name: no BARE (non-dot) directory like
+/// `build` / `out` / `dist` / `target` / `coverage` (all legitimate package names —
+/// e.g. `packages/build/tsconfig.json`), and no non-generated dot config dir like
+/// `.storybook` / `.config` (which legitimately carries a `tsconfig.json`). This is NOT
+/// the generic build-output-exclusion set used elsewhere — it exists solely to keep the
+/// spawn precondition bounded without false-refusing a real authored project.
+const PRUNED_SCAN_DIRS: &[&str] = &[
+    "node_modules",
+    ".git",
+    ".next",
+    ".nuxt",
+    ".output",
+    ".svelte-kit",
+    ".turbo",
+    ".cache",
+];
+
+/// Whether AT LEAST ONE configured TypeScript project (`tsconfig.json` or
+/// `tsconfig.<suffix>.json`) exists ANYWHERE under `root`, short-circuiting on the
+/// first match.
+///
+/// This is the bounded owned-tsgo SPAWN PRECONDITION: owned tsgo is project-bound,
+/// so it must not start a config-less inferred project — but a mainstream monorepo
+/// keeps its configs at `packages/*/tsconfig.json` with NO root `tsconfig.json`, and
+/// a root-only gate wrongly rejects it (yielding no external-TS at all). The
+/// per-project OWNED binding is resolved per query by the shared
+/// [`WorkspaceProjectResolver`](crate::snapshot_builder); this precondition only
+/// answers the coarse "is there any configured project to bind against?" question so
+/// startup fails closed (no spawn) for a workspace that genuinely has none.
+///
+/// Bounded like [`discover_tsconfigs`]: it uses [`walkdir::WalkDir`] with
+/// [`follow_links(false)`][walkdir-follow] and a `filter_entry` that prunes descent
+/// into [`PRUNED_SCAN_DIRS`] — `node_modules` (a package-manager artifact whose
+/// symlink farm never terminates in practice), `.git`, and the framework-GENERATED
+/// dot-dirs (`.next` / `.nuxt` / `.output` / `.svelte-kit` / `.turbo` / `.cache`) — so
+/// a tsconfig that lives ONLY inside a generated / vendored subtree is not counted (it
+/// is not an authored configured project). The prune is deliberately NARROW: because a
+/// false refusal reintroduces the "OWNED refuses to spawn" bug, it NEVER prunes an
+/// ambiguous authored-source name — not a BARE `build` / `out` / `dist` / `target` /
+/// `coverage` package dir (e.g. `packages/build/tsconfig.json`), and not an AUTHORED
+/// dot config dir like `.storybook`. Short-circuits on the first authored match, so it
+/// is cheaper than the full [`discover_tsconfigs`] collection. Cross-platform (`Path`).
+///
+/// [walkdir-follow]: https://docs.rs/walkdir/latest/walkdir/struct.WalkDir.html#method.follow_links
+pub fn has_configured_ts_project_anywhere(root: &Path) -> bool {
+    let walker = walkdir::WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| {
+            // Always descend into the root itself.
+            if entry.depth() == 0 {
+                return true;
+            }
+            // The filter fires on files and directories; it is only load-bearing for
+            // directories (pruning a directory skips its entire subtree).
+            if !entry.file_type().is_dir() {
+                return true;
+            }
+            let Some(name) = entry.file_name().to_str() else {
+                return true;
+            };
+            // Prune node_modules + .git + framework-GENERATED dot-dirs only (NOT every
+            // dot-dir, and NO bare authored-source name like `build`/`out`/`dist`): a
+            // tsconfig ONLY inside one of these is generated / vendored, not an authored
+            // configured project. An AUTHORED dir like `packages/build` or `.storybook`
+            // is still scanned (the narrowed-prune fix — err toward spawning).
+            !PRUNED_SCAN_DIRS.contains(&name)
+        });
+
+    for entry in walker.flatten() {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str() else {
+            continue;
+        };
+        if name == "tsconfig.json" || (name.starts_with("tsconfig.") && name.ends_with(".json")) {
+            // Short-circuit: one authored configured project is enough.
+            return true;
+        }
+    }
+    false
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Tsconfig Parsing — all workspace-backed
 // ═══════════════════════════════════════════════════════════════════════════

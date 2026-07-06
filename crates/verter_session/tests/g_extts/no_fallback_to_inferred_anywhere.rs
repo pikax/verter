@@ -8,22 +8,40 @@
 //!     `@verter/typescript-plugin`'s `getExternalFiles` + `extraFileExtensions`, so
 //!     the transport injects NO inferred-project compiler options and defines NO
 //!     `configure_paths` override (it inherits the trait default no-op).
-//!   * tsgo (owned `--api`) — the carrier-companion CONTENT flows through the shared
-//!     `--lsp` session, while membership is owned by the `--api` checker's
-//!     `open_project`: `resolve_for` calls `update_snapshot_open_project(tsconfig)`,
-//!     selects `project_for_config(== tsconfig)`, and REQUIRES the carrier in
-//!     `project.root_files`, FAILING CLOSED when it is absent. There is NO
-//!     inferred/single-file fallback branch; the config-less owned restart backend
-//!     (`struct TsgoBackend` + its `ResilientBackend` impl + the config-less
-//!     `pub fn new(` constructor + a `tsgo_resilient::new(` wrap) is ABSENT — only
-//!     the project-bound owned backend exists.
+//!   * tsgo (owned) — the OWNED startup is PER-PROJECT BOUND (REOPEN-A). It no longer
+//!     gates on a root `<workspace>/tsconfig.json`; startup only requires that AT LEAST
+//!     ONE configured project exist anywhere (the bounded
+//!     `has_configured_ts_project_anywhere` spawn precondition, accepting
+//!     `packages/*/tsconfig.json` monorepos), and the carrier's OWN owning configured
+//!     project is resolved PER QUERY. Every production OWNED carrier diagnostics
+//!     request obtains a `BoundProject` from the SHARED project-binding helper
+//!     (`crates/verter_lsp/src/tsgo/project_binding.rs`: published snapshot →
+//!     `WorkspaceProjectResolver` → `ProjectBinding` → `ensure_project` →
+//!     `BoundProject`) BEFORE delegating to `TsgoOwnedProvider::get_diagnostics`;
+//!     `NoProject`, `Ambiguous`, `SyntheticScratch`, and a pre-published snapshot each
+//!     return NO external-TS diagnostics (fail closed, never a `tsgo --lsp` inferred /
+//!     own-discovery fall-through). This gate is source→owning-project ADMISSION (a
+//!     `BoundProject` witness EXISTS), NOT `root_files`-membership / project-bound
+//!     EXECUTION on the served diagnostics: an ADMITTED carrier's diagnostics ride
+//!     OWNED's `--lsp` pull's OWN configured-project discovery. The `--api` checker's
+//!     per-query membership witnesses (`update_snapshot_open_project` /
+//!     `project_for_config` / `root_files`, supplied the tsconfig PER QUERY) are
+//!     retained on the TEST-ONLY typecheck oracle, not the production diagnostics
+//!     surface. The config-less owned
+//!     restart backend (`struct TsgoBackend` + its `ResilientBackend` impl + the
+//!     config-less `pub fn new(` constructor + a `tsgo_resilient::new(` wrap) is ABSENT
+//!     — only the project-bound owned backend exists. The test-only
+//!     `semantic_diagnostics_for_carrier_in_project` `--api` oracle is NOT a production guard
+//!     target, and carrier TS FEATURE queries remain existing ungated `--lsp`
+//!     delegation until the documented feature-admission debt lands.
 //!
 //! This STATIC guard is the GLOBAL source-level backstop for the project-bound
 //! membership contract. It walks the external-TS PRODUCTION source across
 //! `crates/verter_lsp/src/**`, `crates/verter_tsc/src/**`, and
 //! `crates/verter_type_runtime/src/**` (BOTH the tsserver and the tsgo backend
 //! paths), EXCLUDING `*_tests.rs` siblings and comment lines, and FAILS if any
-//! inferred-project CONSTRUCTION / OPEN knob appears anywhere.
+//! inferred-project CONSTRUCTION / OPEN knob appears anywhere, AND asserts the
+//! per-project OWNED binding shape (points below).
 //!
 //! It deliberately keys on CONSTRUCTION/OPEN tokens, NEVER the bare substrings
 //! `inferred`/`fallback` — those appear legitimately 100+ times (`ProjectRank::
@@ -49,14 +67,77 @@
 //! inferred-open / config injection added anywhere outside the method body is caught,
 //! not hidden behind either a file-wide pass or a most-recent-`fn` attribution gap.
 //!
+//! ## The per-project OWNED binding rule-set (REOPEN-A)
+//!
+//! Beyond the inferred-construction scan, the guard asserts ALL SIX:
+//!   1. the OWNED carrier-diagnostics production path (`composite.rs`) obtains a
+//!      `BoundProject` from the shared project-binding helper before delegating —
+//!      witnessed by a live `resolve_carrier_bound(` CALL (call-shape, not a bare mention
+//!      or the helper's definition) that is BRACE-SCOPED to the gate method body: it must
+//!      occur INSIDE the `diagnostics_gated` method on `impl TsgoCompositeProvider`
+//!      (byte-offset within the brace-matched body span), not merely somewhere in
+//!      `composite.rs`, so a decoy `resolve_carrier_bound(` elsewhere in the file no
+//!      longer satisfies REQ-1. A `carrier_source_of(` companion-classify call stays
+//!      FILE-LEVEL (its gating role is the same body, but the primary REQ-1/REQ-6
+//!      witnesses are the two brace-scoped calls), and the `published_root` →
+//!      `WorkspaceProjectResolver` → `ensure_project` → `BoundProject` chain lives in
+//!      `project_binding.rs`. As a best-effort static proxy for "fails closed in the
+//!      gate", the fail-closed empty-result return (`Ok(Vec::new())`) is asserted PRESENT
+//!      inside the same gate body span (its non-bound-`else`-arm dominance is NOT
+//!      re-derived statically — see below). This STATIC guard asserts the gate's
+//!      source-level SHAPE; the RUNTIME fail-closed control-flow (a non-bound carrier
+//!      yields NO external-TS diagnostics, resolved BEFORE delegation, never an OWNED
+//!      `--lsp` fall-through) is proven separately by the discriminating tests in
+//!      `crates/verter_lsp/tests/owned_binding_gate.rs`
+//!      (`every_non_bound_carrier_binding_variant_is_fail_closed_none`,
+//!      `gate_no_project_carrier_fails_closed_to_empty`,
+//!      `gate_non_bound_carrier_fails_closed_to_empty_background`,
+//!      `gate_bound_carrier_delegates_to_owned`) — the static+runtime split is deliberate:
+//!      the static guard is the source-shape backstop, the runtime tests own dominance;
+//!   2. the tsgo membership witnesses remain in `owned.rs`
+//!      (`update_snapshot_open_project` / `project_for_config` / `root_files`);
+//!   3. a startup configured-project-presence spawn gate exists — a live CALL to
+//!      `has_configured_ts_project_anywhere` in `main.rs`;
+//!   4. ABSENCE of a `require_owned_tsconfig` call/def, a root-only
+//!      `workspace_root.join("tsconfig.json")` OWNED gate, a stored single
+//!      `tsconfig_path` in the owned provider (`owned.rs`) / backend (`resilient.rs`),
+//!      and a `new_owned(...tsconfig_path...)` param;
+//!   5. the inferred-construction-token bans + the scoped
+//!      `compilerOptionsForInferredProjects` allow-list stay UNCHANGED;
+//!   6. no raw path-only OWNED open that bypasses the witness — the gate checks the
+//!      resolved `BoundProject` via a live `into_bound(` call that is likewise
+//!      BRACE-SCOPED to the `diagnostics_gated` gate body (a decoy `into_bound` elsewhere
+//!      in `composite.rs` does NOT satisfy REQ-6) before delegating, AND the test-only
+//!      OWNED `--api` oracle `semantic_diagnostics_for_carrier_in_project` is NEVER CALLED
+//!      from PRODUCTION source (its DEFINITION in `owned.rs` and its TEST call sites are
+//!      allowed; a production `src` call would be a raw path-only OWNED diagnostics route
+//!      bypassing the always-present `BoundProject` admission layer).
+//!
 //! DISCRIMINATING: the self-test below proves every predicate FIRES on a synthetic
-//! reintroduction (the forbidden construction tokens) and is CLEAN on the
-//! project-bound shape, proves the request-name allow-list rejects a SECOND occurrence,
-//! an occurrence in a different function, AND an occurrence placed after the
-//! `configure_paths` closing brace but before the next function (the most-recent-`fn`
-//! gap), and that the global scan is non-vacuous on EVERY scoped crate (each crate's
-//! source set is non-empty and a probe token inserted into a representative file of
-//! each crate would trip the scan).
+//! reintroduction (the forbidden construction tokens; a reintroduced
+//! `require_owned_tsconfig` call / root-only `join` / stored `tsconfig_path` field) and
+//! is CLEAN on the project-bound per-project-binding shape, proves the CALL-shape
+//! predicates (`resolve_carrier_bound(` / `carrier_source_of(` / `into_bound(` /
+//! `has_configured_ts_project_anywhere(`) FIRE on a live call yet stay CLEAN on the bare
+//! DEFINITION and a comment, proves the BRACE-SCOPED gate predicates
+//! (`calls_named_fn_in_span` / `live_needle_in_span` over `composite_gate_body_span`) are
+//! satisfied by the real IN-BODY `resolve_carrier_bound(` / `into_bound` / `Ok(Vec::new())`
+//! yet are NOT satisfied by a decoy of each placed in a SIBLING method OUTSIDE the gate
+//! body (where the retired file-level `calls_named_fn` would be fooled), that the
+//! gate-body-span locator handles the real method shape (async, multi-line signature,
+//! nested `else { … }` + literal-brace strings via `blank_noncode`) and reports a stale
+//! anchor when `diagnostics_gated` is absent, and that the live `composite.rs` exposes a
+//! real non-empty gate span carrying all three in-body witnesses, proves the PRODUCTION
+//! oracle-absence check FIRES on a
+//! synthetic production call to `semantic_diagnostics_for_carrier_in_project` yet is CLEAN
+//! on its definition and a comment, proves the `new_owned(` arg-list check FIRES on a
+//! (single- OR multi-line) `tsconfig_path` argument yet is CLEAN without one and does not
+//! match a longer callee at a non-identifier boundary, proves the request-name allow-list
+//! rejects a SECOND occurrence, an occurrence in a different function, AND an occurrence
+//! placed after the `configure_paths` closing brace but before the next function (the
+//! most-recent-`fn` gap), and that the global scan is non-vacuous on EVERY scoped crate
+//! (each crate's source set is non-empty and a probe token inserted into a representative
+//! file of each crate would trip the scan).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -176,6 +257,24 @@ const ALLOWLISTED_INFERRED_CONFIG_FN: &str = "configure_paths";
 /// the `TypeProvider for ExtensionTypeProvider` impl, so a same-named method on an
 /// unrelated impl could not satisfy the allow-list.
 const ALLOWLISTED_INFERRED_CONFIG_IMPL: &str = "TypeProvider for ExtensionTypeProvider";
+
+/// The OWNED carrier-diagnostics gate: the `diagnostics_gated` method on the inherent
+/// `impl TsgoCompositeProvider` in composite.rs, whose brace-matched BODY must carry the
+/// REQ-1/REQ-6 binding witnesses (`resolve_carrier_bound(` + `into_bound`) AND the
+/// fail-closed empty-result return. The inherent impl declares `diagnostics_gated`
+/// (unique in the file) and precedes the trait impls, so the impl-name discriminant
+/// resolves to it. Pinning the two binding CALLS to THIS body span — not merely
+/// "somewhere in composite.rs" — is what stops a decoy `resolve_carrier_bound(` /
+/// `into_bound` elsewhere in the file from satisfying REQ-1/REQ-6.
+const OWNED_GATE_FILE: &str = "crates/verter_lsp/src/tsgo/composite.rs";
+const OWNED_GATE_FN: &str = "diagnostics_gated";
+const OWNED_GATE_IMPL: &str = "TsgoCompositeProvider";
+/// The fail-closed no-external-TS-diagnostics return the gate takes on a NON-bound
+/// carrier (the `into_bound()` None arm). Asserted PRESENT inside the gate body as the
+/// best-effort STATIC proxy for "fails closed in the gate" — the runtime control-flow
+/// dominance (this return is the None arm and precedes any delegation) is owned by the
+/// `crates/verter_lsp/tests/owned_binding_gate.rs` tests, not fabricated here.
+const OWNED_GATE_FAIL_CLOSED_RETURN: &str = "Ok(Vec::new())";
 
 /// A non-comment source line.
 fn is_comment(line: &str) -> bool {
@@ -407,14 +506,21 @@ fn blank_noncode(src: &str) -> String {
     String::from_utf8(out).expect("ascii-preserving rewrite")
 }
 
-/// Byte span `[open_brace_inclusive, close_brace_exclusive)` of the
-/// [`ALLOWLISTED_INFERRED_CONFIG_FN`] method body, located by: (1) tracking entry into
-/// the [`ALLOWLISTED_INFERRED_CONFIG_IMPL`] impl block by its signature line + brace
-/// depth, (2) finding the `configure_paths` fn signature WHILE inside that impl,
+/// Byte span `[open_brace_inclusive, close_brace_exclusive)` of the method body for
+/// `fn fn_name`, located by: (1) OPTIONALLY tracking entry into an impl block whose
+/// signature line contains `impl_discriminant` (by that line + brace depth), (2) finding
+/// the `fn_name` signature (WHILE inside that impl when a discriminant is required),
 /// (3) scanning to its opening `{`, (4) brace-matching to the close. The brace scan runs
-/// over [`blank_noncode`] so literal / comment braces never throw off the count. Returns
-/// `None` when no such method body exists (a stale anchor).
-fn configure_paths_body_span(src: &str) -> Option<(usize, usize)> {
+/// over [`blank_noncode`] so literal / comment braces never throw off the count. When
+/// `impl_discriminant` is `None` the method is located file-wide (no impl gate). Returns
+/// `None` when no such method body exists (a stale anchor). This is the shared body-span
+/// locator behind BOTH the `configure_paths` allow-list scope and the OWNED-gate
+/// binding-call scope.
+fn method_body_span(
+    src: &str,
+    impl_discriminant: Option<&str>,
+    fn_name: &str,
+) -> Option<(usize, usize)> {
     let code = blank_noncode(src);
     let code_bytes = code.as_bytes();
     let mut line_start = 0usize;
@@ -428,18 +534,22 @@ fn configure_paths_body_span(src: &str) -> Option<(usize, usize)> {
 
         // Enter the target impl when its signature line appears (before counting this
         // line's braces, so the impl's own opening `{` is recorded at the right depth).
-        if trimmed.starts_with("impl") && line.contains(ALLOWLISTED_INFERRED_CONFIG_IMPL) {
-            in_target_impl_depth = Some(brace_depth);
+        if let Some(disc) = impl_discriminant {
+            if trimmed.starts_with("impl") && line.contains(disc) {
+                in_target_impl_depth = Some(brace_depth);
+            }
         }
 
-        // While inside the target impl, the first `configure_paths` signature pins the
-        // body's opening brace (the `{` at or after the signature in the code view).
+        // The first `fn_name` signature pins the body's opening brace (the `{` at or
+        // after the signature in the code view). When an impl discriminant is required,
+        // the signature only counts WHILE inside that impl; with no discriminant the
+        // first file-wide `fn_name` signature wins.
         if found_sig_open.is_none()
-            && in_target_impl_depth.is_some()
-            && fn_name_introduced_on_line(line) == Some(ALLOWLISTED_INFERRED_CONFIG_FN)
+            && (impl_discriminant.is_none() || in_target_impl_depth.is_some())
+            && fn_name_introduced_on_line(line) == Some(fn_name)
         {
-            // The signature may carry a multi-line return type before `{`; scan the
-            // whole remaining code view from the signature's line start.
+            // The signature may carry a multi-line parameter list / return type before
+            // `{`; scan the whole remaining code view from the signature's line start.
             if let Some(rel) = code[line_start..].find('{') {
                 found_sig_open = Some(line_start + rel);
             }
@@ -481,6 +591,63 @@ fn configure_paths_body_span(src: &str) -> Option<(usize, usize)> {
         idx += 1;
     }
     None
+}
+
+/// Byte span of the [`ALLOWLISTED_INFERRED_CONFIG_FN`] method body on the
+/// [`ALLOWLISTED_INFERRED_CONFIG_IMPL`] impl — the allow-list scope for the single
+/// `compilerOptionsForInferredProjects` config call. A thin wrapper over the shared
+/// [`method_body_span`] locator.
+fn configure_paths_body_span(src: &str) -> Option<(usize, usize)> {
+    method_body_span(
+        src,
+        Some(ALLOWLISTED_INFERRED_CONFIG_IMPL),
+        ALLOWLISTED_INFERRED_CONFIG_FN,
+    )
+}
+
+/// Byte span of the [`OWNED_GATE_FN`] method body on the [`OWNED_GATE_IMPL`] impl — the
+/// REQ-1/REQ-6 brace-scope for the OWNED carrier-diagnostics gate. A thin wrapper over
+/// the shared [`method_body_span`] locator. Pinning the binding calls to THIS span (not
+/// merely "somewhere in composite.rs") is what stops a decoy call elsewhere in the file
+/// from satisfying REQ-1/REQ-6.
+fn composite_gate_body_span(src: &str) -> Option<(usize, usize)> {
+    method_body_span(src, Some(OWNED_GATE_IMPL), OWNED_GATE_FN)
+}
+
+/// Does a LIVE CALL to `name` (`name(`, not the `fn name(` definition line, not a
+/// comment) occur at a byte offset INSIDE `[span.0, span.1)` of `src`? The brace-scoped
+/// counterpart of [`calls_named_fn`]: it applies the SAME call-vs-definition
+/// discrimination, then additionally requires the call to fall inside the given body
+/// span — so a decoy `name(` elsewhere in the file does NOT satisfy the check.
+fn calls_named_fn_in_span(src: &str, name: &str, span: (usize, usize)) -> bool {
+    let (open, close) = span;
+    let def = format!("fn {name}(");
+    let call = format!("{name}(");
+    let mut line_start = 0usize;
+    for line in src.split_inclusive('\n') {
+        if !is_comment(line) && !line.contains(&def) {
+            let mut search_from = 0usize;
+            while let Some(rel) = line[search_from..].find(&call) {
+                let byte = line_start + search_from + rel;
+                if byte >= open && byte < close {
+                    return true;
+                }
+                search_from += rel + call.len();
+            }
+        }
+        line_start += line.len();
+    }
+    false
+}
+
+/// Does a LIVE (non-comment) occurrence of the literal `needle` fall INSIDE
+/// `[span.0, span.1)` of `src`? Reuses [`live_request_occurrences`]'s comment-skipping
+/// byte-offset scan. Used for the fail-closed empty-result return proxy (a literal
+/// expression, not a `name(` call shape).
+fn live_needle_in_span(src: &str, needle: &str, span: (usize, usize)) -> bool {
+    live_request_occurrences(src, needle)
+        .into_iter()
+        .any(|(byte, _)| byte >= span.0 && byte < span.1)
 }
 
 #[test]
@@ -552,6 +719,35 @@ fn no_fallback_to_inferred_anywhere() {
                 ));
             }
         }
+
+        // (S3 / REQ-6) No raw path-only OWNED bypass: the TEST-ONLY OWNED `--api` oracle
+        // must NEVER be CALLED from PRODUCTION source. A production call to
+        // `semantic_diagnostics_for_carrier_in_project` (the low-level per-tsconfig
+        // per-query oracle) would be a raw path-only OWNED diagnostics route that bypasses
+        // the always-present `BoundProject` admission layer. Its DEFINITION in `owned.rs`
+        // (excluded here by the `fn NAME(` check in `calls_named_fn`) and its TEST call
+        // sites (integration `tests/**` + filtered `*_tests.rs`, both outside this
+        // production-`src` scan) are allowed; only a production `src` CALL is forbidden.
+        if calls_named_fn(&content, "semantic_diagnostics_for_carrier_in_project") {
+            violations.push(format!(
+                "{rel}: PRODUCTION call to the test-only OWNED `--api` oracle \
+                 `semantic_diagnostics_for_carrier_in_project` — a raw path-only OWNED \
+                 diagnostics route that bypasses the always-present BoundProject admission layer \
+                 (the oracle is DEFINED in owned.rs and TEST-called only)"
+            ));
+        }
+
+        // (S4 / REQ-4) No `new_owned(...)` call OR definition passes a `tsconfig_path`
+        // argument (belt-and-suspenders beside the resilient.rs whole-file `tsconfig_path`
+        // ban below): a restart re-establishes the process only; the owning tsconfig is
+        // taken PER QUERY, never threaded through the owned restart wrapper's arg list.
+        if call_arglist_contains(&content, "new_owned", "tsconfig_path") {
+            violations.push(format!(
+                "{rel}: a `new_owned(...)` call/def passes a `tsconfig_path` argument — owned \
+                 startup binds per project (the owning tsconfig is resolved per query); it must \
+                 NOT thread a stored root `tsconfig_path` through the restart wrapper"
+            ));
+        }
     }
 
     // EXACT-SHAPE allow-list for the request name in the allow-listed file: it is
@@ -590,6 +786,22 @@ fn no_fallback_to_inferred_anywhere() {
         }
     }
 
+    // (S3 anchor) The PRODUCTION oracle-absence check (in the per-file loop above) is
+    // anchored on a REAL symbol: the OWNED `--api` oracle DEFINITION must exist in
+    // owned.rs. Without this anchor a renamed / removed oracle would make the absence
+    // check vacuously clean (there would be nothing left to forbid a production call OF).
+    if !owned_src
+        .lines()
+        .any(|line| line.contains("fn semantic_diagnostics_for_carrier_in_project("))
+    {
+        violations.push(
+            "crates/verter_type_runtime/src/tsgo/owned.rs: the OWNED `--api` oracle \
+             `semantic_diagnostics_for_carrier_in_project` DEFINITION is missing — the \
+             production-call absence check is anchored on it and would be vacuous without it"
+                .to_string(),
+        );
+    }
+
     // tsgo STRUCTURAL invariant: NO config-less owned restart backend exists. The
     // owned startup wraps only via the project-bound `new_owned`; the config-less
     // `struct TsgoBackend` / its `ResilientBackend` impl / the config-less
@@ -601,16 +813,160 @@ fn no_fallback_to_inferred_anywhere() {
     let resilient_src = fs::read_to_string(&resilient_rs)
         .unwrap_or_else(|e| panic!("read {}: {e}", resilient_rs.display()));
 
-    // main.rs must CALL `require_owned_tsconfig` (the explicit-binding resolver) on
-    // the owned-startup path — not merely define the helper.
-    if !calls_require_owned_tsconfig(&main_src) {
+    // ── REOPEN-A: per-project OWNED binding via the shared project-binding helper +
+    //    BoundProject chain, replacing the root-tsconfig OWNED startup gate. ──
+    let composite_rs = root.join("crates/verter_lsp/src/tsgo/composite.rs");
+    let binding_rs = root.join("crates/verter_lsp/src/tsgo/project_binding.rs");
+    let composite_src = fs::read_to_string(&composite_rs)
+        .unwrap_or_else(|e| panic!("read {}: {e}", composite_rs.display()));
+    let binding_src = fs::read_to_string(&binding_rs)
+        .unwrap_or_else(|e| panic!("read {}: {e}", binding_rs.display()));
+
+    // (1 / 6) The production OWNED carrier-diagnostics gate obtains a BoundProject from
+    //     the shared project-binding helper BEFORE delegating, and the witness calls are
+    //     BRACE-SCOPED to the gate method body: `resolve_carrier_bound(` (REQ-1) AND
+    //     `into_bound(` (REQ-6) must occur INSIDE the `diagnostics_gated` method body on
+    //     `impl TsgoCompositeProvider`, not merely somewhere in composite.rs — so a decoy
+    //     call elsewhere in the file no longer satisfies REQ-1/REQ-6. Honest wording: the
+    //     test-only `semantic_diagnostics_for_carrier_in_project` oracle is NOT a guard
+    //     target — the witness is the gate's IN-BODY helper call + the helper's
+    //     published-snapshot → resolver → ensure_project → BoundProject chain. This STATIC
+    //     guard asserts the gate's source-level SHAPE; the RUNTIME fail-closed control-flow
+    //     / dominance (a non-bound carrier yields NO external-TS diagnostics, resolved
+    //     BEFORE delegation) is proven by the discriminating tests in
+    //     `crates/verter_lsp/tests/owned_binding_gate.rs`
+    //     (`every_non_bound_carrier_binding_variant_is_fail_closed_none`,
+    //     `gate_no_project_carrier_fails_closed_to_empty`,
+    //     `gate_non_bound_carrier_fails_closed_to_empty_background`,
+    //     `gate_bound_carrier_delegates_to_owned`) — the static+runtime split is deliberate.
+    match composite_gate_body_span(&composite_src) {
+        None => violations.push(format!(
+            "{OWNED_GATE_FILE}: could not locate the `{OWNED_GATE_FN}` OWNED carrier-diagnostics \
+             gate method body on `impl {OWNED_GATE_IMPL}` — the REQ-1/REQ-6 brace-scope anchor is \
+             stale (the gate was renamed, moved off the impl, or its braces no longer match); \
+             re-pin it"
+        )),
+        Some(gate_span) => {
+            // (1) REQ-1: obtain a BoundProject via a live `resolve_carrier_bound(` CALL
+            //     INSIDE the gate body before delegating to TsgoOwnedProvider::get_diagnostics.
+            if !calls_named_fn_in_span(&composite_src, "resolve_carrier_bound", gate_span) {
+                violations.push(format!(
+                    "{OWNED_GATE_FILE}: the `{OWNED_GATE_FN}` gate must obtain a BoundProject from \
+                     the shared project-binding helper via a live `resolve_carrier_bound(` CALL \
+                     INSIDE the gate method body (a decoy call elsewhere in composite.rs does NOT \
+                     satisfy REQ-1) before delegating to TsgoOwnedProvider::get_diagnostics — no \
+                     in-body live call found"
+                ));
+            }
+            // (6) REQ-6: check the resolved BoundProject via a live `into_bound(` CALL INSIDE
+            //     the gate body before delegating — no path-only OWNED open may bypass it.
+            if !calls_named_fn_in_span(&composite_src, "into_bound", gate_span) {
+                violations.push(format!(
+                    "{OWNED_GATE_FILE}: the `{OWNED_GATE_FN}` gate must check the resolved \
+                     BoundProject via a live `into_bound(` CALL INSIDE the gate method body (a \
+                     decoy call elsewhere in composite.rs does NOT satisfy REQ-6) before \
+                     delegating — no in-body live call found"
+                ));
+            }
+            // (fail-closed shape) The non-bound path returns the empty external-TS result
+            //     (`Ok(Vec::new())`) INSIDE the gate body. This asserts the fail-closed return
+            //     EXISTS in the gate body — the best-effort static proxy for "fails closed"; the
+            //     dominance property (it is the `into_bound()` None arm, preceding delegation) is
+            //     owned by the runtime tests above, so the static guard does NOT fabricate a
+            //     full-control-flow matcher.
+            if !live_needle_in_span(&composite_src, OWNED_GATE_FAIL_CLOSED_RETURN, gate_span) {
+                violations.push(format!(
+                    "{OWNED_GATE_FILE}: the `{OWNED_GATE_FN}` gate body must contain the \
+                     fail-closed `{OWNED_GATE_FAIL_CLOSED_RETURN}` no-external-TS-diagnostics \
+                     return (the non-bound carrier path) — a non-bound carrier must yield NO \
+                     external-TS diagnostics, never an OWNED `--lsp` fall-through"
+                ));
+            }
+        }
+    }
+    // The carrier-companion classify CALL stays FILE-LEVEL: its gating role is the same
+    // gate body, but the primary REQ-1/REQ-6 witnesses are the two brace-scoped calls
+    // above. `carrier_source_of(` must be CALLED so a NON-carrier path is not gated and a
+    // carrier companion is.
+    if !calls_named_fn(&composite_src, "carrier_source_of") {
         violations.push(
-            "crates/verter_lsp/src/main.rs: owned tsgo startup must CALL `require_owned_tsconfig` \
-             (the explicit-binding resolver) — no live call site found (a config-less owned \
-             startup would skip it)"
+            "crates/verter_lsp/src/tsgo/composite.rs: the gate must CALL `carrier_source_of(` to \
+             classify a carrier companion so a NON-carrier path is not gated and a carrier \
+             companion is — no live call found"
                 .to_string(),
         );
     }
+    for (needle, why) in [
+        (
+            "published_root",
+            "the helper must resolve over the host's LIVE published snapshot",
+        ),
+        (
+            "WorkspaceProjectResolver",
+            "the helper must resolve ownership through the shared WorkspaceProjectResolver \
+             (never a path-only inferred guess)",
+        ),
+        (
+            "ensure_project",
+            "the helper must mint the witness through the engine backend ensure_project",
+        ),
+        (
+            "BoundProject",
+            "the helper must yield the BoundProject witness the gate delegates behind",
+        ),
+    ] {
+        if !has_live(&binding_src, needle) {
+            violations.push(format!(
+                "crates/verter_lsp/src/tsgo/project_binding.rs: the binding helper lost `{needle}` \
+                 — {why}"
+            ));
+        }
+    }
+
+    // (3) The startup configured-project-presence SPAWN GATE exists — a live CALL to
+    //     the bounded precondition (the per-project replacement for the root-only gate).
+    //     Presence of the name alone (a comment, a `use`, the `verter_workspace`
+    //     definition) is NOT enough: the spawn path must INVOKE it (`...anywhere(`).
+    if !calls_named_fn(&main_src, "has_configured_ts_project_anywhere") {
+        violations.push(
+            "crates/verter_lsp/src/main.rs: owned tsgo startup must CALL the bounded \
+             configured-project spawn precondition (a live `has_configured_ts_project_anywhere(` \
+             call, not a bare mention) — the per-project replacement for the deleted root-only gate"
+                .to_string(),
+        );
+    }
+
+    // (4) ABSENCE: the root-only OWNED gate + the stored single tsconfig are DELETED.
+    if has_live(&main_src, "require_owned_tsconfig") {
+        violations.push(
+            "crates/verter_lsp/src/main.rs: the root-only `require_owned_tsconfig` OWNED gate must \
+             be ABSENT (deleted, not merely uncalled) — replaced by per-project binding"
+                .to_string(),
+        );
+    }
+    if has_live(&main_src, "join(\"tsconfig.json\")") {
+        violations.push(
+            "crates/verter_lsp/src/main.rs: a root-only `workspace_root.join(\"tsconfig.json\")` \
+             OWNED startup gate must be ABSENT — owned tsgo binds per project, not root-only"
+                .to_string(),
+        );
+    }
+    if has_live(&owned_src, "tsconfig_path") {
+        violations.push(
+            "crates/verter_type_runtime/src/tsgo/owned.rs: the owned provider must store NO single \
+             `tsconfig_path` — the `--api` oracle takes the owning tsconfig PER QUERY"
+                .to_string(),
+        );
+    }
+    if has_live(&resilient_src, "tsconfig_path") {
+        violations.push(
+            "crates/verter_lsp/src/tsgo/resilient.rs: the owned restart backend must store NO \
+             `tsconfig_path`, and `new_owned(...)` must take no `tsconfig_path` param — a restart \
+             re-establishes the process only"
+                .to_string(),
+        );
+    }
+
     for (needle, why) in [
         (
             "struct TsgoBackend",
@@ -653,16 +1009,69 @@ fn has_live(src: &str, needle: &str) -> bool {
         .any(|line| !is_comment(line) && line.contains(needle))
 }
 
-/// Does a non-comment line CALL `require_owned_tsconfig` (`require_owned_tsconfig(`),
-/// as opposed to merely DEFINING it (`fn require_owned_tsconfig(`)?
-fn calls_require_owned_tsconfig(src: &str) -> bool {
-    src.lines().any(|line| {
-        if is_comment(line) {
-            return false;
+/// Does a non-comment line of `src` CALL `name` (`name(`), as opposed to merely
+/// DEFINING it (`fn name(`) or naming it in prose? Generalises the CALL-vs-definition
+/// rigor of the retired `calls_require_owned_tsconfig` helper: a live CALL has the
+/// open-paren call shape on a non-comment line and is not the `fn name(` definition line.
+/// Mere presence of the name (a comment, a `use`, a doc link) is NOT a call.
+fn calls_named_fn(src: &str, name: &str) -> bool {
+    let def = format!("fn {name}(");
+    let call = format!("{name}(");
+    src.lines()
+        .any(|line| !is_comment(line) && !line.contains(&def) && line.contains(&call))
+}
+
+/// Does ANY `callee(` argument list in `src` contain the identifier `arg`? Paren-matches
+/// each `callee(` occurrence over a [`blank_noncode`] view (so literal parens inside
+/// strings / comments never miscount) and searches the blanked CODE-only view for `arg`
+/// (so an `arg` substring inside a string literal is not a false match). Handles
+/// multi-line signatures AND multi-line calls. A `callee(` occurrence is counted only at
+/// an identifier boundary, so a longer name like `wrap_new_owned(` does not match
+/// `new_owned(`.
+fn call_arglist_contains(src: &str, callee: &str, arg: &str) -> bool {
+    let code = blank_noncode(src);
+    let bytes = code.as_bytes();
+    let needle = format!("{callee}(");
+    let mut from = 0usize;
+    while let Some(rel) = code[from..].find(&needle) {
+        let start = from + rel;
+        // `open` is the byte index of the call's opening paren.
+        let open = start + needle.len() - 1;
+        let at_boundary =
+            start == 0 || !(bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_');
+        if !at_boundary {
+            from = start + needle.len();
+            continue;
         }
-        let is_definition = line.contains("fn require_owned_tsconfig(");
-        !is_definition && line.contains("require_owned_tsconfig(")
-    })
+        // Paren-match from `open` to its close over the code view.
+        let mut depth = 0usize;
+        let mut idx = open;
+        let mut close = None;
+        while idx < bytes.len() {
+            match bytes[idx] {
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(idx);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            idx += 1;
+        }
+        match close {
+            Some(close) => {
+                if code[open + 1..close].contains(arg) {
+                    return true;
+                }
+                from = close + 1;
+            }
+            None => break,
+        }
+    }
+    false
 }
 
 /// DISCRIMINATING self-test: each predicate FIRES on a synthetic config-less
@@ -759,17 +1168,326 @@ fn no_fallback_to_inferred_anywhere_self_test_discriminates() {
         "the project-bound `new_owned` wrap must NOT trip the `tsgo_resilient::new(` needle"
     );
 
-    // ── `require_owned_tsconfig` CALL vs definition ──
+    // ── REOPEN-A per-project OWNED binding predicates: each FIRES on a synthetic
+    //    reintroduction and is CLEAN on the real per-project-binding shape. The
+    //    CALL-shape predicates additionally stay CLEAN on the bare DEFINITION line. ──
+
+    // (S2 / point 1) the helper-CALL gate witness: a live `resolve_carrier_bound(` call
+    // reads as CALLED; the bare DEFINITION line and a comment do NOT.
     assert!(
-        calls_require_owned_tsconfig("    let cfg = require_owned_tsconfig(root)?;"),
-        "a real require_owned_tsconfig call must read as CALLED"
-    );
-    assert!(
-        !calls_require_owned_tsconfig(
-            "fn require_owned_tsconfig(root: &Path) -> Result<String, String> {"
+        calls_named_fn(
+            "    let carrier = resolve_carrier_bound(&self.host, &source).into_bound();",
+            "resolve_carrier_bound"
         ),
-        "the definition alone must read as NOT CALLED"
+        "a live resolve_carrier_bound( gate call must read as CALLED"
     );
+    assert!(
+        !calls_named_fn(
+            "pub fn resolve_carrier_bound(host: &VerterHost, source: &str) -> CarrierBinding {",
+            "resolve_carrier_bound"
+        ),
+        "the resolve_carrier_bound DEFINITION alone must read as NOT CALLED"
+    );
+    assert!(
+        !calls_named_fn(
+            "    // resolve_carrier_bound is the shared binding helper",
+            "resolve_carrier_bound"
+        ),
+        "a comment naming the helper is not a live gate call"
+    );
+
+    // (S2 / point 1) the carrier-companion classify CALL, def-excluded.
+    assert!(
+        calls_named_fn(
+            "        let Some(source) = carrier_source_of(path) else {",
+            "carrier_source_of"
+        ),
+        "a live carrier_source_of( classify call must read as CALLED"
+    );
+    assert!(
+        !calls_named_fn(
+            "fn carrier_source_of(provider_path: &str) -> Option<String> {",
+            "carrier_source_of"
+        ),
+        "the carrier_source_of DEFINITION alone must read as NOT CALLED"
+    );
+
+    // (S2 / point 6) the BoundProject witness check before delegation, as a live call.
+    assert!(
+        calls_named_fn(
+            "    let Some(carrier) = c.into_bound() else {",
+            "into_bound"
+        ),
+        "a live into_bound( witness check must read as CALLED"
+    );
+    assert!(
+        !calls_named_fn(
+            "    pub fn into_bound(self) -> Option<BoundCarrier> {",
+            "into_bound"
+        ),
+        "the into_bound DEFINITION alone must read as NOT CALLED"
+    );
+
+    // ── REQ-1 / REQ-6 BRACE-SCOPED to the OWNED gate body: the binding calls +
+    //    fail-closed return must live INSIDE the `diagnostics_gated` method on
+    //    `impl TsgoCompositeProvider`. A decoy of each placed in a SIBLING method OUTSIDE
+    //    the gate body must NOT satisfy the brace-scoped predicate (where the retired
+    //    file-level `calls_named_fn` would be fooled). Mirrors the configure_paths
+    //    body-span self-tests: async + multi-line signature + nested/literal braces. ──
+
+    // Wrap `methods` in the inherent `impl TsgoCompositeProvider` so
+    // `composite_gate_body_span` has the real anchor shape.
+    let gate_wrap =
+        |methods: &str| -> String { format!("impl TsgoCompositeProvider {{\n{methods}}}\n") };
+
+    // The REAL gate shape (async, multi-line signature, nested `else { … }` blocks): the
+    // in-body `resolve_carrier_bound(` / `into_bound` / `Ok(Vec::new())` all fall INSIDE
+    // the brace-matched gate span.
+    let real_gate = gate_wrap(
+        "    async fn diagnostics_gated(\n        &self,\n        path: &str,\n        \
+         background: bool,\n    ) -> Result<Vec<TypeDiagnostic>, TypeProviderError> {\n        \
+         let Some(source) = carrier_source_of(path) else {\n            \
+         return self.owned_diagnostics(path, background).await;\n        };\n        \
+         let Some(carrier) =\n            \
+         project_binding::resolve_carrier_bound(&self.host, &source).into_bound()\n        \
+         else {\n            return Ok(Vec::new());\n        };\n        \
+         let owned = self.owned_diagnostics(path, background).await?;\n        Ok(owned)\n    }\n",
+    );
+    let real_span = composite_gate_body_span(&real_gate).expect("real gate body span");
+    assert!(
+        calls_named_fn_in_span(&real_gate, "resolve_carrier_bound", real_span),
+        "the real IN-BODY resolve_carrier_bound( call must satisfy the brace-scoped REQ-1 predicate"
+    );
+    assert!(
+        calls_named_fn_in_span(&real_gate, "into_bound", real_span),
+        "the real IN-BODY into_bound( call must satisfy the brace-scoped REQ-6 predicate"
+    );
+    assert!(
+        live_needle_in_span(&real_gate, "Ok(Vec::new())", real_span),
+        "the real IN-BODY fail-closed Ok(Vec::new()) return must satisfy the brace-scoped proxy"
+    );
+
+    // A DECOY of each token placed in a SIBLING method AFTER the gate close: the gate
+    // body itself just delegates (no binding call), so the brace-scoped predicates are
+    // NOT satisfied — the whole point of the strengthening. The retired file-level
+    // `calls_named_fn` IS fooled by the same decoy (asserted for contrast).
+    let decoy_gate = gate_wrap(
+        "    async fn diagnostics_gated(\n        &self,\n        path: &str,\n        \
+         background: bool,\n    ) -> Result<Vec<TypeDiagnostic>, TypeProviderError> {\n        \
+         self.owned_diagnostics(path, background).await\n    }\n\n    \
+         async fn decoy(&self, p: &str) -> Result<Vec<TypeDiagnostic>, TypeProviderError> {\n        \
+         let _c = project_binding::resolve_carrier_bound(&self.host, p).into_bound();\n        \
+         Ok(Vec::new())\n    }\n",
+    );
+    let decoy_span = composite_gate_body_span(&decoy_gate).expect("decoy gate body span");
+    assert!(
+        !calls_named_fn_in_span(&decoy_gate, "resolve_carrier_bound", decoy_span),
+        "a decoy resolve_carrier_bound( OUTSIDE the gate body must NOT satisfy the brace-scoped \
+         REQ-1 predicate"
+    );
+    assert!(
+        !calls_named_fn_in_span(&decoy_gate, "into_bound", decoy_span),
+        "a decoy into_bound( OUTSIDE the gate body must NOT satisfy the brace-scoped REQ-6 predicate"
+    );
+    assert!(
+        !live_needle_in_span(&decoy_gate, "Ok(Vec::new())", decoy_span),
+        "a decoy Ok(Vec::new()) OUTSIDE the gate body must NOT satisfy the brace-scoped fail-closed \
+         proxy"
+    );
+    assert!(
+        calls_named_fn(&decoy_gate, "resolve_carrier_bound")
+            && calls_named_fn(&decoy_gate, "into_bound"),
+        "contrast: the retired FILE-LEVEL calls_named_fn IS fooled by the sibling decoy — the \
+         brace-scope is exactly what closes that gap"
+    );
+
+    // The gate-body-span locator brace-matches over nested code braces AND a literal-brace
+    // string (mirrors the real body's `else { … }` blocks + a `json!({ "}" })`): the span
+    // ends at the method's TRUE closing brace, not a literal `}`, so an in-body needle
+    // after the literal brace is still detected.
+    let nested_gate = gate_wrap(
+        "    async fn diagnostics_gated(\n        &self,\n        path: &str,\n    ) -> \
+         Result<Vec<TypeDiagnostic>, TypeProviderError> {\n        \
+         let _ = json!({ \"k\": \"}\" });\n        \
+         let Some(c) = resolve_carrier_bound(h, path).into_bound() else {\n            \
+         return Ok(Vec::new());\n        };\n        Ok(c.diags())\n    }\n",
+    );
+    let nested_span = composite_gate_body_span(&nested_gate).expect("nested gate body span");
+    assert!(
+        calls_named_fn_in_span(&nested_gate, "into_bound", nested_span)
+            && live_needle_in_span(&nested_gate, "Ok(Vec::new())", nested_span),
+        "an into_bound( call / fail-closed return AFTER a literal-brace string must fall within the \
+         matched gate span (blank_noncode must not let a string `}}` close it early)"
+    );
+
+    // A STALE ANCHOR: no `diagnostics_gated` on the impl at all (renamed / moved off)
+    // makes the gate span unlocatable — the main test reports the stale anchor.
+    assert!(
+        composite_gate_body_span("impl TsgoCompositeProvider {\n    async fn other(&self) {}\n}\n")
+            .is_none(),
+        "a missing diagnostics_gated body must make the composite gate span unlocatable"
+    );
+
+    // The ACTUAL composite.rs exposes a real, non-empty gate span carrying all three
+    // in-body witnesses — proves the brace-scope pin is anchored on the real method, not
+    // vacuously absent (the strengthened main-test predicate is non-vacuous on the tree).
+    let live_composite = fs::read_to_string(workspace_root().join(OWNED_GATE_FILE))
+        .expect("read the live composite.rs");
+    let live_gate_span = composite_gate_body_span(&live_composite)
+        .expect("the live composite.rs must expose a real diagnostics_gated body span");
+    assert!(
+        live_gate_span.1 > live_gate_span.0,
+        "the live gate span must be non-empty"
+    );
+    assert!(
+        calls_named_fn_in_span(&live_composite, "resolve_carrier_bound", live_gate_span),
+        "the live gate body must carry the in-body resolve_carrier_bound( REQ-1 witness"
+    );
+    assert!(
+        calls_named_fn_in_span(&live_composite, "into_bound", live_gate_span),
+        "the live gate body must carry the in-body into_bound( REQ-6 witness"
+    );
+    assert!(
+        live_needle_in_span(
+            &live_composite,
+            OWNED_GATE_FAIL_CLOSED_RETURN,
+            live_gate_span
+        ),
+        "the live gate body must carry the in-body fail-closed Ok(Vec::new()) return"
+    );
+
+    // (S1 / point 3) the startup spawn-gate CALL: a live call reads CALLED; the
+    // `verter_workspace` definition and a comment mention do NOT.
+    assert!(
+        calls_named_fn(
+            "    if !verter_workspace::config::has_configured_ts_project_anywhere(root) { \
+             return Err(reason); }",
+            "has_configured_ts_project_anywhere"
+        ),
+        "a live has_configured_ts_project_anywhere( spawn-gate call must read as CALLED"
+    );
+    assert!(
+        !calls_named_fn(
+            "pub fn has_configured_ts_project_anywhere(root: &Path) -> bool {",
+            "has_configured_ts_project_anywhere"
+        ),
+        "the has_configured_ts_project_anywhere DEFINITION alone must read as NOT CALLED"
+    );
+    assert!(
+        !calls_named_fn(
+            "    // has_configured_ts_project_anywhere is the bounded spawn precondition",
+            "has_configured_ts_project_anywhere"
+        ),
+        "a comment naming the spawn precondition must read as NOT CALLED"
+    );
+
+    // (S3 / REQ-6) the PRODUCTION oracle-absence predicate: a synthetic production CALL to
+    // the test-only OWNED `--api` oracle trips it; the DEFINITION and a comment do NOT
+    // (this is exactly the `calls_named_fn` verdict the per-file production scan applies).
+    assert!(
+        calls_named_fn(
+            "        let d = self.owned.semantic_diagnostics_for_carrier_in_project(&p, &cfg).await;",
+            "semantic_diagnostics_for_carrier_in_project"
+        ),
+        "a synthetic PRODUCTION call to the OWNED --api oracle must trip the absence check"
+    );
+    assert!(
+        !calls_named_fn(
+            "    pub async fn semantic_diagnostics_for_carrier_in_project(",
+            "semantic_diagnostics_for_carrier_in_project"
+        ),
+        "the oracle DEFINITION alone must NOT trip the production-call absence check"
+    );
+    assert!(
+        !calls_named_fn(
+            "    //! reflection ORACLE (`semantic_diagnostics_for_carrier_in_project`). It ...",
+            "semantic_diagnostics_for_carrier_in_project"
+        ),
+        "a comment naming the oracle must NOT trip the production-call absence check"
+    );
+
+    // (S4 / REQ-4) the `new_owned(` arg-list check: a `tsconfig_path` argument (single OR
+    // multi-line) trips it; an arg list without one is CLEAN; a longer callee that merely
+    // ends in `new_owned` does not match at a non-identifier boundary.
+    assert!(
+        call_arglist_contains(
+            "let r = tsgo_resilient::new_owned(owned, crash, bin, root, tsconfig_path);",
+            "new_owned",
+            "tsconfig_path"
+        ),
+        "a new_owned( call passing tsconfig_path must trip the param check"
+    );
+    assert!(
+        call_arglist_contains(
+            "pub fn new_owned(\n    provider: P,\n    tsconfig_path: String,\n    max: u32,\n) {",
+            "new_owned",
+            "tsconfig_path"
+        ),
+        "a MULTI-LINE new_owned definition with a tsconfig_path param must trip the param check"
+    );
+    assert!(
+        !call_arglist_contains(
+            "let r = tsgo_resilient::new_owned(owned, crash_notify, tsgo_bin, root_uri, client, 3);",
+            "new_owned",
+            "tsconfig_path"
+        ),
+        "a new_owned( call WITHOUT tsconfig_path must be CLEAN"
+    );
+    assert!(
+        !call_arglist_contains(
+            "let r = wrap_new_owned(owned, tsconfig_path);",
+            "new_owned",
+            "tsconfig_path"
+        ),
+        "a longer callee ending in new_owned must NOT match at a non-identifier boundary"
+    );
+
+    // (4) ABSENCE predicates FIRE on a synthetic reintroduction, CLEAN otherwise.
+    assert!(
+        has_live(
+            "    let cfg = require_owned_tsconfig(root)?;",
+            "require_owned_tsconfig"
+        ),
+        "a reintroduced require_owned_tsconfig call must trip the absence check"
+    );
+    assert!(
+        !has_live(
+            "    // require_owned_tsconfig was replaced by per-project binding",
+            "require_owned_tsconfig"
+        ),
+        "a comment naming the deleted helper must NOT trip the absence check"
+    );
+    assert!(
+        has_live(
+            "    let ts = workspace_root.join(\"tsconfig.json\");",
+            "join(\"tsconfig.json\")"
+        ),
+        "a reintroduced root-only join(\"tsconfig.json\") gate must trip the absence check"
+    );
+    assert!(
+        has_live("    tsconfig_path: String,", "tsconfig_path"),
+        "a reintroduced stored tsconfig_path field must trip the absence check"
+    );
+    assert!(
+        !has_live("        tsconfig: &str,", "tsconfig_path"),
+        "the per-query `tsconfig` param must NOT trip the `tsconfig_path` absence check"
+    );
+    // (1/6) the binding-helper chain tokens FIRE on a synthetic helper, CLEAN on a stub.
+    for needle in [
+        "published_root",
+        "WorkspaceProjectResolver",
+        "ensure_project",
+        "BoundProject",
+    ] {
+        assert!(
+            has_live(
+                "    let r = WorkspaceProjectResolver::new(published_root, ..); \
+                 backend.ensure_project(b) -> BoundProject",
+                needle
+            ),
+            "the binding-helper chain token `{needle}` must read as present in the helper shape"
+        );
+    }
 
     // ── EXACT-SHAPE request-name allow-list: pinned by BRACE/BODY SCOPE to ONE
     //    occurrence inside the `configure_paths` method body, rejecting a second

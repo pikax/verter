@@ -298,17 +298,18 @@ async fn create_type_provider(
             )
         }
         "shared-tsgo" | "tsgo" => {
-            // OWNED is the universal baseline — built first, always. SHARED
-            // editor-attach is additive + opt-in + fail-closed: when the rendezvous
-            // evidence is present, the OWNED provider is WRAPPED in a
-            // `TsgoCompositeProvider` whose SHARED overlay binds lazily per query
-            // over the published snapshot and overlays ONLY bound carrier
-            // diagnostics — it NEVER displaces the OWNED feature/diagnostics
-            // surface. Absent the rendezvous, the bare OWNED provider is used.
-            // `tsgo` and `shared-tsgo` are the same routing with a clearer name.
+            // OWNED is the universal baseline — built first, always — then WRAPPED in
+            // the ALWAYS-present host-aware admission layer (`TsgoCompositeProvider`),
+            // which gates OWNED carrier diagnostics on the carrier's resolved
+            // `BoundProject` over the published snapshot (a non-bound carrier fails
+            // closed, never a `tsgo --lsp` inferred fall-through). SHARED editor-attach
+            // is additive + opt-in + fail-closed: present only under the rendezvous
+            // evidence as an OPTIONAL overlay that unions bound-carrier `--api`
+            // diagnostics OVER OWNED — it NEVER displaces the OWNED feature/diagnostics
+            // surface. `tsgo` and `shared-tsgo` are the same routing, clearer name.
             match try_spawn_tsgo(&ws_canonical, client_cell).await {
                 Ok(owned) => {
-                    let tp = wrap_shared_if_opted_in(owned, args, host, &ws_canonical);
+                    let tp = wrap_host_aware_admission(owned, args, host, &ws_canonical);
                     (Some(tp), TypeProviderKind::Tsgo, false, None)
                 }
                 Err(reason) => {
@@ -412,7 +413,7 @@ async fn create_type_provider(
             // query and never displaces the OWNED baseline).
             let tsgo_reason = match try_spawn_tsgo(&ws_canonical, client_cell).await {
                 Ok(owned) => {
-                    let tp = wrap_shared_if_opted_in(owned, args, host, &ws_canonical);
+                    let tp = wrap_host_aware_admission(owned, args, host, &ws_canonical);
                     return (Some(tp), TypeProviderKind::Tsgo, false, None);
                 }
                 Err(reason) => {
@@ -432,35 +433,19 @@ async fn create_type_provider(
     }
 }
 
-/// Resolve the EXPLICIT configured tsconfig binding for an owned tsgo workspace.
-///
-/// Owned tsgo is PROJECT-BOUND: the `--api` checker requires a real configured
-/// project, so this resolves the workspace's explicit `tsconfig.json` and returns
-/// its forward-slashed path. A workspace WITHOUT an explicit binding (no
-/// `tsconfig.json`) returns `Err` so the owned startup FAILS CLOSED — there is no
-/// config-less / inferred-project owned fallback.
-fn require_owned_tsconfig(workspace_root: &std::path::Path) -> Result<String, String> {
-    let tsconfig = workspace_root.join("tsconfig.json");
-    // `is_file()` (not `exists()`): a DIRECTORY named `tsconfig.json` is not a
-    // valid configured-project binding and must fail closed, not satisfy the
-    // owned-startup precondition.
-    if tsconfig.is_file() {
-        Ok(tsconfig.to_string_lossy().replace('\\', "/"))
-    } else {
-        Err(format!(
-            "no tsconfig.json file at {} — owned tsgo is project-bound and requires an explicit \
-             configured project; it will not start a config-less inferred project",
-            workspace_root.display()
-        ))
-    }
-}
-
 /// Try to spawn the OWNED, project-bound dual-surface TSGO provider.
 ///
-/// Owned tsgo is PROJECT-BOUND: it requires an explicit configured tsconfig
-/// binding (via [`require_owned_tsconfig`]) and a version-gated `--api` attach
-/// BEFORE serving any traffic, and FAILS CLOSED otherwise. The standard LSP
-/// handshake (`rootUri`) is retained as transport metadata only.
+/// Owned tsgo is PROJECT-BOUND: it requires AT LEAST ONE configured project anywhere
+/// in the workspace (a bounded [`has_configured_ts_project_anywhere`][hcp] probe that
+/// accepts `packages/*/tsconfig.json` monorepos, not just a root `tsconfig.json`) plus
+/// a version-gated `--api` attach BEFORE serving any traffic, and FAILS CLOSED
+/// otherwise (no spawn) — never a config-less inferred project. The carrier's OWN
+/// owning configured project is resolved PER QUERY by the shared project-binding
+/// helper (the always-present host-aware admission layer), so the `--api` checker
+/// stores no tsconfig. The standard LSP handshake (`rootUri`) is transport metadata
+/// only.
+///
+/// [hcp]: verter_workspace::config::has_configured_ts_project_anywhere
 async fn try_spawn_tsgo(
     workspace_root: &str,
     client_cell: &Arc<OnceCell<tower_lsp_server::Client>>,
@@ -472,13 +457,24 @@ async fn try_spawn_tsgo(
         .map_err(|err| err.to_string())?;
     tracing::info!("found tsgo binary: {tsgo_bin}");
 
-    // The configured project is mandatory for owned tsgo — resolve it (fail closed
-    // when absent) BEFORE spawning, so a config-less workspace never starts a
-    // `tsgo --lsp` process it would have to tear down.
-    let tsconfig_str = require_owned_tsconfig(std::path::Path::new(workspace_root))?;
+    // The SPAWN PRECONDITION: owned tsgo is project-bound, so require AT LEAST ONE
+    // configured project ANYWHERE under the workspace (bounded — prunes node_modules;
+    // accepts `packages/*/tsconfig.json` monorepos with no root tsconfig) BEFORE
+    // spawning, so a workspace with NONE fails closed (no `tsgo --lsp` process it would
+    // have to tear down) rather than starting a config-less inferred project. The
+    // per-query per-project binding is resolved later by the admission layer.
+    if !verter_workspace::config::has_configured_ts_project_anywhere(std::path::Path::new(
+        workspace_root,
+    )) {
+        return Err(format!(
+            "no configured TypeScript project (tsconfig.json) found anywhere under \
+             {workspace_root} — owned tsgo is project-bound and requires at least one configured \
+             project; it will not start a config-less inferred project"
+        ));
+    }
 
     // `root_uri` is the LSP transport's workspace-folder metadata only — NOT the
-    // project-binding decision (that is `tsconfig_str` above).
+    // project-binding decision (that is resolved per query by the admission layer).
     let root_uri = path_to_file_uri(workspace_root);
     let crash_notify = Arc::new(Notify::new());
 
@@ -491,12 +487,13 @@ async fn try_spawn_tsgo(
     .map_err(|e| format!("found tsgo at {tsgo_bin}, but spawn/initialize failed: {e}"))?;
 
     // OWNED one-instance dual-surface: attach a version-gated `--api` checker to
-    // THIS `tsgo --lsp` process and open the configured project on it (the carrier
-    // becomes a member of its real tsconfig — the project-bound membership). The
-    // `--api` checker is the project-bound typecheck oracle; the `--lsp` surface
-    // serves features + the user-facing diagnostics. A probe / wire-gate / attach
+    // THIS `tsgo --lsp` process. The checker stores NO configured project — each
+    // carrier's owning tsconfig is supplied per query (the binding the admission
+    // layer resolves), so ONE process serves every configured project. The `--lsp`
+    // surface serves features + the user-facing diagnostics (gated on the carrier's
+    // resolved `BoundProject` by the admission layer). A probe / wire-gate / attach
     // failure fails closed rather than silently degrading the typecheck oracle.
-    let owned = TsgoOwnedProvider::attach(Arc::new(tp), tsconfig_str.clone(), &tsgo_bin)
+    let owned = TsgoOwnedProvider::attach(Arc::new(tp), &tsgo_bin)
         .await
         .map_err(|e| {
             format!(
@@ -511,48 +508,45 @@ async fn try_spawn_tsgo(
         crash_notify,
         tsgo_bin,
         root_uri,
-        tsconfig_str,
         Arc::clone(client_cell),
         3,
     );
     Ok(Arc::new(resilient))
 }
 
-/// Wrap the OWNED tsgo provider in a SHARED-overlay [`TsgoCompositeProvider`] when
-/// the editor-attach rendezvous evidence is present; otherwise return the bare OWNED
-/// provider. SHARED is opt-in and additive — the composite delegates every feature +
-/// the diagnostics fallback to OWNED and overlays ONLY successfully-bound SHARED
-/// carrier diagnostics, so OWNED is never displaced.
-fn wrap_shared_if_opted_in(
+/// Wrap the OWNED tsgo provider in the ALWAYS-present host-aware admission /
+/// composition layer ([`TsgoCompositeProvider`]) — never a bare OWNED provider.
+///
+/// The layer ALWAYS holds OWNED + the host, so the OWNED carrier-diagnostics gate can
+/// resolve each carrier's owning configured project over the host's published snapshot
+/// (a non-bound carrier fails closed to no external-TS diagnostics, never a `tsgo --lsp`
+/// inferred fall-through). The SHARED editor-attach overlay is OPTIONAL — present only
+/// under the rendezvous evidence, additive + fail-closed (it never displaces OWNED and
+/// never bypasses the OWNED gate).
+fn wrap_host_aware_admission(
     owned: Arc<dyn TypeProvider>,
     args: &CliArgs,
     host: &Arc<VerterHost>,
     workspace_root: &str,
 ) -> Arc<dyn TypeProvider> {
-    match try_attach_shared_tsgo(Arc::clone(&owned), args, host, workspace_root) {
-        Some(composite) => composite,
-        None => owned,
-    }
+    let shared = try_attach_shared_tsgo(args, host, workspace_root);
+    Arc::new(TsgoCompositeProvider::new(owned, Arc::clone(host), shared)) as Arc<dyn TypeProvider>
 }
 
-/// Build the SHARED-overlay composite over the OWNED provider (sibling to
-/// [`try_spawn_tsgo`]) when the rendezvous evidence is present.
+/// Build the OPTIONAL SHARED editor-attach [`SharedTsgoOverlay`] when the rendezvous
+/// evidence is present; `None` otherwise (SHARED is opt-in).
 ///
-/// The composite's [`SharedTsgoOverlay`] binds LAZILY per query: on a carrier
-/// diagnostics query it resolves the carrier's owning project through the shared
-/// `WorkspaceProjectResolver` over the host's LIVE published snapshot, mints the
-/// `BoundProject` witness from the resolved binding, discovers the editor-spawned
-/// `verter-relay-shim` advertisement, gates the observed engine version (keyed on the
-/// actual attach-gate version, never a hardcoded literal), and overlays the SHARED
-/// `--api` carrier diagnostics — falling back to the OWNED baseline for every
-/// non-bound / non-SHARED / failed state. Returns `None` when the rendezvous is absent
-/// (SHARED is opt-in) so the caller uses the bare OWNED provider.
+/// The overlay binds LAZILY per query: for a carrier ALREADY resolved to a bound
+/// configured project by the admission layer's OWNED gate, it discovers the
+/// editor-spawned `verter-relay-shim` advertisement, gates the observed engine version
+/// (keyed on the actual attach-gate version, never a hardcoded literal), and overlays
+/// the SHARED `--api` carrier diagnostics OVER OWNED through the SAME already-resolved
+/// binding — falling back to the OWNED baseline for every non-SHARED / failed state.
 fn try_attach_shared_tsgo(
-    owned: Arc<dyn TypeProvider>,
     args: &CliArgs,
     host: &Arc<VerterHost>,
     workspace_root: &str,
-) -> Option<Arc<dyn TypeProvider>> {
+) -> Option<SharedTsgoOverlay> {
     let (control_dir, session_key) = args.shared_rendezvous()?;
     let overlay = SharedTsgoOverlay::new(
         Arc::clone(host),
@@ -563,11 +557,11 @@ fn try_attach_shared_tsgo(
         },
     );
     tracing::info!(
-        "TSGO SHARED editor-attach composite armed (control_dir={control_dir}, \
+        "TSGO SHARED editor-attach overlay armed (control_dir={control_dir}, \
          session_key={session_key}); the overlay binds lazily per query over the \
          published snapshot and fails closed to the OWNED baseline"
     );
-    Some(Arc::new(TsgoCompositeProvider::new(owned, overlay)) as Arc<dyn TypeProvider>)
+    Some(overlay)
 }
 
 /// Try to spawn tsserver.

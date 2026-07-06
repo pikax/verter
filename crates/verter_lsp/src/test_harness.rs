@@ -319,10 +319,27 @@ impl TestSessionBuilder {
                 let root_uri = crate::uri::path_to_file_uri_string(&workspace_id);
                 // OWNED one-instance dual-surface provider: spawn ONE `tsgo --lsp`
                 // (the feature surface), then attach an `--api` checker to the SAME
-                // process and open the CONFIGURED project on it. Diagnostics ride
-                // the `--api` checker holding the real tsconfig (the project-bound
-                // membership), so a carrier's `@/`-aliased import + ambient globals
-                // resolve — NOT a config-less inferred project.
+                // process. The checker stores NO configured project — the carrier's
+                // owning tsconfig is supplied per query (its `@/`-aliased import +
+                // ambient globals resolve through the real configured project the
+                // per-query binding opens) — NOT a config-less inferred project.
+                //
+                // This is a DELIBERATE lower-level OWNED-provider harness: it injects the
+                // BARE `TsgoOwnedProvider`, NOT the production `TsgoCompositeProvider`
+                // host-aware admission layer (`wrap_host_aware_admission`). The always-
+                // present OWNED carrier-diagnostics ADMISSION gate (a non-bound carrier
+                // fails closed) is covered hermetically + discriminatingly by
+                // `crates/verter_lsp/tests/owned_binding_gate.rs` — it does NOT ride this
+                // harness. No carrier-diagnostics ADMISSION-GATE assertion depends on this
+                // bare (ungated) path: the carrier tests that DO ride the harness assert
+                // POSITIVE carrier DX (a bound-carrier `.vue`/`.svelte` in a configured
+                // fixture: aliased imports resolve, a deliberate `TS2322` surfaces,
+                // go-to-definition lands) plus FEATURE-position fail-closed (a definition
+                // at a comment/non-symbol position) — both served by OWNED's `--lsp`
+                // surface, identical to what the production composite delegates for a
+                // BOUND carrier. So wrapping the harness in the admission layer would not
+                // change any assertion here (and would require the harness to publish an
+                // owning snapshot to the composite's binding host).
                 let inner =
                     match crate::tsgo::ipc::TsgoTypeProvider::spawn(&tsgo_bin, &root_uri).await {
                         Ok(p) => Arc::new(p),
@@ -333,10 +350,7 @@ impl TestSessionBuilder {
                             )
                         }
                     };
-                let tsconfig_path = format!("{workspace_id}/tsconfig.json").replace('\\', "/");
-                match crate::tsgo::ipc::TsgoOwnedProvider::attach(inner, tsconfig_path, &tsgo_bin)
-                    .await
-                {
+                match crate::tsgo::ipc::TsgoOwnedProvider::attach(inner, &tsgo_bin).await {
                     Ok(owned) => Arc::new(owned),
                     Err(e) => {
                         return handle_absent_provider(

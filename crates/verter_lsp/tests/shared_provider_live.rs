@@ -1119,7 +1119,9 @@ async fn setup_composite(tsgo: &Path, tag: &str, owned: Arc<dyn TypeProvider>) -
             workspace_root: workspace_norm,
         },
     );
-    let composite = TsgoCompositeProvider::new(owned, overlay);
+    // The always-present host-aware admission layer wraps OWNED + the host, with the
+    // SHARED overlay OPTIONAL (present here under the live rendezvous).
+    let composite = TsgoCompositeProvider::new(owned, host, Some(overlay));
 
     CompositeHarness {
         shim,

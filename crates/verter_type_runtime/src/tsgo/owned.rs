@@ -13,7 +13,7 @@
 //!
 //! The `--api` CHECKER is attached onto the SAME process via
 //! `custom/initializeAPISession` and is the project-bound TYPECHECK / membership /
-//! reflection ORACLE ([`TsgoOwnedProvider::semantic_diagnostics_for_carrier`]). It
+//! reflection ORACLE ([`TsgoOwnedProvider::semantic_diagnostics_for_carrier_in_project`]). It
 //! is the authority S3 proves works against the CONFIGURED project; promoting it to
 //! the sole user-facing diagnostics surface (over the richer `--lsp` pull) requires
 //! closing its per-carrier program parity (the `vue` / JSX / tag / suggestion gaps)
@@ -55,20 +55,20 @@ use crate::protocol::{
 use crate::traits::{ProviderFuture, TypeProvider};
 use crate::tsgo::ipc::TsgoTypeProvider;
 
-/// The attached `--api` checker plus the configured-project context the OWNED
-/// diagnostics route needs. Held behind a mutex so the snapshot can be refreshed
-/// as carriers are opened/changed.
+/// The attached `--api` checker. It stores NO configured project: the tsconfig is
+/// supplied PER QUERY (the owning project the carrier binding resolved), so ONE
+/// `--api` process serves EVERY configured project in the workspace — mirroring the
+/// SHARED provider's per-query `--api` core. Held behind a mutex so the snapshot can
+/// be refreshed as carriers are opened/changed.
 struct ApiSurface {
     /// The `--api` checker client over the minted pipe (same process as `--lsp`).
     client: ApiAttachClient,
-    /// The configured tsconfig path (forward-slashed) opened on the `--api` side.
-    tsconfig_path: String,
     /// The engine version the wire gate channel-validated at attach. Passed to
     /// the first `updateSnapshot` so its integer-handle rail refusal names the
     /// real observed engine.
     engine_version: String,
     /// The current `--api` snapshot context: `(snapshot_handle, project_id)`, refreshed
-    /// on demand. `None` until the first `updateSnapshot` succeeds.
+    /// per query. `None` until the first `updateSnapshot` succeeds.
     snapshot: SyncMutex<Option<(OpaqueHandle, String)>>,
 }
 
@@ -84,8 +84,10 @@ pub struct TsgoOwnedProvider {
 
 impl std::fmt::Debug for TsgoOwnedProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The provider stores no tsconfig (the configured project is per-query), so
+        // report the engine version — the stable attach-time identity.
         f.debug_struct("TsgoOwnedProvider")
-            .field("tsconfig", &self.api.tsconfig_path)
+            .field("engine_version", &self.api.engine_version)
             .finish_non_exhaustive()
     }
 }
@@ -93,8 +95,10 @@ impl std::fmt::Debug for TsgoOwnedProvider {
 impl TsgoOwnedProvider {
     /// Build the OWNED dual-surface provider over an already-spawned
     /// `TsgoTypeProvider` (the `--lsp` surface), attaching an `--api` checker to its
-    /// process and opening `tsconfig_path` (forward-slashed) as the configured
-    /// project on the checker.
+    /// process. The checker stores NO configured project: each diagnostics query
+    /// supplies the carrier's OWN owning tsconfig
+    /// ([`Self::semantic_diagnostics_for_carrier_in_project`]), so ONE process serves
+    /// every configured project in the workspace (per-project OWNED binding).
     ///
     /// ONE process: the `--api` checker rides the inner provider's `tsgo --lsp`
     /// child via `custom/initializeAPISession`. NO second spawn.
@@ -107,7 +111,6 @@ impl TsgoOwnedProvider {
     /// runs once per attach.
     pub async fn attach(
         lsp: Arc<TsgoTypeProvider>,
-        tsconfig_path: impl Into<String>,
         tsgo_bin: impl AsRef<Path>,
     ) -> Result<Self, crate::protocol::TypeProviderError> {
         // Wire gate FIRST — refuse a diverged/unknown engine before opening the
@@ -132,7 +135,6 @@ impl TsgoOwnedProvider {
             lsp,
             api: Arc::new(ApiSurface {
                 client,
-                tsconfig_path: tsconfig_path.into(),
                 engine_version,
                 snapshot: SyncMutex::new(None),
             }),
@@ -145,24 +147,33 @@ impl TsgoOwnedProvider {
         &self.lsp
     }
 
-    /// The `--api` checker's SEMANTIC diagnostics for a carrier — the typecheck
-    /// authority over the CONFIGURED project (the carrier must be a member, opened
-    /// as a `--lsp` didOpen overlay the shared session sees). Returns the
-    /// engine-native diagnostics mapped to [`TypeDiagnostic`]; `Ok(vec![])` when the
-    /// carrier is not a member of the configured project (fail closed — never a
-    /// wrong-project result).
+    /// The `--api` checker's SEMANTIC diagnostics for a carrier in the configured
+    /// project `tsconfig` (supplied PER QUERY — the owning tsconfig the carrier's
+    /// binding resolved) — the typecheck authority over that CONFIGURED project (the
+    /// carrier must be a member, opened as a `--lsp` didOpen overlay the shared
+    /// session sees). Returns the engine-native diagnostics mapped to
+    /// [`TypeDiagnostic`]; `Ok(vec![])` when the carrier is not a member of that
+    /// configured project (fail closed — never a wrong-project result). ONE `--api`
+    /// process serves every configured project because `tsconfig` is opened per
+    /// query, mirroring the SHARED provider's `overlay_diagnostics_in_project`.
     ///
     /// This is the project-bound typecheck oracle the dual-surface model proves;
     /// it is DISTINCT from the user-facing [`TypeProvider::get_diagnostics`]
-    /// surface (which is the rich `--lsp` pull set). Promoting this to the sole
-    /// diagnostics surface is a full-DX-contract concern (closing the `--api`
-    /// per-carrier program parity), not this provider's responsibility.
-    pub async fn semantic_diagnostics_for_carrier(
+    /// surface (which is the rich `--lsp` pull set). It is a TEST / typecheck oracle:
+    /// production OWNED user-facing diagnostics ride the `--lsp` pull, gated on the
+    /// carrier's resolved `BoundProject` by the `verter_lsp` admission layer.
+    /// Promoting this to the sole diagnostics surface is a full-DX-contract concern
+    /// (closing the `--api` per-carrier program parity), not this provider's
+    /// responsibility.
+    pub async fn semantic_diagnostics_for_carrier_in_project(
         &self,
         path: &str,
+        tsconfig: &str,
     ) -> Result<Vec<TypeDiagnostic>, crate::protocol::TypeProviderError> {
         let carrier = slash(path);
-        let Some((snapshot, project, engine_carrier)) = self.api.resolve_for(&carrier).await else {
+        let Some((snapshot, project, engine_carrier)) =
+            self.api.resolve_for(&carrier, tsconfig).await
+        else {
             return Ok(Vec::new());
         };
         let diags = self
@@ -233,28 +244,32 @@ fn slash(p: &str) -> String {
 }
 
 impl ApiSurface {
-    /// Refresh the `--api` snapshot for the configured project and return
-    /// `(snapshot_handle, project_id, engine_carrier_path)` for `carrier`, or `None`
-    /// when the project / carrier is not resolvable on the checker.
+    /// Refresh the `--api` snapshot for the configured project `tsconfig` (supplied
+    /// per query) and return `(snapshot_handle, project_id, engine_carrier_path)` for
+    /// `carrier`, or `None` when the project / carrier is not resolvable on the
+    /// checker.
     ///
     /// `carrier` is the carrier file path; the returned engine path is the carrier
     /// AS THE ENGINE REPORTS IT in the project's root set (diagnostics must be
     /// requested with the engine's own canonical form).
-    async fn resolve_for(&self, carrier: &str) -> Option<(OpaqueHandle, String, String)> {
+    async fn resolve_for(
+        &self,
+        carrier: &str,
+        tsconfig: &str,
+    ) -> Option<(OpaqueHandle, String, String)> {
         // A FAILED project open is an unhealthy-provider signal, distinct from a
         // project that simply is not in the snapshot below. Surface it (the owned
-        // provider must not serve as if healthy when its configured project cannot
+        // provider must not serve as if healthy when the configured project cannot
         // open) rather than letting it silently degrade to empty diagnostics.
         let snap = match self
             .client
-            .update_snapshot_open_project(&self.tsconfig_path, &self.engine_version)
+            .update_snapshot_open_project(tsconfig, &self.engine_version)
             .await
         {
             Ok(snap) => snap,
             Err(err) => {
                 tracing::warn!(
-                    "owned tsgo `--api` could not open the configured project `{}`: {err}",
-                    self.tsconfig_path
+                    "owned tsgo `--api` could not open the configured project `{tsconfig}`: {err}"
                 );
                 return None;
             }
@@ -264,20 +279,20 @@ impl ApiSurface {
         // fallback. ABSENCE of the carrier from `project.root_files` is a `None`
         // (fail closed), not a degraded open.
         let (project_id, engine_carrier) =
-            select_configured_project_carrier(&snap, &self.tsconfig_path, carrier)?;
+            select_configured_project_carrier(&snap, tsconfig, carrier)?;
         // Update the cached snapshot context (the handle is `Copy`).
         *self.snapshot.lock() = Some((snap.snapshot, project_id.clone()));
         Some((snap.snapshot, project_id, engine_carrier))
     }
 }
 
-/// Select the configured project for `tsconfig_path` from an `--api` snapshot and
+/// Select the configured project for `tsconfig` from an `--api` snapshot and
 /// return `(project_id, engine_carrier)` IFF `carrier` is a member of that
 /// project's root set — the project-bound membership decision, isolated for testing.
 ///
 /// Two independent gates, both fail-closed to `None`:
 ///   1. `project_for_config` must find a project whose `configFileName` matches
-///      `tsconfig_path` (path-normalized). No matching configured project ⇒ `None` —
+///      `tsconfig` (path-normalized). No matching configured project ⇒ `None` —
 ///      NEVER a fallback to an inferred/single-file project.
 ///   2. The `carrier` must appear in that project's `root_files` (path-normalized).
 ///      Absence ⇒ `None` — the carrier is not a member, NOT a degraded open.
@@ -291,10 +306,10 @@ impl ApiSurface {
 /// and carrier absence from `root_files` ⇒ `None` (not a degraded open).
 pub fn select_configured_project_carrier(
     snap: &verter_tsgo_api::api_attach::AttachSnapshot,
-    tsconfig_path: &str,
+    tsconfig: &str,
     carrier: &str,
 ) -> Option<(String, String)> {
-    let project = snap.project_for_config(|c| fs_paths_equal(c, tsconfig_path))?;
+    let project = snap.project_for_config(|c| fs_paths_equal(c, tsconfig))?;
     let engine_carrier = project
         .root_files
         .iter()
@@ -444,7 +459,7 @@ impl TypeProvider for TsgoOwnedProvider {
     //
     // The attached `--api` checker is the TYPECHECK / membership / reflection
     // ORACLE (proven project-bound + non-vacuous in the crate's `owned_provider`
-    // live tests via `semantic_diagnostics_for_carrier`); promoting it to the sole
+    // live tests via `semantic_diagnostics_for_carrier_in_project`); promoting it to the sole
     // user-facing diagnostics surface requires closing its per-carrier program
     // parity with the `--lsp` program (the `vue`/JSX/tag/suggestion gaps) and is a
     // full-DX-contract concern, not this provider's job.

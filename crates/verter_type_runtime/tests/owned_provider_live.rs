@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use verter_tsgo_api::transport::spawn::discover_tsgo;
+use verter_type_runtime::protocol::TypeDiagnostic;
 use verter_type_runtime::traits::TypeProvider;
 use verter_type_runtime::tsgo::{TsgoOwnedProvider, TsgoTypeProvider};
 
@@ -78,12 +79,14 @@ fn write_fixture(dir: &Path) -> PathBuf {
     tsconfig
 }
 
-async fn build_owned_provider(exe: &Path, dir: &Path, tsconfig: &Path) -> TsgoOwnedProvider {
+async fn build_owned_provider(exe: &Path, dir: &Path) -> TsgoOwnedProvider {
     let root_uri = format!("file:///{}", slash(dir).trim_start_matches('/'));
     let lsp = TsgoTypeProvider::spawn(&exe.to_string_lossy(), &root_uri)
         .await
         .expect("spawn tsgo --lsp");
-    TsgoOwnedProvider::attach(Arc::new(lsp), slash(tsconfig), exe)
+    // The owned provider stores NO tsconfig — the configured project is supplied
+    // per query to the `--api` oracle (`semantic_diagnostics_for_carrier_in_project`).
+    TsgoOwnedProvider::attach(Arc::new(lsp), exe)
         .await
         .expect("attach --api checker (one process)")
 }
@@ -98,7 +101,7 @@ async fn owned_provider_diagnostics_via_api_and_feature_via_lsp_one_process() {
     };
     let dir = tempdir();
     let tsconfig = write_fixture(&dir);
-    let provider = build_owned_provider(&exe, &dir, &tsconfig).await;
+    let provider = build_owned_provider(&exe, &dir).await;
 
     // The dual-surface provider identifies transparently as the tsgo engine (the
     // --api attach is an internal detail of the ONE provider).
@@ -136,7 +139,7 @@ async fn owned_provider_diagnostics_via_api_and_feature_via_lsp_one_process() {
     //     pull). NON-VACUOUS: an empty/wrong-project result fails this assertion.
     let diags = tokio::time::timeout(
         Duration::from_secs(30),
-        provider.semantic_diagnostics_for_carrier(&carrier_path),
+        provider.semantic_diagnostics_for_carrier_in_project(&carrier_path, &slash(&tsconfig)),
     )
     .await
     .expect("--api semantic diagnostics timed out")
@@ -165,6 +168,99 @@ async fn owned_provider_diagnostics_via_api_and_feature_via_lsp_one_process() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A per-project configured fixture under `dir/<name>`: a `tsconfig.json` whose
+/// `include: ["src/**/*"]` owns `src/`, plus one on-disk seed member so the project
+/// is non-empty. Returns the tsconfig path.
+fn write_project_fixture(dir: &Path, name: &str) -> PathBuf {
+    let proj = dir.join(name);
+    let src = proj.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("seed.ts"), "export const seed = 1;\n").unwrap();
+    let tsconfig = proj.join("tsconfig.json");
+    std::fs::write(
+        &tsconfig,
+        r#"{
+  "compilerOptions": {
+    "strict": true,
+    "target": "ES2020",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "noEmit": true,
+    "skipLibCheck": true
+  },
+  "include": ["src/**/*"]
+}
+"#,
+    )
+    .unwrap();
+    tsconfig
+}
+
+/// MULTI-PROJECT regression on ONE `--api` process. The `--api` oracle now takes the
+/// carrier's configured project PER QUERY
+/// ([`TsgoOwnedProvider::semantic_diagnostics_for_carrier_in_project`]), so opening a
+/// carrier in project A, then a carrier in project B, then RE-querying A keeps BOTH
+/// resolvable on the SAME `--api` process — each query opens the carrier's OWN
+/// tsconfig. The retired stored-single-tsconfig design could serve only the ONE
+/// project fixed at attach; this drives A's, then B's, then A's tsconfig through the
+/// one process and requires each to remain a resolvable configured-project member.
+///
+/// NON-VACUOUS: each project carries a deliberate TS2322 (string → number); an
+/// empty / wrong-project result would NOT surface it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn owned_api_oracle_resolves_multiple_projects_per_query_on_one_process() {
+    let Some(exe) = engine_or_skip() else {
+        return;
+    };
+    let dir = tempdir();
+    let ts_a = write_project_fixture(&dir, "projA");
+    let ts_b = write_project_fixture(&dir, "projB");
+    let provider = build_owned_provider(&exe, &dir).await;
+
+    let a_path = slash(&dir.join("projA").join("src").join("A.ts"));
+    let b_path = slash(&dir.join("projB").join("src").join("B.ts"));
+    // Each carrier has a deliberate TS2322 so a resolvable-member result is non-vacuous.
+    let bad = "export const bad: number = \"definitely not a number\";\n";
+
+    provider.open_file(&a_path, bad).await.expect("open A");
+    provider.open_file(&b_path, bad).await.expect("open B");
+
+    // A helper: query the carrier's `--api` diagnostics in its OWN configured project.
+    async fn query(p: &TsgoOwnedProvider, carrier: &str, tsconfig: &str) -> Vec<TypeDiagnostic> {
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            p.semantic_diagnostics_for_carrier_in_project(carrier, tsconfig),
+        )
+        .await
+        .expect("--api semantic diagnostics timed out")
+        .expect("--api semantic diagnostics")
+    }
+
+    // (1) A resolves in project A.
+    let diag_a = query(&provider, &a_path, &slash(&ts_a)).await;
+    assert!(
+        diag_a.iter().any(|d| d.code.as_deref() == Some("2322")),
+        "carrier A must be a resolvable member of project A (per-query --api open); got: {diag_a:?}"
+    );
+    // (2) B resolves in project B — a DIFFERENT configured project on the SAME process.
+    let diag_b = query(&provider, &b_path, &slash(&ts_b)).await;
+    assert!(
+        diag_b.iter().any(|d| d.code.as_deref() == Some("2322")),
+        "carrier B must be a resolvable member of project B on the same --api process; got: {diag_b:?}"
+    );
+    // (3) A STILL resolves after B — the per-query oracle re-opens A's project. A
+    //     stored-single-tsconfig provider, pinned to B after step (2), could not.
+    let diag_a2 = query(&provider, &a_path, &slash(&ts_a)).await;
+    assert!(
+        diag_a2.iter().any(|d| d.code.as_deref() == Some("2322")),
+        "carrier A must REMAIN resolvable in project A after querying B (multi-project on one \
+         --api process); got: {diag_a2:?}"
+    );
+
+    provider.shutdown().await.expect("shutdown");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// No-dual-path: the OWNED provider's `--api` attach rides the inner provider's
 /// process — exactly ONE tsgo child PID, and that PID is the inner `--lsp`
 /// provider's. There is no second spawn / parallel feature pipeline.
@@ -174,7 +270,7 @@ async fn owned_provider_is_one_process_no_second_spawn() {
         return;
     };
     let dir = tempdir();
-    let tsconfig = write_fixture(&dir);
+    let _tsconfig = write_fixture(&dir);
 
     let root_uri = format!("file:///{}", slash(&dir).trim_start_matches('/'));
     let inner = Arc::new(
@@ -184,7 +280,7 @@ async fn owned_provider_is_one_process_no_second_spawn() {
     );
     let inner_pid = inner.child_pid();
 
-    let provider = TsgoOwnedProvider::attach(Arc::clone(&inner), slash(&tsconfig), &exe)
+    let provider = TsgoOwnedProvider::attach(Arc::clone(&inner), &exe)
         .await
         .expect("attach");
 

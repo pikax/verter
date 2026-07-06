@@ -15,14 +15,13 @@ use crate::type_provider::traits::TypeProvider;
 
 /// The OWNED dual-surface respawn strategy: each (re)spawn produces a
 /// [`TsgoOwnedProvider`] — a fresh `tsgo --lsp` process WITH the `--api` checker
-/// re-attached over its minted pipe and the configured project re-opened. So a
-/// crash recovery restores BOTH surfaces on the new process (no second spawn, no
-/// stale attach).
+/// re-attached over its minted pipe. So a crash recovery restores BOTH surfaces on
+/// the new process (no second spawn, no stale attach). The `--api` checker stores no
+/// configured project — the owning tsconfig is supplied per query — so a restart
+/// re-establishes the PROCESS ONLY; there is no per-project state to restore.
 struct TsgoOwnedBackend {
     tsgo_bin: String,
     root_uri: String,
-    /// The configured tsconfig path (forward-slashed) the `--api` checker opens.
-    tsconfig_path: String,
 }
 
 impl ResilientBackend<TsgoOwnedProvider> for TsgoOwnedBackend {
@@ -55,23 +54,21 @@ impl ResilientBackend<TsgoOwnedProvider> for TsgoOwnedBackend {
                 Some(crash_notify),
             )
             .await?;
-            TsgoOwnedProvider::attach(Arc::new(inner), self.tsconfig_path.clone(), &self.tsgo_bin)
-                .await
+            TsgoOwnedProvider::attach(Arc::new(inner), &self.tsgo_bin).await
         })
     }
 }
 
 /// Build the production OWNED dual-surface tsgo provider wrapped in the resilient
 /// respawn layer: ONE `tsgo --lsp` with the `--api` checker attached, re-attached
-/// on every crash recovery. `tsconfig_path` is the configured project the `--api`
-/// checker opens (forward-slashed).
-#[allow(clippy::too_many_arguments)]
+/// on every crash recovery. The `--api` checker stores no configured project — the
+/// owning tsconfig is supplied per query — so a restart re-establishes the PROCESS
+/// ONLY.
 pub fn new_owned(
     provider: TsgoOwnedProvider,
     crash_notify: Arc<Notify>,
     tsgo_bin: String,
     root_uri: String,
-    tsconfig_path: String,
     client: Arc<OnceCell<Client>>,
     max_restarts: u32,
 ) -> impl TypeProvider {
@@ -79,11 +76,7 @@ pub fn new_owned(
     ResilientProvider::new(
         provider,
         crash_notify,
-        TsgoOwnedBackend {
-            tsgo_bin,
-            root_uri,
-            tsconfig_path,
-        },
+        TsgoOwnedBackend { tsgo_bin, root_uri },
         notifier,
         max_restarts,
     )

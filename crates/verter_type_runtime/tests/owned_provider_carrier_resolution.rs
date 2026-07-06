@@ -19,7 +19,7 @@
 //! have targeted) resolves to `B.d.vue.ts` by tsgo's native probe — so the
 //! provider-side rewriter is not load-bearing on this path.
 //!
-//! NON-VACUOUS: drives a real tsgo. `semantic_diagnostics_for_carrier` is empty
+//! NON-VACUOUS: drives a real tsgo. `semantic_diagnostics_for_carrier_in_project` is empty
 //! for a non-member, so a bare "no diagnostics" assertion would be vacuous; each
 //! positive assertion checks a REAL type-flow result (a deliberate TS2322 proving
 //! the imported public member type was consumed). Under `VERTER_REQUIRE_TSGO` a
@@ -105,12 +105,14 @@ fn write_fixture(dir: &Path) -> PathBuf {
     tsconfig
 }
 
-async fn build_owned_provider(exe: &Path, dir: &Path, tsconfig: &Path) -> TsgoOwnedProvider {
+async fn build_owned_provider(exe: &Path, dir: &Path) -> TsgoOwnedProvider {
     let root_uri = format!("file:///{}", slash(dir).trim_start_matches('/'));
     let lsp = TsgoTypeProvider::spawn(&exe.to_string_lossy(), &root_uri)
         .await
         .expect("spawn tsgo --lsp");
-    TsgoOwnedProvider::attach(Arc::new(lsp), slash(tsconfig), exe)
+    // The owned provider stores NO tsconfig — the configured project is supplied
+    // per query to the `--api` oracle (`semantic_diagnostics_for_carrier_in_project`).
+    TsgoOwnedProvider::attach(Arc::new(lsp), exe)
         .await
         .expect("attach --api checker (one process)")
 }
@@ -162,7 +164,7 @@ async fn owned_bare_vue_import_resolves_to_declaration_carrier_and_public_member
     let dir = tempdir();
     let tsconfig = write_fixture(&dir);
     let src = dir.join("src");
-    let provider = build_owned_provider(&exe, &dir, &tsconfig).await;
+    let provider = build_owned_provider(&exe, &dir).await;
 
     // The consumer is a real on-disk `.ts` member of the configured project. Its
     // import specifier is BARE `./B.vue` (no `.tsx`/`.verter.ts` suffix) — the
@@ -187,7 +189,7 @@ async fn owned_bare_vue_import_resolves_to_declaration_carrier_and_public_member
 
     let diags = tokio::time::timeout(
         Duration::from_secs(30),
-        provider.semantic_diagnostics_for_carrier(&consumer_path),
+        provider.semantic_diagnostics_for_carrier_in_project(&consumer_path, &slash(&tsconfig)),
     )
     .await
     .expect("--api semantic diagnostics timed out")
@@ -231,7 +233,7 @@ async fn owned_bare_vue_import_fails_closed_when_declaration_carrier_didopen_sup
     let dir = tempdir();
     let tsconfig = write_fixture(&dir);
     let src = dir.join("src");
-    let provider = build_owned_provider(&exe, &dir, &tsconfig).await;
+    let provider = build_owned_provider(&exe, &dir).await;
 
     let consumer_path = slash(&src.join("Consumer.ts"));
     let consumer_src = "import B from \"./B.vue\";\n\
@@ -253,7 +255,7 @@ async fn owned_bare_vue_import_fails_closed_when_declaration_carrier_didopen_sup
 
     let diags = tokio::time::timeout(
         Duration::from_secs(30),
-        provider.semantic_diagnostics_for_carrier(&consumer_path),
+        provider.semantic_diagnostics_for_carrier_in_project(&consumer_path, &slash(&tsconfig)),
     )
     .await
     .expect("--api semantic diagnostics timed out")

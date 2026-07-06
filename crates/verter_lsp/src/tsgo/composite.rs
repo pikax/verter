@@ -1,25 +1,41 @@
-//! The composite tsgo provider: a live OWNED provider with a SHARED carrier-
-//! diagnostics overlay.
+//! The composite tsgo provider: the ALWAYS-present host-aware admission layer over a
+//! live OWNED provider, with an OPTIONAL SHARED carrier-diagnostics overlay.
 //!
-//! [`TsgoCompositeProvider`] is the production tsgo [`TypeProvider`] when a SHARED
-//! editor-attach is opt-in-eligible. It holds the complete OWNED dual-surface
-//! provider ([`crate::tsgo::ipc::TsgoOwnedProvider`], the full feature + diagnostics
-//! surface) and a [`SharedTsgoOverlay`]. Every `TypeProvider` method delegates to
-//! OWNED; ONLY `get_diagnostics` is composed — and only when a real
-//! [`ProjectBinding`](verter_session::external_ts::ProjectBinding) resolves for the
-//! queried carrier over the host's LIVE published snapshot. For a bound carrier the
-//! SHARED `--api` semantic diagnostics (produced solely from that resolved binding
-//! through the [`BoundProject`](verter_session::external_ts::BoundProject) witness) are
-//! UNIONED over OWNED's `--lsp` surface, deduplicated ([`compose_diagnostics`]) — OWNED's
-//! syntactic/suggestion/tag/related diagnostics are preserved, never replaced wholesale.
-//! Every other state (`NoProject` / `Ambiguous` / `SyntheticScratch`, an unestablished or
-//! failed attach, an unavailable carrier) leaves the OWNED diagnostics unchanged. SHARED
-//! never displaces OWNED and never regresses an editor feature to a SHARED stub.
+//! [`TsgoCompositeProvider`] is the production tsgo [`TypeProvider`] shape. It holds
+//! the complete OWNED dual-surface provider ([`crate::tsgo::ipc::TsgoOwnedProvider`],
+//! the full feature + diagnostics surface), the host (the LIVE published-snapshot +
+//! per-project R21 env-dims authority), and an OPTIONAL [`SharedTsgoOverlay`] (present
+//! only under the SHARED editor-attach rendezvous). Every non-diagnostic
+//! `TypeProvider` method delegates to OWNED; ONLY carrier `get_diagnostics` is gated +
+//! composed.
 //!
-//! This preserves the project-bound external-TS contract: the per-query SHARED path
-//! resolves ownership through the shared [`WorkspaceProjectResolver`] over the live
-//! [`PublishedRoot`](verter_workspace::published_state::PublishedRoot), mints the
-//! `BoundProject` witness from the resolved binding, and fails closed to OWNED — no
+//! **The OWNED carrier-diagnostics gate.** A path that is a carrier companion resolves
+//! its owning configured project ONCE through the shared
+//! [`project_binding`](crate::tsgo::project_binding) helper — published snapshot →
+//! [`WorkspaceProjectResolver`](verter_session::external_ts::WorkspaceProjectResolver)
+//! → [`ProjectBinding`](verter_session::external_ts::ProjectBinding) →
+//! [`BoundProject`](verter_session::external_ts::BoundProject) witness. Only a bound
+//! carrier delegates to OWNED's `--lsp` diagnostics; every non-bound state (`NoProject`
+//! / `Ambiguous` / `SyntheticScratch`, a pre-published snapshot, an `ensure_project`
+//! refusal) yields NO external-TS diagnostics for the carrier — fail closed, NEVER a
+//! `tsgo --lsp` inferred / own-discovery fall-through. A NON-carrier path (plain
+//! `.ts`/`.tsx`) is NOT gated — it delegates to OWNED unchanged. Non-diagnostic FEATURE
+//! methods delegate to OWNED unchanged (carrier-feature admission is deferred).
+//!
+//! **The optional SHARED union.** For a bound carrier, when the SHARED overlay is opted
+//! in, its `--api` semantic diagnostics — served through the SAME already-resolved
+//! binding (no second resolution) — are UNIONED over OWNED's `--lsp` surface,
+//! deduplicated ([`compose_diagnostics`]): OWNED's syntactic/suggestion/tag/related
+//! diagnostics are preserved, never replaced wholesale. A not-SHARED / unestablished /
+//! failed / unavailable SHARED result leaves the OWNED diagnostics unchanged. SHARED
+//! never displaces OWNED and never regresses an editor feature to a SHARED stub, and the
+//! SHARED opt-in path can NEVER bypass the OWNED gate (a non-bound carrier fails closed
+//! for both bare-OWNED and SHARED-composite consistently).
+//!
+//! This preserves the project-bound external-TS contract: ownership resolves through
+//! the shared [`WorkspaceProjectResolver`](verter_session::external_ts::WorkspaceProjectResolver)
+//! over the live [`PublishedRoot`](verter_workspace::published_state::PublishedRoot),
+//! mints the `BoundProject` witness from the resolved binding, and fails closed — no
 //! inferred fallback, no fabricated binding, no path-only bypass of the witness.
 
 use std::collections::HashMap;
@@ -28,10 +44,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use verter_session::external_ts::{
-    AmbiguityCause, EngineBackend, EnvDims, ExternalTsProjectResolver, ProjectBinding,
-    ProjectResolution, ServeMode, WorkspaceProjectResolver,
-};
+use verter_session::external_ts::{AmbiguityCause, ProjectBinding, ProjectResolution, ServeMode};
 use verter_session::VerterHost;
 use verter_workspace::resolver::{normalize_canonical_id, path_is_carrier};
 use verter_workspace::traits::WorkspaceRead;
@@ -40,12 +53,12 @@ use verter_tsgo_api::control::Advertisement;
 use verter_type_runtime::protocol::{
     Completion, CompletionResolveData, CompletionResolveResult, CompletionResult, HoverInfo,
     InlayHint, ProviderDiagnosticContext, RenameLocation, SemanticToken, SignatureHelp,
-    TypeCodeAction, TypeDiagnostic, TypeDocumentHighlight, TypeLocation,
+    TypeCodeAction, TypeDiagnostic, TypeDocumentHighlight, TypeLocation, TypeProviderError,
 };
 use verter_type_runtime::traits::{ProviderFuture, TypeProvider};
 
-use crate::external_ts::TsgoEngineBackend;
 use crate::tsgo::overlay_core::{LazyOverlayCore, OverlayTransport};
+use crate::tsgo::project_binding::{self, BoundCarrier};
 use crate::tsgo::shared::{EstablishSharedParams, TsgoSharedProvider};
 
 /// The bound on the lazy SHARED-attach establishment: a slow or never-initializing
@@ -177,20 +190,31 @@ impl SharedTsgoOverlay {
             .await;
     }
 
-    /// The SHARED carrier diagnostics for the queried companion, or `None` when
-    /// SHARED does not engage — no carrier source, no resolved binding, an
-    /// unestablished/failed attach, a not-SHARED live decision, a project the `--api`
-    /// could not open, or a carrier that is not a Program root — in which case the
-    /// caller falls back to OWNED. A successfully-served result (even empty) is
-    /// overlaid; a fail-closed/errored one is not (no forged span leaks).
-    async fn engage_diagnostics(&self, provider_path: &str) -> Option<Vec<TypeDiagnostic>> {
-        let source = carrier_source_of(provider_path)?;
-
-        // Lazily establish (once) the SHARED relay-attach transport — at QUERY time,
-        // OFF the OWNED lifecycle critical path. Establishment requires a resolved
-        // project binding (SHARED is never fabricated), resolved over the host's LIVE
-        // published snapshot.
-        let transport = self.ensure_transport(&source).await?;
+    /// The SHARED carrier diagnostics for a carrier ALREADY resolved to a bound
+    /// configured project by the composite's OWNED gate, or `None` when SHARED does
+    /// not engage — an unestablished/failed attach, a not-SHARED live decision, a
+    /// project the `--api` could not open, or a carrier that is not a Program root —
+    /// in which case the caller keeps the OWNED baseline. A successfully-served result
+    /// (even empty) is overlaid; a fail-closed/errored one is not (no forged span
+    /// leaks).
+    ///
+    /// The carrier binding is passed in PRE-RESOLVED (the composite gate resolved it
+    /// ONCE via the shared [`project_binding`] helper): SHARED reuses the SAME binding
+    /// (for its per-query re-decision + transport), the SAME generation (for the
+    /// transport re-arm), and the SAME already-minted `BoundProject`
+    /// (`carrier.bound().project()` — the version-independent owning tsconfig) for the
+    /// `--api` overlay target. There is NO second resolution and NO witness re-mint.
+    async fn engage_diagnostics(
+        &self,
+        provider_path: &str,
+        carrier: &BoundCarrier,
+    ) -> Option<Vec<TypeDiagnostic>> {
+        // Lazily establish (once) the SHARED relay-attach transport for the
+        // ALREADY-resolved binding — at QUERY time, OFF the OWNED lifecycle critical
+        // path (SHARED is never fabricated; the binding is the gate's resolved one).
+        let transport = self
+            .ensure_transport(carrier.binding().clone(), carrier.generation())
+            .await?;
 
         // Inject the recorded content of EVERY open carrier into the established
         // transport (dirty-tracked — only what changed since the last injection) so the
@@ -217,87 +241,27 @@ impl SharedTsgoOverlay {
             return None;
         }
 
-        // The ACTUAL observed engine version from the attach version gate — the
-        // BoundProject witness, the `--api` snapshot rail, and the controller warm
-        // key all key on it (never a hardcoded literal).
-        let ts_version = Arc::<str>::from(transport.observed_version());
-
-        // The real per-query binding for the carrier's owning configured project,
-        // resolved over the host's LIVE published snapshot.
-        let (binding, generation) =
-            self.resolve_carrier_binding(&source, Arc::clone(&ts_version))?;
-
-        // Re-decide the serve mode through the live controller at the current
-        // snapshot/config generation — a not-SHARED decision falls back to OWNED.
-        if transport.redecide_for_binding(&binding, generation).mode() != ServeMode::Shared {
+        // Re-decide the serve mode through the live controller at the resolved
+        // snapshot/config generation, reusing the SAME binding — a not-SHARED decision
+        // falls back to OWNED.
+        if transport
+            .redecide_for_binding(carrier.binding(), carrier.generation())
+            .mode()
+            != ServeMode::Shared
+        {
             return None;
         }
 
-        // Mint the BoundProject witness from the resolved binding through the tsgo
-        // engine backend — the project-bound contract's per-query witness discipline
-        // (no path-only bypass). The witnessed project is the `--api` overlay target.
-        let backend = TsgoEngineBackend::new(ts_version);
-        let bound = backend
-            .ensure_project(binding.ensure_project_request())
-            .ok()?;
-
+        // The witnessed project — the owning tsconfig from the SAME already-minted
+        // BoundProject (version-independent) — is the `--api` overlay target. No second
+        // resolution, no witness re-mint (the `--api` snapshot rail keys on the
+        // transport's own gate-observed version downstream).
         match transport
-            .overlay_diagnostics_in_project(provider_path, bound.project())
+            .overlay_diagnostics_in_project(provider_path, carrier.bound().project())
             .await
         {
             Ok(Some(diags)) => Some(diags),
             Ok(None) | Err(_) => None,
-        }
-    }
-
-    /// Resolve the carrier `source`'s owning project over the host's LIVE published
-    /// snapshot through the shared [`WorkspaceProjectResolver`], returning the FULL
-    /// [`ProjectResolution`] and the snapshot/config generation it was resolved at
-    /// (`None` when the published snapshot is not yet ready). The single host-backed
-    /// resolution entry the binding path and the shadow-safety gate both share.
-    ///
-    /// `ts_version` is carried onto a resolved binding's metadata; it is NOT
-    /// load-bearing for the witness identity or the `--api` op (both key on the
-    /// transport's gate-observed version), so a bootstrap value used only to gate
-    /// establishment — or an empty value for the shadow-safety probe — is safe.
-    fn resolve_carrier(
-        &self,
-        source: &str,
-        ts_version: Arc<str>,
-    ) -> Option<(ProjectResolution, u64)> {
-        let ws_read = self.inner.host.workspace_read();
-        let published = ws_read.published_root()?;
-        let generation = published.snapshot.generation.0;
-        let host = Arc::clone(&self.inner.host);
-        let env_dims_source = move |tsconfig_uri: &str| {
-            let env = host.host_view_env_hashes_for(tsconfig_uri);
-            EnvDims {
-                parse_env_hash: env.parse_env_hash,
-                resolve_env_hash: env.resolve_env_hash,
-                lib_env_hash: env.lib_env_hash,
-                project_identity: host.host_view_project_identity_for(tsconfig_uri),
-            }
-        };
-        let resolver = WorkspaceProjectResolver::new(
-            published.snapshot.as_ref(),
-            ws_read.as_ref(),
-            ts_version,
-            &env_dims_source,
-        );
-        Some((resolver.resolve(source), generation))
-    }
-
-    /// Resolve the carrier `source`'s owning configured project, returning the resolved
-    /// [`ProjectBinding`] and the snapshot/config generation. `NoProject` / `Ambiguous`
-    /// / `SyntheticScratch` ⇒ `None` (OWNED).
-    fn resolve_carrier_binding(
-        &self,
-        source: &str,
-        ts_version: Arc<str>,
-    ) -> Option<(ProjectBinding, u64)> {
-        match self.resolve_carrier(source, ts_version)? {
-            (ProjectResolution::ProjectBinding(binding), generation) => Some((binding, generation)),
-            _ => None,
         }
     }
 
@@ -333,23 +297,24 @@ impl SharedTsgoOverlay {
             return false;
         }
         // (2) Source-resolution shadow-safety (the source's IDE-companion conflict / a
-        //     same-stem rune module beside it), for a genuine virtual companion.
+        //     same-stem rune module beside it), for a genuine virtual companion. The
+        //     empty `ts_version` is safe — the shadow-safety decision is
+        //     version-independent (it reads the resolution KIND, not the binding).
         let Some(source) = carrier_source_of(companion_path) else {
             return false;
         };
-        match self.resolve_carrier(&source, Arc::from("")) {
+        match project_binding::resolve_carrier(&self.inner.host, &source, Arc::from("")) {
             Some((resolution, _)) => injection_shadow_safe(&resolution),
             None => false,
         }
     }
 
-    /// Lazily establish (once) the SHARED relay-attach transport for the queried
-    /// carrier `source`, through the singleflight + bounded + re-arming
-    /// [`LazyTransport`] cell — but ONLY after the carrier's live `ProjectBinding`
-    /// resolves. A no-binding (`NoProject` / `Ambiguous` / `SyntheticScratch`) or
-    /// snapshot-not-ready carrier serves OWNED WITHOUT entering the cell, so it never
-    /// records `Unavailable` on the carrier-independent transport (which attaches to
-    /// the shim, not to any one carrier) — the transport-cell-poisoning guard
+    /// Lazily establish (once) the SHARED relay-attach transport for the carrier's
+    /// ALREADY-resolved `binding` (resolved once by the composite's OWNED gate at
+    /// `generation`), through the singleflight + bounded + re-arming [`LazyTransport`]
+    /// cell. Only a bound carrier reaches here (the gate resolved the binding before
+    /// calling [`Self::engage_diagnostics`]), so the cell is never entered — nor its
+    /// `Unavailable` slot poisoned — by a transient non-binding
     /// ([`LazyTransport::get_or_establish_bound`]). Concurrent queries reuse the ONE
     /// in-flight establishment; a slow/broken attach is bounded by
     /// [`SHARED_ESTABLISH_TIMEOUT`] (fail-closed to OWNED, never a stall); a failed
@@ -362,16 +327,18 @@ impl SharedTsgoOverlay {
     /// advances it): a prior failed establishment re-attempts on the new nonce OR the
     /// new generation, while within one (nonce, generation) a failure does not retry
     /// per query (no handshake retry-storm).
-    async fn ensure_transport(&self, source: &str) -> Option<Arc<TsgoSharedProvider>> {
-        // Resolve the carrier's live binding BEFORE any transport-cell interaction.
-        // No binding / not-yet-ready published snapshot ⇒ serve OWNED and leave the
-        // shared transport cell untouched (never poisoned by a transient non-binding).
-        // The core supplies the live-death eviction predicate to the cell.
-        let bound = self.resolve_carrier_binding(source, Arc::from(""));
+    async fn ensure_transport(
+        &self,
+        binding: ProjectBinding,
+        generation: u64,
+    ) -> Option<Arc<TsgoSharedProvider>> {
+        // The binding is pre-resolved (bound) — pass it straight to the cell. The core
+        // supplies the live-death eviction predicate; a no-binding carrier never
+        // reaches here, so the cell is never poisoned by a transient non-binding.
         self.inner
             .core
             .ensure(
-                bound,
+                Some((binding, generation)),
                 |generation| self.probe_establishment_discriminant(generation),
                 |binding, generation| self.establish_transport(binding, generation),
                 SHARED_ESTABLISH_TIMEOUT,
@@ -616,20 +583,110 @@ fn merge_diagnostic_metadata(into: &mut TypeDiagnostic, from: TypeDiagnostic) {
     }
 }
 
-/// The composite tsgo provider: OWNED baseline + SHARED carrier-diagnostics overlay.
+/// The ALWAYS-present host-aware admission layer over the OWNED tsgo baseline, with an
+/// OPTIONAL SHARED carrier-diagnostics overlay.
 pub struct TsgoCompositeProvider {
     /// The complete OWNED dual-surface provider — the universal baseline every
-    /// non-diagnostic method delegates to, and the diagnostics fallback.
+    /// non-diagnostic method delegates to, and the bound-carrier diagnostics surface.
     owned: Arc<dyn TypeProvider>,
-    /// The SHARED carrier-diagnostics overlay.
-    shared: SharedTsgoOverlay,
+    /// The host — the LIVE published-snapshot + per-project R21 env-dims authority the
+    /// OWNED carrier-diagnostics gate resolves the carrier's owning project over.
+    host: Arc<VerterHost>,
+    /// The OPTIONAL SHARED carrier-diagnostics overlay — present ONLY under the SHARED
+    /// editor-attach rendezvous. Absent, the composite is the bare host-aware OWNED
+    /// admission layer (still gating carrier diagnostics on a resolved `BoundProject`).
+    shared: Option<SharedTsgoOverlay>,
 }
 
 impl TsgoCompositeProvider {
-    /// Build the composite over a complete OWNED provider and a SHARED overlay.
+    /// Build the always-present admission layer over a complete OWNED provider, the
+    /// host (the binding-resolution authority), and an OPTIONAL SHARED overlay.
     #[must_use]
-    pub fn new(owned: Arc<dyn TypeProvider>, shared: SharedTsgoOverlay) -> Self {
-        Self { owned, shared }
+    pub fn new(
+        owned: Arc<dyn TypeProvider>,
+        host: Arc<VerterHost>,
+        shared: Option<SharedTsgoOverlay>,
+    ) -> Self {
+        Self {
+            owned,
+            host,
+            shared,
+        }
+    }
+
+    /// The OWNED carrier-diagnostics gate + optional SHARED union — the sole gated
+    /// diagnostics entry both `get_diagnostics` and `get_diagnostics_background` share.
+    ///
+    /// A NON-carrier path (plain `.ts`/`.tsx`) is NOT gated — it delegates to OWNED
+    /// unchanged. A carrier companion resolves its owning project ONCE via the shared
+    /// [`project_binding`] helper: a NON-bound state yields NO external-TS diagnostics
+    /// (fail closed — never a `tsgo --lsp` inferred / own-discovery fall-through), and a
+    /// BOUND carrier delegates to OWNED and, when SHARED is opted in, unions the SHARED
+    /// `--api` diagnostics over OWNED through the SAME already-resolved binding.
+    async fn diagnostics_gated(
+        &self,
+        path: &str,
+        background: bool,
+    ) -> Result<Vec<TypeDiagnostic>, TypeProviderError> {
+        // NON-carrier path: not gated — delegate to OWNED unchanged.
+        let Some(source) = carrier_source_of(path) else {
+            return self.owned_diagnostics(path, background).await;
+        };
+
+        // Carrier companion: resolve the owning project ONCE. A non-bound state yields
+        // NO external-TS diagnostics for the carrier (fail closed — NEVER a `tsgo --lsp`
+        // inferred / own-discovery fall-through for the carrier).
+        let Some(carrier) =
+            project_binding::resolve_carrier_bound(&self.host, &source).into_bound()
+        else {
+            return Ok(Vec::new());
+        };
+
+        // Bound: OWNED `--lsp` diagnostics for the carrier.
+        let owned = self.owned_diagnostics(path, background).await?;
+
+        // SHARED (opt-in) + bound: union the `--api` semantic diagnostics OVER OWNED
+        // through the SAME already-resolved binding (no second resolution), under ONE
+        // outer bounded deadline — a not-SHARED / stuck / errored SHARED result leaves
+        // OWNED unchanged (fail-closed). Absent SHARED, OWNED stands.
+        match &self.shared {
+            Some(shared) => Ok(compose_owned_with_bounded_shared(
+                owned,
+                shared.engage_diagnostics(path, &carrier),
+                SHARED_OVERLAY_TIMEOUT,
+            )
+            .await),
+            None => Ok(owned),
+        }
+    }
+
+    /// OWNED diagnostics for `path` on the requested lane (foreground vs background).
+    async fn owned_diagnostics(
+        &self,
+        path: &str,
+        background: bool,
+    ) -> Result<Vec<TypeDiagnostic>, TypeProviderError> {
+        if background {
+            self.owned.get_diagnostics_background(path).await
+        } else {
+            self.owned.get_diagnostics(path).await
+        }
+    }
+
+    /// Record the carrier's content into the SHARED overlay (a cheap in-memory insert
+    /// OFF the OWNED lifecycle critical path) — a no-op when SHARED is not opted in.
+    fn shared_record(&self, path: &str, content: &str) {
+        if let Some(shared) = &self.shared {
+            shared.record_content(path, content);
+        }
+    }
+
+    /// Retract a carrier from the SHARED overlay OFF the OWNED close critical path — a
+    /// no-op when SHARED is not opted in.
+    async fn shared_feed_close(&self, path: &str) {
+        if let Some(shared) = &self.shared {
+            shared.feed_close(path).await;
+        }
     }
 }
 
@@ -637,6 +694,7 @@ impl std::fmt::Debug for TsgoCompositeProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TsgoCompositeProvider")
             .field("owned", &self.owned.provider_id())
+            .field("shared", &self.shared.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -665,7 +723,7 @@ impl TypeProvider for TsgoCompositeProvider {
         let content = content.to_string();
         Box::pin(async move {
             self.owned.open_file(&path, &content).await?;
-            self.shared.record_content(&path, &content);
+            self.shared_record(&path, &content);
             Ok(())
         })
     }
@@ -675,7 +733,7 @@ impl TypeProvider for TsgoCompositeProvider {
         let content = content.to_string();
         Box::pin(async move {
             self.owned.load_file(&path, &content).await?;
-            self.shared.record_content(&path, &content);
+            self.shared_record(&path, &content);
             Ok(())
         })
     }
@@ -685,7 +743,7 @@ impl TypeProvider for TsgoCompositeProvider {
         let content = content.to_string();
         Box::pin(async move {
             self.owned.update_file(&path, &content).await?;
-            self.shared.record_content(&path, &content);
+            self.shared_record(&path, &content);
             Ok(())
         })
     }
@@ -694,7 +752,7 @@ impl TypeProvider for TsgoCompositeProvider {
         let path = path.to_string();
         Box::pin(async move {
             self.owned.close_file(&path).await?;
-            self.shared.feed_close(&path).await;
+            self.shared_feed_close(&path).await;
             Ok(())
         })
     }
@@ -704,7 +762,7 @@ impl TypeProvider for TsgoCompositeProvider {
         let content = content.to_string();
         Box::pin(async move {
             self.owned.open_file_background(&path, &content).await?;
-            self.shared.record_content(&path, &content);
+            self.shared_record(&path, &content);
             Ok(())
         })
     }
@@ -714,7 +772,7 @@ impl TypeProvider for TsgoCompositeProvider {
         let content = content.to_string();
         Box::pin(async move {
             self.owned.load_file_background(&path, &content).await?;
-            self.shared.record_content(&path, &content);
+            self.shared_record(&path, &content);
             Ok(())
         })
     }
@@ -724,7 +782,7 @@ impl TypeProvider for TsgoCompositeProvider {
         let content = content.to_string();
         Box::pin(async move {
             self.owned.update_file_background(&path, &content).await?;
-            self.shared.record_content(&path, &content);
+            self.shared_record(&path, &content);
             Ok(())
         })
     }
@@ -733,7 +791,7 @@ impl TypeProvider for TsgoCompositeProvider {
         let path = path.to_string();
         Box::pin(async move {
             self.owned.close_file_background(&path).await?;
-            self.shared.feed_close(&path).await;
+            self.shared_feed_close(&path).await;
             Ok(())
         })
     }
@@ -743,7 +801,7 @@ impl TypeProvider for TsgoCompositeProvider {
         let content = content.to_string();
         Box::pin(async move {
             self.owned.open_file_normal(&path, &content).await?;
-            self.shared.record_content(&path, &content);
+            self.shared_record(&path, &content);
             Ok(())
         })
     }
@@ -753,7 +811,7 @@ impl TypeProvider for TsgoCompositeProvider {
         let content = content.to_string();
         Box::pin(async move {
             self.owned.load_file_normal(&path, &content).await?;
-            self.shared.record_content(&path, &content);
+            self.shared_record(&path, &content);
             Ok(())
         })
     }
@@ -763,7 +821,7 @@ impl TypeProvider for TsgoCompositeProvider {
         let content = content.to_string();
         Box::pin(async move {
             self.owned.update_file_normal(&path, &content).await?;
-            self.shared.record_content(&path, &content);
+            self.shared_record(&path, &content);
             Ok(())
         })
     }
@@ -772,45 +830,27 @@ impl TypeProvider for TsgoCompositeProvider {
         let path = path.to_string();
         Box::pin(async move {
             self.owned.close_file_normal(&path).await?;
-            self.shared.feed_close(&path).await;
+            self.shared_feed_close(&path).await;
             Ok(())
         })
     }
 
-    // ── Diagnostics: COMPOSE the SHARED `--api` carrier semantic diagnostics OVER the
-    //    OWNED `--lsp` surface when a real binding resolves for the queried carrier —
-    //    OWNED's syntactic/suggestion/tag/related diagnostics are preserved, SHARED's
-    //    authoritative semantic ones overlaid, deduplicated. Fail-closed: when SHARED
-    //    does not engage, OWNED stands unchanged. ──
+    // ── Diagnostics: GATE the carrier-diagnostics on a resolved `BoundProject` (a
+    //    non-bound carrier fails closed to no external-TS diagnostics, never a
+    //    `tsgo --lsp` inferred fall-through), then COMPOSE the optional SHARED `--api`
+    //    semantic diagnostics OVER the OWNED `--lsp` surface for a bound carrier —
+    //    OWNED's syntactic/suggestion/tag/related diagnostics preserved, SHARED's
+    //    authoritative semantic ones overlaid, deduplicated. A non-carrier path is not
+    //    gated. Fail-closed: when SHARED does not engage, OWNED stands unchanged. ──
 
     fn get_diagnostics(&self, path: &str) -> ProviderFuture<'_, Vec<TypeDiagnostic>> {
         let path = path.to_string();
-        Box::pin(async move {
-            let owned = self.owned.get_diagnostics(&path).await?;
-            // The ENTIRE SHARED overlay contribution is bounded by ONE outer production
-            // deadline (establish + inject-all-dirty + control + `--api` query); on
-            // elapse OR any SHARED error the already-computed OWNED result serves
-            // (fail-closed) — never an unbounded stall behind a stuck relay/API peer.
-            Ok(compose_owned_with_bounded_shared(
-                owned,
-                self.shared.engage_diagnostics(&path),
-                SHARED_OVERLAY_TIMEOUT,
-            )
-            .await)
-        })
+        Box::pin(async move { self.diagnostics_gated(&path, false).await })
     }
 
     fn get_diagnostics_background(&self, path: &str) -> ProviderFuture<'_, Vec<TypeDiagnostic>> {
         let path = path.to_string();
-        Box::pin(async move {
-            let owned = self.owned.get_diagnostics_background(&path).await?;
-            Ok(compose_owned_with_bounded_shared(
-                owned,
-                self.shared.engage_diagnostics(&path),
-                SHARED_OVERLAY_TIMEOUT,
-            )
-            .await)
-        })
+        Box::pin(async move { self.diagnostics_gated(&path, true).await })
     }
 
     // ── Features: delegate wholly to OWNED (the complete feature surface). SHARED
@@ -965,7 +1005,9 @@ impl TypeProvider for TsgoCompositeProvider {
 
     fn shutdown(&self) -> ProviderFuture<'_, ()> {
         Box::pin(async move {
-            self.shared.shutdown().await;
+            if let Some(shared) = &self.shared {
+                shared.shutdown().await;
+            }
             self.owned.shutdown().await
         })
     }
