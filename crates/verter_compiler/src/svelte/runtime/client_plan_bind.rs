@@ -199,6 +199,29 @@ impl<'a> SupportedClientIr<'a> {
             let setter = self.rewrite_source_plain_js(set_src, analyzed.scope)?;
             return Ok((getter, setter));
         }
+        // A `$store` subscription target (`bind:value={$c}`): the GETTER is the
+        // BARE accessor thunk itself (`$c` — already a zero-arg function, official
+        // passes it unwrapped) and the SETTER the complete `($$value) =>
+        // $.store_set(c, $$value)` closure — both carried COMPLETE (the
+        // `StoreAccessor` get/set form passes them through with no thunk wrap).
+        if let Some(super::expr::BindTargetKind::Identifier) = kind {
+            if let Some(root) = analyzed.bind_target.root_ident.as_deref() {
+                if matches!(
+                    self.ir.analysis.bindings.resolve_kind(
+                        &self.ir.analysis.scopes,
+                        analyzed.scope,
+                        root
+                    ),
+                    Some(super::expr::BindingRuntimeKind::StoreSubscription)
+                ) {
+                    let base = &root[1..];
+                    return Ok((
+                        root.to_string(),
+                        format!("($$value) => $.store_set({base}, $$value)"),
+                    ));
+                }
+            }
+        }
         let getter = self.rewrite(expr, analyzed.scope)?;
         let setter = match kind {
             // A bare identifier: a signal sets directly; a plain local assigns

@@ -511,14 +511,23 @@ fn negative_svelte_options_forms_fail_closed() {
 }
 
 #[test]
-fn options_runes_false_fails_closed_as_legacy_mode() {
-    // `runes={false}` is the legacy-mode owner (5i) — it selects legacy mode, which is
-    // an unsupported client surface, so it fails closed BEFORE a client plan exists.
+fn options_runes_false_with_rune_reference_fails_closed_per_surface() {
+    // `runes={false}` is a valid MODE SELECTION (legacy), not a parse refusal. A
+    // rune NAME referenced under the forced legacy mode is NOT a rune — official
+    // parses `$state` as a STORE subscription and lowers `let` state through
+    // `$.mutable_source` — so the component fails closed with the NARROW
+    // legacy-rune-reference diagnostic (never a silent runes-shaped mis-emit).
     match compile(
         "<svelte:options runes={false} />\n<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n",
     ) {
-        Err(ClientCompileError::Unsupported(UnsupportedSvelteRuntimeSurface::LegacyMode { .. })) => {}
-        other => panic!("`runes={{false}}` must fail closed as LegacyMode (5i), got {other:?}"),
+        Err(ClientCompileError::Unsupported(
+            UnsupportedSvelteRuntimeSurface::LegacyRuneReference { rune, .. },
+        )) => {
+            assert_eq!(rune, "$state", "the referenced rune name is carried");
+        }
+        other => panic!(
+            "`runes={{false}}` + `$state` must fail closed as LegacyRuneReference, got {other:?}"
+        ),
     }
 }
 

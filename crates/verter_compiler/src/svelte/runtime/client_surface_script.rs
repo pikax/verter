@@ -234,6 +234,7 @@ pub(super) struct ClassifiedScriptItems {
 /// closed (no wildcard accept).
 pub(super) fn classify_script_items(
     ir: &SvelteRuntimeIr,
+    store_exempt: &rustc_hash::FxHashSet<String>,
 ) -> Result<ClassifiedScriptItems, UnsupportedSvelteRuntimeSurface> {
     // The `<script module>` IMPORT-ONLY admit predicate: every top-level statement
     // must be an `ImportDeclaration`; the FIRST non-import statement refuses with the
@@ -312,7 +313,13 @@ pub(super) fn classify_script_items(
     let mut first_host_span: Option<Span> = None;
     let mut alloc = Allocator::default();
     if let Some(instance) = ir.analysis.scripts.instance_source {
-        let scan = scan_unsupported_rune_forms(&alloc, instance, true, custom_element_active);
+        let scan = scan_unsupported_rune_forms(
+            &alloc,
+            instance,
+            true,
+            custom_element_active,
+            store_exempt,
+        );
         if let Some(reason) = scan.refusal {
             return Err(reason);
         }
@@ -326,7 +333,13 @@ pub(super) fn classify_script_items(
     // supported rune position (`is_instance = false`).
     for expr in ir.analysis.expressions.all() {
         let wrapped = format!("({});", expr.source);
-        let scan = scan_unsupported_rune_forms(&alloc, &wrapped, false, custom_element_active);
+        let scan = scan_unsupported_rune_forms(
+            &alloc,
+            &wrapped,
+            false,
+            custom_element_active,
+            store_exempt,
+        );
         if let Some(reason) = scan.refusal {
             return Err(reason);
         }
@@ -426,6 +439,7 @@ fn scan_unsupported_rune_forms(
     source: &str,
     is_instance: bool,
     custom_element_active: bool,
+    store_exempt: &rustc_hash::FxHashSet<String>,
 ) -> RuneScanOutcome {
     let Some(program) = super::expr::reparse_module(alloc, source) else {
         return RuneScanOutcome {
@@ -438,6 +452,7 @@ fn scan_unsupported_rune_forms(
         &program,
         is_instance,
         custom_element_active,
+        store_exempt.clone(),
     );
     use oxc_ast_visit::Visit;
     scan.visit_program(&program);

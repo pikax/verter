@@ -446,6 +446,10 @@ impl BindingOccurrenceCollector<'_> {
             // `transform[arg] = { read: b.call }` — a snippet receives its args as
             // zero-arg getter thunks defaulting to `$.noop`).
             Some(BindingRuntimeKind::SnippetParam) => Some(format!("{name}()")),
+            // A `$store` auto-subscription read (`$count`) calls the accessor
+            // thunk (`$count()` — the `const $count = () => $.store_get(count,
+            // '$count', $$stores);` declaration), never `$.get`.
+            Some(BindingRuntimeKind::StoreSubscription) => Some(format!("{name}()")),
             Some(BindingRuntimeKind::Prop | BindingRuntimeKind::BindableProp) => {
                 match self.ctx.prop_reads.get(name) {
                     // A PROP-SOURCE member (default-bearing or written — declared
@@ -577,6 +581,32 @@ impl BindingOccurrenceCollector<'_> {
                 // Recurse the RHS only (the head identifier is consumed above).
                 self.visit_expression(&assign.right);
             }
+            // A `$store` subscription write lowers through the store setter:
+            // `$c = rhs` → `$.store_set(c, rhs)`; a compound `$c += y` →
+            // `$.store_set(c, $c() + y)` (the official compound-assign form —
+            // NEVER `$.update_store`, which is the ++/-- family). A store write
+            // never carries the proxy mutation flag.
+            ClientLvalue::StoreIdent { name } => {
+                let base = &name[1..];
+                let left_start = assign.left.span().start;
+                let rhs_start = assign.right.span().start;
+                let rhs_end = assign.right.span().end;
+                let head_text = match assign.operator {
+                    AssignmentOperator::Assign => format!("$.store_set({base}, "),
+                    op => {
+                        let base_op = compound_base_operator(op);
+                        format!("$.store_set({base}, {name}() {base_op} ")
+                    }
+                };
+                self.occurrences.push(Occurrence::SignalReassign {
+                    head_span: oxc_span::Span::new(left_start, rhs_start),
+                    head_text,
+                    append_at: rhs_end,
+                    append_text: ")".to_string(),
+                });
+                // Recurse the RHS only (the head identifier is consumed above).
+                self.visit_expression(&assign.right);
+            }
             // A PROP-SOURCE write lowers through the getter/setter function:
             // `name = rhs` → `name(rhs)`; a compound `name += y` →
             // `name(name() + y)`. An identifier reassignment never carries the
@@ -700,6 +730,28 @@ impl BindingOccurrenceCollector<'_> {
                 let text = match update.operator {
                     UpdateOperator::Increment => format!("$.{helper}({name})"),
                     UpdateOperator::Decrement => format!("$.{helper}({name}, -1)"),
+                };
+                self.occurrences.push(Occurrence::SignalUpdate {
+                    span: update.span,
+                    text,
+                });
+            }
+            // A `$store` subscription update lowers through the store update
+            // helpers, each carrying the CURRENT accessor value: `$c++` →
+            // `$.update_store(c, $c())`, `$c--` → `$.update_store(c, $c(), -1)`,
+            // `++$c` → `$.update_pre_store(c, $c())`, `--$c` →
+            // `$.update_pre_store(c, $c(), -1)` (the official prefix/decrement
+            // forms — oracle-verified against svelte@5.56.3).
+            ClientLvalue::StoreIdent { name } => {
+                let base = &name[1..];
+                let helper = if update.prefix {
+                    "update_pre_store"
+                } else {
+                    "update_store"
+                };
+                let text = match update.operator {
+                    UpdateOperator::Increment => format!("$.{helper}({base}, {name}())"),
+                    UpdateOperator::Decrement => format!("$.{helper}({base}, {name}(), -1)"),
                 };
                 self.occurrences.push(Occurrence::SignalUpdate {
                     span: update.span,

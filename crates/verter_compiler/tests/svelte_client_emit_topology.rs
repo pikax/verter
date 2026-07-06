@@ -1223,6 +1223,77 @@ const SUPPORTED_OPTIONS: &[&str] = &[
     "options/custom_element_render_host_member",
 ];
 
+/// The `$store` auto-subscription corpus — the mode-independent client store
+/// surface: the per-store accessor thunk (`const $NAME = () => $.store_get(NAME,
+/// '$NAME', $$stores);`), the shared `const [$$stores, $$cleanup] =
+/// $.setup_stores();` body-top setup, the trailing `$$cleanup();` finalizer, the
+/// write lowerings (`$.store_set` / `$.update_store` / `$.update_pre_store`),
+/// and the mode-sensitive component frame (`$.push($$props, false)` legacy /
+/// `true` runes — the frame itself driven by the EXISTING `needs_context`
+/// triggers, never by store presence).
+const SUPPORTED_STORES: &[&str] = &[
+    // The IMPORTED-writable legacy case (button handler updates through the
+    // store object): push=false + flags/legacy + `$.init()` + setup/cleanup.
+    "stores/store_auto_subscribe",
+    // RUNES + store: `$.push($$props, true)` (the imported `writable(0)` call
+    // trips `needs_context`), NO `svelte/internal/flags/legacy`, NO `$.init()`,
+    // store accessor alongside a `$state` signal.
+    "stores/store_runes_mode",
+    // The MINIMAL legacy imported store (interpolation-only): push=false +
+    // flags/legacy + `$.init()`.
+    "stores/store_legacy_only",
+    // Store WRITES: `$c = 5` in a named handler and `$c = 0` in an inline
+    // arrow handler — both lower to `$.store_set(c, …)`.
+    "stores/store_write",
+    // The COMPOUND write forms: `$c++` → `$.update_store(c, $c())`, `$c--` →
+    // `$.update_store(c, $c(), -1)`, `++$c` → `$.update_pre_store(c, $c())`,
+    // `$c += 2` → `$.store_set(c, $c() + 2)`.
+    "stores/store_compound",
+    // TWO stores: ordered accessor consts (`$a` then `$b`, first-subscription
+    // order) before ONE shared `$.setup_stores()`.
+    "stores/store_multiple",
+    // `derived(a, ($a) => $a * 2)`: accessor for `$doubled` ONLY — the callback
+    // param `$a` is scope-shadowed and mints NO accessor; the un-subscribed
+    // `const a = writable(1)` is admitted as a store DEPENDENCY.
+    "stores/store_derived_shadowed",
+    // A LOCAL hand-rolled store factory (no `svelte/store` import, no `new`,
+    // no imported call): store lowering IDENTICAL to the imported case BUT NO
+    // component frame (no `$.push`/`$.pop`, no `$$props` param) — the frame is
+    // `needs_context`-driven, never store-presence-driven.
+    "stores/store_local_factory",
+    // `bind:value={$c}`: the getter is the BARE accessor thunk `$c`, the
+    // setter the `($$value) => $.store_set(c, $$value)` closure.
+    "stores/store_bind_value",
+    // A store whose NAME is a rune-root word, LEGACY mode: `const state =
+    // writable(0)` + `{$state}` subscribes (`const $state = () =>
+    // $.store_get(state, '$state', $$stores)`) — base resolution decides
+    // store-vs-rune, never the name (official emits the subscription).
+    "stores/store_rune_named_state",
+    // The SAME rune-root-named store under FORCED runes mode
+    // (`<svelte:options runes={true} />`): still a subscription — `$state`
+    // over a declared non-rune-init base is a store accessor in EVERY mode.
+    "stores/store_rune_named_state_runes",
+    // A `$derived`-named store, legacy: `const derived = writable(0)` +
+    // `{$derived}` subscribes identically.
+    "stores/store_rune_named_derived",
+    // The each-body NON-shadow control: `{#each items as x}<p>{$y}</p>{/each}`
+    // subscribes `$y` from inside the block body (the each alias `x` shadows
+    // nothing — only a base-name collision rejects, per
+    // `store_invalid_scoped_subscription`).
+    "stores/store_each_nonshadow",
+    // A LOCAL CLASS-based store: `class S { subscribe(fn){…} } const c = new
+    // S(); {$c}` — the class is admitted into the store-dependency closure (a
+    // store factory reached transitively from the `const c = new S()` source of
+    // the `$c` subscription), emitted VERBATIM, and `$c` subscribes identically.
+    "stores/store_class_local",
+    // A store component that ALSO carries custom-element `$$exports` prop
+    // accessors: the close uses the official PRE-RETURN finalizer slot `var $$pop
+    // = $.pop($$exports); $$cleanup(); return $$pop;` (the store `$$cleanup()`
+    // runs BEFORE the captured export return — a bare `return $.pop($$exports);`
+    // would strand the cleanup). SUPPORTED, not fail-closed.
+    "stores/store_custom_element",
+];
+
 /// The repository root (two levels up from this crate's `tests/` dir).
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -6309,8 +6380,48 @@ fn all_supported_slugs() -> Vec<&'static str> {
         .chain(SUPPORTED_SPECIALS.iter())
         .chain(SUPPORTED_LIFECYCLE.iter())
         .chain(SUPPORTED_OPTIONS.iter())
+        .chain(SUPPORTED_STORES.iter())
         .copied()
         .collect()
+}
+
+#[test]
+fn supported_stores_cover_the_full_store_corpus() {
+    // The store corpus is the structural oracle for the `$store` auto-subscription
+    // surface (accessor thunk, setup_stores/$$cleanup, store_set/update_store
+    // writes, the mode-sensitive frame); a dropped row is a coverage regression.
+    assert_eq!(
+        SUPPORTED_STORES.len(),
+        15,
+        "the store corpus must enumerate all 15 `stores/*` fixtures (auto_subscribe, \
+         runes_mode, legacy_only, write, compound, multiple, derived_shadowed, \
+         local_factory, bind_value, rune_named_state, rune_named_state_runes, \
+         rune_named_derived, each_nonshadow, class_local, custom_element)"
+    );
+    let mut seen = std::collections::BTreeSet::new();
+    for &slug in SUPPORTED_STORES {
+        assert!(
+            slug.starts_with("stores/"),
+            "supported-store slug {slug} must be a stores/* fixture"
+        );
+        assert!(seen.insert(slug), "duplicate supported-store slug {slug}");
+    }
+    // Directory coverage: every `stores/*` fixture on disk is enumerated — a new
+    // fixture cannot silently skip the gate.
+    let fixtures =
+        repo_root().join("crates/verter_compiler/tests/svelte_oracle_corpus/fixtures/stores");
+    for entry in std::fs::read_dir(&fixtures).expect("read stores fixtures") {
+        let name = entry.expect("dir entry").file_name();
+        let name = name.to_string_lossy().into_owned();
+        let Some(stem) = name.strip_suffix(".svelte") else {
+            continue;
+        };
+        let slug = format!("stores/{stem}");
+        assert!(
+            seen.contains(slug.as_str()),
+            "stores fixture {slug} is not enumerated in SUPPORTED_STORES"
+        );
+    }
 }
 
 #[test]

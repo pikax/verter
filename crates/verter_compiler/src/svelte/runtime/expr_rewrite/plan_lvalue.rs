@@ -21,6 +21,15 @@ impl BindingOccurrenceCollector<'_> {
         matches!(self.signal_kind(name), Some(k) if super::super::expr::is_import_binding(k))
     }
 
+    /// Whether `name` resolves (scope-awarely) to a `$store` auto-subscription
+    /// accessor binding — the store-write lvalue root (`$c = …` / `$c++`).
+    fn is_store_subscription_root(&self, name: &str) -> bool {
+        matches!(
+            self.signal_kind(name),
+            Some(BindingRuntimeKind::StoreSubscription)
+        )
+    }
+
     /// The typed PROP lvalue of a bare-identifier target resolving to a `$props()`
     /// prop binding: a PROP-SOURCE local (a `Getter` read — declared via
     /// `$.prop`) writes through the setter (`PropSetter`); a NON-source prop
@@ -144,6 +153,12 @@ impl BindingOccurrenceCollector<'_> {
                     ClientLvalue::SignalIdent {
                         name: name.to_string(),
                     }
+                } else if self.is_store_subscription_root(name) {
+                    // A `$store` subscription write (`$c = …`) lowers through the
+                    // store helpers, never a raw `$c = …` pass-through.
+                    ClientLvalue::StoreIdent {
+                        name: name.to_string(),
+                    }
                 } else if let Some(prop) = self.prop_lvalue(name) {
                     prop
                 } else if self.is_import_root(name) {
@@ -195,6 +210,12 @@ impl BindingOccurrenceCollector<'_> {
                 let name = id.name.as_str();
                 if self.is_signal(name) {
                     ClientLvalue::SignalIdent {
+                        name: name.to_string(),
+                    }
+                } else if self.is_store_subscription_root(name) {
+                    // A `$store` subscription update (`$c++`) lowers through the
+                    // store update helpers, never a raw pass-through.
+                    ClientLvalue::StoreIdent {
                         name: name.to_string(),
                     }
                 } else if let Some(prop) = self.prop_lvalue(name) {

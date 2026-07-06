@@ -12,7 +12,10 @@
 //!   function-pair bind `bind:value={get, set}` (admit the named `function get(){…}` /
 //!   `function set(next){…}` declarations).
 //!
-//! Plus [`default_attr_has_matching_bind`] — the bind-relationship query that decides
+//! Plus [`collect_event_handler_fn_referents`] — the bare-identifier EVENT-handler
+//! referents (`onclick={inc}` / `on:click={inc}`) that name a top-level `function`
+//! declaration (admit `function inc(){…}` — the handler passes it by reference) —
+//! and [`default_attr_has_matching_bind`] — the bind-relationship query that decides
 //! whether a static `defaultValue` / `defaultChecked` attribute is co-located with its
 //! matching `bind:value` / `bind:checked` (the form-default property-write acceptance).
 
@@ -164,6 +167,38 @@ pub(super) fn collect_bind_function_pair_names(ir: &SvelteRuntimeIr) -> Vec<Stri
                         names.push(trimmed.to_string());
                     }
                 }
+            }
+        }
+    }
+    names
+}
+
+/// Collect the BARE-IDENTIFIER event-handler referents that name a top-level
+/// instance-script `function` declaration (`onclick={inc}` / `on:click={inc}` with
+/// `function inc(){…}`). A top-level function declaration is admitted by the
+/// script-item allowlist when its name is in this set (the handler passes the
+/// reference through — `$.delegated('click', button, inc)`). An inline arrow /
+/// call / member handler contributes nothing, and a bare identifier that is NOT a
+/// top-level function name contributes nothing (its handler classification fails
+/// closed independently). Driven from the typed `AttrIr` event inventory + the
+/// analyzed handler source, never a raw scan.
+pub(super) fn collect_event_handler_fn_referents<'a>(
+    ir: &'a SvelteRuntimeIr,
+    fn_decl_names: &rustc_hash::FxHashSet<String>,
+) -> Vec<&'a str> {
+    let mut names = Vec::new();
+    for node in &ir.nodes {
+        let IrNode::Element(el) = node else {
+            continue;
+        };
+        for attr in &el.attrs {
+            let AttrIr::Event { handler, .. } = attr else {
+                continue;
+            };
+            let analyzed = ir.analysis.expressions.get(*handler);
+            let trimmed = analyzed.source.trim();
+            if is_plain_identifier(trimmed) && fn_decl_names.contains(trimmed) {
+                names.push(trimmed);
             }
         }
     }

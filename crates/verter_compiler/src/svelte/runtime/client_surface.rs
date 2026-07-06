@@ -142,6 +142,13 @@ pub(super) struct ClassifiedClientSurface {
     /// own coordinates — the same space the rune scan's refusal spans use),
     /// for the plan build's degenerate-host refusal.
     pub(super) first_host_span: Option<Span>,
+    /// The classified `$store` auto-subscriptions in FIRST-SEEN order (the
+    /// instance program, then every analyzed template expression — the official
+    /// analyze walk order the accessor emission is pinned to). Empty for a
+    /// component with no `$name` subscription. The plan reads this fact for the
+    /// per-store accessor / `$.setup_stores()` / `$$cleanup()` emission; it
+    /// NEVER feeds the component-context (`needs_context`) decision.
+    pub(super) store_subscriptions: Vec<super::store_subscriptions::StoreSubscription>,
 }
 
 impl ClientSyntaxSurface {
@@ -152,11 +159,31 @@ impl ClientSyntaxSurface {
     pub(super) fn classify(
         ir: &SvelteRuntimeIr,
     ) -> Result<ClassifiedClientSurface, UnsupportedSvelteRuntimeSurface> {
-        // (1) Mode: legacy (non-runes) is the 5i vertical.
-        if ir.component.mode == super::ir::SvelteMode::Legacy {
-            return Err(UnsupportedSvelteRuntimeSurface::LegacyMode {
-                span: Span::new(0, 0),
-            });
+        // (1) The `$store` auto-subscription facts (mode-independent): the
+        // ordered SCOPE-AWARE subscription scan (fallible — a `$NAME` whose
+        // base resolves to a non-top-level binding is the official
+        // `store_invalid_scoped_subscription` reject), the demand-driven
+        // top-level admission closure it seeds (nothing is admitted without a
+        // subscription), the bare-identifier event-handler function referents,
+        // and the rune-root accessor exemption set. Computed ONCE here, BEFORE
+        // the legacy gate and the rune scans — both consult the exemption set
+        // so a store named a rune-root word (`const state = writable(0)` +
+        // `{$state}`) is never refused as a rune (official emits the
+        // subscription in every mode).
+        let store_facts = super::store_subscriptions::classify_store_facts(ir)?;
+        let fn_decl_names = store_facts.fn_decl_names;
+        let store_exempt = store_facts.rune_exempt_accessors;
+
+        // (1b) Mode: a LEGACY (non-runes) component dispatches PER SURFACE — the
+        // mode-independent `$store` auto-subscription surface flows through the
+        // shared pipeline below, and each not-yet-lowered legacy surface
+        // (`export let` props, `$:` reactive statements, `<slot>`,
+        // `createEventDispatcher`, a rune name under `runes={false}`) fails
+        // closed with its own narrow diagnostic. There is no blanket mode
+        // refusal.
+        let legacy_mode = ir.component.mode == super::ir::SvelteMode::Legacy;
+        if legacy_mode {
+            super::legacy_surface::refuse_unsupported_legacy_surfaces(ir, &store_exempt)?;
         }
 
         // (2) Script-item classification: scan every instance + module script
@@ -170,8 +197,10 @@ impl ClientSyntaxSurface {
         // (type-only / phase / `assert { … }`) fail closed at the import classifier.
         // The returned facts also carry `uses_host` — the admitted zero-arg
         // `$host()` usage the rune scan recorded (instance + template
-        // expressions), consumed by the plan build.
-        let script_facts = classify_script_items(ir)?;
+        // expressions), consumed by the plan build. The rune scan consults the
+        // store-accessor exemption set: a rune-root NAME whose base is a
+        // declared store candidate is a store accessor, never a rune.
+        let script_facts = classify_script_items(ir, &store_exempt)?;
 
         // (3) `$props()` USAGE: an INSTANCE-SCRIPT prop reference (outside the
         // `$props()` declaration itself) and a BOUND prop (official's 2-arg
@@ -193,6 +222,7 @@ impl ClientSyntaxSurface {
             &alloc,
             ir.analysis.scripts.module_source,
             ir.analysis.scripts.instance_source,
+            &ir.analysis.script_imports,
         );
         // (4a) `animate:` PLACEMENT gate (pre-pass): the official `AnimateDirective`
         // analyze rules — one `animate:` per element (`animation_duplicate`), the
@@ -237,6 +267,7 @@ impl ClientSyntaxSurface {
                     root,
                     Namespace::Html,
                     &declared_root_names,
+                    &fn_decl_names,
                     slot_placement,
                     &facts,
                     placement,
@@ -282,20 +313,68 @@ impl ClientSyntaxSurface {
         let script_items = if let Some(instance) = ir.analysis.scripts.instance_source {
             use super::bind_target_names::{
                 collect_bind_function_pair_names, collect_bind_lvalue_roots,
-                collect_bind_this_targets,
+                collect_bind_this_targets, collect_event_handler_fn_referents,
             };
             let bind_this_targets = collect_bind_this_targets(ir);
             let bind_lvalue_roots = collect_bind_lvalue_roots(ir);
             let bind_function_pair_names = collect_bind_function_pair_names(ir);
-            instance_items::classify_supported_instance_items(
+            // The `$store` script admissions: the dependency-closure consts, plus
+            // the closure functions and the bare-identifier event-handler
+            // referents that actually name a top-level function declaration.
+            let mut store_function_names = store_facts.closure_fns;
+            store_function_names.extend(
+                collect_event_handler_fn_referents(ir, &fn_decl_names)
+                    .into_iter()
+                    .map(str::to_string),
+            );
+            let store_admissions = instance_items::StoreScriptAdmissions {
+                const_names: store_facts.const_names,
+                class_names: store_facts.class_names,
+                function_names: store_function_names,
+            };
+            let items = instance_items::classify_supported_instance_items(
                 instance,
                 &bind_this_targets,
                 &bind_lvalue_roots,
                 &bind_function_pair_names,
-            )?
+                &store_admissions,
+            )?;
+            // In LEGACY mode a top-level `let` is reactive state (official lowers
+            // it through `$.mutable_source`), so the runes-shaped verbatim
+            // bind-target `let` admissions must NOT flow through — they would
+            // silently emit the runes shape for a legacy semantic. Fail them
+            // closed (the legacy-state lowering is a follow-up vertical).
+            if legacy_mode {
+                for item in &items {
+                    if matches!(
+                        item,
+                        SupportedInstanceScriptItem::BindThisLocal { .. }
+                            | SupportedInstanceScriptItem::BindLocalLet { .. }
+                    ) {
+                        return Err(UnsupportedSvelteRuntimeSurface::InstanceScriptItem {
+                            construct: "legacy let binding",
+                            span: Span::new(0, 0),
+                        });
+                    }
+                }
+            }
+            items
         } else {
             Vec::new()
         };
+
+        // (6b) RUNE-USAGE × STORE-SUBSCRIPTION COLLISION — fail closed (the
+        // decision is owned by the store-subscription classifier). A
+        // rune-root-NAMED store accessor subscribed WHILE the same rune root has
+        // live admitted usage is a DIVERGENT-mode case official compiles as the
+        // store accessor in legacy mode — a lowering this backend does not
+        // implement — so the combination refuses. See
+        // `store_subscriptions::detect_rune_usage_store_collision`.
+        super::store_subscriptions::detect_rune_usage_store_collision(
+            &script_items,
+            &store_facts.subscriptions,
+            script_facts.uses_host,
+        )?;
 
         let facts = facts.into_inner();
         Ok(ClassifiedClientSurface {
@@ -313,6 +392,7 @@ impl ClientSyntaxSurface {
             user_imports: script_facts.user_imports,
             uses_host: script_facts.uses_host,
             first_host_span: script_facts.first_host_span,
+            store_subscriptions: store_facts.subscriptions,
         })
     }
 }
@@ -648,11 +728,13 @@ pub(super) fn validate_slot_placement(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn classify_node(
     ir: &SvelteRuntimeIr,
     node_id: NodeId,
     namespace: Namespace,
     declared_root_names: &rustc_hash::FxHashSet<String>,
+    fn_decl_names: &rustc_hash::FxHashSet<String>,
     slot_placement: SlotPlacementFacts<'_>,
     facts: &RefCell<SurfaceFacts>,
     placement: NodePlacement,
@@ -817,6 +899,7 @@ fn classify_node(
                     attr,
                     el.span,
                     declared_root_names,
+                    fn_decl_names,
                     facts,
                 )?;
             }
@@ -829,6 +912,7 @@ fn classify_node(
                     child,
                     child_namespace,
                     declared_root_names,
+                    fn_decl_names,
                     slot_placement,
                     facts,
                     NodePlacement::Nested,
@@ -1078,6 +1162,7 @@ fn classify_attr(
     attr: &AttrIr,
     el_span: Span,
     declared_root_names: &rustc_hash::FxHashSet<String>,
+    fn_decl_names: &rustc_hash::FxHashSet<String>,
     facts: &RefCell<SurfaceFacts>,
 ) -> Result<(), UnsupportedSvelteRuntimeSurface> {
     // The accepted element's tag string (for the bind classifier's `input` host
@@ -1366,6 +1451,7 @@ fn classify_attr(
                 &ir.analysis.bindings,
                 &ir.analysis.scopes,
                 direct,
+                fn_decl_names,
             )?;
             // Key the fact by (node, event type, handler expr) so an element with
             // multiple events resolves EACH to its own shape at projection time.

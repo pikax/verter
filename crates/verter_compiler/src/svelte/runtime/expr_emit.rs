@@ -900,6 +900,15 @@ pub(super) fn lower_simple_instance_item(
         // A named function-pair function: its body lowers through the FALLIBLE rewriter,
         // which lives on the projection — the caller handles it.
         Item::FunctionDecl { .. } => SimpleItemLowering::NeedsRewriter,
+        // A `$store` SOURCE const: its init lowers through the FALLIBLE rewriter
+        // (a store read/write inside the init rewrites; a shadowed `$a` callback
+        // param stays verbatim) — the caller (which holds the rewriter) handles it.
+        Item::StoreSourceDecl { .. } => SimpleItemLowering::NeedsRewriter,
+        // A `$store` DEPENDENCY class (a local store implementation reached from
+        // a subscribed base) emits its body VERBATIM — official frames the store
+        // via `new`, class body unchanged; a class body is plain JS with no
+        // signal-bearing reactive surface, so no rewriter pass runs.
+        Item::StoreClassDecl { source, .. } => SimpleItemLowering::Statement(source.clone()),
         // A top-level `$inspect(...);` / `$inspect(...).with(...);` statement is
         // production-ELIDED: it emits NOTHING (no helper, no import, no dev form —
         // official `dev:false` drops the statement, leaving only a cosmetic `;;`

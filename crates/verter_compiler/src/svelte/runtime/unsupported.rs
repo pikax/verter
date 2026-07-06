@@ -129,9 +129,43 @@ pub enum UnsupportedSvelteRuntimeSurface {
         /// The source span of the root interpolation region.
         span: Span,
     },
-    /// Legacy non-runes lowering (`export let` / `$:` / `<slot>` / store
-    /// auto-subscriptions / the legacy flag).
-    LegacyMode {
+    /// An instance-script `export` declaration in a LEGACY (non-runes)
+    /// component — the legacy PROP surface (`export let label` lowers through
+    /// `$.prop($$props, 'label', 8)`; `export const`/`export function` are the
+    /// readonly legacy bindings). Not yet lowered — fails closed.
+    LegacyExportProp {
+        /// The source span of the export declaration.
+        span: Span,
+    },
+    /// A `$:` reactive statement in a LEGACY (non-runes) component — the legacy
+    /// reactivity surface (`$.mutable_source` + `$.legacy_pre_effect` /
+    /// `$.legacy_pre_effect_reset`). Not yet lowered — fails closed.
+    LegacyReactiveStatement {
+        /// The source span of the labeled statement.
+        span: Span,
+    },
+    /// A `<slot>` element in a LEGACY (non-runes) component — the legacy slot
+    /// surface (`$.slot(node, $$props, 'default', …)`). Not yet lowered — fails
+    /// closed.
+    LegacySlotElement {
+        /// The source span of the slot element.
+        span: Span,
+    },
+    /// A `createEventDispatcher` usage (the `svelte` import local referenced in
+    /// the instance script) in a LEGACY (non-runes) component — the legacy
+    /// component-event surface. Not yet lowered — fails closed.
+    LegacyEventDispatcher {
+        /// The source span of the dispatcher reference.
+        span: Span,
+    },
+    /// A Svelte rune NAME referenced in a LEGACY (non-runes) component — under
+    /// `runes={false}` a rune name is NOT a rune (official parses `$state` as a
+    /// STORE subscription of `state` and lowers `let` state through
+    /// `$.mutable_source`), a semantic this backend does not emit. Fails closed
+    /// rather than mis-lowering the reference as a rune.
+    LegacyRuneReference {
+        /// The referenced rune root name (`$state` / `$derived` / …).
+        rune: String,
         /// The source span.
         span: Span,
     },
@@ -295,6 +329,22 @@ pub enum UnsupportedSvelteRuntimeSurface {
         /// The source span.
         span: Span,
     },
+    /// A `$NAME` store subscription whose BASE resolves — in the reference's
+    /// REAL lexical scope — to a NON-top-level binding: a `{#each as x}` alias,
+    /// a `{#snippet}` parameter, an `{#await then x}` binding, a slot `let:`
+    /// local, or a script/expression function parameter shadowing the
+    /// top-level store base. Official `svelte@5.56.3` COMPILE-ERRORS this class
+    /// (`store_invalid_scoped_subscription` — "Cannot subscribe to stores that
+    /// are not declared at the top level of the component"); the scope-aware
+    /// store classifier rejects it instead of subscribing over the shadowed
+    /// top-level base (the former fail-open).
+    StoreScopedSubscription {
+        /// The `$`-prefixed accessor name whose base is scope-shadowed (`$x`).
+        name: String,
+        /// The source span of the offending reference (zero for a
+        /// template-expression reference, whose arena entry carries no span).
+        span: Span,
+    },
     /// A carrier for an OFFICIAL-reject detected MID-REWRITE. The fallible
     /// expression rewriter's error channel is `UnsupportedSvelteRuntimeSurface`,
     /// but some malformed inputs it detects (a `$$`-prefixed member of a
@@ -330,7 +380,15 @@ impl UnsupportedSvelteRuntimeSurface {
             Self::HostOrCustomElement { .. } => "svelte-runtime-unsupported-host-custom-element",
             Self::Element { .. } => "svelte-runtime-unsupported-element",
             Self::ElementName { .. } => "svelte-runtime-unsupported-element-name",
-            Self::LegacyMode { .. } => "svelte-runtime-unsupported-legacy-mode",
+            Self::LegacyExportProp { .. } => "svelte-runtime-unsupported-legacy-export-prop",
+            Self::LegacyReactiveStatement { .. } => {
+                "svelte-runtime-unsupported-legacy-reactive-statement"
+            }
+            Self::LegacySlotElement { .. } => "svelte-runtime-unsupported-legacy-slot",
+            Self::LegacyEventDispatcher { .. } => {
+                "svelte-runtime-unsupported-legacy-event-dispatcher"
+            }
+            Self::LegacyRuneReference { .. } => "svelte-runtime-unsupported-legacy-rune-reference",
             Self::ExperimentalAsync { .. } => "svelte-runtime-unsupported-experimental-async",
             Self::DevMode { .. } => "svelte-runtime-unsupported-dev-mode",
             Self::Style { .. } => "svelte-runtime-unsupported-style",
@@ -348,6 +406,9 @@ impl UnsupportedSvelteRuntimeSurface {
             Self::ParagraphAutoclose { .. } => "svelte-runtime-unsupported-paragraph-autoclose",
             Self::ConstFoldThrow { .. } => "svelte-runtime-unsupported-const-fold-throw",
             Self::ServerGenerate { .. } => "svelte-runtime-unsupported-server-generate",
+            Self::StoreScopedSubscription { .. } => {
+                "svelte-runtime-unsupported-store-scoped-subscription"
+            }
             // A transient official-reject carrier — delegate to the carried rule's
             // official-reject diagnostic id (it is converted to
             // `ClientCompileError::OfficialReject` at the boundary and never surfaces
@@ -381,7 +442,24 @@ impl UnsupportedSvelteRuntimeSurface {
                 "the `<{tag}>` element (its synthesized DOM local var name would be an \
                  invalid / reserved JS identifier; the official compiler collision-renames it)"
             ),
-            Self::LegacyMode { .. } => "legacy (non-runes) mode".to_string(),
+            Self::LegacyExportProp { .. } => {
+                "an instance-script `export` declaration in a legacy (non-runes) component \
+                 (the legacy prop surface)"
+                    .to_string()
+            }
+            Self::LegacyReactiveStatement { .. } => {
+                "a `$:` reactive statement in a legacy (non-runes) component".to_string()
+            }
+            Self::LegacySlotElement { .. } => {
+                "a `<slot>` element in a legacy (non-runes) component".to_string()
+            }
+            Self::LegacyEventDispatcher { .. } => {
+                "a `createEventDispatcher` usage in a legacy (non-runes) component".to_string()
+            }
+            Self::LegacyRuneReference { rune, .. } => format!(
+                "the `{rune}` rune name referenced in a legacy (non-runes) component (under \
+                 `runes={{false}}` a rune name is a store subscription, not a rune)"
+            ),
             Self::ExperimentalAsync { surface, .. } => {
                 format!("the experimental-async `{surface}` surface")
             }
@@ -452,6 +530,17 @@ impl UnsupportedSvelteRuntimeSurface {
             Self::ServerGenerate { .. } => {
                 "server-side rendering (`generate: 'server'`)".to_string()
             }
+            // Mirrors the official `store_invalid_scoped_subscription` COMPILE-ERROR
+            // — surface the official-shaped message directly (NOT the "does not yet
+            // support …" wrapper below): the input is rejected by the official
+            // compiler, not a deferrable Verter feature.
+            Self::StoreScopedSubscription { name, .. } => {
+                return format!(
+                    "cannot subscribe to stores that are not declared at the top level \
+                     of the component (`{name}` resolves to a template-block / \
+                     function-local binding; official `store_invalid_scoped_subscription`)"
+                );
+            }
             // A transient official-reject carrier — surface the carried rule's
             // official-reject message directly (NOT the "does not yet support …"
             // wrapper below), since it mirrors an official COMPILE-ERROR, not a
@@ -474,7 +563,11 @@ impl UnsupportedSvelteRuntimeSurface {
             | Self::HostOrCustomElement { span, .. }
             | Self::Element { span, .. }
             | Self::ElementName { span, .. }
-            | Self::LegacyMode { span }
+            | Self::LegacyExportProp { span }
+            | Self::LegacyReactiveStatement { span }
+            | Self::LegacySlotElement { span }
+            | Self::LegacyEventDispatcher { span }
+            | Self::LegacyRuneReference { span, .. }
             | Self::ExperimentalAsync { span, .. }
             | Self::DevMode { span }
             | Self::Style { span }
@@ -492,6 +585,7 @@ impl UnsupportedSvelteRuntimeSurface {
             | Self::ParagraphAutoclose { span, .. }
             | Self::ConstFoldThrow { span, .. }
             | Self::ServerGenerate { span }
+            | Self::StoreScopedSubscription { span, .. }
             | Self::OfficialReject { span, .. } => *span,
         }
     }

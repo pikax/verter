@@ -1,0 +1,120 @@
+{
+  "slug": "stores/store_compound.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/store",
+      "kind": "named",
+      "names": [
+        "writable"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "store_compound",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "push",
+    "store_get",
+    "setup_stores",
+    "update_store",
+    "update_store",
+    "update_pre_store",
+    "store_set",
+    "init",
+    "first_child",
+    "child",
+    "reset",
+    "sibling",
+    "sibling",
+    "sibling",
+    "template_effect",
+    "set_text",
+    "delegated",
+    "delegated",
+    "delegated",
+    "delegated",
+    "append",
+    "pop",
+    "delegate"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "delegate",
+    "delegated",
+    "first_child",
+    "from_html",
+    "init",
+    "pop",
+    "push",
+    "reset",
+    "set_text",
+    "setup_stores",
+    "sibling",
+    "store_get",
+    "store_set",
+    "template_effect",
+    "update_pre_store",
+    "update_store"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "push": 1,
+    "store_get": 1,
+    "setup_stores": 1,
+    "update_store": 2,
+    "update_pre_store": 1,
+    "store_set": 1,
+    "init": 1,
+    "first_child": 1,
+    "child": 1,
+    "reset": 1,
+    "sibling": 3,
+    "template_effect": 1,
+    "set_text": 1,
+    "delegated": 4,
+    "append": 1,
+    "pop": 1,
+    "delegate": 1
+  },
+  "delegatedEvents": [
+    "click"
+  ],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<button> </button> <button>down</button> <button>pre</button> <button>add</button>",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; import {writable} from 'svelte/store'; var root = $.from_html(`<button> </button> <button>down</button> <button>pre</button> <button>add</button>`, 1); export default function store_compound($$anchor, $$props) {$.push($$props, false); const $c = () => $.store_get(c, '$c', $$stores); const [$$stores, $$cleanup] = $.setup_stores(); const c = writable(0); function bump() {$.update_store(c, $c());} function down() {$.update_store(c, $c(), -1);} function pre() {$.update_pre_store(c, $c());} function add() {$.store_set(c, $c() + 2);} $.init(); var fragment = root(); var button = $.first_child(fragment); var text = $.child(button, true); $.reset(button); var button_1 = $.sibling(button, 2); var button_2 = $.sibling(button_1, 2); var button_3 = $.sibling(button_2, 2); $.template_effect(() => $.set_text(text, $c())); $.delegated('click', button, bump); $.delegated('click', button_1, down); $.delegated('click', button_2, pre); $.delegated('click', button_3, add); $.append($$anchor, fragment); $.pop(); $$cleanup();} $.delegate(['click']);",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

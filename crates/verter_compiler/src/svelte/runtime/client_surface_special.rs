@@ -80,6 +80,10 @@ pub(super) fn classify_special_host(
                     &ir.analysis.bindings,
                     &ir.analysis.scopes,
                     !*delegated,
+                    // Special-host bare-identifier handlers stay fail-closed: the
+                    // top-level-function referent set is scoped to REGULAR
+                    // elements, so the special hosts pass the empty set.
+                    &rustc_hash::FxHashSet::default(),
                 )?;
                 facts.borrow_mut().event_shapes.push((
                     node_id,
@@ -207,6 +211,10 @@ pub(super) fn classify_svelte_element(
                     &ir.analysis.bindings,
                     &ir.analysis.scopes,
                     true,
+                    // Special-host bare-identifier handlers stay fail-closed: the
+                    // top-level-function referent set is scoped to REGULAR
+                    // elements, so the special hosts pass the empty set.
+                    &rustc_hash::FxHashSet::default(),
                 )?;
             }
             // Plain attributes fold into `$.attribute_effect` (a dynamic tag accepts any
@@ -317,6 +325,10 @@ pub(super) fn classify_svelte_boundary(
                     &ir.analysis.bindings,
                     &ir.analysis.scopes,
                     true,
+                    // Special-host bare-identifier handlers stay fail-closed: the
+                    // top-level-function referent set is scoped to REGULAR
+                    // elements, so the special hosts pass the empty set.
+                    &rustc_hash::FxHashSet::default(),
                 )?;
             }
             // The MODERN `failed={…}` / `pending={…}` ATTRIBUTE-expression form (and the shorthand

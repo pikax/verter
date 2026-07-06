@@ -1,0 +1,110 @@
+{
+  "slug": "stores/store_write.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/store",
+      "kind": "named",
+      "names": [
+        "writable"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "store_write",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "push",
+    "store_get",
+    "setup_stores",
+    "store_set",
+    "init",
+    "first_child",
+    "child",
+    "reset",
+    "sibling",
+    "template_effect",
+    "set_text",
+    "delegated",
+    "delegated",
+    "store_set",
+    "append",
+    "pop",
+    "delegate"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "delegate",
+    "delegated",
+    "first_child",
+    "from_html",
+    "init",
+    "pop",
+    "push",
+    "reset",
+    "set_text",
+    "setup_stores",
+    "sibling",
+    "store_get",
+    "store_set",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "push": 1,
+    "store_get": 1,
+    "setup_stores": 1,
+    "store_set": 2,
+    "init": 1,
+    "first_child": 1,
+    "child": 1,
+    "reset": 1,
+    "sibling": 1,
+    "template_effect": 1,
+    "set_text": 1,
+    "delegated": 2,
+    "append": 1,
+    "pop": 1,
+    "delegate": 1
+  },
+  "delegatedEvents": [
+    "click"
+  ],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<button> </button> <button>reset</button>",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; import {writable} from 'svelte/store'; var root = $.from_html(`<button> </button> <button>reset</button>`, 1); export default function store_write($$anchor, $$props) {$.push($$props, false); const $c = () => $.store_get(c, '$c', $$stores); const [$$stores, $$cleanup] = $.setup_stores(); const c = writable(0); function set5() {$.store_set(c, 5);} $.init(); var fragment = root(); var button = $.first_child(fragment); var text = $.child(button, true); $.reset(button); var button_1 = $.sibling(button, 2); $.template_effect(() => $.set_text(text, $c())); $.delegated('click', button, set5); $.delegated('click', button_1, () => {$.store_set(c, 0);}); $.append($$anchor, fragment); $.pop(); $$cleanup();} $.delegate(['click']);",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

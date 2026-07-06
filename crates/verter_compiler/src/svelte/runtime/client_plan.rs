@@ -84,6 +84,19 @@ pub(super) struct ClientModulePlan<'a> {
     pub(super) needs_context: bool,
     /// Whether the component function takes `$$props`.
     pub(super) uses_props: bool,
+    /// The classified `$store` auto-subscriptions in first-seen order — the
+    /// per-store accessor emission input (`const $NAME = () =>
+    /// $.store_get(NAME, '$NAME', $$stores);`). Empty for a store-less
+    /// component.
+    pub(super) store_subscriptions: Vec<super::store_subscriptions::StoreSubscription>,
+    /// Whether the component has at least one `$store` auto-subscription — the
+    /// SOLE driver of the `$.setup_stores()` / accessor / trailing
+    /// `$$cleanup();` emission. SEPARATE from [`needs_context`](Self::needs_context)
+    /// by design: the component-context frame is driven by the EXISTING
+    /// `needs_context` triggers (an imported call / `new` / unsafe member),
+    /// NEVER by store presence — a clean local store emits setup/cleanup with
+    /// NO frame (oracle-verified against svelte@5.56.3).
+    pub(super) has_store_subscriptions: bool,
     /// The custom-element module-epilogue payload (`customElements.define(tag,
     /// $.create_custom_element(…))` / the bare create statement) — `Some` iff the
     /// component compiles as a custom element.
@@ -391,6 +404,7 @@ impl<'a> SupportedClientIr<'a> {
             &alloc,
             ir.analysis.scripts.module_source,
             ir.analysis.scripts.instance_source,
+            &ir.analysis.script_imports,
         );
         let mut projection = SupportedClientIr {
             ir,
@@ -553,6 +567,19 @@ impl<'a> SupportedClientIr<'a> {
         }
         let uses_props = props_param_bound;
 
+        // The `$store` auto-subscription facts (classifier-owned; the plan reads
+        // them for the setup_stores/accessor/$$cleanup emission ONLY — store
+        // presence NEVER feeds `needs_context` above: a clean local store emits
+        // setup/cleanup with NO `$.push`/`$.pop` frame, oracle-verified). When a
+        // store component ALSO carries custom-element `$$exports` prop accessors,
+        // the close uses the official PRE-RETURN finalizer slot — `var $$pop =
+        // $.pop($$exports); $$cleanup(); return $$pop;` (the returned object is
+        // captured, the store `$$cleanup()` runs, then the captured value
+        // returns), emitted by the close in `client.rs`. The combination is
+        // SUPPORTED, not fail-closed.
+        let store_subscriptions = classified.store_subscriptions.clone();
+        let has_store_subscriptions = !store_subscriptions.is_empty();
+
         let (module_snippets, instance_snippets) = projection.collect_top_level_snippets();
 
         Ok(ClientModulePlan {
@@ -566,6 +593,8 @@ impl<'a> SupportedClientIr<'a> {
             instance_snippets,
             needs_context,
             uses_props,
+            store_subscriptions,
+            has_store_subscriptions,
             custom_element,
             ce_exports,
             build: projection,

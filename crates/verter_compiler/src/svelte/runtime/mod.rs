@@ -80,6 +80,7 @@ mod host_attr_gate;
 pub mod html;
 mod instance_items;
 pub mod ir;
+mod legacy_surface;
 mod lower_component;
 mod naming;
 mod needs_context;
@@ -94,6 +95,7 @@ mod rune_scan;
 mod script_body_parse;
 mod state_prep;
 mod state_scan;
+mod store_subscriptions;
 pub mod topology;
 mod unsupported;
 mod whitespace;
@@ -444,11 +446,24 @@ pub fn lower_parsed_svelte_to_ir<'a>(
     let explicit_runes = opts
         .runes
         .or_else(|| forced_runes_option(source, &parsed.template));
+    // Classify BOTH slots' static imports ONCE — the single import authority
+    // (the binding preparation below and the surface classifier consume the
+    // SAME carrier). Hoisted above the mode inference because the `$store`
+    // CANDIDATE set — declarations + admitted import locals — feeds the
+    // rune-vs-store-accessor exemption the mode detector consults: official
+    // DELETES store-classified names from the reference set BEFORE the
+    // `some(is_rune)` inference, so `const state = writable(0)` + a `$state`
+    // reference stays LEGACY mode.
+    let script_imports =
+        client_surface_imports::classify_script_imports(module_source, instance_source);
+    let store_candidates =
+        store_subscriptions::store_base_candidates(alloc, instance_source, &script_imports);
+    let store_exempt = store_subscriptions::rune_root_accessor_exemptions(&store_candidates);
     let script_runes = instance_source
-        .map(|t| script_uses_runes(alloc, t))
+        .map(|t| script_uses_runes(alloc, t, &store_exempt))
         .unwrap_or(false)
         || module_source
-            .map(|t| script_uses_runes(alloc, t))
+            .map(|t| script_uses_runes(alloc, t, &store_exempt))
             .unwrap_or(false);
 
     // A MALFORMED instance / module script (a non-empty OXC error set, not just a
@@ -527,13 +542,12 @@ pub fn lower_parsed_svelte_to_ir<'a>(
         &mut scopes,
         &mut bindings,
     );
-    // Classify BOTH slots' static imports ONCE — the single import authority. The
-    // binding preparation below consumes the admitted carriers; the surface
-    // classifier later propagates a retained slot refusal off this SAME carrier (a
-    // refused slot declares no bindings and the component fails closed before any
-    // binding is consumed).
-    let script_imports =
-        client_surface_imports::classify_script_imports(module_source, instance_source);
+    // The single `ClassifiedScriptImports` carrier was computed BEFORE the mode
+    // inference above; the binding preparation below consumes the admitted
+    // carriers, and the surface classifier later propagates a retained slot
+    // refusal off this SAME carrier (a refused slot declares no bindings and
+    // the component fails closed before any binding is consumed).
+    //
     // Declare every top-level static import local as its typed NON-reactive import
     // binding — a default `.svelte`-COMPONENT import as `ComponentImport` (so a
     // `<Child/>` static callee RESOLVES to the import and reads emit the bare callee,
@@ -565,6 +579,22 @@ pub fn lower_parsed_svelte_to_ir<'a>(
     state_prep::prepare_plain_local_bindings(
         instance_source,
         alloc,
+        root_scope_id,
+        &mut scopes,
+        &mut bindings,
+    );
+    // Declare one `$store` subscription ACCESSOR binding (`$count`) per declared
+    // candidate base — every top-level instance declaration name with a
+    // non-rune init plus every ADMITTED import local (both slots, read from the
+    // shared carrier), computed ONCE before the mode inference above. The
+    // `$`-namespace is disjoint from every other binding pass, so the order is
+    // immaterial; an unreferenced accessor binding is inert. A `$count`
+    // read/write anywhere then resolves scope-awarely to the store-subscription
+    // kind (a shadowing local of the same `$name` wins; a rune-root-NAMED
+    // accessor over a declared store base — `$state` with `const state =
+    // writable(0)` — resolves as a store accessor, matching official).
+    store_subscriptions::prepare_store_subscription_bindings(
+        &store_candidates,
         root_scope_id,
         &mut scopes,
         &mut bindings,
@@ -651,11 +681,16 @@ pub fn lower_parsed_svelte_to_ir<'a>(
     // directions. Only `$host` is template-inferable here: every other rune
     // name in a template expression without a script rune stays inert for the
     // MODE (their unsupported forms are refused downstream by the rune scan).
-    let template_uses_host_rune = ctx
-        .expressions
-        .all()
-        .iter()
-        .any(|expr| expr.references.iter().any(|r| r.name == "$host"));
+    // A `$host` whose base `host` is a declared store candidate is a STORE
+    // ACCESSOR reference, never a rune — it must not flip the mode (official
+    // deletes store-classified names before the inference; the store
+    // classifier owns its accept/reject downstream).
+    let template_uses_host_rune = !store_exempt.contains("$host")
+        && ctx
+            .expressions
+            .all()
+            .iter()
+            .any(|expr| expr.references.iter().any(|r| r.name == "$host"));
     let runes = explicit_runes.unwrap_or(script_runes || template_uses_host_rune);
     let mode = if runes {
         SvelteMode::Runes

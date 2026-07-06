@@ -54,6 +54,12 @@ use verter_span::Span;
 pub(super) enum ClientEventHandlerShape {
     /// A non-async inline arrow / function expression (rewritten).
     Inline,
+    /// A BARE-identifier handler naming a top-level instance-script `function`
+    /// declaration (`onclick={inc}` / `on:click={inc}`) — passed to the event
+    /// helper by REFERENCE (`$.delegated('click', button, inc)` /
+    /// `$.event('click', button, inc)`), identically in runes and legacy mode
+    /// (oracle-verified against svelte@5.56.3).
+    FunctionReference,
 }
 
 /// Classify an event handler's expression into its accepted [`ClientEventHandlerShape`],
@@ -62,11 +68,17 @@ pub(super) enum ClientEventHandlerShape {
 /// `direct` selects the acceptance breadth: a DIRECT (`$.event`) handler — the
 /// regular-element non-delegated / capture / legacy-modifier surface — admits any
 /// non-async inline arrow / function expression; a DELEGATED (`$.delegated`) handler
-/// keeps the NARROW §1.2 boundary (a nullary `$state`-write arrow only), so the
-/// delegated path is unchanged. An async handler is the experimental-async surface; a
-/// bare identifier / member / call / conditional / other expression is the official
-/// binding-resolution / wrapper-form breadth (not yet supported) and fails closed. The
-/// accepted surface is exactly the surface the committed `events/*` goldens prove.
+/// keeps the NARROW §1.2 boundary (a nullary `$state`-or-`$store`-write arrow only),
+/// so the delegated path stays narrow. A BARE identifier naming a top-level
+/// instance-script `function` declaration (`fn_decl_names`, resolved scope-awarely —
+/// a shadowing template binding is NOT the function) is accepted on BOTH paths as a
+/// [`FunctionReference`](ClientEventHandlerShape::FunctionReference) (official passes
+/// the reference through, identically in runes and legacy mode). An async handler is
+/// the experimental-async surface; every other bare identifier / member / call /
+/// conditional expression is the official binding-resolution / wrapper-form breadth
+/// (not yet supported) and fails closed. The accepted surface is exactly the surface
+/// the committed `events/*` + `stores/*` goldens prove.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn classify_event_handler_shape(
     handler_source: &str,
     event_type: &str,
@@ -75,6 +87,7 @@ pub(super) fn classify_event_handler_shape(
     bindings: &BindingTable,
     scopes: &ScopeGraph,
     direct: bool,
+    fn_decl_names: &rustc_hash::FxHashSet<String>,
 ) -> Result<ClientEventHandlerShape, UnsupportedSvelteRuntimeSurface> {
     let refuse = || UnsupportedSvelteRuntimeSurface::NonDelegatedEvent {
         event_type: event_type.to_string(),
@@ -129,11 +142,27 @@ pub(super) fn classify_event_handler_shape(
             }
             Ok(ClientEventHandlerShape::Inline)
         }
-        // Every other handler shape — a bare identifier (`onfocus={ev}`, which needs the
-        // official `build_event_handler` binding resolution this surface does not own), a
-        // function expression on the delegated path, a member / call / conditional /
-        // sequence — is the official binding-resolution / wrapper-form breadth and is not
-        // yet supported. Fail closed (never emit the raw binding as a handler).
+        // A BARE-identifier handler naming a top-level instance-script `function`
+        // declaration (`onclick={inc}`) — accepted as a FunctionReference and passed
+        // to the event helper by reference, on BOTH the delegated and direct paths
+        // (oracle-verified: `$.delegated('click', button, inc)` /
+        // `$.event('click', button, inc)`, identical in runes and legacy mode). The
+        // resolution is SCOPE-AWARE: an identifier that resolves to ANY binding (an
+        // each item, a snippet param, a signal, an import) is NOT the top-level
+        // function and stays the fail-closed binding-resolution breadth.
+        Expression::Identifier(id) => {
+            let name = id.name.as_str();
+            if bindings.resolve_kind(scopes, scope, name).is_none() && fn_decl_names.contains(name)
+            {
+                Ok(ClientEventHandlerShape::FunctionReference)
+            } else {
+                Err(refuse())
+            }
+        }
+        // Every other handler shape — a member / call / conditional / sequence, or a
+        // function expression on the delegated path — is the official
+        // binding-resolution / wrapper-form breadth and is not yet supported. Fail
+        // closed (never emit the raw binding as a handler).
         _ => Err(refuse()),
     }
 }
@@ -262,10 +291,11 @@ fn expr_is_state_write(
             )
         )
     } else {
-        // A bare-identifier REASSIGNMENT of a signal (`c = 1`, `o = { a: 2 }`) OR
-        // of a `$props()` PROP (plain or bindable — the write makes the prop a
-        // PROP SOURCE, lowering through the setter: `a = 1` → `a(1)`, `a++` →
-        // `$.update_prop(a)`).
+        // A bare-identifier REASSIGNMENT of a signal (`c = 1`, `o = { a: 2 }`), of
+        // a `$props()` PROP (plain or bindable — the write makes the prop a PROP
+        // SOURCE, lowering through the setter: `a = 1` → `a(1)`, `a++` →
+        // `$.update_prop(a)`), OR of a `$store` subscription accessor (`$c = 5` →
+        // `$.store_set(c, 5)`, `$c++` → `$.update_store(c, $c())`).
         matches!(
             kind,
             Some(
@@ -273,6 +303,7 @@ fn expr_is_state_write(
                     | BindingRuntimeKind::StateProxy
                     | BindingRuntimeKind::Prop
                     | BindingRuntimeKind::BindableProp
+                    | BindingRuntimeKind::StoreSubscription
             )
         )
     }
@@ -380,6 +411,10 @@ pub(super) enum ClientInterpolationShape {
     /// at any NON-import binding, stay the fail-closed complex-interpolation
     /// breadth.
     ImportedMemberRead,
+    /// `{$count}` where `$count` resolves to a `$store` auto-subscription
+    /// accessor binding — read as the accessor CALL (`$count()`) inside the
+    /// region's `$.template_effect`, never `$.get` and never a static fold.
+    StoreRead,
 }
 
 /// Classify a reactive interpolation's expression into its accepted
@@ -470,6 +505,11 @@ pub(super) fn classify_interpolation_shape(
             | BindingRuntimeKind::ImportedValue
             | BindingRuntimeKind::ComponentImport,
         ) => Ok(ClientInterpolationShape::PlainLiveIdentRead),
+        // A `$store` auto-subscription read (`{$count}`) → the accessor CALL
+        // (`$count()`) inside the region's `$.template_effect`. This arm is the
+        // fix for the latent misclassification where a declared-store `$count`
+        // fell through to the static-interpolation refusal below.
+        Some(BindingRuntimeKind::StoreSubscription) => Ok(ClientInterpolationShape::StoreRead),
         // A bare identifier resolving to a NON-reactive binding (a plain local, a
         // module const, a never-reassigned `$state` lowered to PlainLet) is a
         // compile-time constant — official static-folds it to a `textContent` write,
@@ -648,6 +688,12 @@ pub(super) enum BindGetSetForm {
     /// The get/set are the two user-supplied expressions of a `{get, set}` pair,
     /// passed DIRECTLY to the helper (already signal-rewritten, no thunk wrapper).
     FunctionPair,
+    /// The target is a `$store` subscription accessor (`bind:value={$c}`): the
+    /// GETTER is the BARE accessor thunk itself (`$c` — already a zero-arg
+    /// function, official passes it unwrapped) and the SETTER the complete
+    /// `($$value) => $.store_set(c, $$value)` closure — both passed DIRECTLY to
+    /// the helper, no additional thunk wrapper.
+    StoreAccessor,
 }
 
 /// Classify a supported `bind:` directive into its accepted [`ClientBindShape`], or
@@ -894,6 +940,16 @@ fn classify_dom_value_bind(
             let Some(root_name) = &fact.root_ident else {
                 return Err(refuse());
             };
+            // A `$store` subscription target (`bind:value={$c}`): the getter is the
+            // BARE accessor thunk and the setter the `($$value) =>
+            // $.store_set(c, $$value)` closure, both passed directly
+            // (oracle-verified against svelte@5.56.3).
+            if matches!(
+                bindings.resolve_kind(scopes, scope, root_name),
+                Some(BindingRuntimeKind::StoreSubscription)
+            ) {
+                return accept(BindGetSetForm::StoreAccessor);
+            }
             if bind_root_is_writable_target(bindings, scopes, scope, root_name) {
                 accept(BindGetSetForm::TargetLvalue)
             } else {

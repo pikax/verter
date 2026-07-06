@@ -1,0 +1,101 @@
+{
+  "slug": "stores/store_multiple.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/store",
+      "kind": "named",
+      "names": [
+        "writable"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "store_multiple",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "push",
+    "store_get",
+    "store_get",
+    "setup_stores",
+    "init",
+    "first_child",
+    "child",
+    "reset",
+    "sibling",
+    "child",
+    "reset",
+    "template_effect",
+    "set_text",
+    "set_text",
+    "append",
+    "pop"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "first_child",
+    "from_html",
+    "init",
+    "pop",
+    "push",
+    "reset",
+    "set_text",
+    "setup_stores",
+    "sibling",
+    "store_get",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "push": 1,
+    "store_get": 2,
+    "setup_stores": 1,
+    "init": 1,
+    "first_child": 1,
+    "child": 2,
+    "reset": 2,
+    "sibling": 1,
+    "template_effect": 1,
+    "set_text": 2,
+    "append": 1,
+    "pop": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<p> </p> <p> </p>",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; import {writable} from 'svelte/store'; var root = $.from_html(`<p> </p> <p> </p>`, 1); export default function store_multiple($$anchor, $$props) {$.push($$props, false); const $a = () => $.store_get(a, '$a', $$stores); const $b = () => $.store_get(b, '$b', $$stores); const [$$stores, $$cleanup] = $.setup_stores(); const a = writable(1); const b = writable(2); $.init(); var fragment = root(); var p = $.first_child(fragment); var text = $.child(p, true); $.reset(p); var p_1 = $.sibling(p, 2); var text_1 = $.child(p_1, true); $.reset(p_1); $.template_effect(() => {$.set_text(text, $a()); $.set_text(text_1, $b());}); $.append($$anchor, fragment); $.pop(); $$cleanup();}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

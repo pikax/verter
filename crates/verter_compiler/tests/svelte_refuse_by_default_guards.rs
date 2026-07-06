@@ -598,3 +598,77 @@ fn guard7_discriminates_an_accept_then_drop_static_attr_arm() {
         "the guard must recognize the route-through-finite-allowlist shape"
     );
 }
+
+// ── Guard: the D-47 import-local discharge — no raw ImportDeclaration.specifiers walk ──
+
+/// The verdict predicate (shared by the guard + its discrimination self-test):
+/// does `code` (comments stripped) contain a RAW OXC `ImportDeclaration` /
+/// `.specifiers` import-local walk? The D-47 discharge routes every import LOCAL
+/// through the SHARED `ClassifiedScriptImports` carrier
+/// (`script_imports.admitted(slot)` + `import_binding_entries(import)`),
+/// classified ONCE at IR construction — never a per-file re-walk of the OXC
+/// `Statement::ImportDeclaration` node's `.specifiers`. Restoring the raw walk
+/// re-introduces the OXC import-node reference (`ImportDeclaration`) and/or the
+/// specifier iteration (`specifiers`) — either is the banned shape (the two
+/// files own NO other legitimate use of the raw import node, so any reference is
+/// the dual-path regression).
+fn contains_raw_import_local_walk(code: &str) -> bool {
+    let stripped = strip_comments(code);
+    stripped.contains("ImportDeclaration") || stripped.contains("specifiers")
+}
+
+#[test]
+fn no_raw_import_specifier_walk_in_import_local_discharge_files() {
+    // The two files whose D-47 discharge reads import LOCALS from the shared
+    // `ClassifiedScriptImports` carrier — neither may re-walk the raw OXC import
+    // node's specifiers (a second import-classification path is the D-47 defect).
+    for name in ["needs_context.rs", "reactive_analysis.rs"] {
+        let code = read_runtime_file(name);
+        assert!(
+            !contains_raw_import_local_walk(&code),
+            "GUARD (D-47 discharge): `{name}` must NOT re-walk the raw OXC \
+             `Statement::ImportDeclaration` node / its `.specifiers` to collect import \
+             LOCALS — the import-local half of the unsafe-root / reactive-root set comes \
+             from the shared `ClassifiedScriptImports` carrier \
+             (`script_imports.admitted(slot)` + `import_binding_entries(import)`), \
+             classified ONCE at IR construction. A raw specifier re-walk is a second \
+             import-classification path (the exact D-47 dual-path defect); route through \
+             the carrier instead."
+        );
+    }
+    // POSITIVE (non-vacuous): both files DO consume the shared carrier — the guard
+    // is guarding a LIVE discharge, not an absent one.
+    for name in ["needs_context.rs", "reactive_analysis.rs"] {
+        let code = read_runtime_file(name);
+        assert!(
+            code.contains("ClassifiedScriptImports"),
+            "{name} must consume the shared `ClassifiedScriptImports` carrier (the D-47 \
+             discharge); the guard would be vacuous if the carrier route were gone"
+        );
+    }
+}
+
+#[test]
+fn import_local_discharge_guard_discriminates_a_restored_specifier_walk() {
+    // DISCRIMINATION on inline strings: a restored raw `ImportDeclaration`
+    // specifier walk MUST trip the predicate; the shared-carrier route MUST NOT.
+    let restored_walk = "if let Statement::ImportDeclaration(decl) = stmt { for spec in decl.specifiers.iter() { unsafe_roots.insert(spec.local.name.to_string()); } }";
+    assert!(
+        contains_raw_import_local_walk(restored_walk),
+        "the guard must FLAG a restored raw `ImportDeclaration`/`.specifiers` import-local walk"
+    );
+    let carrier_route = "for import in script_imports.admitted(slot) { for (local, _kind) in import_binding_entries(import) { unsafe_roots.insert(local.to_string()); } }";
+    assert!(
+        !contains_raw_import_local_walk(carrier_route),
+        "the guard must NOT flag the shared-carrier import-local route"
+    );
+    // The comment-strip discrimination: a banned token appearing ONLY in a doc
+    // comment (`/// … ImportDeclaration … .specifiers …`) must NOT trip the guard —
+    // it keys on real code, so the existing doc prose stays green.
+    let comment_only =
+        "// never an independent raw-AST ImportDeclaration re-walk of .specifiers\nlet x = 1;";
+    assert!(
+        !contains_raw_import_local_walk(comment_only),
+        "the guard must ignore a banned token that appears ONLY in a comment"
+    );
+}

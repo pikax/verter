@@ -57,19 +57,39 @@ pub(super) const RUNE_ROOT_NAMES: &[&str] = &[
 /// stays in LEGACY mode. The reference need NOT be a call (`const h = $host;` is a
 /// runes-mode marker — though `$host` without parentheses is a separate official
 /// error the runtime backend raises, the MODE is still runes).
+///
+/// A STORE-EXEMPT accessor name (`$state` whose base `state` is a declared
+/// store candidate — see
+/// [`rune_root_accessor_exemptions`](super::store_subscriptions::rune_root_accessor_exemptions))
+/// is NOT a rune use either: official DELETES store-classified names from the
+/// reference set BEFORE the `some(is_rune)` inference, so `const state =
+/// writable(0)` + a `$state` reference stays LEGACY mode.
 #[derive(Default)]
 pub(super) struct ScopeAwareRuneDetector {
     /// Whether an unresolved rune-name reference was seen.
     used: bool,
     /// The active lexical-scope shadow stack.
     scopes: ShadowStack,
+    /// The store-exempt accessor names (never rune uses).
+    store_exempt: FxHashSet<String>,
 }
 
 impl ScopeAwareRuneDetector {
-    /// Whether `name` is a rune name that is NOT shadowed by a local binding (so
-    /// the reference counts as a rune use, forcing runes mode).
+    /// A detector whose store-exempt accessor set is `store_exempt`.
+    pub(super) fn with_store_exemptions(store_exempt: FxHashSet<String>) -> Self {
+        Self {
+            store_exempt,
+            ..Self::default()
+        }
+    }
+
+    /// Whether `name` is a rune name that is NOT shadowed by a local binding and
+    /// NOT store-exempt (so the reference counts as a rune use, forcing runes
+    /// mode).
     fn is_unshadowed_rune(&self, name: &str) -> bool {
-        RUNE_ROOT_NAMES.contains(&name) && !self.scopes.is_shadowed(name)
+        RUNE_ROOT_NAMES.contains(&name)
+            && !self.store_exempt.contains(name)
+            && !self.scopes.is_shadowed(name)
     }
 
     /// Whether the detector observed any unresolved rune reference.
@@ -415,6 +435,14 @@ pub(super) struct UnsupportedRuneScan {
     /// wrap stays a value position too). `false` for the instance program, whose
     /// top-level statements are real.
     synthetic_program_stmts: bool,
+    /// The STORE-EXEMPT accessor names (`$state` whose base `state` is a
+    /// declared store candidate — see
+    /// [`rune_root_accessor_exemptions`](super::store_subscriptions::rune_root_accessor_exemptions)):
+    /// such a reference is a STORE ACCESSOR, not a rune, so the position /
+    /// member / call classification skips it entirely (the scope-aware store
+    /// classifier owns its accept/reject decision — a base-shadowed reference
+    /// rejects there as the official `store_invalid_scoped_subscription`).
+    store_exempt: FxHashSet<String>,
 }
 
 impl UnsupportedRuneScan {
@@ -433,6 +461,7 @@ impl UnsupportedRuneScan {
         program: &Program<'_>,
         is_instance: bool,
         custom_element_active: bool,
+        store_exempt: FxHashSet<String>,
     ) -> Self {
         let props_rune_spans = supported_props_rune_call_spans(program, is_instance);
         Self {
@@ -447,6 +476,7 @@ impl UnsupportedRuneScan {
             custom_element_active,
             uses_host: false,
             first_host_span: None,
+            store_exempt,
         }
     }
 
@@ -466,9 +496,13 @@ impl UnsupportedRuneScan {
         self.first_host_span
     }
 
-    /// Whether `name` is an unshadowed rune root reference.
+    /// Whether `name` is an unshadowed rune root reference. A STORE-EXEMPT
+    /// accessor name (its base is a declared store candidate) is a store
+    /// accessor, never a rune — the scan skips it wholesale.
     fn is_unshadowed_rune(&self, name: &str) -> bool {
-        RUNE_ROOT_NAMES.contains(&name) && !self.scopes.is_shadowed(name)
+        RUNE_ROOT_NAMES.contains(&name)
+            && !self.store_exempt.contains(name)
+            && !self.scopes.is_shadowed(name)
     }
 
     /// Record `surface` as the first unsupported form (later finds are ignored).

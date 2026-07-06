@@ -1,0 +1,83 @@
+{
+  "slug": "stores/store_rune_named_state_runes.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/store",
+      "kind": "named",
+      "names": [
+        "writable"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "store_rune_named_state_runes",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "push",
+    "store_get",
+    "setup_stores",
+    "child",
+    "reset",
+    "template_effect",
+    "set_text",
+    "append",
+    "pop"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "from_html",
+    "pop",
+    "push",
+    "reset",
+    "set_text",
+    "setup_stores",
+    "store_get",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "push": 1,
+    "store_get": 1,
+    "setup_stores": 1,
+    "child": 1,
+    "reset": 1,
+    "template_effect": 1,
+    "set_text": 1,
+    "append": 1,
+    "pop": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<p> </p>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; import {writable} from 'svelte/store'; var root = $.from_html(`<p> </p>`); export default function store_rune_named_state_runes($$anchor, $$props) {$.push($$props, true); const $state = () => $.store_get(state, '$state', $$stores); const [$$stores, $$cleanup] = $.setup_stores(); const state = writable(0); var p = root(); var text = $.child(p, true); $.reset(p); $.template_effect(() => $.set_text(text, $state())); $.append($$anchor, p); $.pop(); $$cleanup();}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

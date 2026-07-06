@@ -370,7 +370,11 @@ impl<'a> ClientEmitter<'a> {
                     BindGetSetForm::TargetLvalue => {
                         (format!("($$value) => {setter}"), format!("() => {getter}"))
                     }
-                    BindGetSetForm::FunctionPair => (setter.to_string(), getter.to_string()),
+                    // A function-pair / store-accessor bind passes the plan's
+                    // COMPLETE get/set expressions directly (no thunk wrapper).
+                    BindGetSetForm::FunctionPair | BindGetSetForm::StoreAccessor => {
+                        (setter.to_string(), getter.to_string())
+                    }
                 };
                 format!("$.bind_this({var}, {set_tok}, {get_tok})")
             }
@@ -433,7 +437,13 @@ impl<'a> ClientEmitter<'a> {
             BindGetSetForm::TargetLvalue => {
                 (format!("() => {getter}"), format!("($$value) => {setter}"))
             }
-            BindGetSetForm::FunctionPair => (getter.to_string(), setter.to_string()),
+            // A function-pair / store-accessor bind passes the plan's COMPLETE
+            // get/set expressions directly (no thunk wrapper): the store getter
+            // is the bare accessor thunk `$c`, the setter the complete
+            // `($$value) => $.store_set(c, $$value)` closure.
+            BindGetSetForm::FunctionPair | BindGetSetForm::StoreAccessor => {
+                (getter.to_string(), setter.to_string())
+            }
         };
         match routing.helper {
             RuntimeHelper::Value => {

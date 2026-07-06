@@ -852,6 +852,7 @@ impl<'a> SupportedClientIr<'a> {
             self.ir.analysis.scripts.module_source,
             &template_expr_sources,
             &render_callee_sources,
+            &self.ir.analysis.script_imports,
         )
     }
 }

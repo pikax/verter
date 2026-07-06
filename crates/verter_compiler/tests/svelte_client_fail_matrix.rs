@@ -8,7 +8,7 @@
 //! diagnostic. Adding a row is trivial — append a `(name, source, code)` tuple.
 //!
 //! Most rows carry a `$state` so the component is in RUNES mode (a runeless
-//! component fails closed at the legacy-mode gate first, before the surface under
+//! component routes through the legacy per-surface dispatch first, before the surface under
 //! test is reached).
 
 use oxc_allocator::Allocator;
@@ -1260,11 +1260,6 @@ const FAIL_MATRIX: &[FailRow] = &[
         code: "svelte-runtime-unsupported-non-delegated-event",
     },
     FailRow {
-        name: "event_local_function_ident",
-        source: "<script>let c = $state(0); function inc() { c++; }</script>\n<button onclick={inc}>{c}</button>\n",
-        code: "svelte-runtime-unsupported-non-delegated-event",
-    },
-    FailRow {
         name: "event_arrow_call_body",
         source: "<script>let c = $state(0); function f(x) { return x; }</script>\n<button onclick={() => f(c)}>{c}</button>\n",
         code: "svelte-runtime-unsupported-non-delegated-event",
@@ -1687,7 +1682,7 @@ const FAIL_MATRIX: &[FailRow] = &[
     // A `$host` occurrence in a TEMPLATE expression is a runes-mode indicator by
     // itself (official `metadata.runes === true` for a scriptless template-only
     // `$host()` component), so these RUNELESS forms reach the `$host` gates —
-    // NOT the legacy-mode gate.
+    // NOT the legacy per-surface dispatch.
     FailRow {
         // A well-formed template `$host()` with NO customElement and NO script:
         // runes mode is inferred FROM the template `$host` reference, and the
@@ -1760,6 +1755,63 @@ const FAIL_MATRIX: &[FailRow] = &[
         source: "<svelte:options customElement=\"x-m\" />\n<script>let c = $state(0);</script>\n{@render $host().snip(...[1])}\n<button onclick={() => c++}>{c}</button>\n",
         code: "svelte-runtime-unsupported-component",
     },
+    // ── `$store` SCOPED subscriptions — official `store_invalid_scoped_subscription` ──
+    // A `$NAME` reference whose BASE resolves in the expression's real lexical
+    // scope to a NON-top-level binding — a `{#each as x}` alias, a `{#snippet}`
+    // parameter, an `{#await then x}` binding, a script function parameter —
+    // is an official COMPILE ERROR ("Cannot subscribe to stores that are not
+    // declared at the top level of the component"), NEVER a subscription over
+    // the shadowed top-level store. Each row pairs a top-level store base with
+    // a same-name template-block / script-local binding; the scope-aware store
+    // classifier rejects it (fail-closed, matching the official reject).
+    FailRow {
+        // `{#each items as x}{$x}` with a top-level `const x = writable(1)`:
+        // the each ALIAS owns `x` inside the body — official rejects.
+        name: "store_scoped_subscription_each_alias_shadow",
+        source: "<script>import { writable } from 'svelte/store'; const x = writable(1); let { items } = $props();</script>\n{#each items as x}<p>{$x}</p>{/each}\n",
+        code: "svelte-runtime-unsupported-store-scoped-subscription",
+    },
+    FailRow {
+        // `{#snippet snip(x)}{$x}` — the snippet PARAMETER owns `x`.
+        name: "store_scoped_subscription_snippet_param_shadow",
+        source: "<script>import { writable } from 'svelte/store'; const x = writable(1);</script>\n{#snippet snip(x)}<p>{$x}</p>{/snippet}\n{@render snip(2)}\n",
+        code: "svelte-runtime-unsupported-store-scoped-subscription",
+    },
+    FailRow {
+        // `{#await p then x}{$x}` — the await THEN binding owns `x`.
+        name: "store_scoped_subscription_await_then_shadow",
+        source: "<script>import { writable } from 'svelte/store'; const x = writable(1); let { p } = $props();</script>\n{#await p then x}<p>{$x}</p>{/await}\n",
+        code: "svelte-runtime-unsupported-store-scoped-subscription",
+    },
+    FailRow {
+        // A SCRIPT-side base shadow: `function f(x) { return $x; }` — the
+        // function parameter owns `x` at the `$x` reference (probe-verified:
+        // official rejects the scoped subscription in script positions too).
+        name: "store_scoped_subscription_script_fn_param_shadow",
+        source: "<script>import { writable } from 'svelte/store'; const x = writable(1); function f(x) { return $x; }</script>\n<button onclick={f}>go</button>\n",
+        code: "svelte-runtime-unsupported-store-scoped-subscription",
+    },
+    FailRow {
+        // A TEMPLATE-EXPRESSION-internal base shadow: `onclick={(x) => $x}` —
+        // the arrow parameter INSIDE the analyzed expression owns `x` at the
+        // `$x` read (the per-reference base-shadow fact rejects it).
+        name: "store_scoped_subscription_template_arrow_param_shadow",
+        source: "<script>import { writable } from 'svelte/store'; const x = writable(1);</script>\n<button onclick={(x) => $x}>go</button>\n",
+        code: "svelte-runtime-unsupported-store-scoped-subscription",
+    },
+    // ── rune-USAGE × store-SUBSCRIPTION name collision — fail closed ──────
+    // A rune-root-NAMED store accessor (`$state` over `const state = writable(0)`)
+    // subscribed in the template WHILE the SAME rune root has live admitted usage
+    // (`let n = $state(1)`) is a DIVERGENT-mode case: official treats EVERY
+    // `$state` reference as the store accessor and compiles LEGACY
+    // (`let n = $state()(1);`), a lowering this backend does not implement. It
+    // must fail closed with the precise instance-script-item diagnostic rather
+    // than mis-emit a rune-lowered (`$.state`/`$.mutable_source`) module.
+    FailRow {
+        name: "store_rune_named_state_accessor_collides_with_state_rune_usage",
+        source: "<script>import { writable } from 'svelte/store'; const state = writable(0); let n = $state(1);</script>\n<p>{$state}</p>\n<button onclick={() => n++}>{n}</button>\n",
+        code: "svelte-runtime-unsupported-instance-script-item",
+    },
 ];
 
 #[test]
@@ -1829,6 +1881,7 @@ fn fail_matrix_row_codes_are_known_unsupported_diagnostics() {
         "svelte-runtime-unsupported-instance-script-item",
         "svelte-runtime-unsupported-magic-identifier",
         "svelte-runtime-unsupported-paragraph-autoclose",
+        "svelte-runtime-unsupported-store-scoped-subscription",
     ];
     for row in FAIL_MATRIX {
         assert!(
@@ -2951,9 +3004,26 @@ fn fail_matrix_covers_every_documented_sub_shape() {
     // `imports/*` oracle goldens): `instance_import` (every static import form is
     // admitted) and `bind_value_import_member` (a member of an import is an accepted
     // bind lvalue with the context frame) — 217 → 215.
+    // The `$store` auto-subscription surface removed ONE row (now
+    // accepted-positive with `stores/*` oracle goldens): `event_local_function_ident`
+    // (a bare-identifier handler naming a top-level function declaration is passed
+    // by reference — `$.delegated('click', button, inc)` — with the function body
+    // rewritten through the shared rewriter) — 215 → 214.
+    // The SCOPE-AWARE store-subscription base resolution adds FIVE rows — the
+    // official `store_invalid_scoped_subscription` reject class (a `$NAME`
+    // whose base resolves to a NON-top-level binding), one per shadowing
+    // surface: the `{#each as x}` alias, the `{#snippet}` parameter, the
+    // `{#await then x}` binding, a script function parameter, and a
+    // template-expression arrow parameter — 214 → 219.
+    // The rune-USAGE × store-SUBSCRIPTION name-collision refusal adds ONE row:
+    // a rune-root-named store accessor (`$state` over `const state = writable(0)`)
+    // subscribed WHILE the same rune root has live admitted usage
+    // (`let n = $state(1)`) is a divergent-mode case (official compiles LEGACY to
+    // the store accessor `$state()(1)`) that fails closed with the precise
+    // instance-script-item diagnostic — 219 → 220.
     assert_eq!(
         FAIL_MATRIX.len(),
-        215,
+        220,
         "the fail matrix pins 178 fail-closed rows — one documented \
          unsupported-feature sub-shape per row, EXCEPT the D-43 custom-element-host / \
          native-slotting rows, which are REPRESENTATIVE smoke probes for that \

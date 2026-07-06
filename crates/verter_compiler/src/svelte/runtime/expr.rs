@@ -108,6 +108,15 @@ pub enum BindingRuntimeKind {
     /// template read joins the region's `$.template_effect` because official
     /// cannot static-fold a call-init const.
     PropsIdConst,
+    /// A `$store` auto-subscription ACCESSOR binding (`$count` over a declared
+    /// base `count` — a top-level declaration or an admitted import local, with
+    /// NO import-source/type gate: a hand-rolled local `{subscribe, set}`
+    /// factory subscribes identically to an imported `writable`). Reads lower
+    /// to the accessor CALL (`$count()` — the `const $count = () =>
+    /// $.store_get(count, '$count', $$stores);` thunk), never `$.get`; writes
+    /// lower through the store helpers (`$c = v` → `$.store_set(c, v)`, `$c++`
+    /// → `$.update_store(c, $c())`, `++$c` → `$.update_pre_store(c, $c())`).
+    StoreSubscription,
 }
 
 /// Whether a binding kind is an IMPORTED local (a `.svelte`-component default or any
@@ -509,6 +518,15 @@ pub struct ExprReference {
     /// SYNCHRONOUS reactive reads — `onclick={() => x}` is a plain prop init (`has_state =
     /// false`), while `b={x}` / `depth={depth - 1}` are reactive (a getter / derived).
     pub in_function: bool,
+    /// For a `$`-prefixed (non-`$$`) reference ONLY: whether its store BASE name
+    /// (the name minus the `$`) is bound by an EXPRESSION-LOCAL scope at the
+    /// reference site (`onclick={(x) => $x}` — the arrow param owns `x` where
+    /// `$x` is read). The scope-aware store classifier consumes this to reject
+    /// the official `store_invalid_scoped_subscription` class for shadows the
+    /// expression itself introduces (the enclosing-template-scope shadows are
+    /// resolved through `AnalyzedExpr::scope` + the shared `ScopeGraph`).
+    /// Always `false` for a non-`$`-prefixed / `$$`-prefixed name.
+    pub store_base_locally_bound: bool,
 }
 
 /// How a free identifier is referenced inside a template expression.
@@ -2244,6 +2262,17 @@ impl ExprReferenceCollector {
         self.fn_depth > 0
     }
 
+    /// The [`ExprReference::store_base_locally_bound`] fact for `name` at the
+    /// CURRENT scope stack: `name` is a `$`-prefixed (non-`$$`) identifier whose
+    /// store BASE (`name` minus the `$`) is bound by an expression-local frame.
+    fn store_base_locally_bound(&self, name: &str) -> bool {
+        let bytes = name.as_bytes();
+        bytes.first() == Some(&b'$')
+            && bytes.len() > 1
+            && bytes.get(1) != Some(&b'$')
+            && self.is_local(&name[1..])
+    }
+
     /// Push the DEEP-MUTATION write fact for a member-rooted mutation target:
     /// `object` (the member target's `.object`) is ROOT-WALKED to its leftmost
     /// identifier through static / computed / private member links (the shared
@@ -2261,10 +2290,12 @@ impl ExprReferenceCollector {
             return;
         }
         let in_function = self.in_function();
+        let store_base_locally_bound = self.store_base_locally_bound(&name);
         self.refs.push(ExprReference {
             name,
             kind: ExprRefKind::DeepMutate,
             in_function,
+            store_base_locally_bound,
         });
     }
 }
@@ -2363,6 +2394,7 @@ impl<'a> Visit<'a> for ExprReferenceCollector {
                             name: name.clone(),
                             kind: ExprRefKind::Reassign,
                             in_function,
+                            store_base_locally_bound: self.store_base_locally_bound(name),
                         });
                     }
                 }
@@ -2412,10 +2444,12 @@ impl<'a> Visit<'a> for ExprReferenceCollector {
                 if let Some(name) = simple_target_wrapped_ident(other) {
                     if !self.is_local(name) {
                         let in_function = self.in_function();
+                        let store_base_locally_bound = self.store_base_locally_bound(name);
                         self.refs.push(ExprReference {
                             name: name.to_string(),
                             kind: ExprRefKind::Reassign,
                             in_function,
+                            store_base_locally_bound,
                         });
                     }
                 }
@@ -2428,10 +2462,12 @@ impl<'a> Visit<'a> for ExprReferenceCollector {
         let name = it.name.as_str();
         if !self.is_local(name) {
             let in_function = self.in_function();
+            let store_base_locally_bound = self.store_base_locally_bound(name);
             self.refs.push(ExprReference {
                 name: name.to_string(),
                 kind: ExprRefKind::Read,
                 in_function,
+                store_base_locally_bound,
             });
         }
         walk::walk_identifier_reference(self, it);

@@ -4568,7 +4568,7 @@ fn bind_value_plain_local_ident_emits_plain_ident_lvalue() {
     // official emits `$.bind_value(input, () => v, ($$value) => v = $$value)` — plain
     // read/write closures, NOT `$.get`/`$.set`. RED against the signal-only classifier.
     // (A trailing `$state` keeps the component in RUNES mode so the bind classifier is
-    // reached — a runeless component fails at the legacy-mode gate first.)
+    // reached — a runeless component routes through the legacy per-surface dispatch first.)
     let js = emit(
         "<script>let v = \"x\"; let c = $state(0);</script>\n<input bind:value={v} />\n<button onclick={() => c++}>{c}</button>\n",
         "App.svelte",
@@ -5694,7 +5694,7 @@ fn component_dotted_callee_fails_closed() {
     // a likely-undefined member access — emitting `Foo.Bar($$anchor, …)` is wrong. This is
     // the DISCRIMINATOR vs `component_emits_a_direct_call`: same admitted `Foo` import, but
     // the dotted tag must refuse where the bare `<Foo/>` emits. The `$props()` rune forces
-    // runes mode so the fixture reaches the component projection (not the legacy-mode gate).
+    // runes mode so the fixture reaches the component projection (not the legacy dispatch).
     assert_fail_closed(
         "<script>import Foo from './Foo.svelte'; let { p } = $props();</script>\n<Foo.Bar />\n",
         |s| {
@@ -7450,7 +7450,7 @@ fn regular_element_uppercase_static_lone_class_pins_fail_closed() {
     // as debt-ledger row D-37 (docs/arch/svelte-native-compiler-plan.md). This test
     // pins the current refusal and MUST fail (go RED — start accepting) when that
     // convergence lands. (The fixture carries a rune so mode inference lands on runes
-    // mode; a script-less carrier refuses earlier as the unrelated LegacyMode gate.)
+    // mode; a script-less carrier is legacy mode, whose per-surface dispatch owns it.)
     let result = emit_result("<script>let k = $state(0);</script>\n<div CLASS=\"card\">hi</div>\n");
     assert!(
         matches!(
@@ -9603,11 +9603,13 @@ fn state_raw_emits_signal_no_proxy() {
 }
 
 #[test]
-fn legacy_mode_fails_closed() {
-    // A non-runes component (no rune calls) is legacy mode.
+fn legacy_export_prop_fails_closed_per_surface() {
+    // A non-runes component with an instance `export` is the legacy PROP surface
+    // — refused with the NARROW per-surface diagnostic (the blanket legacy-mode
+    // refusal is gone; a store-only legacy component compiles).
     assert_fail_closed(
         "<script>export let label;</script>\n<p>{label}</p>\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::LegacyMode { .. }),
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::LegacyExportProp { .. }),
     );
 }
 
@@ -12070,7 +12072,7 @@ fn module_script_non_import_item_fails_closed_module_script_item() {
     // retired blanket script-import demotion). Covers a module `$state` /
     // `$derived` / `$props()` and a rune-free module body; an instance `$state`
     // keeps the component runes-mode (so the refusal is the module-item gate, not
-    // the legacy-mode gate).
+    // the legacy per-surface dispatch).
     for module_body in [
         "let x=$state(0)",
         "let x=$state(0); let y=$derived(x)",
@@ -12204,7 +12206,7 @@ fn non_rune_const_local_fails_closed_as_instance_script_item() {
     // (construct `const declaration`). RED against the pre-restructure tree (which
     // emitted `const STEP = 2;` verbatim). The supported `$state` is the rune that keeps
     // the component in runes mode (so the surface under test is the `const`, not the
-    // legacy-mode gate).
+    // legacy per-surface dispatch).
     assert_fail_closed(
         "<script>let c = $state(0); const STEP = 2;</script>\n<button onclick={() => c++}>{c}</button>\n",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::InstanceScriptItem { construct, .. } if *construct == "const declaration"),
@@ -22430,4 +22432,550 @@ fn props_logical_default_with_unrewritten_ident_leaf_stays_raw_flag_3() {
         "an unrewritten-ident-leaf logical must not set LAZY:\n{js}"
     );
     assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+// ── `$store` auto-subscriptions: the malformed-sibling / edge matrix ─────────
+//
+// Every accepted store form's malformed / edge sibling has a fail-closed OR
+// correct-behavior discriminating test here (the corpus goldens own the happy
+// paths). Each test asserts BOTH what SHOULD appear and what should NOT.
+
+#[test]
+fn store_push_flag_is_mode_sensitive_and_frame_is_needs_context_driven() {
+    // RUNES + imported store: the frame opens via the EXISTING imported-call
+    // `needs_context` trigger with the RUNES flag — `$.push($$props, true)`,
+    // never `false`.
+    let runes = emit(
+        "<script>import { writable } from 'svelte/store'; const c = writable(0); let n = $state(0);</script>\n<p>{$c}</p>\n<button onclick={() => n++}>{n}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        runes.contains("$.push($$props, true);"),
+        "a runes store component frames with the `true` flag:\n{runes}"
+    );
+    assert!(
+        !runes.contains("$.push($$props, false)"),
+        "a runes component must never push the legacy `false` flag:\n{runes}"
+    );
+    assert!(
+        !runes.contains("$.init()"),
+        "a RUNES framing component emits NO `$.init()` (legacy-frame-only):\n{runes}"
+    );
+
+    // LEGACY + imported store: the same trigger with the LEGACY flag — `false`,
+    // never `true` — plus the legacy-frame `$.init()` after the script items.
+    let legacy = emit(
+        "<script>import { writable } from 'svelte/store'; const c = writable(0);</script>\n<p>{$c}</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        legacy.contains("$.push($$props, false);"),
+        "a legacy store component frames with the `false` flag:\n{legacy}"
+    );
+    assert!(
+        !legacy.contains("$.push($$props, true)"),
+        "a legacy component must never push the runes `true` flag:\n{legacy}"
+    );
+    assert!(
+        legacy.contains("\t$.init();\n"),
+        "a LEGACY framing component emits `$.init()`:\n{legacy}"
+    );
+    assert!(
+        legacy.contains("$.pop();\n\t$$cleanup();"),
+        "the `$$cleanup()` finalizer runs AFTER `$.pop()` when a frame exists:\n{legacy}"
+    );
+
+    // CLEAN LOCAL store (object-literal factory, no `new`, no imported call):
+    // setup/cleanup WITHOUT any frame — store presence never opens the frame.
+    let local = emit(
+        "<script>function w(v) { const subs = []; return { subscribe(f) { subs.push(f); f(v); return () => {}; } }; } const c = w(0);</script>\n<p>{$c}</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        local.contains("const [$$stores, $$cleanup] = $.setup_stores();")
+            && local.contains("$$cleanup();"),
+        "a clean local store still emits setup_stores + $$cleanup:\n{local}"
+    );
+    assert!(
+        !local.contains("$.push(") && !local.contains("$.pop("),
+        "a clean local store must NOT open the component frame:\n{local}"
+    );
+    assert!(
+        !local.contains("$$props"),
+        "a clean local store binds NO `$$props` parameter:\n{local}"
+    );
+    assert!(
+        !local.contains("$.init()"),
+        "a frame-less legacy store emits NO `$.init()`:\n{local}"
+    );
+}
+
+#[test]
+fn store_free_component_emits_no_setup_stores_or_cleanup() {
+    // NEGATIVE (`$$cleanup`): a component with NO `$name` subscription emits
+    // neither the registry setup nor the finalizer.
+    let js = emit(
+        "<script>let n = $state(0);</script>\n<button onclick={() => n++}>{n}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        !js.contains("setup_stores") && !js.contains("$$cleanup") && !js.contains("store_get"),
+        "a store-free component carries no store machinery:\n{js}"
+    );
+}
+
+#[test]
+fn store_lowering_is_import_provenance_independent() {
+    // The IMPORTED-writable and the LOCAL-factory store lower through the SAME
+    // accessor/setup shape — provenance changes the FRAME (needs_context), never
+    // the store lowering itself.
+    let imported = emit(
+        "<script>import { writable } from 'svelte/store'; const c = writable(0);</script>\n<p>{$c}</p>\n",
+        "App.svelte",
+    );
+    let local = emit(
+        "<script>function w(v) { const subs = []; return { subscribe(f) { subs.push(f); f(v); return () => {}; } }; } const c = w(0);</script>\n<p>{$c}</p>\n",
+        "App.svelte",
+    );
+    let accessor = "const $c = () => $.store_get(c, '$c', $$stores);";
+    let setup = "const [$$stores, $$cleanup] = $.setup_stores();";
+    for (label, js) in [("imported", &imported), ("local", &local)] {
+        assert!(
+            js.contains(accessor) && js.contains(setup) && js.contains("$.set_text(text, $c())"),
+            "{label} store lowering must use the identical accessor/setup/read shape:\n{js}"
+        );
+    }
+}
+
+#[test]
+fn store_class_local_emits_class_verbatim_and_subscribes() {
+    // A local CLASS-based store (`class S { subscribe(fn){…} } const c = new
+    // S(); {$c}`): the class is admitted into the store-dependency closure
+    // (reached from the `const c = new S()` source of the `$c` subscription) and
+    // emitted VERBATIM; `$c` subscribes identically to any other store. This was
+    // the class-based local store edge (`InstanceScriptItem{construct:"class"}`) —
+    // now SUPPORTED (oracle-verified against svelte@5.56.3: the class frames the
+    // store via `new`).
+    let js = emit(
+        "<script>class S { subscribe(fn) { fn(1); return () => {}; } } const c = new S();</script>\n<p>{$c}</p>\n",
+        "App.svelte",
+    );
+    // The class body is emitted verbatim (its `subscribe` method survives).
+    assert!(
+        js.contains("class S") && js.contains("subscribe(fn)"),
+        "the store class body must emit verbatim:\n{js}"
+    );
+    // `const c = new S();` frames the store instance.
+    assert!(
+        js.contains("const c = new S();"),
+        "the `new S()` store instance must be emitted:\n{js}"
+    );
+    // The `$c` subscription accessor + shared setup + finalizer.
+    assert!(
+        js.contains("const $c = () => $.store_get(c, '$c', $$stores);")
+            && js.contains("const [$$stores, $$cleanup] = $.setup_stores();")
+            && js.contains("$$cleanup();")
+            && js.contains("$.set_text(text, $c())"),
+        "the `$c` subscription/setup/read shape must be present:\n{js}"
+    );
+    // NEGATIVE: the class is a STORE dependency, never a subscribed base — no
+    // `$.store_get(S, …)` accessor is minted for the class name itself, and the
+    // class is NOT rune-lowered (no `$.state` / `$.proxy`).
+    assert!(
+        !js.contains("store_get(S,") && !js.contains("$S"),
+        "the class NAME must not be subscribed as a store:\n{js}"
+    );
+    assert!(
+        !js.contains("$.state(") && !js.contains("$.proxy("),
+        "a store class must not be rune-lowered:\n{js}"
+    );
+    // NEGATIVE: the old fail-closed refusal is gone (emit succeeded above; assert
+    // no residual refusal marker leaked into the module).
+    assert!(
+        !js.contains("svelte-runtime-unsupported"),
+        "no fail-closed refusal residue may appear:\n{js}"
+    );
+}
+
+#[test]
+fn paren_wrapped_handler_fails_closed_pending_ast_classifier() {
+    // `onclick={(inc)}` — official svelte@5.56.3 ACCEPTS a parenthesized-but-plain
+    // handler (classifies `(inc)` as a `FunctionReference`, passes `inc` by
+    // reference: `$.delegated('click', button, inc)`). Verter's
+    // `is_plain_identifier(source)` TEXT-gate rejects the parens, so `inc` is not
+    // recognized as a handler referent and the `function inc()` declaration fails
+    // closed as an out-of-allowlist instance item. This is a SAFE
+    // official-ACCEPTS / Verter-fail-CLOSES completeness gap (no wrong output
+    // ships), tracked as ledger row D-50 (DEFER). When D-50 lands (the classifier
+    // drives the parenthesized-handler decision from the typed AST), this
+    // converts to a positive by-reference golden in the SAME change.
+    let err = emit_result(
+        "<script>let n = $state(0); function inc() { n++; }</script>\n<button onclick={(inc)}>{n}</button>\n",
+    )
+    .expect_err("a paren-wrapped handler must fail closed pending the D-50 AST classifier");
+    match err {
+        ClientCompileError::Unsupported(surface) => {
+            assert_eq!(
+                surface.diagnostic_code(),
+                "svelte-runtime-unsupported-instance-script-item",
+                "the paren-handler refusal must be the instance-script-item gate \
+                 (the un-referenced `function inc` fails closed); got {surface:?}"
+            );
+        }
+        other => panic!("expected an unsupported-surface refusal, got {other:?}"),
+    }
+    // NEGATIVE (no handler mis-emitted): the compile REFUSED, so there is no
+    // module at all — never a `$.delegated('click', …, inc)` by-reference emit for
+    // the parenthesized form. The DISCRIMINATING control: the SAME component with
+    // the parens removed (`onclick={inc}`) DOES compile and pass `inc` by
+    // reference — the parens are the sole difference between accept and refuse.
+    let control = emit(
+        "<script>let n = $state(0); function inc() { n++; }</script>\n<button onclick={inc}>{n}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        control.contains("$.delegated('click', button, inc)"),
+        "the unparenthesized `onclick={{inc}}` control must pass `inc` by reference:\n{control}"
+    );
+}
+
+#[test]
+fn store_class_with_inner_reactive_reference_fails_closed_pending_body_rewrite() {
+    // A local store CLASS whose method body carries an INNER `$`-store reactive
+    // reference (`class S { m() { return $a; } }` over a top-level store `a`):
+    // official svelte@5.56.3 REWRITES the inner `$a` read to `$a()` (and an inner
+    // `$a = v` write to `$.store_set(a, v)`) inside class method/getter/setter
+    // bodies, field initializers, and static blocks. Verter's `StoreClassDecl`
+    // lowering emits the class body VERBATIM and cannot perform that rewrite, so a
+    // class carrying ANY inner `$`-reactive reference fails closed rather than
+    // shipping the raw (un-rewritten) `$a`. SAFE official-ACCEPTS / Verter-fail-
+    // CLOSES completeness gap (no wrong output ships), tracked as ledger row D-52
+    // (DEFER). When D-52 lands (class-body inner-reactive rewriting), this converts
+    // to a positive rewritten-emission golden in the SAME change.
+    let err = emit_result(
+        "<script>import { writable } from 'svelte/store'; const a = writable(1); class S { m() { return $a; } } const c = new S();</script>\n<p>{$c}</p>\n",
+    )
+    .expect_err("a store class with an inner $-reactive reference must fail closed pending the D-52 body rewriter");
+    match err {
+        ClientCompileError::Unsupported(surface) => {
+            assert_eq!(
+                surface.diagnostic_code(),
+                "svelte-runtime-unsupported-instance-script-item",
+                "the inner-reactive class refusal must be the instance-script-item gate; got {surface:?}"
+            );
+            assert!(
+                surface.message().contains("$-reactive"),
+                "the refusal must name the inner $-reactive class construct; got {surface:?}"
+            );
+        }
+        other => panic!("expected an unsupported-surface refusal, got {other:?}"),
+    }
+    // DISCRIMINATING control: the SAME store class WITHOUT the inner `$`-reference
+    // (`class S { subscribe(fn){…} }`) DOES compile — the class body emits verbatim
+    // and `$c` subscribes. The inner `$a` is the SOLE difference between refuse and
+    // accept, and no raw un-rewritten `$a` ships (the inner-reactive form REFUSED
+    // above, so no module was emitted for it).
+    let control = emit(
+        "<script>class S { subscribe(fn) { fn(1); return () => {}; } } const c = new S();</script>\n<p>{$c}</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        control.contains("class S")
+            && control.contains("subscribe(fn)")
+            && control.contains("const $c = () => $.store_get(c, '$c', $$stores);"),
+        "the simple store class control (no inner $-reactive surface) must stay supported:\n{control}"
+    );
+    assert!(
+        !control.contains("svelte-runtime-unsupported"),
+        "the control must not carry a refusal residue:\n{control}"
+    );
+}
+
+#[test]
+fn store_plus_custom_element_uses_pre_return_pop_finalizer_slot() {
+    // A store component that ALSO carries custom-element `$$exports` prop
+    // accessors: official emits the PRE-RETURN finalizer slot `var $$pop =
+    // $.pop($$exports); $$cleanup(); return $$pop;` — the store `$$cleanup()`
+    // runs BEFORE the captured export return. This was the store + custom-element
+    // finalizer edge (refused as `HostOrCustomElement{surface:"store
+    // subscription"}` with a FACTUALLY-WRONG "no post-return finalizer slot"
+    // rationale) — now SUPPORTED
+    // (oracle-verified against svelte@5.56.3).
+    let js = emit(
+        "<svelte:options customElement=\"my-el\" />\n<script>import { writable } from 'svelte/store'; const c = writable(0); let { label } = $props();</script>\n<p>{$c}{label}</p>\n",
+        "App.svelte",
+    );
+    // The PRE-RETURN finalizer slot, in order: capture → cleanup → return.
+    let pop_capture = js.find("var $$pop = $.pop($$exports);");
+    let cleanup = js.find("$$cleanup();");
+    let ret = js.find("return $$pop;");
+    assert!(
+        pop_capture.is_some() && cleanup.is_some() && ret.is_some(),
+        "the store+CE close must emit the `$$pop` capture / `$$cleanup()` / \
+         `return $$pop` finalizer slot:\n{js}"
+    );
+    assert!(
+        pop_capture < cleanup && cleanup < ret,
+        "the finalizer order must be capture → cleanup → return (store `$$cleanup()` \
+         runs BEFORE the captured export return):\n{js}"
+    );
+    // The `$$exports` accessor object + the custom-element registration survive.
+    assert!(
+        js.contains("var $$exports = {")
+            && js.contains("$.create_custom_element(App, { label: {} }")
+            && js.contains("customElements.define('my-el',"),
+        "the custom-element `$$exports`/registration must be present:\n{js}"
+    );
+    // NEGATIVE: the old refusal is gone (emit succeeded) AND the STRANDED shape —
+    // a bare `return $.pop($$exports);` that would leave `$$cleanup()` unreachable
+    // after the return — must NOT be emitted.
+    assert!(
+        !js.contains("return $.pop($$exports);"),
+        "the stranded `return $.pop($$exports);` (unreachable cleanup) must NOT appear:\n{js}"
+    );
+    assert!(
+        !js.contains("svelte-runtime-unsupported"),
+        "no fail-closed refusal residue may appear:\n{js}"
+    );
+}
+
+#[test]
+fn store_write_to_derived_store_lowers_to_store_set() {
+    // A write to a DERIVED store compiles to `$.store_set` (oracle-verified:
+    // official accepts it at compile time — the failure is a runtime concern).
+    let js = emit(
+        "<script>import { writable, derived } from 'svelte/store'; const a = writable(1); const d = derived(a, ($a) => $a * 2); function w() { $d = 9; }</script>\n<button onclick={w}>{$d}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("function w() { $.store_set(d, 9); }"),
+        "a derived-store write lowers to `$.store_set`:\n{js}"
+    );
+    // NEGATIVE: the shadowed `$a` callback param mints NO accessor; only `$d`.
+    assert!(
+        js.contains("const $d = () => $.store_get(d, '$d', $$stores);"),
+        "the `$d` accessor is minted:\n{js}"
+    );
+    assert!(
+        !js.contains("store_get(a,"),
+        "the shadowed `$a` callback param must NOT mint an accessor:\n{js}"
+    );
+}
+
+#[test]
+fn store_accessor_order_is_first_subscription_order_not_declaration_order() {
+    // DISCRIMINATING: `{$b}` before `{$a}` (declarations a-then-b) mints the
+    // `$b` accessor FIRST — reference order, not declaration order
+    // (oracle-verified against svelte@5.56.3).
+    let js = emit(
+        "<script>import { writable } from 'svelte/store'; const a = writable(1); const b = writable(2);</script>\n<p>{$b}</p>\n<p>{$a}</p>\n",
+        "App.svelte",
+    );
+    let b_pos = js
+        .find("const $b = () => $.store_get(b, '$b', $$stores);")
+        .expect("the $b accessor is emitted");
+    let a_pos = js
+        .find("const $a = () => $.store_get(a, '$a', $$stores);")
+        .expect("the $a accessor is emitted");
+    let setup = js
+        .find("$.setup_stores()")
+        .expect("the shared setup is emitted");
+    assert!(
+        b_pos < a_pos && a_pos < setup,
+        "accessors are first-subscription-ordered BEFORE one shared setup:\n{js}"
+    );
+    assert_eq!(
+        js.matches("$.setup_stores()").count(),
+        1,
+        "exactly ONE shared `$.setup_stores()` for multiple stores:\n{js}"
+    );
+}
+
+#[test]
+fn undeclared_store_subscription_stays_the_official_global_reference_reject() {
+    // `{$count}` with NO declared `count` is the official
+    // `global_reference_invalid` compile error — it must route through the
+    // official-reject gate, never the store classifier.
+    let src = "<script>let x = 1;</script>\n<p>{$count}</p>\n";
+    let alloc = Allocator::default();
+    let parsed = parse_svelte(src);
+    match compile_client(
+        src,
+        &parsed,
+        &SvelteRuntimeOptions::default(),
+        &alloc,
+        false,
+    ) {
+        Err(ClientCompileError::OfficialReject(rejection)) => {
+            assert_eq!(rejection.official_code, "global_reference_invalid");
+        }
+        other => panic!("an undeclared `$count` must official-reject, got {other:?}"),
+    }
+}
+
+#[test]
+fn arbitrary_const_without_subscription_stays_refused() {
+    // The demand boundary: a call-initialized `const x = …` with NO `$x`
+    // subscription is NOT a store source — the const gate keeps it fail-closed.
+    // (The init calls a GLOBAL so the const itself is the first refused item.)
+    assert_fail_closed(
+        "<script>const x = JSON.parse('1'); let n = $state(0);</script>\n<button onclick={() => n++}>{n}</button>\n",
+        |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::InstanceScriptItem {
+                    construct: "const declaration",
+                    ..
+                }
+            )
+        },
+    );
+}
+
+#[test]
+fn store_bind_value_passes_bare_accessor_and_store_set_closure() {
+    // `bind:value={$c}`: the getter is the BARE accessor thunk (`$c`, already a
+    // zero-arg function — official passes it unwrapped) and the setter the
+    // complete `($$value) => $.store_set(c, $$value)` closure.
+    let js = emit(
+        "<script>import { writable } from 'svelte/store'; const c = writable('');</script>\n<input bind:value={$c} />\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.bind_value(input, $c, ($$value) => $.store_set(c, $$value));"),
+        "the store bind passes the bare accessor + store_set closure:\n{js}"
+    );
+    // NEGATIVE: the getter is NOT re-wrapped in a synthesized thunk.
+    assert!(
+        !js.contains("() => $c,") && !js.contains("() => $c()"),
+        "the store bind getter must not be re-thunked:\n{js}"
+    );
+}
+
+#[test]
+fn store_bind_this_target_fails_closed() {
+    // `bind:this={$c}` is NOT a supported store position — the `bind:this`
+    // classifier only admits a DECLARED instance local / function pair, so the
+    // store-accessor target fails closed rather than emitting a broken ref bind.
+    assert_fail_closed(
+        "<script>import { writable } from 'svelte/store'; const c = writable(0); let n = $state(0);</script>\n<div bind:this={$c}></div>\n<button onclick={() => n++}>{n}</button>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Binding { target, .. } if target == "this"),
+    );
+}
+
+#[test]
+fn legacy_surfaces_fail_closed_with_narrow_per_surface_diagnostics() {
+    // `$:` reactive statement (legacy) → the narrow reactive-statement surface.
+    assert_fail_closed(
+        "<script>import { writable } from 'svelte/store'; const c = writable(0); $: doubled = $c * 2;</script>\n<p>{doubled}</p>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::LegacyReactiveStatement { .. }),
+    );
+    // `<slot>` (legacy) → the narrow slot surface.
+    assert_fail_closed("<div><slot></slot></div>\n", |s| {
+        matches!(s, UnsupportedSvelteRuntimeSurface::LegacySlotElement { .. })
+    });
+    // `createEventDispatcher` (legacy) → the narrow dispatcher surface.
+    assert_fail_closed(
+        "<script>import { createEventDispatcher } from 'svelte'; const dispatch = createEventDispatcher(); function go() { dispatch('x'); }</script>\n<button onclick={go}>go</button>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::LegacyEventDispatcher { .. }),
+    );
+    // A legacy bind-target `let` (legacy `let` is reactive state — the runes
+    // verbatim-let shape must not flow through).
+    assert_fail_closed(
+        "<script>let v = 'x';</script>\n<input bind:value={v} />\n",
+        |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::InstanceScriptItem {
+                    construct: "legacy let binding",
+                    ..
+                }
+            )
+        },
+    );
+}
+
+#[test]
+fn runes_named_function_handler_is_passed_by_reference() {
+    // INVERTED (was the `event_local_function_ident` fail row): a bare-identifier
+    // handler naming a top-level function declaration passes the reference
+    // through, with the function body rewritten by the shared rewriter
+    // (oracle-verified against svelte@5.56.3).
+    let js = emit(
+        "<script>let c = $state(0); function inc() { c++; }</script>\n<button onclick={inc}>{c}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.delegated('click', button, inc);"),
+        "the named handler is passed by reference:\n{js}"
+    );
+    assert!(
+        js.contains("function inc() { $.update(c); }"),
+        "the handler body rewrites through the shared rewriter:\n{js}"
+    );
+    // NEGATIVE: no wrapper closure around the reference, and no store machinery.
+    assert!(
+        !js.contains("() => inc") && !js.contains("setup_stores"),
+        "the reference is not wrapped and no store machinery appears:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn store_compound_writes_pin_all_four_helper_shapes() {
+    // The four compound forms lower to their exact helpers (oracle-verified):
+    // postfix `++`/`--` → `$.update_store` (with `-1` for decrement), prefix →
+    // `$.update_pre_store`, compound-assign → `$.store_set` over the accessor
+    // read — never the signal `$.update` family.
+    let js = emit(
+        "<script>import { writable } from 'svelte/store'; const c = writable(0); function a() { $c++; } function b() { $c--; } function d() { ++$c; } function e() { $c += 2; }</script>\n<button onclick={a}>{$c}</button>\n<button onclick={b}>b</button>\n<button onclick={d}>d</button>\n<button onclick={e}>e</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("function a() { $.update_store(c, $c()); }"),
+        "postfix increment:\n{js}"
+    );
+    assert!(
+        js.contains("function b() { $.update_store(c, $c(), -1); }"),
+        "postfix decrement carries -1:\n{js}"
+    );
+    assert!(
+        js.contains("function d() { $.update_pre_store(c, $c()); }"),
+        "prefix increment uses update_pre_store:\n{js}"
+    );
+    assert!(
+        js.contains("function e() { $.store_set(c, $c() + 2); }"),
+        "compound assign uses store_set over the accessor read:\n{js}"
+    );
+    // NEGATIVE: never the signal update family on a store, and no `$.get`.
+    assert!(
+        !js.contains("$.update(c") && !js.contains("$.update_pre(c") && !js.contains("$.get("),
+        "a store write must never use the signal `$.update`/`$.get` family:\n{js}"
+    );
+}
+
+#[test]
+fn nonconst_store_source_declaration_kind_fails_closed() {
+    // A `$store` base whose top-level declaration is `let` — NOT the single-declarator
+    // `const NAME = init` store-source form Verter admits. svelte@5.56.3 ACCEPTS this and
+    // emits the `const $c = () => $.store_get(c, '$c', $$stores)` accessor path
+    // (oracle-probed against svelte@5.56.3, 2026-07-06). Verter admits a store SOURCE only
+    // as a single-declarator `const`, so the `let` declaration falls through to the
+    // instance-script `plain let with call init` gate and fails CLOSED — never an admitted
+    // (mis-emitted) subscription. `assert_fail_closed` panics on ANY emitted module, so it
+    // doubles as the negative "no subscription mis-emitted" assertion. This declaration-KIND
+    // completeness gap is a fail-closed DEFER, tracked by debt row D-51 in
+    // `docs/arch/svelte-native-compiler-plan.md`.
+    assert_fail_closed(
+        "<script>import { writable } from 'svelte/store'; let c = writable(0);</script>\n<p>{$c}</p>\n",
+        |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::InstanceScriptItem {
+                    construct: "plain let with call init",
+                    ..
+                }
+            )
+        },
+    );
 }

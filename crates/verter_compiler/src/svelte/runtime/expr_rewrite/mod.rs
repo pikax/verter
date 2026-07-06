@@ -79,6 +79,15 @@ pub(super) enum ClientLvalue {
     /// A bare-identifier target that is NOT a signal (a plain local / global) —
     /// the assignment passes through unchanged.
     PlainIdent,
+    /// A bare-identifier target that resolves to a `$store` auto-subscription
+    /// accessor (`$c = …` / `$c++`) — the write lowers through the store
+    /// helpers: `$c = v` → `$.store_set(c, v)`; `$c += y` → `$.store_set(c,
+    /// $c() + y)`; `$c++` → `$.update_store(c, $c())`; `++$c` →
+    /// `$.update_pre_store(c, $c())` (decrements carry the trailing `-1`).
+    StoreIdent {
+        /// The `$`-prefixed accessor name (`$c`); the store BASE is `name[1..]`.
+        name: String,
+    },
     /// A bare-identifier target resolving to an ES `import` binding (a component
     /// default or any other imported value). Import bindings are NOT reassignable —
     /// official compile-errors the write (`constant_assignment`, "Cannot assign to

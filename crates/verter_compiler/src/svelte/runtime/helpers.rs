@@ -142,6 +142,24 @@ pub enum SvelteHelper {
     Push,
     /// `$.pop` — close the component instance context.
     Pop,
+    /// `$.store_get` — read a `$store` subscription through the shared
+    /// subscription registry (the per-store accessor thunk body).
+    StoreGet,
+    /// `$.store_set` — write a `$store` subscription (`$c = v` / `$c += n`).
+    StoreSet,
+    /// `$.update_store` — postfix increment/decrement of a `$store`
+    /// subscription (`$c++` / `$c--`).
+    UpdateStore,
+    /// `$.update_pre_store` — prefix increment/decrement of a `$store`
+    /// subscription (`++$c` / `--$c`).
+    UpdatePreStore,
+    /// `$.setup_stores` — the component's shared subscription registry setup
+    /// (`const [$$stores, $$cleanup] = $.setup_stores();`).
+    SetupStores,
+    /// `$.init` — the legacy-mode instance-init hook, emitted after the script
+    /// items when a LEGACY component opens the context frame (`legacy_mode &&
+    /// needs_push`).
+    Init,
 }
 
 impl SvelteHelper {
@@ -212,6 +230,12 @@ impl SvelteHelper {
             Self::Prop => "prop",
             Self::Push => "push",
             Self::Pop => "pop",
+            Self::StoreGet => "store_get",
+            Self::StoreSet => "store_set",
+            Self::UpdateStore => "update_store",
+            Self::UpdatePreStore => "update_pre_store",
+            Self::SetupStores => "setup_stores",
+            Self::Init => "init",
         }
     }
 }

@@ -1,0 +1,54 @@
+{
+  "slug": "stores/store_write.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/store",
+      "kind": "named",
+      "names": [
+        "writable"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "store_write",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "store_set",
+    "escape",
+    "store_get",
+    "unsubscribe_stores"
+  ],
+  "helperSet": [
+    "escape",
+    "store_get",
+    "store_set",
+    "unsubscribe_stores"
+  ],
+  "helperCounts": {
+    "store_set": 1,
+    "escape": 1,
+    "store_get": 1,
+    "unsubscribe_stores": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

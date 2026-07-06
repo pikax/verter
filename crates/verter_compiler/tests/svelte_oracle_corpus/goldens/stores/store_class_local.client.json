@@ -1,0 +1,84 @@
+{
+  "slug": "stores/store_class_local.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "store_class_local",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "push",
+    "store_get",
+    "setup_stores",
+    "init",
+    "child",
+    "reset",
+    "template_effect",
+    "set_text",
+    "append",
+    "pop"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "from_html",
+    "init",
+    "pop",
+    "push",
+    "reset",
+    "set_text",
+    "setup_stores",
+    "store_get",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "push": 1,
+    "store_get": 1,
+    "setup_stores": 1,
+    "init": 1,
+    "child": 1,
+    "reset": 1,
+    "template_effect": 1,
+    "set_text": 1,
+    "append": 1,
+    "pop": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<p> </p>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<p> </p>`); export default function store_class_local($$anchor, $$props) {$.push($$props, false); const $c = () => $.store_get(c, '$c', $$stores); const [$$stores, $$cleanup] = $.setup_stores(); class S {subscribe(fn) {fn(1); return () => {};}} const c = new S(); $.init(); var p = root(); var text = $.child(p, true); $.reset(p); $.template_effect(() => $.set_text(text, $c())); $.append($$anchor, p); $.pop(); $$cleanup();}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

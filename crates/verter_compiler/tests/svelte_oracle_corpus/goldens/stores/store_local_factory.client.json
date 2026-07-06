@@ -1,0 +1,74 @@
+{
+  "slug": "stores/store_local_factory.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "store_local_factory",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "store_get",
+    "setup_stores",
+    "child",
+    "reset",
+    "template_effect",
+    "set_text",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "from_html",
+    "reset",
+    "set_text",
+    "setup_stores",
+    "store_get",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "store_get": 1,
+    "setup_stores": 1,
+    "child": 1,
+    "reset": 1,
+    "template_effect": 1,
+    "set_text": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<p> </p>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<p> </p>`); export default function store_local_factory($$anchor) {const $c = () => $.store_get(c, '$c', $$stores); const [$$stores, $$cleanup] = $.setup_stores(); function w(v) {const subs = []; return {subscribe(f) {subs.push(f); f(v); return () => {};}, set(x) {subs.forEach((fn) => fn(x));}};} const c = w(0); var p = root(); var text = $.child(p, true); $.reset(p); $.template_effect(() => $.set_text(text, $c())); $.append($$anchor, p); $$cleanup();}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

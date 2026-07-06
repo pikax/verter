@@ -435,11 +435,32 @@ impl<'a> ClientEmitter<'a> {
             out.push('\n');
         }
 
+        // The push FLAG is the reactivity MODE: `true` for a runes component,
+        // `false` for a legacy (non-runes) one — the official `5.56.3` shape
+        // (`$.push($$props, true)` runes / `$.push($$props, false)` legacy).
+        // Derived from the component mode, NEVER from store presence.
+        let legacy_mode = self.plan.component.mode == super::ir::SvelteMode::Legacy;
         if needs_push {
-            // The RUNES form carries the trailing `true` (`$.push($$props, true)`)
-            // — the runes-mode flag the official `5.56.3` compiler emits (a legacy
-            // component would be `$.push($$props)`, but legacy fails closed at 5i).
-            out.push_str("\t$.push($$props, true);\n");
+            let flag = if legacy_mode { "false" } else { "true" };
+            out.push_str(&format!("\t$.push($$props, {flag});\n"));
+        }
+
+        // The `$store` auto-subscription setup — driven SOLELY by
+        // `has_store_subscriptions`, never by the frame: one accessor thunk per
+        // subscribed store in first-seen order, then the ONE shared
+        // `$.setup_stores()` registry destructure (the accessor thunks are lazy,
+        // so the forward reference to `$$stores` is sound). Emitted directly
+        // after the `$.push` line when a frame exists, at the body top
+        // otherwise (a clean local store has NO frame — oracle-verified).
+        if self.plan.has_store_subscriptions {
+            for sub in &self.plan.store_subscriptions {
+                let name = &sub.name;
+                let base = sub.base();
+                out.push_str(&format!(
+                    "\tconst {name} = () => $.store_get({base}, '{name}', $$stores);\n"
+                ));
+            }
+            out.push_str("\tconst [$$stores, $$cleanup] = $.setup_stores();\n");
         }
 
         // The component-FUNCTION-scoped `bind:group` accumulators, declared at the TOP of
@@ -481,20 +502,46 @@ impl<'a> ClientEmitter<'a> {
             super::client_custom_element::emit_exports_object(out, &self.plan.ce_exports);
         }
 
+        // The LEGACY-frame instance-init hook: a LEGACY component that opened
+        // the context frame emits `$.init();` after every instance statement,
+        // before the template body (oracle-verified: a runes framing component
+        // and a frame-less legacy component both emit NO `$.init()`).
+        if legacy_mode && needs_push {
+            out.push_str("\t$.init();\n");
+        }
+
         // The ROOT region: its clone frame, walk (interleaving nested block calls),
         // reactive ops, and mount into `$$anchor` — recursively emitting every nested
         // block body region. (`emit_region` lives in `client_block_emit`.)
         self.emit_region(out, self.ir().root, "$$anchor");
 
+        // The context close + the `$store` subscription FINALIZER (`$$cleanup();`),
+        // ordered per the official emission (all four combinations oracle-verified
+        // against svelte@5.56.3):
+        //
+        // - frame, no `$$exports`, store   → `$.pop();` then `$$cleanup();`
+        // - frame, `$$exports`,  no store  → `return $.pop($$exports);`
+        // - frame, `$$exports`,  store     → the PRE-RETURN finalizer slot
+        //   `var $$pop = $.pop($$exports); $$cleanup(); return $$pop;` — the
+        //   returned object is captured into `$$pop`, the store `$$cleanup()`
+        //   runs, THEN the captured value returns; a bare `return
+        //   $.pop($$exports);` would strand `$$cleanup()` after the return.
+        // - no frame, store                → `$$cleanup();` at the body end.
         if needs_push {
-            // A non-empty `$$exports` returns it through the context close
-            // (`return $.pop($$exports);` — the official component-returned-object
-            // form); otherwise the plain statement close.
             if self.plan.ce_exports.is_empty() {
                 out.push_str("\t$.pop();\n");
+                if self.plan.has_store_subscriptions {
+                    out.push_str("\t$$cleanup();\n");
+                }
+            } else if self.plan.has_store_subscriptions {
+                out.push_str("\tvar $$pop = $.pop($$exports);\n");
+                out.push_str("\t$$cleanup();\n");
+                out.push_str("\treturn $$pop;\n");
             } else {
                 out.push_str("\treturn $.pop($$exports);\n");
             }
+        } else if self.plan.has_store_subscriptions {
+            out.push_str("\t$$cleanup();\n");
         }
         out.push_str("}\n");
     }

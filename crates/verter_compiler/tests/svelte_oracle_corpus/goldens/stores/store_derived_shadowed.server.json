@@ -1,0 +1,52 @@
+{
+  "slug": "stores/store_derived_shadowed.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/store",
+      "kind": "named",
+      "names": [
+        "writable",
+        "derived"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "store_derived_shadowed",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "escape",
+    "store_get",
+    "unsubscribe_stores"
+  ],
+  "helperSet": [
+    "escape",
+    "store_get",
+    "unsubscribe_stores"
+  ],
+  "helperCounts": {
+    "escape": 1,
+    "store_get": 1,
+    "unsubscribe_stores": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

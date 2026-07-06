@@ -521,9 +521,12 @@ mod tests {
     }
 
     #[test]
-    fn compile_bundle_fails_closed_for_a_legacy_component_with_no_main() {
-        // A legacy (non-runes) component is an unsupported runtime surface: NO Main
-        // body, and a precise non-fatal diagnostic (so the IDE surface survives).
+    fn compile_bundle_fails_closed_for_a_legacy_export_prop_with_no_main() {
+        // A legacy (non-runes) component with an instance `export` is the legacy
+        // PROP surface — an unsupported runtime surface with its NARROW
+        // per-surface diagnostic: NO Main body, and a precise non-fatal
+        // diagnostic (so the IDE surface survives). The blanket legacy-mode
+        // refusal is gone (a store-only legacy component compiles).
         let compiler = SvelteCarrierCompiler::default();
         let source = "<script>export let label;</script>\n<p>{label}</p>\n";
         let artifact = compiler.parse(source, &ParseOptions::default());
@@ -533,19 +536,19 @@ mod tests {
             .expect("the bundle is produced (fail-closed, not an Err)");
         assert!(
             !bundle.has_runtime_surface(),
-            "a legacy component must NOT carry a runtime surface"
+            "a legacy export-prop component must NOT carry a runtime surface"
         );
         assert!(
             bundle.main.body_code.is_none(),
-            "no Main body for a legacy component"
+            "no Main body for a legacy export-prop component"
         );
         // The fail-closed diagnostic is precise + NON-FATAL (so the IDE survives).
         assert!(
             bundle
                 .diagnostics
                 .iter()
-                .any(|d| d.code == "svelte-runtime-unsupported-legacy-mode"),
-            "the legacy-mode fail-closed diagnostic must be present, got: {:?}",
+                .any(|d| d.code == "svelte-runtime-unsupported-legacy-export-prop"),
+            "the legacy export-prop fail-closed diagnostic must be present, got: {:?}",
             bundle
                 .diagnostics
                 .iter()

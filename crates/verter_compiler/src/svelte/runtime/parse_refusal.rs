@@ -75,11 +75,11 @@ pub(super) fn parse_domain_gate(
         });
     }
     // The STRICT `<svelte:options>` gate: allow ONLY an ABSENT options element, or at
-    // most ONE top-level `<svelte:options>` carrying the supported axes
-    // (`runes={true}` / shorthand `runes`, and a VALID `customElement` value). Fail
-    // closed on a duplicate / nested / non-root options element, a non-boolean /
-    // `false` `runes` value, any other axis (`namespace`/`css`/… → 5m), a spread /
-    // directive, or child content.
+    // most ONE top-level `<svelte:options>` carrying the supported axes (a boolean
+    // `runes` literal — BOTH values are valid mode selections — and a VALID
+    // `customElement` value). Fail closed on a duplicate / nested / non-root options
+    // element, a non-boolean `runes` value, any other axis (`namespace`/`css`/…),
+    // a spread / directive, or child content.
     if let Some(surface) = refuse_unsupported_options(source, parsed) {
         return Some(surface);
     }
@@ -134,9 +134,10 @@ fn refuse_implicit_paragraph_autoclose(
 
 /// The STRICT `<svelte:options>` gate. Allow ONLY: (i) NO options element (mode
 /// inferred from rune usage), or (ii) at most ONE TOP-LEVEL `<svelte:options>`
-/// carrying the supported axes — `runes={true}` (the shorthand `runes` boolean is
-/// `true` too) and a VALID `customElement` value (resolved into the
-/// custom-element descriptor at lowering). Fail closed on EVERY other form.
+/// carrying the supported axes — a boolean `runes` literal (the shorthand `runes`
+/// is `true`; `runes={false}` forces legacy mode) and a VALID `customElement`
+/// value (resolved into the custom-element descriptor at lowering). Fail closed
+/// on EVERY other form.
 /// Returns the typed surface for the first violation, or `None` when the element
 /// is absent or carries only supported axes.
 ///
@@ -144,10 +145,11 @@ fn refuse_implicit_paragraph_autoclose(
 /// - a DUPLICATE `<svelte:options>` (two or more anywhere) — official `options_duplicate`;
 /// - a NESTED / non-root `<svelte:options>` — official `options_invalid_placement`;
 /// - a non-boolean `runes` value (`runes={foo}` / `runes={1}` / `runes="true"`) — only
-///   the boolean literal `true` (or shorthand) is the supported runes plumbing;
-/// - `runes={false}` — selects LEGACY mode, the legacy-mode vertical (5i) owner;
+///   a boolean literal (or the shorthand) is the supported runes plumbing; BOTH
+///   boolean values are valid mode selections (`runes={false}` forces legacy mode,
+///   whose not-yet-lowered surfaces classify per surface downstream);
 /// - `tag` (always an official reject upstream; defensive here) and every OTHER
-///   axis (`namespace`, `css`, `name`, …, a spread, a directive) (5m);
+///   axis (`namespace`, `css`, `name`, …, a spread, a directive);
 /// - child content (a `<svelte:options>` is a self-closing marker; content is invalid).
 fn refuse_unsupported_options(
     source: &str,
@@ -188,23 +190,23 @@ fn refuse_unsupported_options(
     // an invalid `customElement`, a spread/directive, child content — is an EXACT-CODE
     // `OptionsInvalid` parser fact the official-reject gate caught BEFORE this gate; see
     // `official_reject.rs` + the parser `read_options` finalization). So the only inputs reaching
-    // here are the officially-ACCEPTED options axes: `runes={true}` (or shorthand) and a valid
-    // `customElement` value are SUPPORTED; `runes={false}` is the legacy-mode owner (5i); every
-    // OTHER accepted axis (a valid `namespace`/`css`, `immutable`/`accessors`/
-    // `preserveWhitespace`) is the 5m options vertical. The non-supported arms below stay as a
-    // defensive fail-closed for anything an upstream change might newly accept.
+    // here are the officially-ACCEPTED options axes: a boolean `runes` literal (BOTH values —
+    // `runes={true}` forces runes mode, `runes={false}` forces legacy mode; the legacy
+    // component's unsupported surfaces are classified per surface downstream) and a valid
+    // `customElement` value are SUPPORTED; every OTHER accepted axis (a valid `namespace`/`css`,
+    // `immutable`/`accessors`/`preserveWhitespace`) is a later options vertical. The
+    // non-supported arms below stay as a defensive fail-closed for anything an upstream change
+    // might newly accept.
     for attr in &first.attributes {
         let name = options_attr_name(attr);
         match name.as_deref() {
             Some("runes") => match classify_runes_value(source, attr) {
-                // The supported runes plumbing: a boolean `true` literal / shorthand.
-                RunesValue::True => {}
-                // `runes={false}` selects legacy mode — the legacy-mode vertical (5i).
-                RunesValue::False => {
-                    return Some(UnsupportedSvelteRuntimeSurface::LegacyMode {
-                        span: first.open_span,
-                    });
-                }
+                // The supported runes plumbing: BOTH boolean literals are valid
+                // MODE SELECTIONS — `runes={true}` (or shorthand) forces runes
+                // mode, `runes={false}` forces legacy mode. Neither is a parse
+                // refusal; a legacy component's not-yet-lowered surfaces are
+                // classified per surface at runtime surface classification.
+                RunesValue::True | RunesValue::False => {}
                 // A non-boolean `runes` value (`runes={foo}` / `runes={1}` /
                 // `runes="true"`) — only a boolean literal is the supported axis.
                 RunesValue::NonBoolean => {

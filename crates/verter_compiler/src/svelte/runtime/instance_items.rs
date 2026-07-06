@@ -176,6 +176,39 @@ pub(super) enum SupportedInstanceScriptItem {
         /// `(name, init source text)` rows (`None` init = a bare `let a;`).
         siblings: Vec<(String, Option<String>)>,
     },
+    /// A top-level single-declarator `const NAME = <init>;` admitted as a
+    /// `$store` SOURCE: either `NAME` is the base of a classified `$NAME`
+    /// subscription (`const count = writable(0)` admitted because `$count`
+    /// subscribes) or the declaration is a store DEPENDENCY reachable from a
+    /// subscribed base through the demand-driven admission closure (`const
+    /// doubled = derived(a, …)` with `{$doubled}` admits `a`). NO
+    /// import-source/type gate — a hand-rolled local factory's const is the
+    /// same carrier. Carries the binding name + init source; the init lowers
+    /// through the shared FALLIBLE rewriter at projection time (a shadowed
+    /// `$a` callback param stays verbatim; a store read/write inside the init
+    /// rewrites). An arbitrary call-initialized const with NO subscription
+    /// stays out of this carrier and fails closed at the const gate below.
+    StoreSourceDecl {
+        /// The declared store-source binding name.
+        name: String,
+        /// The declarator INIT expression source text (rewriter-lowered).
+        init: String,
+    },
+    /// A top-level `class NAME { … }` declaration admitted as a `$store`
+    /// DEPENDENCY: `NAME` is reachable from a subscribed base through the
+    /// demand-driven admission closure (`const c = new S(); {$c}` admits the
+    /// store class `S`). Official emits the class body VERBATIM (frames the
+    /// store via `new`), so this variant carries the class's full source text
+    /// and lowers byte-for-byte — NO rewriter pass (a class body is plain JS,
+    /// not a signal-bearing reactive surface). A class NOT reachable from any
+    /// classified subscription is out-of-allowlist and fails closed (out of the
+    /// store-subscription scope).
+    StoreClassDecl {
+        /// The declared class name (the store-dependency-closure referent).
+        name: String,
+        /// The class declaration's full source text (emitted verbatim).
+        source: String,
+    },
     /// A top-level `let`/`const` declarator whose init is a WELL-FORMED
     /// assignable effect-family EXPRESSION rune — `$effect.root(fn)` (the result
     /// is the teardown function) or `$effect.tracking()`. Carries the declaration
@@ -262,6 +295,7 @@ pub(super) fn classify_supported_instance_items(
     bind_this_targets: &[String],
     bind_lvalue_roots: &[String],
     bind_function_pair_names: &[String],
+    store_admissions: &StoreScriptAdmissions,
 ) -> Result<Vec<SupportedInstanceScriptItem>, UnsupportedSvelteRuntimeSurface> {
     let alloc = Allocator::default();
     let Some(program) = reparse_module(&alloc, instance_source) else {
@@ -287,9 +321,33 @@ pub(super) fn classify_supported_instance_items(
             bind_this_targets,
             bind_lvalue_roots,
             bind_function_pair_names,
+            store_admissions,
         )?);
     }
     Ok(items)
+}
+
+/// The DEMAND-DRIVEN `$store` script admissions the item classifier consumes —
+/// computed by the classifier's caller from the classified subscriptions (the
+/// [`store_dependency_closure`](super::store_subscriptions::store_dependency_closure)
+/// seeded by subscribed bases, plus the bare-identifier event-handler function
+/// referents). Empty for a component with no `$name` subscription — nothing is
+/// admitted store-wise, so an arbitrary call-initialized const / unreferenced
+/// function keeps its existing fail-closed refusal.
+#[derive(Debug, Default)]
+pub(super) struct StoreScriptAdmissions {
+    /// The top-level `const` names admitted as store sources / dependencies.
+    pub(super) const_names: rustc_hash::FxHashSet<String>,
+    /// The top-level `class` names admitted as store dependencies — a local
+    /// store CLASS reached transitively from a subscribed base (`const c = new
+    /// S()` admits `S`), lowered verbatim. A class NOT reached from any
+    /// subscription stays out of this set and fails closed (out of the
+    /// store-subscription scope).
+    pub(super) class_names: rustc_hash::FxHashSet<String>,
+    /// The top-level `function` names admitted beyond the function-pair set: the
+    /// store dependency-closure functions (a local store factory) plus the
+    /// bare-identifier event-handler referents (`onclick={inc}`).
+    pub(super) function_names: rustc_hash::FxHashSet<String>,
 }
 
 /// Classify ONE top-level instance-script statement into its supported item, or
@@ -309,6 +367,7 @@ fn classify_instance_statement(
     bind_this_targets: &[String],
     bind_lvalue_roots: &[String],
     bind_function_pair_names: &[String],
+    store_admissions: &StoreScriptAdmissions,
 ) -> Result<SupportedInstanceScriptItem, UnsupportedSvelteRuntimeSurface> {
     match stmt {
         Statement::VariableDeclaration(decl) => classify_instance_variable_decl(
@@ -317,14 +376,29 @@ fn classify_instance_statement(
             comments,
             bind_this_targets,
             bind_lvalue_roots,
+            store_admissions,
         ),
         // A named top-level `function name(...) {}` is admitted ONLY when its name is
         // EXACTLY referenced by an accepted DOM function-pair bind (`bind:value={get,
-        // set}`); its body lowers via the shared rewriter at projection time. A function
-        // NOT referenced by such a bind, or an ANONYMOUS function declaration (no usable
-        // name to bind), is out-of-allowlist and fails closed.
-        Statement::FunctionDeclaration(func) => {
-            classify_function_declaration(func, instance_source, bind_function_pair_names)
+        // set}`), by a bare-identifier event handler (`onclick={inc}`), or by the
+        // `$store` dependency closure (a local store factory); its body lowers via
+        // the shared rewriter at projection time. A function referenced by NONE of
+        // those, or an ANONYMOUS function declaration (no usable name to bind), is
+        // out-of-allowlist and fails closed.
+        Statement::FunctionDeclaration(func) => classify_function_declaration(
+            func,
+            instance_source,
+            bind_function_pair_names,
+            store_admissions,
+        ),
+        // A named top-level `class NAME { … }` is admitted ONLY when `NAME` is in
+        // the `$store` dependency closure (a local store CLASS reached from a
+        // subscribed base, `const c = new S(); {$c}`); its body emits VERBATIM.
+        // A class referenced by NO subscription (or an anonymous class with no
+        // usable name) is out-of-allowlist and fails closed (out of the
+        // store-subscription scope).
+        Statement::ClassDeclaration(class) => {
+            classify_class_declaration(class, instance_source, store_admissions)
         }
         // A top-level `$inspect(...);` / `$inspect(...).with(...);` expression
         // statement is production-ELIDED (official `dev:false` removes the whole
@@ -680,6 +754,7 @@ fn classify_function_declaration(
     func: &oxc_ast::ast::Function<'_>,
     instance_source: &str,
     bind_function_pair_names: &[String],
+    store_admissions: &StoreScriptAdmissions,
 ) -> Result<SupportedInstanceScriptItem, UnsupportedSvelteRuntimeSurface> {
     let refuse = || UnsupportedSvelteRuntimeSurface::InstanceScriptItem {
         construct: "function",
@@ -689,7 +764,9 @@ fn classify_function_declaration(
         // An anonymous top-level function declaration has no name to bind a pair to.
         return Err(refuse());
     };
-    if !bind_function_pair_names.iter().any(|n| n == name) {
+    if !bind_function_pair_names.iter().any(|n| n == name)
+        && !store_admissions.function_names.contains(name)
+    {
         return Err(refuse());
     }
     let source = instance_source
@@ -697,6 +774,56 @@ fn classify_function_declaration(
         .unwrap_or_default()
         .to_string();
     Ok(SupportedInstanceScriptItem::FunctionDecl {
+        name: name.to_string(),
+        source,
+    })
+}
+
+/// Classify a top-level `class NAME { … }` declaration into the
+/// [`SupportedInstanceScriptItem::StoreClassDecl`] item, or fail closed.
+///
+/// Admitted ONLY when the class has a name AND that name is in the `$store`
+/// dependency closure (a local store CLASS reached transitively from a
+/// subscribed base — `const c = new S(); {$c}` admits `S`). Its body emits
+/// VERBATIM (official frames the store via `new`, class body unchanged). An
+/// anonymous class (no name to bind), or one whose name is NOT a store-closure
+/// dependency, fails closed at the instance-script-item gate (construct
+/// `class`) — this is the precise gate, NOT a wildcard "emit any class" path.
+fn classify_class_declaration(
+    class: &oxc_ast::ast::Class<'_>,
+    instance_source: &str,
+    store_admissions: &StoreScriptAdmissions,
+) -> Result<SupportedInstanceScriptItem, UnsupportedSvelteRuntimeSurface> {
+    let refuse = || UnsupportedSvelteRuntimeSurface::InstanceScriptItem {
+        construct: "class",
+        span: Span::new(class.span.start, class.span.end),
+    };
+    let Some(name) = class.id.as_ref().map(|id| id.name.as_str()) else {
+        // An anonymous top-level class declaration has no name to bind a
+        // subscription dependency to.
+        return Err(refuse());
+    };
+    if !store_admissions.class_names.contains(name) {
+        return Err(refuse());
+    }
+    // A class body carrying an inner `$`-store/rune reactive reference cannot be
+    // lowered VERBATIM: official `svelte@5.56.3` rewrites an inner `$a` read to
+    // `$a()` and an inner `$a = v` write to `$.store_set(a, v)` inside class
+    // method / getter/setter bodies, field initializers, and static blocks — a
+    // rewrite the verbatim `StoreClassDecl` emit does not perform. Fail closed on
+    // any such class (the SIMPLE `subscribe`-bearing store class with NO inner
+    // reactive surface stays supported via verbatim lowering).
+    if super::store_subscriptions::class_body_has_inner_reactive_reference(class) {
+        return Err(UnsupportedSvelteRuntimeSurface::InstanceScriptItem {
+            construct: "class with an inner $-reactive reference",
+            span: Span::new(class.span.start, class.span.end),
+        });
+    }
+    let source = instance_source
+        .get(class.span.start as usize..class.span.end as usize)
+        .unwrap_or_default()
+        .to_string();
+    Ok(SupportedInstanceScriptItem::StoreClassDecl {
         name: name.to_string(),
         source,
     })
@@ -712,6 +839,7 @@ fn classify_instance_variable_decl(
     comments: &[Comment],
     bind_this_targets: &[String],
     bind_lvalue_roots: &[String],
+    store_admissions: &StoreScriptAdmissions,
 ) -> Result<SupportedInstanceScriptItem, UnsupportedSvelteRuntimeSurface> {
     let refuse = |construct: &'static str| UnsupportedSvelteRuntimeSurface::InstanceScriptItem {
         construct,
@@ -724,6 +852,36 @@ fn classify_instance_variable_decl(
     // declarator or any other shape falls through to the existing gates.
     if let Some(item) = classify_effect_rune_init(decl, instance_source, comments) {
         return Ok(item);
+    }
+    // (0a) A `$store` SOURCE `const` (`const count = writable(0)` with a `$count`
+    // subscription, or a store DEPENDENCY reachable from a subscribed base) —
+    // classified BEFORE the `let`-only gate. STORE-BOUND-ONLY: the admission set
+    // is seeded exclusively by classified `$name` subscriptions, so an arbitrary
+    // `const x = make()` with no subscription falls through to the existing
+    // fail-closed const gate. Single identifier declarator, initialized, no TS
+    // annotation — anything else falls through.
+    if decl.kind == VariableDeclarationKind::Const {
+        if let [d] = decl.declarations.as_slice() {
+            if let BindingPattern::BindingIdentifier(id) = &d.id {
+                let name = id.name.as_str();
+                if store_admissions.const_names.contains(name)
+                    && d.type_annotation.is_none()
+                    && !d.definite
+                {
+                    if let Some(init) = &d.init {
+                        let span = init.span();
+                        if let Some(src) =
+                            instance_source.get(span.start as usize..span.end as usize)
+                        {
+                            return Ok(SupportedInstanceScriptItem::StoreSourceDecl {
+                                name: name.to_string(),
+                                init: src.to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
     }
     // (0b) A `$props.id()` declarator (`let`/`const <name> = $props.id();`, plus
     // literal-only siblings) is the hoisted-id carrier — classified BEFORE the

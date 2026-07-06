@@ -60,20 +60,34 @@ use super::expr::{
 /// ([`render_callee_needs_context`]). Render ARGUMENTS are separate analyzed
 /// expressions that ride `template_expr_sources` — they are never exempted.
 #[must_use]
-pub fn needs_context(
+pub(super) fn needs_context(
     alloc: &Allocator,
     instance_source: Option<&str>,
     module_source: Option<&str>,
     template_expr_sources: &[&str],
     render_callee_sources: &[&str],
+    script_imports: &super::client_surface_imports::ClassifiedScriptImports,
 ) -> bool {
     // The UNSAFE root names: top-level `import` bindings (instance AND module
     // slots — module imports resolve up the lexical chain into template
     // expressions) + `$props()` destructure names. A call/member rooted at one of
-    // these is unsafe (needs context). The MODULE program contributes ROOTS only —
-    // module statements run at module scope, outside the component context, so
-    // they are never scanned for triggers themselves.
+    // these is unsafe (needs context). The imported-LOCAL names come from the
+    // single per-component `ClassifiedScriptImports` carrier (computed once at IR
+    // construction) through the shared `import_binding_entries` iteration — never
+    // an independent raw-AST import re-walk. The MODULE program contributes ROOTS
+    // only — module statements run at module scope, outside the component
+    // context, so they are never scanned for triggers themselves.
     let mut unsafe_roots: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
+    for slot in [
+        super::client_imports::UserImportSlot::Module,
+        super::client_imports::UserImportSlot::Instance,
+    ] {
+        for import in script_imports.admitted(slot) {
+            for (local, _kind) in super::client_surface_imports::import_binding_entries(import) {
+                unsafe_roots.insert(local.to_string());
+            }
+        }
+    }
     if let Some(module) = module_source {
         if let Some(program) = reparse_module(alloc, module) {
             collect_unsafe_root_names(&program, &mut unsafe_roots);
@@ -180,33 +194,25 @@ fn render_callee_needs_context(
     scan.found
 }
 
-/// Collect the UNSAFE top-level root names of an instance program: every `import`
-/// binding name (default / named / namespace) and every `$props()` destructure
-/// name. A call / member rooted at one of these is unsafe (`is_safe_identifier`
-/// returns false for an `import` / `prop` binding).
+/// Collect the UNSAFE `$props()` destructure root names of a program. A call /
+/// member rooted at one of these is unsafe (`is_safe_identifier` returns false
+/// for a `prop` binding). The IMPORT half of the unsafe-root set comes from the
+/// shared `ClassifiedScriptImports` carrier in [`needs_context`] — this walk owns
+/// ONLY the `$props()` destructure names.
 fn collect_unsafe_root_names(program: &Program<'_>, out: &mut rustc_hash::FxHashSet<String>) {
     for stmt in &program.body {
-        match stmt {
-            Statement::ImportDeclaration(import) => {
-                if let Some(specifiers) = &import.specifiers {
-                    for spec in specifiers {
-                        out.insert(spec.local().name.to_string());
-                    }
-                }
+        let Statement::VariableDeclaration(decl) = stmt else {
+            continue;
+        };
+        for d in &decl.declarations {
+            let Some(Expression::CallExpression(call)) = &d.init else {
+                continue;
+            };
+            if is_props_callee(&call.callee) {
+                let mut names = Vec::new();
+                collect_pattern_names(&d.id, &mut names);
+                out.extend(names);
             }
-            Statement::VariableDeclaration(decl) => {
-                for d in &decl.declarations {
-                    let Some(Expression::CallExpression(call)) = &d.init else {
-                        continue;
-                    };
-                    if is_props_callee(&call.callee) {
-                        let mut names = Vec::new();
-                        collect_pattern_names(&d.id, &mut names);
-                        out.extend(names);
-                    }
-                }
-            }
-            _ => {}
         }
     }
 }

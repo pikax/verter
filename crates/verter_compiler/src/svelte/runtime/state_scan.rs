@@ -294,14 +294,25 @@ pub(super) fn collect_proxy_inits(program: &Program<'_>) -> FxHashMap<String, Pr
 /// (`function f($state){ return $state }`) — does NOT count, so such a component
 /// stays in LEGACY mode. A rune name inside a string / comment is not an
 /// identifier reference, so it never mis-classifies. The detection delegates to the
-/// shared [`ScopeAwareRuneDetector`] in [`super::expr`], which reuses the same
+/// shared [`ScopeAwareRuneDetector`] in [`super::rune_scan`], which reuses the same
 /// lexical-scope `ShadowStack` model the other syntax-side collectors use.
+///
+/// `store_exempt` is the rune-root ACCESSOR exemption set
+/// ([`rune_root_accessor_exemptions`](super::store_subscriptions::rune_root_accessor_exemptions)):
+/// a `$state` whose base `state` is a declared store candidate is a STORE
+/// ACCESSOR reference, not a rune use — official deletes store-classified
+/// names from the reference set BEFORE the `some(is_rune)` inference, so such
+/// a component stays in LEGACY mode.
 #[must_use]
-pub fn script_uses_runes(alloc: &Allocator, text: &str) -> bool {
+pub fn script_uses_runes(
+    alloc: &Allocator,
+    text: &str,
+    store_exempt: &rustc_hash::FxHashSet<String>,
+) -> bool {
     let Some(program) = reparse_module(alloc, text) else {
         return false;
     };
-    let mut detector = ScopeAwareRuneDetector::default();
+    let mut detector = ScopeAwareRuneDetector::with_store_exemptions(store_exempt.clone());
     detector.visit_program(&program);
     detector.used()
 }

@@ -97,6 +97,15 @@ impl<'a> SupportedClientIr<'a> {
                         Item::FunctionDecl { source, .. } => {
                             self.rewrite_source(source, root_scope)?
                         }
+                        // A `$store` SOURCE const: the INIT lowers through the shared
+                        // rewriter (a store read/write inside rewrites — `derived(a,
+                        // ($a) => $a * 2)` keeps its SHADOWED callback param verbatim);
+                        // the `const <name> = ` scaffolding is composed around the
+                        // rewritten payload.
+                        Item::StoreSourceDecl { name, init } => {
+                            let rewritten = self.rewrite_source(init, root_scope)?;
+                            format!("const {name} = {rewritten};")
+                        }
                         // A `$effect(fn);` / `$effect.pre(fn);` / bare `$effect.root(fn);`
                         // / `$effect.tracking();` statement: the whole call expression
                         // lowers through the shared rewriter in the STATEMENT role (the
@@ -143,7 +152,7 @@ impl<'a> SupportedClientIr<'a> {
                         // `NeedsRewriter` is produced ONLY for the arms above; any other
                         // item reaching here is a classifier/lowering divergence.
                         _ => unreachable!(
-                            "only StatePrimitive, PropsDestructure, FunctionDecl, EffectStatement, and EffectRuneInit need the rewriter"
+                            "only StatePrimitive, PropsDestructure, FunctionDecl, StoreSourceDecl, EffectStatement, and EffectRuneInit need the rewriter"
                         ),
                     };
                     items.push(ClientScriptItem::BodyStatement { code });

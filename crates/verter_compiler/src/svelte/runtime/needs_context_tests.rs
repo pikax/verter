@@ -4,6 +4,30 @@
 
 use oxc_allocator::Allocator;
 
+/// Call the shared `needs_context` analysis with the import carrier derived from
+/// the SAME script sources (the tests' single entry — production callers thread
+/// the per-component `ClassifiedScriptImports` built once at IR construction).
+fn needs_context(
+    alloc: &Allocator,
+    instance_source: Option<&str>,
+    module_source: Option<&str>,
+    template_expr_sources: &[&str],
+    render_callee_sources: &[&str],
+) -> bool {
+    let imports = super::super::client_surface_imports::classify_script_imports(
+        module_source,
+        instance_source,
+    );
+    super::needs_context(
+        alloc,
+        instance_source,
+        module_source,
+        template_expr_sources,
+        render_callee_sources,
+        &imports,
+    )
+}
+
 #[test]
 fn inspect_with_chain_sets_needs_context_but_plain_and_trace_do_not() {
     // `$inspect(...).with(...)` FORCES the component frame in official production
@@ -13,7 +37,7 @@ fn inspect_with_chain_sets_needs_context_but_plain_and_trace_do_not() {
     // calls and must NOT trigger context (their elision leaves no frame).
     let alloc = oxc_allocator::Allocator::default();
     assert!(
-        super::needs_context(
+        needs_context(
             &alloc,
             Some("let c = $state(0); $inspect(c).with(console.log);"),
             None,
@@ -23,7 +47,7 @@ fn inspect_with_chain_sets_needs_context_but_plain_and_trace_do_not() {
         "`$inspect(...).with(...)` must set needs_context (the official frame)"
     );
     assert!(
-        !super::needs_context(
+        !needs_context(
             &alloc,
             Some("let c = $state(0); $inspect(c);"),
             None,
@@ -33,7 +57,7 @@ fn inspect_with_chain_sets_needs_context_but_plain_and_trace_do_not() {
         "plain `$inspect(x)` must NOT set needs_context"
     );
     assert!(
-        !super::needs_context(
+        !needs_context(
             &alloc,
             Some("let c = $state(0);"),
             None,
@@ -53,11 +77,11 @@ fn render_callee_scan_peels_the_snippet_call_and_scans_only_the_callee() {
     // SAFE — identifier callees (even prop-rooted) and ternaries of identifiers:
     // the outer call is not a trigger and an identifier read never is.
     assert!(
-        !super::needs_context(&alloc, props, None, &[], &["children?.()"]),
+        !needs_context(&alloc, props, None, &[], &["children?.()"]),
         "a prop-identifier render callee must NOT set needs_context"
     );
     assert!(
-        !super::needs_context(
+        !needs_context(
             &alloc,
             Some("let { a, b } = $props(); let cond = $state(true);"),
             None,
@@ -68,7 +92,7 @@ fn render_callee_scan_peels_the_snippet_call_and_scans_only_the_callee() {
     );
     // SAFE — a member rooted at a LOCAL (not an import / prop).
     assert!(
-        !super::needs_context(
+        !needs_context(
             &alloc,
             Some("let __r = $state(0);"),
             None,
@@ -80,7 +104,7 @@ fn render_callee_scan_peels_the_snippet_call_and_scans_only_the_callee() {
     // UNSAFE — a member rooted at the `$host()` CALL RESULT (a non-identifier
     // leaf is never a safe identifier).
     assert!(
-        super::needs_context(
+        needs_context(
             &alloc,
             Some("let __r = $state(0);"),
             None,
@@ -91,7 +115,7 @@ fn render_callee_scan_peels_the_snippet_call_and_scans_only_the_callee() {
     );
     // UNSAFE — a member rooted at an IMPORT, and a PROP-rooted member.
     assert!(
-        super::needs_context(
+        needs_context(
             &alloc,
             Some("import Snips from './Snips.svelte';"),
             None,
@@ -101,23 +125,23 @@ fn render_callee_scan_peels_the_snippet_call_and_scans_only_the_callee() {
         "an import-rooted member render callee must set needs_context"
     );
     assert!(
-        super::needs_context(&alloc, props, None, &[], &["o.snip()"]),
+        needs_context(&alloc, props, None, &[], &["o.snip()"]),
         "a prop-rooted member render callee must set needs_context"
     );
     // UNSAFE — a `new` expression anywhere in the peeled callee.
     assert!(
-        super::needs_context(&alloc, None, None, &[], &["(new Date())()"]),
+        needs_context(&alloc, None, None, &[], &["(new Date())()"]),
         "a new-expression render callee must set needs_context"
     );
     // UNSAFE — an object-literal-rooted member callee and an inner CALL callee
     // rooted at an import (`unsafeImport()()` peels ONE call; the inner call is
     // scanned).
     assert!(
-        super::needs_context(&alloc, None, None, &[], &["({ snip(){} }).snip()"]),
+        needs_context(&alloc, None, None, &[], &["({ snip(){} }).snip()"]),
         "an object-literal-rooted member render callee must set needs_context"
     );
     assert!(
-        super::needs_context(
+        needs_context(
             &alloc,
             Some("import makeSnip from './Make.svelte';"),
             None,
@@ -127,7 +151,7 @@ fn render_callee_scan_peels_the_snippet_call_and_scans_only_the_callee() {
         "an import-rooted inner-call render callee must set needs_context"
     );
     assert!(
-        !super::needs_context(
+        !needs_context(
             &alloc,
             Some("let __r = $state(0);"),
             None,
@@ -139,7 +163,7 @@ fn render_callee_scan_peels_the_snippet_call_and_scans_only_the_callee() {
     // UNSAFE — a conditional whose BRANCH carries an unsafe member (the branch
     // scans; only the outer call is excluded).
     assert!(
-        super::needs_context(
+        needs_context(
             &alloc,
             Some("import Snips from './Snips.svelte'; let { b } = $props(); let cond = $state(true);"),
             None,
@@ -150,7 +174,7 @@ fn render_callee_scan_peels_the_snippet_call_and_scans_only_the_callee() {
     );
     // Paren transparency: the parenthesized-callee spelling peels the same.
     assert!(
-        super::needs_context(
+        needs_context(
             &alloc,
             Some("let __r = $state(0);"),
             None,
@@ -162,7 +186,7 @@ fn render_callee_scan_peels_the_snippet_call_and_scans_only_the_callee() {
     // Conservative fallback: a NON-CALL render source scans whole (unreachable
     // for an emitted render — the projection refuses an uncalled render first).
     assert!(
-        super::needs_context(
+        needs_context(
             &alloc,
             Some("import Snips from './Snips.svelte';"),
             None,
@@ -184,11 +208,11 @@ fn render_callee_arrow_param_shadow_inside_callee_stays_frame_free() {
     let alloc = oxc_allocator::Allocator::default();
     let instance = Some("import Snips from './Snips.svelte';");
     assert!(
-        !super::needs_context(&alloc, instance, None, &[], &["((Snips) => Snips.row)()"]),
+        !needs_context(&alloc, instance, None, &[], &["((Snips) => Snips.row)()"]),
         "an arrow param shadowing the unsafe root inside the callee must NOT set needs_context"
     );
     assert!(
-        super::needs_context(&alloc, instance, None, &[], &["(() => Snips.row)()"]),
+        needs_context(&alloc, instance, None, &[], &["(() => Snips.row)()"]),
         "the unshadowed twin (import-rooted member in the arrow body) must set needs_context"
     );
 }
@@ -202,23 +226,23 @@ fn module_script_import_locals_are_unsafe_roots() {
     let alloc = Allocator::default();
     let module = Some("import * as NS from './m.js';");
     assert!(
-        super::needs_context(&alloc, None, module, &["NS.z"], &[]),
+        needs_context(&alloc, None, module, &["NS.z"], &[]),
         "a member rooted at a MODULE import must set needs_context"
     );
     assert!(
-        !super::needs_context(&alloc, None, module, &["NS"], &[]),
+        !needs_context(&alloc, None, module, &["NS"], &[]),
         "a BARE module-import read must NOT set needs_context"
     );
     // The shadow case uses an UNCALLED arrow (an IIFE's non-identifier callee is
     // itself an unsafe call — official `is_safe_identifier` — so it would trigger
     // regardless of shadowing).
     assert!(
-        !super::needs_context(&alloc, None, module, &["(NS) => NS.z"], &[]),
+        !needs_context(&alloc, None, module, &["(NS) => NS.z"], &[]),
         "a local shadowing the module-import name stays safe"
     );
     // The instance-import behaviour is unchanged by the module parameter.
     assert!(
-        super::needs_context(
+        needs_context(
             &alloc,
             Some("import * as NS from './m.js';"),
             None,

@@ -1,0 +1,92 @@
+{
+  "slug": "stores/store_custom_element.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/store",
+      "kind": "named",
+      "names": [
+        "writable"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "store_custom_element",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "push",
+    "store_get",
+    "setup_stores",
+    "prop",
+    "flush",
+    "child",
+    "reset",
+    "template_effect",
+    "set_text",
+    "append",
+    "pop",
+    "create_custom_element"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "create_custom_element",
+    "flush",
+    "from_html",
+    "pop",
+    "prop",
+    "push",
+    "reset",
+    "set_text",
+    "setup_stores",
+    "store_get",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "push": 1,
+    "store_get": 1,
+    "setup_stores": 1,
+    "prop": 1,
+    "flush": 1,
+    "child": 1,
+    "reset": 1,
+    "template_effect": 1,
+    "set_text": 1,
+    "append": 1,
+    "pop": 1,
+    "create_custom_element": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<p> </p>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; import {writable} from 'svelte/store'; var root = $.from_html(`<p> </p>`); export default function store_custom_element($$anchor, $$props) {$.push($$props, true); const $c = () => $.store_get(c, '$c', $$stores); const [$$stores, $$cleanup] = $.setup_stores(); const c = writable(0); let label = $.prop($$props, 'label', 7); var $$exports = {get label() {return label();}, set label($$value) {label($$value); $.flush();}}; var p = root(); var text = $.child(p); $.reset(p); $.template_effect(() => $.set_text(text, `${$c() ?? ''}${label() ?? ''}`)); $.append($$anchor, p); var $$pop = $.pop($$exports); $$cleanup(); return $$pop;} customElements.define('my-el', $.create_custom_element(store_custom_element, {label: {}}, [], [], {mode: 'open'}));",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}
