@@ -5265,6 +5265,96 @@ mod foundations_guards {
                 return true;
             }
         }
+        // Debt-ledger citation vocabulary. A comment that cross-references a
+        // `docs/arch` debt-ledger row (`tracked as ROW <id>`), or frames a known
+        // bounded limitation as a deferred, ledger-tracked follow-up
+        // (`deferred (tracked as ...)`), is project-management prose, not
+        // final-state. The durable rationale for a bounded residual belongs in
+        // the `docs/arch` architecture doc; the source comment must state the
+        // invariant, never cite the ledger row that tracks the follow-up.
+        //
+        // `deferred (tracked as` is matched CASE-INSENSITIVELY: the parenthetical
+        // pairing of a deferral with a tracker is the citation pattern regardless
+        // of capitalisation (`Deferred (tracked as ...)` at a sentence start is
+        // the same form), and the phrase carries no legitimate final-state sense.
+        if lower.contains("deferred (tracked as") {
+            return true;
+        }
+        // A ledger-row reference. Two entrances share one shape — the noun `row`
+        // at a word boundary, one space, then a LEDGER ID: a single ASCII letter
+        // immediately followed by an ASCII digit run, closed by a trailing word
+        // boundary (`F3`, `E5`, `F1`, `C12`).
+        //
+        // (b1) The cited form `tracked as row <id>`, matched CASE-INSENSITIVELY
+        // (against the lowercased line) so `tracked as ROW F3` and lowercase
+        // `tracked as row e5` trip identically. The `tracked as row ` context plus
+        // the `<letter><digit>` tail is what makes the case-insensitive `row` safe:
+        // `tracked as row-major` (hyphen, no space after `row`), `tracked as row N`
+        // (letter, no digit), `tracked as row 5` (digit, no leading letter), and
+        // `tracked as ROW_MAJOR` (underscore, no space) all lack the ledger token
+        // and are preserved.
+        {
+            let needle = "tracked as row ";
+            let lower_bytes = lower.as_bytes();
+            let mut search_from = 0usize;
+            while let Some(rel) = lower[search_from..].find(needle) {
+                let abs = search_from + rel;
+                // Leading word boundary on `tracked` so `untracked as row A1` (the
+                // needle inside a longer word) is not the citation form.
+                let is_word_start = abs == 0
+                    || !(lower_bytes[abs - 1].is_ascii_alphanumeric()
+                        || lower_bytes[abs - 1] == b'_');
+                let mut i = abs + needle.len();
+                if is_word_start && i < lower_bytes.len() && lower_bytes[i].is_ascii_alphabetic() {
+                    i += 1;
+                    let digit_start = i;
+                    while i < lower_bytes.len() && lower_bytes[i].is_ascii_digit() {
+                        i += 1;
+                    }
+                    if i > digit_start
+                        && (i >= lower_bytes.len()
+                            || !(lower_bytes[i].is_ascii_alphanumeric() || lower_bytes[i] == b'_'))
+                    {
+                        return true;
+                    }
+                }
+                search_from = abs + needle.len();
+            }
+        }
+        // (b2) A bare standalone id `ROW <id>` with no citation verb, matched
+        // CASE-SENSITIVELY on the uppercase ledger noun (lowercase `row a1` is an
+        // ordinary table/grid cell). The leading word boundary excludes
+        // `NARROW`/`ARROW`/`BORROW`; the `<UPPER><digit>` shape excludes `ROW MAJOR`
+        // (letter, not digit) and `ROW 0` (digit, not a letter); and the trailing
+        // word boundary after the digit run excludes longer identifiers like
+        // `ROW F3B`. A rare legitimate uppercase `ROW <id>` label is expected to be
+        // rephrased — the same rephrase-on-collision tradeoff the cutover-pass
+        // `C<n>` and the framework-block scans already make.
+        {
+            let needle = "ROW ";
+            let bytes = line.as_bytes();
+            let mut search_from = 0usize;
+            while let Some(rel) = line[search_from..].find(needle) {
+                let abs = search_from + rel;
+                let is_word_start =
+                    abs == 0 || !(bytes[abs - 1].is_ascii_alphanumeric() || bytes[abs - 1] == b'_');
+                let mut i = abs + needle.len();
+                if is_word_start && i < bytes.len() && bytes[i].is_ascii_uppercase() {
+                    i += 1;
+                    let digit_start = i;
+                    while i < bytes.len() && bytes[i].is_ascii_digit() {
+                        i += 1;
+                    }
+                    if i > digit_start
+                        && (i >= bytes.len()
+                            || !(bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_'))
+                    {
+                        return true;
+                    }
+                }
+                search_from = abs + needle.len();
+            }
+        }
         // Bare `cutover` (case-insensitive) — any cutover-stage
         // reference. CLAUDE.md bans cutover-stage vocabulary outright
         // (`cutover`, `pre-cutover`, `Pre-cutover`, `C2 cutover`,
@@ -6463,6 +6553,8 @@ mod foundations_guards {
             "postc",                     // postC<digit> cutover marker
             "pass c",                    // Pass C<digit> cutover marker
             "gap ",                      // gap <digit> framework-adapter marker
+            "tracked as row",            // debt-ledger citation (`tracked as ROW <id>`)
+            "deferred (tracked as",      // deferred, ledger-tracked follow-up framing
         ];
         let lower = src.to_ascii_lowercase();
         if LOWER_ROOTS.iter().any(|r| lower.contains(r)) {
@@ -6470,6 +6562,13 @@ mod foundations_guards {
         }
         // Uppercase-anchored `PE\d+` branch: check raw text.
         if src.contains("PE") {
+            return true;
+        }
+        // `ROW <id>` debt-ledger branch: case-sensitive (uppercase `ROW `). The
+        // per-line scan applies the word-boundary + `<UPPER><digit>` tail
+        // discriminator; the cheap necessary condition is the literal `ROW `
+        // (uppercase, trailing space) anywhere in the file.
+        if src.contains("ROW ") {
             return true;
         }
         // Bare cutover-pass label `C<digit>` branch: case-sensitive
@@ -6839,6 +6938,28 @@ mod foundations_guards {
         // only these isolate the bare branch.
         "// G9 cutover left a soundness gap",
         "// typed-IR cutover note",
+        // Debt-ledger citation vocabulary — a comment that cross-references a
+        // `docs/arch` debt-ledger row, or frames a known bounded limitation as a
+        // deferred, ledger-tracked follow-up. One fixture uniquely pins each of
+        // the three signals: the case-insensitive `deferred (tracked as` phrase,
+        // the case-insensitive cited `tracked as row <id>` form, and the
+        // case-sensitive bare `ROW <id>` scan.
+        // Real-form citation — all three signals fire on this line.
+        "// stamping a fresh generation is deferred (tracked as ROW F3 in `docs/arch/external-ts-engine-architecture.md`).",
+        // Cited uppercase form without the `deferred` prefix — fires (b1) + (b2).
+        "// (tracked as ROW E5): making the prune waiter-aware is a follow-up.",
+        // Bare standalone id, no citation verb — pins the case-sensitive (b2) scan.
+        "// see ROW F1 for the cancellation-safety follow-up.",
+        // Lowercase cited form — flagged ONLY by the case-insensitive (b1) scan
+        // (the bare (b2) scan requires uppercase `ROW`), so it both pins (b1) and
+        // proves the cited form is caught regardless of capitalisation.
+        "// same window is tracked as row E5 in `docs/arch`.",
+        // `deferred (tracked as` with a lowercase `ledger row` object (no ledger
+        // id) — flagged ONLY by the deferral phrase, so it pins that needle.
+        "// making it cancellation-safe is deferred (tracked as a docs/arch ledger row).",
+        // Sentence-initial capital `Deferred` — proves the deferral phrase is
+        // matched case-insensitively.
+        "// Deferred (tracked as a `docs/arch` ledger row).",
     ];
 
     #[test]
@@ -7052,6 +7173,34 @@ mod foundations_guards {
             "// the codomain C99 is well-defined.",            // C99 bare
             "// see RFC C1 in the appendix.", // `C1` mid-comment, not comment-leading, no trigger
             "// ClassName carries the C identifier prefix.", // `C` then letter — not a digit label
+            // Debt-ledger-citation negatives — the discriminating forms are the
+            // case-insensitive `deferred (tracked as` phrase, the case-insensitive
+            // cited `tracked as row <id>` form, and the case-sensitive bare
+            // `ROW <id>` scan. Ordinary prose using `deferred` as a technical
+            // adjective, `tracked as row` without a `<letter><digit>` ledger id,
+            // lowercase `row` bytes, or uppercase `ROW` inside a word / followed by
+            // a non-ledger tail must all be preserved.
+            "// full type lowering is deferred to the session-side resolver.",
+            "// the seen attribute names are tracked as source-backed spans.",
+            "// the ROW MAJOR traversal order is cache-friendly.",
+            "// the ROW 0 header stays pinned across horizontal scrolls.",
+            "// the ARROW keys move the selection by one step.",
+            "// each matrix row maps to one output channel.",
+            "// the ROW STRIDE governs the pixel-buffer layout.",
+            // `tracked as row-major` / `tracked as row N` pair the tracking verb
+            // with the common noun, not a ledger id (hyphen or bare letter, no
+            // `<letter><digit>` token), so the cited (b1) scan preserves them.
+            "// the tensor is tracked as row-major bytes in the output buffer.",
+            "// the value is tracked as row N of the wide-column table.",
+            // Leading word boundary: `untracked as row A1` has the needle inside a
+            // longer word, so the cited (b1) scan preserves it.
+            "// the cell is untracked as row A1 after the compaction pass.",
+            // `tracked as ROW_MAJOR` — underscore, no space after `row`, so neither
+            // the cited (b1) nor the bare (b2) scan fires.
+            "// the layout is tracked as ROW_MAJOR metadata.",
+            // `ROW F3B` — the `<letter><digit>` run is followed by another
+            // identifier byte, so the (b2) trailing word boundary preserves it.
+            "// ACTIVE ROW F3B carries compact per-lane metadata.",
         ];
         for line in allowed {
             assert!(

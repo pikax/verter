@@ -953,16 +953,16 @@ impl CarrierSyncState {
     /// (`record_pending` locks `pending` in step 1, `gate_for` locks `gates` in step 2 —
     /// never the reverse). No deadlock: no code path holds `gates` then locks `pending`.
     ///
-    /// NARROW residual (NOT fully race-safe): because an in-flight op COALESCES the
+    /// Bounded residual (NOT fully race-safe): because an in-flight op COALESCES the
     /// carrier's NEWEST pending op (`take_drainable`), it can commit an OLDER
     /// waiter's already-recorded op and then prune at that op's own `drain_seq` — observing
     /// no strictly-newer pending and removing the gate Arc WHILE that older waiter still
     /// holds a reference to it and is blocked on `gate.lock()`. A subsequent close/reopen
     /// then mints a FRESH gate Arc, transiently splitting the carrier across two gates. The
     /// window is BOUNDED and self-converging (the coalesced waiter finds nothing drainable
-    /// and releases the old gate) and any resulting inconsistency falls back to OWNED;
-    /// making the prune waiter-aware / generation-stamped is deferred (tracked as ROW E5 in
-    /// `docs/arch/external-ts-engine-architecture.md`).
+    /// and releases the old gate) and any resulting inconsistency falls back to OWNED. The
+    /// prune is not waiter-aware / generation-stamped; the transient split is bounded and
+    /// stays fail-closed to OWNED by design.
     fn prune_carrier_state_if_idle(&self, carrier: &str, up_to_seq: u64) {
         let mut pending = self.pending.lock();
         let has_newer = pending
@@ -1051,9 +1051,9 @@ impl CarrierSyncState {
                 // cancellation), a first-open reserves the slot BEFORE the barrier, so an
                 // OUTER overlay deadline that cancels this future mid-barrier — before the
                 // commit below runs — can leave a reserved unsynced slot (bounded, fail
-                // closed to OWNED). Making the first-open reservation cancellation-safe
-                // (dropping/retracting the reserved slot on an outer-deadline cancel) is
-                // deferred (tracked as ROW F1 in `docs/arch/external-ts-engine-architecture.md`).
+                // closed to OWNED). The first-open reservation is not made cancellation-safe
+                // here: an outer-deadline cancel does not drop/retract the reserved slot, so
+                // this residual stays bounded and fail-closed to OWNED by design.
                 let commit = sync_commit(action, result.is_ok());
                 if matches!(commit, SyncCommit::RetractOpen) {
                     let _ = sink(CarrierWireOp::Close).await;

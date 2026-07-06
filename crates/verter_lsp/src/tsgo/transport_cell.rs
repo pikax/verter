@@ -128,14 +128,13 @@ impl<T> LazyTransport<T> {
                     // as failed. Re-establishment follows the SAME generation/nonce re-arm
                     // discriminant on a SUBSEQUENT query: a still-dead shim (unchanged
                     // discriminant) stays fail-closed (no re-establishment storm), while a
-                    // reconnect (advanced discriminant) re-establishes. NARROW residual
-                    // (tracked as ROW F3): if the generation ALREADY advanced (a fresh
-                    // advertisement) before this eviction observed it, stamping that fresh
-                    // generation as `failed_generation` — without having attempted
-                    // establishment at it — makes recovery wait for a FURTHER advance
-                    // (bounded, fail-closed to OWNED meanwhile). Not stamping an already
-                    // fresh generation as failed before an establishment attempt is deferred
-                    // (tracked as ROW F3 in `docs/arch/external-ts-engine-architecture.md`).
+                    // reconnect (advanced discriminant) re-establishes. Residual: if the
+                    // generation ALREADY advanced (a fresh advertisement) before this
+                    // eviction observed it, stamping that fresh generation as
+                    // `failed_generation` — without having attempted establishment at it —
+                    // makes recovery wait for a FURTHER discriminant advance. Until that
+                    // advance the transport stays `Unavailable` and every query stays
+                    // fail-closed to OWNED.
                     *state = CellState::Unavailable {
                         failed_generation: probe_generation(),
                     };
