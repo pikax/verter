@@ -785,7 +785,7 @@ fn svelte_get_public_api_declaration_mode_is_strictly_declaration_safe() {
         // A non-type `import { … }` (value import) is illegal in this
         // declaration; only `import type …` is allowed.
         assert!(
-            !(t.starts_with("import ") && !t.starts_with("import type ")),
+            !t.starts_with("import ") || t.starts_with("import type "),
             "only type-only imports allowed in a declaration; offending line: `{line}`\n{decl}"
         );
     }

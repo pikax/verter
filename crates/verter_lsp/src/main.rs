@@ -4,6 +4,7 @@ use tokio::sync::{Notify, OnceCell};
 use tower_lsp_server::{LspService, Server};
 use tracing_subscriber::EnvFilter;
 use verter_lsp::server::VerterLanguageServer;
+use verter_lsp::tsgo::composite::{SharedRendezvous, SharedTsgoOverlay, TsgoCompositeProvider};
 use verter_lsp::tsgo::ipc::{find_tsgo_binary_canonical, TsgoOwnedProvider, TsgoTypeProvider};
 use verter_lsp::tsgo::resilient as tsgo_resilient;
 use verter_lsp::tsserver::ipc::TsserverTypeProvider;
@@ -74,7 +75,7 @@ async fn main() {
 
     // Provider selection: auto → detect TS version, pick provider
     let (type_provider, provider_kind, suggest_tsgo, type_provider_none_reason) =
-        create_type_provider(&args, &client_cell).await;
+        create_type_provider(&args, &client_cell, &host).await;
 
     let config = LspConfig {
         host,
@@ -164,7 +165,10 @@ async fn main() {
 
 /// Parsed CLI arguments.
 struct CliArgs {
-    /// Type provider mode: "auto", "tsgo", "tsserver", "off".
+    /// Type provider mode: "auto" (default), "tsgo", "shared-tsgo", "tsserver",
+    /// "extension", "off". "tsgo" and "shared-tsgo" are the SAME routing (SHARED
+    /// editor-attach is additive + opt-in on top of the OWNED tsgo baseline); an
+    /// unrecognized value falls through to "auto".
     type_provider: String,
     /// Path to TypeScript SDK directory (tsserver.js location).
     tsdk: Option<String>,
@@ -177,6 +181,14 @@ struct CliArgs {
     /// MCP server. Supplying this flag now logs a notice that points
     /// consumers at `verter-mcp-server`.
     mcp_port: Option<u16>,
+    /// The rendezvous control directory an editor-spawned `verter-relay-shim`
+    /// advertised into (`--shared-control-dir`, or `VERTER_SHARED_CONTROL_DIR`).
+    /// Present ⇒ SHARED editor-attach is opt-in-eligible; absent ⇒ SHARED is never
+    /// attempted (fail-closed, OWNED baseline).
+    shared_control_dir: Option<String>,
+    /// The shim `--session-key` to discover the advertisement under
+    /// (`--shared-session-key`, or `VERTER_SHARED_SESSION_KEY`).
+    shared_session_key: Option<String>,
 }
 
 impl CliArgs {
@@ -186,6 +198,11 @@ impl CliArgs {
         let mut plugin_path = None;
         let mut workspace_root = None;
         let mut mcp_port = None;
+        // The SHARED editor-attach rendezvous is opt-in via CLI flag or env — the
+        // editor extension supplies it when it spawns a `verter-relay-shim` as its
+        // `tsgo`. Absent both, SHARED is never attempted (fail-closed OWNED baseline).
+        let mut shared_control_dir = std::env::var("VERTER_SHARED_CONTROL_DIR").ok();
+        let mut shared_session_key = std::env::var("VERTER_SHARED_SESSION_KEY").ok();
 
         for arg in std::env::args().skip(1) {
             if let Some(val) = arg.strip_prefix("--type-provider=") {
@@ -194,6 +211,10 @@ impl CliArgs {
                 tsdk = Some(val.to_string());
             } else if let Some(val) = arg.strip_prefix("--plugin-path=") {
                 plugin_path = Some(val.to_string());
+            } else if let Some(val) = arg.strip_prefix("--shared-control-dir=") {
+                shared_control_dir = Some(val.to_string());
+            } else if let Some(val) = arg.strip_prefix("--shared-session-key=") {
+                shared_session_key = Some(val.to_string());
             } else if let Some(val) = arg.strip_prefix("--mcp-port=") {
                 mcp_port = val.parse().ok();
             } else if arg.starts_with("--mcp-lint-preset=") {
@@ -214,6 +235,18 @@ impl CliArgs {
             plugin_path,
             workspace_root,
             mcp_port,
+            shared_control_dir,
+            shared_session_key,
+        }
+    }
+
+    /// The SHARED editor-attach rendezvous `(control_dir, session_key)`, when BOTH
+    /// are supplied — the opt-in evidence that a `verter-relay-shim` may be
+    /// discoverable. Absent either, SHARED is never attempted.
+    fn shared_rendezvous(&self) -> Option<(&str, &str)> {
+        match (&self.shared_control_dir, &self.shared_session_key) {
+            (Some(dir), Some(key)) => Some((dir.as_str(), key.as_str())),
+            _ => None,
         }
     }
 }
@@ -230,6 +263,7 @@ impl CliArgs {
 async fn create_type_provider(
     args: &CliArgs,
     client_cell: &Arc<OnceCell<tower_lsp_server::Client>>,
+    host: &Arc<VerterHost>,
 ) -> (
     Option<Arc<dyn TypeProvider>>,
     TypeProviderKind,
@@ -263,10 +297,20 @@ async fn create_type_provider(
                 Some("Disabled by configuration (--type-provider=off)".into()),
             )
         }
-        "tsgo" => {
-            // TSGO only — no fallback
+        "shared-tsgo" | "tsgo" => {
+            // OWNED is the universal baseline — built first, always. SHARED
+            // editor-attach is additive + opt-in + fail-closed: when the rendezvous
+            // evidence is present, the OWNED provider is WRAPPED in a
+            // `TsgoCompositeProvider` whose SHARED overlay binds lazily per query
+            // over the published snapshot and overlays ONLY bound carrier
+            // diagnostics — it NEVER displaces the OWNED feature/diagnostics
+            // surface. Absent the rendezvous, the bare OWNED provider is used.
+            // `tsgo` and `shared-tsgo` are the same routing with a clearer name.
             match try_spawn_tsgo(&ws_canonical, client_cell).await {
-                Ok(tp) => (Some(tp), TypeProviderKind::Tsgo, false, None),
+                Ok(owned) => {
+                    let tp = wrap_shared_if_opted_in(owned, args, host, &ws_canonical);
+                    (Some(tp), TypeProviderKind::Tsgo, false, None)
+                }
                 Err(reason) => {
                     tracing::warn!("TSGO unavailable — running in verter-only mode: {reason}");
                     (None, TypeProviderKind::None, false, Some(reason))
@@ -362,9 +406,15 @@ async fn create_type_provider(
                 }
             }
 
-            // No tsserver available or not preferred — try TSGO
+            // No tsserver available or not preferred — build the OWNED TSGO
+            // baseline, then WRAP it in the SHARED-overlay composite when the
+            // rendezvous evidence is present (opt-in; the overlay binds lazily per
+            // query and never displaces the OWNED baseline).
             let tsgo_reason = match try_spawn_tsgo(&ws_canonical, client_cell).await {
-                Ok(tp) => return (Some(tp), TypeProviderKind::Tsgo, false, None),
+                Ok(owned) => {
+                    let tp = wrap_shared_if_opted_in(owned, args, host, &ws_canonical);
+                    return (Some(tp), TypeProviderKind::Tsgo, false, None);
+                }
                 Err(reason) => {
                     tracing::warn!("auto mode: tsgo unavailable: {reason}");
                     reason
@@ -466,6 +516,58 @@ async fn try_spawn_tsgo(
         3,
     );
     Ok(Arc::new(resilient))
+}
+
+/// Wrap the OWNED tsgo provider in a SHARED-overlay [`TsgoCompositeProvider`] when
+/// the editor-attach rendezvous evidence is present; otherwise return the bare OWNED
+/// provider. SHARED is opt-in and additive — the composite delegates every feature +
+/// the diagnostics fallback to OWNED and overlays ONLY successfully-bound SHARED
+/// carrier diagnostics, so OWNED is never displaced.
+fn wrap_shared_if_opted_in(
+    owned: Arc<dyn TypeProvider>,
+    args: &CliArgs,
+    host: &Arc<VerterHost>,
+    workspace_root: &str,
+) -> Arc<dyn TypeProvider> {
+    match try_attach_shared_tsgo(Arc::clone(&owned), args, host, workspace_root) {
+        Some(composite) => composite,
+        None => owned,
+    }
+}
+
+/// Build the SHARED-overlay composite over the OWNED provider (sibling to
+/// [`try_spawn_tsgo`]) when the rendezvous evidence is present.
+///
+/// The composite's [`SharedTsgoOverlay`] binds LAZILY per query: on a carrier
+/// diagnostics query it resolves the carrier's owning project through the shared
+/// `WorkspaceProjectResolver` over the host's LIVE published snapshot, mints the
+/// `BoundProject` witness from the resolved binding, discovers the editor-spawned
+/// `verter-relay-shim` advertisement, gates the observed engine version (keyed on the
+/// actual attach-gate version, never a hardcoded literal), and overlays the SHARED
+/// `--api` carrier diagnostics — falling back to the OWNED baseline for every
+/// non-bound / non-SHARED / failed state. Returns `None` when the rendezvous is absent
+/// (SHARED is opt-in) so the caller uses the bare OWNED provider.
+fn try_attach_shared_tsgo(
+    owned: Arc<dyn TypeProvider>,
+    args: &CliArgs,
+    host: &Arc<VerterHost>,
+    workspace_root: &str,
+) -> Option<Arc<dyn TypeProvider>> {
+    let (control_dir, session_key) = args.shared_rendezvous()?;
+    let overlay = SharedTsgoOverlay::new(
+        Arc::clone(host),
+        SharedRendezvous {
+            control_dir: std::path::PathBuf::from(control_dir),
+            session_key: session_key.to_string(),
+            workspace_root: workspace_root.to_string(),
+        },
+    );
+    tracing::info!(
+        "TSGO SHARED editor-attach composite armed (control_dir={control_dir}, \
+         session_key={session_key}); the overlay binds lazily per query over the \
+         published snapshot and fails closed to the OWNED baseline"
+    );
+    Some(Arc::new(TsgoCompositeProvider::new(owned, overlay)) as Arc<dyn TypeProvider>)
 }
 
 /// Try to spawn tsserver.

@@ -490,6 +490,56 @@ async fn sync_overlay_tolerates_jsonrpc_error_response() {
     responder.await.unwrap();
 }
 
+/// FAIL-CLOSED: a slow/broken editor tsgo that RECEIVES the barrier
+/// request but NEVER answers (the connection stays OPEN — not an EOF/Closed) must not
+/// stall the carrier lifecycle. Bounded by its timeout, `sync_overlay` fails CLOSED with
+/// `TsgoApiError::Timeout` within the bound rather than blocking forever.
+#[tokio::test]
+async fn sync_overlay_times_out_when_barrier_never_answers() {
+    // A black-hole server: it drains inbound bytes and NEVER responds, holding its
+    // write half so the client never sees EOF (distinct from the Closed case).
+    let (client, server) = tokio::io::duplex(64 * 1024);
+    let (mut sr, sw) = tokio::io::split(server);
+    let black_hole = tokio::spawn(async move {
+        let _keep_write_open = sw; // never respond; never EOF the client
+        let mut chunk = [0u8; 8192];
+        loop {
+            match sr.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => { /* drain, never answer */ }
+            }
+        }
+    });
+
+    let (cr, cw) = tokio::io::split(client);
+    let conn = JsonRpcConnection::connect(cr, cw);
+    let overlays = StdMutex::new(HashSet::new());
+    let taint = StdMutex::new(HashSet::new());
+    let channel = CarrierInjectionChannel::new(&conn, &overlays, &taint);
+
+    let started = tokio::time::Instant::now();
+    // The OUTER guard proves the barrier does not hang (a pre-timeout sync_overlay would
+    // block until this 5s guard fired); the INNER 50ms bound is what must actually fire.
+    let err = tokio::time::timeout(
+        Duration::from_secs(5),
+        channel.sync_overlay_with_timeout("file:///ws/Slow.vue.tsx", Duration::from_millis(50)),
+    )
+    .await
+    .expect("the bounded barrier must resolve well within the outer guard — never hang")
+    .expect_err("a barrier that never round-trips within its bound must FAIL, not return Ok");
+    assert!(
+        matches!(err, TsgoApiError::Timeout(_)),
+        "the fail-closed barrier must surface TsgoApiError::Timeout, got {err:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the barrier must fail closed within its small bound, not the outer guard"
+    );
+
+    conn.close().await.unwrap();
+    let _ = black_hole.await;
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Relay harness: a fake EDITOR endpoint and a fake SERVER endpoint on two
 // in-memory duplexes, with the relay pumping between them. The editor side is
@@ -1778,5 +1828,120 @@ async fn injected_didopen_precedes_sync_barrier() {
          ordered server wire: {methods:?}"
     );
     drop(editor_write);
+    relay.shutdown().await;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// In-band `initialize` witness capture + the relay-stopped signal — the hooks a
+// shim drives (waitInitialized barrier / editor-disconnect teardown).
+// ────────────────────────────────────────────────────────────────────────────
+
+/// The relay captures the in-band `initialize` witness (the engine
+/// `serverInfo.version`, the editor's `initialize` id, and its workspace
+/// params) as the pass-through handshake completes — and NOT before.
+#[tokio::test]
+async fn relay_captures_in_band_initialize_witness_as_handshake_passes() {
+    let (editor_endpoint, relay_editor_side) = tokio::io::duplex(64 * 1024);
+    let (server_endpoint, relay_server_side) = tokio::io::duplex(64 * 1024);
+    let (er, ew) = tokio::io::split(relay_editor_side);
+    let (sr, sw) = tokio::io::split(relay_server_side);
+    let relay = LspRelay::start(er, ew, sr, sw);
+    let (mut editor_read, mut editor_write) = tokio::io::split(editor_endpoint);
+    let (mut server_read, mut server_write) = tokio::io::split(server_endpoint);
+
+    // Discriminating negative: before any handshake, there is NO witness (the
+    // capture is not an always-Some default).
+    assert!(
+        relay.initialized_witness().is_none(),
+        "a relay with no observed initialize must have no witness"
+    );
+
+    // The editor sends `initialize` (id 7 + workspace params); the relay
+    // forwards it to the server.
+    let init_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "initialize",
+        "params": {
+            "rootUri": "file:///w",
+            "workspaceFolders": [{ "uri": "file:///w", "name": "w" }],
+            "capabilities": {},
+        },
+    });
+    write_frame(&mut editor_write, &init_req).await;
+    let forwarded_req = read_frame(&mut server_read).await;
+    assert_eq!(forwarded_req["method"], "initialize");
+
+    // The server answers with its in-band `serverInfo.version`; the relay
+    // forwards the response to the editor AND captures the witness.
+    let init_resp = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 7,
+        "result": { "serverInfo": { "name": "tsgo", "version": "7.0.1-rc" }, "capabilities": {} },
+    });
+    write_frame(&mut server_write, &init_resp).await;
+    let forwarded_resp = read_frame(&mut editor_read).await;
+    assert_eq!(
+        forwarded_resp["id"], 7,
+        "the editor still receives the real response"
+    );
+
+    let witness = tokio::time::timeout(Duration::from_secs(5), relay.wait_initialized())
+        .await
+        .expect("wait_initialized timed out")
+        .expect("the handshake completed, so a witness must be present");
+    assert_eq!(
+        witness.server_info_version.as_deref(),
+        Some("7.0.1-rc"),
+        "the in-band serverInfo.version is captured"
+    );
+    assert_eq!(
+        witness.observed_initialize_id,
+        serde_json::json!(7),
+        "the editor's initialize id is captured"
+    );
+    assert_eq!(
+        witness.root_uri.as_deref(),
+        Some("file:///w"),
+        "the rootUri workspace witness is captured from the request"
+    );
+    assert_eq!(
+        witness.workspace_folders,
+        Some(serde_json::json!([{ "uri": "file:///w", "name": "w" }])),
+        "the workspaceFolders witness is captured from the request"
+    );
+
+    drop(editor_write);
+    relay.shutdown().await;
+}
+
+/// The relay signals `stopped` when the editor side disconnects (stdin EOF),
+/// and does NOT signal while it is live — the teardown trigger a shim selects on.
+#[tokio::test]
+async fn relay_signals_stopped_on_editor_disconnect() {
+    let (editor_endpoint, relay_editor_side) = tokio::io::duplex(64 * 1024);
+    let (server_endpoint, relay_server_side) = tokio::io::duplex(64 * 1024);
+    let (er, ew) = tokio::io::split(relay_editor_side);
+    let (sr, sw) = tokio::io::split(relay_server_side);
+    let relay = LspRelay::start(er, ew, sr, sw);
+
+    // Discriminating: a LIVE relay must NOT report stopped.
+    let while_live = tokio::time::timeout(Duration::from_millis(250), relay.wait_stopped()).await;
+    assert!(
+        while_live.is_err(),
+        "a live relay (both streams open) must not report stopped"
+    );
+
+    // The editor disconnects: dropping the whole editor endpoint EOFs the
+    // relay's editor read, ending the editor→server pump.
+    drop(editor_endpoint);
+
+    tokio::time::timeout(Duration::from_secs(5), relay.wait_stopped())
+        .await
+        .expect("the relay must report stopped after the editor disconnects");
+
+    // The server endpoint is dropped last (kept alive until here so the stop is
+    // attributable to the EDITOR disconnect, not a server EOF).
+    drop(server_endpoint);
     relay.shutdown().await;
 }

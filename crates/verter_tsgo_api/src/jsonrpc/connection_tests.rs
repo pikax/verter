@@ -222,3 +222,64 @@ async fn closed_connection_fails_request() {
         "a closed connection must fail with Closed/Transport, got {err:?}"
     );
 }
+
+/// A peer NOTIFICATION (a `method` with no `id`, e.g. the control server's
+/// `verter/fatal` liveness signal) is SURFACED to the installed notification handler.
+///
+/// RED before the fix: `route_message` dropped every notification on the floor
+/// (`(false, _) => {}`), so a dead-relay `verter/fatal` never reached the client — the
+/// SHARED overlay could not learn the transport died and occupied a dead provider
+/// until LSP restart.
+#[tokio::test]
+async fn peer_notification_is_surfaced_to_handler() {
+    let (cr, cw, _sr, mut sw) = duplex_pair();
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen_handler = Arc::clone(&seen);
+
+    let conn = JsonRpcConnection::connect_with_handlers(
+        cr,
+        cw,
+        Arc::new(|_method, _params| serde_json::Value::Null),
+        Arc::new(move |method, _params| {
+            seen_handler.lock().unwrap().push(method.to_string());
+        }),
+    );
+
+    // The server sends a `verter/fatal` NOTIFICATION (no id) to the client.
+    let notification = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "verter/fatal",
+        "params": { "reason": "relay_death", "detail": "relay stopped pumping" }
+    });
+    sw.write_all(&encode_message(&notification)).await.unwrap();
+    sw.flush().await.unwrap();
+
+    // Give the reader task a moment to route it.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec!["verter/fatal".to_string()],
+        "a peer notification must be surfaced to the notification handler, not ignored"
+    );
+    conn.close().await.unwrap();
+}
+
+/// The connection-death liveness signal: `is_closed()` is `false` while live and
+/// flips to `true` after the peer EOFs (the reader task ends), so a caller can detect a
+/// dead transport WITHOUT issuing a request.
+#[tokio::test]
+async fn is_closed_reflects_connection_death() {
+    let (cr, cw, sr, sw) = duplex_pair();
+    let conn = JsonRpcConnection::connect(cr, cw);
+    assert!(!conn.is_closed(), "a fresh live connection is not closed");
+
+    // The peer drops both ends → EOF on the client read → the reader task ends.
+    drop(sr);
+    drop(sw);
+    // Give the reader task a moment to observe EOF.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(
+        conn.is_closed(),
+        "a connection whose peer EOFed must report is_closed() == true"
+    );
+}

@@ -21,7 +21,7 @@
 //! notification via [`JsonRpcConnection::notify`].)
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -40,6 +40,14 @@ use crate::jsonrpc::framing::{encode_message, MessageFramer};
 pub type ServerRequestHandler =
     Arc<dyn Fn(&str, &serde_json::Value) -> serde_json::Value + Send + Sync>;
 
+/// A handler invoked for each server→client NOTIFICATION (a frame with a `method`
+/// but no `id`) the peer sends — e.g. the control server's `verter/fatal` liveness
+/// signal. The default ([`JsonRpcConnection::connect`] /
+/// [`JsonRpcConnection::connect_with_handler`]) is a no-op (notifications ignored);
+/// a caller that must react to a peer notification installs one via
+/// [`JsonRpcConnection::connect_with_handlers`].
+pub type NotificationHandler = Arc<dyn Fn(&str, &serde_json::Value) + Send + Sync>;
+
 /// A pending-request table shared between the public handle and the read task.
 type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>>;
 
@@ -57,6 +65,10 @@ pub struct JsonRpcConnection {
     out_tx: mpsc::Sender<Outbound>,
     pending: Pending,
     next_id: Arc<AtomicI64>,
+    /// Flipped to `true` when the reader task ends (peer EOF / transport error /
+    /// malformed frame) or the connection is closed — the connection-death liveness
+    /// signal a caller (e.g. the SHARED overlay) reads to evict a dead transport.
+    closed: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for JsonRpcConnection {
@@ -106,25 +118,55 @@ impl JsonRpcConnection {
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
     {
+        Self::connect_with_handlers(reader, writer, handler, Arc::new(|_method, _params| {}))
+    }
+
+    /// Wrap a split async transport with BOTH a server→client request `handler` and
+    /// a peer-`notification` handler. The notification handler is invoked for each
+    /// peer notification (a `method` with no `id`) — e.g. the control server's
+    /// `verter/fatal` liveness signal — instead of the frame being ignored.
+    pub fn connect_with_handlers<R, W>(
+        reader: R,
+        writer: W,
+        handler: ServerRequestHandler,
+        notification: NotificationHandler,
+    ) -> Self
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+        W: AsyncWrite + Unpin + Send + 'static,
+    {
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let (out_tx, out_rx) = mpsc::channel::<Outbound>(256);
+        let closed = Arc::new(AtomicBool::new(false));
 
         // Writer task: drains the outbound queue onto the transport.
         tokio::spawn(writer_task(writer, out_rx));
-        // Reader task: frames inbound bytes, routes responses to waiters, and
-        // auto-answers server→client requests through `handler`.
+        // Reader task: frames inbound bytes, routes responses to waiters,
+        // auto-answers server→client requests through `handler`, routes peer
+        // notifications to `notification`, and flips `closed` on EOF/error.
         tokio::spawn(reader_task(
             reader,
             Arc::clone(&pending),
             out_tx.clone(),
             handler,
+            notification,
+            Arc::clone(&closed),
         ));
 
         Self {
             out_tx,
             pending,
             next_id: Arc::new(AtomicI64::new(1)),
+            closed,
         }
+    }
+
+    /// Whether the connection is dead: the reader task ended (peer EOF / transport
+    /// error / malformed frame) or [`Self::close`] was called. A caller reads this as
+    /// a liveness signal — a dead connection can serve no further requests.
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
     }
 
     /// Send a JSON-RPC request and await its result. Dropping the returned future
@@ -193,6 +235,7 @@ impl JsonRpcConnection {
 
     /// Close the connection: stop the writer task and fail every in-flight waiter.
     pub async fn close(&self) -> TsgoApiResult<()> {
+        self.closed.store(true, Ordering::Release);
         let _ = self.out_tx.send(Outbound::Close).await;
         // Fail any remaining waiters so callers unblock with `Closed`.
         let mut pending = self.pending.lock();
@@ -223,12 +266,15 @@ where
 }
 
 /// The reader task: frame inbound bytes, route responses to waiters, auto-answer
-/// server→client requests, and ignore peer notifications.
+/// server→client requests, route peer notifications to `notification`, and flip
+/// `closed` on EOF / transport error / malformed frame.
 async fn reader_task<R>(
     mut reader: R,
     pending: Pending,
     out_tx: mpsc::Sender<Outbound>,
     handler: ServerRequestHandler,
+    notification: NotificationHandler,
+    closed: Arc<AtomicBool>,
 ) where
     R: AsyncRead + Unpin + Send + 'static,
 {
@@ -242,28 +288,34 @@ async fn reader_task<R>(
         }
         loop {
             match framer.next_message() {
-                Ok(Some(msg)) => route_message(&msg, &pending, &out_tx, &handler).await,
+                Ok(Some(msg)) => {
+                    route_message(&msg, &pending, &out_tx, &handler, &notification).await
+                }
                 Ok(None) => break,
-                // A malformed frame is unrecoverable: drop every waiter and stop.
+                // A malformed frame is unrecoverable: mark closed, drop every waiter,
+                // and stop.
                 Err(_) => {
+                    closed.store(true, Ordering::Release);
                     pending.lock().clear();
                     return;
                 }
             }
         }
     }
-    // EOF / error: unblock every waiter.
+    // EOF / error: the connection is dead — mark closed and unblock every waiter.
+    closed.store(true, Ordering::Release);
     pending.lock().clear();
 }
 
 /// Route one decoded message: a response (has `id` + `result`/`error`) goes to its
-/// waiter; a server→client request (has `id` + `method`) is auto-answered; a
-/// notification (only `method`) is ignored.
+/// waiter; a server→client request (has `id` + `method`) is auto-answered; a peer
+/// notification (only `method`) is dispatched to `notification`.
 async fn route_message(
     msg: &serde_json::Value,
     pending: &Pending,
     out_tx: &mpsc::Sender<Outbound>,
     handler: &ServerRequestHandler,
+    notification: &NotificationHandler,
 ) {
     let has_id = msg.get("id").map(|v| !v.is_null()).unwrap_or(false);
     let method = msg.get("method").and_then(|m| m.as_str());
@@ -288,8 +340,16 @@ async fn route_message(
                 }
             }
         }
-        // Peer notification (no id): ignored.
-        (false, _) => {}
+        // Peer notification (no id): dispatch to the notification handler.
+        (false, Some(method)) => {
+            let params = msg
+                .get("params")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            notification(method, &params);
+        }
+        // A frame with neither id nor method: nothing to route.
+        (false, None) => {}
     }
 }
 

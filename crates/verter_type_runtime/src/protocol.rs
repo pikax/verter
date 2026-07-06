@@ -376,7 +376,7 @@ pub struct TypeDiagnostic {
 /// end)` back to a carrier-source `Location` through the SAME cross-file/carrier
 /// mappers references/rename/code-actions use, and drops the entry fail-closed
 /// when it cannot be mapped (never a line-0 link).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiagnosticRelatedInfo {
     /// Target file path of the related span (provider-domain path).
     pub path: String,

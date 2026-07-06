@@ -34,6 +34,7 @@ pub mod actor;
 pub mod api_attach;
 pub mod attach;
 pub mod client;
+pub mod control;
 mod egress;
 pub mod error;
 pub mod gate;
@@ -55,7 +56,7 @@ pub use client::TsgoClient;
 pub use error::{TsgoApiError, TsgoApiResult};
 pub use lane::Lane;
 pub use offset::{api_offset_to_byte, api_offset_to_line_col, diagnostic_byte_span};
-pub use relay::{CarrierInjectionChannel, LspRelay};
+pub use relay::{CarrierInjectionChannel, InitializedWitness, LspRelay};
 pub use snapshot::{
     AccessibleEntries, OverlaySnapshot, OverlaySnapshotBuilder, ReadFileResult, RealDirSource,
 };

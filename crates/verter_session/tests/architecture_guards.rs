@@ -4091,6 +4091,21 @@ mod foundations_guards {
             // a subprocess binary is real-FS by nature, never workspace
             // source (sibling of the `verter_type_runtime` IPC entries).
             "crates/verter_tsgo_api/src/transport/spawn.rs",
+            // Relay-shim rendezvous advertisement — the IPC file a shim
+            // writes on startup so a `verter_lsp` control client can DISCOVER
+            // it (create_dir_all / write / read / read_dir / remove). An IPC
+            // rendezvous artifact is real-FS by nature (a separate process
+            // reads it off disk); never workspace/semantic source, never
+            // routable through `WorkspaceAccess` (sibling of the `spawn.rs`
+            // subprocess-binary IPC entry).
+            "crates/verter_tsgo_api/src/control/advertisement.rs",
+            // Relay-shim control endpoint — a Unix-domain-socket file is a
+            // real filesystem artifact the OS binds; the listener removes a
+            // stale socket on bind and its own socket on drop
+            // (`std::fs::remove_file`, `#[cfg(unix)]`). Socket-file lifecycle
+            // is real-FS by nature, never workspace source (same category as
+            // the `advertisement.rs` IPC rendezvous file).
+            "crates/verter_tsgo_api/src/control/transport.rs",
             // Audit substrate's `current_process_rss` reads
             // `/proc/self/statm` (Linux) for memory-delta
             // accounting; matches the historic
@@ -7848,6 +7863,14 @@ mod foundations_guards {
         (
             "crates/verter_tsgo_api/src/transport/spawn.rs",
             "rc tsgo-engine binary discovery (`discover_tsgo`) — walks the pnpm virtual store + classic `@typescript/` sibling layout on the REAL OS filesystem to locate the installed `typescript@>=7` platform binary (`tsc`/`tsc.exe`) the `--api` transport spawns. Real-FS by nature (a subprocess binary cannot be read through the in-memory VFS); same category as `verter_type_runtime/src/tsgo/ipc.rs` + `verter_tsc/src/reporter.rs`. Not a NativeFs/VFS disk-boundary bypass — never reads workspace/semantic state.",
+        ),
+        (
+            "crates/verter_tsgo_api/src/control/advertisement.rs",
+            "relay-shim rendezvous advertisement — the shim (a standalone editor-spawned process, NOT a session/VFS host) writes an advertisement JSON into `--control-dir` (`create_dir_all` + `write`) so a SEPARATE `verter_lsp` control client can discover + verify it (`read` / `read_dir`) and remove it on teardown (`remove_advertisement`). An IPC rendezvous file is real-FS by nature — a different process reads it off disk — and cannot be routed through the in-memory VFS/`WorkspaceAccess`. Same category as `spawn.rs` + `verter_type_runtime/src/tsgo/ipc.rs`; not a NativeFs/VFS disk-boundary bypass, never workspace/semantic state.",
+        ),
+        (
+            "crates/verter_tsgo_api/src/control/transport.rs",
+            "relay-shim control endpoint transport — the control protocol rides same-user local IPC (a Windows named pipe / a Unix-domain socket). On Unix a UDS is a real filesystem artifact the OS binds: the listener removes a stale socket before `bind` and its own socket on `Drop` (`std::fs::remove_file`, `#[cfg(unix)]`). Socket-file lifecycle is real-FS by nature (the pipe/UDS namespace is the OS, not the VFS); same category as `advertisement.rs` + `spawn.rs`, not a NativeFs/VFS disk-boundary bypass, never workspace/semantic state.",
         ),
         (
             "crates/verter_type_runtime/src/discovery.rs",

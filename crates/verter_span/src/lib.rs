@@ -21,6 +21,11 @@ pub use path::{
     longest_project_root, CanonicalPath, InjectedPathKey,
 };
 
+pub mod uri;
+pub use uri::{
+    file_uri_to_path, normalize_file_uri_for_cache, path_to_file_uri_string, percent_decode,
+};
+
 pub mod tsgo_offset;
 pub use tsgo_offset::{utf16_offset_to_byte, utf16_offset_to_line_col};
 

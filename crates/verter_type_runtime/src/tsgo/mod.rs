@@ -10,4 +10,6 @@ pub use ipc::{
     offset_to_position_with_encoding, position_to_offset_with_encoding, TsgoApiSession,
     TsgoBinaryLookupError, TsgoTypeProvider, TSGO_BINARY_ENV,
 };
-pub use owned::TsgoOwnedProvider;
+pub use owned::{
+    position_carrier_diagnostics, select_configured_project_carrier, TsgoOwnedProvider,
+};

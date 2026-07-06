@@ -88,6 +88,264 @@ fn carrier_publish_diagnostics_suppressed_user_file_forwarded() {
 }
 
 #[test]
+fn carrier_referencing_log_trace_notification_suppressed_plain_log_forwarded() {
+    let set = carriers();
+    // A verbose server trace log whose free-text message EMBEDS the carrier URI
+    // as a SUBSTRING (not an exact structured field) — the leak the exact-match
+    // scan cannot see. It carries no editor-actionable content → suppress whole.
+    let carrier_log = json!({
+        "jsonrpc": "2.0",
+        "method": "window/logMessage",
+        "params": {
+            "type": 3,
+            "message": format!("DidOpenFile - {CARRIER}\nCloning snapshot 0 ...\n"),
+        },
+    });
+    assert_eq!(
+        classify_egress(&carrier_log, &set, None),
+        EgressDecision::Suppress,
+        "a server trace log embedding the carrier path must not reach the editor's log channel"
+    );
+    // The verbose server log emits the carrier path in MANY forms — a case-distinct
+    // filename and a backslash path — none of which is the exact tainted URI. The
+    // slash-fold always catches the backslash form; the case-fold is FILESYSTEM-APPROPRIATE:
+    // a lowercased carrier PATH COMPONENT folds to the carrier ONLY on a case-insensitive
+    // FS (Windows/macOS ⇒ Suppress); on a case-sensitive FS (Linux) it is a DISTINCT file
+    // and forwards, so a real case-distinct user frame is never hidden while the historical
+    // Windows/macOS assertion stands. The deterministic dual-mode proof is
+    // `case_fold_is_filesystem_appropriate`.
+    let lowercased = json!({
+        "jsonrpc": "2.0",
+        "method": "window/logMessage",
+        "params": { "type": 3, "message": "computeConfigFileName:: File: /ws/app.vue.tsx" },
+    });
+    let expected_lowercased = if verter_span::path::fs_is_case_insensitive() {
+        EgressDecision::Suppress
+    } else {
+        EgressDecision::Forward
+    };
+    assert_eq!(
+        classify_egress(&lowercased, &set, None),
+        expected_lowercased,
+        "a case-distinct carrier path component in a trace log folds to the carrier ONLY on a \
+         case-insensitive FS (Windows/macOS ⇒ Suppress; case-sensitive Linux ⇒ Forward, a \
+         distinct file)"
+    );
+    let backslashed = json!({
+        "jsonrpc": "2.0",
+        "method": "$/logTrace",
+        "params": { "message": r"Loaded \ws\App.vue.tsx" },
+    });
+    assert_eq!(
+        classify_egress(&backslashed, &set, None),
+        EgressDecision::Suppress,
+        "a backslash carrier path in a trace must be caught (normalized match)"
+    );
+    // Discriminating: a carrier-FREE log message forwards untouched (the rule is
+    // scoped to carrier-referencing trace frames, not all logs).
+    let plain_log = json!({
+        "jsonrpc": "2.0",
+        "method": "window/logMessage",
+        "params": { "type": 3, "message": "Program update completed in 31ms" },
+    });
+    assert_eq!(
+        classify_egress(&plain_log, &set, None),
+        EgressDecision::Forward,
+        "a carrier-free server log forwards untouched"
+    );
+    // Discriminating: the SUBSTRING rule is log/trace-scoped — it does NOT turn a
+    // non-log frame that merely embeds the carrier substring into a whole-frame
+    // suppress via this path (exact-match structured classification still governs
+    // those). A `window/showMessage` embedding the carrier is likewise dropped.
+    let show = json!({
+        "jsonrpc": "2.0",
+        "method": "window/showMessage",
+        "params": { "type": 1, "message": format!("error in {CARRIER}") },
+    });
+    assert_eq!(
+        classify_egress(&show, &set, None),
+        EgressDecision::Suppress,
+        "a carrier-referencing showMessage is suppressed too"
+    );
+}
+
+#[test]
+fn carrier_uri_matches_across_percent_encoding_and_case_folding() {
+    // Verter injected the carrier as `file:///C:/ws/App.vue.tsx`; the engine
+    // echoes it back in a DIFFERENT encoding (percent-encoded drive colon +
+    // lowercased drive) in a workspace/symbol location. Canonical matching must
+    // still recognize it as the carrier and strip it — the exact-match scan
+    // would have LEAKED it.
+    let set: HashSet<String> = std::iter::once("file:///C:/ws/App.vue.tsx".to_string()).collect();
+    let response = json!({
+        "jsonrpc": "2.0",
+        "id": 100,
+        "result": [
+            { "name": "CarrierSym", "kind": 13,
+              "location": { "uri": "file:///c%3A/ws/App.vue.tsx", "range": lsp_range() } },
+            { "name": "UserSym", "kind": 13,
+              "location": { "uri": "file:///c%3A/ws/user.ts", "range": lsp_range() } },
+        ],
+    });
+    match classify_egress(&response, &set, Some("workspace/symbol")) {
+        EgressDecision::FilterCarrierEntries(v) => {
+            let text = v.to_string().to_ascii_lowercase();
+            assert!(
+                !text.contains("app.vue.tsx"),
+                "the percent-encoded/case-folded carrier location must be stripped: {v}"
+            );
+            assert!(text.contains("usersym"), "the user symbol survives: {v}");
+        }
+        other => panic!(
+            "a percent-encoded/case-folded carrier reference must be recognized + \
+             filtered, got {other:?}"
+        ),
+    }
+}
+
+/// The carrier case-fold is FILESYSTEM-APPROPRIATE, driven deterministically through
+/// both modes via the case-injectable [`CarrierMatcher`]: a case-distinct user file is
+/// NOT over-suppressed on a case-sensitive FS, while the Windows/macOS carrier encoding
+/// variant (percent-encoded + case-folded drive) is STILL matched (leak prevention
+/// preserved). The host-mode forward gate is confirmed end-to-end through `classify_egress`.
+#[test]
+fn case_fold_is_filesystem_appropriate() {
+    let set: HashSet<String> = std::iter::once(CARRIER.to_string()).collect();
+
+    // A case-DISTINCT non-carrier user file (differs only by filename case). On a
+    // CASE-SENSITIVE FS it is a DIFFERENT file, so the matcher must NOT match it — hence
+    // `classify_egress` forwards it, never hiding a real user frame. On a CASE-INSENSITIVE
+    // FS it IS the same file (the carrier) and matches.
+    let user_uri = "file:///ws/app.vue.tsx";
+    assert!(
+        !CarrierMatcher::new(&set, false).matches(user_uri),
+        "a case-distinct user file must NOT fold into the carrier on a case-sensitive FS — \
+         a real user frame must never be hidden by an over-broad case fold"
+    );
+    assert!(
+        CarrierMatcher::new(&set, true).matches(user_uri),
+        "on a case-insensitive FS the case-distinct URI IS the same file (the carrier)"
+    );
+
+    // The Windows carrier ENCODING variant (percent-encoded colon + case-distinct DRIVE)
+    // stays matched on EVERY platform — the drive letter is ALWAYS case-insensitive
+    // (preserving the deny-by-default leak prevention on a case-sensitive FS too).
+    let drive_set: HashSet<String> =
+        std::iter::once("file:///C:/ws/App.vue.tsx".to_string()).collect();
+    let echoed = "file:///c%3A/ws/App.vue.tsx";
+    for case_insensitive in [true, false] {
+        assert!(
+            CarrierMatcher::new(&drive_set, case_insensitive).matches(echoed),
+            "the injected carrier echoed with a percent-encoded/case-folded DRIVE must stay \
+             matched on every platform (case_insensitive={case_insensitive})"
+        );
+    }
+
+    // End-to-end through the host classifier: a carrier-referencing frame is suppressed
+    // and a carrier-free user frame forwards — the deny-by-default forward gate holds.
+    let carrier_diag = json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/publishDiagnostics",
+        "params": { "uri": CARRIER, "diagnostics": [{ "range": lsp_range(), "message": "x" }] },
+    });
+    assert_eq!(
+        classify_egress(&carrier_diag, &set, None),
+        EgressDecision::Suppress
+    );
+    let user_diag = json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/publishDiagnostics",
+        "params": { "uri": USER, "diagnostics": [] },
+    });
+    assert_eq!(
+        classify_egress(&user_diag, &set, None),
+        EgressDecision::Forward
+    );
+}
+
+/// UNC / authority carrier canonicalization through the shared
+/// `verter_span::uri::file_uri_to_path` owner. A `file://localhost/...` echo of a
+/// drive carrier (RFC 8089: `localhost` == local) and the two UNC authority forms
+/// must all canonicalize to the carrier's identity and be suppressed; a DISTINCT
+/// UNC share is a user file and forwards (no over-suppression).
+///
+/// RED before the fix: the private reimplementation stripped the authority, so a
+/// `file://localhost/C:/…` echo canonicalized to `localhost/c:/…` and LEAKED.
+#[test]
+fn unc_and_localhost_carrier_variants_canonicalize_and_suppress() {
+    // A `file://localhost/…` echo of the empty-authority drive carrier must match.
+    let drive_set: HashSet<String> =
+        std::iter::once("file:///C:/ws/App.vue.tsx".to_string()).collect();
+    let localhost_echo = json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/publishDiagnostics",
+        "params": { "uri": "file://localhost/C:/ws/App.vue.tsx", "diagnostics": [] },
+    });
+    assert_eq!(
+        classify_egress(&localhost_echo, &drive_set, None),
+        EgressDecision::Suppress,
+        "a file://localhost/ echo of the drive carrier must be recognized (localhost == local file)"
+    );
+
+    // A UNC carrier: the injected 4-slash form and the engine-echoed 2-slash
+    // authority form both collapse to the canonical //server/share/… identity.
+    let unc_set: HashSet<String> =
+        std::iter::once("file:////server/share/App.vue.tsx".to_string()).collect();
+    for echoed in [
+        "file:////server/share/App.vue.tsx",
+        "file://server/share/App.vue.tsx",
+    ] {
+        let diag = json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/publishDiagnostics",
+            "params": { "uri": echoed, "diagnostics": [{ "range": lsp_range(), "message": "x" }] },
+        });
+        assert_eq!(
+            classify_egress(&diag, &unc_set, None),
+            EgressDecision::Suppress,
+            "a UNC carrier echoed as {echoed} must be suppressed (canonical UNC identity)"
+        );
+    }
+
+    // NEGATIVE (no over-suppression): a DIFFERENT UNC share is a user file → Forward.
+    let user_unc = json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/publishDiagnostics",
+        "params": { "uri": "file://server/share/user.ts", "diagnostics": [] },
+    });
+    assert_eq!(
+        classify_egress(&user_unc, &unc_set, None),
+        EgressDecision::Forward,
+        "a distinct UNC user file must NOT be suppressed (no over-suppression)"
+    );
+}
+
+/// The free-text drive-letter fold aligns with the structured canonicalizer.
+/// On a case-SENSITIVE FS the structured carrier key folds the drive to lowercase
+/// (`c:`), so the free-text trace scan must fold an embedded drive path the same
+/// way or the leak is missed — while the REST of the path is NOT folded (no Linux
+/// over-suppression of a case-distinct user file).
+///
+/// RED before the fix: `canonical_text` never folded the drive, so a `C:/…` trace
+/// line missed the `c:/…` carrier key on a case-sensitive FS.
+#[test]
+fn free_text_drive_letter_folds_like_structured_key() {
+    let set: HashSet<String> = std::iter::once("file:///C:/ws/App.vue.tsx".to_string()).collect();
+    // Force the case-SENSITIVE matcher (the drive is ALWAYS case-insensitive).
+    let matcher = CarrierMatcher::new(&set, false);
+    assert!(
+        matcher.text_embeds_carrier("Loaded module from C:/ws/App.vue.tsx for check"),
+        "an embedded drive carrier path must fold its drive letter like the structured key"
+    );
+    // NEGATIVE: only the drive folds — a case-distinct filename stays a different
+    // file on a case-sensitive FS (no over-suppression).
+    assert!(
+        !matcher.text_embeds_carrier("Loaded module from C:/ws/app.vue.tsx for check"),
+        "the rest of the path must NOT fold on a case-sensitive FS (no over-suppression)"
+    );
+}
+
+#[test]
 fn workspace_symbol_mixed_response_strips_carrier_symbol_keeps_user() {
     let set = carriers();
     let response = json!({

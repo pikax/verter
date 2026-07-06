@@ -48,10 +48,11 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::attach::{parse_api_session_handle, ApiSessionHandle, INITIALIZE_API_SESSION_METHOD};
 use crate::egress::{classify_egress, synthesize_server_response, EgressDecision};
@@ -152,6 +153,13 @@ impl GatedWireSink for JsonRpcConnection {
         Box::pin(self.request(method, params))
     }
 }
+
+/// The bound on the carrier-sync barrier ([`CarrierInjectionChannel::sync_overlay`]):
+/// a slow or broken editor tsgo that never answers the injected pull-diagnostic
+/// request cannot stall `carrierDidOpenSynced` / `carrierDidChangeSynced` — and thus
+/// the LSP file lifecycle — beyond this. On elapse the barrier fails CLOSED
+/// ([`TsgoApiError::Timeout`]) so the caller degrades to the OWNED baseline.
+pub const CARRIER_SYNC_BARRIER_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The gated carrier-injection write facade: the SINGLE deny-by-default
 /// allowlist gate in front of a private wire sink.
@@ -349,15 +357,41 @@ impl<'a> CarrierInjectionChannel<'a> {
     /// [`JsonRpcConnection::request`]): a completed JSON-RPC error response
     /// surfaces as [`TsgoApiError::Transport`]; a request with no round-trip
     /// surfaces as [`TsgoApiError::Closed`].
+    ///
+    /// The barrier is BOUNDED by [`CARRIER_SYNC_BARRIER_TIMEOUT`]: a slow or broken
+    /// editor tsgo that never answers the pull-diagnostic request cannot stall the
+    /// carrier lifecycle indefinitely — on timeout the barrier returns
+    /// [`TsgoApiError::Timeout`] (fail-closed; the caller degrades to the OWNED baseline)
+    /// rather than blocking forever.
     pub async fn sync_overlay(&self, uri: &str) -> TsgoApiResult<()> {
+        self.sync_overlay_with_timeout(uri, CARRIER_SYNC_BARRIER_TIMEOUT)
+            .await
+    }
+
+    /// [`Self::sync_overlay`] with an explicit `timeout` bound (the production entry
+    /// uses [`CARRIER_SYNC_BARRIER_TIMEOUT`]; tests drive a small bound against a
+    /// never-answering sink to prove the fail-closed timeout).
+    pub async fn sync_overlay_with_timeout(
+        &self,
+        uri: &str,
+        timeout: Duration,
+    ) -> TsgoApiResult<()> {
         let params = serde_json::json!({ "textDocument": { "uri": uri } });
-        match self.gated_request("textDocument/diagnostic", params).await {
+        let barrier = self.gated_request("textDocument/diagnostic", params);
+        match tokio::time::timeout(timeout, barrier).await {
             // The round-trip completed (the diagnostic RESULT is discarded;
             // a JSON-RPC error response still proves in-order consumption of
             // the queued didOpen/didChange): the barrier held.
-            Ok(_) | Err(TsgoApiError::Transport(_)) => Ok(()),
+            Ok(Ok(_)) | Ok(Err(TsgoApiError::Transport(_))) => Ok(()),
             // No round-trip: the ordering guarantee did NOT hold — propagate.
-            Err(e) => Err(e),
+            Ok(Err(e)) => Err(e),
+            // The barrier exceeded its bound (a slow/broken editor tsgo never
+            // answered): the ordering guarantee did NOT hold — fail CLOSED with a
+            // Timeout rather than block the carrier lifecycle indefinitely.
+            Err(_elapsed) => Err(TsgoApiError::Timeout(format!(
+                "carrier-sync barrier for {uri} exceeded {}ms",
+                timeout.as_millis()
+            ))),
         }
     }
 
@@ -546,6 +580,57 @@ impl GatedWireSink for RelayInjectPort {
     }
 }
 
+/// The in-band `initialize` witness the relay observed as the editor↔server
+/// handshake passed through it: the engine's self-reported `serverInfo.version`
+/// plus the editor's `initialize` request id and workspace params.
+///
+/// A non-owning attach reuses the editor-originated `initialize` (Verter never
+/// re-`initialize`s an editor-owned engine), so the accepted engine version can
+/// only be observed IN-BAND — exactly this witness. A [`LspRelay`] captures it
+/// once, when the editor→tsgo `initialize` response passes the server→editor
+/// pump; [`LspRelay::wait_initialized`] blocks until then.
+#[derive(Debug, Clone)]
+pub struct InitializedWitness {
+    /// The engine `serverInfo.version` read from the `initialize` response
+    /// (`None` if the server reported none — the caller's gate decides).
+    pub server_info_version: Option<String>,
+    /// The JSON-RPC id of the editor's `initialize` request the relay observed.
+    pub observed_initialize_id: serde_json::Value,
+    /// The `rootUri` the editor sent in `initialize`.
+    pub root_uri: Option<String>,
+    /// The `workspaceFolders` the editor sent in `initialize`, if any.
+    pub workspace_folders: Option<serde_json::Value>,
+}
+
+/// The editor→server pump's capture of the `initialize` REQUEST — the half of
+/// [`InitializedWitness`] that only appears on the request. The server→editor
+/// pump joins it with the response's `serverInfo.version` when the correlated
+/// `initialize` response passes.
+#[derive(Debug, Clone)]
+struct InitializeRequestCapture {
+    id: serde_json::Value,
+    root_uri: Option<String>,
+    workspace_folders: Option<serde_json::Value>,
+}
+
+/// The single-slot capture the two pumps share to assemble the
+/// [`InitializedWitness`]. The editor→server pump writes the request half; the
+/// server→editor pump reads it and publishes the joined witness on `tx`.
+type InitializeCaptureSlot = Arc<StdMutex<Option<InitializeRequestCapture>>>;
+
+/// Extract `rootUri` (a string) from an `initialize` request's params.
+fn extract_root_uri(params: Option<&serde_json::Value>) -> Option<String> {
+    params?
+        .get("rootUri")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
+/// Extract `workspaceFolders` from an `initialize` request's params.
+fn extract_workspace_folders(params: Option<&serde_json::Value>) -> Option<serde_json::Value> {
+    params?.get("workspaceFolders").cloned()
+}
+
 /// A transport-agnostic bidirectional `--lsp` FRAME relay between an editor
 /// and a `tsgo --lsp` server, with a gated Verter injection port.
 ///
@@ -625,6 +710,16 @@ pub struct LspRelay {
     /// alike), and carrier-referencing responses to tracked editor requests
     /// replaced by the synthesized neutral.
     suppressed_egress: Arc<AtomicU64>,
+    /// The watch receiver for the in-band `initialize` witness: `None` until
+    /// the editor→tsgo `initialize` response passes the server→editor pump,
+    /// then `Some(witness)`. Level-triggered, so a waiter that arrives after
+    /// the handshake still observes it (see [`LspRelay::wait_initialized`]).
+    witness_rx: watch::Receiver<Option<InitializedWitness>>,
+    /// The watch receiver for the relay-stopped signal: flips to `true` when
+    /// either pump ends (editor / server stream EOF or error), so a shim can
+    /// tear down on editor disconnect or engine exit (see
+    /// [`LspRelay::wait_stopped`]).
+    stopped_rx: watch::Receiver<bool>,
     /// The three pump/writer tasks; aborted on shutdown/drop.
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
@@ -654,6 +749,12 @@ impl LspRelay {
         let open_overlays = Arc::new(StdMutex::new(HashSet::new()));
         let carrier_egress_taint = Arc::new(StdMutex::new(HashSet::new()));
         let pending_editor_requests: EditorPendingMethods = Arc::new(StdMutex::new(HashMap::new()));
+        let initialize_capture: InitializeCaptureSlot = Arc::new(StdMutex::new(None));
+        let (witness_tx, witness_rx) = watch::channel::<Option<InitializedWitness>>(None);
+        // A single `stopped` signal shared by both pumps: either direction
+        // ending (editor / server EOF or stream error) flips it, so the shim
+        // tears down on an editor disconnect as well as an engine exit.
+        let (stopped_tx, stopped_rx) = watch::channel::<bool>(false);
 
         let tasks = vec![
             tokio::spawn(server_writer_task(server_write, server_rx)),
@@ -662,6 +763,8 @@ impl LspRelay {
                 server_tx.clone(),
                 Arc::clone(&reservation_violations),
                 Arc::clone(&pending_editor_requests),
+                Arc::clone(&initialize_capture),
+                stopped_tx.clone(),
             )),
             tokio::spawn(server_to_editor_pump(
                 server_read,
@@ -671,6 +774,9 @@ impl LspRelay {
                 Arc::clone(&carrier_egress_taint),
                 Arc::clone(&pending_editor_requests),
                 Arc::clone(&suppressed_egress),
+                Arc::clone(&initialize_capture),
+                witness_tx,
+                stopped_tx,
             )),
         ];
 
@@ -685,6 +791,8 @@ impl LspRelay {
             pending_editor_requests,
             reservation_violations,
             suppressed_egress,
+            witness_rx,
+            stopped_rx,
             tasks,
         }
     }
@@ -698,6 +806,56 @@ impl LspRelay {
             self.open_overlays.as_ref(),
             self.carrier_egress_taint.as_ref(),
         )
+    }
+
+    /// Block until the editor→tsgo `initialize` response has passed the relay,
+    /// returning the captured in-band [`InitializedWitness`] (the engine's
+    /// `serverInfo.version` + the editor's `initialize` id and workspace
+    /// params). Level-triggered: if the handshake already completed, this
+    /// returns immediately. Returns `None` only if the relay stops before any
+    /// `initialize` response is seen (the witness sender dropped).
+    ///
+    /// This is the SOLE in-band version witness on the SHARED path — a
+    /// non-owning attach never re-`initialize`s the editor-owned engine, so the
+    /// accepted version must be read from the pass-through handshake here.
+    pub async fn wait_initialized(&self) -> Option<InitializedWitness> {
+        let mut rx = self.witness_rx.clone();
+        if let Some(witness) = rx.borrow().clone() {
+            return Some(witness);
+        }
+        loop {
+            // `changed()` errors only when every sender dropped (relay gone).
+            if rx.changed().await.is_err() {
+                return None;
+            }
+            if let Some(witness) = rx.borrow().clone() {
+                return Some(witness);
+            }
+        }
+    }
+
+    /// The in-band `initialize` witness if it has already been observed, without
+    /// blocking (`None` while the handshake is still in flight).
+    #[must_use]
+    pub fn initialized_witness(&self) -> Option<InitializedWitness> {
+        self.witness_rx.borrow().clone()
+    }
+
+    /// Block until the relay stops pumping — either stream direction ending
+    /// (editor stdin EOF / editor disconnect, or the `tsgo` server stream
+    /// closing). A shim awaits this to tear down on an editor disconnect that
+    /// did not route through the engine's own exit. Level-triggered: if the
+    /// relay has already stopped, this returns immediately.
+    pub async fn wait_stopped(&self) {
+        let mut rx = self.stopped_rx.clone();
+        if *rx.borrow() {
+            return;
+        }
+        while rx.changed().await.is_ok() {
+            if *rx.borrow() {
+                return;
+            }
+        }
     }
 
     /// How many editor frames were dropped for carrying a reserved
@@ -805,14 +963,16 @@ async fn editor_to_server_pump<R>(
     server_tx: mpsc::Sender<Vec<u8>>,
     reservation_violations: Arc<AtomicU64>,
     pending_editor_requests: EditorPendingMethods,
+    initialize_capture: InitializeCaptureSlot,
+    stopped_tx: watch::Sender<bool>,
 ) where
     R: AsyncRead + Unpin + Send + 'static,
 {
     let mut framer = MessageFramer::new();
     let mut chunk = [0u8; 8192];
-    loop {
+    'outer: loop {
         match editor_read.read(&mut chunk).await {
-            Ok(0) | Err(_) => break, // EOF
+            Ok(0) | Err(_) => break, // EOF (editor stdin closed / disconnect)
             Ok(n) => framer.push(&chunk[..n]),
         }
         loop {
@@ -821,6 +981,27 @@ async fn editor_to_server_pump<R>(
                     if frame_carries_verter_id(&msg) {
                         reservation_violations.fetch_add(1, Ordering::Relaxed);
                         continue;
+                    }
+                    // Capture the editor's `initialize` REQUEST half of the
+                    // in-band witness (its id + workspace params). The
+                    // server→editor pump joins it with the response's
+                    // `serverInfo.version` when the correlated response passes.
+                    // The relay forwards this frame raw below — the capture is
+                    // observation-only, never a mutation.
+                    if msg.get("method").and_then(|m| m.as_str()) == Some("initialize") {
+                        if let Some(id) = msg.get("id").filter(|v| !v.is_null()) {
+                            let params = msg.get("params");
+                            let capture = InitializeRequestCapture {
+                                id: id.clone(),
+                                root_uri: extract_root_uri(params),
+                                workspace_folders: extract_workspace_folders(params),
+                            };
+                            let mut slot = match initialize_capture.lock() {
+                                Ok(guard) => guard,
+                                Err(poisoned) => poisoned.into_inner(),
+                            };
+                            *slot = Some(capture);
+                        }
                     }
                     // A `$/cancelRequest` prunes the cancelled request from the
                     // pending table. (A server usually answers a cancelled
@@ -861,16 +1042,19 @@ async fn editor_to_server_pump<R>(
                     // the parsed value (which would reorder object keys and
                     // recompact whitespace).
                     if server_tx.send(raw).await.is_err() {
-                        return; // writer gone
+                        break 'outer; // writer gone
                     }
                 }
                 Ok(None) => break,
                 // A malformed editor frame is unrecoverable on a framed
                 // stream: fail closed, stop pumping.
-                Err(_) => return,
+                Err(_) => break 'outer,
             }
         }
     }
+    // Signal that the relay's editor→server direction has stopped (editor
+    // disconnect / stream error), so a shim can tear down.
+    let _ = stopped_tx.send(true);
 }
 
 /// The server→editor pump: frame server bytes; a RESPONSE (`id` present, no
@@ -908,6 +1092,7 @@ async fn editor_to_server_pump<R>(
 /// Carrier-FREE frames stay byte-identical; positions are NOT mapped —
 /// carrier-referencing entries drop fail-closed until a live
 /// `ProviderPositionMapper` can present source locations.
+#[allow(clippy::too_many_arguments)]
 async fn server_to_editor_pump<R, W>(
     mut server_read: R,
     mut editor_write: W,
@@ -916,6 +1101,9 @@ async fn server_to_editor_pump<R, W>(
     carrier_egress_taint: Arc<StdMutex<HashSet<String>>>,
     pending_editor_requests: EditorPendingMethods,
     suppressed_egress: Arc<AtomicU64>,
+    initialize_capture: InitializeCaptureSlot,
+    witness_tx: watch::Sender<Option<InitializedWitness>>,
+    stopped_tx: watch::Sender<bool>,
 ) where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
@@ -984,6 +1172,46 @@ async fn server_to_editor_pump<R, W>(
                     } else {
                         None
                     };
+                    // The correlated `initialize` RESPONSE: join its
+                    // `serverInfo.version` with the editor→server pump's
+                    // request-half capture and PUBLISH the in-band witness
+                    // (once — the watch holds the first observed value). This
+                    // rides the existing editor-request correlation; the frame
+                    // still forwards to the editor untouched below.
+                    if editor_pending_method.as_deref() == Some("initialize") {
+                        let server_info_version = msg
+                            .get("result")
+                            .and_then(|r| r.get("serverInfo"))
+                            .and_then(|s| s.get("version"))
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string);
+                        let request = {
+                            let slot = match initialize_capture.lock() {
+                                Ok(guard) => guard,
+                                Err(poisoned) => poisoned.into_inner(),
+                            };
+                            slot.clone()
+                        };
+                        let observed_initialize_id = request
+                            .as_ref()
+                            .map(|r| r.id.clone())
+                            .or_else(|| msg.get("id").cloned())
+                            .unwrap_or(serde_json::Value::Null);
+                        let witness = InitializedWitness {
+                            server_info_version,
+                            observed_initialize_id,
+                            root_uri: request.as_ref().and_then(|r| r.root_uri.clone()),
+                            workspace_folders: request
+                                .as_ref()
+                                .and_then(|r| r.workspace_folders.clone()),
+                        };
+                        // Publish only the FIRST observed handshake (a benign
+                        // no-op if a later spurious `initialize` response
+                        // arrives — the shared witness is already set).
+                        if witness_tx.borrow().is_none() {
+                            let _ = witness_tx.send(Some(witness));
+                        }
+                    }
                     // Snapshot the MONOTONIC egress-taint set: lock → clone →
                     // drop the guard BEFORE any await (the std Mutex is never
                     // held across an await). A poisoned lock recovers the
@@ -1065,6 +1293,9 @@ async fn server_to_editor_pump<R, W>(
     }
     // EOF / error: unblock every injected-request waiter.
     verter_pending.lock().clear();
+    // Signal that the relay's server→editor direction has stopped (engine
+    // exit / stream error), so a shim can tear down.
+    let _ = stopped_tx.send(true);
 }
 
 #[cfg(test)]

@@ -39,20 +39,36 @@
 //! contract separately.
 
 mod carrier;
+mod eligibility;
 mod engine;
+mod identity_resolver;
+mod live_decision;
 mod mode;
 mod resolver;
+mod warm_cache;
 
 // Explicit re-exports only. We deliberately do NOT `pub use resolver::*`: that
 // would risk putting a bare `ProjectResolver` next to the re-exported
 // `verter_semantic::analysis::project_resolver::ProjectResolver`. The resolver
 // trait is exported under its non-colliding name `ExternalTsProjectResolver`.
 pub use carrier::{CarrierArtifact, CarrierRegistry, CarrierRole, InMemoryCarrierRegistry};
+pub use eligibility::{
+    compose_eligibility, AttachFact, BindingFact, EditorBindingFact, EligibilityFacts, ProxyFact,
+    VersionGateFact,
+};
 pub use engine::{
     BoundProject, BoundProjectSeal, Diagnostics, DiagnosticsOutcome, EngineBackend,
     EngineCapabilities, EngineError, EnsureProject, EnvDims, OpenState, PublishSnapshot, Query,
     QueryFeature, QueryOutcome, ScratchProject, ScratchProjectSeal, ScriptKind, SnapshotFile,
     SnapshotRole,
+};
+pub use identity_resolver::{
+    build_redirect_reference_graph, resolve_reference_canonical_path, resolve_reference_identity,
+    ConfigPathProbe, ProjectGraphInput, ProjectIdentitySource, ReferenceInput,
+};
+pub use live_decision::{
+    decide_live, failover_live, renegotiate_on_reconnect, LiveDecision, LiveDecisionRequest,
+    LiveProjectInput, ServingProvenance,
 };
 pub use mode::{
     editor_binding_matches, failover_component_to_owned, select_component_mode,
@@ -63,6 +79,10 @@ pub use mode::{
 pub use resolver::{
     AmbiguityCause, ExternalTsProjectResolver, ProjectBinding, ProjectEnvDimsSource,
     ProjectResolution, ScratchBinding, WorkspaceProjectResolver,
+};
+pub use warm_cache::{
+    EngineWarmCache, EvictionScope, EvictionTrigger, ReconnectGeneration, WarmAdmissionError,
+    WarmCacheKey, WarmSharedState,
 };
 
 #[cfg(test)]

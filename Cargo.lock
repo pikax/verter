@@ -4073,6 +4073,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "verter_relay_shim"
+version = "0.0.1-beta.1"
+dependencies = [
+ "getrandom 0.2.17",
+ "serde_json",
+ "tokio",
+ "verter_tsgo_api",
+]
+
+[[package]]
 name = "verter_scheduler"
 version = "0.0.1-beta.1"
 dependencies = [

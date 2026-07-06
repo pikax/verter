@@ -395,6 +395,141 @@ fn non_canonical_source_uri_still_detects_carrier_conflict() {
     }
 }
 
+#[test]
+fn real_file_at_carrier_path_downgrades_unowned_source_to_ambiguous() {
+    // The real-file-shadow check is UNCONDITIONAL — a property of the disk layout,
+    // NOT of tsconfig ownership. A source whose companion path is occupied by a real
+    // user file must NEVER be overlay-shadowed EVEN when the source itself is UNOWNED
+    // (`NoProject`): "Verter never overlay-shadows a real user file" holds for every
+    // owner-resolution state, not only the clean-owner (`Unique`) arm.
+    //
+    // DISCRIMINATING: before the unconditional conflict pass, `None` short-circuits to
+    // `NoProject` BEFORE the carrier-path probe runs, so a real `Foo.vue.tsx` beside an
+    // unowned `Foo.vue` resolves to `NoProject` — and the composite's shadow gate
+    // (which rejects only `Ambiguous(CarrierPathOccupiedByRealFile | SameStemRuneModule)`)
+    // then INJECTS/overlay-shadows the real file. The unconditional pass makes it
+    // `Ambiguous(CarrierPathOccupiedByRealFile)` instead.
+    let exts = carrier_exts();
+    for ext in &exts {
+        let source = format!("d:/ws/src/Foo.{ext}");
+        // An extension-specific `*.ts` include does NOT own `Foo.{ext}` ⇒ the source is
+        // `NoProject` (proven by `extension_specific_include_does_not_own_carrier_source`).
+        let control = {
+            let ws = workspace_with(&[
+                ("d:/ws/tsconfig.json", r#"{ "include": ["src/**/*.ts"] }"#),
+                (source.as_str(), "<template></template>"),
+            ]);
+            let snap = snapshot_from_tsconfigs(&ws, &["d:/ws/tsconfig.json"]);
+            let resolver = WorkspaceProjectResolver::new(
+                &snap,
+                &ws,
+                "7.0.1",
+                &(test_env_dims as fn(&str) -> EnvDims),
+            );
+            resolver.resolve(&source)
+        };
+        assert_eq!(
+            control,
+            ProjectResolution::NoProject,
+            "control: an unowned `Foo.{ext}` with NO real file at its companion path is \
+             `NoProject` (the conflict pass fires ONLY on a real file, not blanket)"
+        );
+
+        // The SAME unowned source, but with a real user file at its `.tsx` companion.
+        let ws = workspace_with(&[
+            ("d:/ws/tsconfig.json", r#"{ "include": ["src/**/*.ts"] }"#),
+            (source.as_str(), "<template></template>"),
+            (
+                &format!("d:/ws/src/Foo.{ext}.tsx"),
+                "export const realUserFile = 1;",
+            ),
+        ]);
+        let snap = snapshot_from_tsconfigs(&ws, &["d:/ws/tsconfig.json"]);
+        let resolver = WorkspaceProjectResolver::new(
+            &snap,
+            &ws,
+            "7.0.1",
+            &(test_env_dims as fn(&str) -> EnvDims),
+        );
+        assert_eq!(
+            resolver.resolve(&source),
+            ProjectResolution::Ambiguous(AmbiguityCause::CarrierPathOccupiedByRealFile),
+            "a real file at `Foo.{ext}.tsx` must downgrade an UNOWNED `Foo.{ext}` \
+             (`NoProject`) to `Ambiguous(CarrierPathOccupiedByRealFile)` — the shadow \
+             check is unconditional, never only the clean-owner arm"
+        );
+    }
+}
+
+#[test]
+fn real_file_at_carrier_path_downgrades_multiply_owned_source_to_ambiguous() {
+    // The other non-`Unique` owner state: a source claimed by MULTIPLE configured
+    // projects (`Ambiguous(MultipleOwners)`) with a real user file at its companion path
+    // must STILL be `Ambiguous(CarrierPathOccupiedByRealFile)`, never overlay-shadowed.
+    // The safety-critical shadow conflict is checked BEFORE ownership, so it takes
+    // precedence over a `MultipleOwners` overlap.
+    //
+    // DISCRIMINATING: before the unconditional conflict pass, `Ambiguous(MultipleOwners)`
+    // short-circuits BEFORE the carrier-path probe, so a real `Foo.vue.tsx` beside a
+    // multiply-owned `Foo.vue` resolves to `Ambiguous(MultipleOwners)` — and the
+    // composite's shadow gate (which admits `MultipleOwners` as a genuine virtual
+    // companion) then INJECTS/overlay-shadows the real file. The unconditional pass makes
+    // it `Ambiguous(CarrierPathOccupiedByRealFile)` (rejected) instead.
+    let tsconfigs: &[&str] = &["d:/ws/tsconfig.json", "d:/ws/tsconfig.app.json"];
+    let exts = carrier_exts();
+    for ext in &exts {
+        let source = format!("d:/ws/src/Foo.{ext}");
+        // Two sibling tsconfigs in the SAME dir both `include: ["src/**/*"]` ⇒ both own
+        // `Foo.{ext}` with no deterministic leaf ⇒ MultipleOwners.
+        let control = {
+            let ws = workspace_with(&[
+                ("d:/ws/tsconfig.json", r#"{ "include": ["src/**/*"] }"#),
+                ("d:/ws/tsconfig.app.json", r#"{ "include": ["src/**/*"] }"#),
+                (source.as_str(), "<template></template>"),
+            ]);
+            let snap = snapshot_from_tsconfigs(&ws, tsconfigs);
+            let resolver = WorkspaceProjectResolver::new(
+                &snap,
+                &ws,
+                "7.0.1",
+                &(test_env_dims as fn(&str) -> EnvDims),
+            );
+            resolver.resolve(&source)
+        };
+        assert_eq!(
+            control,
+            ProjectResolution::Ambiguous(AmbiguityCause::MultipleOwners),
+            "control: `Foo.{ext}` claimed by two sibling tsconfigs with NO real file at its \
+             companion path is `Ambiguous(MultipleOwners)`"
+        );
+
+        // The SAME multiply-owned source, but with a real user file at its `.tsx` companion.
+        let ws = workspace_with(&[
+            ("d:/ws/tsconfig.json", r#"{ "include": ["src/**/*"] }"#),
+            ("d:/ws/tsconfig.app.json", r#"{ "include": ["src/**/*"] }"#),
+            (source.as_str(), "<template></template>"),
+            (
+                &format!("d:/ws/src/Foo.{ext}.tsx"),
+                "export const realUserFile = 1;",
+            ),
+        ]);
+        let snap = snapshot_from_tsconfigs(&ws, tsconfigs);
+        let resolver = WorkspaceProjectResolver::new(
+            &snap,
+            &ws,
+            "7.0.1",
+            &(test_env_dims as fn(&str) -> EnvDims),
+        );
+        assert_eq!(
+            resolver.resolve(&source),
+            ProjectResolution::Ambiguous(AmbiguityCause::CarrierPathOccupiedByRealFile),
+            "a real file at `Foo.{ext}.tsx` must downgrade a MULTIPLY-OWNED `Foo.{ext}` to \
+             `Ambiguous(CarrierPathOccupiedByRealFile)` — the shadow check runs BEFORE (and \
+             takes precedence over) ownership, so MultipleOwners never masks a real-file shadow"
+        );
+    }
+}
+
 // ── SyntheticScratch ──
 
 #[test]

@@ -21,15 +21,73 @@
 //! set — the URIs Verter itself EVER injected via `didOpen`, tainted before
 //! the wire send and never removed on `didClose` (the retraction state,
 //! `open_overlays`, is a separate axis: same injection lifecycle, active
-//! lifetime only) — matched by exact string membership against every string
-//! in the frame, object keys included (URI-normalization robustness is a
-//! live-layer concern). No generated-suffix heuristics, and no token
-//! namespace: Verter-origin progress/work-token suppression belongs to the
-//! live layer, and only when backed by real minted-token tracking.
+//! lifetime only) — matched CANONICALLY (percent-decode + case/slash fold,
+//! [`canonicalize_carrier_uri`]) against every string in the frame, object
+//! keys included, so a carrier the engine echoes back in a different URI
+//! encoding than Verter injected (`file:///c%3A/…` vs `file:///C:/…`) still
+//! matches; carrier-referencing pure server-log/trace notifications are
+//! additionally suppressed when their free text EMBEDS a carrier path as a
+//! substring. No generated-suffix heuristics, and no token namespace:
+//! Verter-origin progress/work-token suppression belongs to the live layer,
+//! and only when backed by real minted-token tracking.
 
 use std::collections::HashSet;
 
 use serde_json::Value;
+use verter_span::path::fs_is_case_insensitive;
+use verter_span::uri::{file_uri_to_path, percent_decode};
+
+/// The canonicalized carrier taint set plus the host filesystem's case policy — the
+/// authority every carrier match consults. Bundling the policy with the set keeps the
+/// fold IDENTICAL for the set and every scanned candidate.
+///
+/// Canonicalization always percent-decodes, slash-folds, and folds the Windows
+/// DRIVE-LETTER case (a drive letter is always case-insensitive and only appears in a
+/// Windows path, so `c:` and `C:` — the injected-vs-echoed drive encoding — always
+/// match). The REST of the path folds case ONLY when the host filesystem is
+/// case-insensitive ([`fs_is_case_insensitive`]): on a case-sensitive FS (Linux) a
+/// case-distinct user path is a DIFFERENT file and must NOT be folded into the carrier
+/// (the over-suppression this closes), while the deny-by-default Windows/macOS leak
+/// suppression (`file:///c%3A/…` vs `file:///C:/…`) is preserved.
+struct CarrierMatcher {
+    canonical: HashSet<String>,
+    case_insensitive: bool,
+}
+
+impl CarrierMatcher {
+    /// Canonicalize the raw taint set under `case_insensitive`.
+    fn new(carrier_uris: &HashSet<String>, case_insensitive: bool) -> Self {
+        let canonical = carrier_uris
+            .iter()
+            .map(|u| canonicalize_carrier_uri(u, case_insensitive))
+            .filter(|u| !u.is_empty())
+            .collect();
+        Self {
+            canonical,
+            case_insensitive,
+        }
+    }
+
+    /// Whether the taint set is empty (nothing injected, or nothing canonicalizes to a
+    /// usable key) — nothing can match, so nothing can leak.
+    fn is_empty(&self) -> bool {
+        self.canonical.is_empty()
+    }
+
+    /// Whether `uri`, canonicalized under the same policy, is a tainted carrier
+    /// (whole-URI canonical equality).
+    fn matches(&self, uri: &str) -> bool {
+        self.canonical
+            .contains(&canonicalize_carrier_uri(uri, self.case_insensitive))
+    }
+
+    /// Whether `text`, canonicalized under the same policy, EMBEDS a canonical carrier
+    /// key as a SUBSTRING (the pure-log/trace free-text leak).
+    fn text_embeds_carrier(&self, text: &str) -> bool {
+        let norm = canonical_text(text, self.case_insensitive);
+        self.canonical.iter().any(|k| norm.contains(k.as_str()))
+    }
+}
 
 /// The egress decision for one server→editor frame.
 #[derive(Debug, PartialEq)]
@@ -112,12 +170,16 @@ pub(crate) fn synthesize_server_response(msg: &Value) -> Value {
 /// Deny-by-default, ordered:
 ///
 /// 1. Carrier-free fast path: no string anywhere in the frame (object keys
-///    included — a `WorkspaceEdit.changes` map keys entries by URI) is an
-///    exact member of `carrier_uris` → forward raw. This is the
-///    overwhelmingly common editor traffic; it stays byte-identical.
-/// 2. The frame references at least one carrier URI → answer, suppress, or
-///    filter by channel (see [`classify_carrier_referencing`]); it is never
-///    forwarded raw.
+///    included — a `WorkspaceEdit.changes` map keys entries by URI)
+///    CANONICALIZES ([`canonicalize_carrier_uri`]) to a member of the
+///    canonicalized taint set, AND (for a pure server-log/trace notification)
+///    no free-text body embeds a canonical carrier key as a substring → forward
+///    raw. This is the overwhelmingly common editor traffic; it stays
+///    byte-identical.
+/// 2. The frame references at least one carrier URI (canonical whole-URI match)
+///    or is a carrier-referencing pure-log/trace notification → answer,
+///    suppress, or filter by channel (see [`classify_carrier_referencing`] /
+///    [`is_carrier_referencing_log_trace`]); it is never forwarded raw.
 ///
 /// `editor_pending_method` is the method of the tracked editor request this
 /// frame responds to, if any (the relay's ingress `id → method` record) —
@@ -133,24 +195,197 @@ pub(crate) fn classify_egress(
     carrier_uris: &HashSet<String>,
     editor_pending_method: Option<&str>,
 ) -> EgressDecision {
-    if carrier_uris.is_empty() || !references_carrier(msg, carrier_uris) {
+    // Canonicalize the taint set ONCE under the host FS case policy
+    // ([`CarrierMatcher`]: percent-decode, strip `file://`, forward-slash, always-fold
+    // the drive letter, fold the rest of the path only on a case-insensitive FS) so a
+    // carrier the engine echoes back in a DIFFERENT URI encoding than Verter injected —
+    // a percent-encoded drive colon (`file:///c%3A/…`), a case-folded drive, a backslash
+    // path — still matches its tainted carrier, WITHOUT folding a case-distinct user path
+    // into a carrier on a case-sensitive FS. The SAME canonicalizer (via the matcher) is
+    // applied to every scanned candidate below. An empty taint set — or one whose members
+    // all canonicalize away to nothing — yields an empty matcher, which the carrier-free
+    // fast path forwards without a match.
+    let matcher = CarrierMatcher::new(carrier_uris, fs_is_case_insensitive());
+    // A pure server-log / trace NOTIFICATION whose free-text body EMBEDS a
+    // carrier path as a SUBSTRING (a verbose `window/logMessage` logs the
+    // didOpen'd carrier's own path) leaks Verter's injected carrier into the
+    // editor's log channel — the structured scan below only recognizes a WHOLE
+    // carrier URI. These frames carry no editor-actionable semantic content, so
+    // a carrier-referencing one is dropped wholesale (fail-closed — strands
+    // nothing). With an empty matcher the substring scan matches nothing, so
+    // this never fires ahead of the carrier-free forward.
+    if is_carrier_referencing_log_trace(msg, &matcher) {
+        return EgressDecision::Suppress;
+    }
+    // Carrier-free fast path (deny-by-default): the deep `references_carrier`
+    // carrier scan is the SOLE gate on the forward decision. An empty matcher
+    // (nothing injected, or nothing canonicalizes to a usable key) OR a frame no
+    // canonical carrier whole-URI match touches → forward the RAW original bytes.
+    // This is the one forward production site and the overwhelmingly common editor
+    // traffic; it stays byte-identical.
+    if matcher.is_empty() || !references_carrier(msg, &matcher) {
         return EgressDecision::Forward;
     }
-    classify_carrier_referencing(msg, carrier_uris, editor_pending_method)
+    classify_carrier_referencing(msg, &matcher, editor_pending_method)
 }
 
 /// Deep recursive scan: does any string anywhere in `value` — object keys
-/// included (a `WorkspaceEdit.changes` map keys its entries by URI) — exactly
-/// match a member of `carrier_uris`?
-fn references_carrier(value: &Value, carrier_uris: &HashSet<String>) -> bool {
+/// included (a `WorkspaceEdit.changes` map keys its entries by URI) —
+/// CANONICALIZE to a member of `canonical_carriers` (the canonicalized taint
+/// set)? Canonical comparison ([`canonicalize_carrier_uri`]: percent-decoding,
+/// case / slash folding) so a carrier URI the engine echoes in a different
+/// encoding than Verter injected (`file:///c%3A/…` vs `file:///C:/…`) still
+/// matches — while a plain user document URI never does.
+fn references_carrier(value: &Value, carriers: &CarrierMatcher) -> bool {
     match value {
-        Value::String(s) => carrier_uris.contains(s),
-        Value::Array(items) => items.iter().any(|v| references_carrier(v, carrier_uris)),
+        Value::String(s) => carriers.matches(s),
+        Value::Array(items) => items.iter().any(|v| references_carrier(v, carriers)),
         Value::Object(map) => map
             .iter()
-            .any(|(key, v)| carrier_uris.contains(key) || references_carrier(v, carrier_uris)),
+            .any(|(key, v)| carriers.matches(key) || references_carrier(v, carriers)),
         _ => false,
     }
+}
+
+/// Pure server-log / trace NOTIFICATION methods whose free-text message body may
+/// embed a carrier path as a SUBSTRING (a verbose `window/logMessage` trace
+/// logs the didOpen'd carrier's own path). They carry no editor-actionable
+/// semantic content, so a carrier-referencing one is suppressed wholesale.
+const LOG_TRACE_NOTIFICATION_METHODS: &[&str] = &[
+    "window/logMessage",
+    "window/showMessage",
+    "window/logTrace",
+    "$/logTrace",
+];
+
+/// Whether `msg` is one of the pure server-log/trace notifications
+/// ([`LOG_TRACE_NOTIFICATION_METHODS`]) whose free text EMBEDS a tainted carrier
+/// path — the leak [`references_carrier`]'s whole-URI match cannot catch (the
+/// carrier appears as a SUBSTRING of a larger trace line).
+///
+/// A verbose server log emits the carrier path in many forms across its trace
+/// lines (the `file://` URI, a lowercased drive path, a backslash path), so the
+/// scan canonicalizes each log string ([`canonical_text`]) and substring-matches
+/// the canonical carrier keys (`canonical_carriers`). Scoped to pure-log/trace
+/// frames ONLY — the structured carrier-reference classification uses whole-URI
+/// canonical equality, so this substring rule never over-broadly suppresses a
+/// legitimate semantic frame.
+fn is_carrier_referencing_log_trace(msg: &Value, carriers: &CarrierMatcher) -> bool {
+    let Some(method) = msg.get("method").and_then(|m| m.as_str()) else {
+        return false;
+    };
+    if !LOG_TRACE_NOTIFICATION_METHODS.contains(&method) {
+        return false;
+    }
+    frame_text_embeds_carrier_key(msg, carriers)
+}
+
+/// Deep recursive scan: does any string anywhere in `value`, once canonicalized
+/// ([`canonical_text`]), CONTAIN a canonical carrier key as a SUBSTRING?
+/// Distinct from [`references_carrier`]'s whole-URI canonical equality — used
+/// ONLY for the pure-log/trace free-text leak.
+fn frame_text_embeds_carrier_key(value: &Value, carriers: &CarrierMatcher) -> bool {
+    match value {
+        Value::String(s) => carriers.text_embeds_carrier(s),
+        Value::Array(items) => items
+            .iter()
+            .any(|v| frame_text_embeds_carrier_key(v, carriers)),
+        Value::Object(map) => map
+            .values()
+            .any(|v| frame_text_embeds_carrier_key(v, carriers)),
+        _ => false,
+    }
+}
+
+/// Canonicalize a carrier URI to a comparison key. Applied to BOTH the taint set
+/// and every scanned candidate, so a carrier URI the engine echoes in a different
+/// encoding than Verter injected still canonicalizes to the SAME key.
+///
+/// URI parsing routes through the ONE shared `verter_span::uri::file_uri_to_path`
+/// owner (NOT a private reimplementation): it percent-decodes, forward-slashes, and
+/// resolves the URI authority per RFC 8089 — an empty/`localhost` authority is the
+/// LOCAL file (`file:///C:/…`, `file://localhost/C:/…` collapse to `C:/…`), and any
+/// other authority is the canonical `//host/share` UNC identity (both the 2-slash
+/// `file://server/share` and the 4-slash `file:////server/share` forms collapse to
+/// `//server/share`). Then the FS-appropriate fold applies: ALWAYS fold the Windows
+/// drive-letter case (`C:` == `c:` — the same file), and fold the REST of the path
+/// ONLY on a case-insensitive FS, so a case-distinct user path on a case-sensitive
+/// FS (a DIFFERENT file) is never folded into the carrier.
+fn canonicalize_carrier_uri(uri: &str, case_insensitive: bool) -> String {
+    let path = file_uri_to_path(uri);
+    let drive_folded = fold_drive_letter(&path);
+    if case_insensitive {
+        drive_folded.to_ascii_lowercase()
+    } else {
+        drive_folded
+    }
+}
+
+/// Lowercase a leading Windows drive letter (`C:/…` → `c:/…`), leaving the rest of the
+/// path untouched. A drive letter is always case-insensitive and only appears in a
+/// Windows path, so folding it is safe (and required for `c%3A` vs `C:` matching) on
+/// every platform.
+fn fold_drive_letter(path: &str) -> String {
+    let bytes = path.as_bytes();
+    if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+        let mut folded = String::with_capacity(path.len());
+        folded.push(bytes[0].to_ascii_lowercase() as char);
+        folded.push_str(&path[1..]);
+        folded
+    } else {
+        path.to_string()
+    }
+}
+
+/// Canonicalize a free-text string for substring matching against a canonical
+/// carrier key: percent-decode (through the shared `verter_span::uri::percent_decode`
+/// owner), forward-slash, fold every embedded Windows drive letter
+/// ([`fold_drive_letters_in_text`] — ALIGNED with the structured
+/// [`canonicalize_carrier_uri`]'s always-fold-the-drive rule so a `C:/…` drive path
+/// in a trace line matches the `c:/…` carrier key on a case-sensitive FS too), and
+/// fold case ONLY on a case-insensitive FS (the `file://` scheme is left intact — the
+/// carrier key is substring-matched WITHIN the text). A case-sensitive FS preserves
+/// the rest of the path's case, so a case-distinct path in a log line does not embed a
+/// carrier key.
+fn canonical_text(s: &str, case_insensitive: bool) -> String {
+    let slashed = percent_decode(s).replace('\\', "/");
+    let drive_folded = fold_drive_letters_in_text(&slashed);
+    if case_insensitive {
+        drive_folded.to_ascii_lowercase()
+    } else {
+        drive_folded
+    }
+}
+
+/// Lowercase every Windows drive-letter occurrence (`X:/`) in `s` — the free-text
+/// analogue of [`fold_drive_letter`] (which folds only a LEADING drive), so a drive
+/// path embedded ANYWHERE in a trace line folds its (case-insensitive) drive
+/// identically to the structured carrier key. A drive letter is folded only at a
+/// token boundary (start-of-string or after a non-alphanumeric char) so an `X:/`
+/// inside an identifier is never touched. Safe on every platform — a drive letter is
+/// case-insensitive on the only OS that has drives.
+fn fold_drive_letters_in_text(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let at_boundary = i == 0 || !chars[i - 1].is_ascii_alphanumeric();
+        if at_boundary
+            && i + 2 < chars.len()
+            && chars[i].is_ascii_alphabetic()
+            && chars[i + 1] == ':'
+            && chars[i + 2] == '/'
+        {
+            out.push(chars[i].to_ascii_lowercase());
+            out.push(':');
+            out.push('/');
+            i += 3;
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
 }
 
 /// Answer/suppress/filter for a frame that references at least one carrier
@@ -167,7 +402,7 @@ fn references_carrier(value: &Value, carrier_uris: &HashSet<String>) -> bool {
 /// vouch for).
 fn classify_carrier_referencing(
     msg: &Value,
-    carrier_uris: &HashSet<String>,
+    carriers: &CarrierMatcher,
     editor_pending_method: Option<&str>,
 ) -> EgressDecision {
     let has_id = msg.get("id").map(|v| !v.is_null()).unwrap_or(false);
@@ -178,7 +413,7 @@ fn classify_carrier_referencing(
     // no reply; its deny outcome is the method-aware neutral when the
     // editor request is tracked, a whole-frame drop otherwise.
     if has_id && !has_method {
-        return filter_response(msg, carrier_uris, editor_pending_method);
+        return filter_response(msg, carriers, editor_pending_method);
     }
     // A server→client REQUEST (`id` + `method`): NEVER editor-routed —
     // forwarding (raw or filtered) would either leak carrier data or be a
@@ -206,14 +441,14 @@ fn classify_carrier_referencing(
 /// (fail-closed).
 fn filter_response(
     msg: &Value,
-    carrier_uris: &HashSet<String>,
+    carriers: &CarrierMatcher,
     editor_pending_method: Option<&str>,
 ) -> EgressDecision {
     let Some(result) = msg.get("result") else {
         // Nothing recognized to strip — deny.
         return deny_response(msg, editor_pending_method);
     };
-    let Some(filtered) = filter_result_shape(result, carrier_uris) else {
+    let Some(filtered) = filter_result_shape(result, carriers) else {
         return deny_response(msg, editor_pending_method);
     };
     let mut rebuilt = msg.clone();
@@ -221,7 +456,7 @@ fn filter_response(
         return deny_response(msg, editor_pending_method);
     };
     obj.insert("result".to_string(), filtered);
-    if references_carrier(&rebuilt, carrier_uris) {
+    if references_carrier(&rebuilt, carriers) {
         return deny_response(msg, editor_pending_method);
     }
     EgressDecision::FilterCarrierEntries(rebuilt)
@@ -346,18 +581,18 @@ fn synthesize_editor_response(msg: &Value, method: &str) -> Value {
 /// - an `items`-bearing object — completion lists, workspace/diagnostic
 ///   reports — drops the carrier-referencing items (provider-specific item
 ///   shapes bearing carrier edits/imports are suppressible per item).
-fn filter_result_shape(result: &Value, carrier_uris: &HashSet<String>) -> Option<Value> {
+fn filter_result_shape(result: &Value, carriers: &CarrierMatcher) -> Option<Value> {
     match result {
-        Value::Array(items) => Some(Value::Array(retain_carrier_free(items, carrier_uris))),
+        Value::Array(items) => Some(Value::Array(retain_carrier_free(items, carriers))),
         Value::Object(map) => {
             if map.contains_key("changes") || map.contains_key("documentChanges") {
-                return Some(filter_workspace_edit(result, carrier_uris));
+                return Some(filter_workspace_edit(result, carriers));
             }
             if let Some(Value::Array(items)) = map.get("items") {
                 let mut filtered = map.clone();
                 filtered.insert(
                     "items".to_string(),
-                    Value::Array(retain_carrier_free(items, carrier_uris)),
+                    Value::Array(retain_carrier_free(items, carriers)),
                 );
                 return Some(Value::Object(filtered));
             }
@@ -373,7 +608,7 @@ fn filter_result_shape(result: &Value, carrier_uris: &HashSet<String>) -> Option
 /// are dropped; user entries survive. A non-object edit passes through
 /// unchanged (the caller's post-filter carrier re-scan then denies the
 /// frame — it never forwards with a surviving carrier reference).
-fn filter_workspace_edit(edit: &Value, carrier_uris: &HashSet<String>) -> Value {
+fn filter_workspace_edit(edit: &Value, carriers: &CarrierMatcher) -> Value {
     let Some(map) = edit.as_object() else {
         return edit.clone();
     };
@@ -381,7 +616,7 @@ fn filter_workspace_edit(edit: &Value, carrier_uris: &HashSet<String>) -> Value 
     if let Some(Value::Object(changes)) = map.get("changes") {
         let kept: serde_json::Map<String, Value> = changes
             .iter()
-            .filter(|(uri, _)| !carrier_uris.contains(*uri))
+            .filter(|(uri, _)| !carriers.matches(uri))
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         filtered.insert("changes".to_string(), Value::Object(kept));
@@ -389,7 +624,7 @@ fn filter_workspace_edit(edit: &Value, carrier_uris: &HashSet<String>) -> Value 
     if let Some(Value::Array(doc_changes)) = map.get("documentChanges") {
         filtered.insert(
             "documentChanges".to_string(),
-            Value::Array(retain_carrier_free(doc_changes, carrier_uris)),
+            Value::Array(retain_carrier_free(doc_changes, carriers)),
         );
     }
     Value::Object(filtered)
@@ -397,10 +632,10 @@ fn filter_workspace_edit(edit: &Value, carrier_uris: &HashSet<String>) -> Value 
 
 /// The elements of `items` that reference NO carrier URI anywhere (per-entry
 /// drop over the recognized array channels).
-fn retain_carrier_free(items: &[Value], carrier_uris: &HashSet<String>) -> Vec<Value> {
+fn retain_carrier_free(items: &[Value], carriers: &CarrierMatcher) -> Vec<Value> {
     items
         .iter()
-        .filter(|item| !references_carrier(item, carrier_uris))
+        .filter(|item| !references_carrier(item, carriers))
         .cloned()
         .collect()
 }

@@ -6,13 +6,15 @@
 //! is re-exported elsewhere and the two must not collide; consumers reach this
 //! one as `external_ts::ExternalTsProjectResolver`.
 //!
-//! The implementation ([`WorkspaceProjectResolver`]) resolves ownership
-//! through `verter_workspace`'s configured-owner resolution (the TS-correct
-//! extension model) and then runs the §2.2 / §2.6-step-4 carrier-path conflict
-//! pass: a clean owner is DOWNGRADED to `Ambiguous` (fail closed) when serving a
-//! carrier at its companion path would shadow a real user file, or when a
-//! same-stem rune module makes the bare import ambiguous. Verter NEVER
-//! overlay-shadows a real user file.
+//! The implementation ([`WorkspaceProjectResolver`]) runs the §2.2 / §2.6-step-4
+//! carrier-path conflict pass FIRST — UNCONDITIONALLY, before ownership is even
+//! consulted — then resolves ownership through `verter_workspace`'s
+//! configured-owner resolution (the TS-correct extension model). ANY source
+//! (owned, unowned, or multiply-owned) is DOWNGRADED to `Ambiguous` (fail closed)
+//! when serving a carrier at its companion path would shadow a real user file, or
+//! when a same-stem rune module makes the bare import ambiguous. The conflict is a
+//! property of the disk layout, not of tsconfig ownership: Verter NEVER
+//! overlay-shadows a real user file, in EVERY owner-resolution state.
 
 use std::sync::Arc;
 
@@ -291,9 +293,13 @@ impl<'a> WorkspaceProjectResolver<'a> {
         }
     }
 
-    /// The §2.2 / §2.6-step-4 carrier-path conflict pass. Given a `source_uri`
-    /// that resolved to a clean owner, return `Some(cause)` if the source must be
-    /// downgraded to `Ambiguous` (fail closed), else `None`.
+    /// The §2.2 / §2.6-step-4 carrier-path conflict pass. Given ANY carrier
+    /// `source_uri` (regardless of its owner-resolution state), return
+    /// `Some(cause)` if the source must be downgraded to `Ambiguous` (fail closed)
+    /// because a real user file occupies a companion path or a same-stem rune module
+    /// sits beside it, else `None`. Consulted unconditionally by [`Self::resolve`]
+    /// so the real-file-shadow gate can never be bypassed by an unowned / ambiguous
+    /// owner state.
     ///
     /// The caller-supplied `source_uri` is NORMALIZED at the entry (mirroring the
     /// rest of `verter_workspace::resolver`) so a non-canonical URI (uppercase
@@ -385,6 +391,21 @@ impl<'a> WorkspaceProjectResolver<'a> {
 
 impl ExternalTsProjectResolver for WorkspaceProjectResolver<'_> {
     fn resolve(&self, source_uri: &str) -> ProjectResolution {
+        // The carrier-path conflict pass is a property of the DISK LAYOUT (a real
+        // user file at a companion path, or a same-stem rune module beside the
+        // source) — INDEPENDENT of tsconfig ownership. "Verter NEVER overlay-shadows
+        // a real user file" holds for EVERY owner-resolution state, so the conflict
+        // pass runs FIRST, UNCONDITIONALLY: a real file at the companion path
+        // downgrades the source to `Ambiguous` whether it is owned (`Unique`),
+        // unowned (`None`), or multiply-owned (`Ambiguous(MultipleOwners)`) — never
+        // only the clean-owner arm. `CarrierPathOccupiedByRealFile` correctly takes
+        // precedence over a `MultipleOwners` overlap: the safety-critical shadow
+        // conflict is checked before ownership is even consulted. (A non-carrier
+        // source short-circuits to `None` inside `carrier_path_conflict`, so this is
+        // a no-op for plain `.ts`/`.tsx` sources.)
+        if let Some(cause) = self.carrier_path_conflict(source_uri) {
+            return ProjectResolution::Ambiguous(cause);
+        }
         match self
             .snapshot
             .configured_owner_resolution_for_file(source_uri)
@@ -393,18 +414,12 @@ impl ExternalTsProjectResolver for WorkspaceProjectResolver<'_> {
             ConfiguredOwnerResolution::Ambiguous(_) => {
                 ProjectResolution::Ambiguous(AmbiguityCause::MultipleOwners)
             }
-            ConfiguredOwnerResolution::Unique(id) => {
-                // Even a clean owner fails closed on a carrier-path conflict.
-                if let Some(cause) = self.carrier_path_conflict(source_uri) {
-                    return ProjectResolution::Ambiguous(cause);
-                }
-                match self.binding_for(id) {
-                    Some(binding) => ProjectResolution::ProjectBinding(binding),
-                    // A configured owner that is somehow not Configured: fail
-                    // closed rather than fabricate a binding.
-                    None => ProjectResolution::NoProject,
-                }
-            }
+            ConfiguredOwnerResolution::Unique(id) => match self.binding_for(id) {
+                Some(binding) => ProjectResolution::ProjectBinding(binding),
+                // A configured owner that is somehow not Configured: fail closed
+                // rather than fabricate a binding.
+                None => ProjectResolution::NoProject,
+            },
         }
     }
 }

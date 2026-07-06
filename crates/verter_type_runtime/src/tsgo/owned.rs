@@ -200,7 +200,13 @@ impl TsgoOwnedProvider {
 ///   degrade silently mis-positioned every diagnostic to the file start).
 ///
 /// Pure (no I/O) so the fail-closed miss decision is hermetically testable.
-fn position_carrier_diagnostics(
+///
+/// Shared with the SHARED editor-attach provider (`verter_lsp`): both the OWNED
+/// dual-surface path and the SHARED relay-attach path map `--api` UTF-16 diagnostic
+/// offsets to carrier bytes through THIS single implementation, so the carrier-byte
+/// contract (and the fail-closed no-forged-span rule) has ONE authority regardless
+/// of engine-serving mode.
+pub fn position_carrier_diagnostics(
     diags: &[verter_tsgo_api::proto::types::Diagnostic],
     content: Option<Arc<str>>,
     engine_carrier: &str,
@@ -278,7 +284,12 @@ impl ApiSurface {
 ///
 /// The returned `engine_carrier` is the carrier AS THE ENGINE REPORTS IT in
 /// `root_files` (diagnostics must be requested with the engine's own canonical form).
-fn select_configured_project_carrier(
+///
+/// Shared with the SHARED editor-attach provider (`verter_lsp`): both serving modes
+/// decide configured-project membership through THIS single fail-closed selector —
+/// no matching configured project ⇒ `None` (never an inferred/single-file fallback),
+/// and carrier absence from `root_files` ⇒ `None` (not a degraded open).
+pub fn select_configured_project_carrier(
     snap: &verter_tsgo_api::api_attach::AttachSnapshot,
     tsconfig_path: &str,
     carrier: &str,

@@ -1,0 +1,49 @@
+[package]
+name = "verter_relay_shim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "The Verter tsgo relay shim: the editor spawns it as its `tsgo`; it relays the editor↔tsgo `--lsp` stdio to the REAL tsgo, owns the carrier egress taint, and exposes a versioned control endpoint a separate `verter_lsp` process drives to inject compiled carriers. Stays DUMB — relay + egress + control + injection only."
+publish = false
+
+[[bin]]
+name = "verter-relay-shim"
+path = "src/main.rs"
+
+[dependencies]
+verter_tsgo_api = { path = "../verter_tsgo_api" }
+# OS CSPRNG for the rendezvous nonce (already in the workspace dependency tree).
+getrandom = "0.2"
+# Async runtime for the stdio relay, the child process, the control endpoint,
+# and the shutdown select. `io-std` supplies the editor-side stdin/stdout the
+# relay pumps; `net` supplies the control endpoint (named pipe / UDS).
+tokio = { version = "1.52", features = [
+    "io-util",
+    "io-std",
+    "process",
+    "sync",
+    "time",
+    "rt",
+    "rt-multi-thread",
+    "macros",
+    "net",
+] }
+
+[dev-dependencies]
+# The headless mechanics e2e drives the shim over a fake-editor LSP stdio + the
+# control client, and connects the minted `--api` pipe with the crate's attach
+# client against a REAL spawned tsgo.
+tokio = { version = "1.52", features = [
+    "io-util",
+    "process",
+    "sync",
+    "time",
+    "rt",
+    "rt-multi-thread",
+    "macros",
+    "net",
+] }
+serde_json = { workspace = true }

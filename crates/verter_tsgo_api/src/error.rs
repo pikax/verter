@@ -23,6 +23,12 @@ pub enum TsgoApiError {
     Transport(String),
     /// The request was cancelled before (or while) it was in flight.
     Cancelled,
+    /// A bounded operation exceeded its timeout before its transport round-trip
+    /// completed — e.g. the carrier-sync barrier
+    /// ([`crate::relay::CarrierInjectionChannel::sync_overlay`]) did not round-trip
+    /// within its bound. The ordering guarantee could NOT be established, so the caller
+    /// fails CLOSED (degrades to the OWNED baseline) rather than blocking indefinitely.
+    Timeout(String),
     /// The client/actor was shut down and can no longer serve requests.
     Closed,
     /// A write through the gated carrier-injection channel was refused
@@ -48,6 +54,7 @@ impl fmt::Display for TsgoApiError {
             TsgoApiError::Spawn(m) => write!(f, "tsgo spawn error: {m}"),
             TsgoApiError::Transport(m) => write!(f, "tsgo transport error: {m}"),
             TsgoApiError::Cancelled => write!(f, "tsgo request cancelled"),
+            TsgoApiError::Timeout(m) => write!(f, "tsgo operation timed out: {m}"),
             TsgoApiError::Closed => write!(f, "tsgo client closed"),
             TsgoApiError::WriteGateDenied { method } => write!(
                 f,

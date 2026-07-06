@@ -941,6 +941,7 @@ fn runtime_render_mixed_resolved_and_missing_imported_macro_is_soft() {
 ///   - a MISSING imported macro type (`MissingProps`, softenable), AND
 ///   - a RESOLVED-but-wrong-shape imported macro type (`WrongEmits`, a
 ///     string alias with no call signatures → fatal `XInvalidMacroType`).
+///
 /// The render lane MUST stay FATAL — the presence of a softenable missing
 /// import must NOT drag the co-occurring wrong-shape error into a warning.
 /// DISCRIMINATING: the pre-fix whole-file gate

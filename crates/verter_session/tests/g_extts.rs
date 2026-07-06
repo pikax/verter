@@ -36,6 +36,8 @@ mod shared_mode_failover_is_per_reference_closure;
 mod shared_mode_no_unmapped_carrier_path_leak;
 #[path = "g_extts/shared_mode_requires_full_ts_lsp_proxy.rs"]
 mod shared_mode_requires_full_ts_lsp_proxy;
+#[path = "g_extts/shared_provider_live_wiring.rs"]
+mod shared_provider_live_wiring;
 #[path = "g_extts/tsgo_capability_gate_on_version.rs"]
 mod tsgo_capability_gate_on_version;
 #[path = "g_extts/tsgo_shared_mode_carrier_injection.rs"]
