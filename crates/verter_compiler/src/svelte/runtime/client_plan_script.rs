@@ -19,9 +19,18 @@ use super::expr::ScopeId;
 use super::expr_emit;
 use super::expr_rewrite::PropRead;
 
+/// The instance-script lowering output: the component-body statements (source
+/// order), the hoisted `$props.id()` declaration, and the `$:` reactive
+/// registrations (dependency order).
+type LoweredScriptItems = (Vec<ClientScriptItem>, Option<String>, Vec<String>);
+
 impl<'a> SupportedClientIr<'a> {
     /// Lower the TYPED supported instance-script items into the narrow
-    /// [`ClientScriptItem`] component-body statements, IN SOURCE ORDER.
+    /// [`ClientScriptItem`] component-body statements, IN SOURCE ORDER — plus
+    /// the `$.legacy_pre_effect` REGISTRATION statements of every `$:`
+    /// reactive-statement item, in DEPENDENCY (topological) order (the emitter
+    /// appends them after the body statements with the single trailing
+    /// `$.legacy_pre_effect_reset()`).
     ///
     /// The instance script is the strict finite [`SupportedInstanceScriptItem`](super::instance_items::SupportedInstanceScriptItem)
     /// allowlist (minted by the default-deny classifier); the lowering is a thin
@@ -39,21 +48,42 @@ impl<'a> SupportedClientIr<'a> {
     /// FALLIBLE: a function body using an unsupported form refuses.
     pub(super) fn build_script_items(
         &self,
-    ) -> Result<(Vec<ClientScriptItem>, Option<String>), UnsupportedSvelteRuntimeSurface> {
+    ) -> Result<LoweredScriptItems, UnsupportedSvelteRuntimeSurface> {
         use super::instance_items::SupportedInstanceScriptItem as Item;
         use expr_emit::SimpleItemLowering;
         let root_scope = self.ir.root_scope().scope;
         let mut items = Vec::new();
+        // The `$:` reactive-statement items, in source order — lowered AFTER
+        // the loop (their registrations emit in dependency order at the end of
+        // the body, not in place).
+        let mut reactive_items = Vec::new();
         // The hoisted `$props.id()` declaration — the scan enforces the single-use
         // rule, so at most one item carries it.
         let mut props_id_hoist = None;
         for item in &self.script_items {
+            // A `$:` reactive statement contributes NO in-place body statement;
+            // its registration is collected and emitted after the loop.
+            if let Item::ReactiveStatement { .. } = item {
+                reactive_items.push(item);
+                continue;
+            }
             // A `$props.id()` item yields the BODY-TOP hoist (always a `const`,
             // regardless of the source keyword — official emits `const` for a
             // `let` source declarator); its literal-only SIBLINGS flow through the
             // simple lowering below into the item's source slot.
             if let Item::PropsIdDecl { name, .. } = item {
                 props_id_hoist = Some(format!("const {name} = $.props_id();"));
+            }
+            // A LEGACY `export let` statement emits ONE `let <local> = $.prop(...)`
+            // declaration PER DECLARATOR (official splits multi-declarator
+            // exports the same way), each composed from the unified declarator
+            // plan through the SHARED default lowering.
+            if let Item::ExportLetProps { locals } = item {
+                for local in locals {
+                    let code = self.lower_export_let_prop(local, root_scope)?;
+                    items.push(ClientScriptItem::BodyStatement { code });
+                }
+                continue;
             }
             match expr_emit::lower_simple_instance_item(item) {
                 SimpleItemLowering::Statement(code) => {
@@ -97,6 +127,18 @@ impl<'a> SupportedClientIr<'a> {
                         Item::FunctionDecl { source, .. } => {
                             self.rewrite_source(source, root_scope)?
                         }
+                        // A promoted LEGACY `let`: the INIT lowers through the
+                        // shared rewriter (a sibling-signal read becomes
+                        // `$.get`), then wraps in the `$.mutable_source(...)`
+                        // cell; the uninitialized form is the ZERO-ARG call
+                        // (oracle: `let v;` → `let v = $.mutable_source();`).
+                        Item::MutableSourceLet { name, init } => match init {
+                            Some(src) => {
+                                let rewritten = self.rewrite_source(src, root_scope)?;
+                                format!("let {name} = $.mutable_source({rewritten});")
+                            }
+                            None => format!("let {name} = $.mutable_source();"),
+                        },
                         // A `$store` SOURCE const: the INIT lowers through the shared
                         // rewriter (a store read/write inside rewrites — `derived(a,
                         // ($a) => $a * 2)` keeps its SHADOWED callback param verbatim);
@@ -151,15 +193,172 @@ impl<'a> SupportedClientIr<'a> {
                         }
                         // `NeedsRewriter` is produced ONLY for the arms above; any other
                         // item reaching here is a classifier/lowering divergence.
+                        // (A `ReactiveStatement` was intercepted before this
+                        // dispatch — its registration lowers below.)
                         _ => unreachable!(
-                            "only StatePrimitive, PropsDestructure, FunctionDecl, StoreSourceDecl, EffectStatement, and EffectRuneInit need the rewriter"
+                            "only StatePrimitive, PropsDestructure, MutableSourceLet, FunctionDecl, StoreSourceDecl, EffectStatement, and EffectRuneInit need the rewriter"
                         ),
                     };
                     items.push(ClientScriptItem::BodyStatement { code });
                 }
             }
         }
-        Ok((items, props_id_hoist))
+        let reactive_registrations = self.lower_reactive_statements(&reactive_items, root_scope)?;
+        Ok((items, props_id_hoist, reactive_registrations))
+    }
+
+    /// Lower the `$:` reactive-statement items into their
+    /// `$.legacy_pre_effect(<deps>, <body>);` registration statements, in
+    /// DEPENDENCY (topological) order — mirroring the official ordering walk: a
+    /// statement that ASSIGNS a name registers before every statement that
+    /// DEPENDS on it, source order as the tie-break; a dependency CYCLE is the
+    /// official `reactive_declaration_cycle` compile error.
+    ///
+    /// Per statement:
+    /// - the DEPENDENCY thunk wraps each dependency read by its resolved
+    ///   binding kind — `$.get(x)` for a mutable-source local (through the
+    ///   shared rewriter), `$.deep_read_state(p())` for a legacy prop, the bare
+    ///   accessor call `$c()` for a store subscription, the bare name for an
+    ///   import; a plain local / global never joins the thunk. Empty deps emit
+    ///   the empty thunk `() => {}`.
+    /// - the BODY thunk is the ORIGINAL statement rewritten through the shared
+    ///   FALLIBLE rewriter as an arrow body: a block body verbatim
+    ///   (`() => { … }` over the source block), any other statement wrapped in
+    ///   one block, the empty statement as the empty thunk. An assignment body
+    ///   rewrites through the SAME signal machinery as every other write
+    ///   (`y = e` → `$.set(y, e')`), so there is no per-shape lowering fork.
+    fn lower_reactive_statements(
+        &self,
+        reactive_items: &[&super::instance_items::SupportedInstanceScriptItem],
+        root_scope: ScopeId,
+    ) -> Result<Vec<String>, UnsupportedSvelteRuntimeSurface> {
+        use super::instance_items::SupportedInstanceScriptItem as Item;
+        use super::legacy_reactive::{
+            order_reactive_registrations, ReactiveOrderRow, ReactiveStatementBody,
+        };
+        if reactive_items.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut rows = Vec::with_capacity(reactive_items.len());
+        for item in reactive_items {
+            let Item::ReactiveStatement {
+                deps, assignments, ..
+            } = item
+            else {
+                unreachable!("lower_reactive_statements receives only ReactiveStatement items");
+            };
+            rows.push(ReactiveOrderRow { deps, assignments });
+        }
+        let order = order_reactive_registrations(&rows).map_err(|blame| {
+            let Item::ReactiveStatement { span, .. } = reactive_items[blame] else {
+                unreachable!("the blamed row is a ReactiveStatement item");
+            };
+            UnsupportedSvelteRuntimeSurface::OfficialReject {
+                rejection: super::official_rule::OfficialRejection::of(
+                    super::official_rule::CoreOfficialValidationRule::ReactiveDeclarationCycle,
+                ),
+                span: *span,
+            }
+        })?;
+        let mut registrations = Vec::with_capacity(order.len());
+        for idx in order {
+            let Item::ReactiveStatement { body, deps, .. } = reactive_items[idx] else {
+                unreachable!("the ordered row is a ReactiveStatement item");
+            };
+            let deps_thunk = self.lower_reactive_deps_thunk(deps, root_scope)?;
+            let body_thunk = match body {
+                ReactiveStatementBody::Empty => "() => {}".to_string(),
+                ReactiveStatementBody::Block { source } => {
+                    self.rewrite_source(&format!("() => {source}"), root_scope)?
+                }
+                ReactiveStatementBody::Statement { source } => {
+                    // A single statement wraps in one block (the official
+                    // non-block wrap); the generated `;` closes a
+                    // terminator-less source slice so the block stays valid JS.
+                    let trimmed = source.trim_end();
+                    let terminated = if trimmed.ends_with(';') || trimmed.ends_with('}') {
+                        trimmed.to_string()
+                    } else {
+                        format!("{trimmed};")
+                    };
+                    self.rewrite_source(&format!("() => {{ {terminated} }}"), root_scope)?
+                }
+            };
+            registrations.push(format!("$.legacy_pre_effect({deps_thunk}, {body_thunk});"));
+        }
+        Ok(registrations)
+    }
+
+    /// Compose one `$:` DEPENDENCY thunk: each dependency name resolves at the
+    /// root scope and wraps by BINDING KIND (never by name); a name that
+    /// resolves to no binding (a global) or to a non-reactive local never joins
+    /// the thunk. Empty deps emit the official empty thunk `() => {}`;
+    /// non-empty deps emit the parenthesized sequence `() => (d1, d2)`.
+    fn lower_reactive_deps_thunk(
+        &self,
+        deps: &[String],
+        root_scope: ScopeId,
+    ) -> Result<String, UnsupportedSvelteRuntimeSurface> {
+        use super::expr::BindingRuntimeKind;
+        let bindings = &self.ir.analysis.bindings;
+        let scopes = &self.ir.analysis.scopes;
+        let mut reads = Vec::new();
+        for name in deps {
+            let Some(kind) = bindings.resolve_kind(scopes, root_scope, name) else {
+                // A global (or otherwise untracked) name is never a dependency.
+                continue;
+            };
+            match kind {
+                // A mutable-source local (a promoted `let` or a synthesized
+                // `$:` target): the shared rewriter emits the `$.get(name)`
+                // signal read.
+                BindingRuntimeKind::MutableSource => {
+                    reads.push(self.rewrite_source(name, root_scope)?);
+                }
+                // A legacy prop: the getter-call read, deep-read so a
+                // fine-grained runes-parent mutation still re-runs the effect
+                // (the official bindable-prop wrap).
+                BindingRuntimeKind::Prop | BindingRuntimeKind::BindableProp => {
+                    let read = self.rewrite_source(name, root_scope)?;
+                    reads.push(format!("$.deep_read_state({read})"));
+                }
+                // A store subscription: the bare accessor CALL (`$c()`), no
+                // wrapper (the shared rewriter emits the call).
+                BindingRuntimeKind::StoreSubscription => {
+                    reads.push(self.rewrite_source(name, root_scope)?);
+                }
+                // An imported value: the bare live-binding name (official
+                // includes import-declared dependencies unwrapped).
+                BindingRuntimeKind::ComponentImport | BindingRuntimeKind::ImportedValue => {
+                    reads.push(name.clone());
+                }
+                // A plain local (an unwritten legacy `let`/const) is the
+                // official `normal`-binding skip: never a dependency. The
+                // remaining kinds are either runes-only (unreachable in a
+                // legacy component — the rune-reference gate refuses them) or
+                // template-scope bindings a ROOT-scope resolution never yields;
+                // each is enumerated so a NEW binding kind must make a
+                // conscious dependency decision here.
+                BindingRuntimeKind::PlainLocal
+                | BindingRuntimeKind::StateSignal { .. }
+                | BindingRuntimeKind::BareProxy
+                | BindingRuntimeKind::StateProxy
+                | BindingRuntimeKind::Derived
+                | BindingRuntimeKind::EachSignal
+                | BindingRuntimeKind::AwaitSignal
+                | BindingRuntimeKind::LegacyConstDerived
+                | BindingRuntimeKind::TemplateDeclLocal
+                | BindingRuntimeKind::SnippetName
+                | BindingRuntimeKind::SnippetParam
+                | BindingRuntimeKind::ModuleBinding
+                | BindingRuntimeKind::EffectTrackingConst
+                | BindingRuntimeKind::PropsIdConst => {}
+            }
+        }
+        if reads.is_empty() {
+            return Ok("() => {}".to_string());
+        }
+        Ok(format!("() => ({})", reads.join(", ")))
     }
 
     /// Lower the instance script's `$props()` destructure into its ONE
@@ -233,6 +432,58 @@ impl<'a> SupportedClientIr<'a> {
             return Ok(None);
         }
         Ok(Some(format!("let {};", decls.join(", "))))
+    }
+
+    /// Lower ONE LEGACY `export let` prop declarator into its
+    /// `let <local> = $.prop($$props, '<key>', <flags>[, <default>]);`
+    /// declaration — the SHARED prop-source substrate with the LEGACY flag base:
+    /// `BINDABLE(8)` always (legacy props are bindable by default),
+    /// `UPDATED(4)` when the local is written (a template reassign/mutation) or
+    /// the component compiles with custom-element `accessors`, and the SAME
+    /// official simple/lazy default algorithm ([`Self::lower_props_default`] —
+    /// `LAZY_INITIAL(16)` rides a thunked default). FALLIBLE: a default whose
+    /// expression refuses the shared rewriter fails closed.
+    fn lower_export_let_prop(
+        &self,
+        local: &str,
+        root_scope: ScopeId,
+    ) -> Result<String, UnsupportedSvelteRuntimeSurface> {
+        let (Some(instance), Some(plan)) = (
+            self.ir.analysis.scripts.instance_source,
+            self.decl_plan.as_ref(),
+        ) else {
+            // The item was minted from the instance script's export statements,
+            // so the plan exists on every reachable path — fail closed
+            // defensively rather than emit a divergent declaration.
+            return Err(UnsupportedSvelteRuntimeSurface::InstanceScriptItem {
+                construct: "export",
+                span: Span::new(0, 0),
+            });
+        };
+        let Some(member) = plan.members.iter().find(|m| m.local == local) else {
+            return Err(UnsupportedSvelteRuntimeSurface::InstanceScriptItem {
+                construct: "export",
+                span: Span::new(0, 0),
+            });
+        };
+        // The LEGACY flag base: BINDABLE(8); UPDATED(4) for a written prop or
+        // under the custom-element accessors force (oracle: flags 8 / 12).
+        let mut flags = 8u8;
+        if self.ir.component.custom_element.is_some() || self.prop_updated.contains(&member.local) {
+            flags |= 4;
+        }
+        let arg = match &member.default {
+            None => None,
+            Some(facts) => {
+                Some(self.lower_props_default(instance, member, facts, &mut flags, root_scope)?)
+            }
+        };
+        let key = js_single_quoted(&member.source_key);
+        let call = match arg {
+            Some(arg) => format!("$.prop($$props, {key}, {flags}, {arg})"),
+            None => format!("$.prop($$props, {key}, {flags})"),
+        };
+        Ok(format!("let {} = {call};", member.local))
     }
 
     /// Lower ONE `$props()` member DEFAULT into its `$.prop` initial argument,

@@ -400,6 +400,35 @@ impl BindingOccurrenceCollector<'_> {
         }
     }
 
+    /// The `$.mutable_source` ROOT name of a MEMBER write target (`o.x = …` /
+    /// `o.x++` — the leftmost identifier of the member chain, resolving to the
+    /// promoted legacy [`BindingRuntimeKind::MutableSource`] kind), or `None`.
+    /// A member write rooted at a mutable source wraps the WHOLE assignment /
+    /// update in the official legacy deep-mutation helper
+    /// (`$.mutate(o, $.get(o).x = v)` / `$.mutate(o, $.get(o).x++)`); the inner
+    /// root read still rewrites through the normal signal-read leaf edit.
+    fn member_root_mutable_source(&self, mut object: &Expression<'_>) -> Option<String> {
+        loop {
+            match object {
+                Expression::StaticMemberExpression(m) => object = &m.object,
+                Expression::ComputedMemberExpression(m) => object = &m.object,
+                Expression::PrivateFieldExpression(m) => object = &m.object,
+                Expression::ParenthesizedExpression(p) => object = &p.expression,
+                Expression::Identifier(id) => {
+                    let name = id.name.as_str();
+                    if matches!(
+                        self.signal_kind(name),
+                        Some(BindingRuntimeKind::MutableSource)
+                    ) {
+                        return Some(name.to_string());
+                    }
+                    return None;
+                }
+                _ => return None,
+            }
+        }
+    }
+
     /// Record the first refusal (later refusals are ignored — the first surface is
     /// reported).
     fn refuse(&mut self, surface: UnsupportedSvelteRuntimeSurface) {
@@ -664,12 +693,46 @@ impl BindingOccurrenceCollector<'_> {
                         append_text: ", true)".to_string(),
                     });
                 }
+                // A member write rooted at a promoted legacy `$.mutable_source`
+                // wraps the WHOLE assignment in the official deep-mutation
+                // helper (`o.x = v` → `$.mutate(o, $.get(o).x = v)`); the root
+                // read inside still rewrites through the normal signal leaf
+                // edit (recursed below).
+                if let Some(root) = self.member_assignment_mutable_source_root(&assign.left) {
+                    self.occurrences.push(Occurrence::WrapCall {
+                        insert_at: assign.span.start,
+                        head_text: format!("$.mutate({root}, "),
+                        append_at: assign.span.end,
+                        append_text: ")".to_string(),
+                    });
+                }
                 // A member-rooted or non-signal target: recurse both sides (a
                 // `BareProxy` member write stays plain; a member of a signal object
                 // reads via a getter, handled by recursing into the target object).
                 self.visit_assignment_target(&assign.left);
                 self.visit_expression(&assign.right);
             }
+        }
+    }
+
+    /// The `$.mutable_source` root of an ASSIGNMENT member target, or `None`
+    /// (delegates to [`Self::member_root_mutable_source`] over the member
+    /// target's object).
+    fn member_assignment_mutable_source_root(
+        &self,
+        target: &AssignmentTarget<'_>,
+    ) -> Option<String> {
+        match target {
+            AssignmentTarget::StaticMemberExpression(m) => {
+                self.member_root_mutable_source(&m.object)
+            }
+            AssignmentTarget::ComputedMemberExpression(m) => {
+                self.member_root_mutable_source(&m.object)
+            }
+            AssignmentTarget::PrivateFieldExpression(m) => {
+                self.member_root_mutable_source(&m.object)
+            }
+            _ => None,
         }
     }
 
@@ -805,6 +868,17 @@ impl BindingOccurrenceCollector<'_> {
                         append_text: ", true)".to_string(),
                     });
                 }
+                // A member update rooted at a promoted legacy `$.mutable_source`
+                // wraps in the official deep-mutation helper (`o.x++` →
+                // `$.mutate(o, $.get(o).x++)`).
+                if let Some(root) = self.member_update_mutable_source_root(&update.argument) {
+                    self.occurrences.push(Occurrence::WrapCall {
+                        insert_at: update.span.start,
+                        head_text: format!("$.mutate({root}, "),
+                        append_at: update.span.end,
+                        append_text: ")".to_string(),
+                    });
+                }
                 // A member target (`o.a++`) or non-signal: recurse the object base.
                 match &update.argument {
                     SimpleAssignmentTarget::StaticMemberExpression(m) => {
@@ -822,6 +896,27 @@ impl BindingOccurrenceCollector<'_> {
                     _ => {}
                 }
             }
+        }
+    }
+
+    /// The `$.mutable_source` root of an UPDATE member target, or `None`
+    /// (delegates to [`Self::member_root_mutable_source`] over the member
+    /// target's object).
+    fn member_update_mutable_source_root(
+        &self,
+        target: &SimpleAssignmentTarget<'_>,
+    ) -> Option<String> {
+        match target {
+            SimpleAssignmentTarget::StaticMemberExpression(m) => {
+                self.member_root_mutable_source(&m.object)
+            }
+            SimpleAssignmentTarget::ComputedMemberExpression(m) => {
+                self.member_root_mutable_source(&m.object)
+            }
+            SimpleAssignmentTarget::PrivateFieldExpression(m) => {
+                self.member_root_mutable_source(&m.object)
+            }
+            _ => None,
         }
     }
 

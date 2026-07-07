@@ -290,6 +290,154 @@ pub(super) fn prepare_plain_local_bindings(
     }
 }
 
+/// One tracked LEGACY top-level plain `let` awaiting the demand-driven
+/// `$.mutable_source` promotion decision: the root-scope binding row plus the
+/// SCRIPT-side observed writes (template writes + bind-target write-backs are
+/// attributed by [`finalize_legacy_let_promotions`] once the template scope
+/// graph exists).
+pub(super) struct TrackedLegacyLet {
+    /// The SCRIPT-side observed WRITES (writes-only collection — a method call
+    /// is never a write).
+    script_uses: BindingUseSet,
+    /// The root-scope `PlainLocal` binding row to promote.
+    binding: BindingId,
+}
+
+/// Collect the LEGACY promotion-candidate rows: every top-level single-identifier
+/// non-rune `let` declarator (the bindings [`prepare_plain_local_bindings`]
+/// registered as `PlainLocal`), each with its SCRIPT-side WRITE uses observed in
+/// WRITES-ONLY mode (assignment / update writes only — a mutating method call
+/// like `arr.push(…)` is NOT a write: official keeps such a `let` verbatim-plain,
+/// so it must never promote). Runs AFTER [`prepare_plain_local_bindings`] (it
+/// resolves each candidate to its registered binding row). The promotion itself
+/// is decided by [`finalize_legacy_let_promotions`] once the template writes and
+/// bind-target write-backs are attributable.
+pub(super) fn prepare_legacy_let_tracking(
+    instance_source: Option<&str>,
+    alloc: &Allocator,
+    root_scope: ScopeId,
+    scopes: &ScopeGraph,
+    bindings: &BindingTable,
+) -> Vec<TrackedLegacyLet> {
+    let Some(text) = instance_source else {
+        return Vec::new();
+    };
+    let Some(program) = reparse_module(alloc, text) else {
+        return Vec::new();
+    };
+    use oxc_ast::ast::{BindingPattern, Expression, Statement, VariableDeclarationKind};
+    // The candidate names: top-level `let` identifier declarators registered as
+    // PlainLocal. A RUNE-call init (`$state` / `$derived` / `$props()`) is
+    // EXCLUDED by init shape (the same predicate `prepare_plain_local_bindings`
+    // uses) — a `$state` declarator's kind is only PROVISIONAL here (the
+    // write-gated finalizer may flip a template-written one to a signal later),
+    // so the kind check alone cannot exclude it.
+    let mut names = Vec::new();
+    let mut rows = Vec::new();
+    for stmt in &program.body {
+        let Statement::VariableDeclaration(decl) = stmt else {
+            continue;
+        };
+        if decl.kind != VariableDeclarationKind::Let {
+            continue;
+        }
+        for d in &decl.declarations {
+            let BindingPattern::BindingIdentifier(id) = &d.id else {
+                continue;
+            };
+            if let Some(Expression::CallExpression(call)) = &d.init {
+                if super::expr::state_rune_call(call).is_some()
+                    || super::expr::is_derived_callee(&call.callee)
+                    || super::expr::is_props_callee(&call.callee)
+                {
+                    continue;
+                }
+            }
+            let name = id.name.as_str();
+            let Some(binding) = scopes.resolve(bindings, root_scope, name) else {
+                continue;
+            };
+            if bindings.get(binding).kind != super::expr::BindingRuntimeKind::PlainLocal {
+                continue;
+            }
+            names.push(name.to_string());
+            rows.push((name.to_string(), binding));
+        }
+    }
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    // The SCRIPT-side writes, in WRITES-ONLY mode (scope-aware — a shadowing
+    // nested local of the same name never counts).
+    let mut collector = super::expr::ScriptUseCollector::tracking_writes_only(&names);
+    use oxc_ast_visit::Visit;
+    collector.visit_program(&program);
+    rows.into_iter()
+        .map(|(name, binding)| TrackedLegacyLet {
+            script_uses: collector.use_set(&name),
+            binding,
+        })
+        .collect()
+}
+
+/// Promote each WRITTEN tracked legacy `let` to the
+/// [`BindingRuntimeKind::MutableSource`] kind — the demand-driven legacy
+/// reactivity decision. A `let` is WRITTEN when its script-side writes-only
+/// uses, its scope-resolved TEMPLATE writes (`Reassign` / `DeepMutate`
+/// references), or a two-way `bind:` write-back (the SAME
+/// [`attribute_bind_target_writes`] attribution the `$state` finalizer uses —
+/// a bare-identifier bind target reassigns, a member target deep-mutates,
+/// `bind:this` reassigns its element local) marks it. An unwritten `let` stays
+/// `PlainLocal` (official static-folds its reads — no promotion, no blanket
+/// accept). The caller gates this on the FINAL `SvelteMode::Legacy`; it is
+/// never run for a runes component.
+pub(super) fn finalize_legacy_let_promotions(ctx: &mut LoweringCtx, tracked: &[TrackedLegacyLet]) {
+    if tracked.is_empty() {
+        return;
+    }
+    let tracked_ids: rustc_hash::FxHashMap<BindingId, usize> = tracked
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (t.binding, i))
+        .collect();
+    let mut combined: Vec<BindingUseSet> = tracked.iter().map(|t| t.script_uses).collect();
+    // TEMPLATE writes (handlers / interpolations / bind expressions), resolved
+    // scope-awarely to the EXACT tracked binding.
+    for expr in ctx.expressions.all() {
+        for r in &expr.references {
+            let deep = match r.kind {
+                ExprRefKind::Reassign => false,
+                ExprRefKind::DeepMutate => true,
+                ExprRefKind::Read => continue,
+            };
+            let Some(resolved) = ctx.scopes.resolve(&ctx.bindings, expr.scope, &r.name) else {
+                continue;
+            };
+            if let Some(&idx) = tracked_ids.get(&resolved) {
+                if deep {
+                    combined[idx].deep_mutated = true;
+                } else {
+                    combined[idx].reassigned = true;
+                }
+            }
+        }
+    }
+    // Two-way `bind:` write-backs (the shared attribution the `$state`
+    // finalizer uses).
+    attribute_bind_target_writes(ctx, &tracked_ids, &mut combined);
+    for (t, uses) in tracked.iter().zip(combined) {
+        // Promote ONLY a binding still classified PlainLocal — a row whose kind a
+        // later pass legitimately reclassified (defensive; the rune-init shapes
+        // are already excluded at tracking) is never clobbered.
+        let info = ctx.bindings.get_mut(t.binding);
+        if info.kind == super::expr::BindingRuntimeKind::PlainLocal
+            && (uses.reassigned || uses.deep_mutated)
+        {
+            info.kind = super::expr::BindingRuntimeKind::MutableSource;
+        }
+    }
+}
+
 /// Attribute scope-resolved TEMPLATE writes to the tracked `$state` bindings and
 /// finalize each binding's classification.
 ///

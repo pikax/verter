@@ -55,6 +55,21 @@ use crate::svelte::parser::{
 /// type text.
 #[must_use]
 pub fn official_reject_gate(source: &str, parsed: &ParsedSvelte) -> Option<OfficialRejection> {
+    official_reject_gate_with_runes(source, parsed, None)
+}
+
+/// [`official_reject_gate`] with the caller's `runes` COMPILE-OPTION override (the
+/// [`SvelteRuntimeOptions::runes`](super::SvelteRuntimeOptions::runes) value) — the
+/// override participates in the runes-mode detection for the RUNES-mode legacy-script
+/// rejects (`legacy_export_invalid` / `legacy_reactive_statement_invalid`), exactly as
+/// it does in the lowering's mode inference. `None` (no compile-option override) is
+/// the plain [`official_reject_gate`] entry.
+#[must_use]
+pub(super) fn official_reject_gate_with_runes(
+    source: &str,
+    parsed: &ParsedSvelte,
+    runes_override: Option<bool>,
+) -> Option<OfficialRejection> {
     // ─── PARSE PHASE (official `phases/1-parse`) — the SINGLE parser-owned,
     // encounter-ordered defect stream is the SOLE parse-error arbitration source. Every
     // parse defect (close-tag / strict-parse / script-domain / explicit-`</p>` autoclose)
@@ -165,6 +180,22 @@ pub fn official_reject_gate(source: &str, parsed: &ParsedSvelte) -> Option<Offic
     // sources carry trace placement only. Ordered after the binder / global-reference
     // codes and before the template-walk attribute-name / placement scans.
     if let Some(rejection) = scan_walk_phase_script_rules(source, parsed, &module_bindings) {
+        return Some(rejection);
+    }
+
+    // (b.4) The RUNES-mode legacy-script rejects, thrown by upstream's analyze-walk
+    // statement visitors: an `export let` (any pattern) is `legacy_export_invalid`
+    // and a `$:` labeled statement is `legacy_reactive_statement_invalid` — in
+    // instance-program SOURCE order (walk order; oracle-probed: a `$:` preceding an
+    // `export let` reports the reactive-statement code first). This pre-lowering
+    // scan fires only for the EXPLICIT runes selections (the compile-option
+    // override / `<svelte:options runes={…}>`); the USAGE-INFERRED runes mode is
+    // owned by the lowering's one mode detector, against which the default-deny
+    // classifier re-applies the same rejects — so a runes-mode `export let` / `$:`
+    // can never reach legacy lowering, and no second inference detector exists.
+    if let Some(rejection) =
+        scan_runes_mode_legacy_script_constructs(source, parsed, runes_override)
+    {
         return Some(rejection);
     }
 
@@ -754,6 +785,64 @@ fn instance_script_source<'a>(source: &'a str, parsed: &ParsedSvelte) -> Option<
     parsed
         .instance_content()
         .map(|content| &source[content.start as usize..content.end as usize])
+}
+
+/// Scan the instance program for a RUNES-mode legacy-script construct — an
+/// `export let` declaration (`legacy_export_invalid`, ANY binding pattern:
+/// official rejects the destructured forms identically) or a `$:` labeled
+/// statement (`legacy_reactive_statement_invalid`) — in SOURCE order, returning
+/// the FIRST hit. `None` when the component is not EXPLICITLY runes.
+///
+/// This pre-lowering scan fires ONLY for the EXPLICIT runes selections — the
+/// in-source `<svelte:options runes={…}>` directive
+/// ([`forced_runes_option`](crate::svelte::parser::forced_runes_option)),
+/// which overrides the caller's `runes` compile option in both directions
+/// (matching official), else that compile-option override — the two mode
+/// inputs that exist before lowering. The USAGE-INFERRED runes mode
+/// (rune presence, the template-`$host` term) is decided by the lowering's ONE
+/// mode detector (`SvelteRuntimeIr::component.mode`); the default-deny
+/// classifier re-applies these SAME rejects against that FINAL mode
+/// (`refuse_runes_mode_legacy_script_constructs`), so every inferred-runes
+/// `export let` / `$:` still surfaces as its official reject — through the one
+/// existing detector, never a re-derived second inference (the shared
+/// import-classification carrier is a once-per-component authority the gate
+/// must not re-run).
+fn scan_runes_mode_legacy_script_constructs(
+    source: &str,
+    parsed: &ParsedSvelte,
+    runes_override: Option<bool>,
+) -> Option<OfficialRejection> {
+    let instance = instance_script_source(source, parsed)?;
+    let alloc = Allocator::default();
+    let runes = crate::svelte::parser::forced_runes_option(source, &parsed.template)
+        .or(runes_override)
+        .unwrap_or(false);
+    if !runes {
+        return None;
+    }
+    let program = reparse_module(&alloc, instance)?;
+    for stmt in &program.body {
+        match stmt {
+            Statement::ExportNamedDeclaration(export)
+                if matches!(
+                    export.declaration,
+                    Some(oxc_ast::ast::Declaration::VariableDeclaration(ref decl))
+                        if decl.kind == oxc_ast::ast::VariableDeclarationKind::Let
+                ) =>
+            {
+                return Some(OfficialRejection::of(
+                    CoreOfficialValidationRule::LegacyExportInvalid,
+                ));
+            }
+            Statement::LabeledStatement(labeled) if labeled.label.name == "$" => {
+                return Some(OfficialRejection::of(
+                    CoreOfficialValidationRule::LegacyReactiveStatementInvalid,
+                ));
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Scan for a GLOBAL `$foo` / `$$foo` reference in any script or template expression

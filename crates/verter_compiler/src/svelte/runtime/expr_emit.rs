@@ -387,6 +387,71 @@ impl PropsDeclaratorPlan {
         Some(PropsDeclaratorPlan { members, rest })
     }
 
+    /// Walk the instance script's LEGACY `export let` statements ONCE into the
+    /// unified plan — one [`PropsMemberPlan`] per exported identifier declarator
+    /// (`source_key` = `local` = the exported name; never bindable; the
+    /// declarator INIT is the member DEFAULT, lowered through the SAME official
+    /// simple/lazy algorithm as a `$props()` destructure default), or `None`
+    /// when there is no `export let`. The legacy prop surface has no rest /
+    /// whole-object capture. Destructured / TS-annotated export-let declarators
+    /// contribute nothing (they fail closed at the instance-script item
+    /// allowlist before this plan is consumed).
+    #[must_use]
+    pub(super) fn build_legacy_exports(
+        alloc: &Allocator,
+        instance_source: &str,
+    ) -> Option<PropsDeclaratorPlan> {
+        let program = reparse_module(alloc, instance_source)?;
+        let proxy_inits = super::state_scan::collect_proxy_inits(&program);
+        let mut members = Vec::new();
+        for stmt in &program.body {
+            let Statement::ExportNamedDeclaration(export) = stmt else {
+                continue;
+            };
+            let Some(oxc_ast::ast::Declaration::VariableDeclaration(decl)) = &export.declaration
+            else {
+                continue;
+            };
+            if decl.kind != oxc_ast::ast::VariableDeclarationKind::Let {
+                continue;
+            }
+            for d in &decl.declarations {
+                let BindingPattern::BindingIdentifier(id) = &d.id else {
+                    continue;
+                };
+                members.push(PropsMemberPlan {
+                    source_key: id.name.to_string(),
+                    local: id.name.to_string(),
+                    bindable: false,
+                    default: d
+                        .init
+                        .as_ref()
+                        .map(|init| props_default_facts(init, &proxy_inits)),
+                });
+            }
+        }
+        if members.is_empty() {
+            return None;
+        }
+        Some(PropsDeclaratorPlan {
+            members,
+            rest: None,
+        })
+    }
+
+    /// Project the LEGACY per-name prop read forms: EVERY legacy `export let`
+    /// prop is a prop source (official declares `$.prop` even for a bare,
+    /// never-written prop) and ALWAYS reads as the accessor call (`name()`) —
+    /// unlike a runes no-default prop, which reads `$$props.name` directly.
+    #[must_use]
+    pub(super) fn prop_reads_legacy(&self) -> PropReads {
+        let mut reads = PropReads::default();
+        for plan in &self.members {
+            reads.insert(plan.local.clone(), PropRead::Getter);
+        }
+        reads
+    }
+
     /// Project the per-name `$props()` read forms: a PROP-SOURCE member (a
     /// default-bearing OR written member — the official `is_prop_source` — or
     /// ANY member under `accessors`) is declared via `$.prop` and reads as a
@@ -888,6 +953,16 @@ pub(super) fn lower_simple_instance_item(
             }
         }
         Item::BindThisLocal { name } => SimpleItemLowering::Statement(format!("let {name};")),
+        // A LEGACY `export let` prop statement lowers through the FALLIBLE
+        // rewriter: each declarator emits its own `let <local> = $.prop($$props,
+        // <key>, <flags>[, <default>]);` declaration (default expressions
+        // rewrite through the shared rewriter) — the caller (which holds the
+        // rewriter + the unified declarator plan) handles it.
+        Item::ExportLetProps { .. } => SimpleItemLowering::NeedsRewriter,
+        // A promoted LEGACY `let` lowers through the FALLIBLE rewriter: its init
+        // (which may read sibling signals) rewrites, then wraps in the
+        // `$.mutable_source(...)` cell — the caller handles it.
+        Item::MutableSourceLet { .. } => SimpleItemLowering::NeedsRewriter,
         // A plain-local DOM bind-target root: the declaration stays a verbatim plain
         // `let name = <literal init>;` (official keeps the plain local), or a bare
         // `let name;` for the uninitialized form. The init was restricted to a
@@ -923,6 +998,12 @@ pub(super) fn lower_simple_instance_item(
         Item::EffectStatement { .. } | Item::EffectRuneInit { .. } => {
             SimpleItemLowering::NeedsRewriter
         }
+        // A LEGACY `$:` reactive statement lowers through the FALLIBLE rewriter
+        // into a `$.legacy_pre_effect` REGISTRATION emitted after every other
+        // body statement in dependency order — the caller (which holds the
+        // rewriter + the registration-order walk) intercepts it before this
+        // dispatch.
+        Item::ReactiveStatement { .. } => SimpleItemLowering::NeedsRewriter,
     }
 }
 

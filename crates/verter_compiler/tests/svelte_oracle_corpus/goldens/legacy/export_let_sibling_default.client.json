@@ -1,0 +1,82 @@
+{
+  "slug": "legacy/export_let_sibling_default.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "export_let_sibling_default",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "prop",
+    "prop",
+    "first_child",
+    "child",
+    "reset",
+    "sibling",
+    "child",
+    "reset",
+    "template_effect",
+    "set_text",
+    "set_text",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "first_child",
+    "from_html",
+    "prop",
+    "reset",
+    "set_text",
+    "sibling",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "prop": 2,
+    "first_child": 1,
+    "child": 2,
+    "reset": 2,
+    "sibling": 1,
+    "template_effect": 1,
+    "set_text": 2,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<p> </p> <p> </p>",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<p> </p> <p> </p>`, 1); export default function export_let_sibling_default($$anchor, $$props) {let a = $.prop($$props, 'a', 8, 1); let b = $.prop($$props, 'b', 24, a); var fragment = root(); var p = $.first_child(fragment); var text = $.child(p, true); $.reset(p); var p_1 = $.sibling(p, 2); var text_1 = $.child(p_1, true); $.reset(p_1); $.template_effect(() => {$.set_text(text, a()); $.set_text(text_1, b());}); $.append($$anchor, fragment);}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

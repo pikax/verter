@@ -1221,6 +1221,14 @@ const SUPPORTED_OPTIONS: &[&str] = &[
     // opens the frame (`$.push($$props, true)` … `$.pop()`) around the
     // `$.snippet(node, () => $$props.$$host.snip)` render.
     "options/custom_element_render_host_member",
+    // A LEGACY custom element with an `export let` prop: the accessors force
+    // composes UPDATED onto the legacy base (`$.prop($$props, 'label', 12,
+    // 'x')`), the `$$exports` get/set pair reads and writes through the
+    // accessor (the setter takes NO default param), the frame is
+    // `$.push($$props, false)` … `return $.pop($$exports);`, and NO `$.init()`
+    // — the `$$exports` frame reason alone never warrants the legacy init
+    // hook.
+    "options/custom_element_legacy_export",
 ];
 
 /// The `$store` auto-subscription corpus — the mode-independent client store
@@ -1292,6 +1300,102 @@ const SUPPORTED_STORES: &[&str] = &[
     // runs BEFORE the captured export return — a bare `return $.pop($$exports);`
     // would strand the cleanup). SUPPORTED, not fail-closed.
     "stores/store_custom_element",
+];
+
+/// The LEGACY (non-runes) reactivity corpus: `export let` props through the
+/// shared `$.prop` prop-source substrate (legacy base flags, accessor-call
+/// reads, the official default algorithm) and the demand-driven `let` →
+/// `$.mutable_source` promotion (handler/function/bind writes, `$.get`/`$.set`/
+/// `$.update` routing, the `$.mutate` deep-mutation wrap, the un-proxied legacy
+/// special-host setter).
+const SUPPORTED_LEGACY: &[&str] = &[
+    // ── legacy (non-runes) reactivity: `export let` props + promoted `let` ──
+    // A bare legacy `export let` prop: `let label = $.prop($$props, 'label', 8)`
+    // (legacy base flags 8 — BINDABLE by default), accessor-call reads
+    // (`label()`), the `$$props` param, NO context frame.
+    "legacy/export_let_bare",
+    // A DEFAULT-bearing export let: the simple literal default passes RAW as the
+    // 4th `$.prop` arg (no lazy thunk, no lazy bit).
+    "legacy/export_let_default",
+    // A template-MUTATED export let: flags 12 (8 | UPDATED 4), the increment
+    // through `$.update_prop(count)`, reads still accessor calls.
+    "legacy/export_let_mutated",
+    // A bare REASSIGNED export let: flags 12, the write through the setter call
+    // (`v(2)`).
+    "legacy/export_let_reassigned",
+    // TWO export-let props: ONE `let <local> = $.prop(...)` declaration per
+    // prop in source order (official splits per declarator), the grouped
+    // two-read `$.template_effect`.
+    "legacy/export_let_multiple",
+    // A default READING a SIBLING prop (`export let b = a`): the sibling read
+    // rewrites to the getter and collapses to the BARE getter as the LAZY
+    // carrier — `$.prop($$props, 'b', 24, a)` (flags 24 = BINDABLE 8 | LAZY 16).
+    "legacy/export_let_sibling_default",
+    // A promoted legacy `let` written in an ADMITTED function body
+    // (`onclick={inc}`): `$.mutable_source(0)`, the compound assign
+    // `$.set(count, $.get(count) + 1)`, reads `$.get`.
+    "legacy/let_function_write",
+    // A promoted legacy `let` written by an inline handler: `$.mutable_source(0)`,
+    // `$.update(count)`, `$.get(count)`, NO `$$props`, NO frame.
+    "legacy/let_handler_write",
+    // A bind-target legacy `let`: `$.mutable_source('x')` + the
+    // `$.bind_value(input, () => $.get(v), ($$value) => $.set(v, $$value))`
+    // thunks (the former "legacy let binding" refusal, now supported).
+    "legacy/let_bind_value",
+    // The UNINITIALIZED bind-target form: the ZERO-ARG `$.mutable_source()`.
+    "legacy/let_bind_uninit",
+    // A MEMBER bind target rooted at a promoted object let: the setter wraps in
+    // the official deep-mutation helper
+    // (`($$value) => $.mutate(o, $.get(o).x = $$value)`).
+    "legacy/let_bind_member",
+    // A member MUTATION in a handler: `$.mutate(o, $.get(o).x++)`.
+    "legacy/let_member_mutate",
+    // A special-host (window) bind target under legacy: the setter carries NO
+    // proxy flag (`($$value) => $.set(y, $$value)` — the runes-only `, true` is
+    // absent).
+    "legacy/let_bind_window",
+    // ── `$:` reactive statements (`$.legacy_pre_effect` registrations) ──
+    // A bare-ident reactive assignment (`$: y = x + 1`): the synthesized
+    // zero-arg `const y = $.mutable_source();`, the dep thunk `() =>
+    // ($.get(x))`, the `$.set(y, …)` body, ONE trailing
+    // `$.legacy_pre_effect_reset()`, push/pop WITHOUT `$.init()`.
+    "legacy/reactive_assign",
+    // A block-bodied `$:` (`$: { t = x * 2; console.log(t); }`): ONE effect
+    // wrapping the whole block; `t` is read inside so it joins the dep thunk
+    // in first-mention order (t, x).
+    "legacy/reactive_block",
+    // An `if`-bodied `$:`: the statement wraps verbatim; the pure
+    // assignment-LHS `big` is NOT a dependency.
+    "legacy/reactive_if",
+    // TWO `$:` statements in reverse dependency order (`$: z = y + 1; $: y =
+    // x + 1;`): declarations in source order, REGISTRATIONS topologically
+    // ordered (the y-assigner registers first).
+    "legacy/reactive_topo_order",
+    // A prop + store + `$:` combination: all three dep wrappers in one thunk
+    // (`$.deep_read_state(p())`, the bare accessor `$c()`), store setup, AND
+    // `$.init()` (the store-factory call is an unsafe imported call).
+    "legacy/reactive_prop_store",
+    // A prop + `$:` with NO store: `$.deep_read_state(p())` in the thunk,
+    // `$.push($$props, false)` frame, NO `$.init()` (the reactive statement
+    // opens the frame without the legacy init reason).
+    "legacy/reactive_prop_only",
+    // A prop WRITTEN by a `$:` statement (`export let p; $: p = x;`): the
+    // declaration composes UPDATED onto the legacy base — flags 12 — and the
+    // effect body writes through the setter call (`p($.get(x))`); no colliding
+    // cell synthesizes for the declared prop target.
+    "legacy/reactive_prop_write",
+    // A `$:` for-of whose head binding SHADOWS an outer reactive `let`
+    // (`let i = 0; $: for (const i of [1, 2]) { console.log(i); }`): the dep
+    // thunk is EMPTY (`() => {}`) — the loop-local `i` never records a
+    // dependency on the outer cell — and the body keeps the loop-local reads
+    // bare.
+    "legacy/reactive_for_shadow",
+    // A PARENTHESIZED reactive assignment (`$: (y = x + 1)`): the paren wrapper
+    // is transparent to the implicit-target declaration pass — `y` still
+    // synthesizes the zero-arg `const y = $.mutable_source();` and the body
+    // writes through `$.set(y, …)` (the redundant paren carrier is waived by
+    // the structural comparator).
+    "legacy/reactive_paren_assign",
 ];
 
 /// The repository root (two levels up from this crate's `tests/` dir).
@@ -6381,6 +6485,7 @@ fn all_supported_slugs() -> Vec<&'static str> {
         .chain(SUPPORTED_LIFECYCLE.iter())
         .chain(SUPPORTED_OPTIONS.iter())
         .chain(SUPPORTED_STORES.iter())
+        .chain(SUPPORTED_LEGACY.iter())
         .copied()
         .collect()
 }
@@ -6454,6 +6559,47 @@ fn supported_lifecycle_covers_the_full_lifecycle_corpus() {
             "duplicate supported-lifecycle slug {slug}"
         );
     }
+}
+
+#[test]
+fn supported_legacy_cover_the_full_legacy_corpus() {
+    // The legacy corpus is the structural oracle for the legacy reactivity
+    // surface (`export let` prop-source lowering + the demand-driven `let` →
+    // `$.mutable_source` promotion); a dropped row is a coverage regression.
+    assert_eq!(
+        SUPPORTED_LEGACY.len(),
+        22,
+        "the legacy corpus must enumerate all 22 `legacy/*` fixtures (export_let \
+         bare/default/mutated/reassigned/multiple/sibling_default, let function_write/\
+         handler_write/bind_value/bind_uninit/bind_member/member_mutate/bind_window, \
+         reactive assign/block/if/topo_order/prop_store/prop_only/prop_write/for_shadow/\
+         paren_assign)"
+    );
+    let mut seen = std::collections::BTreeSet::new();
+    for &slug in SUPPORTED_LEGACY {
+        assert!(
+            slug.starts_with("legacy/"),
+            "supported-legacy slug {slug} must be a legacy/* fixture"
+        );
+        assert!(seen.insert(slug), "duplicate supported-legacy slug {slug}");
+    }
+    // Directory coverage: every `legacy/*` fixture on disk is enumerated — a new
+    // fixture must join the corpus (or be consciously excluded here).
+    let dir = repo_root().join("crates/verter_compiler/tests/svelte_oracle_corpus/fixtures/legacy");
+    let mut on_disk: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("read legacy fixture dir {}: {e}", dir.display()))
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().map(|x| x == "svelte").unwrap_or(false))
+        .map(|p| format!("legacy/{}", p.file_stem().unwrap().to_string_lossy()))
+        .collect();
+    on_disk.sort();
+    let mut enumerated: Vec<String> = SUPPORTED_LEGACY.iter().map(|s| s.to_string()).collect();
+    enumerated.sort();
+    assert_eq!(
+        enumerated, on_disk,
+        "every legacy/* fixture on disk must be enumerated in SUPPORTED_LEGACY"
+    );
 }
 
 #[test]
@@ -6818,8 +6964,8 @@ fn supported_options_cover_the_custom_element_corpus() {
     // options-axis vertical, deliberately NOT a supported row).
     assert_eq!(
         SUPPORTED_OPTIONS.len(),
-        14,
-        "the custom-element corpus must enumerate all 14 `options/custom_element_*` fixtures"
+        15,
+        "the custom-element corpus must enumerate all 15 `options/custom_element_*` fixtures"
     );
     let mut seen = std::collections::BTreeSet::new();
     for &slug in SUPPORTED_OPTIONS {

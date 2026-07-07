@@ -1,0 +1,41 @@
+{
+  "slug": "legacy/reactive_prop_only.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "reactive_prop_only",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "escape",
+    "bind_props"
+  ],
+  "helperSet": [
+    "bind_props",
+    "escape"
+  ],
+  "helperCounts": {
+    "escape": 1,
+    "bind_props": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

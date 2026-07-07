@@ -521,43 +521,43 @@ mod tests {
     }
 
     #[test]
-    fn compile_bundle_fails_closed_for_a_legacy_export_prop_with_no_main() {
-        // A legacy (non-runes) component with an instance `export` is the legacy
-        // PROP surface — an unsupported runtime surface with its NARROW
-        // per-surface diagnostic: NO Main body, and a precise non-fatal
-        // diagnostic (so the IDE surface survives). The blanket legacy-mode
-        // refusal is gone (a store-only legacy component compiles).
+    fn compile_bundle_emits_a_runtime_main_for_a_legacy_export_prop() {
+        // A legacy (non-runes) component with an `export let` prop is a
+        // SUPPORTED runtime surface: the prop lowers through the shared
+        // `$.prop` prop-source substrate (legacy base flags 8, accessor-call
+        // reads) and the bundle carries a real Main — the former per-surface
+        // export refusal is gone.
         let compiler = SvelteCarrierCompiler::default();
         let source = "<script>export let label;</script>\n<p>{label}</p>\n";
         let artifact = compiler.parse(source, &ParseOptions::default());
         let alloc = oxc_allocator::Allocator::default();
         let bundle = compiler
             .compile_bundle(source, &artifact, &RuntimeCompileOptions::default(), &alloc)
-            .expect("the bundle is produced (fail-closed, not an Err)");
+            .expect("the bundle is produced");
         assert!(
-            !bundle.has_runtime_surface(),
-            "a legacy export-prop component must NOT carry a runtime surface"
+            bundle.has_runtime_surface(),
+            "a legacy export-let prop component compiles to a runtime surface"
+        );
+        let body = bundle
+            .main
+            .body_code
+            .as_deref()
+            .expect("a Main body for a legacy export-let prop component");
+        assert!(
+            body.contains("let label = $.prop($$props, 'label', 8);"),
+            "the prop lowers through the shared $.prop substrate:\n{body}"
         );
         assert!(
-            bundle.main.body_code.is_none(),
-            "no Main body for a legacy export-prop component"
-        );
-        // The fail-closed diagnostic is precise + NON-FATAL (so the IDE survives).
-        assert!(
-            bundle
+            !bundle
                 .diagnostics
                 .iter()
-                .any(|d| d.code == "svelte-runtime-unsupported-legacy-export-prop"),
-            "the legacy export-prop fail-closed diagnostic must be present, got: {:?}",
+                .any(|d| d.code.starts_with("svelte-runtime-unsupported")),
+            "no unsupported-surface diagnostic for a supported legacy prop, got: {:?}",
             bundle
                 .diagnostics
                 .iter()
                 .map(|d| &d.code)
                 .collect::<Vec<_>>()
-        );
-        assert!(
-            !bundle.has_errors(),
-            "the fail-closed diagnostic is non-fatal so the IDE compile survives"
         );
     }
 

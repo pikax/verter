@@ -94,7 +94,9 @@ pub fn compile_client<'a>(
     // `$foo` / `$$foo` reference, an invalid HTML placement) FIRST, so a genuinely
     // malformed component is rejected for being malformed — not later mis-attributed
     // to an unsupported feature, and never accepted as a divergent `Main`.
-    if let Some(rejection) = official_reject::official_reject_gate(source, parsed) {
+    if let Some(rejection) =
+        official_reject::official_reject_gate_with_runes(source, parsed, opts.runes)
+    {
         return Err(ClientCompileError::OfficialReject(rejection));
     }
     // (2) `parse_domain_gate` — refuse the PARSE-DOMAIN surfaces the runtime IR
@@ -113,9 +115,13 @@ pub fn compile_client<'a>(
         .map_err(ClientCompileError::Lowering)?;
     // (3) `ClientSyntaxSurface::classify` — the DEFAULT-DENY classifier. It accepts
     // ONLY when every node / attr / script-item is in the supported allowlist; the
-    // first unsupported surface fails closed (no wildcard accept arm).
-    let classified = client_surface::ClientSyntaxSurface::classify(&ir)
-        .map_err(ClientCompileError::Unsupported)?;
+    // first unsupported surface fails closed (no wildcard accept arm). The
+    // discriminating `From` conversion routes a classifier-detected OFFICIAL
+    // reject (the `OfficialReject` carrier — e.g. a runes-mode `export let` /
+    // `$:` detected against the FINAL inferred mode) to
+    // `ClientCompileError::OfficialReject`, everything else to `Unsupported`.
+    let classified =
+        client_surface::ClientSyntaxSurface::classify(&ir).map_err(ClientCompileError::from)?;
     // (4) `SupportedClientIr::build` — the semantic projection. It decides which
     // interpolations are ACTUALLY reactive (a non-reactive one fails closed),
     // validates lvalues, and rewrites every script item + op through the FALLIBLE

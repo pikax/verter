@@ -1,0 +1,44 @@
+{
+  "slug": "options/custom_element_legacy_export.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "custom_element_legacy_export",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "fallback",
+    "escape",
+    "bind_props"
+  ],
+  "helperSet": [
+    "bind_props",
+    "escape",
+    "fallback"
+  ],
+  "helperCounts": {
+    "fallback": 1,
+    "escape": 1,
+    "bind_props": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

@@ -49,11 +49,16 @@ impl<'a> SupportedClientIr<'a> {
                 target: bind.target.clone(),
                 span: Span::new(0, 0),
             })?;
-        // The `should_proxy` flag is HOST-driven: a bind on a SPECIAL host
-        // (`<svelte:window|document|body|element>`) emits the proxied setter
-        // `$.set(local, $$value, true)` (the window/document/body/dynamic-element setter
-        // baseline), while an ordinary DOM-element bind stays `$.set(local, $$value)`.
-        let should_proxy = bind_target_is_special_host(self.ir.node(target));
+        // The `should_proxy` flag is HOST-driven AND mode-gated: a bind on a
+        // SPECIAL host (`<svelte:window|document|body|element>`) emits the
+        // proxied setter `$.set(local, $$value, true)` under RUNES mode (the
+        // window/document/body/dynamic-element setter baseline), while an
+        // ordinary DOM-element bind — and EVERY legacy-mode bind — stays
+        // `$.set(local, $$value)` (oracle-verified: legacy
+        // `$.bind_window_scroll('y', …, ($$value) => $.set(y, $$value))`
+        // carries NO proxy flag).
+        let should_proxy = bind_target_is_special_host(self.ir.node(target))
+            && self.ir.component.mode == super::ir::SvelteMode::Runes;
         let (getter, setter) = self.bind_getter_setter(bind.expr, &bind.target, should_proxy)?;
         Ok(ClientRuntimeOp::Bind {
             target: ClientNodeId(target.0),
@@ -260,10 +265,27 @@ impl<'a> SupportedClientIr<'a> {
             // A member target: the LHS is the bound member expression rewritten as a
             // value read (identical to the getter — `$.get(obj).x`), assigned to.
             // Routing through the rewriter is the fix for the signal-wrapped-proxy
-            // member write.
+            // member write. A member rooted at a promoted legacy
+            // `$.mutable_source` additionally wraps the write in the official
+            // deep-mutation helper (`($$value) => $.mutate(o, $.get(o).x =
+            // $$value)` — oracle-verified).
             Some(super::expr::BindTargetKind::Member) => {
                 let lvalue = self.rewrite(expr, analyzed.scope)?;
-                format!("{lvalue} = $$value")
+                let mutable_source_root =
+                    analyzed.bind_target.root_ident.as_deref().filter(|root| {
+                        matches!(
+                            self.ir.analysis.bindings.resolve_kind(
+                                &self.ir.analysis.scopes,
+                                analyzed.scope,
+                                root
+                            ),
+                            Some(super::expr::BindingRuntimeKind::MutableSource)
+                        )
+                    });
+                match mutable_source_root {
+                    Some(root) => format!("$.mutate({root}, {lvalue} = $$value)"),
+                    None => format!("{lvalue} = $$value"),
+                }
             }
             // A function-pair was handled above; a non-lvalue target was refused by the
             // classifier (`bind:value={f()}`). Defensive — fail closed rather than emit

@@ -80,6 +80,7 @@ mod host_attr_gate;
 pub mod html;
 mod instance_items;
 pub mod ir;
+mod legacy_reactive;
 mod legacy_surface;
 mod lower_component;
 mod naming;
@@ -91,6 +92,7 @@ mod parse_refusal;
 mod reactive_analysis;
 mod reactive_fold;
 mod reactive_fold_tristate;
+mod render_callees;
 mod rune_scan;
 mod script_body_parse;
 mod state_prep;
@@ -119,8 +121,8 @@ use verter_span::Span;
 use attr_lowering::lower_attributes;
 use expr::{
     collect_expr_references, parse_debug_identifier_spans, parse_declarators, parse_pattern_names,
-    parse_render_call, reparse_module, AnalyzedExpr, BindingInfo, BindingRuntimeKind, BindingTable,
-    DeclaratorKeyword, ExprArena, RenderCalleeShape, ScopeGraph, ScopeId, ScriptAnalysis,
+    reparse_module, AnalyzedExpr, BindingInfo, BindingRuntimeKind, BindingTable, DeclaratorKeyword,
+    ExprArena, ScopeGraph, ScopeId, ScriptAnalysis,
 };
 use html::StaticTemplatePlan;
 use ir::{
@@ -160,10 +162,12 @@ pub struct SvelteRuntimeOptions {
     /// An explicit component-name override (the `name` compile option). When set,
     /// it overrides the filename-derived name.
     pub name: Option<String>,
-    /// The explicit `runes` COMPILE-OPTION override. When `Some`, it wins outright.
-    /// When `None`, the lowering next honors an in-source `<svelte:options runes={…}>`
-    /// directive (read via [`forced_runes_option`](crate::svelte::parser::forced_runes_option)),
-    /// and only if neither is present does it infer the mode from rune USAGE.
+    /// The explicit `runes` COMPILE-OPTION override. An in-source
+    /// `<svelte:options runes={…}>` directive (read via
+    /// [`forced_runes_option`](crate::svelte::parser::forced_runes_option))
+    /// OVERRIDES this option in both directions — matching official; the
+    /// option applies when the source carries no directive, and only if
+    /// neither is present does the lowering infer the mode from rune USAGE.
     pub runes: Option<bool>,
     /// Production mode (strips dev-only instrumentation downstream).
     pub is_production: bool,
@@ -431,21 +435,21 @@ pub fn lower_parsed_svelte_to_ir<'a>(
     opts: &SvelteRuntimeOptions,
     alloc: &'a Allocator,
 ) -> Result<SvelteRuntimeIr<'a>, RuntimeLoweringErrors> {
-    // --- Mode inference: explicit compile-option override wins; then an explicit
-    // `<svelte:options runes={…}>` override (Svelte's own forced-mode switch,
-    // shared with the IDE projector via `forced_runes_option`); otherwise infer
-    // from rune USAGE. `runes={true}` forces runes mode despite zero rune calls;
-    // `runes={false}` forces legacy mode even when a rune name is present. The
-    // SCRIPT half of the usage inference runs here; the TEMPLATE half (a `$host`
-    // occurrence in a template expression is a runes indicator too) reads the
-    // per-expression free-reference facts the template lowering collects, so the
-    // final mode decision completes AFTER the lowering below — nothing between
-    // here and there consumes the mode. ---
+    // --- Mode inference: an explicit in-source `<svelte:options runes={…}>`
+    // override wins (Svelte's own forced-mode switch, shared with the IDE
+    // projector via `forced_runes_option` — official lets it override the
+    // compile option in both directions); then the `runes` compile-option
+    // override; otherwise infer from rune USAGE. `runes={true}` forces runes
+    // mode despite zero rune calls; `runes={false}` forces legacy mode even
+    // when a rune name is present. The SCRIPT half of the usage inference runs
+    // here; the TEMPLATE half (a `$host` occurrence in a template expression
+    // is a runes indicator too) reads the per-expression free-reference facts
+    // the template lowering collects, so the final mode decision completes
+    // AFTER the lowering below — nothing between here and there consumes the
+    // mode. ---
     let instance_source = parsed.instance_content().map(|s| span_text(source, s));
     let module_source = parsed.module_content().map(|s| span_text(source, s));
-    let explicit_runes = opts
-        .runes
-        .or_else(|| forced_runes_option(source, &parsed.template));
+    let explicit_runes = forced_runes_option(source, &parsed.template).or(opts.runes);
     // Classify BOTH slots' static imports ONCE — the single import authority
     // (the binding preparation below and the surface classifier consume the
     // SAME carrier). Hoisted above the mode inference because the `$store`
@@ -542,6 +546,18 @@ pub fn lower_parsed_svelte_to_ir<'a>(
         &mut scopes,
         &mut bindings,
     );
+    // Declare each instance-script `export let <ident>` declarator as a `Prop`
+    // binding — the LEGACY prop surface (`$.prop($$props, key, 8)`; reads are
+    // accessor calls). Registered mode-independently like the rune passes: a
+    // RUNES-mode `export let` is an official compile error rejected before
+    // these bindings are ever consumed.
+    state_scan::prepare_legacy_export_prop_bindings(
+        instance_source,
+        alloc,
+        root_scope_id,
+        &mut scopes,
+        &mut bindings,
+    );
     // The single `ClassifiedScriptImports` carrier was computed BEFORE the mode
     // inference above; the binding preparation below consumes the admitted
     // carriers, and the surface classifier later propagates a retained slot
@@ -582,6 +598,18 @@ pub fn lower_parsed_svelte_to_ir<'a>(
         root_scope_id,
         &mut scopes,
         &mut bindings,
+    );
+    // Collect the LEGACY `let` → `$.mutable_source` promotion candidates (every
+    // registered top-level PlainLocal `let`) with their SCRIPT-side writes-only
+    // uses. The promotion itself is decided AFTER the template lowering + the
+    // final mode inference (`finalize_legacy_let_promotions` below): a written
+    // legacy `let` promotes; an unwritten one stays a plain local.
+    let legacy_let_tracking = state_prep::prepare_legacy_let_tracking(
+        instance_source,
+        alloc,
+        root_scope_id,
+        &scopes,
+        &bindings,
     );
     // Declare one `$store` subscription ACCESSOR binding (`$count`) per declared
     // candidate base — every top-level instance declaration name with a
@@ -630,7 +658,7 @@ pub fn lower_parsed_svelte_to_ir<'a>(
 
     // Now the full scope graph exists: resolve every `{@render}` callee (a
     // forward-referenced snippet declared later in the same scope now resolves).
-    resolve_render_callees(&mut ctx);
+    render_callees::resolve_render_callees(&mut ctx);
 
     // Attribute scope-resolved TEMPLATE writes to the tracked `$state` bindings
     // (instance + module) and finalize each binding's classification. A write is
@@ -698,6 +726,29 @@ pub fn lower_parsed_svelte_to_ir<'a>(
         SvelteMode::Legacy
     };
 
+    // LEGACY-mode `let` promotion: with the FINAL mode decided and the template
+    // scope graph complete, promote each WRITTEN tracked top-level `let`
+    // (script write, template write, or `bind:` write-back) to the
+    // `$.mutable_source` binding kind — the demand-driven legacy reactivity.
+    // Never run for a runes component (a runes plain local stays plain).
+    // The IMPLICIT `$:` assignment-target declarations follow: a top-level
+    // `$: <target> = …` binding a name not otherwise declared mints a
+    // `$.mutable_source` binding at the root scope (the official implicit
+    // `legacy_reactive` declaration), so every read/write of the target —
+    // template and script alike — routes through the shared signal rewriter.
+    let legacy_reactive_targets = if mode == SvelteMode::Legacy {
+        state_prep::finalize_legacy_let_promotions(&mut ctx, &legacy_let_tracking);
+        legacy_reactive::declare_reactive_assignment_targets(
+            instance_source,
+            alloc,
+            root_scope_id,
+            &mut ctx.scopes,
+            &mut ctx.bindings,
+        )
+    } else {
+        Vec::new()
+    };
+
     let component = ComponentIr {
         name: derive_component_name(opts),
         filename: opts.filename.clone(),
@@ -714,6 +765,7 @@ pub fn lower_parsed_svelte_to_ir<'a>(
         scopes: ctx.scopes,
         bindings: ctx.bindings,
         patterns: ctx.patterns,
+        legacy_reactive_targets,
     };
 
     Ok(SvelteRuntimeIr {
@@ -1405,83 +1457,6 @@ fn lower_declaration_tag(
         });
     }
     Some(ctx.push_node(IrNode::Tag(TagIr::Declaration { kind, declarators })))
-}
-
-/// Resolve every pending `{@render}` callee now that the full scope graph exists.
-///
-/// A static-name call (`row(1)`) whose callee resolves to a `{#snippet}` NAME
-/// binding becomes [`RenderCallee::Snippet`] with the parsed argument
-/// expressions; an optional call (`getSnippet()?.()`), a non-identifier callee,
-/// or an unresolved name stays [`RenderCallee::Dynamic`] (the whole inner
-/// expression).
-fn resolve_render_callees(ctx: &mut LoweringCtx) {
-    let pending = std::mem::take(&mut ctx.pending_renders);
-    for render in pending {
-        let node = render.node;
-        let text = span_text(ctx.source, render.inner);
-        let shape = match parse_render_call(text) {
-            Ok(shape) => shape,
-            Err(()) => {
-                ctx.errors.push(
-                    "svelte-runtime-render-parse",
-                    format!("could not parse `{{@render}}` expression `{text}`"),
-                    render.inner,
-                );
-                continue;
-            }
-        };
-        // Both call shapes carry the trailing call's argument spans; the callee
-        // discriminant (a `{#snippet}` NAME vs the dynamic prop/member callee) is the
-        // only difference. Build the argument ExprIds ONCE so EVERY callee keeps its
-        // argument thunks (the `$.snippet(node, callee, …args)` shape) — not just the
-        // static snippet-name callee.
-        let (static_name, arg_spans) = match shape {
-            RenderCalleeShape::StaticName {
-                name,
-                optional,
-                args,
-            } => (Some((name, optional)), args),
-            RenderCalleeShape::Dynamic { args } => (None, args),
-            // A SPREAD argument is an official HARD ERROR
-            // (`render_tag_invalid_spread_argument`). Mark the node with the tag span;
-            // the client-surface gate fails it closed (the callee/args stay provisional
-            // — they are never emitted). NEVER the silent arg-drop the empty-args path
-            // produced.
-            RenderCalleeShape::SpreadArguments => {
-                if let IrNode::Tag(TagIr::Render {
-                    spread_arg_span, ..
-                }) = &mut ctx.nodes[node.0 as usize]
-                {
-                    *spread_arg_span = Some(render.inner);
-                }
-                continue;
-            }
-        };
-        let arg_ids: Vec<ExprId> = arg_spans
-            .into_iter()
-            .map(|(s, e)| {
-                let span = Span::new(render.inner.start + s, render.inner.start + e);
-                ctx.push_expr(span, render.scope)
-            })
-            .collect();
-        // A static-name callee is a snippet call ONLY when it resolves to a
-        // `{#snippet}` NAME binding in scope (the `optional` flag rides along — a
-        // resolved `row?.(…)` emits the direct optional call); a prop /
-        // dynamic-snippet-value callee stays the provisional `Dynamic(inner)` node.
-        let snippet_binding = static_name.and_then(|(name, optional)| {
-            let binding = ctx.scopes.resolve(&ctx.bindings, render.scope, &name)?;
-            (ctx.bindings.get(binding).kind == BindingRuntimeKind::SnippetName)
-                .then_some((binding, optional))
-        });
-        if let IrNode::Tag(TagIr::Render { callee, args, .. }) = &mut ctx.nodes[node.0 as usize] {
-            if let Some((binding, optional)) = snippet_binding {
-                *callee = RenderCallee::Snippet { binding, optional };
-            }
-            // Otherwise the callee stays the provisional `Dynamic(inner)` — correct
-            // for a prop / member / call-expression / ternary callee.
-            *args = arg_ids;
-        }
-    }
 }
 
 /// Plan the static templates, dynamic slots, and client-side node paths for a

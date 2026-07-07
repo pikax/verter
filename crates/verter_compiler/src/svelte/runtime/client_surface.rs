@@ -184,6 +184,15 @@ impl ClientSyntaxSurface {
         let legacy_mode = ir.component.mode == super::ir::SvelteMode::Legacy;
         if legacy_mode {
             super::legacy_surface::refuse_unsupported_legacy_surfaces(ir, &store_exempt)?;
+        } else {
+            // The RUNES-side twin gate against the FINAL lowered mode: an
+            // `export let` / `$:` statement is an OFFICIAL compile error
+            // (`legacy_export_invalid` / `legacy_reactive_statement_invalid`).
+            // The pre-lowering official-reject gate covers the EXPLICIT runes
+            // selections; this application covers every USAGE-INFERRED runes
+            // mode through the lowering's one mode detector, so a runes-mode
+            // `export let` / `$:` can never reach legacy lowering.
+            super::legacy_surface::refuse_runes_mode_legacy_script_constructs(ir)?;
         }
 
         // (2) Script-item classification: scan every instance + module script
@@ -332,33 +341,38 @@ impl ClientSyntaxSurface {
                 class_names: store_facts.class_names,
                 function_names: store_function_names,
             };
-            let items = instance_items::classify_supported_instance_items(
+            // The LEGACY script facts: the final mode plus the PROMOTED `let`
+            // names (the root-scope bindings the demand-driven legacy promotion
+            // flipped to `$.mutable_source`) — read from the FINALIZED binding
+            // table, never re-derived. Under legacy mode a promoted bind-target
+            // `let` classifies as the mutable-source item; the runes-shaped
+            // verbatim bind-local admissions serve runes mode, where the
+            // promotion set is empty by construction.
+            let legacy_facts = instance_items::LegacyScriptFacts {
+                legacy_mode,
+                promoted_lets: if legacy_mode {
+                    ir.analysis
+                        .bindings
+                        .all()
+                        .iter()
+                        .filter(|b| {
+                            b.kind == super::expr::BindingRuntimeKind::MutableSource
+                                && b.scope == ir.root_scope().scope
+                        })
+                        .map(|b| b.name.clone())
+                        .collect()
+                } else {
+                    rustc_hash::FxHashSet::default()
+                },
+            };
+            instance_items::classify_supported_instance_items(
                 instance,
                 &bind_this_targets,
                 &bind_lvalue_roots,
                 &bind_function_pair_names,
                 &store_admissions,
-            )?;
-            // In LEGACY mode a top-level `let` is reactive state (official lowers
-            // it through `$.mutable_source`), so the runes-shaped verbatim
-            // bind-target `let` admissions must NOT flow through — they would
-            // silently emit the runes shape for a legacy semantic. Fail them
-            // closed (the legacy-state lowering is a follow-up vertical).
-            if legacy_mode {
-                for item in &items {
-                    if matches!(
-                        item,
-                        SupportedInstanceScriptItem::BindThisLocal { .. }
-                            | SupportedInstanceScriptItem::BindLocalLet { .. }
-                    ) {
-                        return Err(UnsupportedSvelteRuntimeSurface::InstanceScriptItem {
-                            construct: "legacy let binding",
-                            span: Span::new(0, 0),
-                        });
-                    }
-                }
-            }
-            items
+                &legacy_facts,
+            )?
         } else {
             Vec::new()
         };

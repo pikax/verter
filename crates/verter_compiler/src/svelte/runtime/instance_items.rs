@@ -209,6 +209,33 @@ pub(super) enum SupportedInstanceScriptItem {
         /// The class declaration's full source text (emitted verbatim).
         source: String,
     },
+    /// A LEGACY `export let` prop statement — the legacy PROP surface. Carries
+    /// the statement's declared LOCAL names in source order; each lowers to its
+    /// own `let <local> = $.prop($$props, '<key>', <flags>[, <default>]);`
+    /// declaration through the SHARED prop-source substrate (the unified
+    /// declarator plan owns the member facts + default lowering — legacy base
+    /// flags 8, `UPDATED` +4 for a written prop, the same official simple/lazy
+    /// default algorithm). Minted ONLY under LEGACY mode: a runes-mode `export
+    /// let` is the official `legacy_export_invalid` compile error.
+    ExportLetProps {
+        /// The exported prop LOCAL names, in source order.
+        locals: Vec<String>,
+    },
+    /// A LEGACY top-level plain `let` PROMOTED to a `$.mutable_source` signal —
+    /// the demand-driven legacy reactivity (the binding is WRITTEN: reassigned,
+    /// member-mutated, or a `bind:` target). Lowers to `let <name> =
+    /// $.mutable_source(<rewritten init>);` (zero-arg for the uninitialized
+    /// form); the init lowers through the shared FALLIBLE rewriter, and every
+    /// read/write of the binding routes through the shared signal rewriter
+    /// (`$.get` / `$.set` / `$.update` / member `$.mutate`). An UNWRITTEN plain
+    /// `let` never mints this item (it keeps its fail-closed refusal).
+    MutableSourceLet {
+        /// The declared signal name.
+        name: String,
+        /// The init expression source text (rewriter-lowered), or `None` for an
+        /// uninitialized `let v;` (the zero-arg `$.mutable_source()` form).
+        init: Option<String>,
+    },
     /// A top-level `let`/`const` declarator whose init is a WELL-FORMED
     /// assignable effect-family EXPRESSION rune — `$effect.root(fn)` (the result
     /// is the teardown function) or `$effect.tracking()`. Carries the declaration
@@ -242,6 +269,33 @@ pub(super) enum SupportedInstanceScriptItem {
         /// payload, before the generated `;`. Empty for the
         /// trailing-comment-free common case.
         tail_trivia: String,
+    },
+    /// A LEGACY `$:` reactive statement — lowers to ONE
+    /// `$.legacy_pre_effect(<deps>, <body>)` registration (the registrations
+    /// emit AFTER every other body statement, in DEPENDENCY order, followed by
+    /// the single `$.legacy_pre_effect_reset()`). The BODY wraps as the effect
+    /// thunk through the shared FALLIBLE rewriter; the dependency thunk wraps
+    /// each dependency read by its resolved binding kind (`$.get(x)` for a
+    /// mutable-source local, `$.deep_read_state(p())` for a legacy prop, the
+    /// bare accessor call `$c()` for a store subscription, the bare name for an
+    /// import). An IMPLICIT bare-identifier assignment target was already
+    /// declared as a `$.mutable_source` binding by the analysis pass, so the
+    /// body assignment rewrites through the shared signal rewriter
+    /// (`$.set(y, …)`) with no per-shape lowering fork. Minted ONLY under
+    /// LEGACY mode: a runes-mode `$:` is the official
+    /// `legacy_reactive_statement_invalid` compile error.
+    ReactiveStatement {
+        /// The typed BODY shape (the effect-thunk payload).
+        body: super::legacy_reactive::ReactiveStatementBody,
+        /// Dependency-candidate names in first-mention order (shadow-pruned;
+        /// pure `=`-assignment-target-only names excluded). Kind resolution
+        /// and the plain-local/global exclusion happen at lowering.
+        deps: Vec<String>,
+        /// The assigned names (the official assignment/update extraction) —
+        /// the registration-order and cycle-detection input.
+        assignments: Vec<String>,
+        /// The labeled statement's source span (the cycle-reject span).
+        span: Span,
     },
 }
 
@@ -296,6 +350,7 @@ pub(super) fn classify_supported_instance_items(
     bind_lvalue_roots: &[String],
     bind_function_pair_names: &[String],
     store_admissions: &StoreScriptAdmissions,
+    legacy: &LegacyScriptFacts,
 ) -> Result<Vec<SupportedInstanceScriptItem>, UnsupportedSvelteRuntimeSurface> {
     let alloc = Allocator::default();
     let Some(program) = reparse_module(&alloc, instance_source) else {
@@ -322,9 +377,25 @@ pub(super) fn classify_supported_instance_items(
             bind_lvalue_roots,
             bind_function_pair_names,
             store_admissions,
+            legacy,
         )?);
     }
     Ok(items)
+}
+
+/// The LEGACY-mode script facts the item classifier consumes: whether the FINAL
+/// lowered mode is legacy (the `export let` prop accept and the `let` promotion
+/// are LEGACY-ONLY — the accept sites themselves are mode-gated, so a runes-mode
+/// `export let` can never take legacy lowering even if an upstream gate were
+/// bypassed), plus the PROMOTED `let` names (the root-scope bindings the
+/// demand-driven legacy promotion flipped to `$.mutable_source` — read from the
+/// finalized binding table by the caller, never re-derived here).
+#[derive(Debug, Default)]
+pub(super) struct LegacyScriptFacts {
+    /// Whether the component's FINAL mode is `SvelteMode::Legacy`.
+    pub(super) legacy_mode: bool,
+    /// The promoted top-level `let` names (kind == `MutableSource`).
+    pub(super) promoted_lets: rustc_hash::FxHashSet<String>,
 }
 
 /// The DEMAND-DRIVEN `$store` script admissions the item classifier consumes —
@@ -360,6 +431,7 @@ pub(super) struct StoreScriptAdmissions {
 /// closed with a precise `construct` label. `comments` is the instance parse's
 /// comment table — the effect-family carriers consult it so a transparent
 /// wrapper's head trivia rides the carrier instead of being sliced away.
+#[allow(clippy::too_many_arguments)]
 fn classify_instance_statement(
     stmt: &Statement<'_>,
     instance_source: &str,
@@ -368,6 +440,7 @@ fn classify_instance_statement(
     bind_lvalue_roots: &[String],
     bind_function_pair_names: &[String],
     store_admissions: &StoreScriptAdmissions,
+    legacy: &LegacyScriptFacts,
 ) -> Result<SupportedInstanceScriptItem, UnsupportedSvelteRuntimeSurface> {
     match stmt {
         Statement::VariableDeclaration(decl) => classify_instance_variable_decl(
@@ -377,7 +450,15 @@ fn classify_instance_statement(
             bind_this_targets,
             bind_lvalue_roots,
             store_admissions,
+            legacy,
         ),
+        // The export-family split. `export let <ident>…` is the LEGACY prop
+        // surface (accepted per-declarator, LEGACY mode only — the accept site
+        // itself is mode-gated); `export const` / `export function` / `export
+        // class` are the `$$exports` component-export surface with their OWN
+        // fail-closed identity (any mode); every other export form keeps its
+        // precise fail-closed residual.
+        Statement::ExportNamedDeclaration(export) => classify_export_statement(export, legacy),
         // A named top-level `function name(...) {}` is admitted ONLY when its name is
         // EXACTLY referenced by an accepted DOM function-pair bind (`bind:value={get,
         // set}`), by a bare-identifier event handler (`onclick={inc}`), or by the
@@ -434,12 +515,137 @@ fn classify_instance_statement(
                 })
             }
         }
+        // A `$:` labeled statement — the LEGACY reactive-statement surface. The
+        // accept site is mode-gated exactly like the `export let` arm: under
+        // legacy mode it mints the typed reactive-statement item (body shape +
+        // dependency/assignment facts from the typed AST); under RUNES mode the
+        // SAME statement is the official `legacy_reactive_statement_invalid`
+        // compile error (the pre-lowering gate and the classifier's runes-side
+        // twin normally reject first; this arm keeps the accept itself
+        // airtight). A non-`$` label stays the generic fail-closed residual.
+        Statement::LabeledStatement(labeled) if labeled.label.name == "$" => {
+            let span = Span::new(stmt.span().start, stmt.span().end);
+            if !legacy.legacy_mode {
+                return Err(UnsupportedSvelteRuntimeSurface::OfficialReject {
+                    rejection: super::official_rule::OfficialRejection::of(
+                        super::official_rule::CoreOfficialValidationRule::LegacyReactiveStatementInvalid,
+                    ),
+                    span,
+                });
+            }
+            let facts = super::legacy_reactive::reactive_statement_facts(&labeled.body);
+            let body = super::legacy_reactive::classify_reactive_statement_body(
+                &labeled.body,
+                instance_source,
+            );
+            Ok(SupportedInstanceScriptItem::ReactiveStatement {
+                body,
+                deps: facts.deps,
+                assignments: facts.assignments,
+                span,
+            })
+        }
         // Every OTHER NON-variable top-level statement fails closed with its construct
         // label. The labels are precise so the completeness gate can pin each family.
         other => Err(UnsupportedSvelteRuntimeSurface::InstanceScriptItem {
             construct: top_level_statement_label(other),
             span: stmt_span(other),
         }),
+    }
+}
+
+/// Classify a top-level `export …` NAMED-export statement — the export-family
+/// split:
+///
+/// - `export let <ident>[= default][, …]` under LEGACY mode → the
+///   [`SupportedInstanceScriptItem::ExportLetProps`] prop item (one emitted
+///   `$.prop` declaration per declarator). Under RUNES mode the SAME statement
+///   is the official `legacy_export_invalid` compile error — returned through
+///   the [`UnsupportedSvelteRuntimeSurface::OfficialReject`] carrier so the
+///   accept site itself is mode-gated (a runes-mode `export let` can never take
+///   legacy lowering).
+/// - `export let` with a DESTRUCTURED / TS-annotated declarator → the precise
+///   fail-closed sibling refusal (official accepts the destructured form as a
+///   lazy-default prop surface — a deferral, not a reject).
+/// - `export const` / `export function` / `export class` (ANY mode) → the
+///   own-identity [`UnsupportedSvelteRuntimeSurface::ComponentExportBinding`]
+///   refusal (the official `$$exports` accessor mechanism, not yet emitted).
+/// - `export var` → its own precise fail-closed label (official lowers it as a
+///   prop with the `var` keyword — a distinct deferred surface).
+/// - A specifier list (`export { a }`) / any other named-export form → the
+///   generic export residual.
+fn classify_export_statement(
+    export: &oxc_ast::ast::ExportNamedDeclaration<'_>,
+    legacy: &LegacyScriptFacts,
+) -> Result<SupportedInstanceScriptItem, UnsupportedSvelteRuntimeSurface> {
+    use oxc_ast::ast::Declaration;
+    let span = Span::new(export.span.start, export.span.end);
+    let refuse = |construct: &'static str| {
+        Err(UnsupportedSvelteRuntimeSurface::InstanceScriptItem { construct, span })
+    };
+    match &export.declaration {
+        Some(Declaration::VariableDeclaration(decl)) => match decl.kind {
+            VariableDeclarationKind::Let => {
+                if !legacy.legacy_mode {
+                    // A RUNES-mode `export let` is the official compile error —
+                    // the mode-gated accept site (the pre-lowering gate and the
+                    // classifier's runes-side gate normally reject first; this
+                    // arm keeps the accept itself airtight).
+                    return Err(UnsupportedSvelteRuntimeSurface::OfficialReject {
+                        rejection: super::official_rule::OfficialRejection::of(
+                            super::official_rule::CoreOfficialValidationRule::LegacyExportInvalid,
+                        ),
+                        span,
+                    });
+                }
+                let mut locals = Vec::new();
+                for d in &decl.declarations {
+                    if d.type_annotation.is_some() || d.definite {
+                        return refuse("ts-annotated export let");
+                    }
+                    match &d.id {
+                        BindingPattern::BindingIdentifier(id) => {
+                            locals.push(id.name.to_string());
+                        }
+                        // Official accepts a destructured `export let` as a
+                        // lazy-default prop surface — OUT of the supported
+                        // export-let shape; the precise sibling refusal.
+                        BindingPattern::ObjectPattern(_)
+                        | BindingPattern::ArrayPattern(_)
+                        | BindingPattern::AssignmentPattern(_) => {
+                            return refuse("destructured export let");
+                        }
+                    }
+                }
+                Ok(SupportedInstanceScriptItem::ExportLetProps { locals })
+            }
+            // `export const` — the readonly `$$exports` component-export surface.
+            VariableDeclarationKind::Const => {
+                Err(UnsupportedSvelteRuntimeSurface::ComponentExportBinding {
+                    construct: "const",
+                    span,
+                })
+            }
+            // `export var` — official lowers it as a PROP with the `var` keyword
+            // (a distinct deferred surface, not the `$$exports` mechanism).
+            VariableDeclarationKind::Var => refuse("export var declaration"),
+            _ => refuse("export"),
+        },
+        Some(Declaration::FunctionDeclaration(_)) => {
+            Err(UnsupportedSvelteRuntimeSurface::ComponentExportBinding {
+                construct: "function",
+                span,
+            })
+        }
+        Some(Declaration::ClassDeclaration(_)) => {
+            Err(UnsupportedSvelteRuntimeSurface::ComponentExportBinding {
+                construct: "class",
+                span,
+            })
+        }
+        // A specifier list (`export { a }` / `export { a as b }` / a re-export)
+        // and every other named-export form — the generic export residual.
+        _ => refuse("export"),
     }
 }
 
@@ -840,6 +1046,7 @@ fn classify_instance_variable_decl(
     bind_this_targets: &[String],
     bind_lvalue_roots: &[String],
     store_admissions: &StoreScriptAdmissions,
+    legacy: &LegacyScriptFacts,
 ) -> Result<SupportedInstanceScriptItem, UnsupportedSvelteRuntimeSurface> {
     let refuse = |construct: &'static str| UnsupportedSvelteRuntimeSurface::InstanceScriptItem {
         construct,
@@ -931,6 +1138,7 @@ fn classify_instance_variable_decl(
                 instance_source,
                 bind_this_targets,
                 bind_lvalue_roots,
+                legacy,
             )
         }
         BindingPattern::ObjectPattern(_) => {
@@ -964,11 +1172,35 @@ fn classify_identifier_declarator(
     instance_source: &str,
     bind_this_targets: &[String],
     bind_lvalue_roots: &[String],
+    legacy: &LegacyScriptFacts,
 ) -> Result<SupportedInstanceScriptItem, UnsupportedSvelteRuntimeSurface> {
     let refuse = |construct: &'static str| UnsupportedSvelteRuntimeSurface::InstanceScriptItem {
         construct,
         span: Span::new(decl.span.start, decl.span.end),
     };
+    // The LEGACY demand-driven promotion: a top-level `let` whose binding the
+    // legacy finalizer flipped to `$.mutable_source` (it is WRITTEN — a script
+    // or template reassign/member-mutation, or a two-way `bind:` target) is the
+    // promoted signal item. Checked BEFORE the runes-shaped bind-local arms so a
+    // legacy bind-target `let` takes the mutable-source lowering, never the
+    // runes verbatim shape. The init (ANY expression) lowers through the shared
+    // FALLIBLE rewriter at projection time; a rune-call init cannot reach here
+    // (the legacy rune-reference gate refused it upstream). LEGACY-only by
+    // construction: the promotion set is populated only under the final legacy
+    // mode.
+    if legacy.promoted_lets.contains(name) {
+        use oxc_span::GetSpan;
+        let init = d.init.as_ref().and_then(|init_expr| {
+            let span = init_expr.span();
+            instance_source
+                .get(span.start as usize..span.end as usize)
+                .map(str::to_string)
+        });
+        return Ok(SupportedInstanceScriptItem::MutableSourceLet {
+            name: name.to_string(),
+            init,
+        });
+    }
     match &d.init {
         // A bare `let name;` (no init): admitted as shape 3 (a `bind:this` clone-root
         // local) OR as the no-init plain-local DOM bind-target root (`let v; <input

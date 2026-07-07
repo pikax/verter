@@ -4,10 +4,10 @@
 //! accessor frame (`var $$exports = { get x() { … }, set x($$value) { … } };`
 //! … `return $.pop($$exports)`). `$host` is rewritten to `$$props.$$host`;
 //! whether the component binds a `$$props` parameter is decided by the plan
-//! build's `props_param_bound` fact (a real props binder OR `needs_context` —
-//! a member on the `$host()` call result is itself a `needs_context` reason,
-//! in handlers and `{@render}` dynamic callees alike), NOT forced by `$host`
-//! alone. The `$host`-usage facts feeding that decision are recorded by the
+//! build's `props_param_bound` fact (a real props binder OR an open context
+//! frame — a member on the `$host()` call result is itself a `needs_context`
+//! reason, in handlers and `{@render}` dynamic callees alike), NOT forced by
+//! `$host` alone. The `$host`-usage facts feeding that decision are recorded by the
 //! rune scan ([`super::rune_scan::UnsupportedRuneScan`]) and carried on the
 //! classified surface — never re-discovered here.
 //!
@@ -27,7 +27,9 @@
 //! - The component-body frame is FACT-DRIVEN, not blanket: the `$.push($$props,
 //!   true)` / `$.pop()` context frame is driven by reactive-analysis
 //!   `needs_context` (an unsafe `{@render}` callee, an unsafe member,
-//!   `$effect`, …) OR non-empty custom-element accessor exports;
+//!   `$effect`, …) OR a `$:` reactive statement OR non-empty custom-element
+//!   accessor exports (only the FIRST reason also warrants the legacy
+//!   `$.init()` hook);
 //!   `props_param_bound` only controls `$$props` parameter binding /
 //!   bare-`$host()` admission. A real props binder without CE accessors, such
 //!   as rest-only or whole-object `$props()`, does not by itself open

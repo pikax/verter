@@ -40,6 +40,19 @@ fn emit_result(source: &str) -> Result<String, ClientCompileError> {
     compile_client(source, &parsed, &opts, &alloc, false).map(|m| m.code)
 }
 
+/// [`emit_result`] with an explicit `runes` COMPILE-OPTION override (for the
+/// compile-option vs in-source `<svelte:options runes={…}>` precedence tests).
+fn emit_result_with_runes(source: &str, runes: Option<bool>) -> Result<String, ClientCompileError> {
+    let alloc = Allocator::default();
+    let parsed = parse_svelte(source);
+    let opts = SvelteRuntimeOptions {
+        filename: Some("App.svelte".to_string()),
+        runes,
+        ..Default::default()
+    };
+    compile_client(source, &parsed, &opts, &alloc, false).map(|m| m.code)
+}
+
 /// The §1.2 conformance fixture.
 const HELLO_INPUT: &str = "<script>\n\tlet name = $state('world');\n\tlet count = $state(0);\n</script>\n\n<h1>Hello {name}!</h1>\n<input bind:value={name} />\n<button onclick={() => count += 1}>clicks: {count}</button>\n";
 
@@ -9603,17 +9616,6 @@ fn state_raw_emits_signal_no_proxy() {
 }
 
 #[test]
-fn legacy_export_prop_fails_closed_per_surface() {
-    // A non-runes component with an instance `export` is the legacy PROP surface
-    // — refused with the NARROW per-surface diagnostic (the blanket legacy-mode
-    // refusal is gone; a store-only legacy component compiles).
-    assert_fail_closed(
-        "<script>export let label;</script>\n<p>{label}</p>\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::LegacyExportProp { .. }),
-    );
-}
-
-#[test]
 fn top_level_style_fails_closed() {
     // F4: a top-level `<style>` (CSS scoping) fails closed — it is NOT accepted
     // as a runtime Main. RED against the pre-fix emitter (which emitted a Main and
@@ -13446,25 +13448,24 @@ fn reactive_state_interpolation_still_emits() {
 }
 #[test]
 fn instance_export_const_fails_closed() {
-    // An instance-script `export const` is OUTSIDE the strict finite instance-script
-    // allowlist (the three shapes: `$state(<primitive>)`, a no-default `$props()`
-    // destructure, a bare `let el;` bind:this target). It fails closed at the
-    // instance-script-item gate (`InstanceScriptItem` construct `export`) rather
-    // than emitting an `export` inside the component function (invalid JS). RED against
-    // the pre-restructure tree (which emitted the `export const` verbatim).
+    // An instance-script `export const` is the `$$exports` component-export
+    // surface — it fails closed under its OWN identity
+    // (`ComponentExportBinding` construct `const`) rather than emitting an
+    // `export` inside the component function (invalid JS).
     assert_fail_closed(
         "<script>let n = $state(0); export const helper = 1;</script>\n<button onclick={() => n++}>{n}</button>\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::InstanceScriptItem { construct, .. } if *construct == "export"),
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::ComponentExportBinding { construct, .. } if *construct == "const"),
     );
 }
 
 #[test]
 fn instance_export_function_fails_closed() {
-    // An instance-script `export function` also fails closed at the instance-script-item
-    // gate — an `export`-declaration statement is out-of-allowlist.
+    // An instance-script `export function` also fails closed under the
+    // `$$exports` component-export identity (`ComponentExportBinding`
+    // construct `function`).
     assert_fail_closed(
         "<script>let n = $state(0); export function helper() { return 1; }</script>\n<button onclick={() => n++}>{n}</button>\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::InstanceScriptItem { construct, .. } if *construct == "export"),
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::ComponentExportBinding { construct, .. } if *construct == "function"),
     );
 }
 
@@ -22865,11 +22866,8 @@ fn store_bind_this_target_fails_closed() {
 
 #[test]
 fn legacy_surfaces_fail_closed_with_narrow_per_surface_diagnostics() {
-    // `$:` reactive statement (legacy) → the narrow reactive-statement surface.
-    assert_fail_closed(
-        "<script>import { writable } from 'svelte/store'; const c = writable(0); $: doubled = $c * 2;</script>\n<p>{doubled}</p>\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::LegacyReactiveStatement { .. }),
-    );
+    // (`$:` reactive statements are SUPPORTED — they lower through
+    // `$.legacy_pre_effect`; see `reactive_store_dep_registers_the_bare_accessor_call`.)
     // `<slot>` (legacy) → the narrow slot surface.
     assert_fail_closed("<div><slot></slot></div>\n", |s| {
         matches!(s, UnsupportedSvelteRuntimeSurface::LegacySlotElement { .. })
@@ -22879,20 +22877,9 @@ fn legacy_surfaces_fail_closed_with_narrow_per_surface_diagnostics() {
         "<script>import { createEventDispatcher } from 'svelte'; const dispatch = createEventDispatcher(); function go() { dispatch('x'); }</script>\n<button onclick={go}>go</button>\n",
         |s| matches!(s, UnsupportedSvelteRuntimeSurface::LegacyEventDispatcher { .. }),
     );
-    // A legacy bind-target `let` (legacy `let` is reactive state — the runes
-    // verbatim-let shape must not flow through).
-    assert_fail_closed(
-        "<script>let v = 'x';</script>\n<input bind:value={v} />\n",
-        |s| {
-            matches!(
-                s,
-                UnsupportedSvelteRuntimeSurface::InstanceScriptItem {
-                    construct: "legacy let binding",
-                    ..
-                }
-            )
-        },
-    );
+    // A legacy bind-target `let` is SUPPORTED — legacy `let` reactivity
+    // promotes it to a real `$.mutable_source` binding (see
+    // `legacy_bind_target_let_promotes_to_mutable_source`).
 }
 
 #[test]
@@ -22978,4 +22965,1231 @@ fn nonconst_store_source_declaration_kind_fails_closed() {
             )
         },
     );
+}
+
+// ── legacy (non-runes) reactivity substrate: `export let` props + promoted `let` ──
+
+#[test]
+fn runes_mode_export_let_is_the_official_legacy_export_invalid_reject() {
+    // Under EXPLICIT runes mode an `export let` is the official svelte@5.56.3
+    // COMPILE ERROR `legacy_export_invalid` — never an unsupported-feature
+    // refusal and never the incidental static-interpolation misattribution.
+    let err = emit_result(
+        "<svelte:options runes={true} />\n<script>export let foo = 1;</script>\n<p>{foo}</p>\n",
+    )
+    .expect_err("a runes-mode `export let` must reject");
+    let ClientCompileError::OfficialReject(rejection) = &err else {
+        panic!("expected the official legacy_export_invalid reject, got {err:?}");
+    };
+    assert_eq!(rejection.official_code, "legacy_export_invalid");
+    assert_eq!(
+        rejection.rule,
+        CoreOfficialValidationRule::LegacyExportInvalid
+    );
+    // NEGATIVE: not the unsupported quadrant, so no static-interpolation code.
+    assert!(
+        !matches!(&err, ClientCompileError::Unsupported(_)),
+        "must not surface as an unsupported feature: {err:?}"
+    );
+    // A DESTRUCTURED `export let` under runes is the SAME official reject.
+    let err = emit_result(
+        "<svelte:options runes={true} />\n<script>export let { a } = { a: 1 };</script>\n<p>hi</p>\n",
+    )
+    .expect_err("a runes-mode destructured `export let` must reject");
+    assert!(
+        matches!(&err, ClientCompileError::OfficialReject(r) if r.official_code == "legacy_export_invalid"),
+        "destructured export let under runes must be legacy_export_invalid: {err:?}"
+    );
+}
+
+#[test]
+fn in_source_runes_option_overrides_the_runes_compile_option() {
+    // Official svelte@5.56.3: an in-source `<svelte:options runes={…}>` wins
+    // over the caller's `runes` compile option in BOTH directions (oracle-
+    // adjudicated). The `export let` legacy surface discriminates the mode.
+
+    // Compile option FALSE + in-source runes={true}: the component IS runes
+    // mode — an `export let` is the official legacy_export_invalid reject.
+    let err = emit_result_with_runes(
+        "<svelte:options runes={true} />\n<script>export let foo = 1;</script>\n<p>{foo}</p>\n",
+        Some(false),
+    )
+    .expect_err("in-source runes={true} must override the runes:false compile option");
+    assert!(
+        matches!(&err, ClientCompileError::OfficialReject(r) if r.official_code == "legacy_export_invalid"),
+        "in-source runes={{true}} over runes:false must reject the legacy export: {err:?}"
+    );
+
+    // Compile option TRUE + in-source runes={false}: the component IS legacy
+    // mode — the SAME `export let` compiles through the legacy prop source.
+    let js = emit_result_with_runes(
+        "<svelte:options runes={false} />\n<script>export let foo = 1;</script>\n<p>{foo}</p>\n",
+        Some(true),
+    )
+    .unwrap_or_else(|e| {
+        panic!("in-source runes={{false}} must override the runes:true compile option: {e:?}")
+    });
+    assert!(
+        js.contains("let foo = $.prop($$props, 'foo', 8, 1);"),
+        "the forced-legacy component lowers `export let` as the legacy prop source:\n{js}"
+    );
+    // NEGATIVE: no runes-mode flags import in the forced-legacy module.
+    assert!(
+        js.contains("import 'svelte/internal/flags/legacy';"),
+        "the forced-legacy module carries the legacy flags import:\n{js}"
+    );
+
+    // SANITY (option-only, no in-source directive): the compile option still
+    // decides the mode on its own — runes:false compiles the legacy export,
+    // runes:true rejects it.
+    let js = emit_result_with_runes(
+        "<script>export let foo = 1;</script>\n<p>{foo}</p>\n",
+        Some(false),
+    )
+    .expect("runes:false with no in-source directive compiles legacy");
+    assert!(
+        js.contains("let foo = $.prop($$props, 'foo', 8, 1);"),
+        "runes:false alone keeps the legacy lowering:\n{js}"
+    );
+    let err = emit_result_with_runes(
+        "<script>export let foo = 1;</script>\n<p>{foo}</p>\n",
+        Some(true),
+    )
+    .expect_err("runes:true with no in-source directive is runes mode");
+    assert!(
+        matches!(&err, ClientCompileError::OfficialReject(r) if r.official_code == "legacy_export_invalid"),
+        "runes:true alone must reject the legacy export: {err:?}"
+    );
+}
+
+#[test]
+fn runes_mode_reactive_statement_is_the_official_reject_explicit_and_inferred() {
+    // H: explicit `<svelte:options runes={true}>` + `$:` → the official
+    // `legacy_reactive_statement_invalid` compile error.
+    let err = emit_result(
+        "<svelte:options runes={true} />\n<script>let c = $state(0); $: d = c * 2;</script>\n<p>{d}</p>\n",
+    )
+    .expect_err("a runes-mode `$:` must reject");
+    let ClientCompileError::OfficialReject(rejection) = &err else {
+        panic!("expected the official legacy_reactive_statement_invalid reject, got {err:?}");
+    };
+    assert_eq!(rejection.official_code, "legacy_reactive_statement_invalid");
+    assert_eq!(
+        rejection.rule,
+        CoreOfficialValidationRule::LegacyReactiveStatementInvalid
+    );
+    // I: the SAME reject when runes mode is INFERRED from rune presence (no
+    // explicit option) — the inference gate must fire for `$state` usage.
+    let err = emit_result("<script>let c = $state(0); $: d = c * 2;</script>\n<p>{d}</p>\n")
+        .expect_err("an inferred-runes `$:` must reject");
+    assert!(
+        matches!(&err, ClientCompileError::OfficialReject(r) if r.official_code == "legacy_reactive_statement_invalid"),
+        "inferred-runes `$:` must be legacy_reactive_statement_invalid: {err:?}"
+    );
+    // NEGATIVE: neither is the static-interpolation misattribution.
+    assert!(
+        !matches!(&err, ClientCompileError::Unsupported(s) if s.diagnostic_code() == "svelte-runtime-unsupported-static-interpolation"),
+        "must not be the static-interpolation refusal: {err:?}"
+    );
+}
+
+#[test]
+fn legacy_export_let_props_lower_through_the_prop_source_substrate() {
+    // A bare legacy `export let` is a prop source with base flags 8 (BINDABLE —
+    // legacy props are bindable by default) and reads as the accessor CALL
+    // (oracle-verified against svelte@5.56.3).
+    let js = emit(
+        "<script>\nexport let label;\n</script>\n<p>{label}</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("let label = $.prop($$props, 'label', 8);"),
+        "bare export let lowers to the 3-arg $.prop with flags 8:\n{js}"
+    );
+    assert!(
+        js.contains("$.set_text(text, label())"),
+        "a legacy prop ALWAYS reads as the accessor call:\n{js}"
+    );
+    assert!(
+        js.contains("($$anchor, $$props)"),
+        "a prop-bearing component threads $$props:\n{js}"
+    );
+    // NEGATIVE: never `$.get(label)`, never a bare `$$props.label` read, no frame.
+    assert!(
+        !js.contains("$.get(label)") && !js.contains("$$props.label"),
+        "a legacy prop read is the accessor call, not $.get / $$props member:\n{js}"
+    );
+    assert!(
+        !js.contains("$.push") && !js.contains("$.pop"),
+        "a legacy export-let prop opens no component context frame:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+
+    // A DEFAULT-bearing export let carries the default as the 4th arg (a simple
+    // literal passes RAW — no lazy thunk, no lazy bit).
+    let js = emit(
+        "<script>\nexport let label = 'hi';\n</script>\n<p>{label}</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("let label = $.prop($$props, 'label', 8, 'hi');"),
+        "default export let lowers the default as the 4th arg:\n{js}"
+    );
+    // NEGATIVE: no thunk wrap for a simple literal default.
+    assert!(
+        !js.contains("() => 'hi'"),
+        "a simple literal default must pass raw (no lazy thunk):\n{js}"
+    );
+}
+
+#[test]
+fn legacy_export_let_mutated_prop_carries_updated_flag_and_update_prop() {
+    // A template-written legacy prop composes UPDATED (+4) onto the legacy base 8
+    // → 12, writes through the prop update helper, and still reads as the
+    // accessor call (oracle case: `export let count = 0` + `count++`).
+    let js = emit(
+        "<script>\nexport let count = 0;\n</script>\n<button onclick={() => count++}>{count}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("let count = $.prop($$props, 'count', 12, 0);"),
+        "a mutated legacy prop carries flags 12 (8 | UPDATED 4):\n{js}"
+    );
+    assert!(
+        js.contains("$.update_prop(count)"),
+        "a prop increment lowers through $.update_prop:\n{js}"
+    );
+    assert!(
+        js.contains("$.set_text(text, count())"),
+        "the mutated prop still reads as the accessor call:\n{js}"
+    );
+    // NEGATIVE: never the signal family on a prop.
+    assert!(
+        !js.contains("$.update(count)") && !js.contains("$.set(count"),
+        "a prop write must not use the signal $.update/$.set family:\n{js}"
+    );
+
+    // A bare REASSIGNMENT writes through the setter call (`v = 2` → `v(2)`).
+    let js = emit(
+        "<script>\nexport let v;\n</script>\n<button onclick={() => v = 2}>{v}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("let v = $.prop($$props, 'v', 12);"),
+        "a reassigned bare prop carries flags 12 with no default:\n{js}"
+    );
+    assert!(
+        js.contains("v(2)"),
+        "a prop reassignment writes through the setter call:\n{js}"
+    );
+}
+
+#[test]
+fn legacy_export_let_multiple_props_emit_one_declaration_each() {
+    // Multiple `export let` statements lower to ONE `let <local> = $.prop(...);`
+    // per prop, in source order (oracle-verified: official splits per declarator).
+    let js = emit(
+        "<script>\nexport let a;\nexport let b = 1;\n</script>\n<p>{a}</p>\n<p>{b}</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("let a = $.prop($$props, 'a', 8);"),
+        "first prop declaration:\n{js}"
+    );
+    assert!(
+        js.contains("let b = $.prop($$props, 'b', 8, 1);"),
+        "second prop declaration with default:\n{js}"
+    );
+    let a_pos = js.find("let a = $.prop").unwrap();
+    let b_pos = js.find("let b = $.prop").unwrap();
+    assert!(a_pos < b_pos, "prop declarations keep source order:\n{js}");
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_export_let_sibling_default_lowers_lazy_getter_carrier() {
+    // `export let a = 1; export let b = a;` — a legacy default referencing a
+    // SIBLING prop is part of the prop DECLARATION (exactly as the runes
+    // `let { a = 1, b = a } = $props()` destructure default), never an
+    // instance-script prop usage. The sibling read rewrites to the getter and
+    // collapses to the BARE getter as the LAZY carrier: flags 24 (BINDABLE 8 |
+    // LAZY 16). Verified against svelte@5.56.3.
+    let result = emit_result(
+        "<script>\nexport let a = 1;\nexport let b = a;\n</script>\n<p>{a}</p>\n<p>{b}</p>\n",
+    );
+    let js = match result {
+        Ok(js) => js,
+        Err(e) => {
+            panic!("a sibling-default legacy prop must compile (not a prop-usage refusal): {e:?}")
+        }
+    };
+    assert!(
+        js.contains("let a = $.prop($$props, 'a', 8, 1);"),
+        "the literal-default sibling stays the eager flag-8 legacy prop source:\n{js}"
+    );
+    assert!(
+        js.contains("let b = $.prop($$props, 'b', 24, a);"),
+        "the sibling-reference default is the LAZY (24 = 8 | 16) bare-getter carrier:\n{js}"
+    );
+    // NEGATIVE: the carrier is the bare getter — never a thunk over the getter
+    // call, never the raw call, and never a `$$props` member thunk.
+    assert!(
+        !js.contains("24, () => a") && !js.contains("24, a()") && !js.contains("() => $$props.a"),
+        "the zero-arg getter call collapses to the bare getter:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn instance_script_prop_writes_fail_closed_in_both_modes() {
+    // A SCRIPT-BODY prop write (`function inc() { count += 1; }`) is an
+    // official-ACCEPTS surface Verter does not lower yet (official rewrites the
+    // body write through the prop accessor — `count(count() + 1)`; a bindable
+    // member write additionally notifies with `, true`). The WHOLE surface —
+    // runes `$props()` AND legacy `export let` — must refuse through the ONE
+    // prop-usage gate with the precise diagnostic, never silently accept and
+    // never emit a raw unrewritten body.
+
+    // LEGACY: `export let` + a function-body compound assign.
+    let err = emit_result(
+        "<script>\nexport let count = 0;\nfunction inc() { count += 1; }\n</script>\n<button onclick={inc}>{count}</button>\n",
+    )
+    .expect_err("a legacy `export let` script-body prop write must fail closed");
+    assert!(
+        matches!(
+            &err,
+            ClientCompileError::Unsupported(UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. })
+                if *rune == "$props() non-interpolation usage"
+        ),
+        "the legacy script-body prop write must refuse via the prop-usage gate: {err:?}"
+    );
+
+    // RUNES: the SAME shape through a `$props()` destructure member.
+    let err = emit_result(
+        "<script>\nlet { count = 0 } = $props();\nfunction inc() { count += 1; }\n</script>\n<button onclick={inc}>{count}</button>\n",
+    )
+    .expect_err("a runes `$props()` script-body prop write must fail closed");
+    assert!(
+        matches!(
+            &err,
+            ClientCompileError::Unsupported(UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. })
+                if *rune == "$props() non-interpolation usage"
+        ),
+        "the runes script-body prop write must refuse via the prop-usage gate: {err:?}"
+    );
+
+    // The coupled bindable MEMBER-write notify (`o.x++` → official
+    // `o(o().x++, true)`) rides the same deferral: a script-body member
+    // mutation on a prop object must ALSO refuse — not emit a notify-less
+    // member write.
+    let err = emit_result(
+        "<script>\nexport let o = { x: 0 };\nfunction bump() { o.x += 1; }\n</script>\n<button onclick={bump}>go</button>\n",
+    )
+    .expect_err("a script-body prop MEMBER write must fail closed");
+    assert!(
+        matches!(
+            &err,
+            ClientCompileError::Unsupported(UnsupportedSvelteRuntimeSurface::AdvancedRune { rune, .. })
+                if *rune == "$props() non-interpolation usage"
+        ),
+        "the script-body prop member write must refuse via the prop-usage gate: {err:?}"
+    );
+}
+
+#[test]
+fn legacy_let_promotes_to_mutable_source_on_handler_write() {
+    // A top-level legacy `let` written by a template handler and read in the
+    // template promotes to a `$.mutable_source` signal: reads `$.get`, updates
+    // `$.update`, and the component takes NO `$$props` and NO frame
+    // (oracle-verified).
+    let js = emit(
+        "<script>\nlet count = 0;\n</script>\n<button onclick={() => count++}>{count}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("let count = $.mutable_source(0);"),
+        "a written legacy let promotes to $.mutable_source:\n{js}"
+    );
+    assert!(
+        js.contains("$.update(count)"),
+        "the increment lowers through $.update:\n{js}"
+    );
+    assert!(
+        js.contains("$.get(count)"),
+        "the template read lowers through $.get:\n{js}"
+    );
+    assert!(
+        js.contains("($$anchor)") && !js.contains("$$props"),
+        "a promoted let threads no $$props:\n{js}"
+    );
+    assert!(
+        !js.contains("$.push") && !js.contains("$.pop"),
+        "a promoted let opens no component context frame:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_let_promotes_via_function_body_write() {
+    // The write may live in an admitted instance-script FUNCTION body (an
+    // `onclick={inc}` referent): the compound assign rewrites through the shared
+    // rewriter (`$.set(count, $.get(count) + 1)`) — oracle-verified.
+    let js = emit(
+        "<script>\nlet count = 0;\nfunction inc() { count += 1; }\n</script>\n<button onclick={inc}>{count}</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("let count = $.mutable_source(0);"),
+        "a function-body-written let promotes:\n{js}"
+    );
+    assert!(
+        js.contains("$.set(count, $.get(count) + 1)"),
+        "the compound assign lowers through $.set over $.get:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_bind_target_let_promotes_to_mutable_source() {
+    // A DOM bind-target legacy `let` ALSO promotes (a bind writes its target):
+    // `bind:value={v}` emits the `$.get`/`$.set` thunks over the mutable source
+    // (oracle-verified) — never a verbatim runes-shaped plain local.
+    let js = emit(
+        "<script>let v = 'x';</script>\n<input bind:value={v} />\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("let v = $.mutable_source('x');"),
+        "a bind-target legacy let promotes to $.mutable_source:\n{js}"
+    );
+    assert!(
+        js.contains("$.bind_value(input, () => $.get(v), ($$value) => $.set(v, $$value));"),
+        "the bind thunks read/write the mutable source:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+
+    // The UNINITIALIZED form lowers to the zero-arg `$.mutable_source()`.
+    let js = emit(
+        "<script>let v;</script>\n<input bind:value={v} />\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("let v = $.mutable_source();"),
+        "an uninitialized bind-target let lowers zero-arg:\n{js}"
+    );
+    assert!(
+        !js.contains("$.mutable_source(void 0)") && !js.contains("$.mutable_source(undefined)"),
+        "the uninitialized form is the ZERO-ARG call:\n{js}"
+    );
+}
+
+#[test]
+fn legacy_member_bind_target_writes_through_mutate() {
+    // A MEMBER bind target rooted at a promoted object let writes through
+    // `$.mutate(root, …)` with the root read rewritten (oracle-verified:
+    // `($$value) => $.mutate(o, $.get(o).x = $$value)`).
+    let js = emit(
+        "<script>let o = { x: '' };</script>\n<input bind:value={o.x} />\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("let o = $.mutable_source({ x: '' });"),
+        "the object-init bind-target let promotes with its init:\n{js}"
+    );
+    assert!(
+        js.contains("() => $.get(o).x"),
+        "the member getter reads through $.get on the root:\n{js}"
+    );
+    assert!(
+        js.contains("($$value) => $.mutate(o, $.get(o).x = $$value)"),
+        "the member setter wraps in $.mutate:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_member_mutation_handler_wraps_in_mutate() {
+    // A member mutation in a handler (`o.x++`) promotes the root and wraps the
+    // whole update in `$.mutate(o, $.get(o).x++)` (oracle-verified).
+    let js = emit(
+        "<script>\nlet o = { x: 0 };\n</script>\n<button onclick={() => o.x++}>x</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("let o = $.mutable_source({ x: 0 });"),
+        "a member-mutated let promotes:\n{js}"
+    );
+    assert!(
+        js.contains("$.mutate(o, $.get(o).x++)"),
+        "the member update wraps in $.mutate:\n{js}"
+    );
+    // NEGATIVE: no bare (unwrapped) member update on the raw binding.
+    assert!(
+        !js.contains("o.x++"),
+        "the raw member update must not survive:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_window_bind_setter_carries_no_proxy_flag() {
+    // A special-host bind under LEGACY mode emits the plain `$.set(local,
+    // $$value)` setter — the runes-only proxy flag (`, true`) must NOT appear
+    // (oracle-verified: `$.bind_window_scroll('y', () => $.get(y), ($$value) =>
+    // $.set(y, $$value))`).
+    let js = emit(
+        "<script>\nlet y = 0;\n</script>\n<svelte:window bind:scrollY={y} />\n<p>hi</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("let y = $.mutable_source(0);"),
+        "the window bind target promotes:\n{js}"
+    );
+    assert!(
+        js.contains("$.bind_window_scroll('y', () => $.get(y), ($$value) => $.set(y, $$value))"),
+        "the legacy special-host setter is un-proxied:\n{js}"
+    );
+    assert!(
+        !js.contains("$$value, true)"),
+        "the runes-only proxy flag must not appear under legacy mode:\n{js}"
+    );
+}
+
+#[test]
+fn legacy_custom_element_export_let_emits_accessor_pairs() {
+    // A legacy CUSTOM ELEMENT with an `export let` prop: the accessors force
+    // makes the prop UPDATED (flags 12), the `$$exports` get/set pair reads and
+    // writes through the accessor, the setter takes NO default param (legacy
+    // shape — unlike the runes `$$value = <default>` form), and the frame is the
+    // legacy `$.push($$props, false)` (oracle-verified).
+    let js = emit(
+        "<svelte:options customElement=\"my-el\" />\n<script>\nexport let label = 'x';\n</script>\n<p>{label}</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("let label = $.prop($$props, 'label', 12, 'x');"),
+        "the CE accessors force composes UPDATED onto the legacy base:\n{js}"
+    );
+    assert!(
+        js.contains("get label() { return label(); }"),
+        "the export getter returns the accessor call:\n{js}"
+    );
+    assert!(
+        js.contains("set label($$value) { label($$value); $.flush(); }"),
+        "the export setter writes through the accessor + flushes:\n{js}"
+    );
+    // NEGATIVE: the legacy CE setter param carries NO default.
+    assert!(
+        !js.contains("set label($$value = 'x')"),
+        "the legacy CE setter must not carry the runes default param:\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, false)") && js.contains("return $.pop($$exports);"),
+        "the CE exports frame is the legacy push flag + $$exports pop:\n{js}"
+    );
+    // NEGATIVE: the `$$exports` frame reason does NOT warrant the legacy init
+    // hook — official gates `$.init()` on the needs-context analysis alone
+    // (oracle-verified: this exact component emits push/pop($$exports) with NO
+    // `$.init()`).
+    assert!(
+        !js.contains("$.init()"),
+        "the exports-only frame must not emit `$.init()`:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn component_export_bindings_fail_closed_with_their_own_identity() {
+    // `export const` / `export function` / `export class` (the official
+    // `$$exports`/`$.bind_prop` readonly-export mechanism) fail closed under
+    // their OWN diagnostic identity in BOTH modes — never the deleted blanket
+    // legacy-export refusal, never the generic `export` construct label.
+    for (label, source) in [
+        (
+            "legacy export const",
+            "<script>export const c = 1;</script>\n<p>hi</p>\n",
+        ),
+        (
+            "legacy export function",
+            "<script>export function f() {}</script>\n<p>hi</p>\n",
+        ),
+        (
+            "legacy export class",
+            "<script>export class K {}</script>\n<p>hi</p>\n",
+        ),
+        (
+            "runes export const",
+            "<script>let c = $state(0); export const FOO = 1;</script>\n<button onclick={() => c++}>{c}</button>\n",
+        ),
+        (
+            "runes export function",
+            "<script>let c = $state(0); export function f() {}</script>\n<button onclick={() => c++}>{c}</button>\n",
+        ),
+    ] {
+        let err = emit_result(source).expect_err(label);
+        let ClientCompileError::Unsupported(surface) = &err else {
+            panic!("{label}: expected the fail-closed unsupported quadrant, got {err:?}");
+        };
+        assert_eq!(
+            surface.diagnostic_code(),
+            "svelte-runtime-unsupported-component-export-binding",
+            "{label}: must refuse under the component-export-binding identity, got {:?}",
+            surface
+        );
+    }
+}
+
+#[test]
+fn export_family_malformed_siblings_fail_closed_precisely() {
+    // Destructured `export let` (object / array pattern) — official ACCEPTS it
+    // as a props surface (flag 24 lazy defaults), but it is OUT of the supported
+    // export-let shape: fail closed with the PRECISE destructured-export label.
+    assert_fail_closed(
+        "<script>export let { a, b } = { a: 1, b: 2 };</script>\n<p>hi</p>\n",
+        |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::InstanceScriptItem {
+                    construct: "destructured export let",
+                    ..
+                }
+            )
+        },
+    );
+    assert_fail_closed("<script>export let [a] = [1];</script>\n<p>hi</p>\n", |s| {
+        matches!(
+            s,
+            UnsupportedSvelteRuntimeSurface::InstanceScriptItem {
+                construct: "destructured export let",
+                ..
+            }
+        )
+    });
+    // `export var` — official lowers it as a prop with the `var` keyword (a
+    // DISTINCT surface out of the export-let scope): its own precise label.
+    // (Static template: a `{v}` read would hit the earlier template-walk
+    // refusal — the item gate owns this statement's identity.)
+    assert_fail_closed("<script>export var v = 1;</script>\n<p>hi</p>\n", |s| {
+        matches!(
+            s,
+            UnsupportedSvelteRuntimeSurface::InstanceScriptItem {
+                construct: "export var declaration",
+                ..
+            }
+        )
+    });
+}
+
+#[test]
+fn export_specifier_list_stays_the_export_residual() {
+    // `export { a };` (official: an aliased prop surface) is OUT of the
+    // export-let scope — the generic export construct refusal owns it. (The
+    // export statement comes FIRST so the item gate reaches it before the
+    // sibling plain-let refusal.)
+    assert_fail_closed(
+        "<script>export { a };\nlet a = 1;</script>\n<p>hi</p>\n",
+        |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::InstanceScriptItem {
+                    construct: "export",
+                    ..
+                }
+            )
+        },
+    );
+}
+
+#[test]
+fn legacy_unwritten_let_stays_refused_not_promoted() {
+    // DEMAND-DRIVEN promotion: a plain legacy `let` that is neither written nor
+    // a bind target stays the fail-closed plain-let refusal — promotion never
+    // becomes a blanket "accept every top-level let".
+    assert_fail_closed("<script>let unused = 5;</script>\n<p>hi</p>\n", |s| {
+        matches!(
+            s,
+            UnsupportedSvelteRuntimeSurface::InstanceScriptItem {
+                construct: "plain let",
+                ..
+            }
+        )
+    });
+    // A mutating METHOD CALL (`arr.push(2)`) is NOT a promotion seed — official
+    // keeps the let verbatim-plain (no mutable_source), so Verter keeps the
+    // fail-closed refusal rather than over-promoting. (The write rides an
+    // ADMITTED handler-referent function body so the item gate — not the
+    // narrow inline-handler gate — owns the refusal; an over-promoting
+    // implementation would compile this component.)
+    assert_fail_closed(
+        "<script>let arr = [1];\nfunction f() { arr.push(2); }</script>\n<button onclick={f}>x</button>\n",
+        |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::InstanceScriptItem {
+                    construct: "plain let",
+                    ..
+                }
+            )
+        },
+    );
+}
+
+#[test]
+fn legacy_template_read_only_let_stays_the_static_interpolation_refusal() {
+    // A template READ of a never-written legacy let is NOT reactive — official
+    // static-folds it to a `textContent` write (a distinct deferred topology),
+    // so the static-interpolation refusal stays.
+    assert_fail_closed("<script>let a = 1;</script>\n<p>{a}</p>\n", |s| {
+        matches!(
+            s,
+            UnsupportedSvelteRuntimeSurface::StaticInterpolation { .. }
+        )
+    });
+}
+
+// ── `$:` legacy reactive statements: lowering + the malformed-sibling matrix ──
+//
+// The `$:` labeled statement lowers to `$.legacy_pre_effect(<deps>, <body>)`
+// registrations plus ONE trailing `$.legacy_pre_effect_reset()` (oracle-verified
+// against svelte@5.56.3). Every accepted form's malformed / edge sibling has a
+// fail-closed OR correct-behavior discriminating test here; each asserts BOTH
+// what SHOULD appear and what should NOT.
+
+#[test]
+fn reactive_assignment_synthesizes_mutable_source_and_registers_pre_effect() {
+    // `$: y = x + 1` (bare-ident assignment, `y` undeclared): synthesizes the
+    // implicit `const y = $.mutable_source();` (NO init arg), registers the
+    // effect with the dep thunk over the statement's reads, and rewrites the
+    // body assignment through the shared signal rewriter.
+    let js = emit(
+        "<script>let x = 0; $: y = x + 1;</script>\n<p>{y}</p>\n<button onclick={() => x++}>b</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("const y = $.mutable_source();"),
+        "the implicit assignment target declares the zero-arg cell:\n{js}"
+    );
+    assert!(
+        js.contains("$.legacy_pre_effect(() => ($.get(x)), () => { $.set(y, $.get(x) + 1); });"),
+        "the effect registers with the dep thunk + rewritten body:\n{js}"
+    );
+    assert!(
+        js.contains("$.legacy_pre_effect_reset();"),
+        "the reset finalizer is emitted:\n{js}"
+    );
+    assert_eq!(
+        js.matches("$.legacy_pre_effect_reset()").count(),
+        1,
+        "the reset is emitted ONCE per component:\n{js}"
+    );
+    // The synthesized binding reads through the signal rewriter elsewhere.
+    assert!(
+        js.contains("$.set_text(text, $.get(y))"),
+        "a template read of the synthesized target is a signal read:\n{js}"
+    );
+    // NEGATIVE: never `$.derived` (effect registration, not value memoization);
+    // never the const-with-init form; the synthesized decl is `const`, not `let`.
+    assert!(
+        !js.contains("$.derived"),
+        "a reactive statement must NEVER lower to $.derived:\n{js}"
+    );
+    assert!(
+        !js.contains("const y = $.mutable_source(0)") && !js.contains("let y = $.mutable_source"),
+        "the synthesized cell takes no init and is a const:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn reactive_block_wraps_the_whole_statement_as_one_effect() {
+    // `$: { t = x * 2; console.log(t); }` — the block body wraps VERBATIM
+    // (rewritten) as ONE effect; `t` is read inside the block so it joins the
+    // dep thunk in first-mention order (t, then x — oracle-pinned).
+    let js = emit(
+        "<script>let x = 0; let t = 0; $: { t = x * 2; console.log(t); }</script>\n<p>{t}</p>\n<button onclick={() => x++}>b</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains(
+            "$.legacy_pre_effect(() => ($.get(t), $.get(x)), () => { $.set(t, $.get(x) * 2); console.log($.get(t)); });"
+        ),
+        "the block wraps as one effect with the (t, x) dep order:\n{js}"
+    );
+    assert_eq!(
+        js.matches("$.legacy_pre_effect(").count(),
+        1,
+        "a multi-statement block registers exactly ONE effect:\n{js}"
+    );
+    // NEGATIVE: `t` is declared (`let t = 0`) — promoted, never re-synthesized.
+    assert!(
+        js.contains("let t = $.mutable_source(0);") && !js.contains("const t = $.mutable_source"),
+        "a declared target stays the promoted let, no spurious synth const:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn reactive_if_statement_wraps_verbatim_with_read_only_deps() {
+    // `$: if (x > 5) { big = true; }` — the `if` wraps verbatim; `big` is only
+    // ever a pure `=`-assignment LHS so it is NOT a dependency (oracle-pinned).
+    let js = emit(
+        "<script>let x = 0; let big = false; $: if (x > 5) { big = true; }</script>\n<p>{big}</p>\n<button onclick={() => x++}>b</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.legacy_pre_effect(() => ($.get(x)), () => { if ($.get(x) > 5) { $.set(big, true); } });"),
+        "the if statement wraps verbatim with x as the only dep:\n{js}"
+    );
+    assert!(
+        !js.contains("$.get(big), $.get(x)") && !js.contains("($.get(big)"),
+        "a pure assignment-LHS name must not join the dep thunk:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn reactive_registrations_emit_in_dependency_order_not_source_order() {
+    // `$: z = y + 1; $: y = x + 1;` — declarations stay in SOURCE order
+    // (z, then y) but the registrations emit in DEPENDENCY order: the
+    // y-assigner registers FIRST even though it appears later (oracle case:
+    // official topologically orders the reactive statements).
+    let js = emit(
+        "<script>let x = 0; $: z = y + 1; $: y = x + 1;</script>\n<p>{z}</p>\n<button onclick={() => x++}>b</button>\n",
+        "App.svelte",
+    );
+    let z_decl = js
+        .find("const z = $.mutable_source();")
+        .expect("z synthesizes");
+    let y_decl = js
+        .find("const y = $.mutable_source();")
+        .expect("y synthesizes");
+    assert!(
+        z_decl < y_decl,
+        "synthesized declarations stay in source order (z before y):\n{js}"
+    );
+    let y_effect = js
+        .find("$.legacy_pre_effect(() => ($.get(x)), () => { $.set(y, $.get(x) + 1); });")
+        .expect("the y-assigner registers");
+    let z_effect = js
+        .find("$.legacy_pre_effect(() => ($.get(y)), () => { $.set(z, $.get(y) + 1); });")
+        .expect("the z-assigner registers");
+    assert!(
+        y_effect < z_effect,
+        "the y-assigner's registration must precede the z-reader's (dependency order):\n{js}"
+    );
+    let reset = js.find("$.legacy_pre_effect_reset();").expect("reset");
+    assert!(
+        reset > z_effect,
+        "the single reset follows every registration:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn reactive_dependency_cycle_is_the_official_reject() {
+    // `$: a = b + x; $: b = a + 1;` — a dependency cycle among reactive
+    // statements is the OFFICIAL compile error `reactive_declaration_cycle`
+    // ("Cyclical dependency detected: a → b → a" — probed first-hand against
+    // svelte@5.56.3), routed through the official-reject channel.
+    let err = emit_result(
+        "<script>let x = 0; $: a = b + x; $: b = a + 1;</script>\n<p>{a}</p>\n<button onclick={() => x++}>b</button>\n",
+    )
+    .expect_err("a reactive dependency cycle must reject");
+    let ClientCompileError::OfficialReject(rejection) = &err else {
+        panic!("expected the official reactive_declaration_cycle reject, got {err:?}");
+    };
+    assert_eq!(rejection.official_code, "reactive_declaration_cycle");
+    assert_eq!(
+        rejection.rule,
+        CoreOfficialValidationRule::ReactiveDeclarationCycle
+    );
+    // NEGATIVE: a SELF-dependency (`$: x = x + 1`) is NOT a cycle — official
+    // excludes self-assigned deps from the edge set.
+    let js = emit(
+        "<script>let x = 0; $: x = x + 1;</script>\n<p>{x}</p>\n<button onclick={() => x++}>b</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.legacy_pre_effect(() => ($.get(x)), () => { $.set(x, $.get(x) + 1); });"),
+        "a self-dependent statement compiles (not a cycle):\n{js}"
+    );
+}
+
+#[test]
+fn reactive_statement_opens_frame_without_legacy_init_while_unsafe_call_still_inits() {
+    // THE FRAME-REASON DISCRIMINATOR. A bare-`$:`-only legacy component (no
+    // store, no `new`, no unsafe call/member) OPENS the push/pop context frame
+    // but must NOT emit `$.init()` (oracle-verified: push/pop present,
+    // `$.init()` absent). A component whose frame reason is an UNSAFE IMPORTED
+    // CALL still emits `$.init()`. Collapsing the two frame reasons into one
+    // boolean breaks one of the two halves.
+    let bare = emit(
+        "<script>let x = 0; $: y = x + 1;</script>\n<p>{y}</p>\n<button onclick={() => x++}>b</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        bare.contains("$.push($$props, false);") && bare.contains("$.pop();"),
+        "a `$:`-only legacy component opens the context frame:\n{bare}"
+    );
+    assert!(
+        !bare.contains("$.init()"),
+        "a `$:`-only frame must NOT emit `$.init()` (frame reason is the \
+         reactive statement, not the legacy-init trigger):\n{bare}"
+    );
+    // CONTROL: the unsafe-imported-call reason (a store factory call) still
+    // warrants `$.init()` — the two reasons must stay separately tracked.
+    let unsafe_call = emit(
+        "<script>import { writable } from 'svelte/store'; const c = writable(0);</script>\n<p>{$c}</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        unsafe_call.contains("$.push($$props, false);") && unsafe_call.contains("\t$.init();\n"),
+        "an unsafe-call frame still emits `$.init()`:\n{unsafe_call}"
+    );
+}
+
+#[test]
+fn reactive_prop_store_combined_wraps_each_dep_by_binding_kind() {
+    // `export let p` + `$c` store + `$: y = p + $c + 1` — the three dep
+    // wrappers in one thunk: a legacy PROP dep deep-reads the getter call
+    // (`$.deep_read_state(p())`), a STORE dep is the bare accessor call
+    // (`$c()`), and the frame carries `$.init()` (the store factory call is an
+    // unsafe imported call). Oracle-pinned against svelte@5.56.3.
+    let js = emit(
+        "<script>import { writable } from 'svelte/store'; export let p; const c = writable(0); $: y = p + $c + 1;</script>\n<p>{y}</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains(
+            "$.legacy_pre_effect(() => ($.deep_read_state(p()), $c()), () => { $.set(y, p() + $c() + 1); });"
+        ),
+        "the prop dep deep-reads, the store dep is the bare accessor call:\n{js}"
+    );
+    assert!(
+        js.contains("\t$.init();\n"),
+        "the unsafe store-factory call still warrants `$.init()`:\n{js}"
+    );
+    // The reset precedes `$.init()` (official emits registrations + reset at
+    // the end of the instance body, then the legacy init hook).
+    let reset = js.find("$.legacy_pre_effect_reset();").expect("reset");
+    let init = js.find("\t$.init();").expect("init");
+    assert!(
+        reset < init,
+        "`$.legacy_pre_effect_reset()` precedes `$.init()`:\n{js}"
+    );
+    // NEGATIVE: the prop dep is never a bare `$.get(p)` and the store dep is
+    // never deep-read.
+    assert!(
+        !js.contains("$.get(p)") && !js.contains("$.deep_read_state($c())"),
+        "dep wrappers are driven by binding kind:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn reactive_prop_only_deep_reads_without_legacy_init() {
+    // `export let p; $: y = p + 1;` — the prop dep deep-reads the getter call,
+    // the frame opens (`$.push($$props, false)`), and NO `$.init()` is emitted
+    // (a legacy prop read alone is not an unsafe-call trigger) — oracle-pinned.
+    let js = emit(
+        "<script>export let p; $: y = p + 1;</script>\n<p>{y}</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains(
+            "$.legacy_pre_effect(() => ($.deep_read_state(p())), () => { $.set(y, p() + 1); });"
+        ),
+        "the prop dep deep-reads the getter call:\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, false);"),
+        "the reactive statement opens the legacy frame:\n{js}"
+    );
+    assert!(
+        !js.contains("$.init()"),
+        "a prop + `$:` component without an unsafe call emits NO `$.init()`:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn reactive_prop_write_composes_updated_onto_the_legacy_prop_flags() {
+    // `export let p; $: p = x;` — a prop WRITTEN by a `$:` reactive statement
+    // is the official `updated` axis exactly like a template write: the
+    // declaration composes UPDATED (+4) onto the legacy base 8 → 12, the
+    // effect body writes through the SETTER call (`p($.get(x))`), and no
+    // colliding cell synthesizes for the already-declared prop target
+    // (oracle-verified against svelte@5.56.3).
+    let js = emit(
+        "<script>export let p; let x = 0; $: p = x;</script>\n<p>{p}</p>\n<button onclick={() => x++}>b</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("let p = $.prop($$props, 'p', 12);"),
+        "a `$:`-written prop carries flags 12 (8 | UPDATED 4):\n{js}"
+    );
+    assert!(
+        js.contains("$.legacy_pre_effect(() => ($.get(x)), () => { p($.get(x)); });"),
+        "the effect body writes through the prop setter call:\n{js}"
+    );
+    assert!(
+        js.contains("$.set_text(text, p())"),
+        "the written prop still reads as the accessor call:\n{js}"
+    );
+    // NEGATIVE: the assignment target is the DECLARED prop — no colliding
+    // synthesized cell — and the prop write never routes through the signal
+    // family.
+    assert!(
+        !js.contains("const p = $.mutable_source"),
+        "no colliding cell synthesizes for the prop target:\n{js}"
+    );
+    assert!(
+        !js.contains("$.set(p,") && !js.contains("$.set(p "),
+        "a prop write must not use the signal $.set family:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn reactive_parenthesized_assignment_still_synthesizes_the_target() {
+    // `$: (y = x + 1)` — a PARENTHESIZED reactive assignment is the same
+    // implicit-target declaration as the bare form (standard JS paren
+    // semantics; official svelte@5.56.3 accepts it and synthesizes `y`): the
+    // zero-arg `const y = $.mutable_source();` cell, the `$.set(y, …)` body
+    // write, and the signal template read.
+    let js = emit(
+        "<script>let x = 0; $: (y = x + 1);</script>\n<p>{y}</p>\n<button onclick={() => x++}>b</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("const y = $.mutable_source();"),
+        "the parenthesized assignment target declares the zero-arg cell:\n{js}"
+    );
+    assert!(
+        js.contains("$.set(y, $.get(x) + 1)"),
+        "the body assignment writes through the signal rewriter:\n{js}"
+    );
+    assert!(
+        js.contains("$.legacy_pre_effect(() => ($.get(x)),"),
+        "the dep thunk reads the promoted `x`:\n{js}"
+    );
+    assert!(
+        js.contains("$.set_text(text, $.get(y))"),
+        "a template read of the synthesized target is a signal read:\n{js}"
+    );
+    // NEGATIVE: never the const-with-init form; the cell is a const, not a let.
+    assert!(
+        !js.contains("const y = $.mutable_source(0)") && !js.contains("let y = $.mutable_source"),
+        "the synthesized cell takes no init and is a const:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn reactive_for_of_loop_local_shadows_the_outer_dep() {
+    // `let i = 0; $: for (const i of [1, 2]) { console.log(i); }` — the for-of
+    // HEAD binding shadows the outer reactive `i` across the whole statement,
+    // so the dep thunk is EMPTY and the body's loop-local reads stay bare
+    // (oracle-verified against svelte@5.56.3: `() => {}`).
+    let js = emit(
+        "<script>let i = 0; $: for (const i of [1, 2]) { console.log(i); }</script>\n<p>{i}</p>\n<button onclick={() => i++}>b</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains(
+            "$.legacy_pre_effect(() => {}, () => { for (const i of [1, 2]) { console.log(i); } });"
+        ),
+        "the shadowed loop local records no outer dependency:\n{js}"
+    );
+    // NEGATIVE: the deps thunk never reads the OUTER cell, and the loop-local
+    // read is never rewritten to a signal read.
+    assert!(
+        !js.contains("() => ($.get(i))"),
+        "the outer `i` must not join the dep thunk:\n{js}"
+    );
+    assert!(
+        !js.contains("console.log($.get(i))"),
+        "the loop-local read stays bare:\n{js}"
+    );
+    // The OUTER `i` stays live elsewhere: the template reads the cell.
+    assert!(
+        js.contains("$.set_text(text, $.get(i))"),
+        "the outer cell still drives the template read:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn reactive_for_head_and_catch_param_scopes_shadow_outer_deps() {
+    // The remaining `$:` binding-scope heads mirror the for-of shadow rule: a
+    // classic for-head `let`, a for-in head `const`, and a catch-clause param
+    // each shadow an outer reactive name across their statement, so none
+    // records the outer dependency (empty dep thunk).
+    for (label, source, effect) in [
+        (
+            "classic for head",
+            "<script>let j = 0; $: for (let j = 0; j < 2; j += 1) { console.log(j); }</script>\n<p>{j}</p>\n<button onclick={() => j++}>b</button>\n",
+            "$.legacy_pre_effect(() => {}, () => { for (let j = 0; j < 2; j += 1) { console.log(j); } });",
+        ),
+        (
+            "for-in head",
+            "<script>let k = 0; $: for (const k in { a: 1 }) { console.log(k); }</script>\n<p>{k}</p>\n<button onclick={() => k++}>b</button>\n",
+            "$.legacy_pre_effect(() => {}, () => { for (const k in { a: 1 }) { console.log(k); } });",
+        ),
+        (
+            "catch param",
+            "<script>let e = 0; $: try { console.log('t'); } catch (e) { console.log(e); }</script>\n<p>{e}</p>\n<button onclick={() => e++}>b</button>\n",
+            "$.legacy_pre_effect(() => {}, () => { try { console.log('t'); } catch (e) { console.log(e); } });",
+        ),
+    ] {
+        let js = emit(source, "App.svelte");
+        assert!(
+            js.contains(effect),
+            "{label}: the shadowed head/param records no outer dependency:\n{js}"
+        );
+        assert!(
+            !js.contains("() => ($.get("),
+            "{label}: no outer name joins the dep thunk:\n{js}"
+        );
+        assert!(parses_as_js(&js), "{label}: module must be valid JS:\n{js}");
+    }
+}
+
+#[test]
+fn reactive_empty_statement_registers_an_empty_effect() {
+    // `$:;` — official compiles the empty labeled statement to an effect with
+    // an empty dep thunk and an empty body (probed first-hand against
+    // svelte@5.56.3); it is handled, not fail-closed.
+    let js = emit(
+        "<script>let x = 0; $:;</script>\n<p>{x}</p>\n<button onclick={() => x++}>b</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.legacy_pre_effect(() => {}, () => {});"),
+        "the empty statement registers the empty-thunk effect:\n{js}"
+    );
+    assert!(
+        js.contains("$.legacy_pre_effect_reset();"),
+        "the reset still finalizes:\n{js}"
+    );
+    // NEGATIVE: nothing synthesizes for an empty statement.
+    assert!(
+        !js.contains("const  = ") && js.matches("$.mutable_source").count() == 1,
+        "only the written `let x` mints a cell (no spurious synth):\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn reactive_member_assignment_wraps_verbatim_without_synth_const() {
+    // `$: obj.v = x * 2` — a MEMBER (non-ident) assignment target takes the
+    // wrap-verbatim shape: NO synthesized declaration for `obj` (it is a
+    // declared, promoted let), the body lowers through the deep-mutation wrap,
+    // and `obj` is NOT a dependency (a member-assignment target root under `=`
+    // is walked up and skipped — oracle-pinned: deps are `x` only).
+    let js = emit(
+        "<script>let x = 0; let obj = { v: 0 }; $: obj.v = x * 2;</script>\n<p>{x}</p>\n<button onclick={() => x++}>b</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.legacy_pre_effect(() => ($.get(x)), () => { $.mutate(obj, $.get(obj).v = $.get(x) * 2); });"),
+        "the member assignment wraps verbatim through the mutation helper:\n{js}"
+    );
+    assert!(
+        !js.contains("const obj = $.mutable_source"),
+        "no spurious const synthesizes for a member target:\n{js}"
+    );
+    assert!(
+        !js.contains("() => ($.get(obj)") && !js.contains("$.get(obj), $.get(x))"),
+        "the member-assignment target root is not a dependency:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn reactive_undeclared_rhs_name_stays_a_plain_global_read() {
+    // `$: y = x + zzz` with `zzz` never declared — official treats `zzz` as a
+    // GLOBAL (probed first-hand: it compiles; the read stays verbatim and never
+    // joins the dep thunk), exactly like `console` in `$: console.log(x)`.
+    let js = emit(
+        "<script>let x = 0; $: y = x + zzz;</script>\n<p>{y}</p>\n<button onclick={() => x++}>b</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.legacy_pre_effect(() => ($.get(x)), () => { $.set(y, $.get(x) + zzz); });"),
+        "the undeclared name reads verbatim as a global:\n{js}"
+    );
+    assert!(
+        !js.contains("$.get(zzz)") && !js.contains("zzz()"),
+        "an undeclared name is never wrapped as a signal or accessor:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn reactive_expression_statement_wraps_verbatim() {
+    // `$: console.log(x);` — a non-assignment expression statement takes the
+    // wrap-verbatim shape: no synthesized declaration, the whole statement is
+    // the effect body.
+    let js = emit(
+        "<script>let x = 0; $: console.log(x);</script>\n<p>{x}</p>\n<button onclick={() => x++}>b</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.legacy_pre_effect(() => ($.get(x)), () => { console.log($.get(x)); });"),
+        "the expression statement wraps verbatim:\n{js}"
+    );
+    assert_eq!(
+        js.matches("$.mutable_source").count(),
+        1,
+        "only the written `let x` mints a cell:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn reactive_destructuring_assignment_fails_closed() {
+    // `$: ({ a } = { a: x });` — official lowers a destructuring reactive
+    // assignment through a `$$value` closure (a distinct lowering); the shared
+    // rewriter fails a destructuring write target closed, so the statement
+    // refuses with the PRECISE destructuring diagnostic — never a mis-emitted
+    // module, never the retired blanket reactive-statement refusal.
+    let err = emit_result(
+        "<script>let x = 0; let a; $: ({ a } = { a: x });</script>\n<p>{a}</p>\n<button onclick={() => x++}>b</button>\n",
+    )
+    .expect_err("a destructuring reactive assignment must fail closed");
+    let ClientCompileError::Unsupported(surface) = &err else {
+        panic!("expected the destructuring-write refusal, got {err:?}");
+    };
+    assert_eq!(
+        surface.diagnostic_code(),
+        "svelte-runtime-unsupported-destructuring-write",
+        "the refusal is the precise destructuring diagnostic: {surface:?}"
+    );
+}
+
+#[test]
+fn reactive_store_dep_registers_the_bare_accessor_call() {
+    // A `$:` reading ONLY a store accessor: the dep thunk carries the bare
+    // accessor call (`$c()`), the body rewrites the store read, and the store
+    // machinery (setup/cleanup) coexists with the reset finalizer. (This is the
+    // former blanket legacy-`$:` refusal case, now lowering.)
+    let js = emit(
+        "<script>import { writable } from 'svelte/store'; const c = writable(0); $: doubled = $c * 2;</script>\n<p>{doubled}</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.legacy_pre_effect(() => ($c()), () => { $.set(doubled, $c() * 2); });"),
+        "the store dep is the bare accessor call:\n{js}"
+    );
+    assert!(
+        js.contains("const [$$stores, $$cleanup] = $.setup_stores();")
+            && js.contains("$$cleanup();"),
+        "the store machinery still emits:\n{js}"
+    );
+    assert!(
+        js.contains("const doubled = $.mutable_source();"),
+        "the assignment target synthesizes:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
 }

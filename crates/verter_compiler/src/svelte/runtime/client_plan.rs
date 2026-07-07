@@ -80,10 +80,33 @@ pub(super) struct ClientModulePlan<'a> {
     /// INSTANCE-scope `const` declarations at the top of the component function body
     /// (before the script statements), in source order.
     pub(super) instance_snippets: Vec<NodeId>,
-    /// Whether the component opens a component context (`$.push`/`$.pop`).
-    pub(super) needs_context: bool,
+    /// Whether the component OPENS the component-context frame
+    /// (`$.push($$props, <mode>)` … `$.pop()`). THREE independent reasons, any
+    /// of which opens the frame: the official needs-context analysis fact, a
+    /// `$:` reactive statement, or a non-empty `$$exports` returned object.
+    /// SEPARATE from [`requires_legacy_init`](Self::requires_legacy_init) by
+    /// design — the two reasons must never re-collapse into one boolean: a
+    /// bare-`$:` component (and an exports-only custom element) opens the frame
+    /// WITHOUT the legacy init hook (oracle-verified against svelte@5.56.3).
+    pub(super) opens_context_frame: bool,
+    /// Whether the LEGACY instance-init hook (`$.init()`) is warranted — the
+    /// official needs-context analysis fact ALONE (an unsafe imported call /
+    /// `new` / unsafe member / user effect / `$inspect().with`). A `$:`
+    /// reactive statement and the `$$exports` frame reason contribute to
+    /// [`opens_context_frame`](Self::opens_context_frame) ONLY, never to this.
+    pub(super) requires_legacy_init: bool,
     /// Whether the component function takes `$$props`.
     pub(super) uses_props: bool,
+    /// The synthesized `$:` assignment-target declarations
+    /// (`const <name> = $.mutable_source();`), in source order — emitted after
+    /// the store setup, before the group-binding accumulators (the official
+    /// implicit-declaration slot). Empty when every `$:` target is declared.
+    pub(super) legacy_reactive_decls: Vec<String>,
+    /// The `$.legacy_pre_effect(<deps>, <body>);` registrations in DEPENDENCY
+    /// (topological) order — emitted after the body statements; a non-empty
+    /// list is followed by the single `$.legacy_pre_effect_reset();`. Empty for
+    /// a component with no `$:` statement.
+    pub(super) reactive_registrations: Vec<String>,
     /// The classified `$store` auto-subscriptions in first-seen order — the
     /// per-store accessor emission input (`const $NAME = () =>
     /// $.store_get(NAME, '$NAME', $$stores);`). Empty for a store-less
@@ -91,11 +114,12 @@ pub(super) struct ClientModulePlan<'a> {
     pub(super) store_subscriptions: Vec<super::store_subscriptions::StoreSubscription>,
     /// Whether the component has at least one `$store` auto-subscription — the
     /// SOLE driver of the `$.setup_stores()` / accessor / trailing
-    /// `$$cleanup();` emission. SEPARATE from [`needs_context`](Self::needs_context)
-    /// by design: the component-context frame is driven by the EXISTING
-    /// `needs_context` triggers (an imported call / `new` / unsafe member),
-    /// NEVER by store presence — a clean local store emits setup/cleanup with
-    /// NO frame (oracle-verified against svelte@5.56.3).
+    /// `$$cleanup();` emission. SEPARATE from
+    /// [`opens_context_frame`](Self::opens_context_frame) by design: the
+    /// component-context frame is driven by its own reasons (the needs-context
+    /// triggers — an imported call / `new` / unsafe member — a `$:` statement,
+    /// or `$$exports`), NEVER by store presence — a clean local store emits
+    /// setup/cleanup with NO frame (oracle-verified against svelte@5.56.3).
     pub(super) has_store_subscriptions: bool,
     /// The custom-element module-epilogue payload (`customElements.define(tag,
     /// $.create_custom_element(…))` / the bare create statement) — `Some` iff the
@@ -118,9 +142,9 @@ pub(super) struct ClientModulePlan<'a> {
 /// the official `updated` flag axis in runes mode (`reassigned || mutated`) and
 /// the write half of `is_prop_source`.
 ///
-/// The accepted prop-WRITE surfaces are exactly TWO — this collection observes
-/// both (any other instance-script prop reference is fail-closed upstream by
-/// the prop-usage gate):
+/// The accepted prop-WRITE surfaces are exactly THREE — this collection
+/// observes all of them (any other instance-script prop reference is
+/// fail-closed upstream by the prop-usage gate):
 ///
 /// 1. TEMPLATE expressions (handlers / interpolations / binds) — the analyzed
 ///    expression arena, resolved through each expression's own scope;
@@ -131,10 +155,20 @@ pub(super) struct ClientModulePlan<'a> {
 ///    harvested with the SAME shared reference collector the template arena uses
 ///    ([`super::expr::collect_expr_references`] — expression-local shadowers
 ///    such as an arrow param already excluded), resolved at the instance ROOT
-///    scope (where the defaults lexically live).
+///    scope (where the defaults lexically live);
+/// 3. LEGACY `$:` reactive-statement bodies — the classified
+///    [`SupportedInstanceScriptItem::ReactiveStatement`] items' assignment
+///    facts (the typed, shadow-pruned assignment/update target extraction of
+///    [`super::legacy_reactive::reactive_statement_facts`]), resolved at the
+///    instance ROOT scope. A `$:`-written prop (`export let p; $: p = x;`) is
+///    the official `updated` axis exactly like a template write — the effect
+///    body lowers through the setter call, so the declaration carries UPDATED.
+///    Only under legacy mode (a runes-mode `$:` is rejected upstream); the
+///    general script-body prop write stays fail-closed at the prop-usage gate.
 fn collect_prop_updated_locals(
     ir: &SvelteRuntimeIr,
     decl_plan: Option<&expr_emit::PropsDeclaratorPlan>,
+    script_items: &[super::instance_items::SupportedInstanceScriptItem],
 ) -> rustc_hash::FxHashSet<String> {
     let mut updated = rustc_hash::FxHashSet::default();
     let mark_prop_writes =
@@ -177,6 +211,31 @@ fn collect_prop_updated_locals(
                 continue;
             };
             mark_prop_writes(root_scope, &facts.references, &mut updated);
+        }
+    }
+    // (3) The `$:` reactive-statement assignment facts — the classified items'
+    // typed, shadow-pruned assignment/update target names, resolved at the
+    // instance root scope (where the `$:` statements lexically live). A name
+    // resolving to a prop binding marks the prop written; a synthesized `$:`
+    // target resolves to its mutable-source cell and never marks.
+    let root_scope = ir.root_scope().scope;
+    for item in script_items {
+        let super::instance_items::SupportedInstanceScriptItem::ReactiveStatement {
+            assignments,
+            ..
+        } = item
+        else {
+            continue;
+        };
+        for name in assignments {
+            if matches!(
+                ir.analysis
+                    .bindings
+                    .resolve_kind(&ir.analysis.scopes, root_scope, name),
+                Some(BindingRuntimeKind::Prop | BindingRuntimeKind::BindableProp)
+            ) {
+                updated.insert(name.clone());
+            }
         }
     }
     updated
@@ -375,21 +434,41 @@ impl<'a> SupportedClientIr<'a> {
         // consumer (the prop-updated harvest, the read forms, the `$.rest_props`
         // hoist, and the `$.prop` destructure lowering). `None` when there is no
         // `$props()`.
-        let decl_plan = ir
-            .analysis
-            .scripts
-            .instance_source
-            .and_then(|src| expr_emit::PropsDeclaratorPlan::build(&alloc, src, ce_accessors));
-        // The prop WRITE facts (a template-expression or `$props()`-default
-        // reassign / deep-mutate resolving to a prop binding) — the `updated` flag
-        // axis. Computed BEFORE the read forms so a written prop's reads flip to
-        // the getter (`is_prop_source`); harvested from the unified plan's member
-        // default spans. A CUSTOM ELEMENT compiles with `accessors` (the official
-        // `is_custom_element` force), so EVERY member is a prop source there.
-        let prop_updated = collect_prop_updated_locals(ir, decl_plan.as_ref());
+        // Mode-split plan construction over the SAME unified carrier: a RUNES
+        // component scans its `$props()` destructure; a LEGACY component scans
+        // its `export let` statements (the two are mutually exclusive — a
+        // `$props()` reference under legacy mode is a legacy-rune-reference
+        // refusal, an `export let` under runes an official reject).
+        let legacy_mode = ir.component.mode == super::ir::SvelteMode::Legacy;
+        let decl_plan = ir.analysis.scripts.instance_source.and_then(|src| {
+            if legacy_mode {
+                expr_emit::PropsDeclaratorPlan::build_legacy_exports(&alloc, src)
+            } else {
+                expr_emit::PropsDeclaratorPlan::build(&alloc, src, ce_accessors)
+            }
+        });
+        // The prop WRITE facts (a template-expression, `$props()`-default, or
+        // legacy `$:` reactive-statement reassign / deep-mutate resolving to a
+        // prop binding) — the `updated` flag axis. Computed BEFORE the read
+        // forms so a written prop's reads flip to the getter (`is_prop_source`);
+        // harvested from the unified plan's member default spans plus the
+        // classified reactive-statement assignment facts. A CUSTOM ELEMENT
+        // compiles with `accessors` (the official `is_custom_element` force),
+        // so EVERY member is a prop source there.
+        let prop_updated =
+            collect_prop_updated_locals(ir, decl_plan.as_ref(), &classified.script_items);
         let prop_reads = decl_plan
             .as_ref()
-            .map(|plan| plan.prop_reads(&prop_updated, ce_accessors))
+            .map(|plan| {
+                if legacy_mode {
+                    // EVERY legacy `export let` prop is a prop source and reads
+                    // as the accessor call (official declares `$.prop` even for
+                    // a bare, never-written prop).
+                    plan.prop_reads_legacy()
+                } else {
+                    plan.prop_reads(&prop_updated, ce_accessors)
+                }
+            })
             .unwrap_or_default();
         // The per-instance proxy-init map — threaded into the TEMPLATE-side rewrite
         // so a handler `o = primitiveVar` does NOT proxy (the one-hop follow).
@@ -495,8 +574,20 @@ impl<'a> SupportedClientIr<'a> {
         // allowlist (a `<script module>` / instance import is fail-closed upstream, so
         // there are no module-scope imports / hoists). A function-pair function body
         // lowers through the fallible rewriter, so this is fallible. A `$props.id()`
-        // item ALSO yields the body-top hoist (`const <name> = $.props_id();`).
-        let (body_statements, props_id_hoist) = projection.build_script_items()?;
+        // item ALSO yields the body-top hoist (`const <name> = $.props_id();`), and
+        // the `$:` reactive-statement items yield their `$.legacy_pre_effect`
+        // registrations in dependency order (a dependency cycle rejects here).
+        let (body_statements, props_id_hoist, reactive_registrations) =
+            projection.build_script_items()?;
+        // The synthesized `$:` assignment-target declarations — one zero-arg
+        // `$.mutable_source` cell per implicitly-declared target, source order
+        // (the analysis pass owns the declaration decision; the plan renders it).
+        let legacy_reactive_decls: Vec<String> = ir
+            .analysis
+            .legacy_reactive_targets
+            .iter()
+            .map(|name| format!("const {name} = $.mutable_source();"))
+            .collect();
 
         // (2) The narrow node arena (mirrors the supported IR node space). The
         // reactivity decision for each interpolation is made here: a non-reactive
@@ -521,27 +612,40 @@ impl<'a> SupportedClientIr<'a> {
             super::client_custom_element::build_custom_element_emission(descriptor, ce_members)
         });
         let ce_exports = if custom_element.is_some() {
+            // The LEGACY CE setter takes NO default parameter (`set label($$value)`)
+            // — only the runes accessor carries the `$$value = <default>` form
+            // (oracle-verified against svelte@5.56.3).
             super::client_custom_element::build_ce_export_accessors(
                 ce_members,
-                ir.analysis.scripts.instance_source,
+                if legacy_mode {
+                    None
+                } else {
+                    ir.analysis.scripts.instance_source
+                },
             )
         } else {
             Vec::new()
         };
 
-        // (5) Component context + props-param facts. The `$$exports` accessor
-        // frame opens the component context (the official `should_inject_context`
-        // arm for a non-empty component-returned object). `$host` usage inside a
-        // custom element does NOT force the `$$props` parameter by itself:
-        // official binds the parameter only when an INDEPENDENT
-        // props-parameter trigger exists — a REAL props binder (`$props()` /
-        // `$bindable(...)` / legacy prop, i.e. `Prop | BindableProp`) or a
-        // `needs_context` reason. A member on the `$host()` call result IS such
-        // a reason (a call-result-rooted member is never a "safe identifier"),
-        // in a handler (`$host().x`) and in a `{@render}` dynamic callee
-        // (`{@render $host().snip()}` — the peeled callee scans) alike; an
-        // alias like `const h = $host(); h.x` is NOT a trigger. With NEITHER,
-        // official emits the DEGENERATE-UNBOUND residue (`function
+        // (5) Component context + props-param facts, as TWO separately-tracked
+        // frame reasons (the official split): `opens_context_frame` is the
+        // `$.push`/`$.pop` decision — the needs-context analysis fact OR a `$:`
+        // reactive statement OR a non-empty `$$exports` returned object (the
+        // official `should_inject_context` arms) — while `requires_legacy_init`
+        // is the needs-context FACT ALONE (official gates `$.init()` on
+        // `analysis.needs_context`, never on the reactive-statement or
+        // returned-object reasons — oracle-verified: a bare-`$:` component and
+        // an exports-only custom element both frame WITHOUT `$.init()`).
+        // `$host` usage inside a custom element does NOT force the `$$props`
+        // parameter by itself: official binds the parameter only when an
+        // INDEPENDENT props-parameter trigger exists — a REAL props binder
+        // (`$props()` / `$bindable(...)` / legacy prop, i.e. `Prop |
+        // BindableProp`) or a frame reason. A member on the `$host()` call
+        // result IS such a reason (a call-result-rooted member is never a "safe
+        // identifier"), in a handler (`$host().x`) and in a `{@render}` dynamic
+        // callee (`{@render $host().snip()}` — the peeled callee scans) alike;
+        // an alias like `const h = $host(); h.x` is NOT a trigger. With
+        // NEITHER, official emits the DEGENERATE-UNBOUND residue (`function
         // App($$anchor)` whose body still reads `$$props.$$host` — a runtime
         // `ReferenceError`); this backend refuses that residue BEFORE emission
         // instead of silently repairing the binding. `props_param_bound` is
@@ -550,7 +654,10 @@ impl<'a> SupportedClientIr<'a> {
         // classifier/analysis FACTS (the rune scan's `$host()` admission over
         // the instance script + every template expression, the shared
         // `needs_context` analysis, the binding table) — no re-parse here.
-        let needs_context = projection.needs_context(&alloc) || !ce_exports.is_empty();
+        let needs_context_fact = projection.needs_context(&alloc);
+        let opens_context_frame =
+            needs_context_fact || !reactive_registrations.is_empty() || !ce_exports.is_empty();
+        let requires_legacy_init = needs_context_fact;
         let host_used = custom_element.is_some() && classified.uses_host;
         let real_props_binder = ir.analysis.bindings.all().iter().any(|b| {
             matches!(
@@ -558,7 +665,7 @@ impl<'a> SupportedClientIr<'a> {
                 BindingRuntimeKind::Prop | BindingRuntimeKind::BindableProp
             )
         });
-        let props_param_bound = real_props_binder || needs_context;
+        let props_param_bound = real_props_binder || opens_context_frame;
         if host_used && !props_param_bound {
             return Err(UnsupportedSvelteRuntimeSurface::HostOrCustomElement {
                 surface: "$host",
@@ -591,8 +698,11 @@ impl<'a> SupportedClientIr<'a> {
             user_imports: classified.user_imports.clone(),
             module_snippets,
             instance_snippets,
-            needs_context,
+            opens_context_frame,
+            requires_legacy_init,
             uses_props,
+            legacy_reactive_decls,
+            reactive_registrations,
             store_subscriptions,
             has_store_subscriptions,
             custom_element,

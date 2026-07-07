@@ -1,0 +1,112 @@
+{
+  "slug": "legacy/reactive_prop_store.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/store",
+      "kind": "named",
+      "names": [
+        "writable"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "reactive_prop_store",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "push",
+    "store_get",
+    "setup_stores",
+    "mutable_source",
+    "prop",
+    "legacy_pre_effect",
+    "deep_read_state",
+    "set",
+    "legacy_pre_effect_reset",
+    "init",
+    "child",
+    "reset",
+    "template_effect",
+    "set_text",
+    "get",
+    "append",
+    "pop"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "deep_read_state",
+    "from_html",
+    "get",
+    "init",
+    "legacy_pre_effect",
+    "legacy_pre_effect_reset",
+    "mutable_source",
+    "pop",
+    "prop",
+    "push",
+    "reset",
+    "set",
+    "set_text",
+    "setup_stores",
+    "store_get",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "push": 1,
+    "store_get": 1,
+    "setup_stores": 1,
+    "mutable_source": 1,
+    "prop": 1,
+    "legacy_pre_effect": 1,
+    "deep_read_state": 1,
+    "set": 1,
+    "legacy_pre_effect_reset": 1,
+    "init": 1,
+    "child": 1,
+    "reset": 1,
+    "template_effect": 1,
+    "set_text": 1,
+    "get": 1,
+    "append": 1,
+    "pop": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<p> </p>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; import {writable} from 'svelte/store'; var root = $.from_html(`<p> </p>`); export default function reactive_prop_store($$anchor, $$props) {$.push($$props, false); const $c = () => $.store_get(c, '$c', $$stores); const [$$stores, $$cleanup] = $.setup_stores(); const y = $.mutable_source(); let p = $.prop($$props, 'p', 8); const c = writable(0); $.legacy_pre_effect(() => ($.deep_read_state(p()), $c()), () => {$.set(y, p() + $c() + 1);}); $.legacy_pre_effect_reset(); $.init(); var p_1 = root(); var text = $.child(p_1, true); $.reset(p_1); $.template_effect(() => $.set_text(text, $.get(y))); $.append($$anchor, p_1); $.pop(); $$cleanup();}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

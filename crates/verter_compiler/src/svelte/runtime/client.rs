@@ -416,8 +416,11 @@ impl<'a> ClientEmitter<'a> {
     fn emit_body(&mut self, out: &mut String) {
         // The component-context (`$.push`/`$.pop`) + props-param facts were decided
         // by the semantic projection (`SupportedClientIr::build`); the emitter reads
-        // the narrow decision, never re-derives it.
-        let needs_push = self.plan.needs_context;
+        // the narrow decision, never re-derives it. The FRAME reason
+        // (`opens_context_frame`) and the legacy-init reason
+        // (`requires_legacy_init`) are SEPARATE plan facts — see the `$.init()`
+        // gate below.
+        let needs_push = self.plan.opens_context_frame;
         let params = if self.plan.uses_props {
             "$$anchor, $$props"
         } else {
@@ -463,6 +466,16 @@ impl<'a> ClientEmitter<'a> {
             out.push_str("\tconst [$$stores, $$cleanup] = $.setup_stores();\n");
         }
 
+        // The synthesized `$:` assignment-target declarations — one zero-arg
+        // `const <name> = $.mutable_source();` per implicit target, source
+        // order, after the store setup and before the group-binding
+        // accumulators (the official implicit-declaration slot).
+        for decl in &self.plan.legacy_reactive_decls {
+            out.push('\t');
+            out.push_str(decl);
+            out.push('\n');
+        }
+
         // The component-FUNCTION-scoped `bind:group` accumulators, declared at the TOP of
         // the body (before the state decls) — ONE `const <name> = [];` per DISTINCT group, in
         // source order (the pinned svelte@5.56.3 shape — oracle CASE `group`: two independent
@@ -493,20 +506,33 @@ impl<'a> ClientEmitter<'a> {
             out.push('\n');
         }
 
+        // The `$:` reactive-statement registrations — AFTER every body
+        // statement, in DEPENDENCY (topological) order, closed by the SINGLE
+        // `$.legacy_pre_effect_reset()` (the official end-of-instance-body
+        // slot, before the `$$exports` object and the `$.init()` hook).
+        if !self.plan.reactive_registrations.is_empty() {
+            for registration in &self.plan.reactive_registrations {
+                out.push('\t');
+                out.push_str(registration);
+                out.push('\n');
+            }
+            out.push_str("\t$.legacy_pre_effect_reset();\n");
+        }
+
         // The custom-element `$$exports` accessor object — AFTER the script
         // statements, BEFORE the template body (the official
         // `component_returned_object` slot). Emitted only when prop accessors
         // exist (a no-props custom element omits `$$exports`; it may still
-        // carry the `$.push`/`$.pop` context frame via `needs_context`).
+        // carry the `$.push`/`$.pop` context frame via the frame reasons).
         if !self.plan.ce_exports.is_empty() {
             super::client_custom_element::emit_exports_object(out, &self.plan.ce_exports);
         }
 
-        // The LEGACY-frame instance-init hook: a LEGACY component that opened
-        // the context frame emits `$.init();` after every instance statement,
-        // before the template body (oracle-verified: a runes framing component
-        // and a frame-less legacy component both emit NO `$.init()`).
-        if legacy_mode && needs_push {
+        // The LEGACY instance-init hook: gated on `requires_legacy_init` — the
+        // needs-context analysis fact ALONE — never on the frame being open. A
+        // `$:`-only or exports-only frame opens push/pop WITHOUT `$.init()`
+        // (oracle-verified; a runes framing component also emits NO `$.init()`).
+        if legacy_mode && self.plan.requires_legacy_init {
             out.push_str("\t$.init();\n");
         }
 

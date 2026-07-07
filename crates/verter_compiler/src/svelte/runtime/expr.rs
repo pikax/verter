@@ -117,6 +117,15 @@ pub enum BindingRuntimeKind {
     /// lower through the store helpers (`$c = v` → `$.store_set(c, v)`, `$c++`
     /// → `$.update_store(c, $c())`, `++$c` → `$.update_pre_store(c, $c())`).
     StoreSubscription,
+    /// A LEGACY (non-runes) top-level `let` PROMOTED to a `$.mutable_source`
+    /// signal cell — the demand-driven promotion: a top-level legacy `let` that
+    /// is WRITTEN (reassigned, member-mutated, or a `bind:` target). Declared
+    /// `let name = $.mutable_source(init);`; reads lower `$.get(name)`, writes
+    /// `$.set` / `$.update` / `$.update_pre` (the shared signal family), and a
+    /// MEMBER write rooted at it wraps in `$.mutate(name, …)` (the official
+    /// legacy deep-mutation helper). A legacy `let` that is never written stays
+    /// `PlainLocal` (official static-folds its reads — no promotion).
+    MutableSource,
 }
 
 /// Whether a binding kind is an IMPORTED local (a `.svelte`-component default or any
@@ -138,6 +147,7 @@ pub(super) fn is_signal_kind(kind: BindingRuntimeKind) -> bool {
             | BindingRuntimeKind::EachSignal
             | BindingRuntimeKind::AwaitSignal
             | BindingRuntimeKind::LegacyConstDerived
+            | BindingRuntimeKind::MutableSource
     )
 }
 
@@ -1776,6 +1786,13 @@ pub struct ScriptUseCollector {
     tracked: rustc_hash::FxHashSet<String>,
     /// The active lexical-scope shadow stack.
     scopes: ShadowStack,
+    /// WRITES-ONLY mode: a method CALL on a tracked receiver (`arr.push(…)`) is
+    /// NOT marked as a deep mutation — only real assignment/update writes count.
+    /// The legacy `let` → `$.mutable_source` promotion consumes this mode
+    /// (official's `mutated` analysis marks assignment/update writes only; a
+    /// method call must never promote). `false` keeps the historical behaviour
+    /// (the method-call receiver fact is retained as a neutral diagnostic fact).
+    writes_only: bool,
 }
 
 impl ScriptUseCollector {
@@ -1787,6 +1804,17 @@ impl ScriptUseCollector {
             c.tracked.insert(n.clone());
             c.uses.insert(n.clone(), BindingUseSet::default());
         }
+        c
+    }
+
+    /// Like [`Self::tracking`] but in WRITES-ONLY mode: a method call on a
+    /// tracked receiver contributes NO deep-mutation fact — only assignment /
+    /// update writes count (the official `mutated` semantics the legacy
+    /// `$.mutable_source` promotion requires).
+    #[must_use]
+    pub fn tracking_writes_only(names: &[String]) -> Self {
+        let mut c = Self::tracking(names);
+        c.writes_only = true;
         c
     }
 
@@ -1960,14 +1988,18 @@ impl<'a> Visit<'a> for ScriptUseCollector {
         // A mutating method call on a binding (`items.push(…)`, `map.set(…)`) is a
         // DEEP MUTATION fact. It does NOT make a runes `$state` a signal (the proxy
         // decision is init-shape-driven), but it is a neutral fact retained for
-        // diagnostics / future SSR-legacy analysis.
-        if let Expression::StaticMemberExpression(m) = &it.callee {
-            if let Expression::Identifier(obj) = &m.object {
-                self.mark_deep_mutated(obj.name.as_str());
-            }
-        } else if let Expression::ComputedMemberExpression(m) = &it.callee {
-            if let Expression::Identifier(obj) = &m.object {
-                self.mark_deep_mutated(obj.name.as_str());
+        // diagnostics / future SSR-legacy analysis. In WRITES-ONLY mode the fact is
+        // NOT recorded (official's `mutated` analysis counts assignment/update
+        // writes only — a method call must never drive the legacy promotion).
+        if !self.writes_only {
+            if let Expression::StaticMemberExpression(m) = &it.callee {
+                if let Expression::Identifier(obj) = &m.object {
+                    self.mark_deep_mutated(obj.name.as_str());
+                }
+            } else if let Expression::ComputedMemberExpression(m) = &it.callee {
+                if let Expression::Identifier(obj) = &m.object {
+                    self.mark_deep_mutated(obj.name.as_str());
+                }
             }
         }
         walk::walk_call_expression(self, it);

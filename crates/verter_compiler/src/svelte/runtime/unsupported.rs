@@ -129,19 +129,16 @@ pub enum UnsupportedSvelteRuntimeSurface {
         /// The source span of the root interpolation region.
         span: Span,
     },
-    /// An instance-script `export` declaration in a LEGACY (non-runes)
-    /// component — the legacy PROP surface (`export let label` lowers through
-    /// `$.prop($$props, 'label', 8)`; `export const`/`export function` are the
-    /// readonly legacy bindings). Not yet lowered — fails closed.
-    LegacyExportProp {
+    /// An instance-script `export const` / `export function` / `export class`
+    /// component-export binding (ANY mode). Official lowers these through the
+    /// `$$exports` accessor object (`var $$exports = { … }` + `$.bind_prop($$props,
+    /// key, value)` + `return $.pop($$exports)`); that accessor mechanism is not
+    /// yet emitted, so the surface fails closed under its OWN identity — never the
+    /// prop surface, never the generic export residual.
+    ComponentExportBinding {
+        /// The exported declaration keyword (`const` / `function` / `class`).
+        construct: &'static str,
         /// The source span of the export declaration.
-        span: Span,
-    },
-    /// A `$:` reactive statement in a LEGACY (non-runes) component — the legacy
-    /// reactivity surface (`$.mutable_source` + `$.legacy_pre_effect` /
-    /// `$.legacy_pre_effect_reset`). Not yet lowered — fails closed.
-    LegacyReactiveStatement {
-        /// The source span of the labeled statement.
         span: Span,
     },
     /// A `<slot>` element in a LEGACY (non-runes) component — the legacy slot
@@ -261,13 +258,15 @@ pub enum UnsupportedSvelteRuntimeSurface {
     /// ALLOWLIST: every OTHER top-level item — a top-level function / class / enum /
     /// namespace / interface / type alias in a plain `<script>`, a plain non-rune
     /// `let` / `const` / `var`, an arbitrary expression / control-flow / empty
-    /// statement, a `$:` reactive label, or a `$` / `$$`-prefixed binding — fails
-    /// closed here BY CONSTRUCTION rather than reaching the broad statement-rewrite
-    /// lowering. Adding a shape requires extending the finite
+    /// statement, a non-`$` labeled statement, or a `$` / `$$`-prefixed binding —
+    /// fails closed here BY CONSTRUCTION rather than reaching the broad
+    /// statement-rewrite lowering. (A legacy-mode `$:` reactive statement is a
+    /// SUPPORTED shape and lowers; the runes-mode `$:` twin is the official
+    /// `legacy_reactive_statement_invalid` reject — [`Self::OfficialReject`], not
+    /// this variant.) Adding a shape requires extending the finite
     /// [`SupportedInstanceScriptItem`](super::client_shapes::SupportedInstanceScriptItem)
     /// enum AND adding a golden in the same change. The broader instance-script
-    /// surface (functions, statements, `$:` reactivity, multi-declarators) is not
-    /// yet supported.
+    /// surface (functions, statements, multi-declarators) is not yet supported.
     InstanceScriptItem {
         /// A short construct label (`function`, `class`, `enum`, `$: label`,
         /// `plain let`, `$$-prefixed binding`, …).
@@ -380,9 +379,8 @@ impl UnsupportedSvelteRuntimeSurface {
             Self::HostOrCustomElement { .. } => "svelte-runtime-unsupported-host-custom-element",
             Self::Element { .. } => "svelte-runtime-unsupported-element",
             Self::ElementName { .. } => "svelte-runtime-unsupported-element-name",
-            Self::LegacyExportProp { .. } => "svelte-runtime-unsupported-legacy-export-prop",
-            Self::LegacyReactiveStatement { .. } => {
-                "svelte-runtime-unsupported-legacy-reactive-statement"
+            Self::ComponentExportBinding { .. } => {
+                "svelte-runtime-unsupported-component-export-binding"
             }
             Self::LegacySlotElement { .. } => "svelte-runtime-unsupported-legacy-slot",
             Self::LegacyEventDispatcher { .. } => {
@@ -442,14 +440,10 @@ impl UnsupportedSvelteRuntimeSurface {
                 "the `<{tag}>` element (its synthesized DOM local var name would be an \
                  invalid / reserved JS identifier; the official compiler collision-renames it)"
             ),
-            Self::LegacyExportProp { .. } => {
-                "an instance-script `export` declaration in a legacy (non-runes) component \
-                 (the legacy prop surface)"
-                    .to_string()
-            }
-            Self::LegacyReactiveStatement { .. } => {
-                "a `$:` reactive statement in a legacy (non-runes) component".to_string()
-            }
+            Self::ComponentExportBinding { construct, .. } => format!(
+                "an instance-script `export {construct}` component-export binding (official \
+                 lowers it through the `$$exports` accessor object + `$.bind_prop`)"
+            ),
             Self::LegacySlotElement { .. } => {
                 "a `<slot>` element in a legacy (non-runes) component".to_string()
             }
@@ -563,8 +557,7 @@ impl UnsupportedSvelteRuntimeSurface {
             | Self::HostOrCustomElement { span, .. }
             | Self::Element { span, .. }
             | Self::ElementName { span, .. }
-            | Self::LegacyExportProp { span }
-            | Self::LegacyReactiveStatement { span }
+            | Self::ComponentExportBinding { span, .. }
             | Self::LegacySlotElement { span }
             | Self::LegacyEventDispatcher { span }
             | Self::LegacyRuneReference { span, .. }

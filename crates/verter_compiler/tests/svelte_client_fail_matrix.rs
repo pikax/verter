@@ -1099,11 +1099,12 @@ const FAIL_MATRIX: &[FailRow] = &[
     // (`svelte_parse_defect_exact_codes`).
     // ── instance-script-item allowlist — non-allowlist top-level items ──────
     FailRow {
-        // An instance-script `export` is out-of-allowlist (the three shapes are a
-        // `$state(<primitive>)`, a no-default `$props()` destructure, a bare `let el;`).
+        // An instance-script `export const` is the `$$exports` component-export
+        // surface — its OWN fail-closed identity (any mode), never the generic
+        // instance-script-item residual and never a prop surface.
         name: "instance_export",
         source: "<script>let c = $state(0); export const FOO = 1;</script>\n<button onclick={() => c++}>{c}</button>\n",
-        code: "svelte-runtime-unsupported-instance-script-item",
+        code: "svelte-runtime-unsupported-component-export-binding",
     },
     FailRow {
         // A plain non-rune `let x = 0` is out-of-allowlist (a template read is only a
@@ -1119,13 +1120,16 @@ const FAIL_MATRIX: &[FailRow] = &[
         source: "<script>let c = $state(0); const STEP = 2;</script>\n<button onclick={() => c++}>{c}</button>\n",
         code: "svelte-runtime-unsupported-instance-script-item",
     },
-    FailRow {
-        // A top-level `$:` reactive label is out-of-allowlist (legacy reactivity; the
-        // official compiler rejects it in runes mode).
-        name: "instance_reactive_label",
-        source: "<script>let count = $state(0);\n$: doubled = count * 2;</script>\n<button onclick={() => count++}>{count}</button>\n",
-        code: "svelte-runtime-unsupported-instance-script-item",
-    },
+    // NOTE: a `$:` reactive label in a RUNES-mode component (`$state` + `$:`) is an
+    // OFFICIAL EXACT-CODE compile error (`legacy_reactive_statement_invalid`), so it
+    // fails closed through the official-reject channel
+    // (`ClientCompileError::OfficialReject`), NOT this unsupported-feature matrix — its
+    // parity rows live in `svelte_client_official_reject_matrix.rs`
+    // (`runes_reactive_statement`, `runes_reactive_statement_inferred`). The LEGACY-mode
+    // `$:` is SUPPORTED (it lowers through `$.legacy_pre_effect` — the positive goldens
+    // are the `legacy/reactive_*` corpus rows), and a `$:` dependency CYCLE is the
+    // official `reactive_declaration_cycle` reject (`reactive_declaration_cycle` corpus
+    // row).
     // NOTE: a plain top-level `enum` (or a typed `let c: number = …`) in a plain (JS)
     // `<script>` is TS-only syntax upstream parses with Acorn and REJECTS as `js_parse_error`,
     // so it now fails closed through the official-reject gate (the body-probe), NOT this
@@ -1879,6 +1883,7 @@ fn fail_matrix_row_codes_are_known_unsupported_diagnostics() {
         "svelte-runtime-unsupported-complex-text",
         "svelte-runtime-unsupported-element-name",
         "svelte-runtime-unsupported-instance-script-item",
+        "svelte-runtime-unsupported-component-export-binding",
         "svelte-runtime-unsupported-magic-identifier",
         "svelte-runtime-unsupported-paragraph-autoclose",
         "svelte-runtime-unsupported-store-scoped-subscription",
@@ -3021,9 +3026,16 @@ fn fail_matrix_covers_every_documented_sub_shape() {
     // (`let n = $state(1)`) is a divergent-mode case (official compiles LEGACY to
     // the store accessor `$state()(1)`) that fails closed with the precise
     // instance-script-item diagnostic — 219 → 220.
+    // The legacy reactivity substrate removed ONE row: `instance_reactive_label`
+    // (a `$state` + `$:` component is RUNES mode, where `$:` is the official
+    // EXACT-CODE `legacy_reactive_statement_invalid` compile error — its parity
+    // rows moved to the reject corpus) — 220 → 219. The `instance_export` row
+    // stays but under the own-identity component-export-binding code, and
+    // `instance_plain_let` keeps pinning that a RUNES plain `let` never promotes
+    // (the legacy `$.mutable_source` promotion is legacy-mode-only).
     assert_eq!(
         FAIL_MATRIX.len(),
-        220,
+        219,
         "the fail matrix pins 178 fail-closed rows — one documented \
          unsupported-feature sub-shape per row, EXCEPT the D-43 custom-element-host / \
          native-slotting rows, which are REPRESENTATIVE smoke probes for that \

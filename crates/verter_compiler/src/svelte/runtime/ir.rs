@@ -106,6 +106,11 @@ pub struct RuntimeAnalysis<'a> {
     /// each / await / snippet / declaration-tag [`PatternId`] after lowering
     /// returns.
     pub patterns: Vec<PatternBindings>,
+    /// The synthesized LEGACY `$:` assignment-target names (the implicit
+    /// `$.mutable_source` declarations, source order) — the plan emits one
+    /// `const <name> = $.mutable_source();` per entry. Empty for a runes
+    /// component or a legacy component whose `$:` targets are all declared.
+    pub(super) legacy_reactive_targets: Vec<String>,
 }
 
 /// The declared binding ids of one binding pattern, in source order.

@@ -215,6 +215,31 @@ pub enum CoreOfficialValidationRule {
     /// an interpolation — is the official hard error. Detected from the OXC AST of every
     /// script + template expression source, never a source-text scan.
     InspectTraceInvalidPlacement,
+    /// An `export let` declaration (any pattern — identifier or destructured) in a
+    /// RUNES-mode component — official `legacy_export_invalid` ("Cannot use
+    /// `export let` in runes mode — use `$props()` instead"). Runes mode is the
+    /// explicit `runes` compile option / `<svelte:options runes={true}>` OR the
+    /// mode INFERRED from rune usage — detected through the SAME mode authorities
+    /// the lowering consults (`forced_runes_option` + `script_uses_runes` with the
+    /// store-accessor exemption), never a second detector. An `export var` is NOT
+    /// this reject (official accepts it plain under runes); `export const` /
+    /// `function` / `class` are the accepted `$$exports` surface in both modes.
+    LegacyExportInvalid,
+    /// A `$:` reactive statement (a `$`-labeled statement) in a RUNES-mode
+    /// component — official `legacy_reactive_statement_invalid` ("`$:` is not
+    /// allowed in runes mode, use `$derived` or `$effect` instead"). The same
+    /// explicit-or-inferred mode detection as
+    /// [`LegacyExportInvalid`](Self::LegacyExportInvalid); a LEGACY-mode `$:`
+    /// lowers through `$.legacy_pre_effect`, never this reject.
+    LegacyReactiveStatementInvalid,
+    /// A dependency CYCLE among LEGACY `$:` reactive statements (statement A
+    /// assigns a name statement B depends on, and vice versa) — official
+    /// `reactive_declaration_cycle` ("Cyclical dependency detected: a → b →
+    /// a"). Detected by the same name-edge graph walk the official analyze
+    /// pass runs when topologically ordering the reactive-statement
+    /// registrations; a SELF-dependency (`$: x = x + 1`) is NOT a cycle
+    /// (official excludes self-assigned dependencies from the edge set).
+    ReactiveDeclarationCycle,
 }
 
 impl CoreOfficialValidationRule {
@@ -249,6 +274,9 @@ impl CoreOfficialValidationRule {
         CoreOfficialValidationRule::BindInvalidExpression,
         CoreOfficialValidationRule::ConstantAssignment,
         CoreOfficialValidationRule::InspectTraceInvalidPlacement,
+        CoreOfficialValidationRule::LegacyExportInvalid,
+        CoreOfficialValidationRule::LegacyReactiveStatementInvalid,
+        CoreOfficialValidationRule::ReactiveDeclarationCycle,
     ];
 
     /// The PascalCase rule name as it appears in a reject corpus row's `rule` field.
@@ -282,6 +310,9 @@ impl CoreOfficialValidationRule {
             Self::BindInvalidExpression => "BindInvalidExpression",
             Self::ConstantAssignment => "ConstantAssignment",
             Self::InspectTraceInvalidPlacement => "InspectTraceInvalidPlacement",
+            Self::LegacyExportInvalid => "LegacyExportInvalid",
+            Self::LegacyReactiveStatementInvalid => "LegacyReactiveStatementInvalid",
+            Self::ReactiveDeclarationCycle => "ReactiveDeclarationCycle",
         }
     }
 
@@ -339,6 +370,9 @@ impl CoreOfficialValidationRule {
             Self::BindInvalidExpression => "bind_invalid_expression",
             Self::ConstantAssignment => "constant_assignment",
             Self::InspectTraceInvalidPlacement => "inspect_trace_invalid_placement",
+            Self::LegacyExportInvalid => "legacy_export_invalid",
+            Self::LegacyReactiveStatementInvalid => "legacy_reactive_statement_invalid",
+            Self::ReactiveDeclarationCycle => "reactive_declaration_cycle",
         }
     }
 
@@ -384,6 +418,11 @@ impl CoreOfficialValidationRule {
             Self::InspectTraceInvalidPlacement => {
                 "svelte-official-reject-inspect-trace-invalid-placement"
             }
+            Self::LegacyExportInvalid => "svelte-official-reject-legacy-export-invalid",
+            Self::LegacyReactiveStatementInvalid => {
+                "svelte-official-reject-legacy-reactive-statement-invalid"
+            }
+            Self::ReactiveDeclarationCycle => "svelte-official-reject-reactive-declaration-cycle",
         }
     }
 
@@ -462,6 +501,17 @@ impl CoreOfficialValidationRule {
             }
             Self::InspectTraceInvalidPlacement => {
                 "a `$inspect.trace()` call that is not the first statement of a function body"
+            }
+            Self::LegacyExportInvalid => {
+                "an `export let` declaration in a runes-mode component (use `$props()` instead)"
+            }
+            Self::LegacyReactiveStatementInvalid => {
+                "a `$:` reactive statement in a runes-mode component (use `$derived` or \
+                 `$effect` instead)"
+            }
+            Self::ReactiveDeclarationCycle => {
+                "a dependency cycle among `$:` reactive statements (a statement assigns a \
+                 name another statement depends on, and vice versa)"
             }
         };
         format!(

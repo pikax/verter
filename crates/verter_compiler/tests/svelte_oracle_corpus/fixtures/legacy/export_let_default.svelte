@@ -1,0 +1,5 @@
+<script>
+	export let label = 'hi';
+</script>
+
+<p>{label}</p>

@@ -288,6 +288,10 @@ fn expr_is_state_write(
                     | BindingRuntimeKind::StateSignal { raw: true }
                     | BindingRuntimeKind::Prop
                     | BindingRuntimeKind::BindableProp
+                    // A promoted legacy `$.mutable_source` object: a member
+                    // mutation lowers through the official deep-mutation wrap
+                    // (`o.x++` → `$.mutate(o, $.get(o).x++)`).
+                    | BindingRuntimeKind::MutableSource
             )
         )
     } else {
@@ -304,6 +308,9 @@ fn expr_is_state_write(
                     | BindingRuntimeKind::Prop
                     | BindingRuntimeKind::BindableProp
                     | BindingRuntimeKind::StoreSubscription
+                    // A promoted legacy `$.mutable_source` signal: a bare
+                    // reassign / update lowers `$.set` / `$.update`.
+                    | BindingRuntimeKind::MutableSource
             )
         )
     }
@@ -1081,6 +1088,10 @@ fn is_writable_bind_root(kind: BindingRuntimeKind) -> bool {
             | BindingRuntimeKind::StateProxy
             | BindingRuntimeKind::BareProxy
             | BindingRuntimeKind::PlainLocal
+            // A promoted legacy `$.mutable_source` let: a bare-identifier bind
+            // sets the cell (`$.set(v, $$value)`); a member bind writes through
+            // the deep-mutation wrap (`$.mutate(o, $.get(o).x = $$value)`).
+            | BindingRuntimeKind::MutableSource
     )
 }
 
@@ -1095,6 +1106,7 @@ fn is_signal_binding(kind: BindingRuntimeKind) -> bool {
             | BindingRuntimeKind::EachSignal
             | BindingRuntimeKind::AwaitSignal
             | BindingRuntimeKind::LegacyConstDerived
+            | BindingRuntimeKind::MutableSource
     )
 }
 
@@ -1237,6 +1249,38 @@ pub(super) fn classify_dynamic_attr_shape(
 pub(super) struct ClientPropsUsage {
     /// The prop local names (the destructure locals), retained as the accepted fact.
     pub(super) prop_locals: Vec<String>,
+}
+
+/// Collect the LEGACY `export let` prop local names from an instance script (the
+/// exported identifier declarator names — the legacy prop surface). Empty when
+/// there is no `export let`. Destructured export-let patterns contribute nothing
+/// (they fail closed at the instance-script item allowlist).
+pub(super) fn collect_export_let_prop_locals(instance_source: Option<&str>) -> Vec<String> {
+    let mut locals = Vec::new();
+    let Some(src) = instance_source else {
+        return locals;
+    };
+    let alloc = Allocator::default();
+    let Some(program) = reparse_module(&alloc, src) else {
+        return locals;
+    };
+    for stmt in &program.body {
+        let Statement::ExportNamedDeclaration(export) = stmt else {
+            continue;
+        };
+        let Some(oxc_ast::ast::Declaration::VariableDeclaration(decl)) = &export.declaration else {
+            continue;
+        };
+        if decl.kind != oxc_ast::ast::VariableDeclarationKind::Let {
+            continue;
+        }
+        for d in &decl.declarations {
+            if let BindingPattern::BindingIdentifier(id) = &d.id {
+                locals.push(id.name.to_string());
+            }
+        }
+    }
+    locals
 }
 
 /// Collect the `$props()` destructure local names from an instance script (the

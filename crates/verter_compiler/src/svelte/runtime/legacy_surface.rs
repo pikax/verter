@@ -10,11 +10,24 @@
 //!   — under `runes={false}` a rune name is NOT a rune: official parses
 //!   `$state` as a STORE subscription and lowers `let` state through
 //!   `$.mutable_source`, semantics this backend must not mis-emit as runes);
-//! - an instance-script `export` declaration ([`UnsupportedSvelteRuntimeSurface::LegacyExportProp`]
-//!   — the legacy prop surface);
-//! - a `$:` reactive statement ([`UnsupportedSvelteRuntimeSurface::LegacyReactiveStatement`]);
 //! - a `createEventDispatcher` usage ([`UnsupportedSvelteRuntimeSurface::LegacyEventDispatcher`]);
 //! - a `<slot>` element ([`UnsupportedSvelteRuntimeSurface::LegacySlotElement`]).
+//!
+//! (An instance-script `export let` is the SUPPORTED legacy prop surface — it
+//! lowers through the shared `$.prop` prop-source substrate — and a `$:`
+//! reactive statement the SUPPORTED legacy reactivity surface — it lowers
+//! through `$.legacy_pre_effect`; the other export forms fail closed at the
+//! instance-script item allowlist with their own identities.)
+//!
+//! This module ALSO owns the RUNES-side twin gate
+//! ([`refuse_runes_mode_legacy_script_constructs`]): under the FINAL lowered
+//! runes mode an `export let` / `$:` statement is an OFFICIAL compile error
+//! (`legacy_export_invalid` / `legacy_reactive_statement_invalid`). The
+//! pre-lowering official-reject gate already rejects the explicit and
+//! script-inferred runes cases; this classifier-side gate re-applies the same
+//! rejects against the FINAL mode (which completes only after lowering — the
+//! template-`$host` inference term), so a runes-mode `export let` / `$:` can
+//! NEVER fall through to legacy lowering.
 //!
 //! Every check is structural — the typed IR, the parsed OXC program, and the
 //! shared [`ClassifiedScriptImports`](super::client_surface_imports::ClassifiedScriptImports)
@@ -90,33 +103,13 @@ pub(super) fn refuse_unsupported_legacy_surfaces(
         }
     }
 
-    // (2)+(3) Instance-script top-level walk: an `export` declaration (the legacy
-    // prop surface) and a `$:` reactive label, refused in SOURCE order.
-    if let Some(instance) = instance_source {
-        if let Some(program) = reparse_module(&alloc, instance) {
-            for stmt in &program.body {
-                match stmt {
-                    Statement::ExportNamedDeclaration(_)
-                    | Statement::ExportDefaultDeclaration(_)
-                    | Statement::ExportAllDeclaration(_) => {
-                        let span = stmt.span();
-                        return Err(UnsupportedSvelteRuntimeSurface::LegacyExportProp {
-                            span: Span::new(span.start, span.end),
-                        });
-                    }
-                    Statement::LabeledStatement(labeled) if labeled.label.name == "$" => {
-                        let span = stmt.span();
-                        return Err(UnsupportedSvelteRuntimeSurface::LegacyReactiveStatement {
-                            span: Span::new(span.start, span.end),
-                        });
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
+    // (An instance `export` / `$:` label is NOT refused here: `export let` is
+    // the SUPPORTED legacy prop surface and `$:` the SUPPORTED legacy
+    // reactive-statement surface — both classified by the instance-script item
+    // allowlist, where every other export/label form fails closed with its own
+    // identity.)
 
-    // (4) A `createEventDispatcher` usage: the referent is the ADMITTED import
+    // (2) A `createEventDispatcher` usage: the referent is the ADMITTED import
     // local whose IMPORTED name is `createEventDispatcher` from the `svelte`
     // module (read from the shared import carrier); any unshadowed instance
     // reference to that local is the legacy component-event surface.
@@ -161,6 +154,62 @@ pub(super) fn refuse_unsupported_legacy_surfaces(
         }
     }
 
+    Ok(())
+}
+
+/// Refuse the RUNES-mode legacy-script constructs against the FINAL lowered mode:
+/// an `export let` declaration (ANY binding pattern) is the official
+/// `legacy_export_invalid` compile error and a `$:` labeled statement the official
+/// `legacy_reactive_statement_invalid` — in instance-program SOURCE order (the
+/// official analyze-walk order). Returned through the
+/// [`UnsupportedSvelteRuntimeSurface::OfficialReject`] carrier, which the compile
+/// boundary converts to a real `ClientCompileError::OfficialReject` — never an
+/// unsupported-feature diagnostic. The caller gates this on `SvelteMode::Runes`;
+/// it is never consulted for a legacy component. It is the airtight twin of the
+/// pre-lowering official-reject scan: the pre-lowering gate covers the explicit
+/// and script-inferred runes cases, THIS gate covers the residual final-mode
+/// inference (the template-`$host` term) so a runes-mode `export let` / `$:` can
+/// never reach legacy lowering.
+pub(super) fn refuse_runes_mode_legacy_script_constructs(
+    ir: &SvelteRuntimeIr,
+) -> Result<(), UnsupportedSvelteRuntimeSurface> {
+    use super::official_rule::{CoreOfficialValidationRule, OfficialRejection};
+    let Some(instance) = ir.analysis.scripts.instance_source else {
+        return Ok(());
+    };
+    let alloc = Allocator::default();
+    let Some(program) = reparse_module(&alloc, instance) else {
+        return Ok(());
+    };
+    for stmt in &program.body {
+        match stmt {
+            Statement::ExportNamedDeclaration(export)
+                if matches!(
+                    export.declaration,
+                    Some(oxc_ast::ast::Declaration::VariableDeclaration(ref decl))
+                        if decl.kind == oxc_ast::ast::VariableDeclarationKind::Let
+                ) =>
+            {
+                let span = stmt.span();
+                return Err(UnsupportedSvelteRuntimeSurface::OfficialReject {
+                    rejection: OfficialRejection::of(
+                        CoreOfficialValidationRule::LegacyExportInvalid,
+                    ),
+                    span: Span::new(span.start, span.end),
+                });
+            }
+            Statement::LabeledStatement(labeled) if labeled.label.name == "$" => {
+                let span = stmt.span();
+                return Err(UnsupportedSvelteRuntimeSurface::OfficialReject {
+                    rejection: OfficialRejection::of(
+                        CoreOfficialValidationRule::LegacyReactiveStatementInvalid,
+                    ),
+                    span: Span::new(span.start, span.end),
+                });
+            }
+            _ => {}
+        }
+    }
     Ok(())
 }
 

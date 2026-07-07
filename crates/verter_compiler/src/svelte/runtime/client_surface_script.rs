@@ -31,7 +31,15 @@ use verter_span::Span;
 pub(super) fn classify_props_usage(
     ir: &SvelteRuntimeIr,
 ) -> Result<ClientPropsUsage, UnsupportedSvelteRuntimeSurface> {
-    let prop_locals = client_shapes::collect_prop_locals(ir.analysis.scripts.instance_source);
+    // The prop locals span BOTH prop surfaces: the runes `$props()` destructure
+    // locals AND the legacy `export let` locals (each registered as a
+    // `Prop`-kind binding; the two are mutually exclusive per component — a
+    // `$props()` reference under legacy mode is a legacy-rune-reference
+    // refusal, an `export let` under runes an official reject).
+    let mut prop_locals = client_shapes::collect_prop_locals(ir.analysis.scripts.instance_source);
+    prop_locals.extend(client_shapes::collect_export_let_prop_locals(
+        ir.analysis.scripts.instance_source,
+    ));
     if prop_locals.is_empty() {
         return Ok(ClientPropsUsage { prop_locals });
     }
@@ -101,35 +109,64 @@ fn resolves_to_prop(ir: &SvelteRuntimeIr, scope: super::expr::ScopeId, name: &st
 
 /// Whether the instance script REFERENCES (reads or writes) a `$props()` prop local
 /// anywhere outside its own `$props()` declaration. The supported prop usage
-/// positions are TEMPLATE expressions only, so any instance-script prop reference
-/// (a read `cb()` / `console.log(a)`, a write `a += 1`) fails the prop gate.
+/// positions are TEMPLATE expressions — plus, under LEGACY mode, a TOP-LEVEL `$:`
+/// reactive statement (its prop reads lower through the shared rewriter as getter
+/// calls, and its dependency thunk deep-reads the prop — the official legacy
+/// surface) — so any OTHER instance-script prop reference (a read `cb()` /
+/// `console.log(a)`, a write `a += 1`) fails the prop gate.
 ///
 /// Reparses the instance program ONCE and walks it with a scope-aware visitor that
 /// SKIPS the `$props()` declarator subtrees (they BIND the prop, they do not read
-/// it) and reports any identifier reference resolving to a prop binding. A reference
-/// to a shadowing local of the same name is not a prop reference (the walk reuses the
+/// it) and — for a LEGACY component — the top-level `$:` labeled statements, and
+/// reports any identifier reference resolving to a prop binding. A reference to a
+/// shadowing local of the same name is not a prop reference (the walk reuses the
 /// shared `ShadowStack` lexical model).
 fn instance_script_references_a_prop(instance_source: &str, ir: &SvelteRuntimeIr) -> bool {
     let alloc = Allocator::default();
     let Some(program) = super::expr::reparse_module(&alloc, instance_source) else {
         return false;
     };
-    // The prop-local names declared at the instance root.
-    let prop_locals: rustc_hash::FxHashSet<String> =
+    // The prop-local names declared at the instance root — the `$props()`
+    // destructure locals plus the legacy `export let` locals.
+    let mut prop_locals: rustc_hash::FxHashSet<String> =
         client_shapes::collect_prop_locals(Some(instance_source))
             .into_iter()
             .collect();
+    prop_locals.extend(client_shapes::collect_export_let_prop_locals(Some(
+        instance_source,
+    )));
     if prop_locals.is_empty() {
         return false;
     }
+    let legacy_mode = ir.component.mode == super::ir::SvelteMode::Legacy;
     let mut scan = PropRefScan {
         prop_locals: &prop_locals,
         scopes: super::expr::ShadowStack::default(),
         found: false,
     };
+    // The root scope frame (the `visit_program` frame, with the prop locals
+    // removed so a prop reference is not treated as shadowed by its own
+    // declaration), pushed here because the walk iterates TOP-LEVEL statements
+    // itself: a LEGACY `$:` labeled statement is a SUPPORTED prop-read surface
+    // and is skipped whole.
     use oxc_ast_visit::Visit;
-    scan.visit_program(&program);
-    let _ = ir;
+    let mut frame = rustc_hash::FxHashSet::default();
+    super::expr::collect_direct_decls(&program.body, &mut frame);
+    super::expr::collect_var_hoists(&program.body, &mut frame);
+    for name in &prop_locals {
+        frame.remove(name);
+    }
+    scan.scopes.push(frame);
+    for stmt in &program.body {
+        if legacy_mode {
+            if let oxc_ast::ast::Statement::LabeledStatement(labeled) = stmt {
+                if labeled.label.name == "$" {
+                    continue;
+                }
+            }
+        }
+        scan.visit_statement(stmt);
+    }
     scan.found
 }
 
@@ -144,19 +181,9 @@ struct PropRefScan<'a> {
 }
 
 impl<'a> oxc_ast_visit::Visit<'a> for PropRefScan<'_> {
-    fn visit_program(&mut self, it: &oxc_ast::ast::Program<'a>) {
-        let mut frame = rustc_hash::FxHashSet::default();
-        super::expr::collect_direct_decls(&it.body, &mut frame);
-        super::expr::collect_var_hoists(&it.body, &mut frame);
-        // The prop locals are declared at THIS scope; remove them from the frame so a
-        // prop reference is not treated as shadowed by its own declaration.
-        for name in self.prop_locals {
-            frame.remove(name);
-        }
-        self.scopes.push(frame);
-        oxc_ast_visit::walk::walk_program(self, it);
-        self.scopes.pop();
-    }
+    // (The root program frame is pushed by the CALLER, which iterates the
+    // top-level statements itself so a legacy `$:` statement can be skipped
+    // whole — see `instance_script_references_a_prop`.)
 
     fn visit_variable_declarator(&mut self, it: &oxc_ast::ast::VariableDeclarator<'a>) {
         // Skip a `$props()` declarator entirely (the destructure pattern + the
@@ -167,6 +194,20 @@ impl<'a> oxc_ast_visit::Visit<'a> for PropRefScan<'_> {
             }
         }
         oxc_ast_visit::walk::walk_variable_declarator(self, it);
+    }
+
+    fn visit_export_named_declaration(&mut self, it: &oxc_ast::ast::ExportNamedDeclaration<'a>) {
+        // Skip a legacy `export let` PROP DECLARATION entirely — its declarators
+        // BIND props, and a DEFAULT INITIALIZER reading a sibling prop
+        // (`export let b = a`) is part of the declaration, exactly as a runes
+        // `$props()` destructure default (the declarator skip above). Any other
+        // export form is walked.
+        if let Some(oxc_ast::ast::Declaration::VariableDeclaration(decl)) = &it.declaration {
+            if decl.kind == oxc_ast::ast::VariableDeclarationKind::Let {
+                return;
+            }
+        }
+        oxc_ast_visit::walk::walk_export_named_declaration(self, it);
     }
 
     fn visit_function(

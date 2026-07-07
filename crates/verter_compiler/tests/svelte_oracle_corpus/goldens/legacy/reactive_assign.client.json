@@ -1,0 +1,110 @@
+{
+  "slug": "legacy/reactive_assign.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "reactive_assign",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "push",
+    "mutable_source",
+    "mutable_source",
+    "legacy_pre_effect",
+    "get",
+    "set",
+    "get",
+    "legacy_pre_effect_reset",
+    "first_child",
+    "child",
+    "reset",
+    "sibling",
+    "template_effect",
+    "set_text",
+    "get",
+    "delegated",
+    "update",
+    "append",
+    "pop",
+    "delegate"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "delegate",
+    "delegated",
+    "first_child",
+    "from_html",
+    "get",
+    "legacy_pre_effect",
+    "legacy_pre_effect_reset",
+    "mutable_source",
+    "pop",
+    "push",
+    "reset",
+    "set",
+    "set_text",
+    "sibling",
+    "template_effect",
+    "update"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "push": 1,
+    "mutable_source": 2,
+    "legacy_pre_effect": 1,
+    "get": 3,
+    "set": 1,
+    "legacy_pre_effect_reset": 1,
+    "first_child": 1,
+    "child": 1,
+    "reset": 1,
+    "sibling": 1,
+    "template_effect": 1,
+    "set_text": 1,
+    "delegated": 1,
+    "update": 1,
+    "append": 1,
+    "pop": 1,
+    "delegate": 1
+  },
+  "delegatedEvents": [
+    "click"
+  ],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<p> </p> <button>b</button>",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<p> </p> <button>b</button>`, 1); export default function reactive_assign($$anchor, $$props) {$.push($$props, false); const y = $.mutable_source(); let x = $.mutable_source(0); $.legacy_pre_effect(() => ($.get(x)), () => {$.set(y, $.get(x) + 1);}); $.legacy_pre_effect_reset(); var fragment = root(); var p = $.first_child(fragment); var text = $.child(p, true); $.reset(p); var button = $.sibling(p, 2); $.template_effect(() => $.set_text(text, $.get(y))); $.delegated('click', button, () => $.update(x)); $.append($$anchor, fragment); $.pop();} $.delegate(['click']);",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

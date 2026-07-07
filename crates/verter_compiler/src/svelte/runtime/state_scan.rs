@@ -182,6 +182,59 @@ pub fn prepare_rune_bindings(
     }
 }
 
+/// Declare each top-level `export let <ident>` declarator of the instance script
+/// as a [`BindingRuntimeKind::Prop`] binding in `scope` — the LEGACY prop
+/// surface (`export let label` lowers through `$.prop($$props, 'label', 8)` and
+/// ALWAYS reads as the accessor call). Registered mode-independently, like the
+/// rune bindings: a RUNES-mode `export let` is an official compile error
+/// (`legacy_export_invalid`) rejected before these bindings are ever consumed.
+/// Destructured export-let patterns register nothing (they fail closed at the
+/// instance-script item allowlist), as does `export var` / `export const` (each
+/// a distinct fail-closed surface).
+pub(super) fn prepare_legacy_export_prop_bindings(
+    instance_source: Option<&str>,
+    alloc: &Allocator,
+    scope: ScopeId,
+    scopes: &mut ScopeGraph,
+    bindings: &mut BindingTable,
+) {
+    let Some(text) = instance_source else {
+        return;
+    };
+    let Some(program) = reparse_module(alloc, text) else {
+        return;
+    };
+    for stmt in &program.body {
+        let Statement::ExportNamedDeclaration(export) = stmt else {
+            continue;
+        };
+        let Some(oxc_ast::ast::Declaration::VariableDeclaration(decl)) = &export.declaration else {
+            continue;
+        };
+        if decl.kind != oxc_ast::ast::VariableDeclarationKind::Let {
+            continue;
+        }
+        for d in &decl.declarations {
+            let BindingPattern::BindingIdentifier(id) = &d.id else {
+                continue;
+            };
+            let name = id.name.as_str();
+            // A name already declared in the scope is never re-registered (valid
+            // source cannot redeclare, so this is purely defensive).
+            if scopes.resolve(bindings, scope, name).is_some() {
+                continue;
+            }
+            let binding = bindings.push(BindingInfo {
+                name: name.to_string(),
+                scope,
+                kind: BindingRuntimeKind::Prop,
+                state: None,
+            });
+            scopes.declare(scope, name, binding);
+        }
+    }
+}
+
 /// Declare every ADMITTED top-level static import LOCAL of one slot as its typed
 /// NON-REACTIVE import binding in `scope` — a default `.svelte`-COMPONENT import as
 /// [`BindingRuntimeKind::ComponentImport`] (so a `<Child/>` invocation's static
