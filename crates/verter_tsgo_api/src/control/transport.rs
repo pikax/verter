@@ -28,9 +28,10 @@ pub type ControlWriteHalf = AttachWriteHalf;
 #[cfg(unix)]
 const UDS_SUN_PATH_BUDGET: usize = 100;
 
-/// The basename prefix of the PRIVATE per-session subdir the listener creates for the control
-/// socket (`vr-ctl-<hash>`). The path-minting and the listener's `Drop` cleanup both key off it,
-/// so the now-empty subdir can be removed on teardown without ever touching `control_dir`.
+/// The basename prefix of the PRIVATE per-session subdir the path-minting creates for the control
+/// socket (`vr-ctl-<hash>`). ONLY the path-minting keys off it; the listener's `Drop` cleanup keys
+/// off the subdir it RECORDED creating at bind (see [`PreparedParent`]), never this prefix, so a
+/// pre-existing user directory that merely shares the shape is never removed.
 #[cfg(unix)]
 const PRIVATE_SUBDIR_PREFIX: &str = "vr-ctl-";
 
@@ -129,6 +130,16 @@ fn grandparent_ceiling_ok(uid: u32, mode: u32, euid: u32) -> bool {
     owned_no_foreign_write || sticky_trusted_owner
 }
 
+/// The outcome of preparing a Unix control socket's private parent directory. It records the
+/// subdir THIS bind actually created, so the listener's `Drop` removes only a directory we own —
+/// never a pre-existing one that merely shares the `vr-ctl-` name.
+#[cfg(unix)]
+struct PreparedParent {
+    /// `Some(path)` ONLY when this call's `DirBuilder::create` created the private subdir; `None`
+    /// when the subdir already existed and was reused/validated (never recorded for cleanup).
+    owned_private_subdir: Option<std::path::PathBuf>,
+}
+
 /// Create + validate the PRIVATE per-session parent directory of a Unix control socket BEFORE
 /// bind. The socket's IMMEDIATE parent is a subdir WE create owner-only (`0o700`); its
 /// grandparent (`--control-dir`) only needs to EXIST + be traversable — it may be a
@@ -142,15 +153,21 @@ fn grandparent_ceiling_ok(uid: u32, mode: u32, euid: u32) -> bool {
 /// `grandparent_ceiling_ok`): it is safe iff EITHER (A) owned by the current euid with no
 /// group/other write bits, OR (B) sticky (like `/tmp` at `0o1777`) AND owned by the current euid or
 /// by root. A sticky grandparent owned by ANOTHER non-root user is rejected — that owner could
-/// rename/swap our validated `0o700` subdir between validate and bind despite the sticky bit.
+/// rename/swap our validated `0o700` subdir between validate and bind despite the sticky bit. A
+/// grandparent (`--control-dir`) that is ITSELF a symlink is rejected up front, so a swappable
+/// symlinked control_dir cannot redirect the bind to an unchecked target (a benign ANCESTOR symlink
+/// like macOS `/tmp`→`/private/tmp` is still fine — only the final component's own symlink-ness is
+/// rejected).
 ///
-/// Full open-time TOCTOU-proofing is bounded by our ownership of the created subdir and this
-/// grandparent ceiling: `tokio::net::UnixListener::bind` takes a PATH (there is no dir-fd bind),
-/// so a path-based bind cannot be atomic against an attacker who can already write the grandparent.
-/// The euid + exact-`0o700` + real-directory gate on the subdir we own, plus the (A)/(B)
-/// ownership/sticky ceiling on the grandparent, is the accepted, standard mitigation.
+/// This is a MITIGATION, NOT full TOCTOU-proofing: `tokio::net::UnixListener::bind` takes a PATH
+/// (there is no dir-fd bind), so a path-based bind is not atomic against an attacker who can already
+/// write the grandparent and swap our validated subdir between validate and bind. The symlink
+/// rejection, the euid + exact-`0o700` + real-directory gate on the subdir we own, and the (A)/(B)
+/// grandparent ceiling are the accepted, standard mitigations; full open-time safety would need an
+/// fd-relative bind (`openat`/`O_NOFOLLOW` against a retained dir-fd), which this path does not do —
+/// `UnixListener::bind` is path-based, with no dir-fd bind.
 #[cfg(unix)]
-fn prepare_unix_socket_parent(endpoint: &str) -> TsgoApiResult<()> {
+fn prepare_unix_socket_parent(endpoint: &str) -> TsgoApiResult<PreparedParent> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 
     let socket_parent = std::path::Path::new(endpoint).parent().ok_or_else(|| {
@@ -168,6 +185,29 @@ fn prepare_unix_socket_parent(endpoint: &str) -> TsgoApiResult<()> {
     // dir). The privacy guarantee lives on the per-session subdir below, not on control_dir.
     if let Some(control_dir) = socket_parent.parent() {
         if !control_dir.as_os_str().is_empty() {
+            // Reject a control_dir that is ITSELF a symlink BEFORE creating or trusting anything
+            // under it: a path-based bind is not atomic, so an attacker who can swap a symlinked
+            // control_dir between validate and bind could redirect the socket to an unchecked
+            // target. `symlink_metadata` does not follow the final component, so a symlinked
+            // control_dir is caught here; a real dir, a not-yet-created dir, or a benign ANCESTOR
+            // symlink (e.g. macOS `/tmp`→`/private/tmp`) all pass — only the final component's own
+            // symlink-ness is rejected. MITIGATION, not full TOCTOU-proofing (see the fn doc).
+            match std::fs::symlink_metadata(control_dir) {
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    return Err(TsgoApiError::Transport(format!(
+                        "control dir {control_dir:?} is a symlink; refusing to bind through it (a \
+                         swappable symlinked control dir could redirect the control socket to an \
+                         unchecked target). Pass a real directory as --control-dir."
+                    )));
+                }
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(TsgoApiError::Transport(format!(
+                        "stat control dir {control_dir:?} failed: {e}"
+                    )));
+                }
+            }
             std::fs::create_dir_all(control_dir).map_err(|e| {
                 TsgoApiError::Transport(format!("create control dir {control_dir:?} failed: {e}"))
             })?;
@@ -176,10 +216,11 @@ fn prepare_unix_socket_parent(endpoint: &str) -> TsgoApiResult<()> {
             // sticky (`0o1000`) AND owned by us or by root. A sticky grandparent owned by another
             // non-root user is rejected — that owner could rename/swap our `0o700` subdir despite
             // the sticky bit — as is any group/other-writable non-sticky dir (fail closed).
-            // `metadata` follows symlinks, so a legitimately-symlinked base (e.g. macOS `/tmp`)
-            // resolves to its real perms. `UnixListener::bind` is path-based (there is no dir-fd
-            // bind), so this ownership/sticky ceiling — not an open-time atomic bind — is the
-            // achievable, standard mitigation for the grandparent-swap TOCTOU.
+            // `metadata` follows ANCESTOR symlinks (the immediate control_dir symlink was already
+            // rejected above), so a benign symlinked ancestor still resolves to its real perms.
+            // `UnixListener::bind` is path-based (there is no dir-fd bind), so this ceiling — not an
+            // open-time atomic bind — is the achievable, standard mitigation for the grandparent-swap
+            // TOCTOU; full open-time safety would require an fd-relative `openat`/`O_NOFOLLOW` bind.
             let gp_meta = std::fs::metadata(control_dir).map_err(|e| {
                 TsgoApiError::Transport(format!("stat control dir {control_dir:?} failed: {e}"))
             })?;
@@ -200,16 +241,18 @@ fn prepare_unix_socket_parent(endpoint: &str) -> TsgoApiResult<()> {
 
     // Create the PRIVATE per-session subdir owner-only (`0o700`), NON-recursively (the
     // grandparent exists), so we are its creator. A pre-existing subdir is VALIDATED below
-    // (it may be a hostile pre-create) rather than trusted.
-    match std::fs::DirBuilder::new().mode(0o700).create(socket_parent) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+    // (it may be a hostile pre-create) rather than trusted. Record whether THIS call created it,
+    // so `Drop` removes only a subdir we own, never one that merely pre-existed.
+    let created_private_subdir = match std::fs::DirBuilder::new().mode(0o700).create(socket_parent)
+    {
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => false,
         Err(e) => {
             return Err(TsgoApiError::Transport(format!(
                 "create private control socket parent {socket_parent:?} failed: {e}"
             )));
         }
-    }
+    };
 
     // Validate the FINAL subdir: `symlink_metadata` does NOT follow symlinks, so a symlink (or
     // any non-directory) is rejected; the euid ownership + exact-`0o700` checks reject a parent
@@ -242,14 +285,38 @@ fn prepare_unix_socket_parent(endpoint: &str) -> TsgoApiResult<()> {
             mode & 0o7777
         )));
     }
-    Ok(())
+    Ok(PreparedParent {
+        owned_private_subdir: created_private_subdir.then(|| socket_parent.to_path_buf()),
+    })
 }
 
-/// Remove a stale socket file at `endpoint`, tolerating ONLY `NotFound`: any other unlink
-/// error (a permission failure, a security-relevant collision) is a bind failure, never
-/// silently swallowed.
+/// Remove a stale control socket at `endpoint`, but ONLY if the path is really a socket. The
+/// endpoint is inspected with `symlink_metadata` (which does NOT follow symlinks): a missing path
+/// is nothing to clean; a socket is unlinked (tolerating a concurrent removal); ANYTHING else — a
+/// regular file, a directory, or a SYMLINK (whose target must never be followed and deleted) —
+/// fails the bind CLOSED rather than deleting a path the shim does not own. Tolerating only
+/// `NotFound` on the removal keeps a permission failure or security-relevant collision a bind
+/// failure, never silently swallowed.
 #[cfg(unix)]
 fn unlink_stale_control_socket(endpoint: &str) -> TsgoApiResult<()> {
+    use std::os::unix::fs::FileTypeExt;
+
+    let meta = match std::fs::symlink_metadata(endpoint) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => {
+            return Err(TsgoApiError::Transport(format!(
+                "stat stale control socket {endpoint:?} failed: {e}"
+            )))
+        }
+    };
+    if !meta.file_type().is_socket() {
+        return Err(TsgoApiError::Transport(format!(
+            "control endpoint {endpoint:?} already exists and is not a socket ({:?}); refusing to \
+             remove it",
+            meta.file_type()
+        )));
+    }
     match std::fs::remove_file(endpoint) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -271,6 +338,177 @@ fn set_control_socket_permissions(endpoint: &str) -> TsgoApiResult<()> {
     })
 }
 
+/// The Windows named-pipe security helper: an EXPLICIT owner-only DACL granting the current-user
+/// SID full control and NOTHING to any broader principal (no Everyone / Authenticated Users /
+/// Administrators), matching the Unix side's `0o600` socket bar. Without it a named pipe inherits
+/// the process token's ambient default DACL, which grants broader access (on many hosts it grants
+/// Everyone). The descriptor is applied to EVERY pipe instance — the `bind` instance AND every
+/// `accept`-provisioned next instance — and the helper fails CLOSED on any Win32 error (it never
+/// falls back to a default-DACL pipe).
+#[cfg(windows)]
+mod owner_only_pipe_security {
+    use std::ffi::c_void;
+
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, LocalFree, ERROR_SUCCESS, FALSE, GENERIC_ALL, HANDLE, TRUE,
+    };
+    use windows_sys::Win32::Security::Authorization::{
+        SetEntriesInAclW, EXPLICIT_ACCESS_W, NO_MULTIPLE_TRUSTEE, SET_ACCESS, TRUSTEE_IS_SID,
+        TRUSTEE_IS_USER,
+    };
+    use windows_sys::Win32::Security::{
+        GetTokenInformation, InitializeSecurityDescriptor, SetSecurityDescriptorDacl, TokenUser,
+        ACL, NO_INHERITANCE, PSID, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, TOKEN_QUERY,
+        TOKEN_USER,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    use crate::error::{TsgoApiError, TsgoApiResult};
+
+    /// `SECURITY_DESCRIPTOR_REVISION` — the frozen Win32 security-descriptor ABI revision (`1`).
+    /// windows-sys names it only under `Win32_System_SystemServices`, a module this crate
+    /// otherwise does not pull, so the stable ABI constant is named locally.
+    const SECURITY_DESCRIPTOR_REVISION: u32 = 1;
+
+    /// An owner-only pipe security descriptor: it owns the heap-stable `SECURITY_DESCRIPTOR` and the
+    /// `SetEntriesInAclW`-allocated DACL, keeps both alive across the pipe-create call, and frees the
+    /// DACL on drop (the kernel copies the security info into the pipe object at creation time).
+    pub(super) struct OwnerOnlyPipeSecurity {
+        /// Boxed for a stable address — `SECURITY_ATTRIBUTES.lpSecurityDescriptor` points at it.
+        descriptor: Box<SECURITY_DESCRIPTOR>,
+        /// The DACL allocated by `SetEntriesInAclW` (via `LocalAlloc`); `LocalFree`d on drop.
+        dacl: *mut ACL,
+        /// Backs the SID the DACL was built from; retained until after the descriptor is built.
+        _token_user: Vec<u8>,
+    }
+
+    impl OwnerOnlyPipeSecurity {
+        /// Build the current-user-only security descriptor, or fail closed on any Win32 error.
+        pub(super) fn build() -> TsgoApiResult<Self> {
+            // SAFETY: each Win32 call below is used per its contract and every fallible result is
+            // checked (the code fails closed, never proceeding on an error). Raw pointers stay
+            // valid: `token` is closed by `TokenHandle`'s drop; the SID aliases the retained
+            // `token_user` buffer only until `SetEntriesInAclW` copies it into `dacl`; and `dacl`
+            // plus the boxed descriptor are retained on the returned value.
+            unsafe {
+                let mut token: HANDLE = std::ptr::null_mut();
+                if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == FALSE {
+                    return Err(win32_last_error("OpenProcessToken"));
+                }
+                let _token = TokenHandle(token);
+
+                // Size the TOKEN_USER, then fetch it.
+                let mut needed: u32 = 0;
+                GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut needed);
+                if needed == 0 {
+                    return Err(win32_last_error("GetTokenInformation (size probe)"));
+                }
+                let mut token_user = vec![0u8; needed as usize];
+                if GetTokenInformation(
+                    token,
+                    TokenUser,
+                    token_user.as_mut_ptr().cast::<c_void>(),
+                    needed,
+                    &mut needed,
+                ) == FALSE
+                {
+                    return Err(win32_last_error("GetTokenInformation"));
+                }
+                let sid: PSID = (*token_user.as_ptr().cast::<TOKEN_USER>()).User.Sid;
+                if sid.is_null() {
+                    return Err(TsgoApiError::Transport(
+                        "control named pipe owner-only DACL: token user SID is null".to_string(),
+                    ));
+                }
+
+                // One ACE: the current user gets full control; no other principal is named.
+                let mut ea: EXPLICIT_ACCESS_W = std::mem::zeroed();
+                ea.grfAccessPermissions = GENERIC_ALL;
+                ea.grfAccessMode = SET_ACCESS;
+                ea.grfInheritance = NO_INHERITANCE;
+                ea.Trustee.MultipleTrusteeOperation = NO_MULTIPLE_TRUSTEE;
+                ea.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+                ea.Trustee.TrusteeType = TRUSTEE_IS_USER;
+                ea.Trustee.ptstrName = sid.cast::<u16>();
+
+                let mut dacl: *mut ACL = std::ptr::null_mut();
+                let rc = SetEntriesInAclW(1, &ea, std::ptr::null(), &mut dacl);
+                if rc != ERROR_SUCCESS || dacl.is_null() {
+                    return Err(win32_code("SetEntriesInAclW", rc));
+                }
+
+                // From here a failure must free the just-allocated DACL before returning.
+                let mut descriptor: Box<SECURITY_DESCRIPTOR> = Box::new(std::mem::zeroed());
+                let sd_ptr = std::ptr::addr_of_mut!(*descriptor).cast::<c_void>();
+                if InitializeSecurityDescriptor(sd_ptr, SECURITY_DESCRIPTOR_REVISION) == FALSE {
+                    let _ = LocalFree(dacl.cast::<c_void>());
+                    return Err(win32_last_error("InitializeSecurityDescriptor"));
+                }
+                if SetSecurityDescriptorDacl(sd_ptr, TRUE, dacl, FALSE) == FALSE {
+                    let _ = LocalFree(dacl.cast::<c_void>());
+                    return Err(win32_last_error("SetSecurityDescriptorDacl"));
+                }
+
+                Ok(Self {
+                    descriptor,
+                    dacl,
+                    _token_user: token_user,
+                })
+            }
+        }
+
+        /// A `SECURITY_ATTRIBUTES` referencing this descriptor. The returned value borrows `self`'s
+        /// heap-stable descriptor, so it is valid only while `self` is alive.
+        pub(super) fn security_attributes(&self) -> SECURITY_ATTRIBUTES {
+            SECURITY_ATTRIBUTES {
+                nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: std::ptr::addr_of!(*self.descriptor) as *mut c_void,
+                bInheritHandle: FALSE,
+            }
+        }
+    }
+
+    impl Drop for OwnerOnlyPipeSecurity {
+        fn drop(&mut self) {
+            if !self.dacl.is_null() {
+                // SAFETY: `dacl` came from `SetEntriesInAclW` (a `LocalAlloc` allocation) and is
+                // freed exactly once here; the kernel already copied the descriptor at pipe
+                // creation, so releasing our copy is sound.
+                unsafe {
+                    let _ = LocalFree(self.dacl.cast::<c_void>());
+                }
+                self.dacl = std::ptr::null_mut();
+            }
+        }
+    }
+
+    /// Closes an owned process-token handle on drop.
+    struct TokenHandle(HANDLE);
+
+    impl Drop for TokenHandle {
+        fn drop(&mut self) {
+            // SAFETY: `self.0` is a token handle from `OpenProcessToken` we exclusively own.
+            unsafe {
+                let _ = CloseHandle(self.0);
+            }
+        }
+    }
+
+    fn win32_last_error(op: &str) -> TsgoApiError {
+        // SAFETY: `GetLastError` reads the calling thread's error state; it is always sound.
+        let code = unsafe { GetLastError() };
+        TsgoApiError::Transport(format!(
+            "control named pipe owner-only DACL: {op} failed (GetLastError {code})"
+        ))
+    }
+
+    fn win32_code(op: &str, code: u32) -> TsgoApiError {
+        TsgoApiError::Transport(format!(
+            "control named pipe owner-only DACL: {op} failed (code {code})"
+        ))
+    }
+}
+
 /// The shim-side control endpoint listener: a Windows named-pipe server or a
 /// Unix-domain-socket listener, bound to the endpoint the shim advertises.
 /// Accepts control connections one instance at a time.
@@ -280,6 +518,10 @@ pub struct ControlListener {
     server: Option<tokio::net::windows::named_pipe::NamedPipeServer>,
     #[cfg(unix)]
     listener: tokio::net::UnixListener,
+    /// The private per-session subdir THIS listener created at bind (if any). `Drop` removes only
+    /// this recorded, owned path — never a pre-existing directory that merely matches the name.
+    #[cfg(unix)]
+    owned_private_subdir: Option<std::path::PathBuf>,
 }
 
 impl ControlListener {
@@ -290,15 +532,27 @@ impl ControlListener {
     pub fn bind(endpoint: &str) -> TsgoApiResult<Self> {
         #[cfg(windows)]
         {
+            use std::ffi::c_void;
             use tokio::net::windows::named_pipe::ServerOptions;
-            let server = ServerOptions::new()
-                .first_pipe_instance(true)
-                .create(endpoint)
-                .map_err(|e| {
-                    TsgoApiError::Transport(format!(
-                        "bind control named pipe {endpoint:?} failed: {e}"
-                    ))
-                })?;
+            // Apply an EXPLICIT owner-only DACL (current-user SID only) so the pipe matches the
+            // Unix `0o600` socket bar instead of inheriting the token's broader default DACL.
+            let security = owner_only_pipe_security::OwnerOnlyPipeSecurity::build()?;
+            let mut sa = security.security_attributes();
+            // SAFETY: `sa` points at `security`'s heap-stable descriptor, which stays alive across
+            // this call; the descriptor names only the current user (owner-only, the 0o600 parity).
+            let server = unsafe {
+                ServerOptions::new()
+                    .first_pipe_instance(true)
+                    .create_with_security_attributes_raw(
+                        endpoint,
+                        std::ptr::addr_of_mut!(sa).cast::<c_void>(),
+                    )
+            }
+            .map_err(|e| {
+                TsgoApiError::Transport(format!("bind control named pipe {endpoint:?} failed: {e}"))
+            })?;
+            // The kernel copied the descriptor at creation; release the ACL now.
+            drop(security);
             Ok(Self {
                 endpoint: endpoint.to_string(),
                 server: Some(server),
@@ -311,7 +565,7 @@ impl ControlListener {
             // per-session parent dir (exactly 0o700, real dir, euid-owned) under a sticky/owned-safe
             // grandparent, then bind and lock the socket down to 0o600.
             check_uds_path_budget(endpoint)?;
-            prepare_unix_socket_parent(endpoint)?;
+            let prepared = prepare_unix_socket_parent(endpoint)?;
             unlink_stale_control_socket(endpoint)?;
             let listener = tokio::net::UnixListener::bind(endpoint).map_err(|e| {
                 TsgoApiError::Transport(format!(
@@ -328,6 +582,7 @@ impl ControlListener {
             Ok(Self {
                 endpoint: endpoint.to_string(),
                 listener,
+                owned_private_subdir: prepared.owned_private_subdir,
             })
         }
         #[cfg(not(any(windows, unix)))]
@@ -358,10 +613,28 @@ impl ControlListener {
             server.connect().await.map_err(|e| {
                 TsgoApiError::Transport(format!("control named pipe accept failed: {e}"))
             })?;
-            // Provision the next instance for a subsequent client.
-            let next = ServerOptions::new().create(&self.endpoint).map_err(|e| {
-                TsgoApiError::Transport(format!("provision next control pipe instance failed: {e}"))
-            })?;
+            // Provision the next instance for a subsequent client, with the SAME explicit
+            // owner-only DACL the bind instance carries (every instance matches the 0o600 bar).
+            let next = {
+                use std::ffi::c_void;
+                let security = owner_only_pipe_security::OwnerOnlyPipeSecurity::build()?;
+                let mut sa = security.security_attributes();
+                // SAFETY: as in `bind` — `sa` references `security`'s heap-stable owner-only
+                // descriptor, which outlives this create call.
+                let created = unsafe {
+                    ServerOptions::new().create_with_security_attributes_raw(
+                        &self.endpoint,
+                        std::ptr::addr_of_mut!(sa).cast::<c_void>(),
+                    )
+                }
+                .map_err(|e| {
+                    TsgoApiError::Transport(format!(
+                        "provision next control pipe instance failed: {e}"
+                    ))
+                })?;
+                drop(security);
+                created
+            };
             self.server = Some(next);
             let (read, write) = tokio::io::split(server);
             Ok((boxed_read(read), boxed_write(write)))
@@ -391,19 +664,14 @@ impl Drop for ControlListener {
         #[cfg(unix)]
         {
             let _ = std::fs::remove_file(&self.endpoint);
-            // Best-effort: if the socket lived in a listener-created PRIVATE per-session subdir
-            // (`vr-ctl-<hash>`) and that subdir is now empty, remove it too so a long-lived
-            // control_dir does not accumulate one empty 0o700 dir per shim start. `remove_dir` only
-            // removes an EMPTY dir, and the prefix gate keeps this off `control_dir` / any user dir;
+            // Best-effort: remove ONLY the PRIVATE per-session subdir THIS listener created
+            // (recorded at bind), and only if it is now empty, so a long-lived control_dir does not
+            // accumulate one empty 0o700 dir per shim start. A subdir that already existed and was
+            // merely reused is left in place — even if its name matches the `vr-ctl-` shape — so a
+            // pre-existing user directory is never deleted. `remove_dir` removes only an EMPTY dir;
             // errors are ignored so teardown never fails.
-            if let Some(parent) = std::path::Path::new(&self.endpoint).parent() {
-                let is_private_subdir = parent
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with(PRIVATE_SUBDIR_PREFIX));
-                if is_private_subdir {
-                    let _ = std::fs::remove_dir(parent);
-                }
+            if let Some(subdir) = &self.owned_private_subdir {
+                let _ = std::fs::remove_dir(subdir);
             }
         }
     }

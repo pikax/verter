@@ -40,6 +40,7 @@
     "benchmark:startup": "node e2e/startupBenchmark.mjs",
     "benchmark:completion": "node e2e/completionBenchmark.mjs",
     "package": "node package.mjs",
+    "package:dev:universal": "node package.mjs --allow-universal",
     "package:win32-x64": "node package.mjs --target win32-x64",
     "package:linux-x64": "node package.mjs --target linux-x64",
     "package:linux-arm64": "node package.mjs --target linux-arm64",

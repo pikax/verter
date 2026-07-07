@@ -59,6 +59,21 @@ use verter_tsgo_api::relay::LspRelay;
 /// `--real-tsgo`.
 const REAL_TSGO_ENV: &str = "VERTER_RELAY_REAL_TSGO";
 
+/// The stable ASCII identity marker embedded in the shim binary so a packaging step can prove a
+/// candidate file's BYTES are the Verter relay shim (not a renamed `tsgo` or an unrelated binary) by
+/// scanning for the pinned `VERTER_RELAY_SHIM_IDENTITY:v1:` prefix. The prefix is a CLOSED contract
+/// the packaging scanner greps for — it must not drift. The `--verter-shim-identity` handler prints
+/// this string (a reachable reference that keeps the literal), and [`SHIM_IDENTITY_MARKER`] pins its
+/// bytes in `.rodata` as a second retention.
+const SHIM_IDENTITY: &str = concat!("VERTER_RELAY_SHIM_IDENTITY:v1:", env!("CARGO_PKG_VERSION"));
+
+/// Belt-and-suspenders retention of [`SHIM_IDENTITY`]'s bytes in the shipped binary: `#[used]` keeps
+/// this static — and hence the literal it references — through compiler + linker dead-code
+/// elimination even if the print handler were ever removed, guaranteeing the marker is always
+/// scannable in the emitted bytes.
+#[used]
+static SHIM_IDENTITY_MARKER: &[u8] = SHIM_IDENTITY.as_bytes();
+
 /// The parsed shim CLI. `control_dir` / `session_key` are the CONTROL rendezvous args
 /// required ONLY by the `--lsp` relay path; a non-`--lsp` passthrough invocation (a
 /// probe such as `--version`) does not require them, so they are optional here and
@@ -84,14 +99,33 @@ fn main() -> ExitCode {
         }
     };
     let shim_exit = runtime.block_on(run());
-    // Shut the runtime down BEFORE converting: a `ShimExit::Signal` re-raises, and we want
-    // no tokio signal machinery / background threads alive when we restore the default
-    // disposition and raise.
+    // Shut the runtime down BEFORE exiting: a `ShimExit::Signal` re-raises, and we want no tokio
+    // signal machinery / background threads alive when we restore the default disposition and raise.
     drop(runtime);
-    shim_exit.into_exit_code()
+    shim_exit.exit()
+}
+
+/// Whether the shim's OWN top-level args request the hidden identity probe
+/// (`--verter-shim-identity`). The scan STOPS at the first `--` separator, so a real-tsgo arg
+/// forwarded after `--` can NEVER trigger the probe — the reserved flag is recognized ONLY among the
+/// shim's own args, never in the forwarded engine argv. Split out as a pure function so this narrow
+/// contract is unit-testable without the process argv.
+fn is_identity_probe(args: impl Iterator<Item = String>) -> bool {
+    args.take_while(|a| a != "--")
+        .any(|a| a == "--verter-shim-identity")
 }
 
 async fn run() -> ShimExit {
+    // The hidden identity probe: print the embedded identity marker and exit 0. Recognized ONLY
+    // among the shim's OWN top-level args ([`is_identity_probe`] stops the scan at the first `--`),
+    // so a real-tsgo arg forwarded after `--` can never trigger it. Checked BEFORE arg parsing (it
+    // needs no `--real-tsgo`) and BEFORE the relay / passthrough paths, so a packaging identity scan
+    // never has to supply engine args.
+    if is_identity_probe(std::env::args().skip(1)) {
+        println!("{SHIM_IDENTITY}");
+        return ShimExit::Code(0);
+    }
+
     let args = match parse_args() {
         Ok(args) => args,
         Err(message) => {
@@ -165,30 +199,254 @@ fn expect_value(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<S
         .ok_or_else(|| format!("{flag} requires a value"))
 }
 
-/// RAII ownership of the spawned real-tsgo child DURING `--lsp` setup.
+/// The spawned real-tsgo child. Containment is INTRINSIC to the spawn on BOTH platforms, so this is
+/// a thin wrapper that adds only the cooperative contained-kill; it holds no per-child job handle.
 ///
-/// The shim SPAWNED this child, so it owns its lifecycle. If any setup step AFTER the
-/// spawn but BEFORE steady-state hand-off fails — nonce minting, endpoint-path creation,
-/// control bind, advertisement write — the guard's `Drop` kills + synchronously reaps the
-/// child so the real tsgo is NEVER orphaned. The guard is disarmed ([`into_inner`]) only
-/// once the accept loop is running and steady-state teardown owns the child.
+/// OS-level containment is the PRIMARY "no orphaned tsgo" guarantee; the cooperative RAII
+/// ([`ChildSetupGuard`]) + Unix signal-handler paths are the BACKSTOP for graceful teardown. The
+/// hard case — the shim itself `SIGKILL`ed or hard-crashing so NEITHER `Drop` NOR a signal handler
+/// can run — is closed by the kernel, INTRINSICALLY AT SPAWN on both platforms:
 ///
-/// Kill semantics on setup failure are `start_kill` (SIGKILL on Unix, `TerminateProcess`
-/// on Windows) — never a graceful SIGTERM: setup never reached steady state, so there is
-/// no clean-shutdown contract to honor. `tokio::process::Child` has no async `Drop`, so
-/// the reap is a synchronous `try_wait` poll (the least-bad RAII answer — a spawn-and-
-/// forget async reaper is unreliable once `run()` returns and the runtime shuts down).
+/// - **Linux**: the child spawns with `PR_SET_PDEATHSIG = SIGKILL` (armed in `pre_exec`), so the
+///   kernel kills it the instant the shim dies, even on an uncatchable `SIGKILL` of the shim.
+/// - **Windows**: the shim assigns ITSELF to a `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` Job Object
+///   BEFORE spawning tsgo (see [`create_kill_on_close_job_and_self_assign`]); on Win8+ a job
+///   member's children join the job at CREATION (no breakaway limit is set), so tsgo is BORN into
+///   the kill-on-close job with ZERO spawn→assign window. The shim's sole job handle is held for the
+///   process lifetime and closed by the OS at exit — normal OR `TerminateProcess` — firing
+///   `KILL_ON_JOB_CLOSE` and reaping the child.
+/// - **Unix generally** (incl. macOS/BSD): the child spawns in its OWN session/process-group
+///   (`setsid`, falling back to `setpgid`), so cooperative teardown group-kills the whole subtree.
+///   macOS/BSD have NO parent-death primitive, so a HARD-killed shim there relies on the RAII /
+///   signal path (best-effort) — there is no kernel reap of an orphan on those platforms.
+struct OwnedChild {
+    child: Child,
+}
+
+impl OwnedChild {
+    /// Wrap a freshly spawned child. On BOTH platforms the child is ALREADY contained at spawn: on
+    /// Unix its own session/process-group (and on Linux `PR_SET_PDEATHSIG`) armed in `pre_exec`; on
+    /// Windows it is born into the shim's kill-on-close Job Object (the shim self-assigned to it
+    /// BEFORE the spawn), so there is no post-spawn containment step that could fail.
+    fn new(child: Child) -> Self {
+        Self { child }
+    }
+
+    /// Start an uncatchable kill of the child. On Unix this ALSO group-kills the child's process
+    /// group (its own session/group after `setsid`), reaping any tsgo grandchildren; `SIGKILL` is
+    /// still delivered to the direct child, so a subsequent `wait()` observes a `SIGKILL`
+    /// signal-exit exactly as a plain `start_kill()` would. On Windows this is the cooperative
+    /// `TerminateProcess` (the Job Object is the hard-kill backstop, not the cooperative kill).
+    fn start_contained_kill(&mut self) -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            if let Some(pid) = self.child.id() {
+                // The child is its own process-group leader (setsid/setpgid in `pre_exec`), so its
+                // pgid == pid; group-killing reaps the whole subtree.
+                // SAFETY: killpg with the child's own pgid + SIGKILL is async-signal-safe and only
+                // targets the child's own group.
+                unsafe {
+                    libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+                }
+            }
+        }
+        // The guaranteed direct-child kill (and the sole kill on Windows).
+        self.child.start_kill()
+    }
+}
+
+impl std::ops::Deref for OwnedChild {
+    type Target = Child;
+    fn deref(&self) -> &Child {
+        &self.child
+    }
+}
+
+impl std::ops::DerefMut for OwnedChild {
+    fn deref_mut(&mut self) -> &mut Child {
+        &mut self.child
+    }
+}
+
+/// An owning RAII wrapper for a Job Object handle (Windows), used ONLY while
+/// [`create_kill_on_close_job_and_self_assign`] sets the job up. On the error paths there — BEFORE
+/// the shim self-assigns — its `Drop` closes the handle, which is safe because the shim is not yet a
+/// job member. On SUCCESS the handle is deliberately LEAKED (`std::mem::forget`), never reaching this
+/// `Drop`: the shim IS a member of this `KILL_ON_JOB_CLOSE` job, so closing the last handle WHILE THE
+/// SHIM IS ALIVE would fire the kill against the shim itself. The handle is instead held for the
+/// whole process lifetime and closed by the OS at exit — normal OR `TerminateProcess` — which is
+/// exactly when `KILL_ON_JOB_CLOSE` should reap any surviving child.
+#[cfg(windows)]
+struct JobHandle(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl Drop for JobHandle {
+    fn drop(&mut self) {
+        // Reached ONLY on a setup error before the shim self-assigns (a success `mem::forget`s the
+        // handle). SAFETY: `self.0` is a job handle we own from `CreateJobObjectW`; closing it once
+        // is valid and releases the (memberless) job.
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
+}
+
+/// Create the kill-on-close Job Object and assign THIS shim process to it — called BEFORE spawning
+/// the real tsgo. On Win8+ a child created by a job member joins the member's job at CREATION (we set
+/// no breakaway limit), so the tsgo spawned NEXT is BORN into this `KILL_ON_JOB_CLOSE` job with ZERO
+/// spawn→assign window: a `TerminateProcess` of the shim can never leave an already-spawned tsgo
+/// outside the job. `tokio::process::Child` is used unchanged (no raw `CreateProcessW`) — the
+/// inheritance is automatic.
+///
+/// On SUCCESS the job handle is LEAKED (held for the process lifetime, closed by the OS at exit): the
+/// shim is itself a member of this kill-on-close job, so closing the last handle while alive would
+/// fire the kill against the shim. The OS closing it at exit — a normal exit OR a hard
+/// `TerminateProcess` — is precisely when `KILL_ON_JOB_CLOSE` should reap any surviving child. On
+/// FAILURE the handle is closed via the [`JobHandle`] RAII guard (the shim is not yet a member, so
+/// closing is safe) and the error propagates so setup fails closed BEFORE any child is spawned.
+#[cfg(windows)]
+fn create_kill_on_close_job_and_self_assign() -> Result<(), String> {
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+    // A NULL name + NULL attributes create an unnamed, NON-inheritable job: no child inherits the
+    // HANDLE (only job MEMBERSHIP, by default association), so closing our SOLE handle is what
+    // triggers KILL_ON_JOB_CLOSE.
+    // SAFETY: FFI per the Win32 contract; a NULL return is the documented failure sentinel.
+    let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+    if job.is_null() {
+        return Err(format!(
+            "CreateJobObjectW failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    // Own the handle NOW so every early return below closes it (the shim is not yet a member).
+    let job = JobHandle(job);
+
+    let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    // SAFETY: `info` is a fully-initialized extended-limit struct; we pass its exact byte size.
+    let set = unsafe {
+        SetInformationJobObject(
+            job.0,
+            JobObjectExtendedLimitInformation,
+            std::ptr::addr_of!(info).cast(),
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        )
+    };
+    if set == 0 {
+        return Err(format!(
+            "SetInformationJobObject failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    // Assign the SHIM ITSELF to the job. On Win8+ the tsgo spawned NEXT joins this job at creation (a
+    // job member's children are associated by default; no breakaway limit is set), closing the
+    // spawn→assign window entirely.
+    // SAFETY: GetCurrentProcess returns a pseudo-handle to this process; assigning it places THIS
+    // process — and, by default association, its future children — under KILL_ON_JOB_CLOSE.
+    let assigned = unsafe { AssignProcessToJobObject(job.0, GetCurrentProcess()) };
+    if assigned == 0 {
+        return Err(format!(
+            "AssignProcessToJobObject(self) failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    // Success: the shim is now a job member. LEAK the handle — it must stay open for the whole shim
+    // lifetime and be closed by the OS at process exit; closing it while the shim runs would fire
+    // KILL_ON_JOB_CLOSE against the shim itself.
+    std::mem::forget(job);
+    Ok(())
+}
+
+/// Contain a freshly-forked real-tsgo child before it `exec`s (Unix), bounding its lifecycle to the
+/// shim's. Runs IN the forked child, so it MUST call ONLY async-signal-safe libc functions.
+///
+/// - `setsid()` puts the child in its OWN session + process-group (it becomes the group leader), so
+///   cooperative teardown can `killpg` the whole subtree; on failure (already a group leader — not
+///   possible for a fresh fork, but defensive) it falls back to `setpgid(0, 0)`. If BOTH fail the
+///   child leads NO group of its own (its pgid stays inherited, not its own pid), so teardown's
+///   `killpg(child_pid)` MISSES the child's subtree — no group carries that pgid, leaving only the
+///   direct-child `start_kill`, so tsgo grandchildren could survive as orphans. The child
+///   `_exit(127)`s rather than run a subtree teardown cannot reap.
+/// - **Linux**: `PR_SET_PDEATHSIG = SIGKILL` makes the kernel kill the child when the shim dies —
+///   the hard-kill orphan guarantee. It is then re-checked against the pre-fork parent pid: if the
+///   parent ALREADY died in the fork→prctl window, `getppid()` no longer matches and the child
+///   `_exit(127)`s rather than running orphaned.
+#[cfg(unix)]
+fn contain_child_unix(parent_pid: u32) -> std::io::Result<()> {
+    // SAFETY: executed in the forked child before exec; every call here is async-signal-safe.
+    unsafe {
+        // Put the child in its OWN process group. `setsid` (new session + group leader) is the
+        // primary path; if it fails, fall back to `setpgid(0, 0)`. If BOTH fail the child leads no
+        // group of its own, so teardown's `killpg(child_pid)` MISSES the child's subtree (no group
+        // carries that pgid) — only the direct-child kill lands, so tsgo grandchildren could survive
+        // as orphans. Refuse to run rather than leave the subtree unreapable.
+        if libc::setsid() == -1 && libc::setpgid(0, 0) == -1 {
+            libc::_exit(127);
+        }
+        #[cfg(target_os = "linux")]
+        {
+            if libc::prctl(
+                libc::PR_SET_PDEATHSIG,
+                libc::SIGKILL as libc::c_ulong,
+                0,
+                0,
+                0,
+            ) == -1
+            {
+                libc::_exit(127);
+            }
+            // Close the fork→prctl race: if the parent already died, PDEATHSIG was armed against a
+            // subreaper (or nothing), so refuse to run orphaned.
+            if libc::getppid() != parent_pid as libc::pid_t {
+                libc::_exit(127);
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            // Non-Linux Unix has no parent-death signal; the process-group containment above plus
+            // the cooperative RAII / signal path are the (best-effort) guarantee. `parent_pid` is
+            // consumed only by the Linux pdeathsig re-check.
+            let _ = parent_pid;
+        }
+    }
+    Ok(())
+}
+
+/// RAII ownership of the spawned real-tsgo [`OwnedChild`] DURING `--lsp` setup.
+///
+/// OS containment (Job Object / `PR_SET_PDEATHSIG`) is the PRIMARY orphan guarantee and is intrinsic
+/// to the spawn (the Windows job is self-assigned BEFORE the spawn, Unix containment is armed in
+/// `pre_exec`); this guard is the cooperative-teardown BACKSTOP. The shim SPAWNED this child, so it
+/// owns its lifecycle. If any setup step AFTER the spawn but BEFORE steady-state hand-off fails —
+/// nonce minting, endpoint-path creation, control bind, advertisement write — the guard's `Drop`
+/// kills + synchronously reaps the child so the real tsgo never lingers until the shim itself exits.
+/// The guard is disarmed ([`into_inner`](Self::into_inner)) only once the accept loop is running and
+/// steady-state teardown owns the child.
+///
+/// Kill semantics on setup failure are `start_contained_kill` (SIGKILL on Unix — group-killing the
+/// child's subtree — / `TerminateProcess` on Windows) — never a graceful SIGTERM: setup never
+/// reached steady state, so there is no clean-shutdown contract to honor. `tokio::process::Child`
+/// has no async `Drop`, so the reap is a synchronous `try_wait` poll (the least-bad RAII answer — a
+/// spawn-and-forget async reaper is unreliable once `run()` returns and the runtime shuts down).
 struct ChildSetupGuard {
-    child: Option<Child>,
+    child: Option<OwnedChild>,
 }
 
 impl ChildSetupGuard {
-    fn new(child: Child) -> Self {
+    fn new(child: OwnedChild) -> Self {
         Self { child: Some(child) }
     }
 
     /// Borrow the guarded child (e.g. to take its piped stdio) while ARMED.
-    fn child_mut(&mut self) -> &mut Child {
+    fn child_mut(&mut self) -> &mut OwnedChild {
         self.child
             .as_mut()
             .expect("child is present until the steady-state hand-off")
@@ -196,10 +454,22 @@ impl ChildSetupGuard {
 
     /// Disarm the guard and hand the child to the steady-state owner. After this the
     /// guard's `Drop` is a no-op — teardown owns the child's status from here.
-    fn into_inner(mut self) -> Child {
+    fn into_inner(mut self) -> OwnedChild {
         self.child
             .take()
             .expect("child is present until the steady-state hand-off")
+    }
+
+    /// Kill + asynchronously reap the guarded child, consuming the guard (disarming its `Drop`).
+    /// Used when a shutdown signal wins the setup-window race: the child is torn down cooperatively
+    /// here (an async `wait`, the runtime still alive) rather than through the synchronous `Drop`
+    /// backstop.
+    #[cfg(unix)]
+    async fn kill_and_reap(mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.start_contained_kill();
+            let _ = child.wait().await;
+        }
     }
 }
 
@@ -208,12 +478,14 @@ impl Drop for ChildSetupGuard {
         let Some(mut child) = self.child.take() else {
             return; // disarmed: steady-state teardown owns the child.
         };
-        // Setup failed after spawn. Kill (if not already gone) and synchronously reap so
-        // the child is never orphaned. SIGKILL / TerminateProcess is uncatchable, so the
-        // poll terminates; a bounded cap is a defensive safety valve against a wedged reap
-        // (leaking is strictly better than hanging the shim's own teardown forever).
+        // Setup failed after spawn. Kill (if not already gone) and synchronously reap so the child
+        // does not linger until the shim exits. SIGKILL / TerminateProcess is uncatchable, so the
+        // poll terminates; a bounded cap is a defensive safety valve against a wedged reap (leaking
+        // is strictly better than hanging the shim's own teardown forever). On Windows the shim's
+        // self-assigned kill-on-close job (closed by the OS if the shim itself dies) is the hard
+        // backstop.
         if let Ok(None) = child.try_wait() {
-            let _ = child.start_kill();
+            let _ = child.start_contained_kill();
         }
         for _ in 0..2000 {
             match child.try_wait() {
@@ -229,8 +501,10 @@ impl Drop for ChildSetupGuard {
 /// that signal — never masked as a clean exit.
 #[derive(Debug)]
 enum ShimExit {
-    /// A normal exit with this status code.
-    Code(u8),
+    /// A normal exit with this FULL-WIDTH status code. Carried as `i32` (not `u8`) so a Windows
+    /// NTSTATUS-shaped code survives intact; the terminal [`exit`](Self::exit) uses
+    /// `std::process::exit` because `ExitCode::from` only accepts `u8` and would clamp it.
+    Code(i32),
     /// A Unix signal-termination, re-raised at [`main`] so the shim exits VIA the signal.
     #[cfg(unix)]
     Signal(i32),
@@ -247,25 +521,45 @@ impl ShimExit {
                 return ShimExit::Signal(sig);
             }
         }
-        ShimExit::Code(status.code().map(|code| (code & 0xff) as u8).unwrap_or(1))
+        // Preserve the FULL exit code — no `& 0xff` truncation. A Unix wait-status exit code is
+        // already 8-bit by POSIX, but a Windows code can be a full 32-bit NTSTATUS-shaped value, so
+        // narrowing here would corrupt it (e.g. 0xC0000005 → 5).
+        ShimExit::Code(status.code().unwrap_or(1))
     }
 
-    /// Convert to the OS exit at the outermost [`main`]. A [`ShimExit::Signal`] restores
-    /// the default disposition and re-raises, so the shim terminates with the SAME signal
-    /// (a signal-killed engine / shim must not report a clean exit); the `128 + signo`
-    /// fallback only applies if the re-raise somehow returns.
-    fn into_exit_code(self) -> ExitCode {
+    /// Terminate the process at the outermost [`main`] with the shim's faithful exit. A
+    /// [`ShimExit::Code`] exits with the FULL-WIDTH code via [`std::process::exit`] (`ExitCode::from`
+    /// only accepts `u8`, so it would clamp a Windows NTSTATUS-shaped code). A [`ShimExit::Signal`]
+    /// restores the DEFAULT disposition, UNBLOCKS the signal, and re-raises so the shim terminates
+    /// with the SAME signal (a signal-killed engine / shim must never report a clean exit); the
+    /// trailing `_exit(128 + signo)` runs only if `raise` somehow returns.
+    fn exit(self) -> ! {
         match self {
-            ShimExit::Code(code) => ExitCode::from(code),
+            ShimExit::Code(code) => std::process::exit(code),
             #[cfg(unix)]
             ShimExit::Signal(sig) => {
-                // SAFETY: restoring the default disposition (`signal`) and `raise` are
-                // async-signal-safe libc calls, and the async runtime is already shut down.
+                // Restore the DEFAULT disposition via `sigaction` (not the weaker, less-portable
+                // `signal`), UNBLOCK the signal so an inherited mask can never suppress it, then
+                // re-raise so the shim dies from the SAME signal. Every call is async-signal-safe and
+                // the async runtime is already shut down (no tokio signal machinery alive).
+                // SAFETY: libc signal primitives on a valid signal number; the runtime is dropped.
                 unsafe {
-                    libc::signal(sig, libc::SIG_DFL);
+                    let mut act: libc::sigaction = std::mem::zeroed();
+                    act.sa_sigaction = libc::SIG_DFL;
+                    libc::sigemptyset(&mut act.sa_mask);
+                    act.sa_flags = 0;
+                    libc::sigaction(sig, &act, std::ptr::null_mut());
+
+                    let mut unblock: libc::sigset_t = std::mem::zeroed();
+                    libc::sigemptyset(&mut unblock);
+                    libc::sigaddset(&mut unblock, sig);
+                    libc::sigprocmask(libc::SIG_UNBLOCK, &unblock, std::ptr::null_mut());
+
                     libc::raise(sig);
+                    // `raise` should not return for a default-fatal signal; if it does, `_exit` (NOT
+                    // a normal return) avoids re-running any teardown and reports `128 + signo`.
+                    libc::_exit(128 + (sig & 0xff));
                 }
-                ExitCode::from(128u8.wrapping_add((sig & 0xff) as u8))
             }
         }
     }
@@ -323,6 +617,73 @@ impl ShutdownSignals {
         })
         .await
     }
+
+    /// A NON-BLOCKING poll of the shutdown signals: return the FIRST already-pending signal number,
+    /// or `None`. Polling with a no-op waker never parks the task — it just reads what tokio has
+    /// already buffered. Used to re-check for a signal delivered DURING the synchronous setup body,
+    /// after the setup-window select has already polled its signal arm once, so a signal buffered
+    /// mid-setup is not masked as a `Code(1)` setup error.
+    fn try_recv(&mut self) -> Option<i32> {
+        let waker = std::task::Waker::noop();
+        let mut cx = std::task::Context::from_waker(waker);
+        for (num, stream) in &mut self.streams {
+            if stream.poll_recv(&mut cx).is_ready() {
+                return Some(*num);
+            }
+        }
+        None
+    }
+}
+
+/// The outcome of the [`run_relay`] setup-window race: EITHER a shutdown signal delivered while the
+/// fallible post-spawn setup was still in flight, OR the setup's completion. Unix-only — Windows has
+/// no shutdown signals, so its setup runs linearly with no race.
+#[cfg(unix)]
+enum SetupOutcome<T> {
+    /// A shutdown signal was delivered during setup.
+    Signalled(i32),
+    /// The fallible setup finished — `Ok` with the steady-state handles, or a propagated `Err`.
+    Done(Result<T, String>),
+}
+
+/// How the setup-window race resolves into the shim's next action.
+#[cfg(unix)]
+enum SetupResolution<T> {
+    /// Re-raise this signal (after killing + reaping the guarded child).
+    Signal(i32),
+    /// Setup succeeded — proceed to steady state with these handles.
+    Proceed(T),
+    /// Setup errored with no signal — return this as the `Code(1)` path.
+    Error(String),
+}
+
+/// Resolve the setup-window race. A delivered shutdown signal WINS: it is re-raised as
+/// [`SetupResolution::Signal`] even when setup was interrupted mid-flight, because a shutdown signal
+/// is the faithful process outcome and must NEVER be masked as the `Code(1)` setup-error path.
+///
+/// The setup body runs SYNCHRONOUSLY (its only `.await` is a detached accept task), so the
+/// setup-window select polls its signal arm just ONCE; a signal delivered DURING setup that then
+/// ERRORS is not seen by that select. `pending_signal_after_setup` carries a non-blocking re-poll of
+/// the shutdown signals taken on the error path: when it is `Some`, the setup error is superseded by
+/// the faithful signal re-raise. A clean setup maps to [`SetupResolution::Proceed`] regardless (the
+/// steady-state biased select observes any still-pending signal); only a setup error with NO pending
+/// signal maps to [`SetupResolution::Error`]. Kept a pure function so every ordering is unit-testable
+/// deterministically (the microscopic real-timing race is not portably forceable).
+#[cfg(unix)]
+fn resolve_setup_race<T>(
+    outcome: SetupOutcome<T>,
+    pending_signal_after_setup: Option<i32>,
+) -> SetupResolution<T> {
+    match outcome {
+        SetupOutcome::Signalled(signum) => SetupResolution::Signal(signum),
+        SetupOutcome::Done(Ok(handles)) => SetupResolution::Proceed(handles),
+        // A setup ERROR does NOT win over a shutdown signal that became pending during the
+        // synchronous setup body: re-raise that signal faithfully instead of masking it as Code(1).
+        SetupOutcome::Done(Err(message)) => match pending_signal_after_setup {
+            Some(signum) => SetupResolution::Signal(signum),
+            None => SetupResolution::Error(message),
+        },
+    }
 }
 
 /// A SHORT grace check on editor disconnect: if the child has already exited (or exits
@@ -337,11 +698,15 @@ async fn grace_check_child_exit(child: &mut Child) -> Option<ExitStatus> {
 }
 
 /// Classify the child's FINAL status after a relay-stop kill. When the child outlived the grace
-/// window WE own the kill, but the reaped status must still be inspected: a plain `SIGKILL` is OUR
-/// kill (a clean editor-disconnect exit → `Code(0)`), whereas ANY other status means the child died
-/// on its OWN in the race between the grace deadline and our kill (a self-signal or a non-zero
-/// self-exit) — propagate THAT faithfully via [`ShimExit::from_status`] so an engine crash is never
-/// masked as a clean disconnect. Blindly returning `Code(0)` here would hide exactly that crash.
+/// window WE own the kill, but the reaped status must still be inspected. We treat a bare `SIGKILL`
+/// after our relay-stop kill as OUR kill — a clean editor-disconnect exit → `Code(0)` — while
+/// ACKNOWLEDGING that we CANNOT DISTINGUISH it from a child self-`SIGKILL` or an OOM-kill racing the
+/// teardown deadline: a wait status carries no origin, so this `SIGKILL` attribution gap is a known
+/// RESIDUAL ambiguity, not a guarantee. ANY OTHER status means the child died on its OWN between the
+/// grace deadline and our kill (a DISTINGUISHABLE self-signal or a non-zero self-exit) — that case is
+/// propagated faithfully via [`ShimExit::from_status`]. (The `SIGKILL` attribution gap can only be
+/// closed with process-origin telemetry — a pidfd / process-handle death record — which a wait
+/// status does not carry.)
 fn shim_exit_after_relay_stop_kill(status: ExitStatus) -> ShimExit {
     #[cfg(unix)]
     {
@@ -364,6 +729,12 @@ fn shim_exit_after_relay_stop_kill(status: ExitStatus) -> ShimExit {
 /// Pass a non-`--lsp` invocation straight through to the real tsgo with
 /// inherited stdio, propagating its exit FAITHFULLY (a Unix signal-exit is re-raised at
 /// [`main`], never masked as a code).
+///
+/// This passthrough child is INTENTIONALLY UNCONTAINED: unlike the `--lsp` relay child it gets NO OS
+/// containment (no Job Object / `setsid` / `PR_SET_PDEATHSIG`) and NO shutdown-signal handlers. The
+/// "no orphaned tsgo" containment contract covers the `--lsp` relay child ONLY — a passthrough is a
+/// short-lived probe (`--version`, `--help`) run to completion with inherited stdio, so there is no
+/// long-lived engine to orphan.
 async fn passthrough(args: &ShimArgs) -> ShimExit {
     let status = Command::new(&args.real_tsgo)
         .args(&args.forwarded)
@@ -408,6 +779,43 @@ async fn run_relay(args: ShimArgs) -> Result<ShimExit, String> {
     #[cfg(unix)]
     let mut shutdown_signals = ShutdownSignals::install()?;
 
+    // Windows: create the kill-on-close Job Object and assign THIS shim process to it BEFORE
+    // spawning tsgo. On Win8+ a job member's children join the job at CREATION (no breakaway limit
+    // is set), so the tsgo spawned next is BORN into the kill-on-close job with ZERO spawn→assign
+    // window — a `TerminateProcess` of the shim can never orphan an already-spawned tsgo. A failure
+    // here returns BEFORE any child is spawned, so it too can never orphan. (Unix containment is
+    // intrinsic to the `pre_exec` spawn below.)
+    #[cfg(windows)]
+    create_kill_on_close_job_and_self_assign()
+        .map_err(|e| format!("contain the relay shim in a job object: {e}"))?;
+
+    // Spawn the real tsgo under OS-level containment — the PRIMARY "no orphaned tsgo" guarantee,
+    // INTRINSIC to the spawn on BOTH platforms: Unix → its own session/process-group (+ Linux
+    // PR_SET_PDEATHSIG) armed in `pre_exec`; Windows → born into the shim's kill-on-close Job Object
+    // (self-assigned just above). The RAII guard is the cooperative-teardown backstop. The signal
+    // install above precedes this spawn, so no spawn→install window can orphan the child on a signal.
+    #[cfg(unix)]
+    let child = {
+        use std::os::unix::process::CommandExt;
+        // Captured BEFORE the fork so the forked child can detect a parent that already died in the
+        // fork→pdeathsig window and refuse to run orphaned.
+        let parent_pid = std::process::id();
+        let mut std_cmd = std::process::Command::new(&args.real_tsgo);
+        std_cmd
+            .args(&args.forwarded)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit());
+        // SAFETY: the `pre_exec` closure runs in the forked child before exec and calls ONLY
+        // async-signal-safe libc functions (see `contain_child_unix`).
+        unsafe {
+            std_cmd.pre_exec(move || contain_child_unix(parent_pid));
+        }
+        Command::from(std_cmd)
+            .spawn()
+            .map_err(|e| format!("spawn real tsgo {:?}: {e}", args.real_tsgo))?
+    };
+    #[cfg(not(unix))]
     let child = Command::new(&args.real_tsgo)
         .args(&args.forwarded)
         .stdin(Stdio::piped())
@@ -421,77 +829,127 @@ async fn run_relay(args: ShimArgs) -> Result<ShimExit, String> {
     // handlers already installed, a signal delivered anywhere from the spawn through to the
     // post-accept disarm is buffered and observed by the steady-state select (which reaps the
     // child); any fallible setup step in between instead unwinds through this armed guard.
-    let mut child_guard = ChildSetupGuard::new(child);
+    let mut child_guard = ChildSetupGuard::new(OwnedChild::new(child));
 
-    let child_stdin = child_guard
-        .child_mut()
-        .stdin
-        .take()
-        .ok_or("real tsgo child stdin was not piped")?;
-    let child_stdout = child_guard
-        .child_mut()
-        .stdout
-        .take()
-        .ok_or("real tsgo child stdout was not piped")?;
+    // The fallible post-spawn setup: take the child's piped stdio, start the relay, mint the
+    // rendezvous witnesses, bind the control endpoint, publish the advertisement, and spawn the
+    // control accept loop. On Unix this is RACED against a shutdown signal (below) with signal
+    // priority, so a signal buffered DURING setup is re-raised faithfully rather than masked as the
+    // `Code(1)` setup-error path.
+    let setup = async {
+        let child_stdin = child_guard
+            .child_mut()
+            .stdin
+            .take()
+            .ok_or("real tsgo child stdin was not piped")?;
+        let child_stdout = child_guard
+            .child_mut()
+            .stdout
+            .take()
+            .ok_or("real tsgo child stdout was not piped")?;
 
-    // The relay: editor side = this process's stdio; server side = the child.
-    let relay = Arc::new(LspRelay::start(
-        tokio::io::stdin(),
-        tokio::io::stdout(),
-        child_stdout,
-        child_stdin,
-    ));
+        // The relay: editor side = this process's stdio; server side = the child.
+        let relay = Arc::new(LspRelay::start(
+            tokio::io::stdin(),
+            tokio::io::stdout(),
+            child_stdout,
+            child_stdin,
+        ));
 
-    // Rendezvous witnesses.
-    let pid = std::process::id();
-    let nonce = mint_nonce()?;
-    let editor_session_generation = mint_generation();
-    let wire_pin = PINNED.wire_fingerprint();
-    let disambiguator = format!("{:016x}", stable_hash_str(&nonce));
+        // Rendezvous witnesses.
+        let pid = std::process::id();
+        let nonce = mint_nonce()?;
+        let editor_session_generation = mint_generation();
+        let wire_pin = PINNED.wire_fingerprint();
+        let disambiguator = format!("{:016x}", stable_hash_str(&nonce));
 
-    // Bind the control endpoint and record its actual path in the advertisement.
-    let endpoint = control_endpoint_path(control_dir, session_key, pid, &disambiguator);
-    let mut listener =
-        ControlListener::bind(&endpoint).map_err(|e| format!("bind control endpoint: {e}"))?;
-    let endpoint = listener.endpoint().to_string();
+        // Bind the control endpoint and record its actual path in the advertisement.
+        let endpoint = control_endpoint_path(control_dir, session_key, pid, &disambiguator);
+        let mut listener =
+            ControlListener::bind(&endpoint).map_err(|e| format!("bind control endpoint: {e}"))?;
+        let endpoint = listener.endpoint().to_string();
 
-    let real_tsgo_str = args.real_tsgo.to_string_lossy().into_owned();
-    let advertisement = Advertisement {
-        advertisement_version: ADVERTISEMENT_VERSION,
-        protocol: PROTOCOL_VERSION,
-        endpoint,
-        nonce: nonce.clone(),
-        pid,
-        session_key: session_key.to_string(),
-        real_tsgo: real_tsgo_str.clone(),
-        real_tsgo_hash: stable_hash_str(&real_tsgo_str),
-        wire_pin,
-        editor_session_generation,
+        let real_tsgo_str = args.real_tsgo.to_string_lossy().into_owned();
+        let advertisement = Advertisement {
+            advertisement_version: ADVERTISEMENT_VERSION,
+            protocol: PROTOCOL_VERSION,
+            endpoint,
+            nonce: nonce.clone(),
+            pid,
+            session_key: session_key.to_string(),
+            real_tsgo: real_tsgo_str.clone(),
+            real_tsgo_hash: stable_hash_str(&real_tsgo_str),
+            wire_pin,
+            editor_session_generation,
+        };
+        let advertisement_path = advertisement
+            .write(control_dir)
+            .map_err(|e| format!("write advertisement: {e}"))?;
+
+        // The control accept loop: a fresh control server per accepted connection,
+        // all sharing the ONE relay. A `verter/detach` closes ONLY its own control
+        // connection (non-destructive); the shim's teardown is owned by the editor /
+        // real-tsgo lifecycle below, never by a Verter control message.
+        let relay_for_accept = Arc::clone(&relay);
+        let accept_task = tokio::spawn(async move {
+            let session_counter = AtomicU64::new(0);
+            // Accept until the listener stops (a listener error ends the loop).
+            while let Ok((read, write)) = listener.accept().await {
+                let n = session_counter.fetch_add(1, Ordering::Relaxed);
+                let server = ControlServer::new(
+                    Arc::clone(&relay_for_accept),
+                    nonce.clone(),
+                    editor_session_generation,
+                    wire_pin,
+                    format!("ctl-{pid}-{n}"),
+                );
+                tokio::spawn(server.serve(read, write));
+            }
+        });
+
+        Ok::<(Arc<LspRelay>, PathBuf, tokio::task::JoinHandle<()>), String>((
+            relay,
+            advertisement_path,
+            accept_task,
+        ))
     };
-    let advertisement_path = advertisement
-        .write(control_dir)
-        .map_err(|e| format!("write advertisement: {e}"))?;
 
-    // The control accept loop: a fresh control server per accepted connection,
-    // all sharing the ONE relay. A `verter/detach` closes ONLY its own control
-    // connection (non-destructive); the shim's teardown is owned by the editor /
-    // real-tsgo lifecycle below, never by a Verter control message.
-    let relay_for_accept = Arc::clone(&relay);
-    let accept_task = tokio::spawn(async move {
-        let session_counter = AtomicU64::new(0);
-        // Accept until the listener stops (a listener error ends the loop).
-        while let Ok((read, write)) = listener.accept().await {
-            let n = session_counter.fetch_add(1, Ordering::Relaxed);
-            let server = ControlServer::new(
-                Arc::clone(&relay_for_accept),
-                nonce.clone(),
-                editor_session_generation,
-                wire_pin,
-                format!("ctl-{pid}-{n}"),
-            );
-            tokio::spawn(server.serve(read, write));
+    // Resolve the setup window. On Unix, RACE the fallible setup against a shutdown signal with
+    // SIGNAL PRIORITY (`biased`): a signal delivered while setup is in flight is the faithful
+    // process outcome — the still-ARMED guard kills + reaps the OWNED child (no orphan) and the
+    // signal is re-raised, never masked as `Code(1)`. A setup error with no signal takes the error
+    // path (the armed guard reaps as the `Err` unwinds). Windows has no shutdown signals, so its
+    // setup runs linearly.
+    #[cfg(unix)]
+    let (relay, advertisement_path, accept_task) = {
+        let outcome = tokio::select! {
+            biased;
+            signum = shutdown_signals.recv() => SetupOutcome::Signalled(signum),
+            res = setup => SetupOutcome::Done(res),
+        };
+        // The setup body runs SYNCHRONOUSLY (its only `.await` is the detached accept task), so the
+        // select above polled its signal arm just once. A shutdown signal delivered DURING setup that
+        // then ERRORED would otherwise be masked as `Code(1)`; re-poll non-blockingly on the error
+        // path to recover it BEST-EFFORT. Not guaranteed: `try_recv` only sees a signal another
+        // worker already pumped through the I/O reactor in that window (tokio's `Signal::poll_recv`
+        // does not itself turn the signal driver). A missed signal still reaps the OWNED child (no
+        // orphan) and only degrades exit-code fidelity to `Code(1)` in an extreme race — never an
+        // orphan, never on the Ok path.
+        let pending_signal_after_setup = match &outcome {
+            SetupOutcome::Done(Err(_)) => shutdown_signals.try_recv(),
+            _ => None,
+        };
+        match resolve_setup_race(outcome, pending_signal_after_setup) {
+            SetupResolution::Signal(signum) => {
+                child_guard.kill_and_reap().await;
+                return Ok(ShimExit::Signal(signum));
+            }
+            SetupResolution::Error(message) => return Err(message),
+            SetupResolution::Proceed(handles) => handles,
         }
-    });
+    };
+    #[cfg(not(unix))]
+    let (relay, advertisement_path, accept_task) = setup.await?;
 
     // Steady-state hand-off: the accept loop is running and every fallible setup step
     // (including the Unix signal-handler install above) has SUCCEEDED, so disarm the guard and
@@ -530,6 +988,10 @@ async fn run_relay(args: ShimArgs) -> Result<ShimExit, String> {
     // SPAWNED this tsgo, so it owns THIS child's lifecycle; the editor's own relayed
     // `exit` already passed through transparently if the editor sent it.
     accept_task.abort();
+    // Await the aborted accept task so its control listener (the UDS socket file on Unix / the
+    // named pipe on Windows) is DETERMINISTICALLY dropped before we return, rather than left to
+    // runtime drop timing — a fresh shim on the same endpoint must not race a lingering listener.
+    let _ = accept_task.await;
     remove_advertisement(&advertisement_path);
 
     // SINGLE status owner: exactly one path reaps the child. Its faithful exit propagates
@@ -552,7 +1014,7 @@ async fn run_relay(args: ShimArgs) -> Result<ShimExit, String> {
                 // a child that died on its OWN in the race between the grace deadline and our kill
                 // surfaces a different status — propagate THAT faithfully rather than masking an
                 // engine crash as a clean Code(0) disconnect.
-                let _ = child.start_kill();
+                let _ = child.start_contained_kill();
                 match child.wait().await {
                     Ok(status) => shim_exit_after_relay_stop_kill(status),
                     // Could not reap the final status; the clean editor-disconnect exit stands.
@@ -564,7 +1026,7 @@ async fn run_relay(args: ShimArgs) -> Result<ShimExit, String> {
         // report the signal so `main` re-raises it (faithful signal-exit).
         #[cfg(unix)]
         Teardown::Signal(signum) => {
-            let _ = child.start_kill();
+            let _ = child.start_contained_kill();
             let _ = child.wait().await;
             ShimExit::Signal(signum)
         }
@@ -597,204 +1059,5 @@ fn mint_generation() -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn tokens(args: &[&str]) -> std::vec::IntoIter<String> {
-        args.iter()
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>()
-            .into_iter()
-    }
-
-    fn is_lsp(args: &ShimArgs) -> bool {
-        args.forwarded.iter().any(|a| a == "--lsp")
-    }
-
-    /// A non-`--lsp` passthrough probe parses WITHOUT requiring the control rendezvous
-    /// args and routes to passthrough — not the relay, and NOT an arg error (the
-    /// advertised transparent-`tsc`-for-probes behaviour). Pre-fix this errored on the
-    /// missing `--control-dir`/`--session-key`.
-    #[test]
-    fn non_lsp_probe_parses_and_routes_to_passthrough() {
-        let args = parse_args_from(tokens(&["--real-tsgo", "/opt/tsgo", "--", "--version"]))
-            .expect("a `--real-tsgo X -- --version` probe must parse WITHOUT control args");
-        assert_eq!(args.real_tsgo, PathBuf::from("/opt/tsgo"));
-        assert!(
-            args.control_dir.is_none(),
-            "a probe requires no --control-dir"
-        );
-        assert!(
-            args.session_key.is_none(),
-            "a probe requires no --session-key"
-        );
-        assert_eq!(args.forwarded, vec!["--version".to_string()]);
-        assert!(!is_lsp(&args), "no --lsp ⇒ the passthrough route is taken");
-    }
-
-    /// The `--lsp` relay path parses the control rendezvous args and is detected as the
-    /// relay route (the control args are enforced in `run_relay`).
-    #[test]
-    fn lsp_relay_parses_with_control_args() {
-        let args = parse_args_from(tokens(&[
-            "--real-tsgo",
-            "/opt/tsgo",
-            "--control-dir",
-            "/tmp/ctl",
-            "--session-key",
-            "sess-1",
-            "--",
-            "--lsp",
-            "--stdio",
-        ]))
-        .expect("the full --lsp relay invocation must parse");
-        assert_eq!(args.control_dir, Some(PathBuf::from("/tmp/ctl")));
-        assert_eq!(args.session_key.as_deref(), Some("sess-1"));
-        assert_eq!(
-            args.forwarded,
-            vec!["--lsp".to_string(), "--stdio".to_string()]
-        );
-        assert!(is_lsp(&args), "--lsp ⇒ the relay route is taken");
-    }
-
-    /// The CLI contract shape is preserved: an unknown flag BEFORE `--` is still an
-    /// arg error (only the control-arg requirement moved to the `--lsp` path).
-    #[test]
-    fn unknown_flag_before_dashdash_is_still_an_error() {
-        let err = parse_args_from(tokens(&["--real-tsgo", "/opt/tsgo", "--bogus"]))
-            .expect_err("an unknown flag before -- must still error");
-        assert!(
-            err.contains("bogus"),
-            "the error must name the unknown arg; got {err:?}"
-        );
-    }
-
-    /// F1 — the Unix shutdown-signal install MUST precede BOTH the child spawn AND the guard
-    /// disarm, and NOTHING fallible may sit between the disarm and the steady-state select. An
-    /// install AFTER the spawn leaves a spawn→install window: a signal in that window kills the
-    /// shim by the default disposition before the RAII guard can reap, orphaning the child. An
-    /// install after the `into_inner` disarm leaves the same orphan window at the tail. The runtime
-    /// orphan test cannot portably inject a signal into that microscopic window, so this is a
-    /// source-structure guard on the ordering invariant. Anchored within `run_relay` so the
-    /// passthrough `Command` (which uses `.status()`, not `.spawn()`) is never mistaken for the
-    /// relay child spawn.
-    #[test]
-    fn shutdown_signal_install_precedes_spawn_and_disarm() {
-        let src = include_str!("main.rs");
-        let run_relay = src
-            .find("async fn run_relay(")
-            .expect("run_relay is present");
-        let region = &src[run_relay..];
-        let install = region
-            .find("ShutdownSignals::install()")
-            .expect("the shutdown-signal install call site is present in run_relay");
-        let spawn = region
-            .find(".spawn()")
-            .expect("the real-tsgo child spawn is present in run_relay");
-        let disarm = region
-            .find("child_guard.into_inner()")
-            .expect("the guard disarm hand-off is present in run_relay");
-        // The handlers must install BEFORE the child spawn — from the instant the child exists a
-        // signal must be caught, never able to kill the shim by default and orphan the child.
-        assert!(
-            install < spawn,
-            "the Unix shutdown-signal install (byte {install}) must run BEFORE the real-tsgo child \
-             spawn (byte {spawn}) so no spawn→install window can orphan the child on a signal"
-        );
-        // ...and before the guard disarm, so a failed install or a setup-window signal unwinds
-        // through the ARMED guard and never orphans the child.
-        assert!(
-            install < disarm,
-            "the shutdown-signal install (byte {install}) must run BEFORE the guard disarm \
-             (byte {disarm})"
-        );
-        // No fallible `?` may sit between the disarm and the steady-state select — the disarm
-        // is the last fallible-free hand-off. Strip line comments so a prose `?` never trips it.
-        let after_disarm = &region[disarm..];
-        let select_off = after_disarm
-            .find("let teardown =")
-            .expect("the steady-state teardown select follows the disarm");
-        let between_code: String = after_disarm[..select_off]
-            .lines()
-            .map(|line| line.split("//").next().unwrap_or(""))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(
-            !between_code.contains('?'),
-            "no fallible `?` may sit between the guard disarm and the steady-state select; \
-             found one in: {between_code:?}"
-        );
-    }
-
-    /// F7(a) — the Unix teardown select must be `biased` with the shutdown-signal arm FIRST,
-    /// so a signal already delivered to the shim is re-raised faithfully rather than losing to
-    /// an also-ready relay/child arm and exiting by code. An unbiased select (or a
-    /// signal-arm-last ordering) can drop a pending SIGTERM. Source-structure guard on the
-    /// tie-break ordering (a select! tie is not deterministically forceable at runtime).
-    #[test]
-    fn teardown_select_prioritizes_the_shutdown_signal() {
-        let src = include_str!("main.rs");
-        let signal_arm = src
-            .find("signum = shutdown_signals.recv()")
-            .expect("the unix teardown signal arm is present");
-        let biased = src[..signal_arm]
-            .rfind("biased;")
-            .expect("the unix teardown select is `biased`");
-        let child_arm = src[signal_arm..]
-            .find("status = child.wait()")
-            .map(|off| signal_arm + off)
-            .expect("the child-exit arm follows the signal arm");
-        assert!(
-            biased < signal_arm,
-            "the teardown select must be `biased` (byte {biased}) before the signal arm \
-             (byte {signal_arm})"
-        );
-        assert!(
-            signal_arm < child_arm,
-            "the shutdown-signal arm (byte {signal_arm}) must be polled BEFORE the child/relay \
-             arms (byte {child_arm}) — biased signal-priority"
-        );
-    }
-
-    /// G5 — the relay-stop kill classifier returns a clean `Code(0)` ONLY for OUR SIGKILL; a child
-    /// that died on its OWN (a self-signal or a non-zero self-exit in the race just after the grace
-    /// deadline) is propagated faithfully, never masked as a clean disconnect. UNIX-ONLY (constructs
-    /// raw wait statuses via `ExitStatusExt::from_raw`); the microscopic post-grace race is not
-    /// portably inducible in a live test, so the decision function is exercised directly.
-    ///
-    /// Discriminating-by-construction: a classifier that blindly returns `Code(0)` after the
-    /// relay-stop kill (the pre-fix branch) FAILS the SIGTERM + non-zero-exit cases below.
-    #[cfg(unix)]
-    #[test]
-    fn relay_stop_kill_classifier_propagates_child_self_death_not_code_zero() {
-        use std::os::unix::process::ExitStatusExt;
-
-        // OUR SIGKILL of a still-alive child → a clean editor-disconnect exit.
-        let killed = ExitStatus::from_raw(libc::SIGKILL);
-        assert!(
-            matches!(shim_exit_after_relay_stop_kill(killed), ShimExit::Code(0)),
-            "our SIGKILL of a still-alive child is a clean Code(0) disconnect"
-        );
-
-        // The child self-signalled (an engine crash via SIGTERM) → re-raise the signal, not Code(0).
-        let self_signalled = ExitStatus::from_raw(libc::SIGTERM);
-        assert!(
-            matches!(
-                shim_exit_after_relay_stop_kill(self_signalled),
-                ShimExit::Signal(sig) if sig == libc::SIGTERM
-            ),
-            "a child that died from its OWN SIGTERM must be re-raised, not masked as Code(0)"
-        );
-
-        // The child self-exited non-zero (a crash exit code) → propagate the code, not Code(0).
-        // A raw wait status encodes the exit code in bits 8..16 (`code << 8`).
-        let self_exited = ExitStatus::from_raw(42 << 8);
-        assert!(
-            matches!(
-                shim_exit_after_relay_stop_kill(self_exited),
-                ShimExit::Code(42)
-            ),
-            "a child that self-exited non-zero must propagate that code, not Code(0)"
-        );
-    }
-}
+#[path = "main_tests.rs"]
+mod tests;

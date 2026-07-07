@@ -746,6 +746,107 @@ fn heartbeat_len(path: &Path) -> u64 {
     std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
 }
 
+/// Sample any file's byte length (0 if absent). The Unix-only `heartbeat_len` above does not
+/// exist on Windows; the hard-kill orphan test runs on BOTH Linux and Windows, so it needs a
+/// platform-neutral sampler.
+#[cfg(any(target_os = "linux", windows))]
+fn file_len(path: &Path) -> u64 {
+    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
+/// HARD-kill the shim so NEITHER its RAII `Drop` NOR its Unix signal handlers can run — only the
+/// OS containment primitive can then reap the OWNED child.
+#[cfg(windows)]
+fn hard_kill_shim(shim: &mut Child) {
+    // `start_kill` maps to `TerminateProcess`: an uncatchable OS kill with no Drop / atexit /
+    // handler — exactly the residual orphan window a kill-on-close Job Object closes.
+    let _ = shim.start_kill();
+}
+#[cfg(target_os = "linux")]
+fn hard_kill_shim(shim: &mut Child) {
+    if let Some(pid) = shim.id() {
+        // SAFETY: SIGKILL to a live pid — uncatchable, no handler, no Drop, no cleanup.
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        }
+    }
+}
+
+/// F1(OS) — OS-BACKED CONTAINMENT is the PRIMARY orphan guarantee. A shim that is HARD-killed
+/// (`TerminateProcess` on Windows / an uncatchable `SIGKILL` on Linux), so NEITHER its RAII `Drop`
+/// NOR its Unix signal handlers can run, must STILL take its OWNED real-tsgo child down with it —
+/// via a Windows kill-on-close Job Object / a Linux `PR_SET_PDEATHSIG`. This is the residual orphan
+/// window the cooperative RAII + signal paths cannot close.
+///
+/// Scoped to the two platforms that HAVE that hard kernel primitive. macOS/BSD have no parent-death
+/// signal, so a hard-killed shim there can orphan the child until the RAII/handler path runs;
+/// asserting the reap on macOS would be a FALSE test, so it is compiled out there — the guarantee on
+/// macOS is process-group + RAII (best-effort), documented on `OwnedChild`.
+///
+/// RED before OS containment (a bare `Child`): the hard-killed shim leaves the fake tsgo running
+/// (its heartbeat keeps growing after the shim is gone). GREEN with containment: the OS reaps it.
+#[cfg(any(target_os = "linux", windows))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hard_killed_shim_does_not_orphan_real_tsgo() {
+    let dir = tempdir("hardkill");
+    let control_dir = dir.join("ctl");
+    let heartbeat = dir.join("heartbeat.log");
+
+    let mut shim = Command::new(env!("CARGO_BIN_EXE_verter-relay-shim"))
+        .arg("--real-tsgo")
+        .arg(env!("CARGO_BIN_EXE_fake_tsgo_heartbeat"))
+        .arg("--control-dir")
+        .arg(&control_dir)
+        .arg("--session-key")
+        .arg("hardkill")
+        .arg("--")
+        .arg("--lsp")
+        .arg("--stdio")
+        .env("FAKE_TSGO_HEARTBEAT_FILE", &heartbeat)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn the relay shim binary");
+    // Hold the shim's stdin OPEN so the relay does not stop on an editor EOF before the kill.
+    let _shim_stdin = shim.stdin.take().expect("shim stdin piped");
+
+    // Steady state: the advertisement is published only AFTER the child is spawned + contained, so
+    // observing it proves the child is live under containment (and makes this test non-vacuous — a
+    // missing fake bin could never advertise and this gate would time out rather than pass hollow).
+    let _adv = wait_for_advertisement(&control_dir, "hardkill").await;
+
+    // Non-vacuity gate: the fake tsgo must be genuinely alive + beating before the hard kill.
+    let warm = file_len(&heartbeat);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        file_len(&heartbeat) > warm,
+        "the fake tsgo must be beating before the hard kill (else the reap assertion is vacuous)"
+    );
+
+    // HARD-kill the shim: no Drop, no signal handler — only the OS primitive can reap the child.
+    hard_kill_shim(&mut shim);
+    // Reap the shim so the OS releases its handles (Windows closes the last job handle → the job's
+    // KILL_ON_JOB_CLOSE reaps the child; Linux delivers the child's PDEATHSIG on the shim's death).
+    let _ = tokio::time::timeout(Duration::from_secs(10), shim.wait()).await;
+    // Let the OS finish reaping the contained child before sampling.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // THE guarantee: the OS reaped the OWNED child, so the heartbeat stops growing once the shim is
+    // gone. Sample across several ~30ms beat intervals.
+    let before = file_len(&heartbeat);
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    let after = file_len(&heartbeat);
+    assert_eq!(
+        before, after,
+        "a HARD-killed shim must not orphan the real tsgo: the heartbeat grew {before}->{after} \
+         bytes after the shim was hard-killed, so the OS did not reap the OWNED child"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// signal (D3) — faithful Unix signal-exit + no orphan on a signal delivered to the SHIM:
 /// a SIGTERM to a running shim must kill + reap its OWNED tsgo child (no orphan) and then
 /// re-raise the signal so the shim itself exits VIA SIGTERM. UNIX-ONLY (POSIX signals);
@@ -951,4 +1052,30 @@ async fn relay_stop_with_crashed_child_propagates_child_signal_not_code_zero() {
     );
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// IDENTITY MARKER: the shim embeds a stable ASCII identity marker so a packaging step can prove a
+/// candidate file's BYTES are the Verter relay shim (not a renamed `tsgo` or an unrelated binary) by
+/// scanning for the pinned `VERTER_RELAY_SHIM_IDENTITY:v1:` prefix. The hidden
+/// `--verter-shim-identity` flag prints it; here we run the REAL binary with that flag and confirm
+/// the pinned prefix is emitted — proving the literal is genuinely embedded AND reachable in the
+/// shipped bytes. Portable: it needs no engine, no control dir, and no editor stdio.
+#[test]
+fn verter_shim_identity_flag_prints_marker() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_verter-relay-shim"))
+        .arg("--verter-shim-identity")
+        .output()
+        .expect("run the relay shim binary with --verter-shim-identity");
+    assert!(
+        output.status.success(),
+        "--verter-shim-identity must exit 0; got {:?} (stderr: {:?})",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("VERTER_RELAY_SHIM_IDENTITY:v1:"),
+        "the shim must print the pinned identity marker on --verter-shim-identity; got stdout \
+         {stdout:?}"
+    );
 }

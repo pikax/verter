@@ -17,6 +17,7 @@ import { afterEach, describe, expect, it } from "vitest";
 // It is a pure module (no import-time side effects) so it can be unit-tested without
 // running the whole `package.mjs` VSIX pipeline.
 import {
+  SHIM_IDENTITY_MARKER as MODULE_SHIM_IDENTITY_MARKER,
   SHIM_STEM,
   resolveShimBinarySource,
   shimBinaryBasename,
@@ -34,11 +35,111 @@ function makeTmp(tag: string): string {
 }
 
 /** Write a fake compiled binary at target/<rust-target|.>/<profile>/<basename>. */
-function writeFakeBinary(repoRoot: string, rel: string, bytes: string): string {
+function writeFakeBinary(repoRoot: string, rel: string, bytes: Buffer | string): string {
   const full = path.join(repoRoot, "target", rel);
   mkdirSync(path.dirname(full), { recursive: true });
   writeFileSync(full, bytes);
   return full;
+}
+
+// --- Fake-binary provenance helpers -------------------------------------------------
+// The staging validation guards against a wrong-artifact mixup: it checks a candidate has a
+// valid executable header whose CPU arch matches the packaged target, plus the embedded
+// identity marker (a PUBLIC, forgeable string — so this validates against an accidental mixup,
+// it does not prove authentic provenance). These helpers synthesize MINIMAL valid headers so the
+// hermetic tests exercise real byte production instead of trivial placeholder strings.
+
+/** The identity-marker prefix embedded in the real shim binary and grepped by staging. */
+const SHIM_IDENTITY_MARKER = "VERTER_RELAY_SHIM_IDENTITY:v1:";
+
+type ExeFormat = "ELF" | "PE" | "MachO";
+type ExeArch = "x86_64" | "aarch64";
+
+/** Normalize a `process.arch`-style token to the canonical arch the validator compares. */
+function canonicalArch(arch: string): ExeArch {
+  if (arch === "x64" || arch === "x86_64") return "x86_64";
+  if (arch === "arm64" || arch === "aarch64") return "aarch64";
+  throw new Error(`test helper: unsupported host arch ${JSON.stringify(arch)}`);
+}
+
+/** The executable format the validator expects for a host platform (universal build). */
+function hostFormat(hostPlatform: string): ExeFormat {
+  if (hostPlatform === "win32") return "PE";
+  if (hostPlatform === "darwin") return "MachO";
+  return "ELF";
+}
+
+/** The (format, arch) the validator expects for a `vsceTarget`, or the host for a universal build. */
+function expectedFormatArch(
+  vsceTarget: string | undefined,
+  hostPlatform: string,
+  hostArch: string,
+): { format: ExeFormat; arch: ExeArch } {
+  const table: Record<string, { format: ExeFormat; arch: ExeArch }> = {
+    "win32-x64": { format: "PE", arch: "x86_64" },
+    "win32-arm64": { format: "PE", arch: "aarch64" },
+    "linux-x64": { format: "ELF", arch: "x86_64" },
+    "linux-arm64": { format: "ELF", arch: "aarch64" },
+    "darwin-x64": { format: "MachO", arch: "x86_64" },
+    "darwin-arm64": { format: "MachO", arch: "aarch64" },
+  };
+  if (vsceTarget) return table[vsceTarget];
+  return { format: hostFormat(hostPlatform), arch: canonicalArch(hostArch) };
+}
+
+/** Build a MINIMAL valid executable header (magic + machine only) for a (format, arch). */
+function fakeArchHeader(format: ExeFormat, arch: ExeArch): Buffer {
+  if (format === "ELF") {
+    const buf = Buffer.alloc(64, 0);
+    buf[0] = 0x7f;
+    buf[1] = 0x45; // 'E'
+    buf[2] = 0x4c; // 'L'
+    buf[3] = 0x46; // 'F'
+    buf[4] = 2; // ELFCLASS64
+    buf[5] = 1; // little-endian
+    buf[6] = 1; // EV_CURRENT
+    buf.writeUInt16LE(arch === "x86_64" ? 0x3e : 0xb7, 18); // e_machine
+    return buf;
+  }
+  if (format === "PE") {
+    const peOff = 0x80;
+    const buf = Buffer.alloc(peOff + 24, 0);
+    buf[0] = 0x4d; // 'M'
+    buf[1] = 0x5a; // 'Z'
+    buf.writeUInt32LE(peOff, 0x3c); // e_lfanew
+    buf[peOff] = 0x50; // 'P'
+    buf[peOff + 1] = 0x45; // 'E'
+    buf[peOff + 2] = 0;
+    buf[peOff + 3] = 0;
+    buf.writeUInt16LE(arch === "x86_64" ? 0x8664 : 0xaa64, peOff + 4); // Machine
+    return buf;
+  }
+  // Mach-O thin, little-endian, 64-bit (MH_MAGIC_64 = 0xFEEDFACF → CF FA ED FE on disk).
+  const buf = Buffer.alloc(32, 0);
+  buf[0] = 0xcf;
+  buf[1] = 0xfa;
+  buf[2] = 0xed;
+  buf[3] = 0xfe;
+  buf.writeUInt32LE(arch === "x86_64" ? 0x01000007 : 0x0100000c, 4); // cputype
+  return buf;
+}
+
+/**
+ * A MINIMAL fake shim binary the provenance validator accepts: a valid arch header for
+ * the packaged target (or the host, for a universal build) followed by the embedded
+ * identity marker + padding. The hermetic tests write these bytes so they satisfy the
+ * arch + identity validation while preserving each test's original intent.
+ */
+function fakeShimBytes(
+  vsceTarget: string | undefined,
+  hostPlatform: string = process.platform,
+  hostArch: string = process.arch,
+): Buffer {
+  const { format, arch } = expectedFormatArch(vsceTarget, hostPlatform, hostArch);
+  const header = fakeArchHeader(format, arch);
+  const marker = Buffer.from(`${SHIM_IDENTITY_MARKER}0.0.0-test\n`, "utf8");
+  const padding = Buffer.alloc(16, 0);
+  return Buffer.concat([header, marker, padding]);
 }
 
 afterEach(() => {
@@ -124,13 +225,14 @@ describe("shim binary candidate resolution order", () => {
     ).toThrow(/unrecognized/i);
   });
 
-  it("uses target/<rust-target>/{release,debug} for a platform build", () => {
+  it("uses target/<rust-target>/{release,debug} for a platform build (debug is opt-in)", () => {
     const repoRoot = makeTmp("repo");
     const candidates = shimBinaryCandidates({
       vsceTarget: "linux-arm64",
       env: {},
       repoRoot,
       hostPlatform: "win32",
+      allowDebug: true,
     });
     expect(candidates).toEqual([
       path.join(repoRoot, "target", "aarch64-unknown-linux-gnu", "release", SHIM_STEM),
@@ -138,13 +240,15 @@ describe("shim binary candidate resolution order", () => {
     ]);
   });
 
-  it("uses host target/{release,debug} for a universal build", () => {
+  it("uses host target/{release,debug} for a universal build (dev-only, allowUniversal)", () => {
     const repoRoot = makeTmp("repo");
     const candidates = shimBinaryCandidates({
       vsceTarget: undefined,
       env: {},
       repoRoot,
       hostPlatform: "win32",
+      allowUniversal: true,
+      allowDebug: true,
     });
     expect(candidates).toEqual([
       path.join(repoRoot, "target", "release", `${SHIM_STEM}.exe`),
@@ -158,8 +262,9 @@ describe("stageShimBinary copies ONLY the Verter shim into bin/", () => {
     const repoRoot = makeTmp("repo");
     const extensionDir = makeTmp("ext");
     const rustTarget = "x86_64-pc-windows-msvc";
+    const shimBytes = fakeShimBytes("win32-x64");
     // A real shim binary AND a decoy tsgo binary sit side by side in the profile dir.
-    writeFakeBinary(repoRoot, path.join(rustTarget, "release", `${SHIM_STEM}.exe`), "SHIM-BYTES");
+    writeFakeBinary(repoRoot, path.join(rustTarget, "release", `${SHIM_STEM}.exe`), shimBytes);
     writeFakeBinary(repoRoot, path.join(rustTarget, "release", "tsgo.exe"), "TSGO-BYTES");
 
     const staged = stageShimBinary({
@@ -174,7 +279,7 @@ describe("stageShimBinary copies ONLY the Verter shim into bin/", () => {
     expect(staged.basename).toBe(`${SHIM_STEM}.exe`);
     const dest = path.join(extensionDir, "bin", `${SHIM_STEM}.exe`);
     expect(existsSync(dest)).toBe(true);
-    expect(readFileSync(dest, "utf8")).toBe("SHIM-BYTES");
+    expect(readFileSync(dest)).toEqual(shimBytes);
 
     // NEGATIVE: bin/ contains ONLY the shim — no tsgo file was ever staged.
     const binEntries = readdirSync(path.join(extensionDir, "bin"));
@@ -185,7 +290,8 @@ describe("stageShimBinary copies ONLY the Verter shim into bin/", () => {
   it("falls back to the debug profile when release is absent", () => {
     const repoRoot = makeTmp("repo");
     const extensionDir = makeTmp("ext");
-    writeFakeBinary(repoRoot, path.join("debug", SHIM_STEM), "DEBUG-SHIM");
+    const shimBytes = fakeShimBytes(undefined, "linux");
+    writeFakeBinary(repoRoot, path.join("debug", SHIM_STEM), shimBytes);
 
     const staged = stageShimBinary({
       vsceTarget: undefined,
@@ -193,9 +299,11 @@ describe("stageShimBinary copies ONLY the Verter shim into bin/", () => {
       repoRoot,
       extensionDir,
       hostPlatform: "linux",
+      allowUniversal: true,
+      allowDebug: true,
     });
     expect(staged.basename).toBe(SHIM_STEM);
-    expect(readFileSync(staged.dest, "utf8")).toBe("DEBUG-SHIM");
+    expect(readFileSync(staged.dest)).toEqual(shimBytes);
   });
 
   it("honors VERTER_RELAY_SHIM_BINARY as the exact source (the CI seam)", () => {
@@ -203,7 +311,8 @@ describe("stageShimBinary copies ONLY the Verter shim into bin/", () => {
     const extensionDir = makeTmp("ext");
     const explicitDir = makeTmp("ci");
     const explicit = path.join(explicitDir, `${SHIM_STEM}.exe`);
-    writeFileSync(explicit, "CI-SHIM");
+    const shimBytes = fakeShimBytes("win32-x64");
+    writeFileSync(explicit, shimBytes);
 
     const staged = stageShimBinary({
       vsceTarget: "win32-x64",
@@ -213,7 +322,7 @@ describe("stageShimBinary copies ONLY the Verter shim into bin/", () => {
       hostPlatform: "linux",
     });
     expect(staged.source).toBe(explicit);
-    expect(readFileSync(staged.dest, "utf8")).toBe("CI-SHIM");
+    expect(readFileSync(staged.dest)).toEqual(shimBytes);
   });
 });
 
@@ -334,7 +443,8 @@ describe("source-basename validation (F5): never copy tsgo bytes as the shim", (
     const extensionDir = makeTmp("ext");
     const ciDir = makeTmp("ci");
     const good = path.join(ciDir, `${SHIM_STEM}.exe`);
-    writeFileSync(good, "GOOD-SHIM");
+    const shimBytes = fakeShimBytes("win32-x64");
+    writeFileSync(good, shimBytes);
 
     const staged = stageShimBinary({
       vsceTarget: "win32-x64",
@@ -344,7 +454,7 @@ describe("source-basename validation (F5): never copy tsgo bytes as the shim", (
       hostPlatform: "linux",
     });
     expect(staged.source).toBe(good);
-    expect(readFileSync(staged.dest, "utf8")).toBe("GOOD-SHIM");
+    expect(readFileSync(staged.dest)).toEqual(shimBytes);
   });
 });
 
@@ -357,7 +467,7 @@ describe("final bin/ invariant (F6): no tsgo, no stale opposite-platform shim", 
     writeFakeBinary(
       repoRoot,
       path.join("x86_64-pc-windows-msvc", "release", `${SHIM_STEM}.exe`),
-      "SHIM",
+      fakeShimBytes("win32-x64"),
     );
     // A stale tsgo artifact from a prior (wrong) build already sits in bin/.
     const binDir = path.join(extensionDir, "bin");
@@ -383,7 +493,7 @@ describe("final bin/ invariant (F6): no tsgo, no stale opposite-platform shim", 
     writeFakeBinary(
       repoRoot,
       path.join("x86_64-pc-windows-msvc", "release", `${SHIM_STEM}.exe`),
-      "WIN-SHIM",
+      fakeShimBytes("win32-x64"),
     );
     const binDir = path.join(extensionDir, "bin");
     mkdirSync(binDir, { recursive: true });
@@ -413,5 +523,401 @@ describe("packaging pipeline ordering (F6b): stage before node_modules mutation"
     expect(stageAt).toBeGreaterThanOrEqual(0);
     expect(mutateAt).toBeGreaterThanOrEqual(0);
     expect(stageAt).toBeLessThan(mutateAt);
+  });
+});
+
+// 10-JS: basename validation is not enough — the staged BYTES must prove they are the
+// Verter shim: the executable format + CPU arch must match the packaged target, the
+// source must be an absolute, regular, non-symlink file, and the bytes must carry the
+// embedded shim identity marker. A renamed tsgo / wrong-arch / unrelated binary is
+// refused BEFORE anything is staged.
+describe("staged-byte provenance (10-JS): arch + identity + real source", () => {
+  it("stage_rejects_wrong_arch_binary", () => {
+    const repoRoot = makeTmp("repo");
+    const extensionDir = makeTmp("ext");
+    const ciDir = makeTmp("ci");
+    // A correctly-named, identity-bearing shim — but built for the WRONG arch: an
+    // ELF/x86_64 binary staged for linux-arm64 (which must be ELF/aarch64).
+    const src = path.join(ciDir, SHIM_STEM);
+    writeFileSync(src, fakeShimBytes("linux-x64"));
+
+    expect(() =>
+      stageShimBinary({
+        vsceTarget: "linux-arm64",
+        env: { VERTER_RELAY_SHIM_BINARY: src },
+        repoRoot,
+        extensionDir,
+        hostPlatform: "linux",
+      }),
+    ).toThrow(/arch|architecture|machine/i);
+
+    // Fail closed BEFORE any bin/ mutation.
+    expect(existsSync(path.join(extensionDir, "bin"))).toBe(false);
+  });
+
+  it("stage_requires_embedded_shim_identity", () => {
+    const repoRoot = makeTmp("repo");
+    const extensionDir = makeTmp("ext");
+    const ciDir = makeTmp("ci");
+    // Correct name + correct arch header, but NO embedded identity marker — e.g. an
+    // unrelated binary that merely shares the target arch. It must be rejected.
+    const src = path.join(ciDir, `${SHIM_STEM}.exe`);
+    writeFileSync(src, fakeArchHeader("PE", "x86_64"));
+
+    expect(() =>
+      stageShimBinary({
+        vsceTarget: "win32-x64",
+        env: { VERTER_RELAY_SHIM_BINARY: src },
+        repoRoot,
+        extensionDir,
+        hostPlatform: "linux",
+      }),
+    ).toThrow(/identity|marker/i);
+
+    expect(existsSync(path.join(extensionDir, "bin"))).toBe(false);
+  });
+
+  it("stage_rejects_symlink_or_relative_source", () => {
+    const repoRoot = makeTmp("repo");
+    const extensionDir = makeTmp("ext");
+    const ciDir = makeTmp("ci");
+    const real = path.join(ciDir, `${SHIM_STEM}.exe`);
+    writeFileSync(real, fakeShimBytes("win32-x64"));
+
+    // (a) A SYMLINK source is rejected — modeled via an injected lstat that reports a
+    // symlink, so the test is hermetic on Windows (no real symlink privilege needed).
+    expect(() =>
+      stageShimBinary({
+        vsceTarget: "win32-x64",
+        env: { VERTER_RELAY_SHIM_BINARY: real },
+        repoRoot,
+        extensionDir,
+        hostPlatform: "linux",
+        lstat: () => ({ isSymbolicLink: () => true, isFile: () => false }),
+      }),
+    ).toThrow(/symlink|symbolic|regular/i);
+
+    // (b) A RELATIVE VERTER_RELAY_SHIM_BINARY is rejected — fully injected FS so the
+    // guard under test is the absolute-path check, not an incidental missing-file error.
+    expect(() =>
+      stageShimBinary({
+        vsceTarget: "win32-x64",
+        env: { VERTER_RELAY_SHIM_BINARY: "relative/verter-relay-shim.exe" },
+        repoRoot,
+        extensionDir,
+        hostPlatform: "linux",
+        exists: () => true,
+        copy: () => {},
+        mkdir: () => {},
+        readdir: () => [`${SHIM_STEM}.exe`],
+        remove: () => {},
+      }),
+    ).toThrow(/absolute/i);
+
+    // Neither rejection created a bin/ directory.
+    expect(existsSync(path.join(extensionDir, "bin"))).toBe(false);
+  });
+});
+
+// 11: a targetless "universal" build silently fell back to the HOST binary — a VSIX
+// with no platform target installs anywhere. Production packaging now REQUIRES --target;
+// the host-dir fallback is reachable ONLY behind an explicit allowUniversal (dev) flag.
+describe("production requires --target; host fallback is dev-only (11)", () => {
+  it("production_package_requires_vsce_target", () => {
+    const repoRoot = makeTmp("repo");
+    const extensionDir = makeTmp("ext");
+
+    // No target and no allowUniversal → fail closed at candidate resolution.
+    expect(() =>
+      shimBinaryCandidates({ vsceTarget: undefined, env: {}, repoRoot, hostPlatform: "linux" }),
+    ).toThrow(/target|universal/i);
+
+    // ...and through the full stage (nothing is staged).
+    expect(() =>
+      stageShimBinary({
+        vsceTarget: undefined,
+        env: {},
+        repoRoot,
+        extensionDir,
+        hostPlatform: "linux",
+      }),
+    ).toThrow(/target|universal/i);
+    expect(existsSync(path.join(extensionDir, "bin"))).toBe(false);
+
+    // With the explicit dev flag, the host target/ dir IS used (the universal dev path).
+    const candidates = shimBinaryCandidates({
+      vsceTarget: undefined,
+      env: {},
+      repoRoot,
+      hostPlatform: "linux",
+      allowUniversal: true,
+    });
+    expect(candidates).toContain(path.join(repoRoot, "target", "release", SHIM_STEM));
+  });
+});
+
+// 12: packaging could silently fall back to a DEBUG-profile binary for production.
+// Candidates are release-only by default; the debug profile is opt-in (allowDebug), a
+// dev-only fallback that package.mjs never passes.
+describe("release-only by default; debug is opt-in (12)", () => {
+  it("production_candidates_never_include_debug_profile", () => {
+    const repoRoot = makeTmp("repo");
+
+    // Platform build: default candidates are release-only — NO debug-profile path.
+    const platformDefault = shimBinaryCandidates({
+      vsceTarget: "linux-x64",
+      env: {},
+      repoRoot,
+      hostPlatform: "linux",
+    });
+    expect(platformDefault).toEqual([
+      path.join(repoRoot, "target", "x86_64-unknown-linux-gnu", "release", SHIM_STEM),
+    ]);
+    expect(platformDefault.every((c) => !/[\\/]debug[\\/]/.test(c))).toBe(true);
+
+    // allowDebug: true adds the debug candidate AFTER release (dev-only fallback).
+    const platformDebug = shimBinaryCandidates({
+      vsceTarget: "linux-x64",
+      env: {},
+      repoRoot,
+      hostPlatform: "linux",
+      allowDebug: true,
+    });
+    expect(platformDebug).toEqual([
+      path.join(repoRoot, "target", "x86_64-unknown-linux-gnu", "release", SHIM_STEM),
+      path.join(repoRoot, "target", "x86_64-unknown-linux-gnu", "debug", SHIM_STEM),
+    ]);
+
+    // The universal (dev) build is release-only by default too.
+    const universalDefault = shimBinaryCandidates({
+      vsceTarget: undefined,
+      env: {},
+      repoRoot,
+      hostPlatform: "linux",
+      allowUniversal: true,
+    });
+    expect(universalDefault).toEqual([path.join(repoRoot, "target", "release", SHIM_STEM)]);
+
+    // package.mjs must NOT enable the debug fallback for production packaging.
+    const pkgSrc = readFileSync(fileURLToPath(new URL("../package.mjs", import.meta.url)), "utf8");
+    expect(pkgSrc.includes("allowDebug")).toBe(false);
+  });
+});
+
+// 13: the final bin/ invariant allowed UNRELATED files to survive (it only pruned
+// tsgo-shaped + stale shim* names). bin/ is now an explicit whitelist — exactly the
+// staged shim — so any other entry is pruned and the final dir is asserted equal to it.
+describe("strict bin/ whitelist (13): bin/ is exactly the staged shim", () => {
+  it("stage_rejects_unrelated_bin_entry", () => {
+    const repoRoot = makeTmp("repo");
+    const extensionDir = makeTmp("ext");
+    writeFakeBinary(
+      repoRoot,
+      path.join("x86_64-pc-windows-msvc", "release", `${SHIM_STEM}.exe`),
+      fakeShimBytes("win32-x64"),
+    );
+    // Unrelated files (neither tsgo nor a shim) already sit in bin/ from some prior step.
+    const binDir = path.join(extensionDir, "bin");
+    mkdirSync(binDir, { recursive: true });
+    writeFileSync(path.join(binDir, "NOTICE.txt"), "unrelated");
+    writeFileSync(path.join(binDir, "leftover.bin"), "junk");
+
+    stageShimBinary({
+      vsceTarget: "win32-x64",
+      env: {},
+      repoRoot,
+      extensionDir,
+      hostPlatform: "linux",
+    });
+
+    // bin/ is EXACTLY the staged shim — every unrelated entry was pruned.
+    expect(readdirSync(binDir).sort()).toEqual([`${SHIM_STEM}.exe`]);
+  });
+});
+
+// 14: the staged Unix binary's executable bit was never asserted, so a copy that dropped
+// the +x bit (or a source without it) would ship a non-executable shim. Staging now
+// chmods the dest to 0o755 for a Unix TARGET (no-op for a Windows target).
+describe("executable bit on Unix targets (14)", () => {
+  it("unix_target_chmods_staged_shim_executable", () => {
+    // A Unix TARGET (even on a Windows host) chmods the staged shim to 0o755.
+    {
+      const repoRoot = makeTmp("repo");
+      const extensionDir = makeTmp("ext");
+      writeFakeBinary(
+        repoRoot,
+        path.join("x86_64-unknown-linux-gnu", "release", SHIM_STEM),
+        fakeShimBytes("linux-x64"),
+      );
+      const chmodCalls: Array<[string, number]> = [];
+      const staged = stageShimBinary({
+        vsceTarget: "linux-x64",
+        env: {},
+        repoRoot,
+        extensionDir,
+        hostPlatform: "win32",
+        chmod: (p: string, mode: number) => chmodCalls.push([p, mode]),
+      });
+      expect(chmodCalls).toEqual([[staged.dest, 0o755]]);
+    }
+
+    // A Windows TARGET never chmods (the +x bit is meaningless on NTFS).
+    {
+      const repoRoot = makeTmp("repo");
+      const extensionDir = makeTmp("ext");
+      writeFakeBinary(
+        repoRoot,
+        path.join("x86_64-pc-windows-msvc", "release", `${SHIM_STEM}.exe`),
+        fakeShimBytes("win32-x64"),
+      );
+      const chmodCalls: Array<[string, number]> = [];
+      stageShimBinary({
+        vsceTarget: "win32-x64",
+        env: {},
+        repoRoot,
+        extensionDir,
+        hostPlatform: "linux",
+        chmod: (p: string, mode: number) => chmodCalls.push([p, mode]),
+      });
+      expect(chmodCalls).toEqual([]);
+    }
+  });
+});
+
+// The staged DEST bytes must be re-validated AFTER the copy, not just the pre-copy source: a source
+// swapped between the source check and the copy would otherwise ship unvalidated bytes (a
+// validate-then-copy TOCTOU). Re-running the wrong-artifact guard on the dest closes it.
+describe("staged-DEST re-validation (TOCTOU): the FINAL bytes are validated, not just the source", () => {
+  it("fails closed when the copied dest bytes differ from the validated source", () => {
+    const repoRoot = makeTmp("repo");
+    const extensionDir = makeTmp("ext");
+    const ciDir = makeTmp("ci");
+    const src = path.join(ciDir, `${SHIM_STEM}.exe`);
+    // The SOURCE on disk is a valid, identity-bearing shim → the source check passes.
+    writeFileSync(src, fakeShimBytes("win32-x64"));
+    // ...but the COPY lands DIFFERENT bytes at dest (model a swap between validate and copy): a
+    // valid PE/x86_64 header WITHOUT the identity marker (a renamed / wrong artifact).
+    const tampered = fakeArchHeader("PE", "x86_64");
+
+    expect(() =>
+      stageShimBinary({
+        vsceTarget: "win32-x64",
+        env: { VERTER_RELAY_SHIM_BINARY: src },
+        repoRoot,
+        extensionDir,
+        hostPlatform: "linux",
+        copy: (_s: string, dst: string) => writeFileSync(dst, tampered),
+      }),
+    ).toThrow(/identity|marker/i);
+  });
+
+  it("accepts a dest whose bytes match the validated source (the normal copy)", () => {
+    const repoRoot = makeTmp("repo");
+    const extensionDir = makeTmp("ext");
+    const ciDir = makeTmp("ci");
+    const src = path.join(ciDir, `${SHIM_STEM}.exe`);
+    const shimBytes = fakeShimBytes("win32-x64");
+    writeFileSync(src, shimBytes);
+
+    const staged = stageShimBinary({
+      vsceTarget: "win32-x64",
+      env: { VERTER_RELAY_SHIM_BINARY: src },
+      repoRoot,
+      extensionDir,
+      hostPlatform: "linux",
+    });
+    // The FINAL staged bytes equal the validated source — the dest re-validation passed.
+    expect(readFileSync(staged.dest)).toEqual(shimBytes);
+  });
+});
+
+// bin/ prune must remove a DIRECTORY entry too — a bare `rmSync(path, { force: true })` throws
+// EISDIR on a directory, so an unlisted directory would otherwise survive the strict whitelist.
+describe("bin/ prune removes stale directory entries, not just files", () => {
+  it("prunes an unlisted directory in bin/ so the final dir is exactly the shim", () => {
+    const repoRoot = makeTmp("repo");
+    const extensionDir = makeTmp("ext");
+    writeFakeBinary(
+      repoRoot,
+      path.join("x86_64-pc-windows-msvc", "release", `${SHIM_STEM}.exe`),
+      fakeShimBytes("win32-x64"),
+    );
+    const binDir = path.join(extensionDir, "bin");
+    mkdirSync(binDir, { recursive: true });
+    // A stale DIRECTORY (with contents) from a prior step sits in bin/ alongside the shim slot.
+    const staleDir = path.join(binDir, "stale-subdir");
+    mkdirSync(staleDir, { recursive: true });
+    writeFileSync(path.join(staleDir, "leftover.txt"), "junk");
+
+    stageShimBinary({
+      vsceTarget: "win32-x64",
+      env: {},
+      repoRoot,
+      extensionDir,
+      hostPlatform: "linux",
+    });
+
+    // The stale directory was pruned (recursive removal); bin/ is EXACTLY the staged shim.
+    expect(readdirSync(binDir)).toEqual([`${SHIM_STEM}.exe`]);
+  });
+});
+
+// The DEFAULT `package` script must fail closed on universal: `node package.mjs` with no --target
+// errors during shim staging (production requires --target). The dev host-binary fallback
+// (--allow-universal) lives in a separate, clearly-named `package:dev:universal` script, never the
+// default entrypoint — otherwise a bare `pnpm package` silently ships a host-arch, install-anywhere
+// VSIX.
+describe("default package script fails closed on universal", () => {
+  it("the `package` script requires --target and never passes --allow-universal", () => {
+    const pkgPath = fileURLToPath(new URL("../package.json", import.meta.url));
+    const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
+    const scripts = (pkg.scripts ?? {}) as Record<string, string>;
+
+    // The default entrypoint is fail-closed: no --allow-universal.
+    expect(scripts.package).toBe("node package.mjs");
+    expect(scripts.package).not.toContain("--allow-universal");
+
+    // The dev host-binary fallback is a SEPARATE, explicitly-named script.
+    expect(scripts["package:dev:universal"]).toBeDefined();
+    expect(scripts["package:dev:universal"]).toContain("--allow-universal");
+
+    // The per-target production scripts are unaffected — each still passes --target and never
+    // --allow-universal.
+    for (const [name, cmd] of Object.entries(scripts)) {
+      if (name.startsWith("package:") && name !== "package:dev:universal") {
+        expect(cmd).toContain("--target");
+        expect(cmd).not.toContain("--allow-universal");
+      }
+    }
+  });
+});
+
+// Cross-language drift guard: the shim identity marker is a CLOSED contract embedded by
+// the Rust binary (crates/verter_relay_shim/src/main.rs) and grepped by this JS staging
+// module. Both sides MUST pin the identical literal — if either drifts, packaging can no
+// longer prove a candidate's bytes are the shim. This fails if either side's prefix changes.
+describe("shim identity marker is a pinned cross-language contract", () => {
+  it("shim_identity_marker_prefix_matches_rust_and_js", () => {
+    const PINNED = "VERTER_RELAY_SHIM_IDENTITY:v1:";
+
+    // The JS module's exported constant is the pinned literal.
+    expect(MODULE_SHIM_IDENTITY_MARKER).toBe(PINNED);
+
+    // The JS staging module source embeds it (the grep literal staging scans candidates for).
+    const stageBinSrc = readFileSync(
+      fileURLToPath(new URL("../stage-bin.mjs", import.meta.url)),
+      "utf8",
+    );
+    expect(stageBinSrc).toContain(PINNED);
+
+    // The Rust shim binary embeds the SAME literal in its identity marker (SHIM_IDENTITY).
+    const mainRsSrc = readFileSync(
+      fileURLToPath(new URL("../../../crates/verter_relay_shim/src/main.rs", import.meta.url)),
+      "utf8",
+    );
+    expect(mainRsSrc).toContain(PINNED);
+
+    // ...and the Rust literal is exactly the JS module constant — no cross-language drift.
+    expect(mainRsSrc).toContain(MODULE_SHIM_IDENTITY_MARKER);
   });
 });

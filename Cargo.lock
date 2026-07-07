@@ -4081,6 +4081,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "verter_tsgo_api",
+ "windows-sys",
 ]
 
 [[package]]
@@ -4235,6 +4236,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "verter_span",
+ "windows-sys",
 ]
 
 [[package]]

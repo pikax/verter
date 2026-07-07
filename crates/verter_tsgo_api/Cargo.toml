@@ -38,6 +38,22 @@ verter_span = { path = "../verter_span" }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# The Windows control named pipe is created with an EXPLICIT owner-only DACL (the
+# current-user SID only) so it matches the Unix side's `0o600` socket bar instead of
+# inheriting the process token's broader ambient default DACL. Building that security
+# descriptor needs the token/SID, ACL, and security-descriptor Win32 surface. `LocalFree`
+# lives in `Win32_Foundation` (not `Win32_System_Memory`); the token calls in
+# `Win32_System_Threading`; `SetEntriesInAclW`/`GetSecurityInfo` in
+# `Win32_Security_Authorization`. `windows-sys 0.61` is already resolved in the workspace
+# lockfile, so this adds no new package version.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Threading",
+] }
+
 # NOTE: the STANDALONE `--api` transport uses the spawned engine's stdin/stdout
 # pipes on EVERY platform (no platform-specific pipe crate). The shipped JS sync
 # client uses a Windows named pipe only because Node's libuv handles cannot do
