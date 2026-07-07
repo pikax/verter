@@ -4077,6 +4077,7 @@ name = "verter_relay_shim"
 version = "0.0.1-beta.1"
 dependencies = [
  "getrandom 0.2.17",
+ "libc",
  "serde_json",
  "tokio",
  "verter_tsgo_api",
@@ -4228,6 +4229,7 @@ version = "0.0.1-beta.1"
 dependencies = [
  "arc-swap",
  "base64",
+ "libc",
  "parking_lot",
  "serde",
  "serde_json",

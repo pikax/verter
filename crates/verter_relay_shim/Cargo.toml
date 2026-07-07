@@ -13,6 +13,17 @@ publish = false
 name = "verter-relay-shim"
 path = "src/main.rs"
 
+# A TEST-SUPPORT fake `tsgo` child spawned by the relay-shim lifecycle tests
+# (`tests/shim_live.rs`) via `CARGO_BIN_EXE_fake_tsgo_heartbeat`. It stands in
+# for the real `tsgo` so the child-ownership/orphan tests run on every platform
+# without a real engine. It lives under `tests/support/` (a test subdir, NOT an
+# auto-discovered `tests/*.rs` target) and is NEVER shipped — this crate is
+# `publish = false`. The explicit `[[bin]]` keeps the bin name stable so the
+# integration test's `env!` resolves.
+[[bin]]
+name = "fake_tsgo_heartbeat"
+path = "tests/support/fake_tsgo_heartbeat.rs"
+
 [dependencies]
 verter_tsgo_api = { path = "../verter_tsgo_api" }
 # OS CSPRNG for the rendezvous nonce (already in the workspace dependency tree).
@@ -30,7 +41,15 @@ tokio = { version = "1.52", features = [
     "rt-multi-thread",
     "macros",
     "net",
+    # Unix SIGINT/SIGTERM/SIGHUP/SIGQUIT handlers for faithful signal-exit teardown
+    # (the shim kills + reaps its OWNED tsgo child, then re-raises the signal).
+    "signal",
 ] }
+
+# The signal re-raise (restore SIG_DFL + raise) + the child's Unix signal-exit
+# fidelity are Unix-only, so `libc` is a Unix-only dependency.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 # The headless mechanics e2e drives the shim over a fake-editor LSP stdio + the

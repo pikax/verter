@@ -673,3 +673,282 @@ async fn verter_detach_is_non_destructive_shim_and_child_survive() {
     let _ = tokio::time::timeout(Duration::from_secs(10), h.shim.wait()).await;
     let _ = std::fs::remove_dir_all(&h.dir);
 }
+
+/// I1 — RAII child ownership: if the shim's `--lsp` setup fails AFTER the real tsgo
+/// child is spawned but BEFORE steady state, the child must be killed + reaped, never
+/// orphaned. PORTABLE (runs on every platform with NO real engine): a FAKE tsgo
+/// heartbeat child stands in for tsgo, and the setup failure is induced by a
+/// `--control-dir` whose parent is a regular file, so the control bind / advertisement
+/// write cannot create the directory.
+///
+/// RED before the guard: the spawned fake tsgo is dropped un-killed on the early `Err`
+/// return (`kill_on_drop` is off), so it keeps heart-beating AFTER the shim process
+/// exits — an orphan. GREEN: the `ChildSetupGuard` reaps it on the setup failure, so the
+/// heartbeat file stops growing once the shim exits, and the shim still exits non-zero.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn setup_failure_after_spawn_kills_fake_tsgo() {
+    let dir = tempdir("setupfail");
+    // The control_dir's PARENT is a regular FILE, so creating control_dir (the UDS parent
+    // dir on Unix / the advertisement dir on Windows) fails — a deterministic setup
+    // failure AFTER the child spawn on both platforms.
+    let regular_file = dir.join("not_a_dir");
+    std::fs::write(&regular_file, b"x").unwrap();
+    let bad_control_dir = regular_file.join("nope");
+    let heartbeat = dir.join("heartbeat.log");
+
+    let mut shim = Command::new(env!("CARGO_BIN_EXE_verter-relay-shim"))
+        .arg("--real-tsgo")
+        .arg(env!("CARGO_BIN_EXE_fake_tsgo_heartbeat"))
+        .arg("--control-dir")
+        .arg(&bad_control_dir)
+        .arg("--session-key")
+        .arg("setupfail")
+        .arg("--")
+        .arg("--lsp")
+        .arg("--stdio")
+        .env("FAKE_TSGO_HEARTBEAT_FILE", &heartbeat)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn the relay shim binary");
+
+    // The shim fails fast on the setup error (after the child spawn) → non-zero exit.
+    let status = tokio::time::timeout(Duration::from_secs(20), shim.wait())
+        .await
+        .expect("the shim must exit promptly on a setup failure (bounded)")
+        .expect("await the shim exit status");
+    assert!(
+        !status.success(),
+        "a setup failure after spawn must exit the shim NON-ZERO; got {status:?}"
+    );
+
+    // After the shim has exited, the fake tsgo must be DEAD (reaped by the guard), so the
+    // heartbeat file stops growing. Sample across the fake's ~30ms beat interval: a
+    // still-alive orphan would append several more bytes.
+    let sample = |p: &Path| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+    let before = sample(&heartbeat);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let after = sample(&heartbeat);
+    assert_eq!(
+        before, after,
+        "the fake tsgo must be reaped on setup failure (no orphan): the heartbeat grew \
+         {before}->{after} bytes AFTER the shim exited, so the child was left running"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Sample a heartbeat file's byte length (0 if it does not exist yet).
+#[cfg(unix)]
+fn heartbeat_len(path: &Path) -> u64 {
+    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
+/// signal (D3) — faithful Unix signal-exit + no orphan on a signal delivered to the SHIM:
+/// a SIGTERM to a running shim must kill + reap its OWNED tsgo child (no orphan) and then
+/// re-raise the signal so the shim itself exits VIA SIGTERM. UNIX-ONLY (POSIX signals);
+/// cfg-compiled-out on Windows.
+///
+/// READINESS GATE (F8): the test waits for the shim's ADVERTISEMENT before signalling. That
+/// gate is SOUND because the shim installs its shutdown handlers BEFORE it spawns the child —
+/// and long before the advertisement is published — so an observed advertisement
+/// deterministically implies the handlers are live. A signal delivered from this point is caught
+/// (buffered by tokio) and drives the guarded teardown; it can never slip through an unhandled
+/// setup-signal gap, and there is no spawn→install window in which the child could be orphaned.
+///
+/// RED before the signal handlers: the shim had NO SIGTERM handler, so SIGTERM's default
+/// action killed the shim WITHOUT cleanup — orphaning the fake tsgo (its heartbeat keeps
+/// growing after the shim exits). GREEN: the handler reaps the child (heartbeat stops) and
+/// re-raises SIGTERM (the shim exits via the signal, never a masked clean exit).
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shim_sigterm_reaps_owned_child_and_reraises_the_signal() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let dir = tempdir("sigterm");
+    let control_dir = dir.join("ctl");
+    let heartbeat = dir.join("heartbeat.log");
+
+    let mut shim = Command::new(env!("CARGO_BIN_EXE_verter-relay-shim"))
+        .arg("--real-tsgo")
+        .arg(env!("CARGO_BIN_EXE_fake_tsgo_heartbeat"))
+        .arg("--control-dir")
+        .arg(&control_dir)
+        .arg("--session-key")
+        .arg("sigterm")
+        .arg("--")
+        .arg("--lsp")
+        .arg("--stdio")
+        .env("FAKE_TSGO_HEARTBEAT_FILE", &heartbeat)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn the relay shim binary");
+    // Hold the shim's stdin OPEN so the relay does not stop on an editor EOF before we
+    // signal it (a null stdin would tear the relay down immediately).
+    let _shim_stdin = shim.stdin.take().expect("shim stdin piped");
+
+    // Readiness gate: the advertisement is published AFTER the shutdown handlers are
+    // installed (F1), so observing it proves the handlers are live — SIGTERM from here is
+    // caught + reaped, never dropped through an unhandled setup-signal gap.
+    let _adv = wait_for_advertisement(&control_dir, "sigterm").await;
+    let pid = shim.id().expect("the shim has a pid") as libc::pid_t;
+
+    // Deliver SIGTERM to the shim.
+    // SAFETY: kill(2) with a live pid + a valid signal number.
+    let rc = unsafe { libc::kill(pid, libc::SIGTERM) };
+    assert_eq!(rc, 0, "kill(shim, SIGTERM) must succeed");
+
+    // The shim must exit, faithfully reporting the signal (never masked as a clean exit).
+    let status = tokio::time::timeout(Duration::from_secs(15), shim.wait())
+        .await
+        .expect("the shim must exit after SIGTERM (bounded)")
+        .expect("await the shim exit status");
+    assert_eq!(
+        status.signal(),
+        Some(libc::SIGTERM),
+        "the shim must exit VIA SIGTERM (faithful signal-exit); got {status:?}"
+    );
+    assert!(
+        !status.success(),
+        "a signal-terminated shim is never a success exit; got {status:?}"
+    );
+
+    // THE fix: the OWNED child was reaped, not orphaned — the heartbeat stops growing once
+    // the shim has exited. Pre-fix the shim was killed by SIGTERM's default action without
+    // cleanup, orphaning the child (heartbeat keeps growing).
+    let before = heartbeat_len(&heartbeat);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let after = heartbeat_len(&heartbeat);
+    assert_eq!(
+        before, after,
+        "SIGTERM must reap the OWNED child (no orphan): the heartbeat grew {before}->{after} \
+         bytes after the shim exited, so the child was left running"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// signal (D3) — faithful propagation of the CHILD's signal-exit: if the real tsgo dies
+/// from a signal (an engine crash), the shim must re-raise that signal rather than mask it
+/// as a clean success. UNIX-ONLY; cfg-compiled-out on Windows.
+///
+/// RED before the single-status-owner teardown: the child-exit arm did `let _ = status`
+/// and the teardown returned `Ok(())`, so the shim exited with code 0 — a MASKED success
+/// that hid the engine crash. GREEN: `ShimExit::from_status` maps the child's signal-exit
+/// to `ShimExit::Signal`, which `main` re-raises, so the shim exits via that signal.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn child_signal_exit_is_faithfully_reraised_not_masked_as_success() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let dir = tempdir("childsig");
+    let control_dir = dir.join("ctl");
+    let heartbeat = dir.join("heartbeat.log");
+
+    let mut shim = Command::new(env!("CARGO_BIN_EXE_verter-relay-shim"))
+        .arg("--real-tsgo")
+        .arg(env!("CARGO_BIN_EXE_fake_tsgo_heartbeat"))
+        .arg("--control-dir")
+        .arg(&control_dir)
+        .arg("--session-key")
+        .arg("childsig")
+        .arg("--")
+        .arg("--lsp")
+        .arg("--stdio")
+        .env("FAKE_TSGO_HEARTBEAT_FILE", &heartbeat)
+        // The fake tsgo raises SIGTERM on ITSELF after a brief warm-up (an engine crash).
+        .env("FAKE_TSGO_RAISE_SIGNAL", libc::SIGTERM.to_string())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn the relay shim binary");
+    // Hold stdin open so the shim observes the CHILD exit (not an editor-EOF relay stop).
+    let _shim_stdin = shim.stdin.take().expect("shim stdin piped");
+
+    // The child dies from SIGTERM → the shim must faithfully re-raise it, not report code 0.
+    let status = tokio::time::timeout(Duration::from_secs(15), shim.wait())
+        .await
+        .expect("the shim must exit after the child's signal-death (bounded)")
+        .expect("await the shim exit status");
+    assert_eq!(
+        status.signal(),
+        Some(libc::SIGTERM),
+        "a child that dies from SIGTERM must be faithfully re-raised by the shim, never \
+         masked as a clean exit; got {status:?}"
+    );
+    assert!(
+        !status.success(),
+        "the shim must NOT report success when its engine was signal-killed; got {status:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// F7(b) — an editor disconnect (relay stop) that COINCIDES with an engine crash must NOT be
+/// masked as a clean `Code(0)` shim exit. Here the editor side EOFs immediately (a null
+/// stdin, so the relay stops soon after startup) WHILE the fake tsgo crashes with SIGTERM
+/// after a brief warm-up. The teardown grace-check must reap the crashed child and propagate
+/// ITS signal, never assume the relay stop was a clean disconnect and return `Code(0)`.
+/// UNIX-ONLY; cfg-compiled-out on Windows.
+///
+/// Discriminates against a relay-stop arm that blindly kills the child and returns `Code(0)`
+/// (masking the crash): that would fail both assertions below. The faithful path — whether
+/// the crash is observed via the child-exit arm or via the relay-stop grace-check — yields
+/// SIGTERM.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn relay_stop_with_crashed_child_propagates_child_signal_not_code_zero() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let dir = tempdir("relaycrash");
+    let control_dir = dir.join("ctl");
+    let heartbeat = dir.join("heartbeat.log");
+
+    // stdin = null → the editor side EOFs immediately, so the relay STOPS soon after the shim
+    // reaches steady state (an editor disconnect), taking the relay-stop teardown arm.
+    let mut shim = Command::new(env!("CARGO_BIN_EXE_verter-relay-shim"))
+        .arg("--real-tsgo")
+        .arg(env!("CARGO_BIN_EXE_fake_tsgo_heartbeat"))
+        .arg("--control-dir")
+        .arg(&control_dir)
+        .arg("--session-key")
+        .arg("relaycrash")
+        .arg("--")
+        .arg("--lsp")
+        .arg("--stdio")
+        .env("FAKE_TSGO_HEARTBEAT_FILE", &heartbeat)
+        // The fake tsgo crashes with SIGTERM shortly after start (an engine crash racing the
+        // editor disconnect).
+        .env("FAKE_TSGO_RAISE_SIGNAL", libc::SIGTERM.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn the relay shim binary");
+
+    // The child's crash must reach the shim's exit status faithfully — never a masked Code(0).
+    let status = tokio::time::timeout(Duration::from_secs(15), shim.wait())
+        .await
+        .expect("the shim must exit after the disconnect + child crash (bounded)")
+        .expect("await the shim exit status");
+    assert_eq!(
+        status.signal(),
+        Some(libc::SIGTERM),
+        "an engine crash coinciding with an editor disconnect must propagate the child's \
+         signal, never be masked as a clean Code(0) disconnect; got {status:?}"
+    );
+    assert!(
+        !status.success(),
+        "the shim must NOT report success when its engine crashed during teardown; got {status:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -309,6 +309,67 @@ async fn control_dispatch_drives_full_attach_lifecycle_through_relay() {
     lb.relay.shutdown().await;
 }
 
+/// `verter/waitInitialized` is BOUNDED + cancellable: when the editor never sends
+/// `initialize` (a broken / detached engine that answers hello but never completes the
+/// LSP handshake), the control server must return a TYPED JSON-RPC error within its
+/// internal timeout instead of blocking the control dispatch forever. The error is the
+/// DISTINCT timeout variant (not the relay-stop variant — the relay is still alive), and
+/// the timeout must NOT tear the relay down.
+///
+/// RED before the fix: `handle_wait_initialized` awaited `relay.wait_initialized()` with
+/// NO timeout, so with no editor initialize this call never returned — the OUTER bound
+/// (strictly longer than the handler's internal 10s timeout) is what fires, and the
+/// `expect("BOUNDED")` panics. GREEN: the bounded typed timeout error returns after the
+/// handler's ~10s internal timeout, well before the 20s outer bound.
+///
+/// A real (unpaused) clock is used deliberately: `verter_tsgo_api` does not enable
+/// tokio's `test-util` feature, so the virtual-clock `start_paused` seam is unavailable —
+/// the outer bound (20s) is > the handler's 10s internal timeout, so the handler's
+/// timeout is what returns and boundedness is proven within the outer bound.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wait_initialized_times_out_when_editor_never_initializes() {
+    let mut lb = wire_loopback("the-nonce");
+
+    // hello completes (required before any other control method). We deliberately do NOT
+    // drive the editor `initialize` handshake, so the relay never captures the in-band
+    // witness and `relay.wait_initialized()` would block indefinitely.
+    lb.client
+        .hello("the-nonce", "verter_lsp")
+        .await
+        .expect("hello");
+
+    // The control call must return a BOUNDED typed error. The outer bound (20s) is
+    // strictly longer than the handler's internal 10s timeout, so the INNER timeout is
+    // what returns; pre-fix nothing bounds the handler and the OUTER bound is what fires.
+    let outer = Duration::from_secs(20);
+    let result = tokio::time::timeout(outer, lb.client.wait_initialized()).await;
+    let err = result
+        .expect("waitInitialized must be BOUNDED — it must return within the outer bound")
+        .expect_err("with no editor initialize, waitInitialized must be a typed error, not Ok");
+
+    // DISTINCT timeout message — NOT the relay-stop message (the relay is still alive).
+    let msg = err.to_string();
+    assert!(
+        msg.contains("timed out"),
+        "the bounded error must be the TIMEOUT variant (distinct message); got {msg:?}"
+    );
+    assert!(
+        !msg.contains("relay stopped"),
+        "a live-relay timeout must NOT report the relay-stop variant; got {msg:?}"
+    );
+
+    // NEGATIVE / discriminator: the waitInitialized timeout must NOT stop the relay.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), lb.relay.wait_stopped())
+            .await
+            .is_err(),
+        "the waitInitialized timeout must leave the relay ALIVE (never a teardown)"
+    );
+
+    lb.client.close().await.unwrap();
+    lb.relay.shutdown().await;
+}
+
 /// E4: an ABNORMAL control-session termination — the control pipe dropped WITHOUT a
 /// `verter/detach` (EOF on the server read) — must STILL retract the session's still-open
 /// carrier overlays (send `didClose` to the real tsgo), so no stale Verter overlay lingers

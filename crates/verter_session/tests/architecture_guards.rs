@@ -4100,11 +4100,19 @@ mod foundations_guards {
             // subprocess-binary IPC entry).
             "crates/verter_tsgo_api/src/control/advertisement.rs",
             // Relay-shim control endpoint — a Unix-domain-socket file is a
-            // real filesystem artifact the OS binds; the listener removes a
-            // stale socket on bind and its own socket on drop
-            // (`std::fs::remove_file`, `#[cfg(unix)]`). Socket-file lifecycle
-            // is real-FS by nature, never workspace source (same category as
-            // the `advertisement.rs` IPC rendezvous file).
+            // real filesystem artifact the OS binds, so the listener owns its
+            // full socket-file lifecycle (`#[cfg(unix)]`): it creates +
+            // validates a PRIVATE per-session `0o700` parent subdir
+            // (`DirBuilder` mode-`0o700` create + `symlink_metadata` — a real
+            // dir, euid-owned, exactly owner-rwx), holds the grandparent to a
+            // sticky-or-euid/root-owned secure-permissions ceiling
+            // (`create_dir_all` + `metadata`), removes a stale socket before
+            // bind and its own socket on drop (`std::fs::remove_file`), chmods
+            // the bound socket to owner-only `0o600` (`set_permissions` /
+            // `Permissions::from_mode`), and removes the now-empty private
+            // subdir on `Drop` (`remove_dir`). This socket-file lifecycle is
+            // real-FS by nature, never workspace source (same category as the
+            // `advertisement.rs` IPC rendezvous file).
             "crates/verter_tsgo_api/src/control/transport.rs",
             // Audit substrate's `current_process_rss` reads
             // `/proc/self/statm` (Linux) for memory-delta
@@ -8019,7 +8027,7 @@ mod foundations_guards {
         ),
         (
             "crates/verter_tsgo_api/src/control/transport.rs",
-            "relay-shim control endpoint transport — the control protocol rides same-user local IPC (a Windows named pipe / a Unix-domain socket). On Unix a UDS is a real filesystem artifact the OS binds: the listener removes a stale socket before `bind` and its own socket on `Drop` (`std::fs::remove_file`, `#[cfg(unix)]`). Socket-file lifecycle is real-FS by nature (the pipe/UDS namespace is the OS, not the VFS); same category as `advertisement.rs` + `spawn.rs`, not a NativeFs/VFS disk-boundary bypass, never workspace/semantic state.",
+            "relay-shim control endpoint transport — the control protocol rides same-user local IPC (a Windows named pipe / a Unix-domain socket). On Unix a UDS is a real filesystem artifact the OS binds, so the listener owns its full socket-file lifecycle (`#[cfg(unix)]`): it creates + validates a PRIVATE per-session `0o700` parent subdir (`std::fs::DirBuilder` mode-`0o700` create + `std::fs::symlink_metadata` — a real dir, euid-owned, exactly owner-rwx), holds the grandparent `control_dir` to a secure-permissions ceiling (`std::fs::create_dir_all` + `std::fs::metadata` — owned by us with no group/other write, or sticky and owned by us or root), removes a stale socket before `bind` and its own socket on `Drop` (`std::fs::remove_file`), chmods the bound socket to owner-only `0o600` (`std::fs::set_permissions` / `Permissions::from_mode`), and removes the now-empty private subdir on `Drop` (`std::fs::remove_dir`). This whole socket-file lifecycle is real-FS by nature (the pipe/UDS namespace is the OS, not the VFS); same category as `advertisement.rs` + `spawn.rs`, not a NativeFs/VFS disk-boundary bypass, never workspace/semantic state.",
         ),
         (
             "crates/verter_type_runtime/src/discovery.rs",

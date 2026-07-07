@@ -32,6 +32,12 @@ base64 = "0.22.1"
 # conversion to `verter_span` so there is ONE offset-normalization implementation.
 verter_span = { path = "../verter_span" }
 
+# The Unix control-socket bind verifies the socket's private parent dir is owned by
+# the current euid (`geteuid`) before binding — a Unix-only ownership check, so `libc`
+# is a Unix-only dependency (workspace-resolved version, matching verter_relay_shim).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # NOTE: the STANDALONE `--api` transport uses the spawned engine's stdin/stdout
 # pipes on EVERY platform (no platform-specific pipe crate). The shipped JS sync
 # client uses a Windows named pipe only because Node's libuv handles cannot do

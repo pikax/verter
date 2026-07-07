@@ -34,6 +34,7 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use tokio::sync::mpsc;
@@ -51,6 +52,13 @@ use super::messages::{
 
 /// JSON-RPC "method not found" error code (per the JSON-RPC 2.0 spec).
 const ERROR_METHOD_NOT_FOUND: i64 = -32601;
+
+/// The hard bound `verter/waitInitialized` waits for the editor→tsgo `initialize`
+/// witness before returning a typed error. The editor may never send `initialize` (a
+/// broken / detached engine), so the handler must never block the control dispatch
+/// indefinitely — it awaits the in-band witness under this timeout AND races the
+/// relay-stop signal, returning the FIRST of {witness, relay-stop, timeout}.
+const WAIT_INITIALIZED_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The shim-side control server for ONE control connection. Holds per-connection
 /// state (hello completion, the carriers this session opened) plus the shared
@@ -299,20 +307,40 @@ impl ControlServer {
     }
 
     async fn handle_wait_initialized(&self, id: &serde_json::Value) -> Vec<u8> {
-        match self.relay.wait_initialized().await {
-            Some(witness) => {
-                let result = WaitInitializedResult {
-                    server_info_version: witness.server_info_version,
-                    observed_initialize_id: witness.observed_initialize_id,
-                    root_uri: witness.root_uri,
-                    workspace_folders: witness.workspace_folders,
-                };
-                ok_frame(id, &result)
-            }
-            None => err_frame(
+        // Bounded AND cancellable: the editor may never complete the LSP handshake (a
+        // broken / detached engine), so this races the in-band witness against BOTH a
+        // relay-stop signal and a hard timeout — never an unbounded block on the control
+        // dispatch. `biased` prefers a real captured witness first, then relay-stop, then
+        // the timeout, so a witness that lands as the relay is stopping still wins. The
+        // relay-stop and timeout arms return `ERROR_CONTROL_OP_FAILED` with DISTINCT
+        // messages so the caller can tell a stopped engine from a hung one.
+        tokio::select! {
+            biased;
+            witness = self.relay.wait_initialized() => match witness {
+                Some(witness) => {
+                    let result = WaitInitializedResult {
+                        server_info_version: witness.server_info_version,
+                        observed_initialize_id: witness.observed_initialize_id,
+                        root_uri: witness.root_uri,
+                        workspace_folders: witness.workspace_folders,
+                    };
+                    ok_frame(id, &result)
+                }
+                None => err_frame(
+                    id,
+                    ERROR_CONTROL_OP_FAILED,
+                    "the relay stopped before the editor initialize was observed",
+                ),
+            },
+            () = self.relay.wait_stopped() => err_frame(
                 id,
                 ERROR_CONTROL_OP_FAILED,
                 "the relay stopped before the editor initialize was observed",
+            ),
+            () = tokio::time::sleep(WAIT_INITIALIZED_TIMEOUT) => err_frame(
+                id,
+                ERROR_CONTROL_OP_FAILED,
+                "timed out awaiting the editor initialize witness",
             ),
         }
     }
