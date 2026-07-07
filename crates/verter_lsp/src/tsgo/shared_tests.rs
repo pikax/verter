@@ -29,7 +29,8 @@ use verter_type_runtime::protocol::TypeProviderError;
 use super::{
     apply_local_sync_commit, decide_shared_serve, promote_synced, reserve_carrier,
     resolve_editor_binding, stable_project_identity, sync_commit, synced_content, CarrierSlot,
-    CarrierSyncState, CarrierWireOp, InjectAction, PendingKind, SyncCommit,
+    CarrierSyncState, CarrierWireOp, InjectAction, PendingKind, SharedModeController, SyncCommit,
+    SyncMutex,
 };
 
 fn pid(b: u8) -> ProjectIdentity {
@@ -256,6 +257,119 @@ fn editor_binding_fact_keys_on_project_identity_not_workspace_root() {
     // No witness root at all also fails closed.
     let (no_witness, _) = resolve_editor_binding(project_a, workspace, None);
     assert_eq!(no_witness, EditorBindingFact::Mismatch);
+}
+
+/// The live controller recomputes the editor-binding evidence for EACH decided
+/// carrier binding rather than reusing the first-establishment fact for the whole
+/// session. A controller established for project A, then queried for a DIFFERENT
+/// project B (same workspace, matching editor-binding witness), must decide over B's
+/// OWN editor binding — so the composite warm key carries B's editor-binding identity.
+///
+/// DISCRIMINATING: the warm cache is primed with project B's CORRECT SHARED entry —
+/// the slot keyed on B's editor binding. When the controller decides for B it must
+/// recompute the editor binding as B and REUSE that primed slot (`WarmShared`). If it
+/// instead reused project A's establishment editor-binding evidence, its warm key would
+/// carry A, the primed B-slot would be unreachable, and the decision would cold-miss
+/// (`ColdShared`). Everything but the editor-binding identity is held identical between
+/// the primed entry and the controller's decide, so the provenance isolates exactly the
+/// per-binding recompute.
+#[test]
+fn controller_recomputes_editor_binding_per_decided_binding() {
+    let workspace = "/ws";
+    let witness = "file:///ws";
+    let ts: Arc<str> = Arc::from("/ws/tsconfig.json");
+    let gen = 1u64;
+    let project_a = pid(1);
+    let project_b = pid(2);
+
+    let version_gate = VersionGateFact::Cleared {
+        observed_version: Arc::<str>::from("7.0.1-rc"),
+    };
+
+    // A shared warm cache primed with project B's CORRECT SHARED serving entry — the
+    // slot the controller MUST key when it recomputes the editor binding for B
+    // (editor-binding identity = B). Priming is a cold insert.
+    let warm = Arc::new(SyncMutex::new(EngineWarmCache::new()));
+    let primed = {
+        let mut guard = warm.lock();
+        decide_shared_serve(
+            version_gate.clone(),
+            AttachFact::Live(shared_session(gen)),
+            BindingFact::from_resolution(&test_binding(project_b)),
+            ProxyFact::Available,
+            EditorBindingFact::evaluate(&project_b, &project_b),
+            project_b,
+            workspace,
+            Arc::clone(&ts),
+            &[],
+            owned_session(gen),
+            gen,
+            project_b,
+            &mut guard,
+        )
+    };
+    assert_eq!(
+        primed.serving(),
+        ServingProvenance::ColdShared,
+        "priming project B's warm entry must be a cold insert (non-vacuity)"
+    );
+
+    // The controller's establishment decision (computed once for project A) — the
+    // initial state. Computed on a throwaway cache so it does not pollute `warm`.
+    let establishment = {
+        let mut throwaway = EngineWarmCache::new();
+        decide_shared_serve(
+            version_gate.clone(),
+            AttachFact::Live(shared_session(gen)),
+            BindingFact::from_resolution(&test_binding(project_a)),
+            ProxyFact::Available,
+            EditorBindingFact::evaluate(&project_a, &project_a),
+            project_a,
+            workspace,
+            Arc::clone(&ts),
+            &[],
+            owned_session(gen),
+            gen,
+            project_a,
+            &mut throwaway,
+        )
+    };
+    assert_eq!(
+        establishment.mode(),
+        ServeMode::Shared,
+        "the controller establishes SHARED for project A (non-vacuity)"
+    );
+
+    let controller = SharedModeController {
+        version_gate,
+        attach: AttachFact::Live(shared_session(gen)),
+        proxy: ProxyFact::Available,
+        // The STABLE editor-binding evidence retained from establishment for project A
+        // (matching workspace root + witness root URI) — NOT a frozen `Matched(A)` fact.
+        workspace_root: Arc::from(workspace),
+        witness_root_uri: Some(Arc::from(witness)),
+        owned_session: owned_session(gen),
+        observed_version: Arc::<str>::from("7.0.1-rc"),
+        warm_cache: Arc::clone(&warm),
+        establishment,
+    };
+
+    // Decide for project B: the controller must recompute the editor binding as B and
+    // reuse B's primed warm slot. Reusing project A's establishment editor binding keys
+    // on A and cold-misses the primed B-slot.
+    let decided = controller.decide(
+        BindingFact::from_resolution(&test_binding(project_b)),
+        project_b,
+        Arc::clone(&ts),
+        &[],
+        gen,
+    );
+    assert_eq!(
+        decided.serving(),
+        ServingProvenance::WarmShared,
+        "decide for project B must recompute the editor binding for B and reuse B's warm \
+         serving slot — reusing project A's establishment editor binding keys on A and misses"
+    );
 }
 
 // ── REFERENCE-CLOSURE: the serve mode is decided over the whole redirect-ON

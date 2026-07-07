@@ -26,7 +26,7 @@ use verter_workspace::workspace_snapshot::{
     ConfiguredOwnerResolution, ProjectPayload, WorkspaceSnapshot,
 };
 
-use crate::framework::descriptor::built_in_descriptors;
+use crate::framework::descriptor::{carrier_companion_identities_for_source, CarrierCompanion};
 
 use super::engine::{EnsureProject, EnvDims};
 
@@ -315,15 +315,17 @@ impl<'a> WorkspaceProjectResolver<'a> {
             return None;
         }
 
-        // (a) A real user file at ANY descriptor-valid IDE carrier-companion path
-        // ⇒ never overlay-shadow it. The companion path(s) are DERIVED from the
-        // adapter's `VirtualFileNaming` authority — Vue's `JsxConditional` yields
-        // BOTH `{name}.vue.tsx` AND `{name}.vue.jsx`, Svelte's `Suffix(".tsx")`
-        // yields `{name}.svelte.tsx`. The script kind / JSX-ness of the source is
-        // not known at ownership time, so a real file at ANY of them is a shadow
-        // conflict. Never a hardcoded suffix list in the resolver.
-        for carrier_path in self.descriptor_ide_carrier_paths(source_uri) {
-            if self.workspace.file_exists(&carrier_path) {
+        // (a) A real user file at ANY descriptor-owned carrier-companion path ⇒ never
+        // overlay-shadow it. The companion paths are DERIVED from the adapter's
+        // `VirtualFileNaming` authority across EVERY family — the IDE carrier (Vue's
+        // `JsxConditional` yields BOTH `{name}.vue.tsx` AND `{name}.vue.jsx`, Svelte's
+        // `Suffix(".tsx")` yields `{name}.svelte.tsx`), the extension-middle declaration
+        // carrier (`{name}.d.vue.ts`), the `.verter.ts` import-surface API, the
+        // testing-API, and any sidecar. The script kind / JSX-ness of the source is not
+        // known at ownership time, so a real file at ANY occupiable companion path is a
+        // shadow conflict. Never a hardcoded suffix list in the resolver.
+        for companion in self.descriptor_carrier_companion_paths(source_uri) {
+            if self.workspace.file_exists(&companion.path) {
                 return Some(AmbiguityCause::CarrierPathOccupiedByRealFile);
             }
         }
@@ -355,37 +357,16 @@ impl<'a> WorkspaceProjectResolver<'a> {
         None
     }
 
-    /// Every descriptor-valid IDE carrier-companion PATH for a carrier
-    /// `source_uri`, derived from the owning adapter's `VirtualFileNaming`
-    /// authority (NOT a hardcoded `.tsx`). The source is classified to its
-    /// carrier language via the shared `LanguageRegistry`, matched to its
-    /// `FrameworkAdapterDescriptor`, and the descriptor authority
-    /// [`crate::framework::descriptor::VirtualFileNaming::ide_carrier_identities`]
-    /// composes each companion identity by appending its IDE suffix to the full
-    /// carrier canonical
-    /// (`Foo.vue` + `.jsx` → `Foo.vue.jsx`). Framework-agnostic: a new adapter
-    /// participates the moment its descriptor is registered, with no per-adapter
-    /// branch here.
-    fn descriptor_ide_carrier_paths(&self, source_uri: &str) -> Vec<String> {
-        use verter_language::StaticClassification;
-
-        let registry = verter_language::LanguageRegistry::global();
-        // A carrier extension (`.vue`/`.svelte`) is a STATIC carrier row, so it
-        // classifies to `Resolved(Framework { .. })`; the carrier language id is
-        // the descriptor-match key.
-        let StaticClassification::Resolved(language) = registry.classify_static(source_uri) else {
-            return Vec::new();
-        };
-        let Some(carrier_language_id) = language.carrier_language_id().cloned() else {
-            return Vec::new();
-        };
-
-        built_in_descriptors()
-            .iter()
-            .filter(|descriptor| descriptor.carrier_language.as_ref() == Some(&carrier_language_id))
-            .filter_map(|descriptor| descriptor.virtual_file_naming.as_ref())
-            .flat_map(|naming| naming.ide_carrier_identities(source_uri))
-            .collect()
+    /// Every descriptor-valid carrier-companion IDENTITY for a carrier `source_uri`,
+    /// across ALL companion families (IDE, extension-middle declaration,
+    /// import-surface API, testing-API, sidecar), derived from the owning adapter's
+    /// `VirtualFileNaming` authority through the registry-level
+    /// [`crate::framework::descriptor::carrier_companion_identities_for_source`] (NOT a
+    /// hardcoded suffix list). A real user file at ANY of these occupiable paths is a
+    /// shadow conflict. Framework-agnostic: a new adapter participates the moment its
+    /// descriptor is registered, with no per-adapter branch here.
+    fn descriptor_carrier_companion_paths(&self, source_uri: &str) -> Vec<CarrierCompanion> {
+        carrier_companion_identities_for_source(source_uri)
     }
 }
 

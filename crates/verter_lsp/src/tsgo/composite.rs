@@ -45,8 +45,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use verter_session::external_ts::{AmbiguityCause, ProjectBinding, ProjectResolution, ServeMode};
+use verter_session::framework::descriptor::classify_carrier_companion;
 use verter_session::VerterHost;
-use verter_workspace::resolver::{normalize_canonical_id, path_is_carrier};
+use verter_workspace::resolver::normalize_canonical_id;
 use verter_workspace::traits::WorkspaceRead;
 
 use verter_tsgo_api::control::Advertisement;
@@ -268,38 +269,44 @@ impl SharedTsgoOverlay {
     /// Whether injecting the recorded `companion_path` overlay is shadow-safe — i.e. no
     /// REAL user file is displaced. TWO independent gates, either of which fails closed:
     ///
-    /// 1. **Disk-occupancy at the EXACT injected path (comprehensive).** The injected
+    /// 1. **Disk-occupancy at the EXACT injected path (defense-in-depth).** The injected
     ///    companion paths — IDE (`Foo.vue.tsx` / `.jsx` / `Foo.svelte.tsx`), DECLARATION
-    ///    (`Foo.d.vue.ts` / `Foo.d.svelte.ts`), API (`Foo.vue.verter.ts`), and any other
-    ///    companion [`carrier_source_of`] admits — all live in the USER namespace. A REAL
-    ///    user file at the exact path SHARED is about to inject generated content at is a
-    ///    collision Verter must NEVER overlay-shadow
-    ///    (`carrier_never_shadows_real_user_file`), for EVERY companion type — including
-    ///    the DECLARATION companion, which a SEPARATE naming authority
-    ///    ([`verter_session::framework::descriptor::VirtualFileNaming::declaration_carrier_identity`])
-    ///    produces and the source-resolution pass (2) never probes. This gate closes the
-    ///    whole class uniformly at the injected path, independent of what source
-    ///    [`carrier_source_of`] derives ([`real_file_occupies_injected_path`]).
+    ///    (`Foo.d.vue.ts` / `Foo.d.svelte.ts`), API (`Foo.vue.verter.ts`), testing-API,
+    ///    sidecar, and any other companion [`carrier_source_of`] admits — all live in the
+    ///    USER namespace. A REAL user file at the exact path SHARED is about to inject
+    ///    generated content at is a collision Verter must NEVER overlay-shadow
+    ///    (`carrier_never_shadows_real_user_file`), for EVERY companion type. This exact-
+    ///    path occupancy gate closes the whole class uniformly, independent of what source
+    ///    [`carrier_source_of`] derives AND of what gate (2)'s conflict pass enumerated, so
+    ///    a stale VFS snapshot, a future companion form, or a direct overlay call can never
+    ///    slip a shadow past ([`real_file_occupies_injected_path`]).
     /// 2. **Source-resolution shadow-safety.** For a genuine virtual companion (no real
-    ///    file at its path), the source's descriptor IDE-companion conflict + a same-stem
-    ///    rune module beside it still downgrade the source to `Ambiguous` through the
-    ///    shared resolver authority — SKIPPED, OWNED serves. A genuine generated companion
-    ///    (a clean binding, `NoProject`, `SyntheticScratch`, or a MultipleOwners
-    ///    ambiguity, none of which sit a REAL file at the companion path) is safe to
-    ///    inject as a supporting Program member.
+    ///    file at its path), the source is resolved and its shadow-cause honoured. The
+    ///    resolver's UNCONDITIONAL carrier-path-conflict pass (`carrier_path_conflict` over
+    ///    `carrier_companion_identities_for_source`) enumerates EVERY descriptor-owned
+    ///    companion family — IDE, declaration, import-surface API, testing-API, sidecar —
+    ///    so a REAL user file at ANY of those companion paths (not just the IDE companion)
+    ///    downgrades the source to `Ambiguous(CarrierPathOccupiedByRealFile)`; a same-stem
+    ///    rune module beside the source downgrades it to `Ambiguous(SameStemRuneModule)`.
+    ///    Either downgrade means SKIPPED, OWNED serves. A genuine generated companion (a
+    ///    clean binding, `NoProject`, `SyntheticScratch`, or a MultipleOwners ambiguity,
+    ///    none of which sit a REAL file at a companion path) is safe to inject as a
+    ///    supporting Program member.
     ///
     /// A not-a-companion path or a not-yet-ready snapshot is conservatively NOT injected.
     fn injection_is_shadow_safe(&self, companion_path: &str) -> bool {
-        // (1) Disk-occupancy at the EXACT injected path — the comprehensive gate that
-        //     covers every companion type (IDE / declaration / API / sidecar) uniformly.
+        // (1) Disk-occupancy at the EXACT injected path — the defense-in-depth gate that
+        //     covers every companion type (IDE / declaration / API / testing / sidecar)
+        //     uniformly at the injected path.
         let ws_read = self.inner.host.workspace_read();
         if real_file_occupies_injected_path(ws_read.as_ref(), companion_path) {
             return false;
         }
-        // (2) Source-resolution shadow-safety (the source's IDE-companion conflict / a
-        //     same-stem rune module beside it), for a genuine virtual companion. The
-        //     empty `ts_version` is safe — the shadow-safety decision is
-        //     version-independent (it reads the resolution KIND, not the binding).
+        // (2) Source-resolution shadow-safety: the source's descriptor carrier-companion
+        //     conflict (across EVERY companion family) or a same-stem rune module beside
+        //     it, for a genuine virtual companion. The empty `ts_version` is safe — the
+        //     shadow-safety decision is version-independent (it reads the resolution KIND,
+        //     not the binding).
         let Some(source) = carrier_source_of(companion_path) else {
             return false;
         };
@@ -396,37 +403,19 @@ impl SharedTsgoOverlay {
     }
 }
 
-/// The carrier SOURCE (`Foo.vue`) a provider companion path (`Foo.vue.tsx` /
-/// `Foo.vue.jsx` / `Foo.vue.verter.ts`) projects from, or `None` when `provider_path`
-/// is not a framework-carrier companion.
+/// The carrier SOURCE (`Foo.vue`) a provider companion path projects from, or `None`
+/// when `provider_path` is not a framework-carrier companion.
 ///
-/// The IDE/API companions append extension components to the carrier source; strip
-/// trailing `.segment` components (bounded, within the basename) until the remainder
-/// classifies as a carrier path through the registry-backed
-/// [`path_is_carrier`] authority — never a hardcoded `.tsx` suffix list. A plain
-/// `.ts`/`.tsx` file (no carrier stem) yields `None` (the OWNED baseline serves it).
-///
-/// TODO(follow-up): for a DECLARATION companion (`Foo.d.vue.ts`) the strip loop stops at
-/// the extension-MIDDLE stem `Foo.d.vue` (which `path_is_carrier` accepts, ending `.vue`),
-/// NOT the true source `Foo.vue`. This is benign today — same-directory project ownership
-/// resolves `Foo.d.vue` and `Foo.vue` to the SAME binding (both match the owner's
-/// `src/**/*.vue` include), and shadow-safety is enforced by the disk-occupancy gate at
-/// the exact injected path ([`real_file_occupies_injected_path`]), independent of this
-/// derivation. The exact fix is to strip the `.d.` infix via the descriptor
-/// declaration-carrier authority so a declaration companion maps to its real `.vue`/
-/// `.svelte` source.
+/// Routes through the descriptor companion-classification authority
+/// ([`classify_carrier_companion`]): every companion family reverse-maps to its TRUE
+/// carrier source — the IDE `Foo.vue.tsx` / `Foo.vue.jsx`, the extension-middle
+/// declaration `Foo.d.vue.ts`, the `.verter.ts` import-surface API, and the
+/// testing-API / sidecar surfaces. A declaration companion maps to `Foo.vue` (the
+/// descriptor inverts the `.d.` infix), never the intermediate `Foo.d.vue` stem. A
+/// plain `.ts`/`.tsx` file (no carrier stem) yields `None` (the OWNED baseline serves
+/// it). Backslash paths normalize to the same forward-slashed source.
 fn carrier_source_of(provider_path: &str) -> Option<String> {
-    let normalized = provider_path.replace('\\', "/");
-    let mut candidate: &str = &normalized;
-    for _ in 0..4 {
-        if path_is_carrier(candidate) {
-            return Some(candidate.to_string());
-        }
-        let basename_start = candidate.rfind('/').map_or(0, |i| i + 1);
-        let dot = candidate[basename_start..].rfind('.')?;
-        candidate = &candidate[..basename_start + dot];
-    }
-    None
+    classify_carrier_companion(provider_path).map(|companion| companion.source)
 }
 
 /// Whether a carrier companion whose SOURCE resolved to `resolution` is shadow-safe to
@@ -453,15 +442,21 @@ fn injection_shadow_safe(resolution: &ProjectResolution) -> bool {
 /// `Foo.d.svelte.ts`), API (`Foo.vue.verter.ts`), and any other companion
 /// [`carrier_source_of`] admits — all live in the USER namespace, so a real user file at
 /// that exact path is a shadow collision Verter must NEVER overlay-shadow
-/// (`carrier_never_shadows_real_user_file`). This is the COMPREHENSIVE gate: it closes
-/// every companion type uniformly at the injected path, independent of which companion
-/// paths the source-resolution conflict pass enumerates and independent of
-/// [`carrier_source_of`]'s source derivation (which mis-derives a declaration companion's
-/// source to `Foo.d.vue`, not the real `Foo.vue`). Probes the shared workspace/VFS
-/// authority ([`WorkspaceRead::file_exists`] — the same disk-occupancy machinery the
-/// resolver's carrier-path-conflict pass uses, never a private disk reimplementation) over
-/// the NORMALIZED path, so a non-canonical (backslash / uppercase-drive) injected path
-/// cannot evade the probe on a case-insensitive FS.
+/// (`carrier_never_shadows_real_user_file`).
+///
+/// This exact-path occupancy probe is an INDEPENDENT injection-boundary guard, NOT an
+/// ownership classifier: it maps nothing back to a source (that is [`carrier_source_of`]'s
+/// role, which reverse-maps every companion — including the extension-middle declaration
+/// `Foo.d.vue.ts` -> the real `Foo.vue` — through the descriptor authority). It fails the
+/// injection closed the instant a real file sits at the injected path, uniformly across
+/// every companion type and independent of what the source-resolution conflict pass
+/// enumerated — defense-in-depth so a stale VFS snapshot, a future companion form, or a
+/// direct overlay call can never overlay-shadow a user file even if the source-side
+/// conflict pass did not flag it. Probes the shared workspace/VFS authority
+/// ([`WorkspaceRead::file_exists`] — the same disk-occupancy machinery the resolver's
+/// carrier-path-conflict pass uses, never a private disk reimplementation) over the
+/// NORMALIZED path, so a non-canonical (backslash / uppercase-drive) injected path cannot
+/// evade the probe on a case-insensitive FS.
 fn real_file_occupies_injected_path(ws: &dyn WorkspaceRead, injected_path: &str) -> bool {
     ws.file_exists(&normalize_canonical_id(injected_path))
 }

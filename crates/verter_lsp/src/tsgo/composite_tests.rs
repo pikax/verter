@@ -240,6 +240,36 @@ fn carrier_source_of_maps_companion_to_source_cross_platform() {
     assert_eq!(carrier_source_of("d:/ws/src/plain.ts"), None);
 }
 
+/// The DECLARATION companion (`Foo.d.vue.ts` / `Foo.d.svelte.ts`) and the API
+/// import-surface companion (`Foo.vue.verter.ts`) map back to the TRUE carrier source
+/// through the descriptor authority — the declaration companion resolves to `Foo.vue`,
+/// NOT the intermediate `.d.<ext>` stem a generic trailing-`.segment` strip lands on.
+/// `Foo.d.vue.ts` is the declaration companion of `Foo.vue`; it is never attributed to a
+/// fabricated `Foo.d.vue` source.
+#[test]
+fn carrier_source_of_maps_declaration_and_api_companions_to_source() {
+    // Declaration companions (extension-middle `.d.<ext>.ts`) map to the carrier source.
+    assert_eq!(
+        carrier_source_of("d:/ws/src/Foo.d.vue.ts").as_deref(),
+        Some("d:/ws/src/Foo.vue")
+    );
+    assert_eq!(
+        carrier_source_of("d:/ws/src/Foo.d.svelte.ts").as_deref(),
+        Some("d:/ws/src/Foo.svelte")
+    );
+    // The API import-surface companion (`.verter.ts`) maps to the carrier source.
+    assert_eq!(
+        carrier_source_of("d:/ws/src/Foo.vue.verter.ts").as_deref(),
+        Some("d:/ws/src/Foo.vue")
+    );
+    // NEGATIVE: the declaration companion is NEVER attributed to the intermediate
+    // `.d.<ext>` stem (`Foo.d.vue`) — that is not a real carrier source.
+    assert_ne!(
+        carrier_source_of("d:/ws/src/Foo.d.vue.ts").as_deref(),
+        Some("d:/ws/src/Foo.d.vue")
+    );
+}
+
 /// The shadow-safety decision over a resolved source. A real user file at a
 /// carrier-companion path surfaces — through the resolver's UNCONDITIONAL carrier-path
 /// conflict pass — as `Ambiguous(CarrierPathOccupiedByRealFile)` in EVERY
@@ -465,11 +495,15 @@ fn shadow_overlay_with(real_files: &[(&str, &str)]) -> SharedTsgoOverlay {
 /// G1 (`carrier_never_shadows_real_user_file`): the SHARED overlay must NEVER inject a
 /// generated carrier over a REAL user file at the exact injected path — for the
 /// DECLARATION carrier (`Foo.d.vue.ts` / `Foo.d.svelte.ts`) as well as the IDE carrier.
-/// The declaration carrier is a SEPARATE naming authority the resolver's IDE-companion
-/// conflict pass never probes (it probes `Foo.d.vue.tsx`/`.jsx`), and `carrier_source_of`
-/// MIS-derives its source as `Foo.d.vue` (not the real `Foo.vue`) — so the source-
-/// resolution pass alone binds it cleanly and would inject it. The disk-occupancy gate at
-/// the EXACT injected path closes it uniformly.
+/// This test pins the exact-path disk-occupancy gate — `injection_is_shadow_safe` step 1
+/// (`real_file_occupies_injected_path`) — which fails the injection closed the instant a
+/// real user file occupies the exact injected declaration-carrier path, before the
+/// source-resolution consultation that follows it. Defense-in-depth: the descriptor
+/// reverse-map in `carrier_source_of` (via `classify_carrier_companion`) maps the
+/// declaration companion back to the real `Foo.vue`, and the resolver's carrier-path
+/// conflict pass (`carrier_path_conflict` over `carrier_companion_identities_for_source`)
+/// enumerates it among every companion family, so the source side would flag it too — but
+/// this guard closes the shadow uniformly at the injected path regardless.
 ///
 /// RED before the fix: `injection_is_shadow_safe(Foo.d.vue.ts)` returned `true` (the real
 /// user file WAS admitted for injection / overlay-shadowed). GREEN after: `false`
@@ -546,31 +580,75 @@ fn memory_ws_with(files: &[&str]) -> MemoryWorkspace {
     ws
 }
 
-/// The comprehensive disk-occupancy gate distinguishes a REAL user file at the exact
-/// injected path from a genuine (absent) generated companion — for EVERY companion type:
-/// declaration (`.d.vue.ts` / `.d.svelte.ts`), IDE (`.vue.tsx`), and API (`.vue.verter.ts`).
-/// This is the class the fix closes uniformly at the injected path.
+/// The disk-occupancy gate distinguishes a REAL user file at the exact injected path from
+/// a genuine (absent) generated companion — for EVERY companion family the built-in
+/// descriptors project. The injected paths are ENUMERATED from the single descriptor
+/// authority (`carrier_companion_identities_for_source`) for a Vue AND a Svelte carrier
+/// source, so the coverage is exactly the descriptor-owned family set — IDE (Vue's `.tsx`
+/// and `.jsx`, Svelte's `.svelte.tsx`), declaration (`.d.vue.ts` / `.d.svelte.ts`),
+/// import-surface API (`.verter.ts`), and the Vue testing-API (`.__verter_test.ts`) — so
+/// it cannot silently omit a family the way a hand-maintained path list can, and stays
+/// honest as the descriptor families evolve.
 #[test]
 fn real_file_occupies_injected_path_covers_every_companion_type() {
-    for injected in [
-        "d:/ws/src/Foo.d.vue.ts",      // declaration carrier (.vue)
-        "d:/ws/src/Foo.d.svelte.ts",   // declaration carrier (.svelte)
-        "d:/ws/src/Foo.vue.tsx",       // IDE carrier
-        "d:/ws/src/Foo.vue.verter.ts", // API companion
-    ] {
-        // A real user file at the exact injected path ⇒ occupied (never overlay-shadowed).
-        let occupied = memory_ws_with(&["d:/ws/src/Foo.vue", "d:/ws/src/Foo.svelte", injected]);
+    use verter_session::framework::descriptor::{
+        carrier_companion_identities_for_source, CarrierCompanionKind,
+    };
+
+    let mut kinds_seen: Vec<CarrierCompanionKind> = Vec::new();
+    for source in ["d:/ws/src/Foo.vue", "d:/ws/src/Foo.svelte"] {
+        let companions = carrier_companion_identities_for_source(source);
         assert!(
-            real_file_occupies_injected_path(&occupied, injected),
-            "a real user file at `{injected}` must be detected as occupied (never overlay-shadowed)"
+            !companions.is_empty(),
+            "the descriptor authority must project at least one companion for `{source}`"
         );
-        // Genuine generated companion: only the sources exist, not the companion path.
-        let genuine = memory_ws_with(&["d:/ws/src/Foo.vue", "d:/ws/src/Foo.svelte"]);
-        assert!(
-            !real_file_occupies_injected_path(&genuine, injected),
-            "a genuine generated companion `{injected}` (no real file at its path) stays injectable"
-        );
+        for companion in &companions {
+            if !kinds_seen.contains(&companion.kind) {
+                kinds_seen.push(companion.kind);
+            }
+            // A real user file at the exact injected companion path ⇒ occupied (never
+            // overlay-shadowed), for EVERY enumerated family.
+            let occupied = memory_ws_with(&[source, companion.path.as_str()]);
+            assert!(
+                real_file_occupies_injected_path(&occupied, &companion.path),
+                "a real user file at `{}` ({:?}) must be detected as occupied (never overlay-shadowed)",
+                companion.path,
+                companion.kind
+            );
+            // Genuine generated companion: only the source exists, not the companion path.
+            let genuine = memory_ws_with(&[source]);
+            assert!(
+                !real_file_occupies_injected_path(&genuine, &companion.path),
+                "a genuine generated companion `{}` ({:?}) (no real file at its path) stays injectable",
+                companion.path,
+                companion.kind
+            );
+        }
     }
+    // The enumeration must span MORE THAN ONE family so the test cannot silently degrade to
+    // a single-kind (or zero) case and still pass.
+    assert!(
+        kinds_seen.len() > 1,
+        "the descriptor authority must project more than one companion family, got {kinds_seen:?}"
+    );
+    // ...and it must include EACH of the three `.ts`-tail families the descriptor authority
+    // projects (a hand-maintained IDE-suffix-only path list would miss them): the Vue
+    // testing-API (`.__verter_test.ts`), the declaration companion (`.d.vue.ts` /
+    // `.d.svelte.ts`), and the import-surface API (`.verter.ts`). Enumerating through the
+    // descriptor authority guarantees every emitted family is covered; asserting each one
+    // makes the test fail if any single family silently stops being enumerated.
+    assert!(
+        kinds_seen.contains(&CarrierCompanionKind::TestingApi),
+        "the enumerated families must include the Vue testing-API companion; got {kinds_seen:?}"
+    );
+    assert!(
+        kinds_seen.contains(&CarrierCompanionKind::Declaration),
+        "the enumerated families must include the declaration companion; got {kinds_seen:?}"
+    );
+    assert!(
+        kinds_seen.contains(&CarrierCompanionKind::ImportSurface),
+        "the enumerated families must include the import-surface API companion; got {kinds_seen:?}"
+    );
 }
 
 /// The occupancy probe NORMALIZES the injected path (backslash → slash, drive

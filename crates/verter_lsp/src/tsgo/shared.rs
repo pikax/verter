@@ -48,7 +48,6 @@ use std::sync::Arc;
 use parking_lot::Mutex as SyncMutex;
 use tokio::sync::Mutex as AsyncMutex;
 
-use verter_span::path::canonicalize_path;
 use verter_tsgo_api::api_attach::ApiAttachClient;
 use verter_tsgo_api::control::{Advertisement, ControlClient};
 use verter_tsgo_api::gate::{self, ObservedEngine};
@@ -72,6 +71,10 @@ use verter_type_runtime::protocol::{
 };
 use verter_type_runtime::traits::{ProviderFuture, TypeProvider};
 use verter_type_runtime::tsgo::{position_carrier_diagnostics, select_configured_project_carrier};
+
+use super::shared_support::{
+    language_id_for, parent_dir, path_to_file_uri, resolve_editor_binding, slash,
+};
 
 /// Why establishing a SHARED attach did not yield a SHARED provider. Every
 /// variant fails CLOSED to the OWNED baseline (the caller falls through to
@@ -257,21 +260,44 @@ pub fn decide_shared_serve(
 /// per-provider decision.
 ///
 /// It retains the establishment-level eligibility facts (version gate, attach
-/// session, proxy, editor binding, OWNED session — all stable across carriers for
-/// one editor session) plus the composite warm cache, so the serve mode is RE-DECIDED
-/// per query for the queried carrier's resolved binding at the CURRENT snapshot/config
-/// generation ([`Self::decide`]) — never frozen at construction. The decision is
-/// memoized per reference-closure in the warm cache (keyed on the snapshot/config
-/// generation, the representative project, the editor generation, and the observed
-/// engine version), so a new published snapshot re-decides (a superseded-generation
-/// entry is unreachable under the new generation) while a same-generation repeat
-/// reuses the warm serving state.
+/// session, proxy, OWNED session — all stable across carriers for one editor session)
+/// plus the STABLE editor-binding evidence (workspace root + witness root URI) and the
+/// composite warm cache, so the serve mode is RE-DECIDED per query for the queried
+/// carrier's resolved binding at the CURRENT snapshot/config generation
+/// ([`Self::decide`]) — never frozen at construction — with the editor-binding fact
+/// RECOMPUTED from that evidence for the carrier's OWN resolved project identity rather
+/// than reused from the first establishment. The decision is
+/// memoized per reference-closure in the warm cache (keyed on the representative
+/// component project, the canonical tsconfig, the snapshot/config generation, the full
+/// serving-engine identity — mode + observed version + wire pin + reconnect/editor
+/// generation — AND the carrier's editor-binding project identity), so a new published
+/// snapshot re-decides (a superseded-generation entry is unreachable under the new
+/// generation) while a same-generation repeat reuses the warm serving state. The
+/// editor-binding identity is a key dimension (the per-carrier discrimination axis), so a later carrier
+/// that recomputes a DIFFERENT editor binding keys a distinct warm slot instead of
+/// reusing the first establishment's.
 pub struct SharedModeController {
     version_gate: VersionGateFact,
     attach: AttachFact,
     proxy: ProxyFact,
-    editor_binding: EditorBindingFact,
-    editor_bound_identity: ProjectIdentity,
+    /// The resolved workspace root — the STABLE editor-binding evidence retained
+    /// (with `witness_root_uri`) so each per-query decision RECOMPUTES the
+    /// editor-binding fact for the carrier's OWN resolved project identity, rather than
+    /// reusing a single first-establishment fact for every later carrier.
+    ///
+    /// Both `workspace_root` and `witness_root_uri` are SESSION-LEVEL constants — the
+    /// single rendezvous workspace root and the editor's `initialize` `rootUri`, fixed
+    /// for the whole editor session — so they are captured ONCE at establishment. They
+    /// are NOT the per-carrier discrimination axis: that is the resolved `project_identity`
+    /// (`node_identity`), which is why [`resolve_editor_binding`] recomputes the fact per
+    /// carrier from the CURRENT `node_identity` against this fixed evidence and keys the
+    /// fact on `project_identity`, never on the workspace root (see
+    /// `editor_binding_fact_keys_on_project_identity_not_workspace_root` and
+    /// `controller_recomputes_editor_binding_per_decided_binding`).
+    workspace_root: Arc<str>,
+    /// The initialize-witness `root_uri` — the other half of the stable editor-binding
+    /// evidence (`None` when the editor advertised no workspace root).
+    witness_root_uri: Option<Arc<str>>,
     owned_session: OwnedSessionFacts,
     /// The observed engine version (from the attach version gate) — a warm-key
     /// dimension carried on the session facts.
@@ -290,8 +316,12 @@ impl SharedModeController {
     /// snapshot/config generation). The generation is a warm-key dimension, so a
     /// fresh published snapshot re-decides COLD (a superseded-generation SHARED
     /// serving state is unreachable under the new generation and never reused) while
-    /// a same-generation repeat reuses the warm state. Pure over the retained facts
-    /// + the warm cache — no engine contact.
+    /// a same-generation repeat reuses the warm state. The editor-binding fact is
+    /// RECOMPUTED for this carrier's own `node_identity` from the retained stable
+    /// evidence (workspace root + witness root URI), never reused from the first
+    /// establishment — so a later carrier resolving a DIFFERENT configured project
+    /// under the same session decides over its OWN editor binding. Pure over the
+    /// retained facts + evidence + the warm cache — no engine contact.
     #[must_use]
     pub fn decide(
         &self,
@@ -302,20 +332,28 @@ impl SharedModeController {
         config_generation: u64,
     ) -> LiveDecision {
         let tsconfig_dir = parent_dir(&canonical_tsconfig);
+        // Recompute the editor-binding fact for THIS carrier's resolved project
+        // identity from the retained stable evidence — never reuse a first-
+        // establishment fact for a later carrier that resolved a different project.
+        let (editor_binding, editor_bound_identity) = resolve_editor_binding(
+            node_identity,
+            &self.workspace_root,
+            self.witness_root_uri.as_deref(),
+        );
         let mut guard = self.warm_cache.lock();
         decide_shared_serve(
             self.version_gate.clone(),
             self.attach.clone(),
             binding_fact,
             self.proxy,
-            self.editor_binding,
+            editor_binding,
             node_identity,
             &tsconfig_dir,
             canonical_tsconfig,
             references,
             self.owned_session.clone(),
             config_generation,
-            self.editor_bound_identity,
+            editor_bound_identity,
             &mut guard,
         )
     }
@@ -460,6 +498,12 @@ impl TsgoSharedProvider {
             params.workspace_root,
             witness.root_uri.as_deref(),
         );
+        // Retain the STABLE editor-binding EVIDENCE (workspace root + witness root URI),
+        // not the computed fact: the live controller recomputes the fact per query for
+        // each carrier's own resolved project identity ([`SharedModeController::decide`]).
+        let controller_workspace_root: Arc<str> = Arc::from(params.workspace_root);
+        let controller_witness_root_uri: Option<Arc<str>> =
+            witness.root_uri.as_deref().map(Arc::from);
 
         // The live attach produced real SHARED-session facts (the sealed provenance
         // type), so attach-liveness is witnessed by the api session, never a bare flag.
@@ -536,8 +580,8 @@ impl TsgoSharedProvider {
             version_gate,
             attach,
             proxy,
-            editor_binding: editor_binding_fact,
-            editor_bound_identity: editor_bound,
+            workspace_root: controller_workspace_root,
+            witness_root_uri: controller_witness_root_uri,
             owned_session,
             observed_version: Arc::clone(&observed_version),
             warm_cache,
@@ -1227,93 +1271,6 @@ fn synced_content(
         .get(engine_carrier)
         .or_else(|| injected.get(carrier))
         .and_then(|slot| slot.synced.clone())
-}
-
-/// Forward-slash-normalize a path for engine comparison.
-fn slash(p: &str) -> String {
-    p.replace('\\', "/")
-}
-
-/// A distinct identity from `id` (one byte flipped) — the fail-closed
-/// editor-binding mismatch witness (never a forged match).
-fn distinct_identity(id: ProjectIdentity) -> ProjectIdentity {
-    let mut bytes = id.0;
-    bytes[0] ^= 0xFF;
-    ProjectIdentity(bytes)
-}
-
-/// The editor-binding-identity fact + the bound identity, keyed on the resolved
-/// PROJECT identity — never a bare workspace-root hash.
-///
-/// The editor-binding EVIDENCE is the initialize witness `root_uri`: the editor bound
-/// the carrier to the workspace Verter resolved iff the witness `rootUri` canonicalizes
-/// to the resolved `workspace_root`. When it matches, the fact is
-/// `Matched(project_identity)`; a missing witness root, or a DIFFERENT workspace,
-/// yields a distinct identity ⇒ `Mismatch` (fail closed — never a forged match).
-///
-/// Because the fact is keyed on `project_identity`, two DISTINCT configured projects
-/// under the SAME `rootUri` produce DISTINCT `Matched` facts, so SHARED eligibility
-/// established for one project can never spill to a sibling project of the same
-/// workspace. Keying on the workspace-root hash (the prior behaviour) made those two
-/// facts EQUAL — the eligibility-spill defect this closes.
-fn resolve_editor_binding(
-    project_identity: ProjectIdentity,
-    workspace_root: &str,
-    witness_root_uri: Option<&str>,
-) -> (EditorBindingFact, ProjectIdentity) {
-    let editor_bound = match witness_root_uri {
-        Some(root_uri)
-            if canonicalize_path(&file_uri_to_path(root_uri))
-                == canonicalize_path(workspace_root) =>
-        {
-            project_identity
-        }
-        _ => distinct_identity(project_identity),
-    };
-    (
-        EditorBindingFact::evaluate(&project_identity, &editor_bound),
-        editor_bound,
-    )
-}
-
-/// The parent directory of a forward-slashed path (the tsconfig dir base).
-fn parent_dir(path: &str) -> String {
-    let slashed = slash(path);
-    match slashed.rfind('/') {
-        Some(i) => slashed[..i].to_string(),
-        None => String::new(),
-    }
-}
-
-/// Minimal `file://` URI decode (drive-form + POSIX). Shared shape with the rest
-/// of the carrier path handling; the shim's egress layer canonicalizes on match.
-fn file_uri_to_path(uri: &str) -> String {
-    verter_span::uri::file_uri_to_path(uri)
-}
-
-/// Convert a forward-slashed path to a `file://` URI.
-fn path_to_file_uri(path: &str) -> String {
-    let normalized = path.replace('\\', "/");
-    if normalized.starts_with('/') {
-        format!("file://{normalized}")
-    } else {
-        format!("file:///{normalized}")
-    }
-}
-
-/// The LSP language id for a carrier companion by extension: `.tsx`/`.jsx` are
-/// the JSX IDE carriers, `.ts`/`.js` the plain companions.
-fn language_id_for(path: &str) -> &'static str {
-    let lower = path.to_ascii_lowercase();
-    if lower.ends_with(".tsx") {
-        "typescriptreact"
-    } else if lower.ends_with(".jsx") {
-        "javascriptreact"
-    } else if lower.ends_with(".js") || lower.ends_with(".mjs") || lower.ends_with(".cjs") {
-        "javascript"
-    } else {
-        "typescript"
-    }
 }
 
 /// The error every SHARED interactive-feature `TypeProvider` method returns. SHARED tsgo

@@ -4,10 +4,12 @@
 //! `{name}.svelte.tsx`) is in the USER namespace, not a Verter-reserved one.
 //! When a real user file already occupies that EXACT path, Verter must NEVER
 //! overlay-shadow it: the source is downgraded to `Ambiguous` (no external-TS
-//! binding) and Verter places no overlay. Asserted for `.vue` AND `.svelte`, and
-//! for EVERY descriptor-valid IDE carrier suffix the adapter's `VirtualFileNaming`
-//! authority yields — so Vue's `JsxConditional` `.jsx` companion is covered as
-//! well as `.tsx`.
+//! binding) and Verter places no overlay. Asserted for `.vue` AND `.svelte`,
+//! across EVERY companion family the descriptor authority enumerates — the IDE
+//! carrier suffixes (`.tsx`, and `.jsx` for a `JsxConditional` adapter like Vue),
+//! the extension-middle DECLARATION carrier (`Foo.d.vue.ts`), the `.verter.ts`
+//! import-surface API, the testing-API, and any sidecar — never only the IDE
+//! companion.
 //!
 //! DISCRIMINATING: without the carrier-path conflict pass a clean owner would
 //! resolve to a `ProjectBinding` even when a real file sits at the carrier path;
@@ -104,5 +106,76 @@ fn carrier_never_shadows_real_user_file() {
     assert!(
         ide_suffixes_for("vue").contains(&".jsx"),
         "Vue's JsxConditional IDE policy must yield a `.jsx` companion path"
+    );
+}
+
+/// A real user file at ANY descriptor-owned companion path — not only the IDE
+/// `.tsx`/`.jsx`, but the extension-middle DECLARATION carrier (`Foo.d.vue.ts` /
+/// `Foo.d.svelte.ts`), the `.verter.ts` import-surface API, the testing-API, and any
+/// sidecar — must downgrade the carrier source to
+/// `Ambiguous(CarrierPathOccupiedByRealFile)`. The shared resolver owner enumerates
+/// EVERY companion family through the descriptor authority
+/// (`carrier_companion_identities_for_source`), so Verter never overlay-shadows a real
+/// user file at any occupiable companion path.
+///
+/// DISCRIMINATING: an IDE-companion-only conflict probe never sees the declaration /
+/// API / testing companions — a source binds cleanly (`ProjectBinding`) with a real
+/// file at (e.g.) `Foo.d.vue.ts`. This guard asserts the `Ambiguous` downgrade the
+/// full-family enumeration produces for EVERY companion the descriptor emits, and pins
+/// the declaration family (the specific gap it closes) as covered.
+#[test]
+fn real_file_at_any_companion_path_downgrades_source_to_ambiguous() {
+    use verter_session::framework::descriptor::{
+        carrier_companion_identities_for_source, CarrierCompanionKind,
+    };
+
+    let exts = carrier_exts();
+    assert!(
+        exts.iter().any(|e| e == "vue") && exts.iter().any(|e| e == "svelte"),
+        "this guard requires the built-in `.vue` AND `.svelte` carrier adapters; got {exts:?}"
+    );
+
+    let mut saw_declaration = false;
+    let mut checked = 0usize;
+    for ext in &exts {
+        let source = format!("d:/ws/src/Foo.{ext}");
+        let companions = carrier_companion_identities_for_source(&source);
+        assert!(
+            !companions.is_empty(),
+            "carrier `Foo.{ext}` must project at least one descriptor-owned companion"
+        );
+        for companion in &companions {
+            if companion.kind == CarrierCompanionKind::Declaration {
+                saw_declaration = true;
+            }
+            let conflicted = resolve_with(
+                &[
+                    (TS, r#"{ "include": ["src/**/*"] }"#),
+                    (source.as_str(), "// carrier"),
+                    (companion.path.as_str(), "export const realUserFile = 1;"),
+                ],
+                &[TS],
+                &source,
+            );
+            assert_eq!(
+                conflicted,
+                ProjectResolution::Ambiguous(AmbiguityCause::CarrierPathOccupiedByRealFile),
+                "a real file at the descriptor-owned {:?} companion `{}` must downgrade \
+                 `{source}` to Ambiguous (Verter never overlay-shadows a real user file at any \
+                 occupiable companion path)",
+                companion.kind,
+                companion.path
+            );
+            checked += 1;
+        }
+    }
+    assert!(
+        saw_declaration,
+        "the declaration companion family (the gap this closes) must be exercised"
+    );
+    assert!(
+        checked >= 8,
+        "expected the Vue (IDE ×2 + declaration + API + testing) and Svelte (IDE + \
+         declaration + API) companion families covered; checked {checked}"
     );
 }
