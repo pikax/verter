@@ -227,9 +227,17 @@ impl SharedTsgoOverlay {
         // (e.g. a real user file occupying a carrier-companion path) is NEVER injected /
         // overlay-shadowed (`carrier_never_shadows_real_user_file`). Best-effort: a
         // failed inject leaves the OWNED baseline as the fallback (fail-closed).
+        // The workspace content generation keys the per-carrier shadow-safety cache: a
+        // content-clean carrier re-checks shadow-safety only when this advances (any
+        // file-set/overlay transition bumps it), so a real user file appearing at a
+        // companion path — or a same-stem rune module — is never overlay-shadowed by a
+        // stale "safe" cache (`carrier_never_shadows_real_user_file`). It advances on the
+        // file-existence surface the shadow-safety `file_exists` probes read, which the
+        // snapshot/config generation (`carrier.generation()`) does NOT.
+        let shadow_generation = self.inner.host.workspace_read().content_generation();
         self.inner
             .core
-            .inject_all_dirty(&transport, |companion| {
+            .inject_all_dirty(&transport, Some(shadow_generation), |companion| {
                 self.injection_is_shadow_safe(companion)
             })
             .await;

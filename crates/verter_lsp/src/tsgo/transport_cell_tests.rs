@@ -92,7 +92,7 @@ async fn concurrent_demands_establish_exactly_once() {
     assert!(
         results
             .iter()
-            .all(|r| matches!(r.as_deref(), Some(FakeTransport(7)))),
+            .all(|r| r.as_ref().map(|e| e.transport.0) == Some(7)),
         "every concurrent demand observes the one established transport"
     );
 }
@@ -117,7 +117,7 @@ async fn established_transport_is_reused() {
                 Duration::from_secs(5),
             )
             .await;
-        assert_eq!(t.as_deref(), Some(&FakeTransport(42)));
+        assert_eq!(t.map(|e| e.transport.0), Some(42));
     }
     assert_eq!(
         count.load(Ordering::SeqCst),
@@ -150,6 +150,7 @@ async fn run_attempt(
         Duration::from_secs(5),
     )
     .await
+    .map(|e| e.transport)
 }
 
 /// RE-ARM: a transient establishment failure does NOT retry within the SAME
@@ -223,7 +224,7 @@ async fn dead_live_transport_is_evicted_and_rearms() {
             Duration::from_secs(5),
         )
         .await;
-    assert_eq!(live.as_deref(), Some(&FakeTransport(1)));
+    assert_eq!(live.map(|e| e.transport.0), Some(1));
     assert_eq!(establish_count.load(Ordering::SeqCst), 1);
 
     // The transport DIES (relay fatal / closed connection).
@@ -280,14 +281,79 @@ async fn dead_live_transport_is_evicted_and_rearms() {
         )
         .await;
     assert_eq!(
-        reestablished.as_deref(),
-        Some(&FakeTransport(3)),
+        reestablished.map(|e| e.transport.0),
+        Some(3),
         "a fresh generation re-establishes after eviction"
     );
     assert_eq!(
         establish_count.load(Ordering::SeqCst),
         2,
         "re-establishment ran exactly once more on the advanced generation"
+    );
+}
+
+/// A dead `Live` transport observed at an ALREADY-ADVANCED generation (a reconnect
+/// republished a fresh advertisement before eviction saw the death) must NOT be stamped
+/// as a FAILED generation — that would poison the fresh advertisement and force recovery
+/// to wait for a FURTHER advance. Instead the SAME demand re-establishes at the advanced
+/// generation.
+///
+/// RED before the fix: the dead-live eviction UNCONDITIONALLY stamps the CURRENT
+/// (advanced) generation as `failed_generation` and returns `None`; the fresh generation
+/// is poisoned. GREEN: the same call transitions toward establishment and mints
+/// transport 2.
+#[tokio::test]
+async fn dead_live_at_already_advanced_generation_rearms_immediately() {
+    let cell: LazyTransport<FakeTransport> = LazyTransport::new();
+    let alive = Arc::new(AtomicBool::new(true));
+    let establish_count = Arc::new(AtomicUsize::new(0));
+    let liveness = {
+        let alive = Arc::clone(&alive);
+        move |_t: &FakeTransport| alive.load(Ordering::SeqCst)
+    };
+
+    // Establish a Live transport at gen-1.
+    let ec = Arc::clone(&establish_count);
+    let live = cell
+        .get_or_establish(
+            gen_const(Some("gen-1")),
+            liveness.clone(),
+            || async move {
+                ec.fetch_add(1, Ordering::SeqCst);
+                Some(Arc::new(FakeTransport(1)))
+            },
+            Duration::from_secs(5),
+        )
+        .await;
+    assert_eq!(live.map(|e| e.transport.0), Some(1));
+    assert_eq!(establish_count.load(Ordering::SeqCst), 1);
+
+    // The transport DIES, and the generation has ALREADY advanced to gen-2 (a reconnect
+    // republished a fresh advertisement) by the time the next demand observes the death.
+    alive.store(false, Ordering::SeqCst);
+
+    // The SAME demand at gen-2 must re-establish (transport 2), NOT stamp gen-2 failed.
+    let ec = Arc::clone(&establish_count);
+    let reestablished = cell
+        .get_or_establish(
+            gen_const(Some("gen-2")),
+            liveness.clone(),
+            || async move {
+                ec.fetch_add(1, Ordering::SeqCst);
+                Some(Arc::new(FakeTransport(2)))
+            },
+            Duration::from_secs(5),
+        )
+        .await;
+    assert_eq!(
+        reestablished.map(|e| e.transport.0),
+        Some(2),
+        "a dead-live at an already-advanced generation re-establishes in the SAME demand (no poisoning)"
+    );
+    assert_eq!(
+        establish_count.load(Ordering::SeqCst),
+        2,
+        "the advanced-generation re-establishment ran exactly once"
     );
 }
 
@@ -368,8 +434,8 @@ async fn no_binding_never_enters_cell_and_never_poisons() {
         )
         .await;
     assert_eq!(
-        r2.as_deref(),
-        Some(&FakeTransport(7)),
+        r2.map(|e| e.transport.0),
+        Some(7),
         "a bindable carrier engages SHARED — the prior no-binding miss did NOT poison the cell"
     );
     assert_eq!(
@@ -460,8 +526,8 @@ async fn real_failure_rearms_only_on_generation_or_nonce_advance() {
         )
         .await;
     assert_eq!(
-        r3.as_deref(),
-        Some(&FakeTransport(9)),
+        r3.map(|e| e.transport.0),
+        Some(9),
         "a fresh config generation re-arms even under the SAME shim nonce"
     );
     assert_eq!(
@@ -511,5 +577,46 @@ async fn missing_generation_does_not_rearm() {
         count.load(Ordering::SeqCst),
         1,
         "an absent generation must not re-arm a prior failure (no storm)"
+    );
+}
+
+/// The committed transport identity carries the generation observable AFTER a successful
+/// establishment, not the pre-establishment sample. Production re-reads the advertisement
+/// internally during the handshake, so an advertisement/nonce that advances mid-establish
+/// must be reflected in the identity — else a later dead-live eviction compares the CURRENT
+/// generation against a STALE establishment generation and mis-decides evict-vs-rearm (a
+/// spurious extra rearm, or a missed one).
+///
+/// RED before the fix: the generation is sampled BEFORE the establish future and the
+/// identity carries that stale pre-establishment value ("gen-1").
+#[tokio::test]
+async fn establishment_generation_reflects_the_post_establish_probe() {
+    let cell: LazyTransport<FakeTransport> = LazyTransport::new();
+    let probes = Arc::new(AtomicUsize::new(0));
+
+    // The advertisement generation ADVANCES during establishment: the first probe (sampled
+    // before the establish future runs) observes "gen-1"; every later probe observes
+    // "gen-2".
+    let probe = {
+        let probes = Arc::clone(&probes);
+        move || {
+            let n = probes.fetch_add(1, Ordering::SeqCst);
+            Some(if n == 0 { "gen-1" } else { "gen-2" }.to_string())
+        }
+    };
+    let established = cell
+        .get_or_establish(
+            probe,
+            always_alive,
+            || async { Some(Arc::new(FakeTransport(1))) },
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("establishes");
+    assert_eq!(
+        established.identity.establishment_generation.as_deref(),
+        Some("gen-2"),
+        "the identity carries the POST-establishment generation, not the pre-establishment \
+         sample"
     );
 }
