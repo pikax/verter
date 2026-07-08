@@ -926,7 +926,12 @@ fn named_pipe_dacl_is_owner_only() {
             0,
             "GetTokenInformation must succeed"
         );
-        let current_user: PSID = (*token_user.as_ptr().cast::<TOKEN_USER>()).User.Sid;
+        // SAFETY: `token_user` is a `Vec<u8>` (align-1) buffer; projecting `.User.Sid` off a
+        // `&TOKEN_USER` place would read the `PSID` through an under-aligned reference (UB). Take the
+        // field address with `addr_of!` (no reference formed) and `read_unaligned` the pointer value
+        // — identical `PSID`, no misaligned reference.
+        let tu = token_user.as_ptr().cast::<TOKEN_USER>();
+        let current_user: PSID = core::ptr::read_unaligned(core::ptr::addr_of!((*tu).User.Sid));
 
         let world = well_known_sid(WinWorldSid);
         let auth = well_known_sid(WinAuthenticatedUserSid);
@@ -982,6 +987,113 @@ fn named_pipe_dacl_is_owner_only() {
     drop(listener);
 }
 
+/// The Windows control named pipe PINS its OWNER to the current-user SID (`SetSecurityDescriptorOwner`
+/// in `OwnerOnlyPipeSecurity::build`), not the token's default owner. Reads the bound pipe's OWNER
+/// back via `GetSecurityInfo(..., OWNER_SECURITY_INFORMATION, ...)` and asserts `EqualSid` against the
+/// process token's current-user SID. WINDOWS-ONLY; runs on the Windows gate.
+///
+/// This is the RUNTIME CORRECTNESS check, NOT the discriminating rail: on a NON-ELEVATED gate the
+/// pipe's DEFAULT owner is ALREADY the current user, so the readback passes even WITHOUT the explicit
+/// owner pin — it would only catch a regression under an ELEVATED token (where the default owner is
+/// `BUILTIN\Administrators`). The elevation-INDEPENDENT discriminator is the source-structure guard
+/// `owner_only_pipe_security_pins_the_owner_sid`, which goes RED the instant the pin is removed.
+#[cfg(windows)]
+#[test]
+fn named_pipe_owner_is_current_user() {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, ERROR_SUCCESS, HANDLE};
+    use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_KERNEL_OBJECT};
+    use windows_sys::Win32::Security::{
+        EqualSid, GetTokenInformation, TokenUser, OWNER_SECURITY_INFORMATION, PSID, TOKEN_QUERY,
+        TOKEN_USER,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    // `ControlListener::bind` registers the named-pipe server with the tokio reactor, so it must run
+    // inside a runtime context; the OWNER read itself is synchronous (no `.await`).
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build a tokio runtime");
+    let _guard = rt.enter();
+
+    let endpoint = format!(
+        r"\\.\pipe\verter-relay-ctl-owner-{}-{}",
+        std::process::id(),
+        unique_disamb()
+    );
+    let listener = ControlListener::bind(&endpoint).expect("bind the control named pipe");
+    let handle: HANDLE = listener
+        .server
+        .as_ref()
+        .expect("a bound listener holds a pending pipe instance")
+        .as_raw_handle();
+
+    // SAFETY: a standard read-back of the kernel object's OWNER; every fallible Win32 call is
+    // checked, and the raw SIDs (`owner_sid` aliases `psd`; `current_user` aliases `token_user`)
+    // stay valid until `psd` / the token buffer are released at the end of the block.
+    unsafe {
+        let mut owner_sid: PSID = std::ptr::null_mut();
+        let mut psd: *mut std::ffi::c_void = std::ptr::null_mut();
+        let rc = GetSecurityInfo(
+            handle,
+            SE_KERNEL_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &mut owner_sid,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut psd,
+        );
+        assert_eq!(
+            rc, ERROR_SUCCESS,
+            "GetSecurityInfo must read the pipe OWNER"
+        );
+        assert!(!owner_sid.is_null(), "the pipe must carry a real owner SID");
+
+        // The current user's SID (retained via the token buffer for the comparison below).
+        let mut token: HANDLE = std::ptr::null_mut();
+        assert_ne!(
+            OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token),
+            0,
+            "OpenProcessToken must succeed"
+        );
+        let mut needed: u32 = 0;
+        GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut needed);
+        let mut token_user = vec![0u8; needed as usize];
+        assert_ne!(
+            GetTokenInformation(
+                token,
+                TokenUser,
+                token_user.as_mut_ptr().cast::<std::ffi::c_void>(),
+                needed,
+                &mut needed,
+            ),
+            0,
+            "GetTokenInformation must succeed"
+        );
+        // SAFETY: `token_user` is a `Vec<u8>` (align-1) buffer; projecting `.User.Sid` off a
+        // `&TOKEN_USER` place would read the `PSID` through an under-aligned reference (UB). Take the
+        // field address with `addr_of!` (no reference formed) and `read_unaligned` the pointer value
+        // — identical `PSID`, no misaligned reference.
+        let tu = token_user.as_ptr().cast::<TOKEN_USER>();
+        let current_user: PSID = core::ptr::read_unaligned(core::ptr::addr_of!((*tu).User.Sid));
+
+        assert_ne!(
+            EqualSid(owner_sid, current_user),
+            0,
+            "the control pipe's OWNER must be the current-user SID (the 0o600 parity under any \
+             token), not the token's default owner"
+        );
+
+        let _ = CloseHandle(token);
+        let _ = LocalFree(psd);
+    }
+
+    // The listener (and its pipe handle) must outlive the OWNER read above.
+    drop(listener);
+}
+
 /// F7 — EVERY named-pipe create site in `transport.rs` must apply the owner-only security attributes
 /// (`create_with_security_attributes_raw`), never the default-DACL `ServerOptions::create`. The DACL
 /// readback test above only inspects the BIND instance, but `accept()` provisions each NEXT instance
@@ -1018,6 +1130,63 @@ fn every_named_pipe_create_uses_owner_only_security() {
         count >= 2,
         "expected at least the bind + accept ServerOptions pipe-create sites in transport.rs; \
          found {count} — has the pipe-create path moved?"
+    );
+}
+
+/// `OwnerOnlyPipeSecurity::build` must PIN the security descriptor's OWNER to the current-user SID
+/// (`SetSecurityDescriptorOwner`), not only its DACL. Without the owner pin, under an ELEVATED token
+/// the pipe owner defaults to `BUILTIN\Administrators`, who hold implicit `WRITE_DAC` and can rewrite
+/// the very owner-only DACL — breaking the current-user-only / `0o600` parity claim under elevated
+/// tokens.
+///
+/// This SOURCE-STRUCTURE guard is the ELEVATION-INDEPENDENT discriminating rail: it goes RED the
+/// instant the owner pin is removed, on ANY platform/elevation. The runtime `named_pipe_owner_is_
+/// current_user` readback CANNOT discriminate on a non-elevated gate — there the pipe's DEFAULT owner
+/// is ALREADY the current user, so the readback passes even without the explicit set — so the source
+/// guard is the discriminator and the readback is the runtime correctness check. Reads `transport.rs`
+/// (production source only — the test file is a separate `#[path]` module, so this guard's own
+/// `SetSecurityDescriptorOwner` literal is never scanned) with line comments stripped, so the
+/// SAFETY-comment prose mentioning the owner pin can never satisfy the check — only the live CALL
+/// counts. It further pins the EXACT owner arguments — `SetSecurityDescriptorOwner(sd_ptr, sid,
+/// FALSE)` after whitespace-stripping — so it also goes RED if the owner is pinned to the WRONG SID
+/// or defaulted (`TRUE`), not only when the whole call is removed. Runs on every platform.
+#[test]
+fn owner_only_pipe_security_pins_the_owner_sid() {
+    let src = include_str!("transport.rs");
+    let build = src
+        .find("fn build() -> TsgoApiResult<Self>")
+        .expect("OwnerOnlyPipeSecurity::build is present");
+    let end = src[build..]
+        .find("fn security_attributes")
+        .map(|off| build + off)
+        .expect("security_attributes follows build");
+    // Strip line comments so the SAFETY-comment prose can never satisfy the CALL checks below.
+    let body: String = src[build..end]
+        .lines()
+        .map(|line| line.split("//").next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let dacl = body
+        .find("SetSecurityDescriptorDacl(")
+        .expect("build sets the DACL via SetSecurityDescriptorDacl(...)");
+    let owner = body.find("SetSecurityDescriptorOwner(").expect(
+        "OwnerOnlyPipeSecurity::build must PIN the descriptor OWNER to the current-user SID via \
+         SetSecurityDescriptorOwner(...); without it an elevated token defaults the pipe owner to \
+         BUILTIN\\Administrators (implicit WRITE_DAC), who could rewrite the owner-only DACL",
+    );
+    assert!(
+        dacl < owner,
+        "the OWNER pin (byte {owner}) must follow the DACL set (byte {dacl}) in build()"
+    );
+    // Pin the EXACT owner call: the SID must be `sid` (the current-user SID) and the defaulted flag
+    // must be `FALSE` (explicitly set, NOT defaulted). Space-strip so argument spacing is irrelevant;
+    // a wrong SID or a `TRUE` (defaulted) owner then fails this exact-form check.
+    let body_nospace = body.replace(' ', "");
+    assert!(
+        body_nospace.contains("SetSecurityDescriptorOwner(sd_ptr,sid,FALSE)"),
+        "build() must pin the OWNER with the exact call SetSecurityDescriptorOwner(sd_ptr, sid, \
+         FALSE) — the current-user `sid` with `FALSE` = explicitly set (not defaulted); a wrong SID \
+         or a defaulted `TRUE` owner breaks the current-user-only / 0o600 parity"
     );
 }
 

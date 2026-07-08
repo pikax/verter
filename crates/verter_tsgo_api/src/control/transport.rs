@@ -340,11 +340,13 @@ fn set_control_socket_permissions(endpoint: &str) -> TsgoApiResult<()> {
 
 /// The Windows named-pipe security helper: an EXPLICIT owner-only DACL granting the current-user
 /// SID full control and NOTHING to any broader principal (no Everyone / Authenticated Users /
-/// Administrators), matching the Unix side's `0o600` socket bar. Without it a named pipe inherits
-/// the process token's ambient default DACL, which grants broader access (on many hosts it grants
-/// Everyone). The descriptor is applied to EVERY pipe instance — the `bind` instance AND every
-/// `accept`-provisioned next instance — and the helper fails CLOSED on any Win32 error (it never
-/// falls back to a default-DACL pipe).
+/// Administrators), matching the Unix side's `0o600` socket bar. The descriptor also PINS its OWNER
+/// to that same current-user SID: without an explicit owner, under an ELEVATED token the pipe owner
+/// defaults to `BUILTIN\Administrators`, who hold implicit `WRITE_DAC` and could rewrite the very
+/// owner-only DACL. Without the DACL a named pipe inherits the process token's ambient default DACL,
+/// which grants broader access (on many hosts it grants Everyone). The descriptor is applied to EVERY
+/// pipe instance — the `bind` instance AND every `accept`-provisioned next instance — and the helper
+/// fails CLOSED on any Win32 error (it never falls back to a default-DACL pipe).
 #[cfg(windows)]
 mod owner_only_pipe_security {
     use std::ffi::c_void;
@@ -357,9 +359,9 @@ mod owner_only_pipe_security {
         TRUSTEE_IS_USER,
     };
     use windows_sys::Win32::Security::{
-        GetTokenInformation, InitializeSecurityDescriptor, SetSecurityDescriptorDacl, TokenUser,
-        ACL, NO_INHERITANCE, PSID, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, TOKEN_QUERY,
-        TOKEN_USER,
+        GetTokenInformation, InitializeSecurityDescriptor, SetSecurityDescriptorDacl,
+        SetSecurityDescriptorOwner, TokenUser, ACL, NO_INHERITANCE, PSID, SECURITY_ATTRIBUTES,
+        SECURITY_DESCRIPTOR, TOKEN_QUERY, TOKEN_USER,
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -378,7 +380,8 @@ mod owner_only_pipe_security {
         descriptor: Box<SECURITY_DESCRIPTOR>,
         /// The DACL allocated by `SetEntriesInAclW` (via `LocalAlloc`); `LocalFree`d on drop.
         dacl: *mut ACL,
-        /// Backs the SID the DACL was built from; retained until after the descriptor is built.
+        /// Backs the current-user SID the DACL AND the descriptor OWNER reference; retained until
+        /// the kernel copies the security descriptor into the pipe object at creation.
         _token_user: Vec<u8>,
     }
 
@@ -387,9 +390,12 @@ mod owner_only_pipe_security {
         pub(super) fn build() -> TsgoApiResult<Self> {
             // SAFETY: each Win32 call below is used per its contract and every fallible result is
             // checked (the code fails closed, never proceeding on an error). Raw pointers stay
-            // valid: `token` is closed by `TokenHandle`'s drop; the SID aliases the retained
-            // `token_user` buffer only until `SetEntriesInAclW` copies it into `dacl`; and `dacl`
-            // plus the boxed descriptor are retained on the returned value.
+            // valid: `token` is closed by `TokenHandle`'s drop; the retained `token_user` buffer is
+            // LOAD-BEARING for BOTH the DACL and the OWNER — the SID aliases it and must outlive
+            // `SetEntriesInAclW` copying the SID into `dacl` AND the kernel copying the SD owner (set
+            // via `SetSecurityDescriptorOwner`, which references the SID DIRECTLY) at pipe creation.
+            // `token_user`, `dacl`, and the boxed descriptor are all retained on the returned value
+            // until then.
             unsafe {
                 let mut token: HANDLE = std::ptr::null_mut();
                 if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == FALSE {
@@ -414,7 +420,14 @@ mod owner_only_pipe_security {
                 {
                     return Err(win32_last_error("GetTokenInformation"));
                 }
-                let sid: PSID = (*token_user.as_ptr().cast::<TOKEN_USER>()).User.Sid;
+                // SAFETY: `token_user` is a `Vec<u8>` (align-1) buffer, so forming a `&TOKEN_USER`
+                // place to project `.User.Sid` would read the `PSID` through an under-aligned
+                // reference (UB by the letter). `addr_of!` computes the field address by offset
+                // WITHOUT forming a reference, and `read_unaligned` reads the `PSID` value from it;
+                // the SID bytes it points at stay owned by the retained `token_user`. The pointer
+                // VALUE is identical to a direct field read, so the Win32 APIs receive the same SID.
+                let tu = token_user.as_ptr().cast::<TOKEN_USER>();
+                let sid: PSID = core::ptr::read_unaligned(core::ptr::addr_of!((*tu).User.Sid));
                 if sid.is_null() {
                     return Err(TsgoApiError::Transport(
                         "control named pipe owner-only DACL: token user SID is null".to_string(),
@@ -447,6 +460,16 @@ mod owner_only_pipe_security {
                 if SetSecurityDescriptorDacl(sd_ptr, TRUE, dacl, FALSE) == FALSE {
                     let _ = LocalFree(dacl.cast::<c_void>());
                     return Err(win32_last_error("SetSecurityDescriptorDacl"));
+                }
+                // PIN the OWNER to the current-user SID (`FALSE` = explicitly set, NOT defaulted).
+                // Without it, under an ELEVATED token the pipe owner defaults to
+                // `BUILTIN\Administrators`, who hold implicit `WRITE_DAC` and could rewrite the
+                // owner-only DACL — breaking the current-user-only / 0o600 parity. The owner
+                // references `sid` DIRECTLY (aliasing the retained `token_user`) until the kernel
+                // copies the descriptor at pipe creation.
+                if SetSecurityDescriptorOwner(sd_ptr, sid, FALSE) == FALSE {
+                    let _ = LocalFree(dacl.cast::<c_void>());
+                    return Err(win32_last_error("SetSecurityDescriptorOwner"));
                 }
 
                 Ok(Self {

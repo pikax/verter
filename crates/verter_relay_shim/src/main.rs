@@ -199,13 +199,16 @@ fn expect_value(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<S
         .ok_or_else(|| format!("{flag} requires a value"))
 }
 
-/// The spawned real-tsgo child. Containment is INTRINSIC to the spawn on BOTH platforms, so this is
-/// a thin wrapper that adds only the cooperative contained-kill; it holds no per-child job handle.
+/// The spawned real-tsgo child. The child is contained at spawn on EVERY platform — its OWN
+/// session/process-group on Unix, the shim's job on Windows — so this is a thin wrapper that adds
+/// only the cooperative contained-kill; it holds no per-child job handle.
 ///
 /// OS-level containment is the PRIMARY "no orphaned tsgo" guarantee; the cooperative RAII
 /// ([`ChildSetupGuard`]) + Unix signal-handler paths are the BACKSTOP for graceful teardown. The
 /// hard case — the shim itself `SIGKILL`ed or hard-crashing so NEITHER `Drop` NOR a signal handler
-/// can run — is closed by the kernel, INTRINSICALLY AT SPAWN on both platforms:
+/// can run — is closed by a kernel parent-death primitive INTRINSIC AT SPAWN on Linux and Windows
+/// ONLY; macOS/BSD have NO such primitive, so the hard case there falls to the best-effort
+/// cooperative backstop (third bullet):
 ///
 /// - **Linux**: the child spawns with `PR_SET_PDEATHSIG = SIGKILL` (armed in `pre_exec`), so the
 ///   kernel kills it the instant the shim dies, even on an uncatchable `SIGKILL` of the shim.
@@ -218,7 +221,10 @@ fn expect_value(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<S
 /// - **Unix generally** (incl. macOS/BSD): the child spawns in its OWN session/process-group
 ///   (`setsid`, falling back to `setpgid`), so cooperative teardown group-kills the whole subtree.
 ///   macOS/BSD have NO parent-death primitive, so a HARD-killed shim there relies on the RAII /
-///   signal path (best-effort) — there is no kernel reap of an orphan on those platforms.
+///   signal path (best-effort) — there is no kernel reap of an orphan on those platforms. Closing
+///   that window needs a watcher that OUTLIVES the shim — a surviving supervisor PROCESS, or the
+///   child watching the parent via `kqueue`/`EVFILT_PROC`/`NOTE_EXIT` — because an in-shim thread
+///   cannot act after the shim's own uncatchable `SIGKILL`.
 struct OwnedChild {
     child: Child,
 }
@@ -422,10 +428,14 @@ fn contain_child_unix(parent_pid: u32) -> std::io::Result<()> {
 
 /// RAII ownership of the spawned real-tsgo [`OwnedChild`] DURING `--lsp` setup.
 ///
-/// OS containment (Job Object / `PR_SET_PDEATHSIG`) is the PRIMARY orphan guarantee and is intrinsic
-/// to the spawn (the Windows job is self-assigned BEFORE the spawn, Unix containment is armed in
-/// `pre_exec`); this guard is the cooperative-teardown BACKSTOP. The shim SPAWNED this child, so it
-/// owns its lifecycle. If any setup step AFTER the spawn but BEFORE steady-state hand-off fails —
+/// The intrinsic-at-spawn HARD-kill orphan guarantee is Linux (`PR_SET_PDEATHSIG`) + Windows (the
+/// self-assigned Job Object) ONLY — there the kernel reaps the child even if this guard never runs.
+/// On macOS/BSD the `pre_exec` `setsid` gives process-group CONTAINMENT only (no parent-death
+/// primitive), so for the hard-kill case there THIS RAII guard, together with the Unix
+/// signal-handler path, IS the (best-effort) orphan backstop — best-effort because it cannot run on
+/// a `SIGKILL`/hard-crash of the shim. This guard is the cooperative-teardown BACKSTOP in every
+/// teardown. The shim SPAWNED this child, so it owns its lifecycle. If any setup step AFTER the
+/// spawn but BEFORE steady-state hand-off fails —
 /// nonce minting, endpoint-path creation, control bind, advertisement write — the guard's `Drop`
 /// kills + synchronously reaps the child so the real tsgo never lingers until the shim itself exits.
 /// The guard is disarmed ([`into_inner`](Self::into_inner)) only once the accept loop is running and
@@ -618,20 +628,19 @@ impl ShutdownSignals {
         .await
     }
 
-    /// A NON-BLOCKING poll of the shutdown signals: return the FIRST already-pending signal number,
-    /// or `None`. Polling with a no-op waker never parks the task — it just reads what tokio has
-    /// already buffered. Used to re-check for a signal delivered DURING the synchronous setup body,
-    /// after the setup-window select has already polled its signal arm once, so a signal buffered
-    /// mid-setup is not masked as a `Code(1)` setup error.
-    fn try_recv(&mut self) -> Option<i32> {
-        let waker = std::task::Waker::noop();
-        let mut cx = std::task::Context::from_waker(waker);
-        for (num, stream) in &mut self.streams {
-            if stream.poll_recv(&mut cx).is_ready() {
-                return Some(*num);
-            }
-        }
-        None
+    /// Await a shutdown signal already captured during the synchronous setup body, bounded so the
+    /// genuinely-no-signal case cannot block the shim's setup-error path. A signal delivered DURING
+    /// setup is captured by tokio's OS signal handler — written to the signal self-pipe — at
+    /// delivery; the awaited `recv()` here TURNS the reactor (a real waker-driven wakeup, not a poll
+    /// gamble), so a buffered signal is drained DETERMINISTICALLY and returned immediately. The 50ms
+    /// bound only limits the rare case where no signal was delivered (a plain setup error), after
+    /// which this returns `None` and the setup error takes its faithful `Code(1)` path.
+    async fn recv_pending_now(&mut self) -> Option<i32> {
+        // `timeout` yields `Ok(signum)` on a drained signal and `Err(Elapsed)` on the 50ms bound;
+        // `.ok()` collapses that to `Some(signum)` / `None`.
+        tokio::time::timeout(std::time::Duration::from_millis(50), self.recv())
+            .await
+            .ok()
     }
 }
 
@@ -663,12 +672,12 @@ enum SetupResolution<T> {
 ///
 /// The setup body runs SYNCHRONOUSLY (its only `.await` is a detached accept task), so the
 /// setup-window select polls its signal arm just ONCE; a signal delivered DURING setup that then
-/// ERRORS is not seen by that select. `pending_signal_after_setup` carries a non-blocking re-poll of
-/// the shutdown signals taken on the error path: when it is `Some`, the setup error is superseded by
-/// the faithful signal re-raise. A clean setup maps to [`SetupResolution::Proceed`] regardless (the
-/// steady-state biased select observes any still-pending signal); only a setup error with NO pending
-/// signal maps to [`SetupResolution::Error`]. Kept a pure function so every ordering is unit-testable
-/// deterministically (the microscopic real-timing race is not portably forceable).
+/// ERRORS is not seen by that select. `pending_signal_after_setup` carries a bounded, reactor-turning
+/// re-check of the shutdown signals taken on the error path: when it is `Some`, the setup error is
+/// superseded by the faithful signal re-raise. A clean setup maps to [`SetupResolution::Proceed`]
+/// regardless (the steady-state biased select observes any still-pending signal); only a setup error
+/// with NO pending signal maps to [`SetupResolution::Error`]. Kept a pure function so every ordering
+/// is unit-testable deterministically (the microscopic real-timing race is not portably forceable).
 #[cfg(unix)]
 fn resolve_setup_race<T>(
     outcome: SetupOutcome<T>,
@@ -789,11 +798,15 @@ async fn run_relay(args: ShimArgs) -> Result<ShimExit, String> {
     create_kill_on_close_job_and_self_assign()
         .map_err(|e| format!("contain the relay shim in a job object: {e}"))?;
 
-    // Spawn the real tsgo under OS-level containment — the PRIMARY "no orphaned tsgo" guarantee,
-    // INTRINSIC to the spawn on BOTH platforms: Unix → its own session/process-group (+ Linux
-    // PR_SET_PDEATHSIG) armed in `pre_exec`; Windows → born into the shim's kill-on-close Job Object
-    // (self-assigned just above). The RAII guard is the cooperative-teardown backstop. The signal
-    // install above precedes this spawn, so no spawn→install window can orphan the child on a signal.
+    // Spawn the real tsgo under OS-level containment — the PRIMARY "no orphaned tsgo" guarantee. Its
+    // HARD-kill part (the kernel reaps the child even if neither Drop nor a signal handler runs) is
+    // INTRINSIC to the spawn on Linux (PR_SET_PDEATHSIG) + Windows (the kill-on-close Job Object)
+    // ONLY: Unix → its own session/process-group (+ Linux PR_SET_PDEATHSIG) armed in `pre_exec`;
+    // Windows → born into the shim's kill-on-close Job Object (self-assigned just above). On
+    // macOS/BSD the `setsid` process-group containment has NO parent-death primitive, so the RAII
+    // guard / signal path is the best-effort hard-kill backstop there. The RAII guard is the
+    // cooperative-teardown backstop generally. The signal install above precedes this spawn, so no
+    // spawn→install window can orphan the child on a signal.
     #[cfg(unix)]
     let child = {
         use std::os::unix::process::CommandExt;
@@ -929,14 +942,15 @@ async fn run_relay(args: ShimArgs) -> Result<ShimExit, String> {
         };
         // The setup body runs SYNCHRONOUSLY (its only `.await` is the detached accept task), so the
         // select above polled its signal arm just once. A shutdown signal delivered DURING setup that
-        // then ERRORED would otherwise be masked as `Code(1)`; re-poll non-blockingly on the error
-        // path to recover it BEST-EFFORT. Not guaranteed: `try_recv` only sees a signal another
-        // worker already pumped through the I/O reactor in that window (tokio's `Signal::poll_recv`
-        // does not itself turn the signal driver). A missed signal still reaps the OWNED child (no
-        // orphan) and only degrades exit-code fidelity to `Code(1)` in an extreme race — never an
-        // orphan, never on the Ok path.
+        // then ERRORED would otherwise be masked as `Code(1)`. Recover it DETERMINISTICALLY on the
+        // error path with a bounded await: the signal was captured by tokio's OS signal handler
+        // (written to the signal self-pipe) at delivery, and `recv_pending_now` TURNS the reactor on
+        // the awaited `recv()` — a real waker-driven wakeup, not a non-reactor poll — so a signal
+        // buffered mid-setup is drained and re-raised faithfully instead of masked. The 50ms bound
+        // only limits the genuinely-no-signal case (a plain setup error → the faithful `Code(1)`
+        // path); a delivered signal returns immediately.
         let pending_signal_after_setup = match &outcome {
-            SetupOutcome::Done(Err(_)) => shutdown_signals.try_recv(),
+            SetupOutcome::Done(Err(_)) => shutdown_signals.recv_pending_now().await,
             _ => None,
         };
         match resolve_setup_race(outcome, pending_signal_after_setup) {

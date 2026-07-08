@@ -429,6 +429,90 @@ fn setup_signal_pending_during_synchronous_setup_error_wins() {
     }
 }
 
+/// The setup-error signal recovery must use the DETERMINISTIC bounded await (`recv_pending_now`,
+/// which turns the reactor on an awaited `recv()`), never a non-reactor-turning poll (`try_recv`
+/// with a no-op waker). A signal delivered during the synchronous setup body is captured by tokio's
+/// OS signal handler — written to the signal self-pipe — at DELIVERY; only a poll that never turns
+/// the reactor made observing it a gamble. The awaited `recv()` is a real waker-driven wakeup, so a
+/// buffered signal is drained deterministically; the bound only limits the genuinely-no-signal case.
+/// The live signal-during-sync-setup race is not portably inducible, so the determinism is
+/// by-construction and this source-structure guard pins the mechanism. Pre-fix the recovery called
+/// `shutdown_signals.try_recv()` (the no-op-waker poll), so this guard FAILS against it.
+/// Region-bounded to `run_relay` production source (before the tests module) with line comments
+/// stripped, so this guard's own literals and any prose can never satisfy the check.
+#[test]
+fn setup_error_signal_recovery_uses_the_bounded_await() {
+    let src = include_str!("main.rs");
+    let run_relay = src
+        .find("async fn run_relay(")
+        .expect("run_relay is present");
+    let tests_mod = src.find("mod tests").expect("the tests module is present");
+    let region: String = src[run_relay..tests_mod]
+        .lines()
+        .map(|line| line.split("//").next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n");
+    // The setup-error recovery must call the DETERMINISTIC bounded await, which turns the reactor.
+    assert!(
+        region.contains("SetupOutcome::Done(Err(_)) => shutdown_signals.recv_pending_now()"),
+        "the setup-error path must recover a mid-setup signal via the DETERMINISTIC bounded await \
+         recv_pending_now(...).await (which turns the reactor on the awaited recv()), not a \
+         non-reactor-turning poll"
+    );
+    // ...and must NOT use the non-reactor-turning `try_recv` no-op-waker poll anywhere in run_relay.
+    assert!(
+        !region.contains("try_recv"),
+        "the setup-error signal recovery must not use the non-reactor-turning try_recv() poll (a \
+         no-op-waker poll that never turns the signal driver); use the bounded recv_pending_now"
+    );
+}
+
+/// `ShutdownSignals::recv_pending_now` must stay the DETERMINISTIC bounded, reactor-turning drain:
+/// a `tokio::time::timeout` around the awaited `self.recv()`. Turning the reactor on the awaited
+/// `recv()` is what drains a signal delivered during synchronous setup — already written to the OS
+/// signal self-pipe at delivery — on the first reactor turn; the bound only limits the
+/// genuinely-no-signal case. A non-reactor poll (`try_recv`, a `Waker::noop` / `noop_waker` poll, or
+/// a bare `poll_recv`) would turn observing a buffered signal back into a gamble. This
+/// source-structure guard isolates the `recv_pending_now` body (line comments stripped, so its own
+/// prose can never satisfy the check) and pins the mechanism: it FAILS if the body is rewritten to a
+/// non-reactor poll under the same name.
+#[test]
+fn recv_pending_now_uses_the_bounded_reactor_turning_await() {
+    let src = include_str!("main.rs");
+    let start = src
+        .find("async fn recv_pending_now")
+        .expect("recv_pending_now is present");
+    // Bound to the method body: its closing brace is the first line at the method's 4-space indent.
+    let rel_end = src[start..]
+        .find("\n    }")
+        .expect("recv_pending_now body closes at the method's 4-space indent");
+    let body: String = src[start..start + rel_end]
+        .lines()
+        .map(|line| line.split("//").next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n");
+    // The drain MUST be the bounded, reactor-turning await: a timeout around the awaited recv().
+    assert!(
+        body.contains("tokio::time::timeout"),
+        "recv_pending_now must bound the drain with tokio::time::timeout(...), so the \
+         genuinely-no-signal case cannot block the setup-error path"
+    );
+    assert!(
+        body.contains("self.recv()"),
+        "recv_pending_now must await self.recv() — turning the reactor is what drains a signal \
+         buffered on the OS self-pipe during synchronous setup"
+    );
+    // ...and MUST NOT degrade to a non-reactor poll, which would turn observing a buffered signal
+    // into a gamble instead of a deterministic reactor-turning drain.
+    for banned in ["try_recv", "Waker::noop", "noop_waker", "poll_recv"] {
+        assert!(
+            !body.contains(banned),
+            "recv_pending_now must not use the non-reactor poll `{banned}`; keep the bounded \
+             reactor-turning tokio::time::timeout(_, self.recv()).await drain"
+        );
+    }
+}
+
 /// G5 — the relay-stop kill classifier returns a clean `Code(0)` ONLY for OUR SIGKILL; a child
 /// that died on its OWN (a self-signal or a non-zero self-exit in the race just after the grace
 /// deadline) is propagated faithfully, never masked as a clean disconnect. UNIX-ONLY (constructs
