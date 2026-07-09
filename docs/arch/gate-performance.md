@@ -257,13 +257,101 @@ measured no-op: the `test` profile already inherits
 
 | ID | Item | Status | Notes |
 |----|------|--------|-------|
-| L6 | Opt-in build linker + CI sccache | DEFERRED | Alternate linker config (`.cargo/config.perf.toml` for lld/mold/zld) plus CI-only `sccache`. Deferred because it is not a default contributor or canonical-gate behavior, requires per-platform availability/correctness validation on macOS/Windows/Linux, and the already-landed single-compile archive runner plus integration-test binary consolidation removed the dominant measured gate waste. Rough value: incremental link/build latency reduction for opted-in local users and warm CI jobs, likely meaningful only after measuring the current consolidated-gate link time. Pick up when future gate profiling shows link time or repeated CI cold builds remain a top bottleneck, or when CI queue cost justifies a hermetic cache-key rollout. Risk of not doing it: leaves some local opt-in and warm-CI compile/link savings unrealized; no known correctness, coverage, or default gate-performance regression. |
+| L6 | Opt-in build linker + CI sccache | SPLIT: sccache opt-in LANDED / linker DEFERRED | The sccache half is landed as an opt-in helper: `scripts/sccache-env.mjs` (see "Opt-in shared sccache (orchestration)" below) computes a shared compiler-cache environment on demand; the default build, `.cargo/config.toml`, and every CI runner without sccache are untouched. The alternate-LINKER half remains DEFERRED: repo M3/M4 measurements show the macOS `ld-prime` default already beats brew `lld` by ~9% and `mold` is Mach-O-N/A, so no alternate linker wins on measured hosts; pick the linker piece up only if future measurements on other hosts show a win. |
+
+## Opt-in shared sccache (orchestration)
+
+Multi-agent orchestration spawns many `git worktree`s, and each one cold-compiles
+its own `target/`. `scripts/sccache-env.mjs` is a portable, opt-in helper that
+lets all worktrees SHARE one sccache compiler cache. It computes the sccache
+environment and either prints it or runs a child command with it merged in —
+it is never itself a rustc wrapper, never execs rustc, and never impersonates
+sccache.
+
+Opt-in invocations:
+
+```bash
+# RECOMMENDED run path: run the canonical gate under the shared cache
+# (hard-fail if sccache is missing). --exec passes argv straight to the child
+# (spawnSync, no shell), so values with spaces are safe:
+node scripts/sccache-env.mjs --exec --required -- node scripts/gate.mjs
+
+# Inspect the computed KEY=VALUE lines (line-parseable output for tooling and
+# inspection ONLY — values are unquoted, so it is NOT safe for raw shell
+# `eval`; use --exec to run commands):
+node scripts/sccache-env.mjs --print-env
+```
+
+Contract:
+
+- **CI-safe default: OFF.** Nothing activates sccache unless a caller explicitly
+  invokes the helper. `.cargo/config.toml` is untouched, no default
+  `rustc-wrapper` exists, and a runner without sccache is unaffected. Without
+  `--required`, a missing sccache is a LOUD no-op: the helper prints a stderr
+  warning and runs the child with the caller's unmodified environment (plain
+  rustc); with `--required` it exits non-zero without running the child.
+- **`CARGO_INCREMENTAL=0`** is set only inside the computed environment because
+  sccache cannot cache incremental compilation artifacts. It is opt-in-only —
+  never a global dev default; a normal `cargo` invocation keeps incremental
+  compilation.
+- **Cross-worktree sharing.** `SCCACHE_DIR` defaults to
+  `~/.cache/verter-sccache` (outside any worktree; respected if already set),
+  and `SCCACHE_BASEDIRS` defaults to every root reported by
+  `git worktree list --porcelain`, joined with the platform path delimiter, so
+  builds under different worktree roots relativize to identical cache keys and
+  hit the same cache entries. Both are overridable via the environment.
+- **Tunable cache size.** `SCCACHE_CACHE_SIZE` defaults to `10G`; respected if
+  already set.
+- **Run via `--exec`, not shell eval.** `--print-env` emits newline `KEY=VALUE`
+  lines with UNQUOTED values — line-parseable for tooling/inspection, but NOT
+  safe for raw `eval "$(...)"` when a value contains spaces. The recommended
+  run path is `--exec -- <cmd>`: argv reaches the child directly (spawnSync,
+  no shell), so no quoting hazard exists.
+- **`SCCACHE_BASEDIRS` is a point-in-time snapshot** captured when the helper
+  runs: a worktree created AFTER the value was computed is not covered until
+  the helper runs again. Invoke `--exec` per build (each invocation re-derives
+  the worktree list) rather than capturing the env once and reusing it.
+- **Fail-closed basedir validation.** Every `SCCACHE_BASEDIRS` entry — derived
+  or overridden via the environment — must be a non-empty absolute path;
+  sccache rejects relative basedirs (its server refuses to start), so the
+  helper exits non-zero with a diagnostic instead of emitting an invalid value.
+- **Executable-only discovery.** A candidate becomes `RUSTC_WRAPPER` only if it
+  is a regular file AND executable (`X_OK` on POSIX; on Windows, where `X_OK`
+  is meaningless, an executable extension per `isWindowsExecutableName`: the
+  default set `.exe`/`.com`/`.bat`/`.cmd` is ALWAYS accepted — a real
+  `sccache.exe` is executable even when `PATHEXT` is empty or omits `.EXE` —
+  unioned with the `PATHEXT` entries, which extend but never shrink the set).
+  A non-executable file named `sccache` counts as ABSENT — optional mode
+  no-ops, `--required` fails cleanly — never a broken wrapper.
+- **`--exec` child must be a real executable.** The child is spawned without a
+  shell (no `shell: true`), so on Windows a `.cmd`/`.bat` shim cannot be
+  spawned directly — invoke the underlying `.exe` or pass an explicit
+  interpreter. The documented usage (`node <script>`) is unaffected.
+- **Portability.** Node stdlib only (`node:os`, `node:path`, `node:fs`,
+  `node:process`, `node:child_process`): discovery scans `PATH` split on
+  `path.delimiter` (plus `sccache.exe` on win32), honors an absolute
+  `VERTER_SCCACHE_BIN` override, and contains no hardcoded per-OS paths — the
+  helper behaves identically on macOS, Windows, and Linux.
+
+Self-tests: `scripts/sccache-env.test.mjs` (Vitest; hermetic —
+presence/absence forced via `VERTER_SCCACHE_BIN`; the win32 extension decision
+is the exported pure `isWindowsExecutableName`, unit-tested on any OS). Run
+via the root `pnpm run test:scripts` script (an explicit-path root vitest run
+— `scripts/` is not a workspace package, so the root `pnpm test` /
+`pnpm -r run test` never reaches it). In CI the self-tests run in the
+`js-build-test` job ("Rust build-tooling helper self-tests (sccache-env)"
+step in `.github/workflows/ci.yml`); that job is path-filtered, and the
+`detect-changes` `js` filter lists `scripts/sccache-env.mjs` and
+`scripts/sccache-env.test.mjs` explicitly, so a change to either file
+triggers the job.
 
 ## Tooling
 
 | Script | Role |
 |--------|------|
 | `scripts/gate.mjs` | The canonical Rust gate CLI — archive → nextest run → direct libtest → aggregated verdict. Only bare `node scripts/gate.mjs` is the gate. |
+| `scripts/sccache-env.mjs` | Opt-in shared-sccache environment helper (`--exec -- <cmd>` recommended; `--print-env` for tooling/inspection, not shell-eval; `--required`); see "Opt-in shared sccache (orchestration)" above. |
+| `scripts/sccache-env.test.mjs` | Vitest self-tests for `sccache-env.mjs` (`pnpm run test:scripts`; runs in the `js-build-test` CI job, which the `js` path filter triggers on changes to either sccache-env file); hermetic via `VERTER_SCCACHE_BIN`. |
 | `scripts/gate-internals.mjs` | Reusable gate internals (classifiers, single-flight mutex, contained-step runner, multi-step seam); imported by `gate.mjs` and by the self-test. |
 | `scripts/gate-selftest.mjs` | Drives the cargo-free seam/classifier scenarios in-process against `gate-internals.mjs` — exercises gate logic without building the workspace. |
 | `scripts/gate-selftest-runner.mjs` | Runner harness for the gate self-test scenarios. |

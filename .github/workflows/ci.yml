@@ -51,6 +51,8 @@ jobs:
               - 'tsconfig*.json'
               - 'scripts/v5-process/**'
               - 'scripts/gen-svelte-goldens.mjs'
+              - 'scripts/sccache-env.mjs'
+              - 'scripts/sccache-env.test.mjs'
               - 'crates/verter_compiler/tests/svelte_oracle_corpus/**'
               - '.github/workflows/ci.yml'
             wasm:
@@ -281,6 +283,11 @@ jobs:
         # specs (packageManifest*/ssrReadiness) that block a blanket package run.
         run: |
           pnpm vitest run packages/typescript-plugin/src/carrier-routing-no-vue-gate.spec.ts packages/vue-vscode/src/carrier-routing-no-vue-gate.spec.ts
+      - name: Rust build-tooling helper self-tests (sccache-env)
+        # Explicit-path root vitest run: scripts/ is not a workspace package,
+        # so `pnpm -r run test` never reaches these specs — same convention as
+        # the carrier-routing guards step above.
+        run: pnpm run test:scripts
       - name: Test report
         if: always()
         uses: dorny/test-reporter@v1
