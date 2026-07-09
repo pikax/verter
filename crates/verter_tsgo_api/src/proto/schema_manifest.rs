@@ -44,7 +44,7 @@ pub struct FramingConstants {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SchemaManifest {
     /// The REFERENCE `typescript` distribution version this codec was verified
-    /// against (e.g. `7.0.1-rc`). The gate accepts a version CHANNEL
+    /// against (e.g. `7.0.2`). The gate accepts a version CHANNEL
     /// ([`crate::gate::classify_engine_version`]), not this one build; this
     /// field documents the build the hand-written codec was checked against
     /// and appears in gate refusal messages.
@@ -141,7 +141,7 @@ pub const PINNED_CALLBACKS: &[&str] = &[
 ///
 /// On a version bump the maintainer re-verifies the hand-written codec, then
 /// updates `engine_version` (and the op/callback inventory if the surface
-/// changed). `engine_version` is `typescript@7.0.1-rc` — the REFERENCE build
+/// changed). `engine_version` is `typescript@7.0.2` — the REFERENCE build
 /// within the accepted version channel
 /// ([`crate::gate::classify_engine_version`]), not the sole accepted version:
 /// the gate admits every build in the channel, all of which share the
@@ -151,7 +151,7 @@ pub const PINNED_CALLBACKS: &[&str] = &[
 /// compiler-options diagnostic surface the codec now hand-writes); the
 /// fingerprint reflects that op set.
 pub const PINNED: SchemaManifest = SchemaManifest {
-    engine_version: "7.0.1-rc",
+    engine_version: "7.0.2",
     framing: FramingConstants {
         fixarray3: crate::proto::msgpack::MSGPACK_FIXARRAY3,
         bin8: crate::proto::msgpack::MSGPACK_BIN8,

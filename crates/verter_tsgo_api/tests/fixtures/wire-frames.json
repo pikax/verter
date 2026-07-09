@@ -1,5 +1,5 @@
 {
-  "engineVersion": "7.0.1-rc",
+  "engineVersion": "7.0.2",
   "note": "Canonical tsgo --api tuple frames. requestFrames are JS-channel WRITE bytes; liveFrames are raw bytes tsgo wrote back. Hex-encoded.",
   "requestFrames": {
     "initialize": {
@@ -46,7 +46,7 @@
   "liveFrames": {
     "initialize_response": {
       "request_method": "initialize",
-      "hex": "9304c40a696e697469616c697a65c4597b227573654361736553656e73697469766546696c654e616d6573223a66616c73652c2263757272656e744469726563746f7279223a22443a5c5c6465765c5c706572736f6e616c5c5c7665727465722d657874747335227d",
+      "hex": "9304c40a696e697469616c697a65c4577b227573654361736553656e73697469766546696c654e616d6573223a66616c73652c2263757272656e744469726563746f7279223a22443a5c5c6465765c5c706572736f6e616c5c5c7665727465722d72636761227d",
       "captured_from": "real tsgo engine"
     }
   }

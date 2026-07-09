@@ -249,15 +249,15 @@ fn oracle_consumption_path_has_no_tsgo_spawn() {
     }
 }
 
-/// The tsgo engine is the rc `typescript` package, pinned to the EXACT version
-/// the snapshots were captured under (`7.0.1-rc`). A floating `"latest"` would
+/// The tsgo engine is the GA `typescript` package, pinned to the EXACT version
+/// the snapshots are validated against (`7.0.2`). A floating `"latest"` would
 /// let an upgrade silently change tsgo answers without invalidating any
 /// snapshot. Discriminating: reverting the workspace `package.json` to
 /// `"latest"` (or any other version) FAILS this guard. The retired
 /// `@typescript/native-preview` dev channel must NOT be declared.
 #[test]
 fn tsgo_version_is_pinned() {
-    const PINNED_TSGO_VERSION: &str = "7.0.1-rc";
+    const PINNED_TSGO_VERSION: &str = "7.0.2";
 
     // MANIFEST_DIR is `crates/verter_session`; the workspace `package.json` is at
     // the repo root (two levels up).

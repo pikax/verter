@@ -67,7 +67,7 @@ fn fixtures_pin_the_expected_engine_version() {
     // re-verified) — this assertion surfaces a stale-fixture mismatch.
     let fx = load_fixtures();
     assert_eq!(
-        fx.engine_version, "7.0.1-rc",
+        fx.engine_version, "7.0.2",
         "fixture engine version drifted; re-capture fixtures and re-verify the codec"
     );
     assert!(

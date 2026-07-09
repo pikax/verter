@@ -439,13 +439,17 @@ mod tests {
         );
     }
 
-    // ── DISCRIMINATING: the pinned rc version PASSES the gate (the inverse of
-    //    the above — the genuine rc engine clears the version dimension). ──────
+    // ── DISCRIMINATING: the RETAINED rc channel still PASSES the gate under the
+    //    GA pin — a genuine `7.0.1-rc` engine clears the version dimension, and
+    //    the clearance carries the GA reference manifest (`PINNED`). ───────────
     #[test]
-    fn pinned_rc_version_passes_the_gate() {
+    fn retained_rc_channel_passes_under_ga_pin() {
         let observed = ObservedEngine::from_codec_wire("7.0.1-rc");
-        let clearance = validate(&observed).expect("the pinned rc version must pass");
-        assert_eq!(clearance.manifest.engine_version, "7.0.1-rc");
+        let clearance = validate(&observed).expect("the retained rc channel must pass");
+        // The observed rc version is accepted (rc arm retained); the clearance's
+        // manifest is the pinned GA reference build.
+        assert_eq!(clearance.observed_version, "7.0.1-rc");
+        assert_eq!(clearance.manifest.engine_version, "7.0.2");
     }
 
     // ── DISCRIMINATING: the accepted set is a CHANNEL, not one build — a later

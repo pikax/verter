@@ -559,7 +559,7 @@ mod tests {
             .expect_err("a string first snapshot handle must be refused");
         engine.await.unwrap();
         assert!(
-            matches!(err, TsgoApiError::UnsupportedTsgoWire(ref m) if m.contains("7.0.1-rc")),
+            matches!(err, TsgoApiError::UnsupportedTsgoWire(ref m) if m.contains("7.0.2")),
             "the refusal must be the typed UnsupportedTsgoWire naming the observed \
              engine version; got {err:?}"
         );
