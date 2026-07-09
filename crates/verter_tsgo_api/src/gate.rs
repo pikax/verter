@@ -4,10 +4,11 @@
 //! the maintained wire pin ([`crate::proto::schema_manifest::PINNED`]). The
 //! gate compares two dimensions:
 //!   1. the engine version string — validated by CHANNEL, not by equality with
-//!      one build: [`classify_engine_version`] accepts the `7.0.<patch>-rc`
-//!      release-candidate channel and `7.0.0-dev.<date>.<n>` nightlies at or
-//!      after the integer-handle wire (earlier nightlies issue STRING opaque
-//!      handles, a different wire class). The pin's
+//!      one build: [`classify_engine_version`] accepts the bare `7.0.<patch>`
+//!      GA stable-release channel, the `7.0.<patch>-rc` release-candidate
+//!      channel, and `7.0.0-dev.<date>.<n>` nightlies at or after the
+//!      integer-handle wire (earlier nightlies issue STRING opaque handles, a
+//!      different wire class). The pin's
 //!      [`crate::proto::schema_manifest::SchemaManifest::engine_version`] is
 //!      the reference build the codec was verified against, not the sole
 //!      accepted version. The observed version comes from either an OWNED
@@ -51,6 +52,9 @@ const NIGHTLY_INTEGER_HANDLE_FLIP_DATE: u32 = 20260604;
 /// shares the integer-handle `--api` wire the codec targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EngineChannel {
+    /// A bare `7.0.<patch>` GA stable-release build (e.g. `7.0.2`) — the current
+    /// reference channel, with NO prerelease or build-metadata suffix.
+    StableRelease,
     /// A `7.0.<patch>-rc` release-candidate build (e.g. `7.0.1-rc`).
     RcRelease,
     /// A `7.0.0-dev.<date>.<n>` nightly at or after the integer-handle wire
@@ -60,6 +64,9 @@ pub enum EngineChannel {
 
 /// Classify an engine version string into an accepted [`EngineChannel`].
 ///
+/// - `Some(EngineChannel::StableRelease)` for a bare `7.0.<patch>` GA build
+///   where `<patch>` is one or more ASCII digits and there is NO prerelease or
+///   build-metadata suffix (`7.0.0`, `7.0.2`, `7.0.13`).
 /// - `Some(EngineChannel::RcRelease)` for `7.0.<patch>-rc` where `<patch>` is
 ///   one or more ASCII digits (`7.0.0-rc`, `7.0.1-rc`, `7.0.12-rc`).
 /// - `Some(EngineChannel::NightlyPreview)` for `7.0.0-dev.<date>.<n>` where
@@ -67,9 +74,18 @@ pub enum EngineChannel {
 ///   [`NIGHTLY_INTEGER_HANDLE_FLIP_DATE`] and `<n>` is one or more ASCII
 ///   digits.
 /// - `None` for anything else — the caller fails closed on an unclassified
-///   version.
+///   version. A different major/minor (`7.1.x`, `8.x`), a prerelease other than
+///   `-rc` (`7.0.2-beta`), and any build-metadata suffix are refused until their
+///   wire is separately verified.
 pub fn classify_engine_version(v: &str) -> Option<EngineChannel> {
     let rest = v.strip_prefix("7.0.")?;
+
+    // Stable-release channel: a bare `7.0.<patch>` GA build — the patch is pure
+    // ASCII digits with no `-rc`/`-beta`/`+build` suffix. This is the reference
+    // channel the codec is now verified against.
+    if !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()) {
+        return Some(EngineChannel::StableRelease);
+    }
 
     // Release-candidate channel: `7.0.<patch>-rc`.
     if let Some(patch) = rest.strip_suffix("-rc") {
@@ -190,15 +206,16 @@ pub fn validate_against(
     pin: &SchemaManifest,
 ) -> TsgoApiResult<GateClearance> {
     // Dimension 1: version channel. An engine outside the accepted channels
-    // (rc releases, integer-handle nightlies) is an unknown wire and is
-    // refused; the pin's version is the reference build, not an equality bar.
+    // (GA stable releases, rc releases, integer-handle nightlies) is an unknown
+    // wire and is refused; the pin's version is the reference build, not an
+    // equality bar.
     if classify_engine_version(&observed.engine_version).is_none() {
         return Err(TsgoApiError::UnsupportedTsgoWire(format!(
-            "engine version `{}` is not in a supported channel (accepted: \
-             `7.0.<patch>-rc` release candidates, or `7.0.0-dev.<date>.<n>` \
-             nightlies at/after the integer-handle wire; reference build \
-             `{}`); re-verify the hand-written codec and bump the schema \
-             manifest",
+            "engine version `{}` is not in a supported channel (accepted: bare \
+             `7.0.<patch>` GA stable releases, `7.0.<patch>-rc` release \
+             candidates, or `7.0.0-dev.<date>.<n>` nightlies at/after the \
+             integer-handle wire; reference build `{}`); re-verify the \
+             hand-written codec and bump the schema manifest",
             observed.engine_version, pin.engine_version
         )));
     }
@@ -263,6 +280,82 @@ mod tests {
     }
 
     // ── DISCRIMINATING: the version-channel classifier's accept/reject table ─
+    #[test]
+    fn classifier_accepts_stable_release_channel() {
+        // Bare `7.0.<patch>` GA builds classify into the stable-release channel.
+        assert_eq!(
+            classify_engine_version("7.0.2"),
+            Some(EngineChannel::StableRelease),
+            "the GA `7.0.2` reference build is the stable-release channel"
+        );
+        assert_eq!(
+            classify_engine_version("7.0.0"),
+            Some(EngineChannel::StableRelease),
+            "the earliest `7.0.x` GA patch is accepted"
+        );
+        assert_eq!(
+            classify_engine_version("7.0.13"),
+            Some(EngineChannel::StableRelease),
+            "a multi-digit GA patch is accepted"
+        );
+    }
+
+    // ── DISCRIMINATING: the stable arm is a DISTINCT channel from rc — a bare
+    //    `7.0.2` and its `7.0.2-rc` sibling classify into different arms. ───────
+    #[test]
+    fn stable_and_rc_are_distinct_channels() {
+        assert_eq!(
+            classify_engine_version("7.0.2"),
+            Some(EngineChannel::StableRelease)
+        );
+        assert_eq!(
+            classify_engine_version("7.0.2-rc"),
+            Some(EngineChannel::RcRelease)
+        );
+        assert_ne!(
+            classify_engine_version("7.0.2"),
+            classify_engine_version("7.0.2-rc"),
+            "GA and its rc sibling are not the same channel"
+        );
+    }
+
+    // ── DISCRIMINATING: bare out-of-range and suffixed stable strings are
+    //    refused — the stable arm is `7.0.<patch>` ONLY, no prerelease/build,
+    //    no other major/minor. ────────────────────────────────────────────────
+    #[test]
+    fn classifier_rejects_out_of_channel_and_suffixed_stable_versions() {
+        // A different minor / major as a BARE stable string is out of channel.
+        assert_eq!(classify_engine_version("7.1.0"), None, "wrong minor");
+        assert_eq!(classify_engine_version("7.1.2"), None, "wrong minor");
+        assert_eq!(classify_engine_version("8.0.0"), None, "wrong major");
+        assert_eq!(classify_engine_version("6.0.0"), None, "major < 7");
+        // A prerelease/build suffix other than `-rc` is refused.
+        assert_eq!(
+            classify_engine_version("7.0.2-beta"),
+            None,
+            "beta prerelease"
+        );
+        assert_eq!(
+            classify_engine_version("7.0.2-alpha"),
+            None,
+            "alpha prerelease"
+        );
+        assert_eq!(
+            classify_engine_version("7.0.2-rc.1"),
+            None,
+            "a dotted rc suffix is not the bare `-rc` grammar"
+        );
+        assert_eq!(
+            classify_engine_version("7.0.2+build"),
+            None,
+            "build metadata is refused"
+        );
+        // Malformed bare-stable shapes.
+        assert_eq!(classify_engine_version("7.0."), None, "empty patch");
+        assert_eq!(classify_engine_version("7.0.x"), None, "non-digit patch");
+        assert_eq!(classify_engine_version("7.0.2.3"), None, "extra segment");
+    }
+
     #[test]
     fn classifier_accepts_rc_release_channel() {
         assert_eq!(
@@ -361,6 +454,20 @@ mod tests {
     fn later_rc_patch_passes_the_gate() {
         let observed = ObservedEngine::from_codec_wire("7.0.2-rc");
         validate(&observed).expect("any 7.0.x-rc build is in the accepted channel");
+    }
+
+    // ── DISCRIMINATING: the GA stable-release channel clears the gate. This
+    //    asserts ACCEPTANCE (not the variant name) so it compiles against the
+    //    pre-arm tree and FAILS RED there (bare `7.0.2` classified `None` → the
+    //    gate refused it); it goes GREEN once the `StableRelease` arm lands. ────
+    #[test]
+    fn stable_release_ga_version_passes_the_gate() {
+        assert!(
+            classify_engine_version("7.0.2").is_some(),
+            "bare GA `7.0.2` must classify into an accepted channel"
+        );
+        let observed = ObservedEngine::from_codec_wire("7.0.2");
+        validate(&observed).expect("the GA stable release must clear the wire gate");
     }
 
     #[test]
