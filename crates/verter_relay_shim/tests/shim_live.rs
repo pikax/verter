@@ -328,7 +328,7 @@ async fn setup(tsgo: &Path, tag: &str) -> Harness {
         .to_string();
     eprintln!("[mechanics] relayed real-tsgo serverInfo.version = {relayed_version:?}");
     assert_eq!(
-        relayed_version, "7.0.1-rc",
+        relayed_version, "7.0.2",
         "the fake editor observes the REAL relayed tsgo version"
     );
     editor
@@ -358,7 +358,7 @@ async fn setup(tsgo: &Path, tag: &str) -> Harness {
         .server_info_version
         .clone()
         .expect("the in-band serverInfo.version witness");
-    assert_eq!(server_version, "7.0.1-rc");
+    assert_eq!(server_version, "7.0.2");
     assert_eq!(witness.root_uri.as_deref(), Some(root_uri.as_str()));
 
     // initializeApiSession → connect the minted `--api` pipe DIRECTLY.

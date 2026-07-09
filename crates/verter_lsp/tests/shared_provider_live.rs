@@ -1,5 +1,5 @@
 //! LIVE end-to-end proof of the SHARED editor-attach tsgo provider against the
-//! REAL 7.0.1-rc engine, through the REAL relay-shim + control protocol.
+//! REAL 7.0.2 engine, through the REAL relay-shim + control protocol.
 //!
 //! `[fake editor] -> [real verter-relay-shim] -> [real tsgo]`, with `verter_lsp`'s
 //! `TsgoSharedProvider` as the SEPARATE control-client actor. A FAKE EDITOR spawns
@@ -441,7 +441,7 @@ fn resolved_binding(workspace_root: &str, tsconfig: &str) -> ProjectResolution {
     let resolver = WorkspaceProjectResolver::new(
         &snapshot,
         &vfs as &dyn WorkspaceRead,
-        "7.0.1-rc",
+        "7.0.2",
         &env_dims_source,
     );
     resolver.resolve(&format!("{workspace_root}/src/Widget.vue"))
@@ -485,7 +485,7 @@ async fn setup(tsgo: &Path, tag: &str) -> Harness {
         .expect("the relayed initialize response");
     assert_eq!(
         init_resp["result"]["serverInfo"]["version"].as_str(),
-        Some("7.0.1-rc"),
+        Some("7.0.2"),
         "the fake editor observes the REAL relayed tsgo version"
     );
     editor
@@ -1021,7 +1021,7 @@ fn two_project_reference_fixture_resolves_as_one_closure() {
     let resolver = WorkspaceProjectResolver::new(
         &snapshot,
         &vfs as &dyn WorkspaceRead,
-        "7.0.1-rc",
+        "7.0.2",
         &env_dims_source,
     );
     let resolution = resolver.resolve(&format!("{ws_root}/app/src/Widget.vue"));
@@ -1090,7 +1090,7 @@ async fn setup_composite(tsgo: &Path, tag: &str, owned: Arc<dyn TypeProvider>) -
         .expect("the relayed initialize response");
     assert_eq!(
         init_resp["result"]["serverInfo"]["version"].as_str(),
-        Some("7.0.1-rc"),
+        Some("7.0.2"),
         "the fake editor observes the REAL relayed tsgo version"
     );
     editor

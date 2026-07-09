@@ -349,24 +349,24 @@ fn create_junction_or_symlink(src: &Path, dest: &Path) {
     let _ = std::os::unix::fs::symlink(src, dest);
 }
 
-// ── gated rc `--api` engine preflight ────────────────────────────────────
+// ── gated `--api` engine preflight ───────────────────────────────────────
 //
 // The `--noEmit` typecheck now runs the gated in-memory tsgo `--api` backend,
-// which requires the rc `@typescript/typescript-*` native engine the wire gate
-// pins (`typescript@7.0.1-rc`, a workspace-root devDep installed by
+// which requires the `@typescript/typescript-*` native engine the wire gate
+// pins (`typescript@7.0.2`, a workspace-root devDep installed by
 // `pnpm install --frozen-lockfile`). The temp project's junctioned
 // `packages/example/node_modules` does NOT carry that engine (it pins an older
 // `typescript`), and the retired native-preview `tsgo` (npx cache) fails the wire
-// gate — so this preflight resolves the rc engine once (an explicit
+// gate — so this preflight resolves the gated engine once (an explicit
 // `VERTER_TSGO_BIN` wins; else the SHARED `verter_tsgo_api` discovery against the
 // workspace root) and threads it to the verter-tsc subprocess via
-// `VERTER_TSGO_BIN`. A genuinely-absent rc engine SKIPs — the pinned multiset is
+// `VERTER_TSGO_BIN`. A genuinely-absent engine SKIPs — the pinned multiset is
 // engine-specific, so never assert against a missing or wrong engine.
 
-/// Resolve the gated rc `--api` engine: an explicit `VERTER_TSGO_BIN` override
+/// Resolve the gated `--api` engine: an explicit `VERTER_TSGO_BIN` override
 /// first, then the shared `verter_tsgo_api` discovery against the workspace root
-/// (where `pnpm install --frozen-lockfile` installs `typescript@7.0.1-rc`).
-fn resolve_rc_engine() -> Option<PathBuf> {
+/// (where `pnpm install --frozen-lockfile` installs `typescript@7.0.2`).
+fn resolve_gated_engine() -> Option<PathBuf> {
     if let Some(raw) = std::env::var_os("VERTER_TSGO_BIN") {
         let path = PathBuf::from(raw);
         if path.is_file() {
@@ -389,16 +389,16 @@ fn verter_tsc_diagnostic_set_parity() {
         }
     };
 
-    // PREFLIGHT 2 — the gated rc `--api` engine (what the in-memory typecheck now
-    // uses). The pinned multiset is engine-specific: when the rc engine is genuinely
+    // PREFLIGHT 2 — the gated `--api` engine (what the in-memory typecheck now
+    // uses). The pinned multiset is engine-specific: when the engine is genuinely
     // absent we SKIP rather than assert against a missing/wrong engine. The resolved
     // engine is threaded to the verter-tsc subprocess via `VERTER_TSGO_BIN` (the temp
-    // project's junctioned node_modules does not carry the rc engine).
-    let rc_engine = match resolve_rc_engine() {
+    // project's junctioned node_modules does not carry the gated engine).
+    let gated_engine = match resolve_gated_engine() {
         Some(p) => p,
         None => {
             eprintln!(
-                "SKIP: rc tsgo `--api` engine (typescript@7.0.1-rc) not found — the pinned set \
+                "SKIP: gated tsgo `--api` engine (typescript@7.0.2) not found — the pinned set \
                  is engine-specific; set VERTER_TSGO_BIN or run `pnpm install --frozen-lockfile` \
                  in the workspace so the pinned engine is discoverable"
             );
@@ -409,7 +409,7 @@ fn verter_tsc_diagnostic_set_parity() {
 
     let bin = env!("CARGO_BIN_EXE_verter-tsc");
     let output = Command::new(bin)
-        .env("VERTER_TSGO_BIN", &rc_engine)
+        .env("VERTER_TSGO_BIN", &gated_engine)
         .arg("--noEmit")
         .arg("-p")
         .arg(temp_path.join("tsconfig.json"))
@@ -418,7 +418,10 @@ fn verter_tsc_diagnostic_set_parity() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    eprintln!("=== rc tsgo --api engine: {} ===", rc_engine.display());
+    eprintln!(
+        "=== gated tsgo --api engine: {} ===",
+        gated_engine.display()
+    );
     eprintln!("=== verter-tsc STDERR ===\n{stderr}");
     eprintln!("=== verter-tsc STDOUT ===\n{stdout}");
 
@@ -442,10 +445,10 @@ fn verter_tsc_diagnostic_set_parity() {
     // legitimate empty run.
     assert!(
         !diags.is_empty(),
-        "REGRESSION: the rc tsgo `--api` engine IS present ({}) but verter-tsc parsed ZERO \
+        "REGRESSION: the gated tsgo `--api` engine IS present ({}) but verter-tsc parsed ZERO \
          diagnostics over the intentional-error fixture (all diagnostics dropped / output format \
          changed / early exit / engine failed to connect).\nSTDERR:\n{stderr}\nSTDOUT:\n{stdout}",
-        rc_engine.display()
+        gated_engine.display()
     );
 
     let root_str = temp_path.to_string_lossy().replace('\\', "/");
