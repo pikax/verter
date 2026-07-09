@@ -15,13 +15,16 @@
 //! fail-closed outcome that yields NO `BoundProject`, so the caller serves no
 //! external-TS result for the carrier (never an inferred/path-only fallback).
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use verter_session::external_ts::{
     AmbiguityCause, BoundProject, EngineBackend, EnvDims, ExternalTsProjectResolver,
     ProjectBinding, ProjectResolution, WorkspaceProjectResolver,
 };
 use verter_session::VerterHost;
+use verter_workspace::published_state::PublishedRoot;
+use verter_workspace::resolver::normalize_canonical_id;
 
 use crate::external_ts::TsgoEngineBackend;
 
@@ -191,5 +194,273 @@ pub fn resolve_carrier_bound(host: &Arc<VerterHost>, source: &str) -> CarrierBin
         ProjectResolution::NoProject => CarrierBinding::NoProject,
         ProjectResolution::Ambiguous(cause) => CarrierBinding::Ambiguous(cause),
         ProjectResolution::SyntheticScratch(_) => CarrierBinding::SyntheticScratch,
+    }
+}
+
+/// The upper bound on live admission entries within a single generation — a
+/// defense-in-depth cap beyond the per-generation prune so a pathological churn of
+/// distinct carrier sources at ONE generation cannot grow the map without bound. On
+/// overflow the generation's entries are dropped wholesale (the next queries
+/// re-resolve); admission stays correct, only warmth is lost.
+const ADMISSION_CACHE_MAX_ENTRIES: usize = 4096;
+
+/// The bounded number of cold-path fence retries. On each miss the admission decision is
+/// resolved with the cache lock RELEASED; if a publication supersedes the captured epoch
+/// mid-resolve the decision is discarded and re-resolved at the new epoch (never warmed).
+/// After this bound a freshly-resolved decision is returned WITHOUT promoting it warm — so
+/// sustained churn fails closed rather than caching a torn result. Mirrors the completion
+/// fence's "retry at most 3 times on mid-flight changes" rule.
+const ADMISSION_FENCE_MAX_RETRIES: usize = 3;
+
+/// An admission EPOCH: the UNREPEATABLE publication identity a carrier FEATURE admission is
+/// scoped to. Feature admission is an AUTHZ surface — a decision recorded at one epoch MUST
+/// NOT authorize a feature at a later epoch — so the epoch combines all of:
+///
+/// * `published` — the EXACT published-root publication (`None` before the first publish).
+///   Identity is the RETAINED `Arc<PublishedRoot>` POINTER (`Arc::ptr_eq`), NEVER the
+///   `snapshot.generation.0` scalar: `ProjectGraph::from_configs` hard-codes every rebuilt
+///   graph to generation 1, so a reconfigure republishes generation 1 and the scalar
+///   REPEATS. Two distinct publications carrying the same scalar are DISTINCT epochs
+///   because their Arc pointers differ, and the cache RETAINS the Arc so its pointer cannot
+///   be freed-and-reused underneath a live entry (the ABA guard).
+/// * `content_generation` — the workspace file-existence / content generation: a companion
+///   appearing / disappearing, or a content edit, re-decides admission, and it advances
+///   INDEPENDENTLY of a republish.
+/// * `project_generation` — the host's MONOTONIC `current_project_generation()`, which
+///   advances on a host-mediated reconfigure (never on a content edit) and NEVER resets.
+///
+/// Epoch equality requires ALL THREE to match — the publication by POINTER identity, the
+/// two generations by value. `PartialEq` is hand-written (not derived): `PublishedRoot` is
+/// compared by `Arc` pointer, never by content.
+struct AdmissionEpoch {
+    published: Option<Arc<PublishedRoot>>,
+    content_generation: u64,
+    project_generation: u64,
+}
+
+impl PartialEq for AdmissionEpoch {
+    fn eq(&self, other: &Self) -> bool {
+        self.content_generation == other.content_generation
+            && self.project_generation == other.project_generation
+            && match (&self.published, &other.published) {
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+}
+
+/// The admission map key: the NORMALIZED carrier SOURCE path. Keying on the normalized
+/// source (not the companion path) means every companion of one carrier shares ONE
+/// admission decision, and a backslash / non-canonical path cannot evade a warm hit. The
+/// epoch is NOT part of the key — it is anchored ONCE on [`AdmissionCacheState`] and every
+/// live entry belongs to that single epoch (a store at a new epoch clears the map first).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CarrierAdmissionKey {
+    source: String,
+}
+
+/// The exact fail-closed reason a carrier feature admission was DENIED — the non-bound
+/// [`CarrierBinding`] states, preserved distinctly (an ADMITTED carrier is never one of
+/// these). `Copy`: the denied arm of a warm hit is a trivial clone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionDenial {
+    /// The host's published snapshot is not yet ready.
+    PreSnapshot,
+    /// The resolver found no owning tsconfig for the source.
+    NoProject,
+    /// Two configs claim the source, or a carrier-path conflict.
+    Ambiguous,
+    /// An untitled buffer / file outside any tsconfig — the scratch lane.
+    SyntheticScratch,
+    /// The binding resolved but the engine backend refused to mint the witness.
+    EnsureFailed,
+}
+
+/// The cached outcome of a carrier FEATURE admission: an ADMITTED carrier carries the
+/// resolved [`BoundCarrier`] witness behind an `Arc` (a warm hit is an arc-clone), and a
+/// DENIED carrier carries the exact fail-closed [`AdmissionDenial`]. Only
+/// [`Admission::Admitted`] authorizes an OWNED feature delegation; every other state —
+/// and, by construction, any never-produced state — FAILS CLOSED.
+#[derive(Clone)]
+pub enum Admission {
+    /// The carrier resolved to its owning configured project's `BoundProject` witness.
+    Admitted(Arc<BoundCarrier>),
+    /// The carrier failed closed — no external-TS feature is served (the exact reason).
+    Denied(AdmissionDenial),
+}
+
+impl Admission {
+    /// Whether the carrier was ADMITTED — the SOLE state that authorizes an OWNED feature
+    /// delegation. A `Denied` (and any never-constructed) admission fails closed.
+    #[must_use]
+    pub fn is_admitted(&self) -> bool {
+        matches!(self, Admission::Admitted(_))
+    }
+
+    /// The resolved [`BoundCarrier`] witness IFF the carrier was ADMITTED, else `None`.
+    /// The witness is RETAINED so a consumer that needs the owning project (the binding
+    /// or the minted `BoundProject`) reuses this ONE resolution rather than re-resolving.
+    #[must_use]
+    pub fn bound_carrier(&self) -> Option<&BoundCarrier> {
+        match self {
+            Admission::Admitted(carrier) => Some(carrier),
+            Admission::Denied(_) => None,
+        }
+    }
+
+    /// The exact fail-closed [`AdmissionDenial`] IFF the carrier was DENIED, else `None`.
+    #[must_use]
+    pub fn denial(&self) -> Option<AdmissionDenial> {
+        match self {
+            Admission::Denied(reason) => Some(*reason),
+            Admission::Admitted(_) => None,
+        }
+    }
+}
+
+/// The epoch-scoped OWNED carrier FEATURE admission cache owned by
+/// [`TsgoCompositeProvider`](crate::tsgo::composite::TsgoCompositeProvider). Every carrier
+/// FEATURE provider call resolves its owning project ONCE per `(source, admission epoch)`
+/// through the shared [`resolve_carrier_bound`] resolver; the decision is memoized and
+/// reused on every warm-state editor query at the SAME epoch. There is ONE resolver — this
+/// cache MEMOIZES it; it is NOT a second binding engine, and it does NOT touch the
+/// carrier-diagnostics gate (which resolves its own binding per query).
+///
+/// The epoch is the UNREPEATABLE publication identity ([`AdmissionEpoch`]): the RETAINED
+/// `Arc<PublishedRoot>` pointer plus the content + project generations. Keying the memo on
+/// the publication Arc identity — NOT the repeatable `snapshot.generation.0` scalar —
+/// closes the reconfigure reset hole: `configure_projects` publishes the new (possibly
+/// non-owning) graph BEFORE it bumps the monotonic project generation, and
+/// `ProjectGraph::from_configs` resets that scalar to 1, so a scalar key let an `admit`
+/// racing the window between the publish and the bump reconstruct a prior owning epoch's
+/// tuple and be served the stale `Admitted` warm (a fail-OPEN cross-epoch privilege
+/// bleed). The publication-Arc epoch makes the republished root a natural lookup MISS, and
+/// the cold-path fence discards any decision whose epoch was superseded mid-resolve — the
+/// monotonic project generation ALONE does NOT cover that window.
+///
+/// Warm hit: normalize the source + capture the cheap epoch + map lookup under the SAME
+/// epoch + clone the [`Admission`] (an arc-clone for `Admitted`). NO provider sync, NO FS
+/// probe, NO `--lsp` request, and the cache lock is NEVER held across the cold resolve.
+#[derive(Default)]
+pub struct CarrierAdmissionCache {
+    state: Mutex<AdmissionCacheState>,
+}
+
+/// The live admission entries plus the ONE epoch they belong to.
+#[derive(Default)]
+struct AdmissionCacheState {
+    /// The [`AdmissionEpoch`] every live `entries` decision belongs to. A store at a
+    /// DIFFERENT epoch — a different publication `Arc`, or a content / project-generation
+    /// change — CLEARS the map and re-anchors here, RETAINING the new publication Arc. So
+    /// no stale `Admitted` from an old epoch survives into a new one (no cross-epoch
+    /// privilege bleed), the map stays bounded to one epoch's carriers, and the retained
+    /// Arc pointer cannot be freed-and-reused underneath a live entry (the ABA guard).
+    epoch: Option<AdmissionEpoch>,
+    entries: HashMap<CarrierAdmissionKey, Admission>,
+}
+
+impl CarrierAdmissionCache {
+    /// A fresh, empty admission cache.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Admit (or fail-closed deny) the carrier `source` at the host's CURRENT admission
+    /// epoch. A warm hit at the SAME epoch (the same publication `Arc` identity + content +
+    /// project generation) returns the memoized decision cheaply; a cold miss resolves ONCE
+    /// through [`resolve_carrier_bound`] with the cache lock RELEASED, fences the result
+    /// against a mid-resolve publication, then memoizes it epoch-scoped.
+    #[must_use]
+    pub fn admit(&self, host: &Arc<VerterHost>, source: &str) -> Admission {
+        let key = CarrierAdmissionKey {
+            source: normalize_canonical_id(source),
+        };
+        // Bounded fence retries: if a publication supersedes the captured epoch mid-resolve
+        // the decision belongs to a stale view — discard it and re-resolve at the new epoch
+        // (never warm a torn result). After the bound, fail closed by returning a
+        // freshly-resolved decision that is NOT stored.
+        for _ in 0..ADMISSION_FENCE_MAX_RETRIES {
+            let epoch = Self::current_epoch(host);
+            if let Some(cached) = self.lookup(&key, &epoch) {
+                return cached;
+            }
+            // Cold: resolve ONCE with NO cache lock held (the resolve walks the workspace
+            // project resolver + mints a witness — never under the map mutex).
+            let admission = Self::resolve(host, source);
+            // Cold-path fence: the resolve read LIVE state with the lock released. If the
+            // publication identity moved since `epoch` was captured, the decision belongs to
+            // a superseded epoch — discard WITHOUT storing and retry at the new epoch.
+            if Self::current_epoch(host) == epoch {
+                self.store(&key, epoch, admission.clone());
+                return admission;
+            }
+        }
+        // Sustained mid-flight churn exhausted the fence retries: return the current
+        // decision WITHOUT promoting it warm (a torn/racing result is never cached).
+        Self::resolve(host, source)
+    }
+
+    /// The host's CURRENT admission epoch, read cheaply (NO resolve): the live published
+    /// root RETAINED as the `Arc<PublishedRoot>` identity (`None` before the first publish)
+    /// plus the content + monotonic project generations.
+    fn current_epoch(host: &Arc<VerterHost>) -> AdmissionEpoch {
+        let ws_read = host.workspace_read();
+        let published = ws_read.published_root();
+        let content_generation = ws_read.content_generation();
+        let project_generation = host.project_type_store().current_project_generation();
+        AdmissionEpoch {
+            published,
+            content_generation,
+            project_generation,
+        }
+    }
+
+    /// Resolve the admission decision for `source` through the ONE shared
+    /// [`resolve_carrier_bound`] resolver, mapping every non-bound state to its exact
+    /// fail-closed [`AdmissionDenial`]. The bound witness is wrapped `Arc` in place (the
+    /// resolver's `Box<BoundCarrier>` converts without a re-box).
+    fn resolve(host: &Arc<VerterHost>, source: &str) -> Admission {
+        match resolve_carrier_bound(host, source) {
+            CarrierBinding::Bound(bound) => Admission::Admitted(Arc::from(bound)),
+            CarrierBinding::PreSnapshot => Admission::Denied(AdmissionDenial::PreSnapshot),
+            CarrierBinding::NoProject => Admission::Denied(AdmissionDenial::NoProject),
+            CarrierBinding::Ambiguous(_) => Admission::Denied(AdmissionDenial::Ambiguous),
+            CarrierBinding::SyntheticScratch => {
+                Admission::Denied(AdmissionDenial::SyntheticScratch)
+            }
+            CarrierBinding::EnsureFailed => Admission::Denied(AdmissionDenial::EnsureFailed),
+        }
+    }
+
+    /// A warm-hit lookup: the memoized decision for `key` IFF the cache is anchored at the
+    /// SAME `epoch` (the same publication `Arc` identity + content + project generation),
+    /// else `None`. A different epoch — including a re-published root at the SAME
+    /// `snapshot.generation.0` scalar but a DIFFERENT `Arc` pointer — is a natural miss, so
+    /// a stale `Admitted` is never served across a publication.
+    fn lookup(&self, key: &CarrierAdmissionKey, epoch: &AdmissionEpoch) -> Option<Admission> {
+        let state = self.state.lock().expect("admission cache mutex poisoned");
+        if state.epoch.as_ref() != Some(epoch) {
+            return None;
+        }
+        state.entries.get(key).cloned()
+    }
+
+    /// Memoize `admission` under `key`, epoch-scoped. A store at a DIFFERENT epoch than the
+    /// map's current anchor CLEARS every prior-epoch entry and re-anchors + RETAINS the new
+    /// publication `Arc` (no stale `Admitted` survives a publication / generation change —
+    /// no cross-epoch privilege bleed); a per-epoch overflow past
+    /// [`ADMISSION_CACHE_MAX_ENTRIES`] likewise drops the epoch's entries. Bounded either
+    /// way.
+    fn store(&self, key: &CarrierAdmissionKey, epoch: AdmissionEpoch, admission: Admission) {
+        let mut state = self.state.lock().expect("admission cache mutex poisoned");
+        if state.epoch.as_ref() != Some(&epoch) {
+            state.entries.clear();
+            state.epoch = Some(epoch);
+        } else if state.entries.len() >= ADMISSION_CACHE_MAX_ENTRIES {
+            state.entries.clear();
+        }
+        state.entries.insert(key.clone(), admission);
     }
 }

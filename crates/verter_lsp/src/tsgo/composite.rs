@@ -19,8 +19,13 @@
 //! / `Ambiguous` / `SyntheticScratch`, a pre-published snapshot, an `ensure_project`
 //! refusal) yields NO external-TS diagnostics for the carrier — fail closed, NEVER a
 //! `tsgo --lsp` inferred / own-discovery fall-through. A NON-carrier path (plain
-//! `.ts`/`.tsx`) is NOT gated — it delegates to OWNED unchanged. Non-diagnostic FEATURE
-//! methods delegate to OWNED unchanged (carrier-feature admission is deferred).
+//! `.ts`/`.tsx`) is NOT gated — it delegates to OWNED unchanged. Carrier FEATURE methods
+//! (hover, definition, type-definition, references, rename, signature-help,
+//! semantic-tokens, document-highlights, inlay-hints, completion + resolve, code-actions)
+//! are ALSO gated — on the SAME `BoundProject` admission, memoized through the generation-scoped
+//! [`CarrierAdmissionCache`], via [`TsgoCompositeProvider::feature_admits`]: a non-bound
+//! carrier serves the empty/none external default (the LSP handler merge preserves the
+//! native sub-answer for MIXED features), NEVER a `--lsp` self-discovery fall-through.
 //!
 //! **The optional SHARED union.** For a bound carrier, when the SHARED overlay is opted
 //! in, its `--api` semantic diagnostics — served through the SAME already-resolved
@@ -59,7 +64,7 @@ use verter_type_runtime::protocol::{
 use verter_type_runtime::traits::{ProviderFuture, TypeProvider};
 
 use crate::tsgo::overlay_core::{LazyOverlayCore, OverlayTransport};
-use crate::tsgo::project_binding::{self, BoundCarrier};
+use crate::tsgo::project_binding::{self, BoundCarrier, CarrierAdmissionCache};
 use crate::tsgo::shared::{EstablishSharedParams, TsgoSharedProvider};
 
 /// The bound on the lazy SHARED-attach establishment: a slow or never-initializing
@@ -586,6 +591,90 @@ fn merge_diagnostic_metadata(into: &mut TypeDiagnostic, from: TypeDiagnostic) {
     }
 }
 
+/// Every carrier TS FEATURE provider call the composite GATES on a resolved
+/// `BoundProject` admission. Each variant maps 1:1 to exactly one gated `TypeProvider`
+/// feature method on [`TsgoCompositeProvider`]; the enum is the EXHAUSTIVE registry of
+/// gated features (no wildcard arm).
+///
+/// TWO distinct enforcement layers — do not conflate them:
+/// * COMPILE-TIME: [`Self::name`]'s wildcard-free `match` makes only the
+///   VARIANT→`name()` mapping exhaustive — a new variant must be named there or the
+///   crate fails to compile. It does NOT tie variants to methods.
+/// * GUARD-ENFORCED: the `carrier_features_are_admission_gated` guard ties the variant
+///   set to the gated-method registry (set-equality) AND, over EVERY `self.owned.*`
+///   delegation in `impl TypeProvider for TsgoCompositeProvider`, requires each to be
+///   either a gated feature whose delegation is DOMINATED by a `feature_admits(` gate or
+///   an explicitly-allowlisted lifecycle/passthrough method — so a NEW ungated feature
+///   method (a `--lsp` self-discovery fall-through) is caught even if it is never added
+///   to this enum.
+///
+/// Provenance class (informs the DENIED shape the HANDLER layer composes, NOT a
+/// composite-runtime branch — every denied feature serves its own type's empty/none
+/// external default):
+/// * EXTERNAL-ONLY — no native sub-answer to merge; denied ⇒ empty/none.
+/// * MIXED — the LSP handler merges a native sub-answer; denied ⇒ the external default
+///   (empty/none) so the handler merge preserves the native side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderFeature {
+    // ── EXTERNAL-ONLY (denied ⇒ empty/none; no owned call, no native sub-answer) ──
+    /// `get_type_definition`.
+    TypeDefinition,
+    /// `get_signature_help`.
+    SignatureHelp,
+    /// `get_semantic_tokens`.
+    SemanticTokens,
+    // ── MIXED (denied ⇒ external default so the handler merge preserves the native) ──
+    /// `get_hover`.
+    Hover,
+    /// `get_definition`.
+    Definition,
+    /// `get_references`.
+    References,
+    /// `get_document_highlights`.
+    DocumentHighlights,
+    /// `get_inlay_hints`.
+    InlayHints,
+    /// `get_completions` (MIXED).
+    Completions,
+    /// `get_completion_details` (MIXED).
+    CompletionDetails,
+    /// `resolve_completion` (EXTERNAL-ONLY — denied ⇒ no provider enrichment).
+    ResolveCompletion,
+    /// `get_rename_locations` (MIXED — the LSP handler's incomplete-rename safety gates
+    /// stay a separate layer this admission does not touch).
+    RenameLocations,
+    /// `get_code_actions` (MIXED — the LSP `handle_code_action` handler contributes
+    /// native Verter carrier code-actions (organize-imports, extract-component,
+    /// macro/component/event actions, action-engine fixes) and MERGES the provider's
+    /// `getCodeFixes` quickfixes over them; denied ⇒ the empty external default so the
+    /// handler merge preserves the native side).
+    CodeActions,
+}
+
+impl ProviderFeature {
+    /// The stable feature name, for admission observability. EXHAUSTIVE match (no
+    /// wildcard): the ONLY compile-time-enforced property is that every variant is named
+    /// here (a new variant fails to compile until it is). The method↔variant tie and the
+    /// dominance-over-all-delegations partition are GUARD-enforced (see the type doc).
+    fn name(self) -> &'static str {
+        match self {
+            ProviderFeature::TypeDefinition => "type_definition",
+            ProviderFeature::SignatureHelp => "signature_help",
+            ProviderFeature::SemanticTokens => "semantic_tokens",
+            ProviderFeature::Hover => "hover",
+            ProviderFeature::Definition => "definition",
+            ProviderFeature::References => "references",
+            ProviderFeature::DocumentHighlights => "document_highlights",
+            ProviderFeature::InlayHints => "inlay_hints",
+            ProviderFeature::Completions => "completions",
+            ProviderFeature::CompletionDetails => "completion_details",
+            ProviderFeature::ResolveCompletion => "resolve_completion",
+            ProviderFeature::RenameLocations => "rename_locations",
+            ProviderFeature::CodeActions => "code_actions",
+        }
+    }
+}
+
 /// The ALWAYS-present host-aware admission layer over the OWNED tsgo baseline, with an
 /// OPTIONAL SHARED carrier-diagnostics overlay.
 pub struct TsgoCompositeProvider {
@@ -599,6 +688,12 @@ pub struct TsgoCompositeProvider {
     /// editor-attach rendezvous. Absent, the composite is the bare host-aware OWNED
     /// admission layer (still gating carrier diagnostics on a resolved `BoundProject`).
     shared: Option<SharedTsgoOverlay>,
+    /// The generation-scoped OWNED carrier FEATURE admission cache — consulted by every
+    /// gated feature method (through [`Self::feature_admits`]) before delegating to
+    /// OWNED. It MEMOIZES the ONE shared `resolve_carrier_bound` resolver per
+    /// `(source, generation)`; it is NOT a second binding engine and does NOT touch the
+    /// diagnostics gate (which resolves its own binding per query).
+    admission: CarrierAdmissionCache,
 }
 
 impl TsgoCompositeProvider {
@@ -614,7 +709,36 @@ impl TsgoCompositeProvider {
             owned,
             host,
             shared,
+            admission: CarrierAdmissionCache::new(),
         }
+    }
+
+    /// Whether a carrier FEATURE query for `path` is ADMITTED — the sole choke point
+    /// every gated feature method routes through BEFORE delegating to OWNED.
+    ///
+    /// A NON-carrier path (plain `.ts`/`.tsx`, `carrier_source_of == None`) is UNGATED:
+    /// it delegates to OWNED unchanged. A carrier companion admits through the
+    /// generation-scoped [`CarrierAdmissionCache`] (the ONE shared `resolve_carrier_bound`
+    /// resolver, memoized): only a resolved `BoundProject` admits. Every non-bound state —
+    /// and, by the cache's construction, any never-produced state — FAILS CLOSED: the
+    /// caller serves its type's empty/none external default, NEVER a `tsgo --lsp`
+    /// self-discovery fall-through. `feature` ties each method to its [`ProviderFeature`]
+    /// variant (the method↔variant registry) and labels the fail-closed trace.
+    fn feature_admits(&self, feature: ProviderFeature, path: &str) -> bool {
+        // NON-carrier path (plain `.ts`/`.tsx`): not gated — delegate to OWNED unchanged.
+        let Some(source) = carrier_source_of(path) else {
+            return true;
+        };
+        let admitted = self.admission.admit(&self.host, &source).is_admitted();
+        if !admitted {
+            tracing::trace!(
+                feature = feature.name(),
+                source = %source,
+                "carrier feature denied — no BoundProject; serving the external default \
+                 (fail-closed, never a `--lsp` self-discovery fall-through)"
+            );
+        }
+        admitted
     }
 
     /// The OWNED carrier-diagnostics gate + optional SHARED union — the sole gated
@@ -856,8 +980,12 @@ impl TypeProvider for TsgoCompositeProvider {
         Box::pin(async move { self.diagnostics_gated(&path, true).await })
     }
 
-    // ── Features: delegate wholly to OWNED (the complete feature surface). SHARED
-    //    never regresses an editor feature to a stub. ──
+    // ── Features: GATE each carrier feature on a resolved `BoundProject` admission
+    //    (through `feature_admits`) before delegating to OWNED — a non-bound carrier
+    //    serves the empty/none external default (MIXED: the handler merge preserves the
+    //    native sub-answer; EXTERNAL-ONLY: empty/none), NEVER a `--lsp` self-discovery
+    //    fall-through. A non-carrier `.ts`/`.tsx` is ungated. SHARED never regresses an
+    //    editor feature to a stub. ──
 
     fn get_completions(
         &self,
@@ -865,7 +993,22 @@ impl TypeProvider for TsgoCompositeProvider {
         offset: u32,
         trigger_character: Option<&str>,
     ) -> ProviderFuture<'_, CompletionResult> {
-        self.owned.get_completions(path, offset, trigger_character)
+        // MIXED: a denied carrier serves the empty external default (native completions
+        // preserved by the handler merge); a non-carrier path is ungated.
+        let path = path.to_string();
+        let trigger_character = trigger_character.map(str::to_string);
+        Box::pin(async move {
+            if self.feature_admits(ProviderFeature::Completions, &path) {
+                self.owned
+                    .get_completions(&path, offset, trigger_character.as_deref())
+                    .await
+            } else {
+                Ok(CompletionResult {
+                    items: Vec::new(),
+                    is_incomplete: false,
+                })
+            }
+        })
     }
 
     fn get_completion_details<'a>(
@@ -874,7 +1017,14 @@ impl TypeProvider for TsgoCompositeProvider {
         offset: u32,
         items: &'a [Completion],
     ) -> ProviderFuture<'a, Vec<Completion>> {
-        self.owned.get_completion_details(path, offset, items)
+        // MIXED: a denied carrier serves the empty external default.
+        Box::pin(async move {
+            if self.feature_admits(ProviderFeature::CompletionDetails, path) {
+                self.owned.get_completion_details(path, offset, items).await
+            } else {
+                Ok(Vec::new())
+            }
+        })
     }
 
     fn resolve_completion(
@@ -882,15 +1032,42 @@ impl TypeProvider for TsgoCompositeProvider {
         path: &str,
         data: CompletionResolveData,
     ) -> ProviderFuture<'_, Option<CompletionResolveResult>> {
-        self.owned.resolve_completion(path, data)
+        // EXTERNAL-ONLY: a denied carrier suppresses provider enrichment (None) — no
+        // owned resolve call.
+        let path = path.to_string();
+        Box::pin(async move {
+            if self.feature_admits(ProviderFeature::ResolveCompletion, &path) {
+                self.owned.resolve_completion(&path, data).await
+            } else {
+                Ok(None)
+            }
+        })
     }
 
     fn get_hover(&self, path: &str, offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
-        self.owned.get_hover(path, offset)
+        // MIXED: a denied carrier serves the None external default (the handler merge
+        // preserves any native sub-answer); a non-carrier path is ungated.
+        let path = path.to_string();
+        Box::pin(async move {
+            if self.feature_admits(ProviderFeature::Hover, &path) {
+                self.owned.get_hover(&path, offset).await
+            } else {
+                Ok(None)
+            }
+        })
     }
 
     fn get_definition(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
-        self.owned.get_definition(path, offset)
+        // MIXED: a denied carrier serves the empty external default (native preserved by
+        // the handler merge).
+        let path = path.to_string();
+        Box::pin(async move {
+            if self.feature_admits(ProviderFeature::Definition, &path) {
+                self.owned.get_definition(&path, offset).await
+            } else {
+                Ok(Vec::new())
+            }
+        })
     }
 
     fn get_type_definition(
@@ -898,11 +1075,30 @@ impl TypeProvider for TsgoCompositeProvider {
         path: &str,
         offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeLocation>> {
-        self.owned.get_type_definition(path, offset)
+        // EXTERNAL-ONLY: a denied carrier serves the empty external default with NO owned
+        // delegation (never a `--lsp` self-discovery fall-through); a non-carrier path is
+        // ungated.
+        let path = path.to_string();
+        Box::pin(async move {
+            if self.feature_admits(ProviderFeature::TypeDefinition, &path) {
+                self.owned.get_type_definition(&path, offset).await
+            } else {
+                Ok(Vec::new())
+            }
+        })
     }
 
     fn get_references(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
-        self.owned.get_references(path, offset)
+        // MIXED: a denied carrier serves the empty external default (native preserved by
+        // the handler merge).
+        let path = path.to_string();
+        Box::pin(async move {
+            if self.feature_admits(ProviderFeature::References, &path) {
+                self.owned.get_references(&path, offset).await
+            } else {
+                Ok(Vec::new())
+            }
+        })
     }
 
     fn get_rename_locations(
@@ -910,7 +1106,18 @@ impl TypeProvider for TsgoCompositeProvider {
         path: &str,
         offset: u32,
     ) -> ProviderFuture<'_, Vec<RenameLocation>> {
-        self.owned.get_rename_locations(path, offset)
+        // MIXED: a denied carrier serves the empty external default (native rename only);
+        // the LSP handler's existing incomplete-rename safety gates — a SEPARATE layer
+        // this admission does not touch — still block unsafe partial edits. Never a
+        // `--lsp` self-discovery fall-through after admission failure.
+        let path = path.to_string();
+        Box::pin(async move {
+            if self.feature_admits(ProviderFeature::RenameLocations, &path) {
+                self.owned.get_rename_locations(&path, offset).await
+            } else {
+                Ok(Vec::new())
+            }
+        })
     }
 
     fn get_signature_help(
@@ -918,7 +1125,15 @@ impl TypeProvider for TsgoCompositeProvider {
         path: &str,
         offset: u32,
     ) -> ProviderFuture<'_, Option<SignatureHelp>> {
-        self.owned.get_signature_help(path, offset)
+        // EXTERNAL-ONLY: a denied carrier serves `None` with NO owned delegation.
+        let path = path.to_string();
+        Box::pin(async move {
+            if self.feature_admits(ProviderFeature::SignatureHelp, &path) {
+                self.owned.get_signature_help(&path, offset).await
+            } else {
+                Ok(None)
+            }
+        })
     }
 
     fn get_code_actions(
@@ -928,12 +1143,35 @@ impl TypeProvider for TsgoCompositeProvider {
         end_offset: u32,
         diagnostics: &[ProviderDiagnosticContext],
     ) -> ProviderFuture<'_, Vec<TypeCodeAction>> {
-        self.owned
-            .get_code_actions(path, start_offset, end_offset, diagnostics)
+        // MIXED: a denied carrier serves the empty external default (the LSP
+        // `handle_code_action` handler's native Verter carrier code-actions —
+        // organize-imports, extract-component, macro/component/event actions,
+        // action-engine fixes — are preserved by its merge); a non-carrier path is
+        // ungated. Never a `--lsp` self-discovery fall-through after admission failure.
+        let path = path.to_string();
+        let diagnostics = diagnostics.to_vec();
+        Box::pin(async move {
+            if self.feature_admits(ProviderFeature::CodeActions, &path) {
+                self.owned
+                    .get_code_actions(&path, start_offset, end_offset, &diagnostics)
+                    .await
+            } else {
+                Ok(Vec::new())
+            }
+        })
     }
 
     fn get_semantic_tokens(&self, path: &str) -> ProviderFuture<'_, Vec<SemanticToken>> {
-        self.owned.get_semantic_tokens(path)
+        // EXTERNAL-ONLY: a denied carrier serves the empty external default with NO owned
+        // delegation.
+        let path = path.to_string();
+        Box::pin(async move {
+            if self.feature_admits(ProviderFeature::SemanticTokens, &path) {
+                self.owned.get_semantic_tokens(&path).await
+            } else {
+                Ok(Vec::new())
+            }
+        })
     }
 
     fn get_document_highlights(
@@ -941,7 +1179,16 @@ impl TypeProvider for TsgoCompositeProvider {
         path: &str,
         offset: u32,
     ) -> ProviderFuture<'_, Vec<TypeDocumentHighlight>> {
-        self.owned.get_document_highlights(path, offset)
+        // MIXED: a denied carrier serves the empty external default (native preserved by
+        // the handler merge).
+        let path = path.to_string();
+        Box::pin(async move {
+            if self.feature_admits(ProviderFeature::DocumentHighlights, &path) {
+                self.owned.get_document_highlights(&path, offset).await
+            } else {
+                Ok(Vec::new())
+            }
+        })
     }
 
     fn get_inlay_hints(
@@ -950,7 +1197,18 @@ impl TypeProvider for TsgoCompositeProvider {
         start_offset: u32,
         end_offset: u32,
     ) -> ProviderFuture<'_, Vec<InlayHint>> {
-        self.owned.get_inlay_hints(path, start_offset, end_offset)
+        // MIXED: a denied carrier serves the empty external default (native preserved by
+        // the handler merge).
+        let path = path.to_string();
+        Box::pin(async move {
+            if self.feature_admits(ProviderFeature::InlayHints, &path) {
+                self.owned
+                    .get_inlay_hints(&path, start_offset, end_offset)
+                    .await
+            } else {
+                Ok(Vec::new())
+            }
+        })
     }
 
     // ── Config / workspace / lifecycle: delegate to OWNED. ──
