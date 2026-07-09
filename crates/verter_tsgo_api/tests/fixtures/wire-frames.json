@@ -7,15 +7,15 @@
       "payload": "null",
       "hex": "9301c40a696e697469616c697a65c4046e756c6c"
     },
-    "updateSnapshot_openProject": {
+    "updateSnapshot_openProjects": {
       "method": "updateSnapshot",
-      "payload": "{\"openProject\":\"/repo/tsconfig.json\"}",
-      "hex": "9301c40e757064617465536e617073686f74c4257b226f70656e50726f6a656374223a222f7265706f2f7473636f6e6669672e6a736f6e227d"
+      "payload": "{\"openProjects\":[\"/repo/tsconfig.json\"]}",
+      "hex": "9301c40e757064617465536e617073686f74c4287b226f70656e50726f6a65637473223a5b222f7265706f2f7473636f6e6669672e6a736f6e225d7d"
     },
     "updateSnapshot_fileChanges": {
       "method": "updateSnapshot",
-      "payload": "{\"openProject\":\"/repo/tsconfig.json\",\"fileChanges\":{\"changed\":[\"/repo/src/a.ts\"]}}",
-      "hex": "9301c40e757064617465536e617073686f74c4527b226f70656e50726f6a656374223a222f7265706f2f7473636f6e6669672e6a736f6e222c2266696c654368616e676573223a7b226368616e676564223a5b222f7265706f2f7372632f612e7473225d7d7d"
+      "payload": "{\"openProjects\":[\"/repo/tsconfig.json\"],\"fileChanges\":{\"changed\":[\"/repo/src/a.ts\"]}}",
+      "hex": "9301c40e757064617465536e617073686f74c4557b226f70656e50726f6a65637473223a5b222f7265706f2f7473636f6e6669672e6a736f6e225d2c2266696c654368616e676573223a7b226368616e676564223a5b222f7265706f2f7372632f612e7473225d7d7d"
     },
     "getSemanticDiagnostics": {
       "method": "getSemanticDiagnostics",

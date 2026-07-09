@@ -1,7 +1,8 @@
 //! Tests for [`ApiAttachClient`] driven over an in-memory duplex by a fake `--api`
 //! server. NON-VACUOUS: real framing + real typed DTO (de)serialization; asserts
-//! the EXACT param shapes the attach wire requires (e.g. `updateSnapshot` carries
-//! `openProject` ONLY) and that diagnostics decode with their TS codes.
+//! the EXACT param shapes the attach wire requires (e.g. the FIRST `updateSnapshot`
+//! leases `openProjects: [tsconfig]` and subsequent snapshots OMIT it — the
+//! ref-counted open persists) and that diagnostics decode with their TS codes.
 
 use super::*;
 use crate::jsonrpc::framing::{encode_message, MessageFramer};
@@ -93,7 +94,7 @@ async fn initialize_decodes_typed_response() {
 }
 
 #[tokio::test]
-async fn update_snapshot_sends_open_project_only() {
+async fn update_snapshot_first_open_sends_open_projects() {
     let (client, recorder) = setup();
     let snap = client
         .update_snapshot_open_project("/ws/tsconfig.json", "7.0.1-rc")
@@ -106,8 +107,9 @@ async fn update_snapshot_sends_open_project_only() {
     assert_eq!(snap.projects[0].id, "proj-1");
     assert_eq!(snap.projects[0].root_files, vec!["/ws/src/Widget.vue.tsx"]);
 
-    // DISCRIMINATING: the attach `updateSnapshot` carries `openProject` ONLY — no
-    // `fileChanges`, no `openFiles` (the --lsp server owns documents).
+    // DISCRIMINATING: the FIRST attach `updateSnapshot` leases the GA ref-counted
+    // `openProjects: [tsconfig]` — never the deprecated `openProject` scalar, and
+    // no `fileChanges`/`openFiles` (the --lsp server owns documents).
     let rec = recorder.lock();
     let (m, params) = rec
         .iter()
@@ -115,8 +117,13 @@ async fn update_snapshot_sends_open_project_only() {
         .expect("recorded");
     assert_eq!(m, "updateSnapshot");
     assert_eq!(
-        params["openProject"],
-        serde_json::json!("/ws/tsconfig.json")
+        params["openProjects"],
+        serde_json::json!(["/ws/tsconfig.json"]),
+        "the first open leases openProjects as a resolved file-name array: {params}"
+    );
+    assert!(
+        params.get("openProject").is_none(),
+        "the deprecated `openProject` scalar must NEVER ride the wire: {params}"
     );
     assert!(
         params.get("fileChanges").is_none(),
@@ -127,7 +134,84 @@ async fn update_snapshot_sends_open_project_only() {
         "attach updateSnapshot must NOT send openFiles: {params}"
     );
     let obj = params.as_object().expect("params is an object");
-    assert_eq!(obj.len(), 1, "openProject must be the ONLY param: {params}");
+    assert_eq!(
+        obj.len(),
+        1,
+        "openProjects must be the ONLY param on the first open: {params}"
+    );
+}
+
+/// DISCRIMINATING (project-keyed lease): GA `openProjects` opens are ref-counted,
+/// ADDITIVE, and PER-PROJECT. One `ApiAttachClient` serves MULTIPLE projects
+/// (per-carrier), so the lease must be keyed on the tsconfig path, NOT a single
+/// global "first snapshot" latch. Each DISTINCT project leases `openProjects`
+/// exactly once; a subsequent snapshot of an ALREADY-open project omits it (the
+/// refcount persists). Fails RED against the global-latch codec, whose SECOND
+/// call (a DIFFERENT project) wrongly sends `{}` and never opens project B.
+#[tokio::test]
+async fn update_snapshot_leases_open_projects_per_project() {
+    let (client, recorder) = setup();
+    // Call #1: cold open of project A — leases openProjects[A].
+    client
+        .update_snapshot_open_project("/ws/A/tsconfig.json", "7.0.2")
+        .await
+        .expect("first updateSnapshot (A) ok");
+    // Call #2: open of a DIFFERENT project B on the SAME client — must lease
+    // openProjects[B]. GA `openProjects` is additive/ref-counted, so omitting it
+    // here (the global-latch bug) never opens B.
+    client
+        .update_snapshot_open_project("/ws/B/tsconfig.json", "7.0.2")
+        .await
+        .expect("second updateSnapshot (B) ok");
+    // Call #3: re-open project A — already leased, so openProjects is OMITTED
+    // (the ref-counted open persists → no double-increment). Folds in the
+    // same-project omit case.
+    client
+        .update_snapshot_open_project("/ws/A/tsconfig.json", "7.0.2")
+        .await
+        .expect("third updateSnapshot (A again) ok");
+
+    let rec = recorder.lock();
+    let snaps: Vec<&serde_json::Value> = rec
+        .iter()
+        .filter(|(m, _)| m == "updateSnapshot")
+        .map(|(_, p)| p)
+        .collect();
+    assert_eq!(
+        snaps.len(),
+        3,
+        "exactly three updateSnapshot calls recorded"
+    );
+
+    // Call #1 leased project A.
+    assert_eq!(
+        snaps[0]["openProjects"],
+        serde_json::json!(["/ws/A/tsconfig.json"]),
+        "call #1 leases openProjects[A]: {}",
+        snaps[0]
+    );
+
+    // Call #2 leased project B — THE regression assertion. The global-latch codec
+    // sends `{}` here (the validated latch was set by call #1), so B never opens.
+    assert_eq!(
+        snaps[1]["openProjects"],
+        serde_json::json!(["/ws/B/tsconfig.json"]),
+        "call #2 (a DIFFERENT project) MUST lease openProjects[B], not send `{{}}`: {}",
+        snaps[1]
+    );
+
+    // Call #3 re-opens A — already leased, so openProjects is OMITTED.
+    assert!(
+        snaps[2].get("openProjects").is_none(),
+        "call #3 (A already leased) must OMIT openProjects (refcount persists): {}",
+        snaps[2]
+    );
+    let obj = snaps[2].as_object().expect("call #3 params is an object");
+    assert!(
+        obj.is_empty(),
+        "call #3 must send an empty {{}} (A's open persists): {}",
+        snaps[2]
+    );
 }
 
 /// A fake `--api` server whose `updateSnapshot` reply encodes a STRING snapshot

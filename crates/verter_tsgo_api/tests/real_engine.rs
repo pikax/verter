@@ -2,7 +2,7 @@
 //!
 //! Spawns the actual tsgo process through the production stdio-pipe transport
 //! and drives the single-writer actor through the real wire: `initialize`,
-//! `updateSnapshot(openProject)`, and `getSemanticDiagnostics` on both a clean
+//! `updateSnapshot(openProjects)`, and `getSemanticDiagnostics` on both a clean
 //! and a deliberately-broken OVERLAY file (served only through the snapshot's
 //! FS callbacks, never written to disk).
 //!
@@ -101,13 +101,13 @@ async fn real_engine_initialize_update_snapshot_and_diagnostics() {
         "engine reported a current directory"
     );
 
-    // 2. updateSnapshot(openProject) — opens the configured project; the carrier
+    // 2. updateSnapshot(openProjects) — opens the configured project; the carrier
     //    must appear in the project's root files (discovered via the merged
     //    getAccessibleEntries).
     let snap: UpdateSnapshotResponse = req_json(
         &handle,
         method::UPDATE_SNAPSHOT,
-        serde_json::json!({ "openProject": common::norm(&tsconfig) }),
+        serde_json::json!({ "openProjects": [common::norm(&tsconfig)] }),
     )
     .await;
     // Got a snapshot handle faithful to the rc engine's wire shape — a bare
@@ -165,7 +165,9 @@ async fn real_engine_initialize_update_snapshot_and_diagnostics() {
     handle.publish_snapshot(err_snapshot);
 
     let params = UpdateSnapshotParams {
-        open_project: Some(common::norm(&tsconfig)),
+        open_projects: Some(vec![
+            verter_tsgo_api::proto::types::DocumentIdentifier::file_name(common::norm(&tsconfig)),
+        ]),
         file_changes: Some(verter_tsgo_api::proto::types::FileChanges::Summary(
             verter_tsgo_api::proto::types::FileChangeSummary {
                 changed: Some(vec![
@@ -176,6 +178,7 @@ async fn real_engine_initialize_update_snapshot_and_diagnostics() {
                 ..Default::default()
             },
         )),
+        ..Default::default()
     };
     let snap2: UpdateSnapshotResponse = req_json(
         &handle,
@@ -247,10 +250,7 @@ async fn typed_client_connects_through_gate_and_serves_typed_ops() {
     let init = client.initialize().await.expect("initialize");
     assert!(!init.current_directory.is_empty());
 
-    let params = UpdateSnapshotParams {
-        open_project: Some(common::norm(&tsconfig)),
-        file_changes: None,
-    };
+    let params = UpdateSnapshotParams::single_project(common::norm(&tsconfig));
     let snap = client
         .update_snapshot(&params)
         .await
@@ -354,10 +354,7 @@ async fn program_getter_surfaces_non_root_imported_error_that_per_file_misses() 
 
     let client = TsgoClient::connect(&exe, &tmp, snapshot, 16).expect("connect");
     client.initialize().await.expect("initialize");
-    let params = UpdateSnapshotParams {
-        open_project: Some(common::norm(&tsconfig)),
-        file_changes: None,
-    };
+    let params = UpdateSnapshotParams::single_project(common::norm(&tsconfig));
     let snap = client
         .update_snapshot(&params)
         .await
@@ -496,10 +493,7 @@ async fn config_file_parsing_getter_surfaces_bad_target_and_none_on_clean() {
 
         let client = TsgoClient::connect(exe, &tmp, snapshot, 16).expect("connect");
         client.initialize().await.expect("initialize");
-        let params = UpdateSnapshotParams {
-            open_project: Some(common::norm(&tsconfig)),
-            file_changes: None,
-        };
+        let params = UpdateSnapshotParams::single_project(common::norm(&tsconfig));
         let snap = client
             .update_snapshot(&params)
             .await

@@ -164,7 +164,7 @@ async fn attach_api_over_spawned_lsp_sees_didopen_overlay_carrier() {
         .await
         .expect("didOpen overlay + sync");
 
-    // 3. Open the CONFIGURED project on the --api side (openProject only — the
+    // 3. Open the CONFIGURED project on the --api side (openProjects only — the
     //    --lsp server owns documents). This is the project-bound membership: the
     //    carrier rides the configured tsconfig, NOT a config-less inferred project.
     //    The updateSnapshot rail rides the STORED in-band serverInfo witness the

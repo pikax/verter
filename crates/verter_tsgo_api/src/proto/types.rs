@@ -128,18 +128,55 @@ pub enum FileChanges {
     },
 }
 
-// ── updateSnapshot params (proto.d.ts:46-63; sync/api.js:62-68) ──────────────
-/// Params for `updateSnapshot`. Mirrors `UpdateSnapshotParams`
-/// (proto.d.ts:61-63). `openProject` is run through `resolveFileName` on the JS
-/// side before sending (sync/api.js:65-67).
+// ── updateSnapshot params (proto.d.ts:51-83; sync/api.js:62-69) ──────────────
+/// Params for `updateSnapshot`. Mirrors the GA `LSPUpdateSnapshotParams`
+/// (proto.d.ts:51-83).
+///
+/// The deprecated scalar `openProject` is NEVER on the wire: the GA client shim
+/// `toUpdateSnapshotRequest` (proto.js) strips it and re-emits
+/// `openProjects: [resolveFileName(openProject)]`. This codec models the
+/// normalized post-shim surface directly — the ref-counted open/close set.
+///
+/// Opens are REF-COUNTED and PERSIST across snapshots until explicitly closed
+/// (proto.d.ts:57-82); a lease field omitted (`None`) never rides the wire, so a
+/// persisted open is not re-leased (see the ATTACH lease model in
+/// `api_attach.rs`). Every field is `skip_serializing_if = "Option::is_none"` to
+/// match the JS optional-omit behavior.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdateSnapshotParams {
-    /// Path to a tsconfig.json to open in the new snapshot.
-    #[serde(rename = "openProject", skip_serializing_if = "Option::is_none")]
-    pub open_project: Option<String>,
+    /// Projects to open in the new snapshot (each resolved to its file-name
+    /// form). Ref-counted: the open persists until a matching close.
+    #[serde(rename = "openProjects", skip_serializing_if = "Option::is_none")]
+    pub open_projects: Option<Vec<DocumentIdentifier>>,
+    /// Projects to close (balances a prior open's refcount).
+    #[serde(rename = "closeProjects", skip_serializing_if = "Option::is_none")]
+    pub close_projects: Option<Vec<DocumentIdentifier>>,
+    /// Files to open in the new snapshot. Ref-counted like `open_projects`.
+    #[serde(rename = "openFiles", skip_serializing_if = "Option::is_none")]
+    pub open_files: Option<Vec<DocumentIdentifier>>,
+    /// Files to close (balances a prior open's refcount).
+    #[serde(rename = "closeFiles", skip_serializing_if = "Option::is_none")]
+    pub close_files: Option<Vec<DocumentIdentifier>>,
     /// File changes relative to the previous snapshot.
     #[serde(rename = "fileChanges", skip_serializing_if = "Option::is_none")]
     pub file_changes: Option<FileChanges>,
+}
+
+impl UpdateSnapshotParams {
+    /// Ergonomic single-project open: lowers to
+    /// `open_projects: [DocumentIdentifier::file_name(p)]` with every other lease
+    /// field left `None`. A NON-serialized convenience constructor — it does NOT
+    /// reintroduce an `openProject` wire field. `p` is already the resolved
+    /// file-name form the JS shim's `resolveFileName` would have produced (Verter
+    /// threads normalized absolute tsconfig paths; a `{ uri }` caller normalizes
+    /// to its file-name form before send).
+    #[must_use]
+    pub fn single_project(p: impl Into<String>) -> Self {
+        Self {
+            open_projects: Some(vec![DocumentIdentifier::file_name(p)]),
+            ..Default::default()
+        }
+    }
 }
 
 // ── Response DTOs (proto.d.ts) ───────────────────────────────────────────────
@@ -287,30 +324,56 @@ mod tests {
     // which matches the JS object-literal field order at each call site.
 
     #[test]
-    fn update_snapshot_open_project_json_matches_js_shape() {
+    fn update_snapshot_open_projects_json_matches_js_shape() {
         let p = UpdateSnapshotParams {
-            open_project: Some("/repo/tsconfig.json".to_string()),
-            file_changes: None,
+            open_projects: Some(vec![DocumentIdentifier::file_name("/repo/tsconfig.json")]),
+            ..Default::default()
         };
-        // JS sends `{ openProject: "/repo/tsconfig.json" }` (fileChanges omitted).
+        // The GA client shim re-emits `openProjects: [resolveFileName(openProject)]`
+        // — `openProject` is NEVER on the wire (proto.js `toUpdateSnapshotRequest`).
         assert_eq!(
             serde_json::to_string(&p).unwrap(),
-            r#"{"openProject":"/repo/tsconfig.json"}"#
+            r#"{"openProjects":["/repo/tsconfig.json"]}"#
         );
     }
 
     #[test]
     fn update_snapshot_file_changes_json_matches_js_shape() {
         let p = UpdateSnapshotParams {
-            open_project: Some("/repo/tsconfig.json".to_string()),
+            open_projects: Some(vec![DocumentIdentifier::file_name("/repo/tsconfig.json")]),
             file_changes: Some(FileChanges::Summary(FileChangeSummary {
                 changed: Some(vec![DocumentIdentifier::file_name("/repo/src/a.ts")]),
                 ..Default::default()
             })),
+            ..Default::default()
         };
         assert_eq!(
             serde_json::to_string(&p).unwrap(),
-            r#"{"openProject":"/repo/tsconfig.json","fileChanges":{"changed":["/repo/src/a.ts"]}}"#
+            r#"{"openProjects":["/repo/tsconfig.json"],"fileChanges":{"changed":["/repo/src/a.ts"]}}"#
+        );
+    }
+
+    // ── NEGATIVE: the deprecated `openProject` scalar was DELETED from the wire.
+    //    Only the GA ref-counted `openProjects` array rides — guard the dead key
+    //    is gone (exact-key match, not a substring: `"openProjects"` itself
+    //    contains the substring `openProject`). ─────────────────────────────────
+    #[test]
+    fn update_snapshot_never_emits_deprecated_open_project_key() {
+        let p = UpdateSnapshotParams::single_project("/repo/tsconfig.json");
+        let v = serde_json::to_value(&p).unwrap();
+        let obj = v.as_object().expect("params serialize to a JSON object");
+        assert!(
+            obj.contains_key("openProjects"),
+            "the GA wire carries `openProjects`: {v}"
+        );
+        assert!(
+            !obj.contains_key("openProject"),
+            "the deprecated `openProject` scalar must NEVER ride the wire: {v}"
+        );
+        // The single-project ergonomic helper lowers to the resolved file-name array.
+        assert_eq!(
+            v["openProjects"],
+            serde_json::json!(["/repo/tsconfig.json"])
         );
     }
 

@@ -187,7 +187,7 @@ pub struct TypecheckInputs<'a> {
     pub engine: &'a Path,
     /// The engine working directory (the project root, for module resolution).
     pub cwd: &'a Path,
-    /// The virtual synthetic-tsconfig path (overlay key + `openProject` target).
+    /// The virtual synthetic-tsconfig path (overlay key + `openProjects` target).
     pub tsconfig_path: String,
     /// The synthetic tsconfig JSON served at `tsconfig_path`.
     pub tsconfig_bytes: String,
@@ -308,10 +308,10 @@ async fn collect_diagnostics(
         )));
     }
 
-    let params = UpdateSnapshotParams {
-        open_project: Some(tsconfig_path.to_string()),
-        file_changes: None,
-    };
+    // OWNED one-shot: connect → 1×updateSnapshot → diagnostics → drop. A single
+    // `open_projects: [tsconfig]` is correct (the client is torn down after, so
+    // no lease bookkeeping is required).
+    let params = UpdateSnapshotParams::single_project(tsconfig_path.to_string());
     let snap = match client.update_snapshot(&params).await {
         Ok(s) => s,
         Err(e) => {

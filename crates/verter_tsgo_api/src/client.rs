@@ -283,9 +283,10 @@ impl TsgoClient {
         .await
     }
 
-    /// `release` — release a snapshot handle.
+    /// `release` — release a snapshot handle. GA reads `{ snapshot: N }`
+    /// (api.js:196); fire-and-forget (the response is ignored).
     pub async fn release(&self, snapshot: &OpaqueHandle) -> TsgoApiResult<()> {
-        let payload = serde_json::to_vec(&serde_json::json!({ "handle": snapshot }))?;
+        let payload = serde_json::to_vec(&serde_json::json!({ "snapshot": snapshot }))?;
         self.handle
             .request(method::RELEASE, payload, RequestOptions::default())
             .await
@@ -533,6 +534,37 @@ mod tests {
         );
     }
 
+    // ── DISCRIMINATING: `release` sends the GA `{ snapshot: N }` param
+    //    (api.js:196), NOT the pre-GA `{ handle: N }`. GA reads `snapshot`, so a
+    //    `handle` payload silently no-ops (a snapshot leak). Fire-and-forget, so
+    //    the divergence never surfaces through parity/codec_roundtrip — a capture
+    //    test is the only rail. Fails RED against the `{ handle }` payload. ──────
+    #[tokio::test]
+    async fn release_sends_snapshot_param_not_handle() {
+        let (client, from_engine, to_engine) = test_client();
+        let engine = capture_request_payload(to_engine, from_engine).await;
+        client
+            .release(&OpaqueHandle(42))
+            .await
+            .expect("release resolves");
+        let payload = engine.await.unwrap();
+        assert_eq!(
+            payload["snapshot"],
+            serde_json::json!(42),
+            "release must send the GA `snapshot` param (got {payload})"
+        );
+        assert!(
+            payload["snapshot"].is_number(),
+            "the released handle rides the wire as a JSON integer: {payload}"
+        );
+        assert!(
+            payload.get("handle").is_none(),
+            "release must NOT send the pre-GA `handle` param: {payload}"
+        );
+        let obj = payload.as_object().expect("release params are an object");
+        assert_eq!(obj.len(), 1, "release sends `snapshot` ONLY: {payload}");
+    }
+
     // ── DISCRIMINATING: the OWNED first-`updateSnapshot` integer-handle rail.
     //    An engine whose first snapshot handle is a STRING (the pre-integer
     //    opaque-handle wire) must be refused with the typed
@@ -589,6 +621,162 @@ mod tests {
         engine.await.unwrap();
         assert_eq!(resp.snapshot, OpaqueHandle(7));
         assert!(resp.projects.is_empty());
+    }
+
+    // ── SCHEDULE COVERAGE: bind `PINNED_REQUEST_FIELDS` to what the codec ACTUALLY
+    //    sends. For every op the codec drives, capture the real serialized request
+    //    payload over the mock engine and assert its JSON object key set matches
+    //    that op's scheduled row — EQ for the fixed-shape ops, and ⊆ the scheduled
+    //    lease superset for `updateSnapshot` (whose first open sends only
+    //    `openProjects` of the {openProjects,closeProjects,openFiles,closeFiles,
+    //    fileChanges} family). DISCRIMINATING: a schedule row that DROPS a key the
+    //    codec really sends — or GAINS one it never sends — fails this test, so the
+    //    hand-maintained schedule cannot silently drift from the send-sites. The
+    //    op-NAME-only fingerprint was blind to exactly this dimension (it shipped
+    //    the `openProject`→`openProjects` fork), so binding the schedule to the
+    //    real sends is what closes that gap. ──────────────────────────────────────
+    #[tokio::test]
+    async fn pinned_request_fields_match_real_send_sites() {
+        use crate::proto::schema_manifest::PINNED_REQUEST_FIELDS;
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let (client, from_engine, to_engine) = test_client();
+        let recorded: Arc<parking_lot::Mutex<Vec<(String, serde_json::Value)>>> =
+            Arc::new(parking_lot::Mutex::new(Vec::new()));
+
+        // The mock engine records each (method, payload) and replies with a per-op
+        // canned body so the client call resolves. It processes exactly the number
+        // of ops the test drives, then returns (deterministic, no hang).
+        const DRIVEN_OPS: usize = 8;
+        let rec = Arc::clone(&recorded);
+        let engine = tokio::spawn(async move {
+            let mut to_engine = to_engine;
+            for _ in 0..DRIVEN_OPS {
+                let raw = to_engine
+                    .recv()
+                    .await
+                    .expect("client sends a request frame");
+                let (req, _) = decode_frame(&raw, 0).expect("decode request frame");
+                let name = String::from_utf8_lossy(req.name).into_owned();
+                let payload: serde_json::Value =
+                    serde_json::from_slice(req.payload).expect("request payload is JSON");
+                rec.lock().push((name.clone(), payload));
+                let body: Vec<u8> = match name.as_str() {
+                    // Integer handle so the first-open rail passes.
+                    "updateSnapshot" => {
+                        serde_json::to_vec(&serde_json::json!({ "snapshot": 1, "projects": [] }))
+                            .unwrap()
+                    }
+                    "typeToString" => serde_json::to_vec(&serde_json::json!("number")).unwrap(),
+                    "getTypeAtPosition" => {
+                        serde_json::to_vec(&serde_json::json!({ "id": 7, "flags": 1 })).unwrap()
+                    }
+                    "getSymbolAtPosition" => serde_json::to_vec(
+                        &serde_json::json!({ "id": 1, "name": "x", "flags": 0, "checkFlags": 0 }),
+                    )
+                    .unwrap(),
+                    // The diagnostics getters decode `Vec<Diagnostic>`; `release` is
+                    // fire-and-forget — an empty array resolves them all.
+                    _ => b"[]".to_vec(),
+                };
+                let resp = encode_frame(MessageType::Response, req.name, &body);
+                from_engine.send(resp).await.expect("engine reply");
+            }
+        });
+
+        // Drive every op the codec SENDS. `initialize` is intentionally excluded —
+        // its params are a bare JSON null (not an object) and its scheduled row is
+        // empty; the schedule tracks object-shaped request payloads.
+        let snap = OpaqueHandle(1);
+        client
+            .update_snapshot(&UpdateSnapshotParams::single_project("/ws/tsconfig.json"))
+            .await
+            .expect("updateSnapshot resolves");
+        client
+            .get_semantic_diagnostics(&snap, "proj", "/ws/A.tsx")
+            .await
+            .expect("getSemanticDiagnostics resolves");
+        client
+            .get_syntactic_diagnostics(&snap, "proj", "/ws/A.tsx")
+            .await
+            .expect("getSyntacticDiagnostics resolves");
+        client
+            .get_config_file_parsing_diagnostics(&snap, "proj")
+            .await
+            .expect("getConfigFileParsingDiagnostics resolves");
+        client
+            .get_type_at_position(&snap, "proj", "/ws/A.tsx", 10)
+            .await
+            .expect("getTypeAtPosition resolves");
+        client
+            .get_symbol_at_position(&snap, "proj", "/ws/A.tsx", 10)
+            .await
+            .expect("getSymbolAtPosition resolves");
+        client
+            .type_to_string(&snap, "proj", &OpaqueHandle(7))
+            .await
+            .expect("typeToString resolves");
+        client.release(&snap).await.expect("release resolves");
+
+        engine.await.expect("mock engine did not panic");
+
+        // Index the schedule for lookup.
+        let schedule: BTreeMap<&str, BTreeSet<&str>> = PINNED_REQUEST_FIELDS
+            .iter()
+            .map(|(op, fields)| (*op, fields.iter().copied().collect()))
+            .collect();
+
+        let recorded = recorded.lock();
+        // We drove exactly the scheduled send ops (initialize excluded).
+        let driven: BTreeSet<&str> = recorded.iter().map(|(m, _)| m.as_str()).collect();
+        let expected: BTreeSet<&str> = [
+            "updateSnapshot",
+            "getSemanticDiagnostics",
+            "getSyntacticDiagnostics",
+            "getConfigFileParsingDiagnostics",
+            "getTypeAtPosition",
+            "getSymbolAtPosition",
+            "typeToString",
+            "release",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            driven, expected,
+            "the test must drive exactly the scheduled send ops"
+        );
+
+        for (op, payload) in recorded.iter() {
+            let keys: BTreeSet<&str> = payload
+                .as_object()
+                .unwrap_or_else(|| panic!("`{op}` params must be a JSON object: {payload}"))
+                .keys()
+                .map(String::as_str)
+                .collect();
+            let scheduled = schedule
+                .get(op.as_str())
+                .unwrap_or_else(|| panic!("`{op}` has no PINNED_REQUEST_FIELDS row"));
+            if op == "updateSnapshot" {
+                // The first open sends only `openProjects` of the lease family; the
+                // scheduled row is the full superset, so the sent keys must be ⊆ it.
+                assert!(
+                    keys.is_subset(scheduled),
+                    "`updateSnapshot` first-open keys {keys:?} must be ⊆ the scheduled \
+                     lease superset {scheduled:?}"
+                );
+                assert!(
+                    keys.contains("openProjects"),
+                    "`updateSnapshot` first open must lease openProjects (got {keys:?})"
+                );
+            } else {
+                // Fixed-shape ops: the sent key set must EQUAL the scheduled row, so
+                // a dropped-or-added schedule key fails the test.
+                assert_eq!(
+                    &keys, scheduled,
+                    "the codec's `{op}` send keys must EQUAL its schedule row"
+                );
+            }
+        }
     }
 
     #[test]

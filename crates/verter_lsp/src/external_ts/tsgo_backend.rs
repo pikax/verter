@@ -65,7 +65,7 @@ impl EngineBackend for TsgoEngineBackend {
     /// Mint the [`BoundProject`] witness from the [`EnsureProject`] request (itself
     /// mintable only from a resolved `ProjectBinding`). The OWNED tsgo provider
     /// holds no per-project on-disk store — the configured project is opened on the
-    /// `--api` checker via `updateSnapshot({openProject})` and carriers ride `--lsp`
+    /// `--api` checker via `updateSnapshot({openProjects})` and carriers ride `--lsp`
     /// didOpen overlays — so this materialises only the witness.
     fn ensure_project(&self, request: EnsureProject) -> Result<BoundProject, EngineError> {
         Ok(BoundProject::from_ensured(

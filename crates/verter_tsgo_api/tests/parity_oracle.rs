@@ -107,7 +107,7 @@ async fn rust_result(
     let snap: UpdateSnapshotResponse = req(
         &handle,
         method::UPDATE_SNAPSHOT,
-        serde_json::json!({ "openProject": common::norm(tsconfig) }),
+        serde_json::json!({ "openProjects": [common::norm(tsconfig)] }),
     )
     .await;
 

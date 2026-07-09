@@ -207,7 +207,7 @@ async fn vue_specific_include_companion_becomes_member_via_virtualization() {
         let snap: UpdateSnapshotResponse = req_json(
             &handle,
             method::UPDATE_SNAPSHOT,
-            serde_json::json!({ "openProject": tsconfig_norm }),
+            serde_json::json!({ "openProjects": [tsconfig_norm] }),
         )
         .await;
         let project = find_project(&snap, &tsconfig);
@@ -248,7 +248,7 @@ async fn vue_specific_include_companion_becomes_member_via_virtualization() {
     let snap: UpdateSnapshotResponse = req_json(
         &handle,
         method::UPDATE_SNAPSHOT,
-        serde_json::json!({ "openProject": tsconfig_norm }),
+        serde_json::json!({ "openProjects": [tsconfig_norm] }),
     )
     .await;
     let project = find_project(&snap, &tsconfig);
@@ -298,7 +298,7 @@ async fn vue_specific_include_companion_becomes_member_via_virtualization() {
     let snap2: UpdateSnapshotResponse = req_json(
         &handle2,
         method::UPDATE_SNAPSHOT,
-        serde_json::json!({ "openProject": tsconfig_norm }),
+        serde_json::json!({ "openProjects": [tsconfig_norm] }),
     )
     .await;
     let project2 = find_project(&snap2, &tsconfig);

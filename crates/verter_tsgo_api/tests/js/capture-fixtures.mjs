@@ -152,15 +152,15 @@ function toHex(buf) {
 const requestFixtures = [
   { name: "initialize", method: "initialize", payload: "null" },
   {
-    name: "updateSnapshot_openProject",
+    name: "updateSnapshot_openProjects",
     method: "updateSnapshot",
-    payload: JSON.stringify({ openProject: "/repo/tsconfig.json" }),
+    payload: JSON.stringify({ openProjects: ["/repo/tsconfig.json"] }),
   },
   {
     name: "updateSnapshot_fileChanges",
     method: "updateSnapshot",
     payload: JSON.stringify({
-      openProject: "/repo/tsconfig.json",
+      openProjects: ["/repo/tsconfig.json"],
       fileChanges: { changed: ["/repo/src/a.ts"] },
     }),
   },

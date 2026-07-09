@@ -32,7 +32,7 @@
 //! ## Serving scope
 //!
 //! This provider is the SHARED DIAGNOSTICS / project-bound typecheck oracle
-//! (proven live against the real 7.0.1-rc engine). Interactive features
+//! (proven live against the real 7.0.2 engine). Interactive features
 //! (hover/completion/definition/…) over the SHARED path — where the editor's own
 //! `--lsp` surface serves `.ts` features directly and `.vue`-carrier feature
 //! mapping is layered on top — are a residual supervised full-DX concern
