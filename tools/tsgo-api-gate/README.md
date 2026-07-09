@@ -8,7 +8,7 @@ project driven by the **user-installed** TS≥7 distribution, so the real `tscon
 (`paths`/`baseUrl`/`types`/`typeRoots`/`jsx`/project references) applies to it.
 
 **Which package is "tsgo"?** The shipping TS≥7 distribution is the npm **`typescript`** package at
-v7 (e.g. `typescript@7.0.1-rc`), whose per-platform native binaries are
+v7 (e.g. `typescript@7.0.2`), whose per-platform native binaries are
 `@typescript/typescript-{platform}-{arch}` and which exports the `--api` client at
 `typescript/unstable/sync`. The `@typescript/native-preview` dev-preview channel (binaries
 `@typescript/native-preview-{platform}-{arch}`) ships the **identical** `--api` surface.
@@ -19,8 +19,8 @@ as a fallback **source** when no installed `typescript@>=7` is present. `run-gat
 installed/repo `typescript` (major ≥ 7) **first**, then falls back to `@typescript/native-preview`,
 and drives whichever is installed (override with `TSGO_PATH`/`TS7_SOURCE`). The production
 **no-TypeScript** fallback (not exercised by this gate) **downloads** the npm `typescript` package at
-the **`rc`** dist-tag — the current TS7 channel (`npm view typescript@rc` → `7.0.1-rc` today; npm
-`latest` is still the `6.x` line), retargeting `latest` once TS7 ships stable — and **fails closed
+the **`latest`** dist-tag — the TS7 GA channel now that TS7 has shipped stable
+(`npm view typescript@latest` → `7.0.2`) — and **fails closed
 when offline**. It is download-only, never a bundled/forked binary.
 
 It also serves as the **version-bump gate**: the tsgo `--api` surface is `unstable`/generated,

@@ -4028,10 +4028,10 @@ fn dirs_or_home() -> Option<PathBuf> {
     std::env::var("HOME").ok().map(PathBuf::from)
 }
 
-/// The TS≥7 tsgo-engine binary source — the installed `typescript@>=7` (rc)
+/// The TS≥7 tsgo-engine binary source — the installed `typescript@>=7`
 /// package's native binary. Mirrors the gate's discovery
 /// (`tools/tsgo-api-gate/run-gate.mjs`): the published `typescript@7.x` (e.g.
-/// `7.0.1-rc`) ships the typescript-go engine as `tsc` (renamed from `tsgo`) in
+/// `7.0.2`) ships the typescript-go engine as `tsc` (renamed from `tsgo`) in
 /// `@typescript/typescript-{plat}-{arch}`. This is the SOLE engine source.
 const TSGO_ENGINE_SOURCES: &[TsgoEngineSource] = &[TsgoEngineSource {
     scope_package_prefix: "@typescript/typescript-",

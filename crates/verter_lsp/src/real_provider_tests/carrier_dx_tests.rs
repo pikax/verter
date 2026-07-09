@@ -364,7 +364,7 @@ async fn assert_carrier_dx_contract_tsserver(session: &RealProviderTestSession) 
 ///   `TS2304 defineProps`, the prop surface degrades to `any`, no bindings are
 ///   extracted), so on THIS fixture refs/rename return only the self-occurrence
 ///   side. Building a Vue-macro/JSX/type-runtime conformance fixture, and validating
-///   against the authoritative `typescript@7.0.1-rc` engine (not the dev channel),
+///   against the authoritative `typescript@7.0.2` engine (not the dev channel),
 ///   is the tracked follow-up for the both-sides refs/rename + completion items.
 /// * The plain-`.ts`-importer raw companion→source remap for def/refs/rename (the
 ///   editor's-own-TS-channel surface for a plain `.ts`) is the §2.10 SHARED-proxy

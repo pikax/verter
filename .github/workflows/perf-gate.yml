@@ -137,7 +137,7 @@ jobs:
         with:
           node-version: lts/*
           cache: pnpm
-      # The tsgo engine (typescript@7.0.1-rc, the TS 7 native compiler) is PINNED
+      # The tsgo engine (typescript@7.0.2, the TS 7 native compiler) is PINNED
       # in the workspace-root devDeps; --frozen-lockfile brings exactly that
       # version. The gate resolves the installed `typescript` version and FAILS a
       # full run on a mismatch with the manifest's tsgoVersion — so there is NO

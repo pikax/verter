@@ -414,7 +414,7 @@ fn run_inmemory_typecheck(
         None => {
             return Err(api_check::TypecheckError::new(
                 "verter-tsc: no gated tsgo `--api` engine found for in-memory typecheck. \
-                 Install the pinned engine (`typescript@7.0.1-rc`) in the project's node_modules, \
+                 Install the pinned engine (`typescript@7.0.2`) in the project's node_modules, \
                  or point VERTER_TSGO_BIN at the `tsc` native binary. \
                  (There is no tsc fallback for the typecheck path.)",
             ));

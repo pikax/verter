@@ -51,13 +51,13 @@ struct EngineSource {
     pnpm_prefix: &'static str,
     /// classic-sibling `@typescript/<name>` prefix, e.g. `typescript-`.
     sibling_prefix: &'static str,
-    /// the binary file stem (no extension): `tsc` for the rc engine.
+    /// the binary file stem (no extension): `tsc` for the TS≥7 engine.
     binary_stem: &'static str,
 }
 
-/// The TS≥7 tsgo-engine binary source — the installed `typescript@>=7` (rc)
+/// The TS≥7 tsgo-engine binary source — the installed `typescript@>=7`
 /// package's platform binary. Mirrors the gate (`run-gate.mjs::discoverTsgo`):
-/// the published `typescript@7.x` (e.g. `7.0.1-rc`) ships the typescript-go
+/// the published `typescript@7.x` (e.g. `7.0.2`) ships the typescript-go
 /// engine as `tsc` (renamed from `tsgo`) in `@typescript/typescript-<plat>-<arch>`.
 /// This is the SOLE engine source — there is no second channel.
 const ENGINE_SOURCES: &[EngineSource] = &[EngineSource {

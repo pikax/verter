@@ -25,11 +25,11 @@ const require = createRequire(import.meta.url);
 //     `@typescript/typescript-<plat>-<arch>` shipping the `--api` surface
 //     (`./unstable/sync` -> dist/api/sync/api.js).
 //   - This gate only DISCOVERS an installed/repo binary. The production NO-TYPESCRIPT
-//     fallback (not exercised here) DOWNLOADS the npm `typescript` package at the `rc`
-//     dist-tag (the current TS7 channel — `npm view typescript@rc` = 7.0.1-rc today; npm
-//     `latest` is still the 6.x line), retargeting `latest` once TS7 ships stable, and
-//     fails closed when offline. It is download-only — never a bundled/forked binary.
-// The published `typescript@7.x` (e.g. 7.0.1-rc) ships the typescript-go binary as
+//     fallback (not exercised here) DOWNLOADS the npm `typescript` package at the
+//     `latest` dist-tag (the TS7 GA channel now that TS7 has shipped stable —
+//     `npm view typescript@latest` = 7.0.2), and fails closed when offline. It is
+//     download-only — never a bundled/forked binary.
+// The published `typescript@7.x` (e.g. 7.0.2) ships the typescript-go binary as
 // `tsc` (renamed from `tsgo`) in `@typescript/typescript-<plat>-<arch>`.
 const TS7_SOURCES = [
   {
