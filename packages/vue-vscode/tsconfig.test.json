@@ -1,6 +1,13 @@
 {
   "extends": "./tsconfig.json",
-  "include": ["./e2e", "./src/startupOptimizations.ts", "./src/e2eEnv.ts"],
+  "include": [
+    "./e2e",
+    "./src/startupOptimizations.ts",
+    "./src/e2eEnv.ts",
+    "./src/d1AcceptanceGate.ts",
+    "./src/sharedTsgoLaunch.ts",
+    "./src/runSummaryOracle.ts"
+  ],
   "exclude": [
     "./e2e/fixtures",
     "./e2e/dx/vitest.config.ts",

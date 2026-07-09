@@ -34,6 +34,8 @@ import {
 
 import { join, normalize } from "path";
 import { appendFileSync, existsSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
+import { spawn, type ChildProcess } from "child_process";
 
 import type { PatchClient, NotificationParams } from "@verter/language-shared";
 import { patchClient, NotificationType, RequestType } from "@verter/language-shared";
@@ -70,6 +72,7 @@ import {
 import { StartupProbe, readStartupProbeConfig, writeTimingMarker } from "./startupProbe";
 import { shouldRestartLanguageServerForConfigurationChange } from "./languageServerConfig";
 import { addShowRecentAuditRecordsCommand } from "./audit";
+import { planSharedTsgo, typeProviderRoutesTsgo } from "./sharedTsgoLaunch";
 
 type GetClient = () => PatchClient<LanguageClient>;
 type ActivationRuntime = Awaited<ReturnType<typeof activateExtension>>;
@@ -494,6 +497,20 @@ export async function activateVueLanguageServer(
 
   const binaryPath = findLspBinary(context.extensionPath, log);
 
+  // Establish the OPTIONAL SHARED editor-attach rendezvous (fail-closed to OWNED).
+  // The `--shared-*` args (empty when OWNED) arm the LSP; the shim is spawned once
+  // and torn down on deactivate — reused across restarts (never respawned per restart).
+  const effectiveTypeProvider =
+    readE2eEnv("TYPE_PROVIDER") ||
+    workspace.getConfiguration("verter").get<string>("typeProvider", "auto");
+  const sharedTsgo = establishSharedTsgo(
+    context.extensionPath,
+    rootPath,
+    effectiveTypeProvider,
+    log,
+  );
+  context.subscriptions.push({ dispose: () => sharedTsgo.dispose() });
+
   // CSS intellisense service — created after client, referenced by middleware closures
   let cssService: CssService | undefined;
   const getCssService = () => {
@@ -734,7 +751,7 @@ export async function activateVueLanguageServer(
   };
 
   let client = createLanguageServer(
-    buildServerOptions(binaryPath, rootPath, context.extensionPath, log),
+    buildServerOptions(binaryPath, rootPath, context.extensionPath, log, sharedTsgo.lspArgs),
     clientOptions,
   );
   const getClient = () => client as unknown as PatchClient<LanguageClient>;
@@ -1062,7 +1079,13 @@ export async function activateVueLanguageServer(
         stop: () => client.stop(),
         createAndStart: async () => {
           client = createLanguageServer(
-            buildServerOptions(binaryPath, rootPath, context.extensionPath, log),
+            buildServerOptions(
+              binaryPath,
+              rootPath,
+              context.extensionPath,
+              log,
+              sharedTsgo.lspArgs,
+            ),
             clientOptions,
           );
           registerTypeProviderPidListener(client);
@@ -1103,11 +1126,107 @@ export async function activateVueLanguageServer(
   };
 }
 
+/** A live SHARED-tsgo rendezvous: the `--shared-*` LSP args + the shim disposer. */
+interface SharedTsgoLaunch {
+  /** The `--shared-control-dir` / `--shared-session-key` args to arm the LSP (empty when OWNED). */
+  lspArgs: string[];
+  /** Tear down the spawned relay shim (no-op when OWNED). */
+  dispose: () => void;
+}
+
+const NO_SHARED_TSGO: SharedTsgoLaunch = { lspArgs: [], dispose: () => {} };
+
+/**
+ * Establish the OPTIONAL SHARED editor-attach rendezvous, FAIL-CLOSED.
+ *
+ * SHARED is an additive tsgo overlay: the extension discovers the built/packaged
+ * `verter-relay-shim` + the native-preview tsgo, spawns the shim (which advertises a
+ * live real-tsgo attach into an isolated control dir), and returns the `--shared-*`
+ * args that arm the LSP's `shared_rendezvous()`. Absent the shim OR the tsgo — or on
+ * ANY error — it returns {@link NO_SHARED_TSGO} so the extension launches the OWNED
+ * baseline, never crashing. Only engaged for a tsgo-routing provider (SHARED is a
+ * tsgo overlay); `auto` stays OWNED here (the LSP's own auto-mode still serves OWNED).
+ */
+function establishSharedTsgo(
+  extensionPath: string,
+  workspaceRoot: string | undefined,
+  typeProvider: string,
+  log?: LogOutputChannel,
+): SharedTsgoLaunch {
+  if (!typeProviderRoutesTsgo(typeProvider)) {
+    // TODO(follow-up): also engage for `auto` when the workspace resolves to tsgo —
+    // that requires replicating the LSP's auto tsgo-decision (workspace TS engine
+    // discovery) in the extension; today `auto` stays OWNED here (the LSP's own auto
+    // mode still serves the OWNED tsgo baseline, just without the SHARED overlay).
+    return NO_SHARED_TSGO;
+  }
+  try {
+    const nativePreviewTsdk = workspace
+      .getConfiguration("typescript.native-preview")
+      .get<string>("tsdk");
+    const plan = planSharedTsgo({
+      extensionPath,
+      controlDirRoot: tmpdir(),
+      env: process.env,
+      nativePreviewTsdk: nativePreviewTsdk || undefined,
+      workspaceRoot,
+    });
+    if (!plan.engaged) {
+      log?.info(`[shared-tsgo] not engaged — ${plan.reason}`);
+      return NO_SHARED_TSGO;
+    }
+
+    // Spawn the shim: it spawns the real tsgo (`--lsp --stdio`), relays its stdio,
+    // and advertises into the control dir under the session key. stdin is held OPEN
+    // (never ended) so the relayed real tsgo stays alive + attachable; the LSP's
+    // SHARED overlay discovers the advertisement lazily per carrier query. stderr is
+    // inherited for diagnosability; stdout is piped (the relay's editor side).
+    const child: ChildProcess = spawn(plan.shimPath, plan.shimArgs, {
+      stdio: ["pipe", "pipe", "inherit"],
+      windowsHide: true,
+    });
+    child.on("error", (err) => {
+      log?.warn(`[shared-tsgo] relay shim spawn error (staying OWNED): ${err}`);
+    });
+    log?.info(
+      `[shared-tsgo] armed: shim=${plan.shimPath} realTsgo=${plan.realTsgo} ` +
+        `controlDir=${plan.controlDir} (SHARED editor-attach overlay will bind lazily per query)`,
+    );
+
+    let disposed = false;
+    return {
+      lspArgs: plan.lspArgs,
+      dispose: () => {
+        if (disposed) return;
+        disposed = true;
+        try {
+          // `child.kill()` terminates the SHIM (SIGTERM on Unix / TerminateProcess on
+          // Windows). The GRANDCHILD real-tsgo the shim spawned is reaped by the shim's
+          // OWN OS-level containment, NOT by this call: on Windows tsgo is born into the
+          // shim's `KILL_ON_JOB_CLOSE` Job Object (reaped when the shim's job handle
+          // closes at exit), on Linux it carries `PR_SET_PDEATHSIG=SIGKILL`, and on
+          // macOS/BSD the shim's SIGTERM handler tears its child down (graceful). The one
+          // residual is a HARD-kill (SIGKILL) of the shim on macOS/BSD — no parent-death
+          // primitive there — which the shim documents as best-effort; a normal dispose
+          // (SIGTERM) does not hit it. See `crates/verter_relay_shim/src/main.rs`.
+          child.kill();
+        } catch {
+          /* already gone */
+        }
+      },
+    };
+  } catch (err) {
+    log?.warn(`[shared-tsgo] establish failed (staying OWNED): ${err}`);
+    return NO_SHARED_TSGO;
+  }
+}
+
 function buildServerOptions(
   binaryPath: string,
   rootPath: string | undefined,
   extensionPath: string,
   log?: LogOutputChannel,
+  sharedLspArgs: string[] = [],
 ): ServerOptions {
   const logLevel = workspace.getConfiguration("verter.server").get<string>("logLevel", "info");
   const verterConfig = workspace.getConfiguration("verter");
@@ -1130,6 +1249,10 @@ function buildServerOptions(
     args.push(`--mcp-port=0`);
     args.push(`--mcp-lint-preset=${mcpLintPreset}`);
   }
+  // Arm the OPTIONAL SHARED editor-attach rendezvous (both --shared-* or neither;
+  // empty when OWNED). These are ---prefixed flags, so they precede the positional
+  // workspace-root arg the LSP parses last.
+  args.push(...sharedLspArgs);
   if (rootPath) args.push(rootPath);
 
   log?.info(

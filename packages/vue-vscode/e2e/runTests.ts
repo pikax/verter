@@ -4,6 +4,7 @@ import { execSync } from "child_process";
 import { runTests } from "@vscode/test-electron";
 import * as os from "os";
 import { copyLspBinaryToTemp, readE2eEnv, resolveVscodeExecutablePath } from "./sharedLaunch";
+import { clearRunArtifacts, enforceRunSummary } from "../src/runSummaryOracle";
 
 /**
  * Fixture entries: plain name uses auto type provider,
@@ -116,6 +117,10 @@ async function main() {
       }
     }
 
+    const logFile = path.join(os.tmpdir(), `verter-e2e-${label}.log`);
+    // Delete any STALE run summary + D1 markers BEFORE the run so a prior-run summary can
+    // never false-green a current zero-exit crash that writes no fresh summary.
+    clearRunArtifacts(logFile);
     try {
       await runTests({
         vscodeExecutablePath,
@@ -125,7 +130,7 @@ async function main() {
         extensionTestsEnv: {
           ...process.env,
           VERTER_E2E_TEST: "1",
-          VERTER_E2E_LOG_FILE: path.join(os.tmpdir(), `verter-e2e-${label}.log`),
+          VERTER_E2E_LOG_FILE: logFile,
           VERTER_E2E_FIXTURE: fixture,
           VERTER_E2E_TIMING_FILE: path.join(os.tmpdir(), `verter-e2e-timing-${label}.json`),
           VERTER_LOG: "debug",
@@ -133,6 +138,15 @@ async function main() {
           ...(typeProvider ? { VERTER_E2E_TYPE_PROVIDER: typeProvider } : {}),
         },
       });
+      // The @vscode/test-electron process exit code is an UNRELIABLE pass/fail signal
+      // on some hosts (Windows: VS Code can exit 0 even when the extension test run
+      // rejected). The authoritative oracle is the run summary the mocha runner writes
+      // (`suite/index.ts` → `<logFile>.runsummary`): fail on any reported test failure,
+      // and — for a NARROWED run (`VERTER_E2E_ONLY`) OR the D1 acceptance — on a vacuous
+      // 0-test execution AND on a MISSING summary (a zero-exit host crash never green).
+      const isD1 = fixture === "external-ts-d1" || Boolean(process.env.VERTER_E2E_D1);
+      const refuseVacuous = Boolean(process.env.VERTER_E2E_ONLY) || isD1;
+      await enforceRunSummary(logFile, label, { refuseVacuous });
       console.log(`  PASSED: ${label}`);
     } catch (err) {
       console.error(`  FAILED: ${label}`, err);
