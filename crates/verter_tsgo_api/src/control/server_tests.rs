@@ -51,7 +51,7 @@ fn spawn_fake_tsgo(endpoint: DuplexStream) -> Arc<StdMutex<FakeServerState>> {
 /// but NEVER answers the pull-diagnostic sync barrier — the connection stays OPEN
 /// (no EOF, so the relay stays alive), so the carrier's `did_open_synced` barrier
 /// fails CLOSED via timeout. This models a slow/broken editor tsgo that RECEIVED
-/// the overlay open but left the sync barrier unanswered — the F2 sent-but-unsynced
+/// the overlay open but left the sync barrier unanswered — the sent-but-unsynced
 /// case.
 fn spawn_fake_tsgo_cfg(
     endpoint: DuplexStream,
@@ -127,6 +127,17 @@ fn carrier_uri(msg: &serde_json::Value) -> Option<String> {
         .get("uri")?
         .as_str()
         .map(str::to_string)
+}
+
+/// Decode one framed control response into its JSON value (a white-box test that
+/// calls a handler directly gets the raw frame bytes back).
+fn decode_frame(frame: &[u8]) -> serde_json::Value {
+    let mut framer = MessageFramer::new();
+    framer.push(frame);
+    framer
+        .next_message()
+        .expect("frame decodes")
+        .expect("one complete message")
 }
 
 async fn reply<W: AsyncWriteExt + Unpin>(
@@ -316,11 +327,11 @@ async fn control_dispatch_drives_full_attach_lifecycle_through_relay() {
 /// DISTINCT timeout variant (not the relay-stop variant — the relay is still alive), and
 /// the timeout must NOT tear the relay down.
 ///
-/// RED before the fix: `handle_wait_initialized` awaited `relay.wait_initialized()` with
-/// NO timeout, so with no editor initialize this call never returned — the OUTER bound
-/// (strictly longer than the handler's internal 10s timeout) is what fires, and the
-/// `expect("BOUNDED")` panics. GREEN: the bounded typed timeout error returns after the
-/// handler's ~10s internal timeout, well before the 20s outer bound.
+/// Discrimination: `handle_wait_initialized` bounds its `relay.wait_initialized()` await with
+/// an internal 10s timeout, so with no editor initialize the bounded typed timeout error
+/// returns after ~10s — well before the 20s outer bound. An UNBOUNDED await would never return,
+/// the OUTER bound (strictly longer than the handler's internal 10s timeout) would fire, and the
+/// `expect("BOUNDED")` would panic.
 ///
 /// A real (unpaused) clock is used deliberately: `verter_tsgo_api` does not enable
 /// tokio's `test-util` feature, so the virtual-clock `start_paused` seam is unavailable —
@@ -340,7 +351,7 @@ async fn wait_initialized_times_out_when_editor_never_initializes() {
 
     // The control call must return a BOUNDED typed error. The outer bound (20s) is
     // strictly longer than the handler's internal 10s timeout, so the INNER timeout is
-    // what returns; pre-fix nothing bounds the handler and the OUTER bound is what fires.
+    // what returns; an unbounded handler would instead let the OUTER bound fire.
     let outer = Duration::from_secs(20);
     let result = tokio::time::timeout(outer, lb.client.wait_initialized()).await;
     let err = result
@@ -370,15 +381,15 @@ async fn wait_initialized_times_out_when_editor_never_initializes() {
     lb.relay.shutdown().await;
 }
 
-/// E4: an ABNORMAL control-session termination — the control pipe dropped WITHOUT a
+/// An ABNORMAL control-session termination — the control pipe dropped WITHOUT a
 /// `verter/detach` (EOF on the server read) — must STILL retract the session's still-open
 /// carrier overlays (send `didClose` to the real tsgo), so no stale Verter overlay lingers
 /// in the editor's own tsgo Program. NON-DESTRUCTIVE: the retraction touches Verter's own
 /// overlays only; the shim's relay (editor↔tsgo path + its OWNED tsgo child) stays ALIVE.
 ///
-/// RED before the fix: only an explicit `verter/detach` drained the session's carriers, so
-/// an EOF / dropped-pipe termination left the overlays OPEN — the fake tsgo never saw the
-/// `didClose`.
+/// Discrimination: the session-end drain covers an EOF / dropped-pipe termination, not only an
+/// explicit `verter/detach`. A drain that fired only on an explicit `verter/detach` would leave
+/// the overlays OPEN and the fake tsgo would never see the `didClose`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn abnormal_control_termination_retracts_open_carriers_non_destructively() {
     let mut lb = wire_loopback("the-nonce");
@@ -454,7 +465,7 @@ async fn abnormal_control_termination_retracts_open_carriers_non_destructively()
     lb.relay.shutdown().await;
 }
 
-/// F2: a carrier whose `didOpen` was SENT to the real tsgo but whose sync BARRIER never
+/// A carrier whose `didOpen` was SENT to the real tsgo but whose sync BARRIER never
 /// completed (the editor tsgo received the overlay open but never answered the
 /// pull-diagnostic barrier — a slow/broken engine, bounded by `CARRIER_SYNC_BARRIER_TIMEOUT`)
 /// MUST STILL be retracted by the session-end drain. The overlay is already LIVE in the
@@ -462,11 +473,11 @@ async fn abnormal_control_termination_retracts_open_carriers_non_destructively()
 /// before the barrier), so an un-retracted sent-but-unsynced open leaks a stale Verter
 /// overlay into the editor's Program until editor teardown.
 ///
-/// RED before the fix: the control session recorded a carrier as retract-eligible ONLY on
-/// the FULL synced-open success (`did_open_synced` returned Ok), so a barrier timeout left
-/// the carrier UNTRACKED and the session-end drain sent NO `didClose` for it — the leak.
-/// After the fix the carrier is tracked at `didOpen`-SEND time (before the barrier), so the
-/// drain retracts it on every termination mode.
+/// Discrimination: the control session tracks a carrier as retract-eligible at `didOpen`-SEND
+/// time (before the barrier), so a barrier timeout still leaves it TRACKED and the session-end
+/// drain retracts it on every termination mode. Tracking a carrier only on the FULL synced-open
+/// success (`did_open_synced` returned Ok) would instead leave a barrier-timed-out carrier
+/// UNTRACKED, and the drain would send NO `didClose` for it — the leak.
 ///
 /// NON-DESTRUCTIVE: the drain retracts Verter's OWN overlay only; the relay (editor↔tsgo
 /// path + its OWNED tsgo child) stays ALIVE (`non_owning_attach_lifecycle`).
@@ -815,17 +826,16 @@ async fn poll_carrier_retracted(fake: &Arc<StdMutex<FakeServerState>>, carrier_u
     false
 }
 
-/// H1: an explicit `verter/detach` with an OMITTED params body (`{}`) FAILS CLOSED — it
+/// An explicit `verter/detach` with an OMITTED params body (`{}`) FAILS CLOSED — it
 /// retracts the session's open carriers through the unified session-end drain (a
 /// `didClose` to the real tsgo), NON-DESTRUCTIVELY. Only an EXPLICIT `closeCarriers:
 /// false` opts out; an omitted/unspecified preference must NOT leave a stale Verter
 /// overlay in the editor's own tsgo Program.
 ///
-/// RED before the fix: `handle_detach` deserialized into a `bool` whose `Default` is
-/// `false` and `unwrap_or_default()`-ed, so an omitted param set
-/// `retract_carriers_on_end = false` and the drain was SKIPPED — the fake tsgo never saw
-/// the `didClose` (the leak). After the fix an omitted param reads as `None`, which
-/// retracts.
+/// Discrimination: `handle_detach` reads `closeCarriers` as `Option<bool>`, so an omitted param
+/// is `None` and FAILS CLOSED to a retract. Deserializing into a `bool` whose `Default` is
+/// `false` and `unwrap_or_default()`-ing it would instead set `retract_carriers_on_end = false`,
+/// SKIP the drain, and leak — the fake tsgo would never see the `didClose`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn detach_omitted_params_fails_closed_and_retracts_via_drain() {
     let mut lb = wire_raw_loopback("the-nonce");
@@ -866,14 +876,16 @@ async fn detach_omitted_params_fails_closed_and_retracts_via_drain() {
     lb.relay.shutdown().await;
 }
 
-/// H1: an explicit `verter/detach` with a MALFORMED params body (`closeCarriers` is not a
+/// An explicit `verter/detach` with a MALFORMED params body (`closeCarriers` is not a
 /// bool) FAILS CLOSED — it retracts the session's open carriers through the unified
 /// session-end drain, NON-DESTRUCTIVELY. A malformed body is treated as unspecified, so
 /// it must NOT leave a stale Verter overlay in the editor's own tsgo Program.
 ///
-/// RED before the fix: `unwrap_or_default()` mapped the malformed body to
-/// `close_carriers = false`, skipping the drain (the leak). After the fix a malformed
-/// body maps to `None`, which retracts.
+/// Discrimination: `DetachParams::close_carriers` is `Option<bool>`, so a malformed body
+/// deserializes (via `unwrap_or_default()`) to the `None` default and `None != Some(false)`
+/// RETRACTS (fail-closed). An implementation that treated an unparseable `closeCarriers` as
+/// `false` — a bool-shaped field, or an explicit opt-out fallback — would instead SKIP the
+/// drain and leak a stale overlay.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn detach_malformed_params_fails_closed_and_retracts_via_drain() {
     let mut lb = wire_raw_loopback("the-nonce");
@@ -913,4 +925,445 @@ async fn detach_malformed_params_fails_closed_and_retracts_via_drain() {
     );
 
     lb.relay.shutdown().await;
+}
+
+/// The session-end carrier drain is BOUNDED even against a WEDGED writer: with far more
+/// open carriers than the injection channel's outbound capacity and a peer that never
+/// accepts a `didClose`, `retract_open_carriers` must RETURN within its overall drain
+/// budget — never block teardown indefinitely — and `opened_carriers` must be emptied
+/// (drained up front) regardless of how many closes were actually delivered.
+///
+/// The wedge: the relay's `server_writer_task` writes to a 1-byte server pipe that is
+/// NEVER drained, so it parks on `write_all` after one byte; the 256-slot `server_tx` mpsc
+/// then fills and every further `didClose` send BLOCKS. Both duplex endpoints are kept
+/// ALIVE (bound, not dropped) so the channels stay OPEN (wedged), not closed.
+///
+/// Discriminator: an UNBOUNDED drain — each `did_close` awaited with NO overall budget — blocks
+/// forever against a wedged writer, so the outer bound below fires and the `is_ok()` assertion
+/// fails (RED); the bounded drain returns within its budget (GREEN).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_end_drain_is_bounded_against_a_wedged_writer() {
+    let (_editor_endpoint, relay_editor) = tokio::io::duplex(64 * 1024);
+    let (_server_endpoint, relay_server) = tokio::io::duplex(1);
+    let (er, ew) = tokio::io::split(relay_editor);
+    let (sr, sw) = tokio::io::split(relay_server);
+    let relay = Arc::new(LspRelay::start(er, ew, sr, sw));
+
+    let mut server = ControlServer::new(Arc::clone(&relay), "n", 1, 1, "ctl");
+    // Far more carriers than the 256-slot mpsc + the one frame the parked writer holds, so
+    // the drain is guaranteed to block on a `didClose` send partway through.
+    for i in 0..512 {
+        server.opened_carriers.insert(format!("file:///w/c{i}.ts"));
+    }
+    assert_eq!(server.opened_carriers.len(), 512);
+
+    // Drive a SHORT overall budget so the bounded drain returns fast; the outer bound is
+    // generous but strictly below the 10s production default, so an UNBOUNDED drain (or one
+    // that ignores its budget) trips it.
+    let budget = Duration::from_millis(300);
+    let start = std::time::Instant::now();
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(3),
+        server.retract_open_carriers_within(budget),
+    )
+    .await;
+    let elapsed = start.elapsed();
+
+    assert!(
+        outcome.is_ok(),
+        "the session-end drain must RETURN bounded against a wedged writer — never block \
+         teardown indefinitely (RED: an unbounded drain hangs and this outer bound fires)"
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "the drain respects its overall budget (~{budget:?}), not the 10s default; elapsed {elapsed:?}"
+    );
+    assert!(
+        server.opened_carriers.is_empty(),
+        "the open set is drained UP FRONT, so it is empty after the bounded drain regardless \
+         of how many closes reached the wedged writer"
+    );
+
+    relay.shutdown().await;
+}
+
+/// Characterization / regression guard: the unified session-end drain retracts EVERY
+/// still-tracked carrier — BOTH a FAILED-CLOSE residual AND a NEVER-CLOSED carrier — in one
+/// pass (cross-carrier coverage). This seals that COVERAGE (a cross-block dependency); it does
+/// NOT claim a base delta — the up-front `opened_carriers` drain and the success-only `didClose`
+/// removal are long-standing, so the pre/post discrimination of the drain MECHANISM is carried
+/// by the plant below (disabling `retract_open_carriers`), not by this test behaving differently
+/// against the literal pre-change tree. A carrier whose companion path turns shadow-unsafe is
+/// retracted by a bounded best-effort `didClose`; if that retract does NOT confirm, the overlay
+/// stays a live doc in the editor's shared tsgo Program — a membership residual. The
+/// transport-close drain is where such a residual is removed.
+///
+/// The invariant this locks (all in `server.rs`):
+///   * `handle_carrier_did_close` removes a URI from `opened_carriers` ONLY on a successful
+///     `relay.did_close` ack. A close that does not confirm returns an ERROR frame and leaves
+///     the URI TRACKED — the residual.
+///   * `retract_open_carriers` drains `opened_carriers` and issues one best-effort `didClose`
+///     per still-tracked URI — the residual AND the never-closed carrier alike.
+///
+/// `relay.did_close` fails only when the server-side wire is down (its sole send-failure
+/// mode); a live wire always acks and removes, so a shim-side residual can only arise on a
+/// down wire, and the wire is brought down here to reproduce that exact condition. On a down
+/// wire the drain's best-effort `didClose`s cannot be DELIVERED to tsgo — the honest guarantee
+/// is bounded best-effort, backstopped by owned-tsgo process death. So the drain's COVERAGE of
+/// every still-tracked carrier is characterized by `opened_carriers` draining to empty (the
+/// exact set `server.rs` iterates to emit one `didClose` each). Real `didClose` DELIVERY on a
+/// LIVE wire is locked by the sibling drain tests
+/// (`abnormal_control_termination_retracts_open_carriers_non_destructively`,
+/// `sent_but_unsynced_open_is_retracted_on_session_end`).
+///
+/// DISCRIMINATION: defeating the drain (a no-op `retract_open_carriers`) leaves BOTH the
+/// residual A and the never-closed B tracked — the final `is_empty()` assertion fails (RED).
+/// The real drain empties the set (GREEN).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_end_drain_retracts_failed_close_residual_and_never_closed_carrier() {
+    // A LIVE relay + fake tsgo: open two real carrier overlays first.
+    let (editor_endpoint, relay_editor) = tokio::io::duplex(64 * 1024);
+    let (server_endpoint, relay_server) = tokio::io::duplex(64 * 1024);
+    let (er, ew) = tokio::io::split(relay_editor);
+    let (sr, sw) = tokio::io::split(relay_server);
+    let relay = Arc::new(LspRelay::start(er, ew, sr, sw));
+    let fake = spawn_fake_tsgo(server_endpoint);
+    // Keep the editor side open so the editor→server pump sees no EOF (relay stays alive
+    // while the two carriers are opened).
+    let _editor_keepalive = editor_endpoint;
+    let mut server = ControlServer::new(Arc::clone(&relay), "n", 1, 1, "ctl");
+
+    let uri_a = "file:///w/src/A.vue.tsx";
+    let uri_b = "file:///w/src/B.vue.tsx";
+    let open_params = |uri: &str| {
+        serde_json::json!({
+            "uri": uri, "languageId": "typescript", "version": 1,
+            "text": "export const x = 1;",
+        })
+    };
+
+    // Both carriers open as real live overlays: tracked in `opened_carriers` AND received by
+    // the real tsgo.
+    let ack_a = tokio::time::timeout(
+        Duration::from_secs(5),
+        server.handle_carrier_did_open_synced(&serde_json::json!(10), open_params(uri_a)),
+    )
+    .await
+    .expect("open A resolves within bound");
+    assert!(
+        decode_frame(&ack_a).get("result").is_some(),
+        "open A must ack"
+    );
+    let ack_b = tokio::time::timeout(
+        Duration::from_secs(5),
+        server.handle_carrier_did_open_synced(&serde_json::json!(11), open_params(uri_b)),
+    )
+    .await
+    .expect("open B resolves within bound");
+    assert!(
+        decode_frame(&ack_b).get("result").is_some(),
+        "open B must ack"
+    );
+    assert!(
+        server.opened_carriers.contains(uri_a) && server.opened_carriers.contains(uri_b),
+        "both opens are tracked as live overlays before any close"
+    );
+    {
+        let opened = &fake.lock().unwrap().opened;
+        assert!(
+            opened.iter().any(|u| u == uri_a) && opened.iter().any(|u| u == uri_b),
+            "both carriers reached the real tsgo as live overlays"
+        );
+    }
+
+    // Bring the server-side wire DOWN so `relay.did_close` fails — the only condition under
+    // which a per-carrier close does not confirm and leaves a shim-side residual (a live wire
+    // always acks and removes).
+    relay.shutdown().await;
+    let mut wire_down = false;
+    for _ in 0..200 {
+        if relay
+            .injection_channel()
+            .did_close("file:///__probe__")
+            .await
+            .is_err()
+        {
+            wire_down = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        wire_down,
+        "the server-side wire must be down so `relay.did_close` fails — the residual precondition"
+    );
+
+    // A per-carrier close for A that does NOT confirm: `relay.did_close` errors, so
+    // `handle_carrier_did_close` returns an ERROR frame and does NOT remove A.
+    let close_frame = server
+        .handle_carrier_did_close(&serde_json::json!(99), serde_json::json!({ "uri": uri_a }))
+        .await;
+    let close_value = decode_frame(&close_frame);
+    assert!(
+        close_value.get("error").is_some() && close_value.get("result").is_none(),
+        "a close whose `relay.did_close` failed must return an ERROR frame, never an ack: \
+         {close_value}"
+    );
+    assert!(
+        server.opened_carriers.contains(uri_a),
+        "handle_carrier_did_close removes ONLY on a successful ack — an unconfirmed close leaves \
+         A TRACKED (the membership residual)"
+    );
+
+    // B was never closed. Both the residual A and the never-closed B are still tracked — the
+    // exact set the session-end drain iterates to emit one `didClose` per URI.
+    assert!(
+        server.opened_carriers.contains(uri_a) && server.opened_carriers.contains(uri_b),
+        "the residual A and the never-closed B are both still tracked pre-drain"
+    );
+    let drain_didclose_targets: Vec<String> = server.opened_carriers.iter().cloned().collect();
+    assert!(
+        drain_didclose_targets.iter().any(|u| u == uri_a),
+        "the failed-close residual A is in the drain's didClose emission set"
+    );
+    assert!(
+        drain_didclose_targets.iter().any(|u| u == uri_b),
+        "the never-closed B is in the drain's didClose emission set"
+    );
+
+    // The unified session-end drain retracts EVERY still-tracked carrier — BOTH the residual A
+    // and the never-closed B (cross-carrier). RED if the drain is defeated: a no-op retract
+    // leaves the set populated.
+    server.retract_open_carriers().await;
+    assert!(
+        server.opened_carriers.is_empty(),
+        "the session-end drain must retract BOTH the failed-close residual A AND the never-closed \
+         B — every still-tracked carrier is drained on transport close"
+    );
+}
+
+/// Saturate the relay's outbound `server_tx` mpsc against a WEDGED writer so the NEXT carrier
+/// notification send PARKS (the wedge the bounded handler must survive). Sends `didClose`
+/// notifications until a bounded probe send fails to complete within its short probe window —
+/// at which point the 256-slot channel is full and any further send parks (the writer is parked
+/// on a 1-byte, never-drained server pipe, so it never frees a slot). Bounded to 1024 sends so a
+/// mis-set-up wedge fails loudly rather than looping forever.
+async fn saturate_wedged_server_channel(relay: &Arc<LspRelay>) {
+    for _ in 0..1024 {
+        if tokio::time::timeout(
+            Duration::from_millis(50),
+            relay.injection_channel().did_close("file:///w/saturate.ts"),
+        )
+        .await
+        .is_err()
+        {
+            return; // the outbound channel is full — a further send now parks (wedged)
+        }
+    }
+    panic!("failed to saturate the wedged server channel within 1024 sends");
+}
+
+/// A freshly WEDGED relay for a bounded-handler arm: its outbound `server_tx` mpsc is SATURATED
+/// (the next relay send parks) and its server writer is parked on a never-drained 1-byte server
+/// pipe. Returns the relay plus BOTH duplex peer endpoints — the caller binds the endpoints ALIVE
+/// (a dropped peer would CLOSE the pipe and make a send ERROR instead of park, a different failure
+/// mode) and `shutdown`s the relay at the end of the arm.
+async fn wedged_relay_with_saturated_writer() -> (Arc<LspRelay>, DuplexStream, DuplexStream) {
+    let (editor_endpoint, relay_editor) = tokio::io::duplex(64 * 1024);
+    let (server_endpoint, relay_server) = tokio::io::duplex(1);
+    let (er, ew) = tokio::io::split(relay_editor);
+    let (sr, sw) = tokio::io::split(relay_server);
+    let relay = Arc::new(LspRelay::start(er, ew, sr, sw));
+    // Fill the outbound channel so the NEXT relay send — a handler's `didOpen`/`didChange`/
+    // `didClose` NOTIFICATION or the `custom/initializeAPISession` REQUEST — parks on the wedge.
+    saturate_wedged_server_channel(&relay).await;
+    (relay, editor_endpoint, server_endpoint)
+}
+
+/// EVERY relay-round-trip control handler BOUNDS its relay send against a WEDGED writer (a full
+/// outbound mpsc whose server writer is parked on `write_all`), so a wedged writer can never PIN
+/// the serial read→dispatch serve loop inside a handler. An UNBOUNDED handler send would block the
+/// serve loop forever — the loop would never observe EOF/detach and never reach the session-end
+/// drain, so the drain's own bound would be moot. This INDEPENDENTLY drives all FOUR
+/// relay-round-trip handlers against a freshly saturated wedged relay and asserts each RETURNS a
+/// fail-closed error frame within its SHORT injected `carrier_op_bound` (never the 10s default):
+///   * `handle_carrier_did_open_synced` — the `didOpen` NOTIFICATION send; a bounded-out open is
+///     POSSIBLY-LIVE, so it is tracked for the session-end drain.
+///   * `handle_carrier_did_change_synced` — the `didChange` NOTIFICATION send; no tracking change.
+///   * `handle_carrier_did_close` — the `didClose` NOTIFICATION send; the URI STAYS tracked (only a
+///     confirmed close removes it) and the session-end drain then clears it.
+///   * `handle_initialize_api_session` — the `custom/initializeAPISession` REQUEST round-trip; a
+///     bounded-out initialize must NOT set `api_session_active`.
+///
+/// The wedge: the relay's server writer writes to a 1-byte server pipe that is NEVER drained, so it
+/// parks after one byte and the 256-slot `server_tx` mpsc fills; a further send/request then parks.
+/// A SHORT injected `carrier_op_bound` makes each internal timeout observable fast.
+///
+/// Discriminator (per arm): with THAT handler's own send left UNBOUNDED the wedged channel blocks
+/// the handler forever, so the arm's outer bound fires and its `expect` fails (the handler never
+/// returns). With the bound the handler returns a fail-closed error frame within the short bound.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn relay_round_trip_handlers_are_bounded_against_a_wedged_writer() {
+    // didOpenSynced: the `didOpen` NOTIFICATION send is bounded; a bounded-out open is tracked.
+    {
+        let (relay, _editor_endpoint, _server_endpoint) =
+            wedged_relay_with_saturated_writer().await;
+        let mut server = ControlServer::new(Arc::clone(&relay), "n", 1, 1, "ctl");
+        server.carrier_op_bound = Duration::from_millis(300);
+        let uri = "file:///w/src/OpenWedged.vue.tsx";
+
+        let start = std::time::Instant::now();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(3),
+            server.handle_carrier_did_open_synced(
+                &serde_json::json!(1),
+                serde_json::json!({
+                    "uri": uri, "languageId": "typescript", "version": 1, "text": "",
+                }),
+            ),
+        )
+        .await;
+        let elapsed = start.elapsed();
+        let frame = outcome.expect(
+            "handle_carrier_did_open_synced must RETURN bounded against a wedged writer — never pin \
+             the serial serve loop (an unbounded send hangs and this outer bound fires)",
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "didOpenSynced honoured its SHORT ~300ms bound, not the 10s default; elapsed {elapsed:?}"
+        );
+        let value = decode_frame(&frame);
+        assert!(
+            value.get("error").is_some() && value.get("result").is_none(),
+            "a wedged/timed-out didOpenSynced must return an ERROR frame, never an ack: {value}"
+        );
+        // A bounded-out open MAY have reached tsgo (POSSIBLY-LIVE), so it is tracked for the drain.
+        assert!(
+            server.opened_carriers.contains(uri),
+            "a bounded-out didOpen tracks the possibly-live overlay for the session-end drain"
+        );
+        relay.shutdown().await;
+    }
+
+    // didChangeSynced: the `didChange` NOTIFICATION send is bounded; makes no tracking change.
+    {
+        let (relay, _editor_endpoint, _server_endpoint) =
+            wedged_relay_with_saturated_writer().await;
+        let mut server = ControlServer::new(Arc::clone(&relay), "n", 1, 1, "ctl");
+        server.carrier_op_bound = Duration::from_millis(300);
+        let uri = "file:///w/src/ChangeWedged.vue.tsx";
+
+        let start = std::time::Instant::now();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(3),
+            server.handle_carrier_did_change_synced(
+                &serde_json::json!(2),
+                serde_json::json!({ "uri": uri, "version": 2, "text": "" }),
+            ),
+        )
+        .await;
+        let elapsed = start.elapsed();
+        let frame = outcome.expect(
+            "handle_carrier_did_change_synced must RETURN bounded against a wedged writer — never \
+             pin the serial serve loop (an unbounded send hangs and this outer bound fires)",
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "didChangeSynced honoured its SHORT ~300ms bound, not the 10s default; elapsed {elapsed:?}"
+        );
+        let value = decode_frame(&frame);
+        assert!(
+            value.get("error").is_some() && value.get("result").is_none(),
+            "a wedged/timed-out didChangeSynced must return an ERROR frame, never an ack: {value}"
+        );
+        relay.shutdown().await;
+    }
+
+    // didClose: the `didClose` NOTIFICATION send is bounded; the URI STAYS tracked; the drain
+    // clears it.
+    {
+        let (relay, _editor_endpoint, _server_endpoint) =
+            wedged_relay_with_saturated_writer().await;
+        let mut server = ControlServer::new(Arc::clone(&relay), "n", 1, 1, "ctl");
+        server.carrier_op_bound = Duration::from_millis(300);
+        let uri = "file:///w/src/Wedged.vue.tsx";
+        server.opened_carriers.insert(uri.to_string());
+
+        let start = std::time::Instant::now();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(3),
+            server
+                .handle_carrier_did_close(&serde_json::json!(3), serde_json::json!({ "uri": uri })),
+        )
+        .await;
+        let elapsed = start.elapsed();
+        let frame = outcome.expect(
+            "handle_carrier_did_close must RETURN bounded against a wedged writer — never pin the \
+             serial serve loop (an unbounded send hangs and this outer bound fires)",
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "didClose honoured its SHORT ~300ms bound, not the 10s default; elapsed {elapsed:?}"
+        );
+        let value = decode_frame(&frame);
+        assert!(
+            value.get("error").is_some() && value.get("result").is_none(),
+            "a wedged/timed-out didClose must return an ERROR frame, never an ack: {value}"
+        );
+        // Only a confirmed (`Ok(Ok(()))`) close removes the URI, so a bounded-out close LEAVES it
+        // tracked for the session-end drain. (RED for a handler that removed on timeout/failure.)
+        assert!(
+            server.opened_carriers.contains(uri),
+            "a bounded-out close must LEAVE the URI tracked (only a confirmed close removes it) so \
+             the session-end drain retracts it"
+        );
+        // The session-end drain then clears the tracking set (drained up front, itself bounded).
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            server.retract_open_carriers_within(Duration::from_millis(300)),
+        )
+        .await
+        .expect("the session-end drain must itself return bounded against the wedged channel");
+        assert!(
+            server.opened_carriers.is_empty(),
+            "the bounded session-end drain clears the still-tracked URI from the open set"
+        );
+        relay.shutdown().await;
+    }
+
+    // initializeApiSession: the `custom/initializeAPISession` REQUEST round-trip is bounded; a
+    // bounded-out initialize must NOT mark the session active.
+    {
+        let (relay, _editor_endpoint, _server_endpoint) =
+            wedged_relay_with_saturated_writer().await;
+        let mut server = ControlServer::new(Arc::clone(&relay), "n", 1, 1, "ctl");
+        server.carrier_op_bound = Duration::from_millis(300);
+
+        let start = std::time::Instant::now();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(3),
+            server.handle_initialize_api_session(&serde_json::json!(4)),
+        )
+        .await;
+        let elapsed = start.elapsed();
+        let frame = outcome.expect(
+            "handle_initialize_api_session must RETURN bounded against a wedged writer — never pin \
+             the serial serve loop (an unbounded round-trip hangs and this outer bound fires)",
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "initializeApiSession honoured its SHORT ~300ms bound, not the 10s default; elapsed {elapsed:?}"
+        );
+        let value = decode_frame(&frame);
+        assert!(
+            value.get("error").is_some() && value.get("result").is_none(),
+            "a wedged/timed-out initializeApiSession must return an ERROR frame, never a result: {value}"
+        );
+        // A bounded-out initialize never minted a session, so it must NOT mark it active.
+        assert!(
+            !server.api_session_active,
+            "a bounded-out initializeApiSession must NOT set api_session_active (no session minted)"
+        );
+        relay.shutdown().await;
+    }
 }

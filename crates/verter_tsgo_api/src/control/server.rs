@@ -15,22 +15,29 @@
 //! owned child down only on editor disconnect / real-tsgo exit — never on a Verter
 //! control detach.
 //!
-//! Carrier-overlay retraction is UNIFIED into ONE session-end drain: on ANY
+//! Carrier-overlay retraction is UNIFIED into ONE best-effort session-end drain: on ANY
 //! control-session end — a clean `verter/detach` AND every abnormal termination
-//! (EOF / malformed frame / outbound failure / control-pipe drop without detach) —
-//! every carrier this session sent a `didOpen` for and has not yet closed is
-//! retracted (a `didClose` to the real tsgo through the gated channel). A carrier is
-//! retract-eligible from `didOpen`-SEND time, NOT only once its sync barrier
-//! completes, so a sent-but-unsynced open (a barrier timeout, or an abnormal session
-//! end while the barrier is still in flight) cannot leave a stale Verter overlay in
-//! the editor's own tsgo Program. This is overlays-only and stays non-destructive;
-//! only an explicit `verter/detach` with `closeCarriers: false` opts out of the drain.
+//! (EOF / malformed frame / outbound failure / control-pipe drop without detach) — the server
+//! ATTEMPTS to retract every carrier this session sent a `didOpen` for and has not yet closed
+//! (a `didClose` to the real tsgo through the gated channel). A carrier is retract-eligible
+//! from `didOpen`-SEND time, NOT only once its sync barrier completes, so a sent-but-unsynced
+//! open (a barrier timeout, or an abnormal session end while the barrier is still in flight) is
+//! included in the drain attempt. The drain is BOUNDED and BEST-EFFORT: delivery of any
+//! individual `didClose` is NOT guaranteed — an undelivered close is abandoned when the budget
+//! expires, so a stale Verter overlay MAY linger in the editor's own tsgo Program if teardown
+//! is cut short. This is overlays-only and stays non-destructive; only an explicit
+//! `verter/detach` with `closeCarriers: false` opts out of the drain.
 //!
 //! The drain fires on every termination mode because the read→dispatch loop breaks to
-//! it on EOF, a malformed frame, an outbound-send failure, and `verter/detach` alike;
-//! the only in-flight handler that can delay it — the carrier sync barrier — is BOUNDED
-//! (`CARRIER_SYNC_BARRIER_TIMEOUT`), so an unanswered barrier delays the drain by at most
-//! that bound, never indefinitely.
+//! it on EOF, a malformed frame, an outbound-send failure, and `verter/detach` alike. Two
+//! independent bounds keep teardown from blocking indefinitely: an in-flight carrier sync
+//! barrier is bounded by `CARRIER_SYNC_BARRIER_TIMEOUT` (that const bounds `sync_overlay`
+//! ONLY), and the session-end retract loop itself ([`ControlServer::retract_open_carriers`])
+//! runs under ONE overall `CARRIER_SYNC_BARRIER_TIMEOUT` drain budget — so a wedged writer
+//! that never accepts a `didClose` delays teardown by at most that overall budget, never
+//! indefinitely. When the budget expires the drain is cancelled and any undelivered closes are
+//! abandoned (the open set was drained up front, so it is empty regardless) and teardown
+//! proceeds.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -41,7 +48,7 @@ use tokio::sync::mpsc;
 
 use crate::error::TsgoApiError;
 use crate::jsonrpc::framing::{encode_message, MessageFramer};
-use crate::relay::LspRelay;
+use crate::relay::{LspRelay, CARRIER_SYNC_BARRIER_TIMEOUT};
 
 use super::messages::{
     self, verify_hello, ControlAck, ControlCapabilities, FatalParams, FatalReason, HelloParams,
@@ -74,16 +81,35 @@ pub struct ControlServer {
     api_session_active: bool,
     /// The carriers this session has a LIVE `didOpen` overlay for in the editor's tsgo
     /// Program: a "sent-open, not-yet-closed" set. A URI is inserted the moment its
-    /// `didOpen` is dispatched to the real tsgo (BEFORE the sync barrier) and removed on a
-    /// `didClose`, so a sent-but-unsynced open (barrier timeout / abnormal session end mid
-    /// barrier) is still retracted by the session-end drain and cannot leak.
+    /// `didOpen` is dispatched to the real tsgo (BEFORE the sync barrier) and removed only
+    /// after a confirmed/successful `didClose` ack (a close that does not confirm returns an
+    /// error frame and leaves the URI tracked for the drain), so a sent-but-unsynced open
+    /// (barrier timeout / abnormal session end mid barrier) is INCLUDED in the best-effort
+    /// session-end drain ATTEMPT. That drain is BOUNDED (see [`Self::retract_open_carriers`]),
+    /// so such an overlay MAY LINGER in the editor's Program if the overall drain budget
+    /// expires before its `didClose` is delivered — individual `didClose` delivery is not
+    /// guaranteed.
     opened_carriers: HashSet<String>,
-    /// Whether the unified session-end drain retracts this session's still-open carrier
-    /// overlays. Defaults to `true`, so EVERY termination mode — a clean `verter/detach`
-    /// AND every abnormal path (EOF / malformed frame / outbound failure / control-pipe
-    /// drop without detach) — retracts. Only an explicit `verter/detach` with
+    /// Whether the unified session-end drain ATTEMPTS to retract this session's still-open
+    /// carrier overlays. Defaults to `true`, so EVERY termination mode — a clean
+    /// `verter/detach` AND every abnormal path (EOF / malformed frame / outbound failure /
+    /// control-pipe drop without detach) — ATTEMPTS best-effort retraction (the drain is
+    /// BOUNDED, so overlays MAY linger). Only an explicit `verter/detach` with
     /// `closeCarriers: false` opts OUT (the client deliberately leaves its overlays).
     retract_carriers_on_end: bool,
+    /// The per-op bound each relay-round-trip handler ([`Self::handle_carrier_did_open_synced`],
+    /// [`Self::handle_carrier_did_change_synced`], [`Self::handle_carrier_did_close`],
+    /// [`Self::handle_initialize_api_session`]) wraps its relay send in. Those sends — the
+    /// `didOpen`/`didChange`/`didClose` NOTIFICATIONS and the `custom/initializeAPISession`
+    /// REQUEST — all ride the SAME BOUNDED outbound mpsc to the relay's server writer; a WEDGED
+    /// writer (the mpsc full, the writer parked on `write_all`) makes an UNBOUNDED send/round-trip
+    /// block the SERIAL read→dispatch serve loop forever — so the loop never observes EOF/detach
+    /// and never reaches the session-end drain, defeating the drain's own bound. Wrapping each in
+    /// this bound turns a wedged send into a fail-closed error frame instead of a block, keeping
+    /// the serve loop live so it can terminate and drain. Defaults to [`CARRIER_SYNC_BARRIER_TIMEOUT`]
+    /// (the same bound the carrier-sync barrier uses); a test sets it to a SHORT value to observe
+    /// the internal timeout fire against a wedged writer.
+    carrier_op_bound: Duration,
 }
 
 impl ControlServer {
@@ -109,6 +135,7 @@ impl ControlServer {
             api_session_active: false,
             opened_carriers: HashSet::new(),
             retract_carriers_on_end: true,
+            carrier_op_bound: CARRIER_SYNC_BARRIER_TIMEOUT,
         }
     }
 
@@ -172,13 +199,16 @@ impl ControlServer {
 
         // The UNIFIED session-end overlay drain: on ANY control-session end — a clean
         // `verter/detach` AND every abnormal termination (EOF / malformed frame / outbound
-        // failure / control-pipe drop WITHOUT detach) — retract this session's still-open
-        // carrier overlays so no stale Verter overlay lingers in the editor's own tsgo
-        // Program. `retract_carriers_on_end` honors an explicit
-        // `detach(closeCarriers: false)` opt-out; it defaults to `true`, so an abnormal
-        // termination (which carries no detach signal) always retracts. NON-DESTRUCTIVE:
-        // overlays only — never a shim/child teardown (the shim owns its OWNED tsgo child's
-        // lifecycle and tears it down only on editor disconnect / real-tsgo exit).
+        // failure / control-pipe drop WITHOUT detach) — BEST-EFFORT retract this session's
+        // still-open carrier overlays so stale Verter overlays are dropped from the editor's
+        // own tsgo Program wherever the bounded drain budget allows. The drain is BOUNDED (see
+        // `retract_open_carriers`), so an overlay whose `didClose` the budget cannot deliver
+        // MAY LINGER — individual `didClose` delivery is not guaranteed.
+        // `retract_carriers_on_end` honors an explicit `detach(closeCarriers: false)` opt-out;
+        // it defaults to `true`, so an abnormal termination (which carries no detach signal)
+        // always ATTEMPTS the best-effort retract. NON-DESTRUCTIVE: overlays only — never a
+        // shim/child teardown (the shim owns its OWNED tsgo child's lifecycle and tears it down
+        // only on editor disconnect / real-tsgo exit).
         if self.retract_carriers_on_end {
             self.retract_open_carriers().await;
         }
@@ -195,13 +225,55 @@ impl ControlServer {
     /// drain after a clean detach) is a no-op. NON-DESTRUCTIVE: sends `didClose` to the real
     /// tsgo for Verter's OWN overlays only — never `exit`/`shutdown`, never a shim/child
     /// teardown (Verter must not terminate an engine it did not spawn). The SINGLE drain
-    /// path every session-end mode shares.
+    /// path every session-end mode shares, BOUNDED by the overall
+    /// [`CARRIER_SYNC_BARRIER_TIMEOUT`] drain budget so a wedged writer (a full injection
+    /// channel to a peer that never accepts a `didClose`) cannot block teardown indefinitely.
+    ///
+    /// This is the transport-close removal for EVERY carrier still tracked in
+    /// `opened_carriers` — INCLUDING a carrier whose per-carrier close did NOT confirm. A
+    /// bounded or failed `didClose` leaves the URI tracked, because
+    /// [`Self::handle_carrier_did_close`] removes it ONLY on a successful ack; so a
+    /// best-effort overlay retract that did not physically leave the editor's shared tsgo
+    /// Program is removed here on session/transport end.
+    ///
+    /// The ACHIEVABLE guarantee, stated precisely — NOT a claim of guaranteed physical
+    /// removal under all conditions:
+    ///   * On a LIVE control path a carrier's own per-carrier close
+    ///     ([`Self::handle_carrier_did_close`]) is an ordered `didClose` that CONFIRMS (its
+    ///     send succeeds) before the URI is removed from `opened_carriers`.
+    ///   * This session-end drain is BOUNDED BEST-EFFORT: it ATTEMPTS an ordered `didClose` for
+    ///     each still-tracked carrier WITHIN the overall `total_budget` and does not await
+    ///     confirmation; closes not attempted before the budget expires are abandoned
+    ///     (best-effort) — individual delivery is NOT guaranteed past the budget.
+    ///   * A residual left by a WEDGED writer (a down / never-draining control path where the
+    ///     drain's `didClose` cannot be delivered at all) is backstopped by owned-tsgo
+    ///     PROCESS DEATH: the shim tears its OWNED tsgo child down on editor disconnect /
+    ///     real-tsgo exit, which drops every lingering overlay along with the Program.
     async fn retract_open_carriers(&mut self) {
-        let channel = self.relay.injection_channel();
+        self.retract_open_carriers_within(CARRIER_SYNC_BARRIER_TIMEOUT)
+            .await;
+    }
+
+    /// [`Self::retract_open_carriers`] with an explicit overall `total_budget` (the
+    /// production entry uses [`CARRIER_SYNC_BARRIER_TIMEOUT`]; tests drive a small bound
+    /// against a wedged writer to prove the fail-closed drain returns bounded, mirroring
+    /// [`crate::relay::CarrierInjectionChannel::sync_overlay_with_timeout`]).
+    ///
+    /// The open set is DRAINED into an owned `Vec` BEFORE any await, so on ANY outcome —
+    /// including budget exhaustion — `opened_carriers` is empty and a repeat drain is a
+    /// no-op. The whole best-effort loop runs under ONE `total_budget` timeout; when that
+    /// budget expires mid-drain the loop is cancelled and any undelivered `didClose`s are
+    /// abandoned (best-effort, non-destructive). Individual carrier retraction is NOT
+    /// guaranteed — only overall boundedness is.
+    async fn retract_open_carriers_within(&mut self, total_budget: Duration) {
         let uris: Vec<String> = self.opened_carriers.drain().collect();
-        for uri in uris {
-            let _ = channel.did_close(&uri).await;
-        }
+        let channel = self.relay.injection_channel();
+        let _ = tokio::time::timeout(total_budget, async {
+            for uri in uris {
+                let _ = channel.did_close(&uri).await;
+            }
+        })
+        .await;
     }
 
     /// Dispatch one decoded control message. Returns the response frame bytes to
@@ -356,31 +428,46 @@ impl ControlServer {
                 return err_frame(id, ERROR_MALFORMED_PAYLOAD, &format!("carrier params: {e}"))
             }
         };
-        // Send the `didOpen` FIRST, then track the carrier as retract-eligible the moment it
-        // reaches the real tsgo — BEFORE the sync barrier. The overlay is LIVE in the
-        // editor's own tsgo Program the instant the `didOpen` is sent, so a barrier
-        // timeout/failure (or an abnormal session end while the barrier is in flight) must
-        // NOT strand it: the session-end drain must retract EVERY carrier a `didOpen` was
-        // sent for, not only those whose barrier completed. Tracking on the full synced-open
-        // success alone was the leak — a sent-but-unsynced open never entered the drain set.
-        if let Err(e) = self
-            .relay
-            .injection_channel()
-            .did_open(
+        // Send the `didOpen` FIRST (BOUNDED), then track the carrier as retract-eligible the
+        // moment it MAY have reached the real tsgo — BEFORE the sync barrier. The overlay is
+        // LIVE in the editor's own tsgo Program the instant the `didOpen` is sent, so a barrier
+        // timeout/failure (or an abnormal session end while the barrier is in flight) must NOT
+        // strand it: the session-end drain must retract EVERY carrier a `didOpen` was (or MAY
+        // have been) sent for. The send is BOUNDED so a wedged writer cannot pin the serial
+        // serve loop before the drain. Tracking on the full synced-open success alone was the
+        // leak — a sent-but-unsynced open never entered the drain set.
+        match tokio::time::timeout(
+            self.carrier_op_bound,
+            self.relay.injection_channel().did_open(
                 &params.uri,
                 &params.language_id,
                 params.version,
                 &params.text,
-            )
-            .await
+            ),
+        )
+        .await
         {
-            // The `didOpen` never reached tsgo (a send failure): nothing was injected, so
-            // nothing is tracked and nothing can leak.
-            return op_error_frame(id, "carrier didOpen", &e);
+            // The `didOpen` reached tsgo — record the carrier for the session-end drain BEFORE
+            // awaiting the barrier.
+            Ok(Ok(())) => {
+                self.opened_carriers.insert(params.uri.clone());
+            }
+            // A definite send failure (a dead channel): the `didOpen` never reached tsgo, so
+            // nothing was injected and nothing can leak — do NOT track.
+            Ok(Err(e)) => return op_error_frame(id, "carrier didOpen", &e),
+            // The send did not complete within the bound (a wedged writer): the `didOpen` MAY
+            // have reached tsgo, so the overlay is POSSIBLY-LIVE — track it as retract-eligible
+            // so the session-end drain retracts it, then report the error without pinning the
+            // serve loop.
+            Err(_elapsed) => {
+                self.opened_carriers.insert(params.uri.clone());
+                return op_error_frame(
+                    id,
+                    "carrier didOpen",
+                    &carrier_send_timeout_error(self.carrier_op_bound),
+                );
+            }
         }
-        // The `didOpen` reached tsgo — record the carrier for the session-end drain BEFORE
-        // awaiting the barrier.
-        self.opened_carriers.insert(params.uri.clone());
         // Then the ordered sync barrier (the `didOpen` is already drained in LSP order). A
         // barrier failure is reported to the client, but the carrier stays tracked above so
         // the session-end drain still retracts it.
@@ -407,21 +494,38 @@ impl ControlServer {
             }
         };
         let channel = self.relay.injection_channel();
-        // didChange then the ordered sync barrier — mirrors did_open_synced so a
-        // subsequent updateSnapshot sees the updated overlay.
-        let result = async {
-            channel
-                .did_change(&params.uri, params.version, &params.text)
-                .await?;
-            channel.sync_overlay(&params.uri).await
+        // BOUND the `didChange` send so a wedged writer cannot pin the serial serve loop, THEN
+        // the ordered sync barrier — mirrors did_open_synced so a subsequent updateSnapshot sees
+        // the updated overlay. A `didChange` failure/timeout keeps the prior state on the client
+        // side; the shim just reports the error and makes no tracking change either way.
+        match tokio::time::timeout(
+            self.carrier_op_bound,
+            channel.did_change(&params.uri, params.version, &params.text),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return op_error_frame(id, "carrier didChangeSynced", &e),
+            Err(_elapsed) => {
+                return op_error_frame(
+                    id,
+                    "carrier didChangeSynced",
+                    &carrier_send_timeout_error(self.carrier_op_bound),
+                )
+            }
         }
-        .await;
-        match result {
+        match channel.sync_overlay(&params.uri).await {
             Ok(()) => ok_frame(id, &ControlAck { ok: true }),
             Err(e) => op_error_frame(id, "carrier didChangeSynced", &e),
         }
     }
 
+    /// Retract ONE carrier overlay: `didClose` through the gated injection channel, then
+    /// remove the URI from `opened_carriers` — but ONLY on a successful ack. A failed
+    /// `relay.did_close` returns an error frame and leaves the URI TRACKED (removal is gated
+    /// on the ack precisely so an unconfirmed close is not silently dropped); the still-open
+    /// overlay is retracted by the session-end drain ([`Self::retract_open_carriers`]) on
+    /// transport close.
     async fn handle_carrier_did_close(
         &mut self,
         id: &serde_json::Value,
@@ -433,24 +537,45 @@ impl ControlServer {
                 return err_frame(id, ERROR_MALFORMED_PAYLOAD, &format!("carrier params: {e}"))
             }
         };
-        let result = self.relay.injection_channel().did_close(&params.uri).await;
-        match result {
-            Ok(()) => {
+        // BOUND the relay `didClose` send. On a WEDGED writer (the outbound mpsc full, the
+        // writer parked on `write_all`) an unbounded send blocks the SERIAL serve loop forever,
+        // so the loop never reaches the session-end drain. Only a CONFIRMED close removes the
+        // URI; on a bounded-out (`Elapsed`) or failed (`Err`) send the URI stays TRACKED so the
+        // session-end drain still retracts it (the residual-stays-tracked invariant).
+        match tokio::time::timeout(
+            self.carrier_op_bound,
+            self.relay.injection_channel().did_close(&params.uri),
+        )
+        .await
+        {
+            Ok(Ok(())) => {
                 self.opened_carriers.remove(&params.uri);
                 ok_frame(id, &ControlAck { ok: true })
             }
-            Err(e) => op_error_frame(id, "carrier didClose", &e),
+            Ok(Err(e)) => op_error_frame(id, "carrier didClose", &e),
+            Err(_elapsed) => op_error_frame(
+                id,
+                "carrier didClose",
+                &carrier_send_timeout_error(self.carrier_op_bound),
+            ),
         }
     }
 
     async fn handle_initialize_api_session(&mut self, id: &serde_json::Value) -> Vec<u8> {
-        match self
-            .relay
-            .injection_channel()
-            .reinitialize_api_session()
-            .await
+        // BOUND the `reinitialize_api_session` round-trip. It rides the SAME gated server-writer
+        // path as the carrier sends — a `custom/initializeAPISession` REQUEST — so on a WEDGED
+        // writer (the outbound mpsc full, the writer parked on `write_all`) an unbounded await
+        // would pin the SERIAL read→dispatch serve loop forever: the loop would never observe
+        // EOF/detach and never reach the session-end drain. Mirrors the carrier-op handlers'
+        // three-arm shape; on a bounded-out (`Elapsed`) or failed (`Err`) round-trip
+        // `api_session_active` STAYS false (no `--api` session was minted).
+        match tokio::time::timeout(
+            self.carrier_op_bound,
+            self.relay.injection_channel().reinitialize_api_session(),
+        )
+        .await
         {
-            Ok(handle) => {
+            Ok(Ok(handle)) => {
                 self.api_session_active = true;
                 // The server mints a Windows named pipe / a Unix-domain socket;
                 // report it in the matching field. The path is opaque to the
@@ -468,7 +593,12 @@ impl ControlServer {
                 };
                 ok_frame(id, &result)
             }
-            Err(e) => op_error_frame(id, "initializeApiSession", &e),
+            Ok(Err(e)) => op_error_frame(id, "initializeApiSession", &e),
+            Err(_elapsed) => op_error_frame(
+                id,
+                "initializeApiSession",
+                &carrier_send_timeout_error(self.carrier_op_bound),
+            ),
         }
     }
 
@@ -541,6 +671,20 @@ fn err_frame(id: &serde_json::Value, code: i64, message: &str) -> Vec<u8> {
         "id": id,
         "error": { "code": code, "message": message },
     }))
+}
+
+/// The typed error a relay-op handler returns when its relay op send/request does not
+/// complete within [`ControlServer::carrier_op_bound`] — a WEDGED writer (the outbound mpsc full,
+/// the writer parked on `write_all`). It bounds BOTH the `didOpen`/`didChange`/`didClose`
+/// NOTIFICATIONS and the `custom/initializeAPISession` REQUEST. Returning it instead of blocking
+/// keeps the SERIAL serve loop from being pinned, so the loop can terminate and reach the
+/// session-end drain. Mirrors
+/// [`crate::relay::CarrierInjectionChannel::sync_overlay_with_timeout`]'s fail-closed timeout.
+fn carrier_send_timeout_error(bound: Duration) -> TsgoApiError {
+    TsgoApiError::Timeout(format!(
+        "relay op send/request exceeded {}ms (wedged writer; the serve loop is not pinned)",
+        bound.as_millis()
+    ))
 }
 
 /// Encode a control-op failure (a relay/injection error) as a JSON-RPC error.

@@ -39,14 +39,10 @@
 //! and are not served here; SHARED is opt-in and fail-closed, so absent that
 //! surface the caller uses the OWNED provider (full features) as the baseline.
 
-use std::collections::HashMap;
-use std::future::Future;
 use std::path::Path;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex as SyncMutex;
-use tokio::sync::Mutex as AsyncMutex;
 
 use verter_tsgo_api::api_attach::ApiAttachClient;
 use verter_tsgo_api::control::{Advertisement, ControlClient};
@@ -75,6 +71,10 @@ use verter_type_runtime::tsgo::{position_carrier_diagnostics, select_configured_
 use super::shared_support::{
     language_id_for, parent_dir, path_to_file_uri, resolve_editor_binding, slash,
 };
+
+#[path = "carrier_sync.rs"]
+mod carrier_sync;
+pub(crate) use carrier_sync::*;
 
 /// Why establishing a SHARED attach did not yield a SHARED provider. Every
 /// variant fails CLOSED to the OWNED baseline (the caller falls through to
@@ -749,12 +749,15 @@ impl TsgoSharedProvider {
         // The engine may report the carrier under a different canonicalization than
         // the key Verter injected under; look up by the engine's form first, then
         // fall back to the injected key. Serve ONLY the barrier-SYNCED content (the
-        // text the shared Program actually accepted) — a reserved-but-not-yet-synced
-        // carrier yields `None` (fail-closed, no unaccepted text positioned against).
-        let content = self.sync.synced_content(&engine_carrier, carrier);
+        // text the shared Program actually accepted). A reserved/uncertain
+        // (`PossiblyOpenUnsynced`) or never-injected carrier yields `None`: FAIL CLOSED to
+        // OWNED (an `Err`) rather than positioning an (even empty) SHARED result against an
+        // absent barrier-synced basis.
+        let content =
+            require_synced_carrier_content(self.sync.synced_content(&engine_carrier, carrier))?;
         Ok(Some(position_carrier_diagnostics(
             &diags,
-            content,
+            Some(content),
             &engine_carrier,
         )?))
     }
@@ -772,10 +775,12 @@ impl TsgoSharedProvider {
     /// committed, and a burst of edits COALESCES to the latest op (the gate holder always
     /// drains the newest pending). This method supplies the wire sink (the shim CONTROL
     /// channel: `carrier_did_open_synced` / `carrier_did_change_synced` /
-    /// `carrier_did_close`); the ordering + local-slot consistency ([`reserve_carrier`] /
-    /// [`sync_commit`] — a first-open barrier failure best-effort RETRACTS the
-    /// possibly-open Program file and drops the local slot; a `didChange` failure keeps
-    /// the PRIOR synced content; a close drops the slot after its barrier) live in the
+    /// `carrier_did_close`); the ordering + local-slot consistency ([`reserve_carrier_capturing`] /
+    /// [`sync_commit`] — a first-open barrier failure marks the slot `PossiblyOpenUnsynced`
+    /// and best-effort retracts the possibly-open Program file; a `didChange` failure fails
+    /// closed to the non-serveable `OpenUnsyncedContent` slot; a close transitions the slot to
+    /// the non-serveable `PossiblyOpenUnsynced` shell BEFORE its barrier and removes it only on a
+    /// SUCCESSFUL close — a failed/timed-out close leaves the shell to reconcile) live in the
     /// state machine.
     async fn drive_carrier(&self, path: &str, kind: PendingKind) -> Result<(), TypeProviderError> {
         let carrier = slash(path);
@@ -820,7 +825,12 @@ impl TsgoSharedProvider {
     /// per-carrier state machine. Routed through the SAME gate as injection so the
     /// `didClose` is ordered w.r.t. an in-flight/queued injection (never a reopen after
     /// a committed close) and supersedes an older queued injection; the state machine
-    /// drops the local slot after the close barrier.
+    /// transitions the local slot to the non-serveable `PossiblyOpenUnsynced` shell BEFORE
+    /// the bounded close barrier and removes it only on a SUCCESSFUL close (a failed/timed-out
+    /// close leaves the shell to reconcile). The shim mirrors this on its own side — its
+    /// control server removes a carrier from its open-overlay set only on a confirmed
+    /// `didClose` — so a close that does not confirm there leaves the overlay tracked
+    /// shim-side, where the shim's session-end drain retracts it on transport close.
     async fn close_carrier_overlay(&self, path: &str) -> Result<(), TypeProviderError> {
         self.drive_carrier(path, PendingKind::Close).await
     }
@@ -840,452 +850,6 @@ fn redirect_on_references(
         .map(|r| ReferenceInput::redirect_on(Arc::clone(r)))
         .collect()
 }
-
-/// A resolved carrier wire operation an injection sink performs — the ordered state
-/// machine ([`CarrierSyncState::drive`]) decides the action + version and hands the
-/// sink the COALESCED content; the sink maps it onto the shim CONTROL channel.
-enum CarrierWireOp {
-    /// The carrier's FIRST reservation — send `didOpen` (version 1) with its content.
-    Open { version: i64, content: Arc<str> },
-    /// An already-reserved carrier — send `didChange` at a monotonic version.
-    Change { version: i64, content: Arc<str> },
-    /// Send `didClose` — remove the carrier's overlay from the shared Program. Issued
-    /// BOTH for a top-level carrier close AND for the best-effort retract of a
-    /// possibly-open Program file after a first-open barrier failed (both end the doc);
-    /// the retract variant's result is ignored (the local slot is dropped regardless).
-    Close,
-}
-
-/// The lifecycle op a coalesced submission resolves to — an injection carrying its
-/// coalesced content, or a close.
-#[derive(Clone)]
-enum PendingKind {
-    /// Inject (open/change) the carrier at the coalesced content.
-    Inject(Arc<str>),
-    /// Close (retract) the carrier overlay.
-    Close,
-}
-
-/// The latest-pending coalescing cell for one carrier. A gate holder drains the NEWEST
-/// submitted lifecycle op (`latest_*` — an inject-with-content OR a close) rather than
-/// replaying each intermediate submission, and skips entirely when the newest has
-/// already been committed (`latest_seq <= committed_seq`) by an earlier gate holder — so
-/// a burst of edits (and a trailing close) reaches the Program in ~one barrier and the
-/// LATEST op always wins: a close SUPERSEDES an older queued injection, and a newer
-/// injection SUPERSEDES an older close (a genuine reopen).
-struct PendingSubmission {
-    /// The newest submitted op + its global submission sequence.
-    latest_seq: u64,
-    latest_kind: PendingKind,
-    /// The highest submission sequence a gate holder has SUCCESSFULLY committed
-    /// (barrier-synced). Advanced only on a successful commit.
-    committed_seq: u64,
-}
-
-/// The per-carrier ORDERED lifecycle state machine.
-///
-/// Concurrent open/change/close on the SAME carrier URI (the host has multiple provider
-/// sync paths — did_change eager, the debounced coordinator, foreground / background /
-/// import — plus the close path, and does NOT serialize per carrier) used to desync the
-/// SHARED overlay: a `didChange` could race ahead of the first `didOpen`, a first-open
-/// timeout could retract a slot a concurrent change had promoted, or a `didClose` could
-/// interleave with an in-flight injection and reopen a closed carrier (an op after a
-/// committed close). This state machine SERIALIZES each carrier's wire send + barrier +
-/// commit behind a per-carrier ASYNC gate (a `tokio::sync::Mutex`, correctly held across
-/// the barrier await — never a sync lock across `.await`), COALESCES a burst of edits
-/// (and a trailing close) to the latest op, and keeps the local slot view consistent
-/// with the shared Program on failure/timeout. Open, change, AND close all flow through
-/// the SAME gate + coalescing cell, so the newest submission always wins: a close
-/// supersedes an older queued injection (no op after a committed close) and a newer
-/// injection supersedes an older close (a genuine reopen). Fail-closed: a broken
-/// connection surfaces as an `Err` the composite treats as OWNED.
-struct CarrierSyncState {
-    /// The barrier-SYNCED carrier slots (the ONLY content served / positioned from),
-    /// keyed by forward-slashed carrier path.
-    injected: SyncMutex<HashMap<String, CarrierSlot>>,
-    /// Per-carrier async gates serializing each carrier's wire send + barrier + commit
-    /// so lifecycle ops commit in submission order (an Open barrier before any Change;
-    /// a close after a committed injection, never reopening it).
-    gates: SyncMutex<HashMap<String, Arc<AsyncMutex<()>>>>,
-    /// Per-carrier latest-pending coalescing cells.
-    pending: SyncMutex<HashMap<String, PendingSubmission>>,
-    /// A GLOBAL monotonic `didChange` version counter. LSP requires only that each
-    /// `didChange` version exceed the document's previous version; a single monotonic
-    /// counter guarantees that for EVERY carrier. `didOpen` uses version 1; this starts
-    /// at 2.
-    next_version: AtomicI64,
-    /// A GLOBAL monotonic submission-sequence counter (the coalescing discriminant).
-    next_seq: AtomicU64,
-}
-
-impl CarrierSyncState {
-    fn new() -> Self {
-        Self {
-            injected: SyncMutex::new(HashMap::new()),
-            gates: SyncMutex::new(HashMap::new()),
-            pending: SyncMutex::new(HashMap::new()),
-            next_version: AtomicI64::new(2),
-            next_seq: AtomicU64::new(1),
-        }
-    }
-
-    /// The last barrier-SYNCED content for a carrier (by the engine's canonicalization
-    /// first, then the injected key) — the ONLY content served / positioned from.
-    fn synced_content(&self, engine_carrier: &str, carrier: &str) -> Option<Arc<str>> {
-        synced_content(&self.injected, engine_carrier, carrier)
-    }
-
-    /// The per-carrier async gate (get-or-insert). A brief sync lock fetches the `Arc`;
-    /// the caller then awaits the async gate — the sync lock is never held across the
-    /// await.
-    fn gate_for(&self, carrier: &str) -> Arc<AsyncMutex<()>> {
-        Arc::clone(self.gates.lock().entry(carrier.to_string()).or_default())
-    }
-
-    /// Record `kind` as the carrier's latest pending submission at `seq` (a later
-    /// submission overwrites an earlier one — the coalescing target). An inject and a
-    /// close share the one cell, so the newest op supersedes an older one of EITHER
-    /// kind (a close supersedes a queued inject; a reopen supersedes an older close).
-    fn record_pending(&self, carrier: &str, seq: u64, kind: PendingKind) {
-        let mut pending = self.pending.lock();
-        match pending.get_mut(carrier) {
-            Some(p) if seq > p.latest_seq => {
-                p.latest_seq = seq;
-                p.latest_kind = kind;
-            }
-            Some(_) => {}
-            None => {
-                pending.insert(
-                    carrier.to_string(),
-                    PendingSubmission {
-                        latest_seq: seq,
-                        latest_kind: kind,
-                        committed_seq: 0,
-                    },
-                );
-            }
-        }
-    }
-
-    /// The newest pending op still needing a sync — `None` when the latest has already
-    /// been committed (an earlier gate holder synced this-or-newer op).
-    fn take_drainable(&self, carrier: &str) -> Option<(u64, PendingKind)> {
-        let pending = self.pending.lock();
-        let p = pending.get(carrier)?;
-        (p.latest_seq > p.committed_seq).then(|| (p.latest_seq, p.latest_kind.clone()))
-    }
-
-    /// Mark `seq` (and everything before it) as committed (barrier-synced), so a later
-    /// gate holder for the same-or-older content skips the redundant sync.
-    fn mark_committed(&self, carrier: &str, seq: u64) {
-        if let Some(p) = self.pending.lock().get_mut(carrier) {
-            p.committed_seq = p.committed_seq.max(seq);
-        }
-    }
-
-    /// Prune a carrier's per-carrier gate + pending state on a committed close, but ONLY
-    /// when NO newer op is queued for the carrier (`latest_seq <= up_to_seq`). The
-    /// injected slot is already dropped by the close; this keeps the `gates` / `pending`
-    /// maps tracking the CURRENT open set rather than the cumulative touched set.
-    ///
-    /// Race-safety (common case): a queued op records its pending submission
-    /// (`record_pending`, a NEWER `latest_seq`) BEFORE it fetches the gate Arc (`gate_for`),
-    /// so a newer pending op is the exact witness that another op holds/awaits this
-    /// carrier's gate — observing it (`latest_seq > up_to_seq`) SKIPS the prune, so the
-    /// common newer-op-queued path never orphans a queued op onto a fresh Arc. The `pending`
-    /// and `gates` locks are taken TOGETHER, in the SAME order `drive` acquires them
-    /// (`record_pending` locks `pending` in step 1, `gate_for` locks `gates` in step 2 —
-    /// never the reverse). No deadlock: no code path holds `gates` then locks `pending`.
-    ///
-    /// Bounded residual (NOT fully race-safe): because an in-flight op COALESCES the
-    /// carrier's NEWEST pending op (`take_drainable`), it can commit an OLDER
-    /// waiter's already-recorded op and then prune at that op's own `drain_seq` — observing
-    /// no strictly-newer pending and removing the gate Arc WHILE that older waiter still
-    /// holds a reference to it and is blocked on `gate.lock()`. A subsequent close/reopen
-    /// then mints a FRESH gate Arc, transiently splitting the carrier across two gates. The
-    /// window is BOUNDED and self-converging (the coalesced waiter finds nothing drainable
-    /// and releases the old gate) and any resulting inconsistency falls back to OWNED. The
-    /// prune is not waiter-aware / generation-stamped; the transient split is bounded and
-    /// stays fail-closed to OWNED by design.
-    fn prune_carrier_state_if_idle(&self, carrier: &str, up_to_seq: u64) {
-        let mut pending = self.pending.lock();
-        let has_newer = pending
-            .get(carrier)
-            .is_some_and(|p| p.latest_seq > up_to_seq);
-        if has_newer {
-            return;
-        }
-        let mut gates = self.gates.lock();
-        pending.remove(carrier);
-        gates.remove(carrier);
-    }
-
-    /// Ordered per-carrier lifecycle op: serialize + coalesce + commit, driving the
-    /// wire send + barrier through `sink`. Open, change, AND close all flow through
-    /// this ONE gate + coalescing cell.
-    ///
-    /// The submission is recorded as the carrier's latest pending op; the caller then
-    /// acquires the per-carrier gate (a later op BLOCKS here until the in-flight op's
-    /// barrier completes — ordered commits, no `didChange` ahead of `didOpen`, no
-    /// `didClose` interleaved with an in-flight injection), drains the NEWEST pending op
-    /// (coalescing a burst — the newest op wins, so a close supersedes an older queued
-    /// injection and a reopen supersedes an older close), then performs it:
-    ///
-    /// - [`PendingKind::Inject`]: decide Open vs Change by slot presence (reserved under
-    ///   the gate — no TOCTOU), send the wire op + await its barrier, then commit the
-    ///   local slot consistently. A first-open barrier failure retracts the
-    ///   possibly-open Program file and drops the slot; a `didChange` failure keeps the
-    ///   prior synced content.
-    /// - [`PendingKind::Close`]: send `didClose` ONLY when the carrier is currently
-    ///   reserved (open in the Program) and drop the local slot; a never-opened carrier
-    ///   (or one an earlier gate holder already closed) is a no-op — the slot presence
-    ///   is the authoritative open/closed decision under the gate.
-    ///
-    /// Returns the barrier `Result` (a broken connection is an `Err` the caller fails
-    /// closed on).
-    async fn drive<S, Fut>(
-        &self,
-        carrier: &str,
-        kind: PendingKind,
-        sink: S,
-    ) -> Result<(), TypeProviderError>
-    where
-        S: Fn(CarrierWireOp) -> Fut,
-        Fut: Future<Output = Result<(), TypeProviderError>>,
-    {
-        // 1. Record this submission as the carrier's latest pending op.
-        let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
-        self.record_pending(carrier, seq, kind);
-
-        // 2. Acquire the per-carrier gate — a later op BLOCKS here until the in-flight
-        //    op's barrier completes (ordered commits; no didChange ahead of didOpen; no
-        //    didClose interleaved with an in-flight injection).
-        let gate = self.gate_for(carrier);
-        let _guard = gate.lock().await;
-
-        // 3. Drain the NEWEST pending op. If an earlier gate holder already committed
-        //    this-or-newer op, this call is a no-op (coalesced away).
-        let Some((drain_seq, drain_kind)) = self.take_drainable(carrier) else {
-            return Ok(());
-        };
-
-        match drain_kind {
-            PendingKind::Inject(drain_content) => {
-                // Decide Open vs Change by slot presence (under the gate — no TOCTOU).
-                let action = reserve_carrier(&self.injected, carrier);
-                let op = match action {
-                    InjectAction::Open => CarrierWireOp::Open {
-                        version: 1,
-                        content: Arc::clone(&drain_content),
-                    },
-                    InjectAction::Change => CarrierWireOp::Change {
-                        version: self.next_version.fetch_add(1, Ordering::Relaxed),
-                        content: Arc::clone(&drain_content),
-                    },
-                };
-
-                // Wire send + barrier — the ONLY await under the gate for an inject.
-                let result = sink(op).await;
-
-                // Commit the local slot consistently with the shared Program. A first-open
-                // barrier that COMPLETES with a failure best-effort RETRACTS the possibly
-                // open Program file BEFORE dropping the local slot, so both sides stay
-                // consistent. This reconciliation runs only when the barrier COMPLETES:
-                // unlike the Close arm (which drops its slot UP FRONT to survive an outer
-                // cancellation), a first-open reserves the slot BEFORE the barrier, so an
-                // OUTER overlay deadline that cancels this future mid-barrier — before the
-                // commit below runs — can leave a reserved unsynced slot (bounded, fail
-                // closed to OWNED). The first-open reservation is not made cancellation-safe
-                // here: an outer-deadline cancel does not drop/retract the reserved slot, so
-                // this residual stays bounded and fail-closed to OWNED by design.
-                let commit = sync_commit(action, result.is_ok());
-                if matches!(commit, SyncCommit::RetractOpen) {
-                    let _ = sink(CarrierWireOp::Close).await;
-                }
-                apply_local_sync_commit(&self.injected, carrier, drain_content, commit);
-                if result.is_ok() {
-                    self.mark_committed(carrier, drain_seq);
-                }
-                result
-            }
-            PendingKind::Close => {
-                // Drop the local slot UP FRONT — BEFORE the wire barrier — so a bounded /
-                // cancelled off-path close (the timeout-safe retract) still leaves the
-                // carrier reading not-synced: the local view can never outlive a cancelled
-                // wire close (a `tokio::time::timeout` that cancels this future mid-barrier
-                // must not skip the slot drop). Slot PRESENCE (captured here) is the
-                // authoritative open/closed decision under the gate: send `didClose` ONLY
-                // when the carrier was actually reserved (open in the Program); a
-                // never-opened carrier (or one an earlier gate holder already closed) sends
-                // nothing.
-                let was_open = take_carrier_slot(&self.injected, carrier);
-                let result = if was_open {
-                    // Wire send + barrier — the ONLY await under the gate for a close.
-                    sink(CarrierWireOp::Close).await
-                } else {
-                    Ok(())
-                };
-                if result.is_ok() {
-                    self.mark_committed(carrier, drain_seq);
-                }
-                // Prune the carrier's per-carrier gate + pending cell (the slot is already
-                // dropped) when THIS close is the latest op — no newer submission is
-                // queued — so the per-carrier maps track the CURRENT open set, not the
-                // cumulative touched set across a long opt-in session. Skipped when a newer
-                // op is pending (that op owns the gate Arc; pruning it would orphan the
-                // queued op onto a fresh Arc and split ordering).
-                self.prune_carrier_state_if_idle(carrier, drain_seq);
-                result
-            }
-        }
-    }
-}
-
-/// A tracked carrier overlay slot. The last barrier-SYNCED content (the ONLY content
-/// served / positioned from) is tracked SEPARATELY from the optimistically-reserved
-/// in-flight injection, so the local overlay view never diverges from the shared
-/// Program on a sync timeout.
-struct CarrierSlot {
-    /// The last content the shim's sync barrier confirmed the shared Program
-    /// ACCEPTED. `None` while a first-open is in flight (reserved but not yet synced),
-    /// and only ever set to content a barrier accepted ([`promote_synced`]). The
-    /// UTF-16 diagnostic index is built from THIS — never the optimistic reservation.
-    synced: Option<Arc<str>>,
-}
-
-/// Whether a carrier injection must send a `didOpen` (the carrier's FIRST reservation)
-/// or a `didChange` (a carrier already reserved).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum InjectAction {
-    /// The carrier slot was absent — this caller reserved it and must send `didOpen`.
-    Open,
-    /// The carrier slot was already reserved — send `didChange`.
-    Change,
-}
-
-/// Atomically reserve the carrier slot and decide the injection action.
-///
-/// A SINGLE lock acquisition inspects the entry: exactly one caller sees the absent
-/// slot, inserts a pending slot (`synced: None`), and returns [`InjectAction::Open`];
-/// every concurrent caller sees the reserved slot and returns [`InjectAction::Change`].
-/// This is the reserve-before-await that closes the inject TOCTOU — no window between
-/// "is it open?" and the wire send in which two first-opens both send `didOpen`
-/// version 1. Reservation NEVER touches `synced` (the reserved text is not served
-/// until its barrier is confirmed accepted — see [`promote_synced`]).
-fn reserve_carrier(
-    injected: &SyncMutex<HashMap<String, CarrierSlot>>,
-    carrier: &str,
-) -> InjectAction {
-    use std::collections::hash_map::Entry;
-    match injected.lock().entry(carrier.to_string()) {
-        Entry::Occupied(_) => InjectAction::Change,
-        Entry::Vacant(vacant) => {
-            vacant.insert(CarrierSlot { synced: None });
-            InjectAction::Open
-        }
-    }
-}
-
-/// The local-slot action after an injection's sync barrier resolves — the
-/// consistency oracle that keeps the local overlay view aligned with the shared
-/// Program. PURE over `(action, barrier_ok)`; the caller applies it via
-/// [`apply_local_sync_commit`] and (for [`SyncCommit::RetractOpen`]) issues the wire
-/// `didClose`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SyncCommit {
-    /// The barrier SYNCED — promote the reserved text to the slot's authoritative
-    /// synced content (the only content served / positioned from).
-    Promote,
-    /// A FIRST-OPEN barrier FAILED/timed out — the Program MAY hold the didOpen, so
-    /// retract it (`didClose`) and drop the local slot (both sides end closed).
-    RetractOpen,
-    /// A `didChange` barrier FAILED/timed out — keep the PRIOR synced content the
-    /// Program still holds; never serve the reserved-but-unaccepted new text.
-    KeepPriorSynced,
-}
-
-/// Map an injection's sync-barrier outcome to the local-slot action that keeps the
-/// local view consistent with the shared Program: any success promotes; a first-open
-/// failure retracts the possibly-open Program file; a `didChange` failure keeps the
-/// prior synced content.
-fn sync_commit(action: InjectAction, barrier_ok: bool) -> SyncCommit {
-    match (action, barrier_ok) {
-        (_, true) => SyncCommit::Promote,
-        (InjectAction::Open, false) => SyncCommit::RetractOpen,
-        (InjectAction::Change, false) => SyncCommit::KeepPriorSynced,
-    }
-}
-
-/// Apply the local-slot half of a [`SyncCommit`] (promote the synced content / drop
-/// the slot / keep the prior synced). The wire `didClose` retract for
-/// [`SyncCommit::RetractOpen`] is the caller's separate control call.
-fn apply_local_sync_commit(
-    injected: &SyncMutex<HashMap<String, CarrierSlot>>,
-    carrier: &str,
-    text: Arc<str>,
-    commit: SyncCommit,
-) {
-    match commit {
-        SyncCommit::Promote => promote_synced(injected, carrier, text),
-        SyncCommit::RetractOpen => drop_carrier_slot(injected, carrier),
-        SyncCommit::KeepPriorSynced => {}
-    }
-}
-
-/// Promote the barrier-SYNCED `text` to the slot's authoritative synced content
-/// (called only after the sync barrier ACCEPTED the injection).
-fn promote_synced(
-    injected: &SyncMutex<HashMap<String, CarrierSlot>>,
-    carrier: &str,
-    text: Arc<str>,
-) {
-    if let Some(slot) = injected.lock().get_mut(carrier) {
-        slot.synced = Some(text);
-    }
-}
-
-/// Drop a carrier's local slot (a first-open barrier failed — the caller separately
-/// retracts the possibly-open Program file, keeping the two consistent).
-fn drop_carrier_slot(injected: &SyncMutex<HashMap<String, CarrierSlot>>, carrier: &str) {
-    injected.lock().remove(carrier);
-}
-
-/// Remove a carrier's local slot and report whether it was present (open in the
-/// Program) — one lock acquisition. Called by the close arm SYNCHRONOUSLY, before the
-/// wire barrier, so a bounded / cancelled close still drops the slot: the local view can
-/// never outlive a cancelled wire close (the timeout-safe close).
-fn take_carrier_slot(injected: &SyncMutex<HashMap<String, CarrierSlot>>, carrier: &str) -> bool {
-    injected.lock().remove(carrier).is_some()
-}
-
-/// The last barrier-SYNCED content for a carrier — by the engine's canonicalization
-/// first, then the injected key — the ONLY content served / positioned from. A
-/// reserved-but-not-yet-synced slot returns `None` (fail-closed — no unaccepted text).
-fn synced_content(
-    injected: &SyncMutex<HashMap<String, CarrierSlot>>,
-    engine_carrier: &str,
-    carrier: &str,
-) -> Option<Arc<str>> {
-    let injected = injected.lock();
-    injected
-        .get(engine_carrier)
-        .or_else(|| injected.get(carrier))
-        .and_then(|slot| slot.synced.clone())
-}
-
-/// The error every SHARED interactive-feature `TypeProvider` method returns. SHARED tsgo
-/// is the DIAGNOSTICS-ONLY project-bound typecheck oracle (see the module docs);
-/// interactive features (hover / definition / references / completion / …) are served by
-/// the OWNED baseline, and the composite ([`crate::tsgo::composite::TsgoCompositeProvider`])
-/// delegates EVERY feature method to OWNED — so these methods are UNREACHABLE through the
-/// production composite. Returning a LOUD error (rather than a silent empty result) makes
-/// any accidental production wiring of the raw SHARED provider as a feature backend fail
-/// visibly instead of silently serving no results — the raw feature surface is
-/// deliberately non-production, not a hollow silent stub.
-const SHARED_FEATURE_NOT_SERVED: &str =
-    "shared tsgo is diagnostics-only; interactive features are served by the OWNED baseline \
-     (the composite delegates every feature to OWNED) — this raw SHARED feature method is \
-     not reachable in production";
 
 impl TypeProvider for TsgoSharedProvider {
     fn provider_id(&self) -> &'static str {
