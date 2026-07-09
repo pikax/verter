@@ -234,7 +234,8 @@ impl ControlServer {
     /// bounded or failed `didClose` leaves the URI tracked, because
     /// [`Self::handle_carrier_did_close`] removes it ONLY on a successful ack; so a
     /// best-effort overlay retract that did not physically leave the editor's shared tsgo
-    /// Program is removed here on session/transport end.
+    /// Program is re-attempted here — a bounded best-effort `didClose` — on session/transport
+    /// end (delivery is NOT guaranteed past the budget or on a wedged writer).
     ///
     /// The ACHIEVABLE guarantee, stated precisely — NOT a claim of guaranteed physical
     /// removal under all conditions:

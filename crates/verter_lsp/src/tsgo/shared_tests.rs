@@ -1103,8 +1103,9 @@ fn env_dims_source_closure_is_usable() {
 
 /// Concurrent open+change ordering. A `didChange` on a carrier must BLOCK on the
 /// per-carrier gate until the FIRST `didOpen`'s barrier completes — never race ahead —
-/// and the latest content is served after. RED without the gate: the Change wire-sends
-/// while the Open barrier is still in flight (a didChange ahead of the didOpen).
+/// and the latest content is served after. This is non-vacuous: without the per-carrier
+/// gate the Change wire-sends while the Open barrier is still in flight (a didChange ahead
+/// of the didOpen), the ordering the assertions below forbid.
 #[tokio::test]
 async fn concurrent_open_and_change_orders_open_barrier_before_change() {
     use std::sync::Mutex as StdMutex;
@@ -1198,8 +1199,9 @@ async fn concurrent_open_and_change_orders_open_barrier_before_change() {
 /// committed. With serialization, the failed first-open marks its slot PossiblyOpenUnsynced +
 /// best-effort retracts, then the queued later injection RECONCILES the uncertain shell (a
 /// bounded retract) and re-OPENS the latest content and commits — the stale earlier op never
-/// clobbers the committed later state. RED without the gate: the concurrent first-open
-/// timeout's retract races the later op's promote, leaving the overlay desynced.
+/// clobbers the committed later state. This is non-vacuous: without the gate the concurrent
+/// first-open timeout's retract races the later op's promote and leaves the overlay desynced —
+/// the desync the serialization asserted below prevents.
 #[tokio::test]
 async fn failed_first_open_does_not_drop_a_later_committed_change() {
     use std::sync::Mutex as StdMutex;
@@ -1397,10 +1399,10 @@ fn close_and_injection_supersede_each_other_by_newest_seq() {
 /// barrier completes (never a `didClose` interleaved with the in-flight injection),
 /// then close the carrier — never reopen it (no op after a committed close).
 ///
-/// RED without routing close through the gate: the close sends `didClose` immediately
-/// (bypassing the per-carrier gate), so the wire records a `didClose` while the
-/// `didOpen` barrier is still in flight — the op-around-close ordering violation that
-/// can leak/reopen a closed carrier.
+/// This is non-vacuous: without routing close through the gate the close would send
+/// `didClose` immediately (bypassing the per-carrier gate), so the wire would record a
+/// `didClose` while the `didOpen` barrier is still in flight — the op-around-close ordering
+/// violation (leak/reopen of a closed carrier) that the gate ordering asserted below prevents.
 #[tokio::test]
 async fn close_is_ordered_through_the_gate_behind_an_in_flight_open() {
     use std::sync::Mutex as StdMutex;
@@ -2499,10 +2501,12 @@ async fn coalesced_away_no_drain_prunes_idle_gate_and_pending_state() {
 /// a fail-closed `Err` WITHIN the bound (never hang the per-carrier gate), leave the slot the
 /// reconcilable `PossiblyOpenUnsynced` shell, and RELEASE the gate so a subsequent op proceeds.
 ///
-/// RED if the internal `tokio::time::timeout` wrapper in `bounded_carrier_close_with_timeout` is
-/// removed: the `drive(Close)` below has NO outer bound, so an unwrapped `sink(Close)` on a
-/// `pending()` future would hang this test forever (it never returns `Err`, never releases the
-/// gate). The injected short bound is what makes the internal fire observable in-test.
+/// This is non-vacuous: the `drive(Close)` below has NO outer bound, so without the internal
+/// `tokio::time::timeout` wrapper in `bounded_carrier_close_with_timeout` an unwrapped
+/// `sink(Close)` on a `pending()` future would hang forever — never returning `Err`, never
+/// releasing the gate. The internal wrapper honouring the injected short bound is what returns
+/// `Err` in-test, so the assertions below observe the internal timeout firing rather than an
+/// outer deadline.
 #[tokio::test]
 async fn bounded_close_internal_timeout_fires_and_releases_gate() {
     use std::time::Instant;
@@ -2588,11 +2592,12 @@ async fn bounded_close_internal_timeout_fires_and_releases_gate() {
 /// reconcilable for the next retry. The wire records `[close]` ONLY — the fresh `didOpen` is
 /// never sent onto a possibly-still-open Program.
 ///
-/// RED if the abort arm regressed to fall through to the open (dropping the `return Err`): the
-/// wire would be `[close, open:v1]` and the result `Ok` — the exact bare-duplicate-`didOpen`
-/// defect (a `didOpen` onto an un-reconciled, possibly-open Program file). Every OTHER
-/// `ReconcileThenOpen` drive-test drives the reconcile close to SUCCESS, so this failure arm was
-/// otherwise untested.
+/// This is non-vacuous: were the abort arm to fall through to the open (dropping the
+/// `return Err`), the wire would record `[close, open:v1]` and the drive would return `Ok` — the
+/// bare-duplicate-`didOpen` defect (a `didOpen` onto an un-reconciled, possibly-open Program
+/// file). Every OTHER `ReconcileThenOpen` drive-test drives the reconcile close to SUCCESS, so
+/// the `[close]`-only wire and the fail-closed `Err` asserted below are what lock this failure
+/// arm.
 #[tokio::test]
 async fn reconcile_close_failure_aborts_the_fresh_open() {
     use std::sync::Mutex as StdMutex;

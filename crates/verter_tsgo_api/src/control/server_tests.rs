@@ -341,7 +341,7 @@ async fn control_dispatch_drives_full_attach_lifecycle_through_relay() {
 async fn wait_initialized_times_out_when_editor_never_initializes() {
     let mut lb = wire_loopback("the-nonce");
 
-    // hello completes (required before any other control method). We deliberately do NOT
+    // hello completes (it must precede any other control method). We deliberately do NOT
     // drive the editor `initialize` handshake, so the relay never captures the in-band
     // witness and `relay.wait_initialized()` would block indefinitely.
     lb.client
@@ -938,9 +938,10 @@ async fn detach_malformed_params_fails_closed_and_retracts_via_drain() {
 /// then fills and every further `didClose` send BLOCKS. Both duplex endpoints are kept
 /// ALIVE (bound, not dropped) so the channels stay OPEN (wedged), not closed.
 ///
-/// Discriminator: an UNBOUNDED drain — each `did_close` awaited with NO overall budget — blocks
-/// forever against a wedged writer, so the outer bound below fires and the `is_ok()` assertion
-/// fails (RED); the bounded drain returns within its budget (GREEN).
+/// This is non-vacuous: an UNBOUNDED drain — each `did_close` awaited with NO overall budget —
+/// blocks forever against a wedged writer, so the outer bound below would fire and the `is_ok()`
+/// assertion would fail; the bounded drain instead returns within its budget, which the
+/// `is_ok()` + elapsed assertions below verify.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_end_drain_is_bounded_against_a_wedged_writer() {
     let (_editor_endpoint, relay_editor) = tokio::io::duplex(64 * 1024);
@@ -972,7 +973,7 @@ async fn session_end_drain_is_bounded_against_a_wedged_writer() {
     assert!(
         outcome.is_ok(),
         "the session-end drain must RETURN bounded against a wedged writer — never block \
-         teardown indefinitely (RED: an unbounded drain hangs and this outer bound fires)"
+         teardown indefinitely (an unbounded drain would hang and trip this outer bound)"
     );
     assert!(
         elapsed < Duration::from_secs(2),
@@ -988,39 +989,38 @@ async fn session_end_drain_is_bounded_against_a_wedged_writer() {
 }
 
 /// Characterization / regression guard: the unified session-end drain retracts EVERY
-/// still-tracked carrier — BOTH a FAILED-CLOSE residual AND a NEVER-CLOSED carrier — in one
-/// pass (cross-carrier coverage). This seals that COVERAGE (a cross-block dependency); it does
-/// NOT claim a base delta — the up-front `opened_carriers` drain and the success-only `didClose`
-/// removal are long-standing, so the pre/post discrimination of the drain MECHANISM is carried
-/// by the plant below (disabling `retract_open_carriers`), not by this test behaving differently
-/// against the literal pre-change tree. A carrier whose companion path turns shadow-unsafe is
-/// retracted by a bounded best-effort `didClose`; if that retract does NOT confirm, the overlay
-/// stays a live doc in the editor's shared tsgo Program — a membership residual. The
-/// transport-close drain is where such a residual is removed.
+/// still-tracked carrier — BOTH a FAILED-CLOSE residual AND a NEVER-CLOSED carrier — by emitting
+/// one `didClose` per still-tracked URI in a single pass (cross-carrier coverage).
 ///
 /// The invariant this locks (all in `server.rs`):
 ///   * `handle_carrier_did_close` removes a URI from `opened_carriers` ONLY on a successful
 ///     `relay.did_close` ack. A close that does not confirm returns an ERROR frame and leaves
-///     the URI TRACKED — the residual.
+///     the URI TRACKED — a failed-close residual.
 ///   * `retract_open_carriers` drains `opened_carriers` and issues one best-effort `didClose`
-///     per still-tracked URI — the residual AND the never-closed carrier alike.
+///     per still-tracked URI. The drain sees only the `HashSet<String>` of tracked URIs and does
+///     not branch on WHY a URI is tracked, so a failed-close residual and a never-closed carrier
+///     are identical drain inputs.
 ///
-/// `relay.did_close` fails only when the server-side wire is down (its sole send-failure
-/// mode); a live wire always acks and removes, so a shim-side residual can only arise on a
-/// down wire, and the wire is brought down here to reproduce that exact condition. On a down
-/// wire the drain's best-effort `didClose`s cannot be DELIVERED to tsgo — the honest guarantee
-/// is bounded best-effort, backstopped by owned-tsgo process death. So the drain's COVERAGE of
-/// every still-tracked carrier is characterized by `opened_carriers` draining to empty (the
-/// exact set `server.rs` iterates to emit one `didClose` each). Real `didClose` DELIVERY on a
-/// LIVE wire is locked by the sibling drain tests
-/// (`abnormal_control_termination_retracts_open_carriers_non_destructively`,
-/// `sent_but_unsynced_open_is_retracted_on_session_end`).
+/// The proof runs in two parts because the residual precondition and the emission observation
+/// cannot share one transport. `relay.did_close` is send-only and fails ONLY when the
+/// server-side wire is down (its sole send-failure mode): a shim-side residual can form ONLY on
+/// a down wire, yet on a down wire the drain's `didClose`s cannot reach tsgo, so emission is
+/// unobservable there. Emission is observable only on a LIVE wire, where every close acks and no
+/// residual can form.
+///   * Part A (down wire) establishes the MEMBERSHIP precondition: an unconfirmed close leaves
+///     the residual A tracked, the never-closed B stays tracked, and both are the exact set the
+///     drain iterates. Draining that set to empty is the no-op-retract discriminator.
+///   * Part B (fresh live wire) establishes EMISSION: seeded with the same two URIs, the drain
+///     emits an observable `didClose` for BOTH, recorded by the fake tsgo.
 ///
-/// DISCRIMINATION: defeating the drain (a no-op `retract_open_carriers`) leaves BOTH the
-/// residual A and the never-closed B tracked — the final `is_empty()` assertion fails (RED).
-/// The real drain empties the set (GREEN).
+/// Together they characterize cross-carrier drain emission over the failed-close-residual and
+/// never-closed membership. A no-op `retract_open_carriers` leaves Part A's set populated and
+/// sends nothing in Part B; a drain that clears the set without emitting (`opened_carriers`
+/// drained but no `didClose` sent) still empties Part A's set yet sends nothing in Part B — so
+/// the emission polls are what make this non-vacuous beyond mere set-clearing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_end_drain_retracts_failed_close_residual_and_never_closed_carrier() {
+    // ===== Part A — down-wire residual precondition (MEMBERSHIP) =====
     // A LIVE relay + fake tsgo: open two real carrier overlays first.
     let (editor_endpoint, relay_editor) = tokio::io::duplex(64 * 1024);
     let (server_endpoint, relay_server) = tokio::io::duplex(64 * 1024);
@@ -1119,7 +1119,7 @@ async fn session_end_drain_retracts_failed_close_residual_and_never_closed_carri
     // exact set the session-end drain iterates to emit one `didClose` per URI.
     assert!(
         server.opened_carriers.contains(uri_a) && server.opened_carriers.contains(uri_b),
-        "the residual A and the never-closed B are both still tracked pre-drain"
+        "the residual A and the never-closed B are both still tracked when the drain starts"
     );
     let drain_didclose_targets: Vec<String> = server.opened_carriers.iter().cloned().collect();
     assert!(
@@ -1131,15 +1131,52 @@ async fn session_end_drain_retracts_failed_close_residual_and_never_closed_carri
         "the never-closed B is in the drain's didClose emission set"
     );
 
-    // The unified session-end drain retracts EVERY still-tracked carrier — BOTH the residual A
-    // and the never-closed B (cross-carrier). RED if the drain is defeated: a no-op retract
-    // leaves the set populated.
+    // No-op-retract discriminator: draining the tracked set to empty proves the drain ran over
+    // every still-tracked URI. On this down wire the emitted `didClose`s cannot reach tsgo, so
+    // emission itself is proven in Part B; here we characterize only that the drain consumed the
+    // whole set (a no-op `retract_open_carriers` leaves it populated).
     server.retract_open_carriers().await;
     assert!(
         server.opened_carriers.is_empty(),
-        "the session-end drain must retract BOTH the failed-close residual A AND the never-closed \
-         B — every still-tracked carrier is drained on transport close"
+        "the session-end drain consumes EVERY still-tracked carrier — BOTH the failed-close \
+         residual A AND the never-closed B are drained from tracking on transport close"
     );
+
+    // ===== Part B — live-wire cross-carrier EMISSION =====
+    // A FRESH live relay + fake + server. Part A proved the failed-close residual A and the
+    // never-closed B are identical drain inputs (URIs in `opened_carriers`), so seeding the same
+    // two URIs directly reproduces that exact set. On this live wire the drain's `didClose` per
+    // URI is observable: the fake tsgo records both retractions.
+    let (editor_endpoint2, relay_editor2) = tokio::io::duplex(64 * 1024);
+    let (server_endpoint2, relay_server2) = tokio::io::duplex(64 * 1024);
+    let (er2, ew2) = tokio::io::split(relay_editor2);
+    let (sr2, sw2) = tokio::io::split(relay_server2);
+    let relay2 = Arc::new(LspRelay::start(er2, ew2, sr2, sw2));
+    let fake2 = spawn_fake_tsgo(server_endpoint2);
+    let _editor_keepalive2 = editor_endpoint2;
+    let mut server2 = ControlServer::new(Arc::clone(&relay2), "n", 1, 1, "ctl");
+
+    server2.opened_carriers.insert(uri_a.to_string());
+    server2.opened_carriers.insert(uri_b.to_string());
+
+    server2.retract_open_carriers().await;
+
+    assert!(
+        poll_carrier_retracted(&fake2, uri_a).await,
+        "the drain must EMIT a `didClose` for the failed-close residual A — observed by the real \
+         tsgo, not merely cleared from the tracked set"
+    );
+    assert!(
+        poll_carrier_retracted(&fake2, uri_b).await,
+        "the drain must EMIT a `didClose` for the never-closed carrier B — observed by the real \
+         tsgo, not merely cleared from the tracked set"
+    );
+    assert!(
+        server2.opened_carriers.is_empty(),
+        "the drain empties the tracked set after emitting both cross-carrier `didClose`s"
+    );
+
+    relay2.shutdown().await;
 }
 
 /// Saturate the relay's outbound `server_tx` mpsc against a WEDGED writer so the NEXT carrier
@@ -1311,7 +1348,8 @@ async fn relay_round_trip_handlers_are_bounded_against_a_wedged_writer() {
             "a wedged/timed-out didClose must return an ERROR frame, never an ack: {value}"
         );
         // Only a confirmed (`Ok(Ok(()))`) close removes the URI, so a bounded-out close LEAVES it
-        // tracked for the session-end drain. (RED for a handler that removed on timeout/failure.)
+        // tracked for the session-end drain — a handler that removed on timeout/failure would drop
+        // it prematurely.
         assert!(
             server.opened_carriers.contains(uri),
             "a bounded-out close must LEAVE the URI tracked (only a confirmed close removes it) so \
