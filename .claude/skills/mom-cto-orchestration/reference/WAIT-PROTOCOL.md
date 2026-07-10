@@ -24,7 +24,7 @@ A single 15-minute blocking call can hit idle timeout; chunking plus brief model
 
 ## Gates / Concurrent Work
 
-If a gate is expected under 5 minutes, run foreground with `timeout 300`. Otherwise detach + chunk-poll. Dispatch concurrent work in background (gate, 2 codex reviewers, 1 claude reviewer, sub-agents), each with a marker, then run ONE foreground watchdog over all markers. When any marker is ready, collect it and re-enter the watchdog for remaining markers. Never background the watchdog and yield.
+If a gate is expected under 5 minutes, run foreground with `timeout 300`. Otherwise detach + chunk-poll. Only the CTO-owned orchestration process waits for review or verifier jobs on this CLI path; implementation managers never background-dispatch a gate or reviewer and then wait or yield. Dispatch the concurrent jobs in background — each with a marker — then run ONE foreground watchdog over all markers. A canonical/full (heavy) gate overlaps the THREE reviewer jobs (author-dependent model mix: Claude/Fable author → 2 GPT + 1 Claude; GPT/Codex author → 2 Claude + 1 fresh GPT) ONLY on isolated workers; on a single host, serialize the heavy gate against reviewer processes — one heavy suite per host. Targeted non-heavy jobs may run concurrently either way. When any marker is ready, collect it and re-enter the watchdog for remaining markers. Never background the watchdog and yield. Completion markers are notifications, not verdicts — act only on the durable summary/report artifact.
 
 ## Recovery
 

@@ -113,7 +113,11 @@ Extracted file contains module contents directly — `use super::*;`, helpers, a
 
 ### End-of-change Checks
 
-After TDD loop, run the full verification pass:
+Outside the orchestration landing-train lifecycle — a local change NOT driven as a train — run the canonical Rust pair after the change, per the repo End-of-change Checks. The full workspace suite is the canonical completeness gate.
+
+Any change driven THROUGH the landing-train lifecycle — including a single substantial train (even a one-slice train) — uses the tiered gating: during slice implementation and fix cycles, targeted runs (changed tests + affected crates + a conservative reverse-dependency closure) are ITERATION EVIDENCE ONLY, and a selector that cannot prove the affected closure MUST fall back to full-workspace coverage for that run (still iteration evidence, never landing evidence); the canonical pair runs at exactly the two lifecycle points — after the final content change on the rebased, landing-frozen train tree, and again independently at post-land confirm. Targeted success is never landing evidence, and the standalone clause above never lets a train-driven change skip the frozen-tree final gate.
+
+The canonical full verification pass:
 
 1. `cargo nextest run --workspace` — CANONICAL completeness gate; runs every workspace test target INCLUDING the ~25 verter_session integration binaries
 2. `cargo test -p verter_session --tests` — shared-process surface for the verter_session integration suite
@@ -124,6 +128,14 @@ After TDD loop, run the full verification pass:
 Bare `cargo test --workspace --tests` silently SKIPS the verter_session integration suite (~4404 tests): `session_metrics` feature unification drops those binaries from the workspace test set, so the run reports green while never compiling them. Must NOT be used as the sole Rust gate — always run the `cargo nextest run --workspace` + `cargo test -p verter_session --tests` pair above.
 
 Do not run bare `cargo test --workspace` (no `--tests`) by default — it also runs doctests and example builds, substantially slower. Run doctests (`cargo test --workspace --doc`) only when rustdoc examples changed or explicitly requested.
+
+### §1a Mutation Recipes
+
+For every NEW or CHANGED correctness-bearing test, guard, or refusal, record a reversible mutation recipe: verify the starting SHA; plant the mutation; run the named guarding test and require the expected failure (RED); restore; verify a clean original SHA; run the green test; run an unplanted control that stays GREEN. Persist commands and results. Read every new test body; reject stubs, always-true assertions, and non-discriminating characterization. The independent confirmer executes each recipe again; sampling is forbidden.
+
+### Timeout Is Never a Pass
+
+A timeout or incomplete run is never green and never presumed environmental. Rerun the timed-out test in isolation with an adequate timeout and no co-resident heavy work: if it clears → environmental (retain both artifacts); if it repeats → collect hang diagnostics; if classification stays ambiguous → HARD FAIL. The advertised slow-timeout must match the configured one — `.config/nextest.toml` advertises ~60s but configures 5s×3, killing valid tests around 15s on an 8GB host; fix that mismatch rather than tolerating false timeouts. Genuinely long tests get explicit per-test overrides.
 
 ### Enum-variant ripple (silent catch-all absorption)
 
@@ -141,6 +153,10 @@ let parsed = oxc_parser::Parser::new(&alloc, &tpl.code, source_type).parse();
 assert!(parsed.errors.is_empty(), "JS parse error: {:?}\n{}", parsed.errors, tpl.code);
 ```
 
+### Never Hand-Edit Generated Goldens
+
+Regenerate goldens from their authoritative source and record the source-manifest identity in the review evidence packet. A hand-edited golden is a defect, not a fixture update.
+
 ### Testing Strategy
 
 - **Unit tests**: Test individual plugins with minimal SFC snippets
@@ -150,9 +166,7 @@ assert!(parsed.errors.is_empty(), "JS parse error: {:?}\n{}", parsed.errors, tpl
 
 ### Architecture Guard Rule (MANDATORY)
 
-Every new `CRITICAL` architecture rule must ship with an executable guard in the same change: static architecture guard, AST/source scanner with narrow allowlists, or a discriminating regression test that fails against old behavior. A rule without a guard is not durable enough for this repo's migration style.
-
-When the guard cannot be automated immediately, the owning skill/doc must name it, explain the gap, and link the follow-up. Do not add prose-only critical rules that future changes can violate silently.
+Every new `CRITICAL` architecture rule must land with primary EXECUTABLE enforcement in the same change. Primary architecture enforcement uses type or capability boundaries, dependency checks, AST-aware analysis, or a discriminating behavioral guard that fails against old behavior. Textual/substring scanning may exist only as a secondary retired-symbol tripwire and cannot establish architectural compliance. Prose plus a future follow-up is insufficient — a rule without primary executable enforcement is not durable enough for this repo's migration style.
 
 ### Test Hermeticity (MANDATORY)
 
