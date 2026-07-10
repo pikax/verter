@@ -7,6 +7,7 @@
 //! helpers or the script read-rewrite helpers, which the emitting backend
 //! selects. It emits NO JS string.
 
+use super::css::types::CssScopeFacts;
 use super::helpers::{DelegatedEvents, HelperTrace, ImportPlan, SvelteHelper};
 use super::html::{StaticTemplatePlan, TemplateFactory};
 use super::ir::{
@@ -45,8 +46,18 @@ pub struct ClientTopologyPlan {
 /// read-rewrite helpers (`$.get` / `$.set` / `$.template_effect` / …). The
 /// recorded set is therefore the structural-helper SUBSET of the official
 /// module's full helper set. Emits NO JS string.
+///
+/// `scope_facts` is the proven `<style>` plan's scope-injection facts (`None`
+/// for a style-less component) — the SAME per-node scoped fact the emission
+/// reads, fed to the shared `<svelte:element>` attribute routing so the
+/// recorded helper (`$.set_class` vs `$.attribute_effect`) never drifts from
+/// the emitted one.
 #[must_use]
-pub fn plan_client_topology(ir: &SvelteRuntimeIr, html: &StaticTemplatePlan) -> ClientTopologyPlan {
+pub fn plan_client_topology(
+    ir: &SvelteRuntimeIr,
+    html: &StaticTemplatePlan,
+    scope_facts: Option<&CssScopeFacts>,
+) -> ClientTopologyPlan {
     let mut helpers = HelperTrace::new();
     let mut delegated = DelegatedEvents::new();
 
@@ -86,7 +97,7 @@ pub fn plan_client_topology(ir: &SvelteRuntimeIr, html: &StaticTemplatePlan) -> 
     // delegated/non-delegated event helpers in traversal order. The module-level
     // `$.delegate([...])` set declaration is gated below on the COLLECTED delegated
     // set being non-empty (no separate "saw a delegated event" flag).
-    walk_topology(ir, ir.root, &mut helpers, &mut delegated);
+    walk_topology(ir, ir.root, &mut helpers, &mut delegated, scope_facts);
 
     // The mount: each template REGION that clones a fragment mounts it with
     // `$.append`, so the append count equals the number of MOUNTING factories — one
@@ -124,10 +135,11 @@ fn walk_topology(
     scope: TemplateScopeId,
     helpers: &mut HelperTrace,
     delegated: &mut DelegatedEvents,
+    scope_facts: Option<&CssScopeFacts>,
 ) {
     let roots: Vec<NodeId> = ir.template_scope(scope).roots.clone();
     for node in roots {
-        walk_node_topology(ir, node, helpers, delegated);
+        walk_node_topology(ir, node, helpers, delegated, scope_facts);
     }
 }
 
@@ -136,6 +148,7 @@ fn walk_node_topology(
     node: NodeId,
     helpers: &mut HelperTrace,
     delegated: &mut DelegatedEvents,
+    scope_facts: Option<&CssScopeFacts>,
 ) {
     match ir.node(node) {
         IrNode::Element(el) => {
@@ -146,7 +159,7 @@ fn walk_node_topology(
                 record_attr_topology(attr, Some(&el.tag), &el.attrs, helpers, delegated);
             }
             for &child in &el.children {
-                walk_node_topology(ir, child, helpers, delegated);
+                walk_node_topology(ir, child, helpers, delegated, scope_facts);
             }
         }
         // A component invocation records ONLY the `$.bind_this` helper for a
@@ -158,7 +171,7 @@ fn walk_node_topology(
         // factories ride `html.templates`; their block / render helpers ride this walk).
         IrNode::Component(c) => {
             record_component_bind_this(&c.attrs, helpers);
-            walk_component_slot_topology(ir, &c.slots, helpers, delegated);
+            walk_component_slot_topology(ir, &c.slots, helpers, delegated, scope_facts);
         }
         IrNode::Special(s) => {
             // The component-FAMILY specials are component invocations (only `bind:this`
@@ -168,7 +181,7 @@ fn walk_node_topology(
                 SpecialKind::Component | SpecialKind::SelfRef | SpecialKind::Fragment
             ) {
                 record_component_bind_this(&s.attrs, helpers);
-                walk_component_slot_topology(ir, &s.slots, helpers, delegated);
+                walk_component_slot_topology(ir, &s.slots, helpers, delegated, scope_facts);
                 return;
             }
             if s.kind == SpecialKind::Head {
@@ -195,6 +208,14 @@ fn walk_node_topology(
             // not in the owned-helper universe).
             if s.kind != SpecialKind::Boundary {
                 for attr in &s.attrs {
+                    // A `<svelte:element>` SPREAD is a fold ENTRY of the single
+                    // `$.attribute_effect` the fold-route check below records once
+                    // for the whole element — the per-attribute spread arm (the
+                    // regular-element rule, one call PER element) must not record
+                    // a second one.
+                    if s.kind == SpecialKind::Element && matches!(attr, AttrIr::Spread { .. }) {
+                        continue;
+                    }
                     record_attr_topology(attr, host_token, &s.attrs, helpers, delegated);
                 }
             }
@@ -202,37 +223,42 @@ fn walk_node_topology(
             // the whole co-located fold (the official dynamic-element fold) — record it
             // once. The SHARED routing (`svelte_element_attr_route`) decides: the
             // lone-static-class route (with or without co-located `class:` directives)
-            // emits the dedicated `$.set_class` (NOT folded, not in the owned-helper
-            // universe here); a `bind:` records its own bind helper above; a LEGACY
-            // `on:` (`AttrIr::Event`) records `$.event` above (NOT folded). Mirrors the
-            // emitter's routing exactly so the recorded helper never drifts from the
-            // emission.
+            // and the SCOPED class-less synthetic-class route emit the dedicated
+            // `$.set_class` (NOT folded, not in the owned-helper universe here); a
+            // `bind:` records its own bind helper above; a LEGACY `on:`
+            // (`AttrIr::Event`) records `$.event` above (NOT folded). Mirrors the
+            // emitter's routing exactly — including the per-node SCOPED fact read from
+            // the SAME shared scope facts — so the recorded helper never drifts from
+            // the emission.
             if s.kind == SpecialKind::Element
                 && matches!(
-                    super::client_svelte_element::svelte_element_attr_route(&s.attrs),
+                    super::client_svelte_element::svelte_element_attr_route(
+                        &s.attrs,
+                        scope_facts.is_some_and(|facts| facts.hash_for(node).is_some()),
+                    ),
                     super::client_svelte_element::SvelteElementAttrRoute::Fold { .. }
                 )
             {
                 helpers.call(SvelteHelper::AttributeEffect);
             }
             for &child in &s.children {
-                walk_node_topology(ir, child, helpers, delegated);
+                walk_node_topology(ir, child, helpers, delegated, scope_facts);
             }
         }
         IrNode::Block(block) => match block {
             BlockIr::If { branches } => {
                 helpers.call(SvelteHelper::If);
                 for b in branches {
-                    walk_topology(ir, b.body, helpers, delegated);
+                    walk_topology(ir, b.body, helpers, delegated, scope_facts);
                 }
             }
             BlockIr::Each {
                 body, else_body, ..
             } => {
                 helpers.call(SvelteHelper::Each);
-                walk_topology(ir, *body, helpers, delegated);
+                walk_topology(ir, *body, helpers, delegated, scope_facts);
                 if let Some(eb) = else_body {
-                    walk_topology(ir, *eb, helpers, delegated);
+                    walk_topology(ir, *eb, helpers, delegated, scope_facts);
                 }
             }
             BlockIr::Await {
@@ -243,15 +269,15 @@ fn walk_node_topology(
             } => {
                 helpers.call(SvelteHelper::Await);
                 for ts in [pending, then_body, catch_body].into_iter().flatten() {
-                    walk_topology(ir, *ts, helpers, delegated);
+                    walk_topology(ir, *ts, helpers, delegated, scope_facts);
                 }
             }
             BlockIr::Key { body, .. } => {
                 helpers.call(SvelteHelper::Key);
-                walk_topology(ir, *body, helpers, delegated);
+                walk_topology(ir, *body, helpers, delegated, scope_facts);
             }
             BlockIr::Snippet { body, .. } => {
-                walk_topology(ir, *body, helpers, delegated);
+                walk_topology(ir, *body, helpers, delegated, scope_facts);
             }
         },
         IrNode::Tag(tag) => match tag {
@@ -289,15 +315,16 @@ fn walk_component_slot_topology(
     slots: &super::ir::ComponentSlots,
     helpers: &mut HelperTrace,
     delegated: &mut DelegatedEvents,
+    scope_facts: Option<&CssScopeFacts>,
 ) {
     for &snippet in &slots.snippet_defs {
-        walk_node_topology(ir, snippet, helpers, delegated);
+        walk_node_topology(ir, snippet, helpers, delegated, scope_facts);
     }
     if let Some(default) = slots.default {
-        walk_topology(ir, default, helpers, delegated);
+        walk_topology(ir, default, helpers, delegated, scope_facts);
     }
     for named in &slots.named {
-        walk_topology(ir, named.region, helpers, delegated);
+        walk_topology(ir, named.region, helpers, delegated, scope_facts);
     }
 }
 

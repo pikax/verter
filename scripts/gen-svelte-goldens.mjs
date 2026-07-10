@@ -3,11 +3,15 @@
  * Generator — Svelte helper-topology reference goldens.
  *
  * Runs the PINNED official `svelte@5.56.3` compiler over the vendored
- * `.svelte` corpus and writes committed, NORMALIZED golden files that pin
- * STRUCTURE + helper-call TOPOLOGY — NOT bytes. The goldens are the pinned
- * Svelte reference the drift gate compares against; byte identity is the bar
- * nowhere. (When the native-Svelte runtime codegen lands it will diff its own
- * emitted output against these same goldens — a follow-up conformance use.)
+ * `.svelte` corpus and writes committed, NORMALIZED golden files. The goldens
+ * are the pinned Svelte reference the drift gate and the native runtime
+ * codegen conformance gates compare against. Cosmetic JS CARRIER formatting
+ * is WAIVED (whitespace/indentation outside literals, local variable-name
+ * noise) — but the goldens DO pin bytes where bytes are the contract: the
+ * CSS payload bytes (`css.code`, the injected `$$css` literal inside
+ * `clientModule`), the scope-hash TOPOLOGY (masked value, pinned placement),
+ * the helper-call argument row, the static-HTML skeleton template strings,
+ * and every other literal preserved by `normalizeModuleForComparison`.
  *
  * This mirrors the `scripts/gen-corpus-audit-tests.mjs` and
  * `scripts/generate-svelte-bind-contract.mjs` patterns: one idempotent
@@ -16,7 +20,7 @@
  * normalized output (non-zero exit on drift). The script is the ONLY way the
  * goldens change — goldens are never hand-edited.
  *
- * ## What is normalized (topology, not bytes)
+ * ## What is normalized (carrier formatting waived; contractual bytes pinned)
  *
  * For each `.svelte` fixture, for each backend (`client` + `server`):
  *   - `backend`               — `client` | `server`.
@@ -42,15 +46,18 @@
  *                               multi-root FRAGMENT flag (`1` / absent).
  *   - `css`                   — `{ present, hash, code }`: whether the fixture
  *                               emitted scoped CSS, the extracted `svelte-<hash>`
- *                               scope hash (topology — the SAME hash must reach
- *                               both backends and the template), and the
- *                               normalized scoped CSS code with the hash masked.
+ *                               scope hash (the SAME hash must reach both
+ *                               backends and the template), and the scoped CSS
+ *                               code BYTES with only the hash masked — the
+ *                               `css.code` payload is byte-contractual.
  *
  * Whitespace, indentation, and local variable-name noise (`text`, `text_1`,
- * `node`, `var fragment`, …) are intentionally NOT pinned — they are formatting
- * the drift bar does not require. Helper FAMILIES, the import set, the
- * export shape, the template skeletons, the scope-hash topology, and the
- * per-backend decisions ARE pinned.
+ * `node`, `var fragment`, …) in the JS CARRIER are intentionally NOT pinned —
+ * cosmetic carrier formatting the conformance bar waives. Helper FAMILIES and
+ * their argument rows, the import set, the export shape, the static-HTML
+ * template skeleton strings, the scope-hash topology, the per-backend
+ * decisions, and the CSS payload bytes (external `css.code` and the injected
+ * `$$css` literal) ARE pinned.
  *
  * ## Usage
  *
@@ -109,12 +116,11 @@ import {
   extractDelegatedEvents,
   extractExportDefault,
   extractImports,
-  extractScopeHash,
   extractTemplates,
   helperCountsOf,
   helperSequenceOf,
   loadPinnedCompiler as loadPinnedCompilerFrom,
-  maskScopeHash,
+  normalizeCss,
   normalizeModuleForComparison,
 } from "./svelte-golden-lib.mjs";
 
@@ -373,10 +379,14 @@ const FIXTURE_COMPILE_OPTIONS = {
   // The `customElement: true` compile option (no `<svelte:options>` value) —
   // the create-without-define custom-element form.
   "options/custom_element_option_true.svelte": { customElement: true },
+  // NO filename: the default css-hash input falls back to the css TEXT
+  // (`filename === '(unknown)' ? css : filename ?? css`) — the golden's
+  // css.hash pins the fallback, discriminating it from the filename input.
+  "css/scope_hash_fallback_no_filename.svelte": { filename: undefined },
 };
 
 // ---------------------------------------------------------------------------
-// Normalization (topology, not bytes)
+// Normalization (carrier formatting waived; contractual bytes pinned)
 // ---------------------------------------------------------------------------
 
 // The topology extractors (scope-hash masking, non-code masking,
@@ -391,12 +401,11 @@ function normalize(slug, backend, compiled) {
   const helperSet = [...new Set(helperSequence)].sort();
   const helperCounts = helperCountsOf(helperSequence);
 
-  const cssCode = compiled.css && compiled.css.code ? compiled.css.code : null;
-  const css = {
-    present: !!cssCode,
-    hash: cssCode ? extractScopeHash(cssCode) : null,
-    code: cssCode ? maskScopeHash(cssCode) : null,
-  };
+  // The shared css normalization (svelte-golden-lib `normalizeCss`):
+  // presence is `compiled.css !== null` — an existing-but-empty `<style>`
+  // body is a REAL artifact (`{present: true, hash: null, code: ""}`), only
+  // an absent style block / injected mode normalizes absent.
+  const css = normalizeCss(compiled);
 
   return {
     slug,

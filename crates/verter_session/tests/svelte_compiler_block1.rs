@@ -605,6 +605,45 @@ fn runtime_main_request_on_a_refused_special_element_is_an_explicit_refusal_yet_
 }
 
 #[test]
+fn svelte_style_virtual_node_carries_the_demanded_css_source_map() {
+    // A Svelte SFC with a scoped `<style>`, compiled under a profile that
+    // DEMANDS maps (`CompileProfile.source_map = true`), must surface the css
+    // map on the `VirtualNodeKind::Style` response: the compiler produces
+    // `RuntimeStyleBlock.source_map` (the official `css.map`, generated from
+    // the same transform that rendered the code) and the session must CARRY
+    // it into the cached virtual file — not drop it on the floor.
+    let host = host();
+    let source = "<script>let c = $state(0);</script>\n<style>.r{color:red}</style>\n<button class=\"r\" onclick={() => c++}>{c}</button>\n";
+    upsert(&host, "/src/Styled.svelte", source, FileLanguage::svelte());
+    let profile = CompileProfile {
+        target: CompileTarget::IDE,
+        source_map: true,
+        ..CompileProfile::default()
+    };
+    let resp = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/Styled.svelte".to_string()),
+            node_kind: Some(VirtualNodeKind::Style { index: 0 }),
+            compile_profile: profile,
+        })
+        .expect("the style virtual node resolves");
+    assert!(
+        resp.code.contains(".r"),
+        "the scoped css code rides the style node: {}",
+        resp.code
+    );
+    let map = resp
+        .source_map
+        .as_deref()
+        .expect("the demanded css map rides the Style response (not dropped)");
+    assert!(
+        map.contains("\"mappings\""),
+        "a real source-map JSON rides the style node: {map}"
+    );
+}
+
+#[test]
 fn runtime_main_request_on_a_supported_svelte_component_returns_the_main_module() {
     // R6 NEGATIVE: a SUPPORTED runes component's runtime `Main` request returns the
     // client module (NOT a refusal) — the refusal path is gated on a real refusal,

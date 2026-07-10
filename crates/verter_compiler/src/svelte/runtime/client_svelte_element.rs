@@ -73,15 +73,27 @@ impl<'a> SupportedClientIr<'a> {
         // attribute-effect fold ordering.
         let mut class_dirs: Vec<String> = Vec::new();
         let mut style_dirs: Vec<String> = Vec::new();
+        // The scope hash for THIS dynamic element — `Some` iff the selector-to-template
+        // matcher marked the host node scoped (the SAME shared [`CssScopeFacts`] read
+        // every other injection site consumes). The SCOPED fact feeds the route (the
+        // official analyze-phase synthetic-class condition reads `node.metadata.scoped`)
+        // and the fold's official 6th `$.attribute_effect` argument; the SetClass fast
+        // path reads the hash again through the shared class projection.
+        //
+        // [`CssScopeFacts`]: super::css::types::CssScopeFacts
+        let scope_hash = self
+            .css_scope
+            .as_ref()
+            .and_then(|facts| facts.hash_for(node_id));
         // The official `SvelteElement` attribute ROUTE (see [`svelte_element_attr_route`]):
         // the lone-static-class `$.set_class($$element, 0, …)` fast path (WITH any
         // co-located `class:` directives merged into the directive-object argument, via the
         // SHARED regular-element class projection), the `$.attribute_effect` fold, or no
         // attribute emission. On the fast path the class attribute + the `class:`
         // directives are CONSUMED by the pieces (they do not fold).
-        let route = svelte_element_attr_route(&s.attrs);
+        let route = svelte_element_attr_route(&s.attrs, scope_hash.is_some());
         let set_class = if matches!(route, SvelteElementAttrRoute::SetClass) {
-            Some(self.project_set_class_pieces(&s.attrs)?)
+            Some(self.project_set_class_pieces(node_id, &s.attrs)?)
         } else {
             None
         };
@@ -161,12 +173,11 @@ impl<'a> SupportedClientIr<'a> {
                         continue;
                     }
                     // A valueless boolean attribute folds as `name: true`; a present value as
-                    // the entity-decoded single-quoted literal.
+                    // the single-quoted literal over the producer-DECODED value (read via
+                    // `as_str`, never a second decode).
                     let v = match value {
                         None => "true".to_string(),
-                        Some(v) => {
-                            js_single_quoted(&super::entity_decode::decode_attr_entities(&v.value))
-                        }
+                        Some(v) => js_single_quoted(v.value.as_str()),
                     };
                     fold.push(ElementFoldItem::Entry(format!("{}: {v}", object_key(name))));
                 }
@@ -260,10 +271,11 @@ impl<'a> SupportedClientIr<'a> {
             }
         }
         // The analyze-phase SYNTHESIZED empty `class` / `style` attributes (official
-        // `phases/2-analyze/index.js`): a `class:`/`style:` directive with no matching
-        // plain attribute (and no spread) contributes a `class: ''` / `style: ''` fold
-        // entry, appended AFTER the real attributes (official pushes the synthetics onto
-        // the attribute list) and BEFORE the `[$.CLASS]` / `[$.STYLE]` directive entries.
+        // `phases/2-analyze/index.js`): a `class:`/`style:` directive OR a SCOPED node
+        // with no matching plain attribute (and no spread) contributes a `class: ''` /
+        // `style: ''` fold entry, appended AFTER the real attributes (official pushes the
+        // synthetics onto the attribute list) and BEFORE the `[$.CLASS]` / `[$.STYLE]`
+        // directive entries.
         if let SvelteElementAttrRoute::Fold {
             synth_class,
             synth_style,
@@ -296,6 +308,9 @@ impl<'a> SupportedClientIr<'a> {
             is_svg: false,
             set_class,
             fold,
+            // The fold's official 6th `$.attribute_effect` argument — the scope-hash
+            // literal for a SCOPED node (`build_attribute_effect`), `None` otherwise.
+            css_hash: scope_hash.map(js_single_quoted),
             binds,
             events,
             body_region,
@@ -330,24 +345,28 @@ pub(super) enum SvelteElementAttrRoute {
 /// the analyze-phase empty-`class`/`style` synthesis rule composed with the transform's
 /// lone-class check:
 ///
-/// - Official synthesizes an empty `class=""` when `class:` directives are present with
-///   no `class` attribute and no spread, and an empty `style=""` when `style:`
-///   directives are present with no `style` attribute and no spread
-///   (`phases/2-analyze/index.js`), appending them AFTER the real attributes.
+/// - Official synthesizes an empty `class=""` when the node is SCOPED or `class:`
+///   directives are present, with no `class` attribute and no spread
+///   (`!has_spread && !has_class && (node.metadata.scoped || has_class_directive)`),
+///   and an empty `style=""` when `style:` directives are present with no `style`
+///   attribute and no spread (`phases/2-analyze/index.js`), appending them AFTER the
+///   real attributes. `scoped` is the caller-provided per-node fact (the shared
+///   `CssScopeFacts` membership) — never inferred from the attribute inventory.
 /// - `attributes.length === 1 && class && is_text_attribute` — counting the synthetics,
 ///   NOT `on:` / `bind:` / `class:` / `style:` directives — routes to the
 ///   [`SetClass`](SvelteElementAttrRoute::SetClass) fast path (so a lone static-text
-///   `class`, with or without co-located `class:` directives, and a PURE `class:`
-///   directive set both take `$.set_class`; a co-located `style:` directive synthesizes
-///   the `style` attribute and forces the fold).
+///   `class`, with or without co-located `class:` directives, a PURE `class:`
+///   directive set, and a SCOPED node with no plain attributes all take `$.set_class`;
+///   a co-located `style:` directive synthesizes the `style` attribute and forces the
+///   fold).
 /// - Any other non-empty effective attribute set routes to the
 ///   [`Fold`](SvelteElementAttrRoute::Fold).
 ///
 /// Structural over the typed `AttrIr` — no source scan, no `starts_with("class")`.
 /// SHARED by the projection (`project_svelte_element`) and the plan topology
 /// (`topology.rs`) so the recorded helper (`$.set_class` vs `$.attribute_effect`) never
-/// drifts from the emission.
-pub(super) fn svelte_element_attr_route(attrs: &[AttrIr]) -> SvelteElementAttrRoute {
+/// drifts from the emission — both callers pass the SAME per-node scoped fact.
+pub(super) fn svelte_element_attr_route(attrs: &[AttrIr], scoped: bool) -> SvelteElementAttrRoute {
     let mut plain_count = 0usize;
     let mut has_spread = false;
     let mut has_class = false;
@@ -380,7 +399,11 @@ pub(super) fn svelte_element_attr_route(attrs: &[AttrIr]) -> SvelteElementAttrRo
             _ => {}
         }
     }
-    let synth_class = !has_spread && !has_class && has_class_dirs;
+    // The official synthetic-class condition (`phases/2-analyze/index.js`):
+    // `!has_spread && !has_class && (node.metadata.scoped || has_class_directive)` —
+    // a SCOPED node synthesizes the empty class even with no `class:` directives
+    // (the spread path appends the hash on its own, so a spread suppresses it).
+    let synth_class = !has_spread && !has_class && (scoped || has_class_dirs);
     let synth_style = !has_spread && !has_style && has_style_dirs;
     let effective = plain_count + usize::from(synth_class) + usize::from(synth_style);
     if effective == 0 {
@@ -502,10 +525,19 @@ impl<'a> ClientEmitter<'a> {
                     }
                 }
             }
-            setup.push_str(&format!(
-                "$.attribute_effect($$element, () => ({{ {} }}));",
-                entries.join(", ")
-            ));
+            // The SHARED `$.attribute_effect` argument row (the same tail builder the
+            // regular-element spread fold uses): a SCOPED dynamic element threads its
+            // scope-hash literal as the official 6th argument
+            // (`build_attribute_effect`); `<svelte:element>` never takes the `<input>`
+            // remove-defaults tail (the official `SvelteElement` visitor passes no
+            // `should_remove_defaults`).
+            let call = super::client_spread_html_emit::attribute_effect_call(
+                "$$element",
+                &entries.join(", "),
+                false,
+                el.css_hash.as_deref(),
+            );
+            setup.push_str(&format!("{call};"));
         }
         for bind in &el.binds {
             // The measurement / property binds stay AFTER the class/attribute build (the

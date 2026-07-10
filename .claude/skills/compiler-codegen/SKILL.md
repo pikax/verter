@@ -139,6 +139,8 @@ Post-hoc string manipulation breaks sourcemap accuracy: `CodeTransform` generate
 
 **Wrong:** Call `content.replace(".vue'", ".vue.ts'")` on the built string -- the source map still reflects the pre-replace byte offsets.
 
+The rule has NO scoped exceptions: the Svelte scoped-CSS renderer (`crates/verter_compiler/src/svelte/runtime/css/render.rs`) edits the original component source through the shared `CodeTransform`'s checked (`try_*`) operations -- whose insertion-affinity chunk model carries the `magic-string` semantics the official `svelte@5.56.3` `render_stylesheet` depends on (content-only `try_update` preserving the replaced range's first-chunk boundary insertions, left/right insertion affinity with per-affinity stacking, `try_remove` clearing interior insertions; pinned by `code_transform/edit_semantics_tests.rs`) -- and generates the css source map (`css.map`) from the SAME transform that built `css.code`. The guard `svelte_css_renderer_uses_code_transform` (`crates/verter_compiler/tests/`) asserts the renderer stays on the shared transform and bans any private edit buffer from the css matcher/render tree.
+
 ## Binding Metadata Flow
 
 1. `script/process.rs` parses `<script setup>` -> walks AST -> classifies bindings as `BindingType` (SetupConst, SetupRef, Props, etc.)

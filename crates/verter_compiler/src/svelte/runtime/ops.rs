@@ -395,8 +395,11 @@ fn attr_op_kind_for_name(name: &str) -> AttrOpKind {
 fn non_static_property_op(target: NodeId, attr: &AttrIr) -> Option<RuntimeOp> {
     let (name, value) = match attr {
         AttrIr::Static { name, value } if cannot_be_set_statically(name) => {
+            // The literal is the producer-DECODED value (the runtime property
+            // write receives the semantic string, matching the official
+            // parse-time decoded `Text.data`).
             let v = match value {
-                Some(v) => NonStaticPropertyValue::Literal(v.value.clone()),
+                Some(v) => NonStaticPropertyValue::Literal(v.value.as_str().to_string()),
                 None => NonStaticPropertyValue::Boolean,
             };
             (name.clone(), v)

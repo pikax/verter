@@ -379,6 +379,15 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // scheduler-retained parse snapshot and returns owned typed
             // IR — never a raw-string re-parse per body touch.
             "lazy_decl_lowering_uses_scheduler_snapshot_not_reparse",
+            // The Svelte CSS selector-to-template matcher tree walks the
+            // owned typed projections (`AnalyzedExpr::matcher_expr` /
+            // `AnalyzedExpr::render_callee`) lowered during the single
+            // template-expression parse — never an `oxc_parser` /
+            // `Allocator` construction, a `format!("(…")` synth-wrap
+            // reparse, or a semantic `analyzed.source` read inside the
+            // matcher tree (the no-format-then-reparse facet on the
+            // Svelte CSS surface).
+            "svelte_css_matcher_uses_analyzed_expr_ir",
             // Migration foundation: the carrier-construction surface emits
             // TYPED carriers (BareRef / ImportType / RawFallback / typed
             // QueryError), never a raw `TypeExpr::Unknown` control sentinel
@@ -443,6 +452,14 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // `prepend_left` / `append_left` preserves byte offsets;
             // `String::replace` on the built result does not).
             "compile_audit_sourcemap",
+            // The Svelte scoped-CSS renderer edits through the SHARED
+            // `CodeTransform` (positive: the token is real code in
+            // css/render.rs) and NO private edit buffer may return to
+            // the css matcher/render tree (negative: the retired
+            // private-buffer type names and the into_string +
+            // chunk-list buffer shape are banned there). Discrimination
+            // self-tests flip each predicate on the guarded mutation.
+            "svelte_css_renderer_uses_code_transform",
         ],
     ),
     (

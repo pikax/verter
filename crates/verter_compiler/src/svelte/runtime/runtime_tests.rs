@@ -1255,8 +1255,8 @@ fn legacy_component_import_plan_sets_legacy_flag() {
     // `import 'svelte/internal/flags/legacy'`.
     let src = "<script>\n\timport { writable } from 'svelte/store';\n\tconst count = writable(0);\n</script>\n<button>{$count}</button>";
     let ir = lower(src, &alloc);
-    let plan = plan_static_templates(&ir);
-    let topo = plan_client_topology(&ir, &plan);
+    let plan = plan_static_templates(&ir, None);
+    let topo = plan_client_topology(&ir, &plan, None);
     assert!(
         topo.imports.legacy_flag,
         "a legacy (non-runes) component sets the legacy flag"
@@ -1274,8 +1274,8 @@ fn runes_component_import_plan_clears_legacy_flag() {
     // A runes component (`$state`) → runes mode → NO legacy flag.
     let src = "<script>\n\tlet count = $state(0);\n\tfunction inc(){ count += 1; }\n</script>\n<button onclick={inc}>{count}</button>";
     let ir = lower(src, &alloc);
-    let plan = plan_static_templates(&ir);
-    let topo = plan_client_topology(&ir, &plan);
+    let plan = plan_static_templates(&ir, None);
+    let topo = plan_client_topology(&ir, &plan, None);
     assert!(
         !topo.imports.legacy_flag,
         "a runes component must NOT set the legacy flag"
@@ -1301,8 +1301,8 @@ fn topology_records_no_bind_helper_for_checked_without_type() {
     // closed, so the topology recorder must NOT record `BindChecked`.
     let src = "<script>let c = $state(false);</script>\n<input bind:checked={c} />\n";
     let ir = lower(src, &alloc);
-    let plan = plan_static_templates(&ir);
-    let topo = plan_client_topology(&ir, &plan);
+    let plan = plan_static_templates(&ir, None);
+    let topo = plan_client_topology(&ir, &plan, None);
     assert!(
         !topo.helpers.uses(SvelteHelper::BindChecked),
         "a refused `bind:checked` (no type) must record NO bind helper (the recorder \
@@ -1320,8 +1320,8 @@ fn topology_records_no_bind_helper_for_group_with_valueless_type() {
     // `BindGroup`.
     let src = "<script>let g = $state(\"\");</script>\n<input type bind:group={g} value=\"a\" />\n";
     let ir = lower(src, &alloc);
-    let plan = plan_static_templates(&ir);
-    let topo = plan_client_topology(&ir, &plan);
+    let plan = plan_static_templates(&ir, None);
+    let topo = plan_client_topology(&ir, &plan, None);
     assert!(
         !topo.helpers.uses(SvelteHelper::BindGroup),
         "a refused `bind:group` (valueless type) must record NO bind helper:\n{:?}",
@@ -1337,8 +1337,8 @@ fn topology_still_records_bind_helper_for_valid_group() {
     // (the gate must not over-refuse). Verified against svelte@5.56.3.
     let src = "<script>let g = $state(\"\");</script>\n<input type=\"radio\" bind:group={g} value=\"a\" />\n";
     let ir = lower(src, &alloc);
-    let plan = plan_static_templates(&ir);
-    let topo = plan_client_topology(&ir, &plan);
+    let plan = plan_static_templates(&ir, None);
+    let topo = plan_client_topology(&ir, &plan, None);
     assert!(
         topo.helpers.uses(SvelteHelper::BindGroup),
         "a valid static-type `bind:group` must still record the bind helper:\n{:?}",
@@ -1370,8 +1370,8 @@ fn svelte_options_runes_true_forces_runes_mode_without_rune_calls() {
         "an explicit `<svelte:options runes={{true}}>` forces runes mode despite zero rune calls"
     );
     // Negative (the mode-derived flag): a runes component carries NO legacy flag.
-    let plan = plan_static_templates(&ir);
-    let topo = plan_client_topology(&ir, &plan);
+    let plan = plan_static_templates(&ir, None);
+    let topo = plan_client_topology(&ir, &plan, None);
     assert!(
         !topo.imports.legacy_flag,
         "forced-runes mode must NOT set the legacy flag"
@@ -1394,8 +1394,8 @@ fn svelte_options_runes_false_forces_legacy_mode_with_state_rune() {
         "an explicit `<svelte:options runes={{false}}>` forces legacy mode even with a `$state` rune present"
     );
     // The mode-derived flag: a legacy component carries the legacy flag.
-    let plan = plan_static_templates(&ir);
-    let topo = plan_client_topology(&ir, &plan);
+    let plan = plan_static_templates(&ir, None);
+    let topo = plan_client_topology(&ir, &plan, None);
     assert!(
         topo.imports.legacy_flag,
         "forced-legacy mode sets the legacy flag"
@@ -1431,8 +1431,8 @@ fn shadowing_function_param_named_rune_keeps_component_legacy() {
         "a function-param `$state` is a shadowing local, not a rune — the component stays legacy"
     );
     // The mode-derived flag confirms it: a legacy component carries the legacy flag.
-    let plan = plan_static_templates(&ir);
-    let topo = plan_client_topology(&ir, &plan);
+    let plan = plan_static_templates(&ir, None);
+    let topo = plan_client_topology(&ir, &plan, None);
     assert!(
         topo.imports.legacy_flag,
         "the shadowed-rune component is legacy → carries the legacy flag"
@@ -1452,8 +1452,8 @@ fn real_state_rune_call_makes_component_runes() {
         super::ir::SvelteMode::Runes,
         "a real (un-shadowed) `$state(0)` call forces runes mode"
     );
-    let plan = plan_static_templates(&ir);
-    let topo = plan_client_topology(&ir, &plan);
+    let plan = plan_static_templates(&ir, None);
+    let topo = plan_client_topology(&ir, &plan, None);
     assert!(
         !topo.imports.legacy_flag,
         "the real-rune component is runes → no legacy flag"
@@ -1544,7 +1544,7 @@ fn fragment_flag_set_for_multi_root_absent_for_single() {
 
     let two_root = "<h1>a</h1>\n<p>b</p>";
     let ir = lower(two_root, &alloc);
-    let plan = plan_static_templates(&ir);
+    let plan = plan_static_templates(&ir, None);
     assert_eq!(
         first_fragment_flag(&plan.templates[0]),
         TemplateFlag::from_bits(TemplateFlag::FRAGMENT),
@@ -1553,7 +1553,7 @@ fn fragment_flag_set_for_multi_root_absent_for_single() {
 
     let three_root = "<h1>a</h1>\n<p>b</p>\n<span>c</span>";
     let ir = lower(three_root, &alloc);
-    let plan = plan_static_templates(&ir);
+    let plan = plan_static_templates(&ir, None);
     assert_eq!(
         first_fragment_flag(&plan.templates[0]),
         TemplateFlag::from_bits(TemplateFlag::FRAGMENT),
@@ -1562,7 +1562,7 @@ fn fragment_flag_set_for_multi_root_absent_for_single() {
 
     let one_root = "<div><span>a</span><span>b</span></div>";
     let ir = lower(one_root, &alloc);
-    let plan = plan_static_templates(&ir);
+    let plan = plan_static_templates(&ir, None);
     assert_eq!(
         first_fragment_flag(&plan.templates[0]),
         None,
@@ -1579,7 +1579,7 @@ fn block_only_root_plans_comment_anchor() {
     let alloc = Allocator::default();
     let src = "<script>\n\tlet show = $state(true);\n</script>\n{#if show}<p>x</p>{/if}";
     let ir = lower(src, &alloc);
-    let plan = plan_static_templates(&ir);
+    let plan = plan_static_templates(&ir, None);
     assert!(
         matches!(
             plan.templates[0],
@@ -1606,8 +1606,8 @@ fn onclick_is_delegated_onfocus_is_not() {
     let alloc = Allocator::default();
     let src = "<script>\n\tlet n = $state(0);\n</script>\n<button onclick={() => n++}>x</button>\n<input onfocus={() => {}} />";
     let ir = lower(src, &alloc);
-    let plan = plan_static_templates(&ir);
-    let topo = plan_client_topology(&ir, &plan);
+    let plan = plan_static_templates(&ir, None);
+    let topo = plan_client_topology(&ir, &plan, None);
     assert!(
         topo.delegated_events.contains("click"),
         "onclick registers `click` in the delegated set"
@@ -1625,6 +1625,40 @@ fn onclick_is_delegated_onfocus_is_not() {
     assert!(
         topo.helpers.uses(SvelteHelper::Event),
         "a non-delegated handler uses $.event"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 8b — the `<svelte:element>` fold records exactly ONE `$.attribute_effect`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn svelte_element_fold_plans_exactly_one_attribute_effect() {
+    // A `<svelte:element>` whose attributes route to the FOLD emits exactly ONE
+    // `$.attribute_effect` for the WHOLE co-located fold — the spread must NOT
+    // double-record through the per-attribute recorder (the regular-element
+    // spread arm) on top of the fold-route record. Official emits one call;
+    // the planned count must equal it.
+    let alloc = Allocator::default();
+    let src = "<script>let tag = $state('div');\nlet { p } = $props();</script>\n<svelte:element this={tag} {...p}>x</svelte:element>";
+    let ir = lower(src, &alloc);
+    let plan = plan_static_templates(&ir, None);
+    let topo = plan_client_topology(&ir, &plan, None);
+    assert_eq!(
+        topo.helpers.count(SvelteHelper::AttributeEffect),
+        1,
+        "a spread <svelte:element> fold plans exactly one $.attribute_effect"
+    );
+
+    // The REGULAR-element spread control still records its single fold call.
+    let src = "<script>let { p } = $props();</script>\n<div {...p}>x</div>";
+    let ir = lower(src, &alloc);
+    let plan = plan_static_templates(&ir, None);
+    let topo = plan_client_topology(&ir, &plan, None);
+    assert_eq!(
+        topo.helpers.count(SvelteHelper::AttributeEffect),
+        1,
+        "a spread regular element plans exactly one $.attribute_effect"
     );
 }
 
@@ -2774,6 +2808,85 @@ fn render_member_callee_carries_args() {
 }
 
 // ---------------------------------------------------------------------------
+// The stored `render_callee` fact — classified ONCE by the SAME parse that
+// analyzes the expression (`collect_expr_references`), the single authority
+// the render-callee resolution pass AND the CSS matcher read (no consumer
+// re-parses the inner text). FAILS against an always-Dynamic-empty stub.
+// ---------------------------------------------------------------------------
+
+/// The stored `render_callee` fact of one expression source (the same
+/// single-parse analysis `push_expr` runs).
+fn render_callee_fact_of(src: &str) -> super::expr::RenderCalleeShape {
+    super::expr::collect_expr_references(src)
+        .expect("the render expression parses")
+        .render_callee
+}
+
+#[test]
+fn render_callee_fact_static_name_carries_optional_flag_and_arg_spans() {
+    use super::expr::RenderCalleeShape;
+    // `row(1)` — the arg span is INNER-TEXT-relative (the `1` at 4..5).
+    assert_eq!(
+        render_callee_fact_of("row(1)"),
+        RenderCalleeShape::StaticName {
+            name: "row".to_string(),
+            optional: false,
+            args: vec![(4, 5)],
+        }
+    );
+    // The optional call keeps the flag; author parens around the callee peel.
+    assert_eq!(
+        render_callee_fact_of("row?.(1)"),
+        RenderCalleeShape::StaticName {
+            name: "row".to_string(),
+            optional: true,
+            args: vec![(6, 7)],
+        }
+    );
+    assert_eq!(
+        render_callee_fact_of("(row)(1)"),
+        RenderCalleeShape::StaticName {
+            name: "row".to_string(),
+            optional: false,
+            args: vec![(6, 7)],
+        }
+    );
+}
+
+#[test]
+fn render_callee_fact_member_and_non_call_shapes_stay_dynamic() {
+    use super::expr::RenderCalleeShape;
+    // A member callee stays Dynamic but keeps its argument span (`x` at 9..10).
+    assert_eq!(
+        render_callee_fact_of("obj.snip(x)"),
+        RenderCalleeShape::Dynamic {
+            args: vec![(9, 10)],
+        }
+    );
+    // A non-call expression is the whole dynamic callee, with no args.
+    assert_eq!(
+        render_callee_fact_of("row"),
+        RenderCalleeShape::Dynamic { args: Vec::new() }
+    );
+}
+
+#[test]
+fn render_callee_fact_spread_argument_flags_fail_closed() {
+    use super::expr::RenderCalleeShape;
+    // A spread argument is the official `render_tag_invalid_spread_argument`
+    // hard error — the fact carries the fail-closed marker, even through
+    // author parens around the whole call.
+    assert_eq!(
+        render_callee_fact_of("row(...xs)"),
+        RenderCalleeShape::SpreadArguments
+    );
+    assert_eq!(
+        render_callee_fact_of("(row(...xs))"),
+        RenderCalleeShape::SpreadArguments
+    );
+}
+
+// ---------------------------------------------------------------------------
 // F12 — a zero-root template (only a `<script>` + whitespace) still plans a
 // CommentAnchor for the root region. FAILS against the skip-empty-region path
 // that produced no factory.
@@ -2784,7 +2897,7 @@ fn zero_root_template_plans_comment_anchor() {
     let alloc = Allocator::default();
     let src = "<script>let n = $state(0);</script>\n";
     let ir = lower(src, &alloc);
-    let plan = plan_static_templates(&ir);
+    let plan = plan_static_templates(&ir, None);
     assert!(
         !plan.templates.is_empty(),
         "a zero-root component still plans a root factory"
@@ -2819,7 +2932,7 @@ fn client_paths_built_from_effective_dom_sequence() {
     // sequence, so there is NO sibling offset).
     let src = "<script>let x = $state(0);</script><div>\n{x}</div>";
     let ir = lower(src, &alloc);
-    let plan = plan_static_templates(&ir);
+    let plan = plan_static_templates(&ir, None);
     // The interpolation node's path.
     let interp = ir
         .nodes
@@ -2877,7 +2990,7 @@ fn multiroot_dynamic_after_static_root_descends_from_fragment_first() {
     // — FirstChild THEN Sibling{1}. FAILS against the bare `Sibling{1}` path.
     let src = "<script>let x = $state(0);</script><a href=\"/\">link</a>{x}";
     let ir = lower(src, &alloc);
-    let plan = plan_static_templates(&ir);
+    let plan = plan_static_templates(&ir, None);
     let interp = ir
         .nodes
         .iter()
@@ -2913,7 +3026,7 @@ fn every_node_base_path_refers_to_a_node_with_its_own_plan() {
     // a multi-root layout — exercise both the Fragment-base and Node-base paths.
     let src = "<script>let x = $state(0); let y = $state(1);</script><section><div><span>{x}</span></div></section>{y}";
     let ir = lower(src, &alloc);
-    let plan = plan_static_templates(&ir);
+    let plan = plan_static_templates(&ir, None);
     // Every PathBase::Node(n) must refer to a node that has its OWN path plan.
     for path in &plan.client_paths {
         if let PathBase::Node(base) = path.base {
@@ -2950,7 +3063,7 @@ fn dynamic_slot_list_covers_every_dynamic_surface() {
         "<script>let h = $state('<b>x</b>');</script><div>{@html h}</div>",
         &alloc,
     );
-    let html_slots = plan_static_templates(&html_ir).slots;
+    let html_slots = plan_static_templates(&html_ir, None).slots;
     assert!(
         html_slots
             .iter()
@@ -2963,7 +3076,7 @@ fn dynamic_slot_list_covers_every_dynamic_surface() {
         &alloc,
     );
     assert!(
-        plan_static_templates(&spread_ir)
+        plan_static_templates(&spread_ir, None)
             .slots
             .iter()
             .any(|s| matches!(s.kind, DynamicSlotKind::Spread { .. })),
@@ -2975,7 +3088,7 @@ fn dynamic_slot_list_covers_every_dynamic_surface() {
         &alloc,
     );
     assert!(
-        plan_static_templates(&class_ir)
+        plan_static_templates(&class_ir, None)
             .slots
             .iter()
             .any(|s| matches!(s.kind, DynamicSlotKind::Class { .. })),
@@ -2987,7 +3100,7 @@ fn dynamic_slot_list_covers_every_dynamic_surface() {
         &alloc,
     );
     assert!(
-        plan_static_templates(&style_ir)
+        plan_static_templates(&style_ir, None)
             .slots
             .iter()
             .any(|s| matches!(s.kind, DynamicSlotKind::Style { .. })),
@@ -2999,7 +3112,7 @@ fn dynamic_slot_list_covers_every_dynamic_surface() {
         &alloc,
     );
     assert!(
-        plan_static_templates(&bind_ir)
+        plan_static_templates(&bind_ir, None)
             .slots
             .iter()
             .any(|s| matches!(s.kind, DynamicSlotKind::Bind { .. })),
@@ -3023,7 +3136,7 @@ fn component_dynamic_prop_contributes_a_slot() {
     let src =
         "<script>import Foo from './Foo.svelte'; let v = $state(1);</script><Foo value={v} />";
     let ir = lower(src, &alloc);
-    let slots = plan_static_templates(&ir).slots;
+    let slots = plan_static_templates(&ir, None).slots;
     assert!(
         slots.iter().any(|s| matches!(
             &s.kind,
@@ -3041,7 +3154,7 @@ fn special_element_dynamic_bind_contributes_a_slot() {
     // slot from the special element's attrs.
     let src = "<script>let w = $state(0);</script><svelte:window bind:innerWidth={w} />";
     let ir = lower(src, &alloc);
-    let slots = plan_static_templates(&ir).slots;
+    let slots = plan_static_templates(&ir, None).slots;
     assert!(
         slots.iter().any(|s| matches!(
             &s.kind,
@@ -3065,7 +3178,7 @@ mod non_body_special_excluded_from_skeleton {
     fn skeletons(src: &str) -> Vec<(String, Option<String>)> {
         let alloc = Allocator::default();
         let ir = lower(src, &alloc);
-        plan_static_templates(&ir)
+        plan_static_templates(&ir, None)
             .templates
             .iter()
             .filter_map(|t| match t {
@@ -3205,7 +3318,7 @@ mod non_rendering_construct_excluded_from_skeleton {
     fn skeletons(src: &str) -> Vec<(String, Option<String>)> {
         let alloc = Allocator::default();
         let ir = lower(src, &alloc);
-        plan_static_templates(&ir)
+        plan_static_templates(&ir, None)
             .templates
             .iter()
             .filter_map(|t| match t {
@@ -3296,7 +3409,7 @@ fn static_text_content_is_raw_not_double_escaped() {
     // passes ALL of them through verbatim into the from_html template string.
     let src = "<div>x &amp; y &lt; z &nbsp; Tom &amp; Jerry</div>";
     let ir = lower(src, &alloc);
-    let plan = plan_static_templates(&ir);
+    let plan = plan_static_templates(&ir, None);
     let html = match &plan.templates[0] {
         TemplateFactory::FromHtml { html, .. } => html.clone(),
         other => panic!("expected a from_html factory, got {other:?}"),
@@ -3326,7 +3439,7 @@ fn static_attribute_value_is_entity_aware_escaped() {
     // `&amp;` (preserved, NOT doubled).
     let src = "<div title='say \"hi\" Tom & Jerry &amp; co'>x</div>";
     let ir = lower(src, &alloc);
-    let plan = plan_static_templates(&ir);
+    let plan = plan_static_templates(&ir, None);
     let html = match &plan.templates[0] {
         TemplateFactory::FromHtml { html, .. } => html.clone(),
         other => panic!("expected a from_html factory, got {other:?}"),
@@ -3369,7 +3482,7 @@ mod attribute_entity_decode {
     fn attr_skeleton(src: &str) -> String {
         let alloc = Allocator::default();
         let ir = lower(src, &alloc);
-        match &plan_static_templates(&ir).templates[0] {
+        match &plan_static_templates(&ir, None).templates[0] {
             TemplateFactory::FromHtml { html, .. } => html.clone(),
             other => panic!("expected a from_html factory, got {other:?}"),
         }
@@ -3601,7 +3714,7 @@ fn static_whitespace_preserved_around_nested_element() {
     // `<p>Hello <strong>world</strong> !</p>` — both significant spaces kept.
     let src = "<p>Hello <strong>world</strong> !</p>";
     let ir = lower(src, &alloc);
-    let plan = plan_static_templates(&ir);
+    let plan = plan_static_templates(&ir, None);
     let html = match &plan.templates[0] {
         TemplateFactory::FromHtml { html, .. } => html.clone(),
         other => panic!("expected a from_html factory, got {other:?}"),
@@ -3625,7 +3738,7 @@ fn static_interior_whitespace_preserved_but_edges_trimmed() {
     // preserved verbatim (NOT collapsed to one). FAILS against `collapse_text`.
     let src = "<p>  Hello   world  </p>";
     let ir = lower(src, &alloc);
-    let plan = plan_static_templates(&ir);
+    let plan = plan_static_templates(&ir, None);
     let html = match &plan.templates[0] {
         TemplateFactory::FromHtml { html, .. } => html.clone(),
         other => panic!("expected a from_html factory, got {other:?}"),
@@ -3660,7 +3773,7 @@ fn literal_nbsp_root_is_significant_not_whitespace_dropped() {
     // `<p>x</p>` region with the NBSP silently dropped.
     let src = "\u{00a0}{#if true}<p>x</p>{/if}";
     let ir = lower(src, &alloc);
-    let plan = plan_static_templates(&ir);
+    let plan = plan_static_templates(&ir, None);
     let htmls: Vec<String> = plan
         .templates
         .iter()
@@ -3811,11 +3924,14 @@ mod topology_oracle {
 
     /// The serialized template skeleton our planner produced as `(html, flag)`
     /// rows, in plan order. A comment-anchor factory is excluded (the tight
-    /// fixture set has no comment-anchor root).
+    /// fixture set has no comment-anchor root). `css` is the fixture's proven
+    /// scope-injection facts (`None` for a style-less fixture) — the skeleton
+    /// bake consumes it exactly as the production pipeline threads it.
     fn planner_templates(
         ir: &crate::svelte::runtime::ir::SvelteRuntimeIr,
+        css: Option<&crate::svelte::runtime::css::types::CssScopeFacts>,
     ) -> Vec<(String, Option<String>)> {
-        let plan = plan_static_templates(ir);
+        let plan = plan_static_templates(ir, css);
         plan.templates
             .iter()
             .filter_map(|t| match t {
@@ -3828,6 +3944,65 @@ mod topology_oracle {
                 | TemplateFactory::Standalone { .. } => None,
             })
             .collect()
+    }
+
+    /// Build the fixture's proven css scope-injection facts from its top-level
+    /// `<style>` (`None` for a style-less fixture). Mirrors the production
+    /// wiring: parse + analyze + match over the runtime IR; a fixture that
+    /// fails the plan build (analysis OR matcher-unprovable) fails LOUD (the
+    /// vendored corpus is supported by construction).
+    fn fixture_scope_facts(
+        source: &str,
+        ir: &crate::svelte::runtime::ir::SvelteRuntimeIr,
+    ) -> Option<crate::svelte::runtime::css::types::CssScopeFacts> {
+        use crate::svelte::runtime::css;
+        let parsed = parse_svelte(source);
+        let style = parsed.styles.first()?;
+        let content = style.content.expect("a corpus style has a body span");
+        // The matrix hash input is irrelevant (the skeleton comparison masks
+        // every `svelte-<hash>` token), so the css-text fallback suffices; the
+        // mode does not affect the skeleton.
+        let plan = css::build_style_scope_plan(
+            source,
+            content,
+            None,
+            css::types::CssMode::External,
+            ir,
+            false,
+        )
+        .expect("a corpus style analyzes and proves its matcher facts");
+        Some(plan.scope_facts())
+    }
+
+    /// Mask every `svelte-<hash>` scope token to the golden's `svelte-<scoped>`
+    /// placeholder — the Rust port of the golden generator's `maskScopeHash`
+    /// (`/svelte-[0-9a-z]+/g`), so the skeleton comparison is hash-independent.
+    fn mask_scope_hash(text: &str) -> String {
+        let bytes = text.as_bytes();
+        let mut out = String::with_capacity(text.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            if text[i..].starts_with("svelte-") {
+                let start = i + "svelte-".len();
+                let mut end = start;
+                while end < bytes.len()
+                    && (bytes[end].is_ascii_digit() || bytes[end].is_ascii_lowercase())
+                {
+                    end += 1;
+                }
+                if end > start {
+                    out.push_str("svelte-<scoped>");
+                    i = end;
+                    continue;
+                }
+            }
+            // Advance one CHAR (the skeleton may contain multi-byte decoded
+            // entities).
+            let ch = text[i..].chars().next().expect("in-bounds char");
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+        out
     }
 
     /// Normalize the dynamic-text placeholder inside an otherwise-empty element
@@ -3930,17 +4105,10 @@ mod topology_oracle {
         // the matrix asserts it. The fixture as a whole still fails closed elsewhere on
         // the checkbox-group `$state([])` array-proxy, owned by 5g.)
         //
-        // CSS scope-class injection: official injects the `svelte-<hash>` scoped
-        // class into the skeleton; the scope-hash computation + injection is the
-        // CSS-scoping layer, not the runtime-IR template plan.
-        LedgerRow {
-            fixture: "css/scoped_styles.svelte",
-            axis: TopologyAxis::Skeleton,
-            owning_layer: "the CSS scoping layer (scope-class injection)",
-            reason: "official injects the `svelte-<hash>` scoped class into the skeleton; the \
-                     scope-hash + class injection is the CSS-scoping layer's concern, not the \
-                     runtime-IR template plan",
-        },
+        // (The `css/scoped_styles.svelte` Skeleton ledger row was REMOVED: the
+        // scope-class injection now bakes `svelte-<hash>` into the planned
+        // skeleton, so the matrix asserts the fixture exactly.)
+        //
         // Identical-skeleton template hoisting/dedup: official hoists two identical
         // `from_html` skeletons (the `{:then}` + `{:catch}` branches both serialize
         // to `<p></p>`) into ONE shared factory; the runtime-IR plan emits one region
@@ -4036,8 +4204,11 @@ mod topology_oracle {
         let ir =
             lower_parsed_svelte_to_ir(&source, &parsed, &SvelteRuntimeOptions::default(), &alloc)
                 .expect("fixture lowers");
-        let plan = plan_static_templates(&ir);
-        let topo = plan_client_topology(&ir, &plan);
+        // The fixture's proven scope-injection facts (a style-less fixture has
+        // none) — the skeleton bake consumes them exactly as production does.
+        let css_facts = fixture_scope_facts(&source, &ir);
+        let plan = plan_static_templates(&ir, css_facts.as_ref());
+        let topo = plan_client_topology(&ir, &plan, css_facts.as_ref());
 
         // The owned universe as a set, for membership checks.
         let owned_universe: BTreeMap<&str, ()> = OWNED_STRUCTURAL_HELPERS
@@ -4102,10 +4273,15 @@ mod topology_oracle {
         // (3) The template skeleton (serialized static HTML + fragment flag) as a
         // normalized MULTISET.
         if !is_ledgered(slug, TopologyAxis::Skeleton) {
-            let mut planned: Vec<(String, Option<String>)> = planner_templates(&ir)
-                .into_iter()
-                .map(|(html, flag)| (normalize_placeholder(&html), flag))
-                .collect();
+            // BOTH sides mask the scope hash to `svelte-<scoped>` (the golden
+            // stores the masked form; Verter's planned skeleton carries the
+            // real hash) — the comparison pins the scope-class TOPOLOGY, and
+            // the hash VALUE is pinned by the emitted-JS/css parity gates.
+            let mut planned: Vec<(String, Option<String>)> =
+                planner_templates(&ir, css_facts.as_ref())
+                    .into_iter()
+                    .map(|(html, flag)| (normalize_placeholder(&mask_scope_hash(&html)), flag))
+                    .collect();
             let mut golden_templates: Vec<(String, Option<String>)> = golden
                 .templates
                 .iter()
@@ -4269,8 +4445,8 @@ mod topology_oracle {
         let ir =
             lower_parsed_svelte_to_ir(&source, &parsed, &SvelteRuntimeOptions::default(), &alloc)
                 .expect("fixture lowers");
-        let plan = plan_static_templates(&ir);
-        let topo = plan_client_topology(&ir, &plan);
+        let plan = plan_static_templates(&ir, None);
+        let topo = plan_client_topology(&ir, &plan, None);
         assert!(
             topo.delegated_events.contains("click"),
             "click is delegated"
@@ -4417,8 +4593,8 @@ mod topology_oracle {
                 &alloc,
             )
             .expect("fixture lowers");
-            let plan = plan_static_templates(&ir);
-            let topo = plan_client_topology(&ir, &plan);
+            let plan = plan_static_templates(&ir, None);
+            let topo = plan_client_topology(&ir, &plan, None);
             // Consistency: a non-empty planned set must coincide with the golden's
             // `delegate` helper presence (the module-level set declaration).
             let golden_has_delegate = golden.helper_set.iter().any(|h| h == "delegate");
@@ -4465,7 +4641,7 @@ mod topology_oracle {
                 &alloc,
             )
             .expect("fixture lowers");
-            let plan = plan_static_templates(&ir);
+            let plan = plan_static_templates(&ir, None);
 
             // The body-reachable interpolation node ids: walk every template scope's
             // roots, descending element/component/renderable-special children but NOT
@@ -4608,8 +4784,9 @@ mod topology_oracle {
         let ir =
             lower_parsed_svelte_to_ir(&source, &parsed, &SvelteRuntimeOptions::default(), &alloc)
                 .expect("fixture lowers");
-        let plan = plan_static_templates(&ir);
-        let topo = plan_client_topology(&ir, &plan);
+        let css_facts = fixture_scope_facts(&source, &ir);
+        let plan = plan_static_templates(&ir, css_facts.as_ref());
+        let topo = plan_client_topology(&ir, &plan, css_facts.as_ref());
         let owned_universe: BTreeMap<&str, ()> = OWNED_STRUCTURAL_HELPERS
             .iter()
             .map(|h| (h.ident(), ()))
@@ -4640,10 +4817,11 @@ mod topology_oracle {
                 })
             }
             TopologyAxis::Skeleton => {
-                let mut planned: Vec<(String, Option<String>)> = planner_templates(&ir)
-                    .into_iter()
-                    .map(|(html, flag)| (normalize_placeholder(&html), flag))
-                    .collect();
+                let mut planned: Vec<(String, Option<String>)> =
+                    planner_templates(&ir, css_facts.as_ref())
+                        .into_iter()
+                        .map(|(html, flag)| (normalize_placeholder(&mask_scope_hash(&html)), flag))
+                        .collect();
                 let mut golden_templates: Vec<(String, Option<String>)> = golden
                     .templates
                     .iter()
@@ -4758,7 +4936,7 @@ mod nested_region_slot_path_completeness {
         // body's scope id. The prior root-only collection produced NEITHER.
         let src = "<script>\n\tlet items = $state([{ name: 'a' }]);\n</script>\n{#each items as x}<p>{x.name}</p>{/each}";
         let ir = lower(src, &alloc);
-        let plan = plan_static_templates(&ir);
+        let plan = plan_static_templates(&ir, None);
         let body = each_body_scope(&ir).expect("the each block has a body scope");
 
         // (1) A Text slot for `{x.name}` exists in the each-body region.
@@ -4809,7 +4987,7 @@ mod nested_region_slot_path_completeness {
         // `first_child(fragment)`).
         let src = "<script>\n\tlet show = $state(true);\n\tlet url = $state('x');\n</script>\n{#if show}<a href={url}>link</a><b>x</b>{/if}";
         let ir = lower(src, &alloc);
-        let plan = plan_static_templates(&ir);
+        let plan = plan_static_templates(&ir, None);
         let branches = if_branch_scopes(&ir);
         assert!(!branches.is_empty(), "the if block has at least one branch");
 
@@ -4845,7 +5023,7 @@ mod nested_region_slot_path_completeness {
         // against the pre-fix code that planned a spurious `first_child` walk.
         let src = "<script>\n\tlet show = $state(true);\n\tlet url = $state('x');\n</script>\n{#if show}<a href={url}>link</a>{/if}";
         let ir = lower(src, &alloc);
-        let plan = plan_static_templates(&ir);
+        let plan = plan_static_templates(&ir, None);
         let branches = if_branch_scopes(&ir);
         let attr_slot = plan
             .slots
@@ -4871,7 +5049,7 @@ mod nested_region_slot_path_completeness {
         // wrapped in an `{#if}`).
         let src = "<script>\n\tlet p = $state(Promise.resolve({ x: 1 }));\n\tlet show = $state(true);\n</script>\n{#if show}{#await p then v}<p>{v.x}</p>{/await}{/if}";
         let ir = lower(src, &alloc);
-        let plan = plan_static_templates(&ir);
+        let plan = plan_static_templates(&ir, None);
         // Find the then-branch interpolation slot anywhere in the plan.
         let then_slot = plan.slots.iter().find(|s| {
             matches!(&s.kind, DynamicSlotKind::Text { expr, .. } if expr_src(&ir, *expr).contains("v.x"))
@@ -4899,7 +5077,7 @@ mod nested_region_slot_path_completeness {
         // indexing does not mis-attribute root content).
         let src = "<script>\n\tlet n = $state(0);\n</script>\n<p>{n}</p>";
         let ir = lower(src, &alloc);
-        let plan = plan_static_templates(&ir);
+        let plan = plan_static_templates(&ir, None);
         assert!(
             plan.slots
                 .iter()
@@ -4925,7 +5103,7 @@ mod mixed_element_interp_skeleton {
     fn single_skeleton(src: &str) -> String {
         let alloc = Allocator::default();
         let ir = lower(src, &alloc);
-        let plan = plan_static_templates(&ir);
+        let plan = plan_static_templates(&ir, None);
         let mut htmls: Vec<String> = plan
             .templates
             .iter()
@@ -5020,7 +5198,7 @@ mod mixed_element_interp_skeleton {
     fn element_region_skeleton(src: &str, tag_prefix: &str) -> String {
         let alloc = Allocator::default();
         let ir = lower(src, &alloc);
-        let plan = plan_static_templates(&ir);
+        let plan = plan_static_templates(&ir, None);
         let mut hits: Vec<String> = plan
             .templates
             .iter()
@@ -5097,7 +5275,7 @@ mod whitespace_removal_and_pre_newline {
     fn single_skeleton(src: &str) -> String {
         let alloc = Allocator::default();
         let ir = lower(src, &alloc);
-        let plan = plan_static_templates(&ir);
+        let plan = plan_static_templates(&ir, None);
         let mut htmls: Vec<String> = plan
             .templates
             .iter()
@@ -5247,7 +5425,7 @@ mod non_static_property_attrs {
     fn single_skeleton(src: &str) -> String {
         let alloc = Allocator::default();
         let ir = lower(src, &alloc);
-        let plan = plan_static_templates(&ir);
+        let plan = plan_static_templates(&ir, None);
         let mut htmls: Vec<String> = plan
             .templates
             .iter()
@@ -5286,7 +5464,7 @@ mod non_static_property_attrs {
         // svelte@5.56.3 (`from_html(\`<video></video>\`, 2)` + `video.muted = true`).
         let alloc = Allocator::default();
         let ir = lower("<video muted></video>", &alloc);
-        let plan = plan_static_templates(&ir);
+        let plan = plan_static_templates(&ir, None);
         let html = match &plan.templates[0] {
             TemplateFactory::FromHtml { html, .. } => html.clone(),
             other => panic!("expected from_html, got {other:?}"),
@@ -5451,7 +5629,7 @@ mod standalone_component_root {
     fn factories(src: &str) -> Vec<TemplateFactory> {
         let alloc = Allocator::default();
         let ir = lower(src, &alloc);
-        plan_static_templates(&ir).templates
+        plan_static_templates(&ir, None).templates
     }
 
     /// Whether any factory is a `from_html` whose skeleton contains `needle`.
@@ -5607,8 +5785,8 @@ mod standalone_component_root {
         // EMPIRICALLY confirmed against svelte@5.56.3 (no from_html, no $.append).
         let alloc = Allocator::default();
         let ir = lower("<script>let Foo = 1;</script><Foo/>", &alloc);
-        let plan = plan_static_templates(&ir);
-        let topo = plan_client_topology(&ir, &plan);
+        let plan = plan_static_templates(&ir, None);
+        let topo = plan_client_topology(&ir, &plan, None);
         assert!(
             !topo.helpers.uses(SvelteHelper::FromHtml),
             "a standalone component records no FromHtml helper"
@@ -5772,7 +5950,7 @@ mod official_whitespace_skeleton {
     fn from_html_rows(src: &str) -> Vec<(String, Option<String>)> {
         let alloc = Allocator::default();
         let ir = lower(src, &alloc);
-        plan_static_templates(&ir)
+        plan_static_templates(&ir, None)
             .templates
             .iter()
             .filter_map(|t| match t {
@@ -5918,7 +6096,7 @@ mod official_whitespace_skeleton {
     fn single_factory(src: &str) -> TemplateFactory {
         let alloc = Allocator::default();
         let ir = lower(src, &alloc);
-        let templates = plan_static_templates(&ir).templates;
+        let templates = plan_static_templates(&ir, None).templates;
         assert_eq!(
             templates.len(),
             1,
@@ -6066,7 +6244,7 @@ mod official_entity_decode_attribute {
     fn attr_value(src: &str) -> String {
         let alloc = Allocator::default();
         let ir = lower(src, &alloc);
-        let html = match &plan_static_templates(&ir).templates[0] {
+        let html = match &plan_static_templates(&ir, None).templates[0] {
             TemplateFactory::FromHtml { html, .. } => html.clone(),
             other => panic!("expected a from_html factory, got {other:?}"),
         };
@@ -6152,7 +6330,7 @@ mod official_entity_decode_text {
     fn text_seed(src: &str) -> Option<String> {
         let alloc = Allocator::default();
         let ir = lower(src, &alloc);
-        plan_static_templates(&ir)
+        plan_static_templates(&ir, None)
             .templates
             .into_iter()
             .find_map(|t| match t {
@@ -6175,6 +6353,18 @@ mod official_entity_decode_text {
         assert_eq!(dt("&#65;"), "A");
         assert_eq!(dt("&#x41;"), "A");
         assert_eq!(text_seed("&#65;").as_deref(), Some("A"));
+    }
+
+    #[test]
+    fn text_uppercase_x_prefix_is_not_a_numeric_reference() {
+        // The official pattern `#(?:x[a-fA-F\d]+|\d+)(?:;)?` accepts a
+        // LOWERCASE `x` prefix only — `&#X41;` is NOT a character reference
+        // and stays literal in BOTH decode contexts. Hex DIGITS keep both
+        // cases (`&#x4A1;` → U+04A1).
+        assert_eq!(dt("&#X41;"), "&#X41;");
+        assert_eq!(dt("&#x4A1;"), "\u{04A1}");
+        // Control: the lowercase prefix decodes (the two-sided discriminator).
+        assert_eq!(dt("&#x41;"), "A");
     }
 
     #[test]
@@ -6605,8 +6795,8 @@ mod official_event_attribute_modeling {
             "<script>let h = () => {};</script><button onclickcapture={h}>x</button>",
             &alloc,
         );
-        let plan = plan_static_templates(&ir);
-        let topo = plan_client_topology(&ir, &plan);
+        let plan = plan_static_templates(&ir, None);
+        let topo = plan_client_topology(&ir, &plan, None);
         assert!(
             !topo.delegated_events.contains("click"),
             "a capture handler must not enter the delegated set"
@@ -6652,8 +6842,8 @@ mod official_event_attribute_modeling {
             "the forwarded prop keeps the `on` prefix (it is `onclick`, not `click`)"
         );
         // It is NOT delegated.
-        let plan = plan_static_templates(&ir);
-        let topo = plan_client_topology(&ir, &plan);
+        let plan = plan_static_templates(&ir, None);
+        let topo = plan_client_topology(&ir, &plan, None);
         assert!(
             !topo.delegated_events.contains("click"),
             "a component-hosted onclick never enters the delegated set"
@@ -6684,8 +6874,8 @@ mod official_event_attribute_modeling {
             has_onclick_attr,
             "a <svelte:element> `onclick` is a dynamic attribute (the attribute_effect surface)"
         );
-        let plan = plan_static_templates(&ir);
-        let topo = plan_client_topology(&ir, &plan);
+        let plan = plan_static_templates(&ir, None);
+        let topo = plan_client_topology(&ir, &plan, None);
         assert!(
             !topo.delegated_events.contains("click"),
             "a <svelte:element> onclick never enters the delegated set"
@@ -6729,8 +6919,8 @@ mod official_event_attribute_modeling {
                 !delegated,
                 "a {host} global listener is a DIRECT $.event, never delegated"
             );
-            let plan = plan_static_templates(&ir);
-            let topo = plan_client_topology(&ir, &plan);
+            let plan = plan_static_templates(&ir, None);
+            let topo = plan_client_topology(&ir, &plan, None);
             assert!(
                 !topo.delegated_events.contains("click"),
                 "{host} onclick never enters the delegated set"
@@ -6751,8 +6941,8 @@ mod official_event_attribute_modeling {
         let (event_type, delegated, _capture, _mods) = first_event(&ir);
         assert_eq!(event_type, "click");
         assert!(delegated, "a regular element onclick is delegated");
-        let plan = plan_static_templates(&ir);
-        let topo = plan_client_topology(&ir, &plan);
+        let plan = plan_static_templates(&ir, None);
+        let topo = plan_client_topology(&ir, &plan, None);
         assert!(
             topo.delegated_events.contains("click"),
             "a regular element delegated click enters the delegated set"
@@ -6790,6 +6980,15 @@ mod official_entity_decode_unit_table {
             ("a&copy=b", "a&copy=b"), // `=` blocks → kept literal
             ("&copyx", "&copyx"),   // following alnum blocks → kept literal
             ("&copyright;", "&copyright;"), // `copy` blocked by `r`, full name unknown
+            // UPPERCASE `X` PREFIX is NOT a numeric reference — the official
+            // pattern `#(?:x[a-fA-F\d]+|\d+)(?:;)?` accepts a lowercase `x`
+            // only (first-hand: `class="a&#X20;b"` keeps the literal,
+            // markup-escaped `a&amp;#X20;b`). Hex DIGITS may still be
+            // uppercase — only the prefix is case-sensitive.
+            ("&#X41;", "&#X41;"),     // uppercase prefix kept literal
+            ("&#X20;", "&#X20;"),     // the oracle's exact class-value case
+            ("a&#X20;b", "a&#X20;b"), // embedded — no space is produced
+            ("&#x4A1;", "\u{04A1}"),  // uppercase hex DIGITS still decode → ҡ
             // validate_code specifics.
             ("&#128;", "\u{20ac}"),     // Windows-1252 remap → €
             ("&#10;x", " x"),           // line feed → space
@@ -6809,6 +7008,34 @@ mod official_entity_decode_unit_table {
                 "decode_attribute_entities({input:?}) must match official (got {got:?})"
             );
         }
+    }
+
+    #[test]
+    fn decode_runs_exactly_once_amp_protects_inner_reference() {
+        // DECODE-ONCE pin (ground-truthed against svelte@5.56.3
+        // `decode_character_references('a&amp;#32;b', /*is_attr*/ true)`): the
+        // `&amp;` decodes to `&` and the produced `&#32;` stays LITERAL — the
+        // single pass never re-scans its own output, so the result is the ONE
+        // token `a&#32;b`. A double decode would re-decode the produced
+        // `&#32;` to a space and split the value into the TWO tokens `a b`
+        // (the css scope matcher would then wrongly match `.b`).
+        let once = decode_attribute_entities_for_test("a&amp;#32;b");
+        assert_eq!(
+            once, "a&#32;b",
+            "`&amp;` decodes to `&`; the produced `#32;` stays literal (decode-once)"
+        );
+        assert_ne!(
+            once, "a b",
+            "a two-token `a b` result means the decoder re-decoded its own output (double-decode)"
+        );
+        // The double-decode result IS `a b` — the fixed point differs, so the
+        // equality above discriminates one pass from two.
+        assert_eq!(
+            decode_attribute_entities_for_test(&once),
+            "a b",
+            "NON-VACUITY: a second pass over the decoded value yields `a b`, so \
+             the decode-once assertion genuinely discriminates"
+        );
     }
 }
 
@@ -6911,7 +7138,7 @@ mod exact_node_path_goldens {
         let src: &'static str = Box::leak(src.to_string().into_boxed_str());
         let alloc: &'static Allocator = Box::leak(Box::new(Allocator::default()));
         let ir = lower(src, alloc);
-        let paths = plan_static_templates(&ir).client_paths;
+        let paths = plan_static_templates(&ir, None).client_paths;
         (ir, paths)
     }
 
@@ -7027,7 +7254,7 @@ mod official_controlled_child_and_attr_skeleton {
     fn sorted_htmls(src: &str) -> Vec<String> {
         let alloc = Allocator::default();
         let ir = lower(src, &alloc);
-        let mut v: Vec<String> = plan_static_templates(&ir)
+        let mut v: Vec<String> = plan_static_templates(&ir, None)
             .templates
             .iter()
             .filter_map(|t| match t {
@@ -7151,7 +7378,7 @@ mod official_controlled_child_and_attr_skeleton {
     fn flag_bits(src: &str) -> Option<u8> {
         let alloc = Allocator::default();
         let ir = lower(src, &alloc);
-        match &plan_static_templates(&ir).templates[0] {
+        match &plan_static_templates(&ir, None).templates[0] {
             TemplateFactory::FromHtml { fragment_flag, .. } => fragment_flag.map(|f| f.bits()),
             other => panic!("expected a from_html factory, got {other:?}"),
         }

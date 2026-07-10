@@ -44,7 +44,7 @@ fn compile(source: &str) -> Result<String, ClientCompileError> {
         filename: Some("App.svelte".to_string()),
         ..Default::default()
     };
-    compile_client(source, &parsed, &opts, &alloc, false).map(|m| m.code)
+    compile_client(source, &parsed, &opts, &alloc, false, false).map(|m| m.code)
 }
 
 /// Whether a component COMPILES to an emitted `Main` module (a non-fail-closed
@@ -55,15 +55,17 @@ fn emits_main(source: &str) -> bool {
 
 /// The EXACT supported element set (the finite client-core allowlist). Any change to
 /// this set is a deliberate enum + golden change, asserted by
-/// [`element_matrix_supports_exactly_the_thirteen_core_tags`]. `video` joined as the
+/// [`element_matrix_supports_exactly_the_core_tags`]. `video` joined as the
 /// media host for the `muted` DOM-property write; `textarea`/`select`/`option`/
 /// `audio`/`details` joined as the bindings-breadth DOM-bind hosts (each emits a
 /// bare clone frame with empty content; their special-content / non-bind interiors are
 /// content-gated, not element-gated); `span` is the plain inline structural host the
-/// component slot / `{#snippet}` body fixtures need.
+/// component slot / `{#snippet}` body fixtures need; `h2` / `ul` / `li` joined as the
+/// css-scoping golden hosts (the synthesized-scope-class heading + the
+/// combinator/`{#each}` list surfaces).
 const SUPPORTED_ELEMENTS: &[&str] = &[
-    "a", "audio", "base", "button", "details", "div", "h1", "input", "link", "meta", "option", "p",
-    "select", "span", "textarea", "video",
+    "a", "audio", "base", "button", "details", "div", "h1", "h2", "input", "li", "link", "meta",
+    "option", "p", "select", "span", "textarea", "ul", "video",
 ];
 
 /// The full HTML tag universe (the TS DOM lib `HTMLElementTagNameMap`,
@@ -316,18 +318,19 @@ fn element_matrix_supports_exactly_the_core_tags() {
     assert_eq!(
         supported, expected,
         "the element allowlist must support EXACTLY {{a, audio, base, button, details, div, h1, \
-         input, link, meta, option, p, select, span, textarea, video}} — a tag cloned into a Main \
-         outside that set is a leak; a tag in the set failing to emit is an over-reach. (`span` is \
-         the plain inline structural host the component-slot / `{{#snippet}}`-body fixtures need; \
-         `meta` / `link` / `base` are the `<svelte:head>` metadata void elements; `ul` / `li` have \
-         no live conformance need.)"
+         h2, input, li, link, meta, option, p, select, span, textarea, ul, video}} — a tag cloned \
+         into a Main outside that set is a leak; a tag in the set failing to emit is an \
+         over-reach. (`span` is the plain inline structural host the component-slot / \
+         `{{#snippet}}`-body fixtures need; `meta` / `link` / `base` are the `<svelte:head>` \
+         metadata void elements; `h2` / `ul` / `li` are the css-scoping golden hosts.)"
     );
     // Belt-and-suspenders on the cardinality (the convergence count gate).
     assert_eq!(
         supported.len(),
-        16,
-        "exactly sixteen elements are in the client-core allowlist (the §1.2 / bind-host \
-         tags + span + the head metadata void elements meta/link/base)"
+        19,
+        "exactly nineteen elements are in the client-core allowlist (the §1.2 / bind-host \
+         tags + span + the head metadata void elements meta/link/base + the css-scoping \
+         hosts h2/ul/li)"
     );
 }
 

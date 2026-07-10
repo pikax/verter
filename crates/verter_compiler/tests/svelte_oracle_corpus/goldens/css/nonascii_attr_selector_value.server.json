@@ -1,0 +1,31 @@
+{
+  "slug": "css/nonascii_attr_selector_value.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "nonascii_attr_selector_value",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [],
+  "helperSet": [],
+  "helperCounts": {},
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": true,
+    "hash": "svelte-1a0qwvy",
+    "code": "\n\t[data-x=café].svelte-<scoped> {\n\t\tcolor: red;\n\t}\n"
+  }
+}

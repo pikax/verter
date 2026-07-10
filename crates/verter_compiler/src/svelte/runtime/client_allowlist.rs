@@ -32,6 +32,9 @@ pub(super) enum SupportedHtmlElement {
     Div,
     /// `<h1>`.
     H1,
+    /// `<h2>` — the css-scoping corpus's class-less scoped heading (the
+    /// synthesized-scope-class golden surface).
+    H2,
     /// `<input>`.
     Input,
     /// `<p>`.
@@ -65,6 +68,12 @@ pub(super) enum SupportedHtmlElement {
     /// `<base>` — a `<svelte:head>` document-base VOID element (baked into the head's
     /// `$.from_html` skeleton).
     Base,
+    /// `<ul>` — the list host (the css-scoping combinator/`{#each}` golden
+    /// surfaces).
+    Ul,
+    /// `<li>` — the list item (the css-scoping combinator/`{#each}` golden
+    /// surfaces).
+    Li,
 }
 
 impl SupportedHtmlElement {
@@ -80,6 +89,7 @@ impl SupportedHtmlElement {
             "button" => Some(Self::Button),
             "div" => Some(Self::Div),
             "h1" => Some(Self::H1),
+            "h2" => Some(Self::H2),
             "input" => Some(Self::Input),
             "p" => Some(Self::P),
             "span" => Some(Self::Span),
@@ -92,6 +102,8 @@ impl SupportedHtmlElement {
             "meta" => Some(Self::Meta),
             "link" => Some(Self::Link),
             "base" => Some(Self::Base),
+            "ul" => Some(Self::Ul),
+            "li" => Some(Self::Li),
             _ => None,
         }
     }
@@ -108,6 +120,7 @@ impl SupportedHtmlElement {
             Self::Button => "button",
             Self::Div => "div",
             Self::H1 => "h1",
+            Self::H2 => "h2",
             Self::Input => "input",
             Self::P => "p",
             Self::Span => "span",
@@ -120,6 +133,8 @@ impl SupportedHtmlElement {
             Self::Meta => "meta",
             Self::Link => "link",
             Self::Base => "base",
+            Self::Ul => "ul",
+            Self::Li => "li",
         }
     }
 }
@@ -435,11 +450,13 @@ mod tests {
         // six, the `video` media host for the `muted` property write, the bindings-breadth
         // DOM-bind hosts (`textarea`/`select`/`option`/`audio`/`details`), the plain
         // inline `span` host the component slot / `{#snippet}` body fixtures need (no
-        // special content model), plus the `<svelte:head>` metadata VOID elements
-        // (`meta`/`link`/`base`) the head body region serializes.
+        // special content model), the `<svelte:head>` metadata VOID elements
+        // (`meta`/`link`/`base`) the head body region serializes, plus the css-scoping
+        // golden hosts (`h2` — the class-less scoped heading; `ul`/`li` — the
+        // combinator/`{#each}` list surfaces).
         let expected = [
-            "a", "button", "div", "h1", "input", "p", "span", "video", "textarea", "select",
-            "option", "audio", "details", "meta", "link", "base",
+            "a", "button", "div", "h1", "h2", "input", "p", "span", "video", "textarea", "select",
+            "option", "audio", "details", "meta", "link", "base", "ul", "li",
         ];
         let accepted: Vec<&str> = expected
             .into_iter()
@@ -447,12 +464,9 @@ mod tests {
             .collect();
         assert_eq!(accepted, expected);
         // A representative spread of out-of-allowlist tags is STILL rejected — including the
-        // still-demoted breadth (`ul` / `li` / `optgroup` / `img` / `slot` / `datalist`) and
-        // a reserved-word tag. (Only `span` is in the accepted set above — the plain inline
-        // structural host; `ul` / `li` have no live conformance need.)
+        // still-demoted breadth (`optgroup` / `img` / `slot` / `datalist`) and
+        // a reserved-word tag.
         for tag in [
-            "ul",
-            "li",
             "optgroup",
             "img",
             "slot",
@@ -479,11 +493,12 @@ mod tests {
         // is a COMPILE-TIME exhaustiveness guard: a NEW variant that is not added here
         // fails to compile (a non-exhaustive match), so the coverage can never silently
         // regress.
-        const ALL: [SupportedHtmlElement; 16] = [
+        const ALL: [SupportedHtmlElement; 19] = [
             SupportedHtmlElement::A,
             SupportedHtmlElement::Button,
             SupportedHtmlElement::Div,
             SupportedHtmlElement::H1,
+            SupportedHtmlElement::H2,
             SupportedHtmlElement::Input,
             SupportedHtmlElement::P,
             SupportedHtmlElement::Span,
@@ -496,6 +511,8 @@ mod tests {
             SupportedHtmlElement::Meta,
             SupportedHtmlElement::Link,
             SupportedHtmlElement::Base,
+            SupportedHtmlElement::Ul,
+            SupportedHtmlElement::Li,
         ];
         // Compile-time exhaustiveness: forces `ALL` to enumerate every variant (a new
         // variant breaks this match → the developer must add it to `ALL` too).
@@ -505,6 +522,7 @@ mod tests {
                 | SupportedHtmlElement::Button
                 | SupportedHtmlElement::Div
                 | SupportedHtmlElement::H1
+                | SupportedHtmlElement::H2
                 | SupportedHtmlElement::Input
                 | SupportedHtmlElement::P
                 | SupportedHtmlElement::Span
@@ -516,7 +534,9 @@ mod tests {
                 | SupportedHtmlElement::Details
                 | SupportedHtmlElement::Meta
                 | SupportedHtmlElement::Link
-                | SupportedHtmlElement::Base => {}
+                | SupportedHtmlElement::Base
+                | SupportedHtmlElement::Ul
+                | SupportedHtmlElement::Li => {}
             }
         }
         for el in ALL {

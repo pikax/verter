@@ -1,0 +1,31 @@
+{
+  "slug": "css/nbsp_nth_child.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "nbsp_nth_child",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [],
+  "helperSet": [],
+  "helperCounts": {},
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": true,
+    "hash": "svelte-1ec60xn",
+    "code": "\n\tli.svelte-<scoped>:nth-child(2n + 1) {\n\t\tcolor: red;\n\t}\n"
+  }
+}

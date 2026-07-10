@@ -16,6 +16,7 @@
 
 use verter_span::Span;
 
+use super::entity_decode::DecodedAttrValue;
 use super::expr::{BindingTable, ExprArena, ScopeGraph, ScopeId, ScriptAnalysis};
 use crate::svelte::parser::CustomElementDescriptor;
 
@@ -376,11 +377,14 @@ pub enum SpecialKind {
     Fragment,
 }
 
-/// A static (compile-time-constant) attribute value.
+/// A static (compile-time-constant) attribute value. The carried value is the
+/// ENTITY-DECODED semantic text (decoded ONCE at the attribute-IR producer
+/// boundary): the CSS scope matcher and every client emitter read this same
+/// decoded value — emitters serialize it ESCAPE-ONLY (never a second decode).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StaticAttrValue {
-    /// The literal attribute value.
-    pub value: String,
+    /// The DECODED literal attribute value.
+    pub value: DecodedAttrValue,
 }
 
 /// Which authored syntax an [`AttrIr::Event`] came from. The MODERN Svelte-5 `on*`

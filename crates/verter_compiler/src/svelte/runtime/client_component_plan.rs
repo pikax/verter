@@ -343,21 +343,18 @@ impl<'a> SupportedClientIr<'a> {
         build: &mut CallBuild,
     ) -> Result<ComponentMember, UnsupportedSvelteRuntimeSurface> {
         match attr {
-            // A STATIC prop value is the parser's RAW attribute span — entity-DECODE it
-            // through the shared attribute-value decoder (the same
-            // [`super::entity_decode::decode_attr_entities`] the `$$slots` grouping key
-            // uses), matching official's parse-time decoded `Text.data`: a retained
-            // `slot="foo&amp;bar"` prop emits `slot: 'foo&bar'`, identical to its
-            // `$$slots` key, and every other static prop (`title="foo&amp;bar"`)
-            // decodes the same way. The Mixed arm needs no decode here — its literal
-            // parts were decoded at lowering; a Dynamic value is a JS expression (no
-            // decode applies).
+            // A STATIC prop value carries the producer-DECODED semantic text
+            // (the attribute-IR boundary owns the decode), matching official's
+            // parse-time decoded `Text.data`: a retained `slot="foo&amp;bar"`
+            // prop emits `slot: 'foo&bar'`, identical to its `$$slots` key, and
+            // every other static prop (`title="foo&amp;bar"`) reads the same
+            // decoded value (via `as_str`, never a second decode). The Mixed arm
+            // needs no decode here — its literal parts were decoded at lowering;
+            // a Dynamic value is a JS expression (no decode applies).
             AttrIr::Static { name, value } => Ok(ComponentMember::Init {
                 key: name.clone(),
                 value: match value {
-                    Some(v) => {
-                        js_single_quoted(&super::entity_decode::decode_attr_entities(&v.value))
-                    }
+                    Some(v) => js_single_quoted(v.value.as_str()),
                     None => "true".to_string(),
                 },
             }),

@@ -6137,6 +6137,16 @@ mod foundations_guards {
     //     Greek-letter plan-phase codenames.
     //   - `pre-C\d` / `post-C\d` / `Pass C\d` — pre/post/Pass narrative
     //     forms of the cutover `C<n>` codename.
+    //   - `debt row` (case-insensitive) — a debt-ledger row citation.
+    //     Ledger project-management vocabulary; the durable follow-up
+    //     belongs in `docs/arch/` or `.claude/skills/*`, and a source
+    //     comment must state its semantics rather than label itself a
+    //     ledger row.
+    //   - `CSS-FIRST` (case-SENSITIVE, ALL-CAPS) — a coined milestone
+    //     label (sibling of `SCOPE-LOCK` / `AX-WIP`). The lowercase design
+    //     descriptor `css-first` (e.g. `css-first diagnostic order`, the
+    //     `TS-first` ordering-prose family) is legitimate final-state prose
+    //     and is NOT matched.
 
     /// Predicate: returns `true` when `line` contains a forbidden
     /// phase-archaeology pattern. Implemented with case-sensitive
@@ -6265,6 +6275,20 @@ mod foundations_guards {
         // and cutover-suffixed form regardless of capitalisation. Reuses
         // the single `lower` view computed above (no per-line re-alloc).
         if lower.contains("cutover") {
+            return true;
+        }
+        // Debt-ledger row vocabulary + the coined ALL-CAPS `CSS-FIRST`
+        // milestone label. A "debt row" citation is debt-ledger
+        // project-management vocabulary — a source comment must state the
+        // durable semantics (the tracked follow-up lives in `docs/arch/` or
+        // `.claude/skills/*`), never label itself a ledger row; matched
+        // case-insensitively via the shared `lower` view so every
+        // capitalisation trips. `CSS-FIRST` is an ALL-CAPS coined milestone
+        // label (as the `SCOPE-LOCK` / `AX-WIP` markers above are), matched
+        // case-SENSITIVELY so the ordinary lowercase design descriptor
+        // (`css-first diagnostic order`, mirroring the codebase's own
+        // `TS-first` ordering prose) stays legitimate final-state prose.
+        if lower.contains("debt row") || line.contains("CSS-FIRST") {
             return true;
         }
         // Case-insensitive `codex` vocabulary scan with separator
@@ -7432,6 +7456,8 @@ mod foundations_guards {
         "postc",                     // postC<digit> cutover marker
         "pass c",                    // Pass C<digit> cutover marker
         "gap ",                      // gap <digit> framework-adapter marker
+        "debt row",                  // debt-ledger row citation (ledger vocab)
+        "css-first",                 // CSS-FIRST coined milestone label
     ];
 
     /// The shared NECESSARY-CONDITION check for
@@ -7922,6 +7948,16 @@ mod foundations_guards {
         "/// B1a wires the descriptor registry.",     // `B<digits><letter>` branch
         "// closing the gap 3 framework-adapter seam.", // `gap <digit>` branch
         "/// resolves the gap 2 enumeration domain.", // `gap <digit>` branch
+        // Debt-ledger row citation — ledger project-management vocabulary.
+        // Each fixture is isolated to the `debt row` branch (no other
+        // trigger root on the line) so removing that needle turns the
+        // predicate self-test RED. The second fixture is ALL-CAPS to pin
+        // the case-insensitive match.
+        "// the sourcemap parity follow-up debt row, coarse-but-correct.",
+        "// DEBT ROW: escaped-keyword anchor parity is deferred.",
+        // `CSS-FIRST` ALL-CAPS coined milestone label — isolated to the
+        // case-sensitive `CSS-FIRST` branch (no other trigger root).
+        "/// the CSS-FIRST diagnostic-ordering milestone label.",
     ];
 
     #[test]
@@ -8135,6 +8171,14 @@ mod foundations_guards {
             "// the codomain C99 is well-defined.",            // C99 bare
             "// see RFC C1 in the appendix.", // `C1` mid-comment, not comment-leading, no trigger
             "// ClassName carries the C identifier prefix.", // `C` then letter — not a digit label
+            // Debt/CSS-FIRST negatives — the `debt row` needle matches
+            // only the two-word ledger citation, and the `CSS-FIRST` needle
+            // is case-SENSITIVE, so ordinary `debt` prose and the lowercase
+            // `css-first` design descriptor (the real production ordering
+            // prose) stay legitimate final-state prose.
+            "// this is real architecture debt, not a correctness regression.",
+            "// Both checks run before template lowering (the css-first diagnostic order).",
+            "// the css-first diagnostic beats a template-lowering failure.",
         ];
         for line in allowed {
             assert!(

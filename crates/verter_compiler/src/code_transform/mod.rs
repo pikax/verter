@@ -31,13 +31,22 @@
 //! );
 //! ```
 
+mod batch;
 mod chunk;
 #[allow(clippy::module_inception)] // CodeTransform struct lives in code_transform module
 mod code_transform;
+mod fallible;
 mod source_map;
 
 pub use code_transform::CodeTransform;
+// The typed refusal surface of the checked (`try_*`) operations, re-exported
+// alongside `CodeTransform` as this module's public error type (the inner
+// module is private, so this is its only public path).
+#[allow(unused_imports)] // consumed by tests and by out-of-module callers
+pub use fallible::CodeTransformError;
 pub use source_map::SourceMapOptions;
 
+#[cfg(test)]
+mod edit_semantics_tests;
 #[cfg(test)]
 mod tests;

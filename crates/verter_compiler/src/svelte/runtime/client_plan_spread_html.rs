@@ -17,7 +17,6 @@ use super::client_codegen_helpers::{
 };
 use super::client_plan::SupportedClientIr;
 use super::client_plan_types::{AttrValue, AttrValuePart, ClientNodeId, ClientRuntimeOp};
-use super::entity_decode::decode_attr_entities;
 use super::ir::{AttrIr, ElementIr, ExprId, IrNode, NodeId, StyleDirectiveValue};
 use verter_span::Span;
 
@@ -48,14 +47,15 @@ impl<'a> SupportedClientIr<'a> {
         for attr in &el.attrs {
             match attr {
                 AttrIr::Static { name, value } => {
-                    // A static attribute folds as `name: 'lit'`; its HTML entities decode
-                    // (the fold value is a runtime JS string, NOT a baked skeleton attr). A
-                    // VALUELESS attribute (`value: None` — `<input {...p} disabled />`) folds
+                    // A static attribute folds as `name: 'lit'` over the producer-DECODED
+                    // value (the fold value is a runtime JS string, NOT a baked skeleton
+                    // attr; read via `as_str`, never a second decode). A VALUELESS
+                    // attribute (`value: None` — `<input {...p} disabled />`) folds
                     // as the RAW boolean `name: true`, distinct from a present empty-string
                     // value (`Some("")` — `disabled=""`) which stays `name: ''`.
                     let v = match value {
                         None => "true".to_string(),
-                        Some(v) => js_single_quoted(&decode_attr_entities(&v.value)),
+                        Some(v) => js_single_quoted(v.value.as_str()),
                     };
                     entries.push(format!("{}: {v}", object_key(name)));
                 }
@@ -147,10 +147,21 @@ impl<'a> SupportedClientIr<'a> {
         // carrying an authored `defaultValue` / `defaultChecked` reset attribute SUPPRESSES
         // the tail (the official `Element.js` rule).
         let input_trailing = Self::element_takes_attribute_effect_input_tail(el);
+        // The SCOPED spread element passes the scope-hash literal as the fold's
+        // `css_hash` argument (the official `build_attribute_effect` — "the
+        // spread method appends the hash to the end of the class attribute on
+        // its own"), read from the SAME shared scope facts the other injection
+        // sites consume.
+        let css_hash = self
+            .css_scope
+            .as_ref()
+            .and_then(|facts| facts.hash_for(target))
+            .map(js_single_quoted);
         Ok(ClientRuntimeOp::AttributeEffect {
             target: ClientNodeId(target.0),
             fold_body,
             input_trailing,
+            css_hash,
         })
     }
 

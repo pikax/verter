@@ -2517,13 +2517,23 @@ impl VerterHost {
 
         for (i, style) in compiled.styles.into_iter().enumerate() {
             let override_entry = style_layer.and_then(|layer| layer.by_index.get(&i));
+            // The compiler-produced css map (`RuntimeStyleBlock.source_map`,
+            // present only when the compile demanded maps) — bound BEFORE
+            // `style.code` moves into the `Arc` below. It rides the cached
+            // file ONLY when NO override is active: an override's code is
+            // DIFFERENT text, so the original style's map must never be
+            // attached to it (the override supplies its own map, or none).
+            let style_source_map: Option<Arc<str>> = style.source_map.map(Arc::from);
             outputs.insert(
                 VirtualNodeKind::Style { index: i },
                 CachedVirtualFile {
                     code: override_entry
                         .map(|e| e.code.clone())
                         .unwrap_or_else(|| Arc::from(style.code)),
-                    source_map: override_entry.and_then(|e| e.source_map.clone()),
+                    source_map: match override_entry {
+                        Some(entry) => entry.source_map.clone(),
+                        None => style_source_map,
+                    },
                     lang: Some(style.lang.unwrap_or_else(|| "css".to_string())),
                     meta: VirtualMeta {
                         style_index: Some(i),

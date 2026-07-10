@@ -1,0 +1,56 @@
+{
+  "slug": "css/nbsp_keyframes_animation.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "nbsp_keyframes_animation",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "from_html"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div class=\"x svelte-<scoped>\">y</div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div class=\"x svelte-<scoped>\">y</div>`); export default function nbsp_keyframes_animation($$anchor) {var div = root(); $.append($$anchor, div);}",
+  "css": {
+    "present": true,
+    "hash": "svelte-1qo70ko",
+    "code": "\n\t.x.svelte-<scoped> {\n\t\tanimation : svelte-<scoped>-spin 1s;\n\t}\n\n\t@keyframes svelte-<scoped>-spin {\n\t\tfrom {\n\t\t\topacity: 0;\n\t\t}\n\t}\n"
+  }
+}

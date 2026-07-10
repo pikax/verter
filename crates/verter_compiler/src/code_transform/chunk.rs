@@ -1,3 +1,17 @@
+/// Insertion affinity at a chunk boundary, following the `magic-string`
+/// left/right model: at one offset, LEFT-affinity content renders before
+/// RIGHT-affinity content, and range edits treat LEFT content as belonging to
+/// the chunk ENDING at the offset and RIGHT content as belonging to the chunk
+/// STARTING there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum InsertAffinity {
+    /// Belongs to the chunk ending at the anchor (`appendLeft`).
+    Left,
+    /// Belongs to the chunk starting at the anchor (`prependRight` /
+    /// `appendRight`).
+    Right,
+}
+
 /// Represents a piece of the output string.
 ///
 /// Each variant models a distinct operation, eliminating impossible states
@@ -36,6 +50,25 @@ pub(super) enum Chunk<'a> {
         content: &'a str,
         source_start: u32,
         content_offset: u32,
+    },
+    /// Pure insertion attached to a source offset with an explicit boundary
+    /// affinity — the `magic-string` insertion model used by the checked
+    /// [`CodeTransform::try_append_left`] / [`try_prepend_right`] /
+    /// [`try_append_right`] operations. Renders exactly like `Inserted`
+    /// (unmapped); the anchor + affinity let the range replacements
+    /// (`update` / `overwrite` / `remove`) apply boundary-attachment
+    /// semantics: RIGHT-affinity content at a replaced range's start and
+    /// LEFT-affinity content at its chunks' end boundaries belong to the
+    /// range (cleared by non-content-only edits), while the complementary
+    /// affinities belong to the neighboring chunks (always preserved).
+    ///
+    /// [`CodeTransform::try_append_left`]: super::CodeTransform::try_append_left
+    /// [`try_prepend_right`]: super::CodeTransform::try_prepend_right
+    /// [`try_append_right`]: super::CodeTransform::try_append_right
+    InsertedAnchored {
+        content: &'a str,
+        anchor: u32,
+        affinity: InsertAffinity,
     },
 }
 
@@ -81,6 +114,16 @@ impl<'a> Chunk<'a> {
             content,
             source_start,
             content_offset,
+        }
+    }
+
+    /// Create an affinity-anchored insertion (the `magic-string` model used
+    /// by the checked insertion operations).
+    pub fn inserted_anchored(content: &'a str, anchor: u32, affinity: InsertAffinity) -> Self {
+        Self::InsertedAnchored {
+            content,
+            anchor,
+            affinity,
         }
     }
 

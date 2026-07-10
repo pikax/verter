@@ -634,11 +634,17 @@ mod tests {
             styles: vec![
                 RuntimeStyleBlock {
                     code: ".a{}".to_string(),
+                    source_map: None,
                     lang: None,
+                    scope_hash: None,
+                    has_global: false,
                 },
                 RuntimeStyleBlock {
                     code: ".b{}".to_string(),
+                    source_map: None,
                     lang: Some("scss".to_string()),
+                    scope_hash: None,
+                    has_global: false,
                 },
             ],
             ..RuntimeCompileOutput::default()

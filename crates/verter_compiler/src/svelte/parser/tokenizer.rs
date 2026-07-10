@@ -2554,7 +2554,11 @@ fn options_namespace_is_valid(text: &str, value: &Option<SvelteAttributeValue>) 
 }
 
 /// Whether a `<svelte:options css>` value is the VALID `injected` (the only accepted value
-/// upstream). A shorthand / boolean / dynamic / other-string value is invalid.
-fn options_css_is_injected(text: &str, value: &Option<SvelteAttributeValue>) -> bool {
+/// upstream). A shorthand / boolean / dynamic / other-string value is invalid. The static
+/// value mirrors upstream `get_static_value`: a Text value (`css="injected"`) or a single
+/// static STRING-LITERAL expression (`css={'injected'}` / `css={"injected"}`) — the ONE
+/// authority for the `css === 'injected'` check, shared by the options official-reject
+/// classification and the runtime css-output-mode detection so the two can never diverge.
+pub(crate) fn options_css_is_injected(text: &str, value: &Option<SvelteAttributeValue>) -> bool {
     matches!(options_static_value(text, value), OptionsStaticValue::Str(s) if s == "injected")
 }

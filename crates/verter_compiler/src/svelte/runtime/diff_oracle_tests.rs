@@ -203,7 +203,7 @@ fn lower_generated<'a>(
     let parsed = parse_svelte(source);
     let ir = lower_parsed_svelte_to_ir(source, &parsed, &SvelteRuntimeOptions::default(), alloc)
         .expect("generated fixture lowers");
-    let plan = plan_static_templates(&ir);
+    let plan = plan_static_templates(&ir, None);
     (ir, plan)
 }
 
@@ -616,7 +616,7 @@ fn project_dynamic_slots(ir: &SvelteRuntimeIr, plan: &StaticTemplatePlan) -> BTr
 /// event correctly yields an empty set — matching official's empty `$.delegate([...])`.
 /// FAITHFUL: it reads Verter's collected set, never the official rule.
 fn project_delegated_events(ir: &SvelteRuntimeIr, plan: &StaticTemplatePlan) -> Vec<String> {
-    let topo = plan_client_topology(ir, plan);
+    let topo = plan_client_topology(ir, plan, None);
     let mut out: Vec<String> = topo.delegated_events.ordered().to_vec();
     out.sort();
     out
@@ -632,7 +632,7 @@ fn project_delegated_events(ir: &SvelteRuntimeIr, plan: &StaticTemplatePlan) -> 
 /// called — a component-event `delegated` / `delegate` leak, or a window/comment
 /// region helper Verter plans where official folds it, surfaces here.
 fn project_helper_set(ir: &SvelteRuntimeIr, plan: &StaticTemplatePlan) -> Vec<String> {
-    let topo = plan_client_topology(ir, plan);
+    let topo = plan_client_topology(ir, plan, None);
     let mut out: Vec<String> = topo
         .helpers
         .helper_set()

@@ -1,0 +1,31 @@
+{
+  "slug": "css/nbsp_keyframes_animation.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "nbsp_keyframes_animation",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [],
+  "helperSet": [],
+  "helperCounts": {},
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": true,
+    "hash": "svelte-1qo70ko",
+    "code": "\n\t.x.svelte-<scoped> {\n\t\tanimation : svelte-<scoped>-spin 1s;\n\t}\n\n\t@keyframes svelte-<scoped>-spin {\n\t\tfrom {\n\t\t\topacity: 0;\n\t\t}\n\t}\n"
+  }
+}

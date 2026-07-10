@@ -324,7 +324,10 @@ pub(super) fn extract_this_expr(
             // §1.6 core (rare; a follow-up).
             match &attr {
                 AttrIr::Dynamic { expr, .. } => this_expr = Some(*expr),
-                AttrIr::Static { value: Some(v), .. } => static_tag = Some(v.value.clone()),
+                // The static tag literal reads the producer-DECODED value.
+                AttrIr::Static { value: Some(v), .. } => {
+                    static_tag = Some(v.value.as_str().to_string());
+                }
                 _ => {}
             }
             // Drop the `this` attribute from the generic list either way.

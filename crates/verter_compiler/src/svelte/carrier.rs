@@ -389,10 +389,36 @@ impl CarrierCompiler for SvelteCarrierCompiler {
             // custom-element output (its value wins over the option anyway).
             custom_element: false,
         };
-        match super::runtime::compile_client(source, parsed, &runtime_opts, alloc, opts.ssr) {
+        // `opts.source_map` is the neutral OUTPUT-axis map demand: it reaches
+        // the css RENDER through `compile_client`'s `want_source_map` (never
+        // a lowering option on `SvelteRuntimeOptions`).
+        match super::runtime::compile_client(
+            source,
+            parsed,
+            &runtime_opts,
+            alloc,
+            opts.ssr,
+            opts.source_map,
+        ) {
             Ok(module) => {
                 bundle.main.body_code = Some(module.code);
                 bundle.main.lang = Some("js".to_string());
+                // The EXTERNAL scoped-css artifact (the official `compiled.css`
+                // — `{ code, map, hasGlobal }` + the scope hash): it publishes
+                // as the bundle's style block (the Svelte analogue of the Vue
+                // styles population). Injected-mode css is inlined in the
+                // module (no artifact), and a style-less component has none.
+                if let Some(css) = module.css {
+                    bundle.styles.push(
+                        crate::framework_common::carrier_compiler::RuntimeStyleBlock {
+                            code: css.code,
+                            source_map: css.source_map,
+                            lang: None,
+                            scope_hash: Some(css.hash),
+                            has_global: css.has_global,
+                        },
+                    );
+                }
             }
             Err(super::runtime::ClientCompileError::Unsupported(surface)) => {
                 // Fail closed: NO `Main` runtime node is produced, the bundle is
@@ -559,6 +585,117 @@ mod tests {
                 .map(|d| &d.code)
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn external_scoped_css_rides_the_bundle_with_demanded_map_and_has_global() {
+        // §3.7: the external css artifact is `{ code, map, hash, has_global }`
+        // on `RuntimeCompileOutput.styles`. The EXISTING
+        // `RuntimeCompileOptions.source_map` flag is the map demand — it
+        // reaches the css RENDER through `compile_client`, and the produced
+        // map + the `:global` fact ride the neutral style block.
+        let compiler = SvelteCarrierCompiler::default();
+        let source = "<script>let c = $state(0);</script>\n<style>.r{color:red}\n:global(.x){margin:0}</style>\n<button class=\"r\" onclick={() => c++}>{c}</button>\n";
+        let artifact = compiler.parse(source, &ParseOptions::default());
+        let alloc = oxc_allocator::Allocator::default();
+        let opts = RuntimeCompileOptions {
+            filename: Some("App.svelte".to_string()),
+            source_map: true,
+            ..Default::default()
+        };
+        let bundle = compiler
+            .compile_bundle(source, &artifact, &opts, &alloc)
+            .expect("svelte runtime bundle");
+        let style = bundle.styles.first().expect("an external style block");
+        assert!(
+            style.scope_hash.is_some(),
+            "the scoped block carries its hash"
+        );
+        assert!(
+            style.has_global,
+            "`:global(.x)` css reaches RuntimeStyleBlock.has_global"
+        );
+        let map = style
+            .source_map
+            .as_deref()
+            .expect("RuntimeCompileOptions.source_map demands the css map");
+        assert!(
+            map.contains("App.svelte"),
+            "the css map names the component source: {map}"
+        );
+
+        // A/B: no demand ⇒ no map (same component, source_map off).
+        let opts_off = RuntimeCompileOptions {
+            filename: Some("App.svelte".to_string()),
+            ..Default::default()
+        };
+        let bundle_off = compiler
+            .compile_bundle(source, &artifact, &opts_off, &alloc)
+            .expect("svelte runtime bundle");
+        assert_eq!(
+            bundle_off.styles.first().expect("a style block").source_map,
+            None,
+            "an undemanded css map stays None"
+        );
+
+        // A non-global component reports `has_global == false`.
+        let non_global = "<script>let c = $state(0);</script>\n<style>.r{color:red}</style>\n<button class=\"r\" onclick={() => c++}>{c}</button>\n";
+        let artifact2 = compiler.parse(non_global, &ParseOptions::default());
+        let bundle2 = compiler
+            .compile_bundle(non_global, &artifact2, &opts, &alloc)
+            .expect("svelte runtime bundle");
+        assert!(
+            !bundle2.styles.first().expect("a style block").has_global,
+            "css without `:global` must not claim has_global"
+        );
+    }
+
+    #[test]
+    fn empty_external_style_still_publishes_an_empty_css_artifact() {
+        // Official svelte@5.56.3 first-hand: `compile('<style></style><p>hi</p>',
+        // { css: 'external' }).css` is NON-null — `{ code: '', hasGlobal: false,
+        // map: {...} }`. An EXISTING `<style>` block always publishes the external
+        // artifact, even when the rendered `css.code` is empty; only the ABSENCE
+        // of a style block publishes none (`compiled.css === null`).
+        let compiler = SvelteCarrierCompiler::default();
+        let source = "<style></style><p>hi</p>\n";
+        let artifact = compiler.parse(source, &ParseOptions::default());
+        let alloc = oxc_allocator::Allocator::default();
+        let opts = RuntimeCompileOptions {
+            filename: Some("X.svelte".to_string()),
+            source_map: true,
+            ..Default::default()
+        };
+        let bundle = compiler
+            .compile_bundle(source, &artifact, &opts, &alloc)
+            .expect("svelte runtime bundle");
+        assert_eq!(
+            bundle.styles.len(),
+            1,
+            "an existing (empty) style block publishes exactly ONE artifact"
+        );
+        let style = &bundle.styles[0];
+        assert_eq!(
+            style.code, "",
+            "the artifact's code is the official empty render"
+        );
+        assert!(!style.has_global, "an empty stylesheet has no `:global`");
+        assert!(
+            style.scope_hash.is_some(),
+            "the scope hash is still real (the filename hash input)"
+        );
+        assert!(
+            style.source_map.is_some(),
+            "the demanded css map rides the empty artifact (official emits a map)"
+        );
+
+        // NEGATIVE: NO `<style>` block ⇒ NO artifact (official css === null).
+        let source_none = "<p>hi</p>\n";
+        let artifact_none = compiler.parse(source_none, &ParseOptions::default());
+        let bundle_none = compiler
+            .compile_bundle(source_none, &artifact_none, &opts, &alloc)
+            .expect("svelte runtime bundle");
+        assert!(bundle_none.styles.is_empty(), "no style block, no artifact");
     }
 
     #[test]

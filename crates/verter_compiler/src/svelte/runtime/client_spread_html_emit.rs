@@ -9,25 +9,46 @@ use super::client::ClientEmitter;
 use super::client_plan::ClientRuntimeOp;
 use super::ir::{IrNode, NodeId};
 
+/// Build one `$.attribute_effect(<host>, () => ({ <body> })[, void 0, void 0, void 0,
+/// <css_hash | void 0>[, true]])` call — the official argument row `(el, fn, sync,
+/// async, blockers, css_hash, remove_defaults)` with missing trailing arguments
+/// dropped: a SCOPED host passes its scope-hash literal at the `css_hash` slot (the
+/// intermediate sync/async/blockers slots become `void 0`); a void / self-closing
+/// element (an `<input>`, whose value/defaultValue handling the trailing `true`
+/// flags) keeps the tail through `remove_defaults`. HOST-INDEPENDENT — the ONE tail
+/// builder the regular-element spread fold and the `<svelte:element>` fold share, so
+/// the argument topology never drifts between the two emitters.
+pub(super) fn attribute_effect_call(
+    var: &str,
+    fold_body: &str,
+    input_trailing: bool,
+    css_hash: Option<&str>,
+) -> String {
+    match (css_hash, input_trailing) {
+        (Some(hash), true) => format!(
+            "$.attribute_effect({var}, () => ({{ {fold_body} }}), void 0, void 0, void 0, {hash}, true)"
+        ),
+        (Some(hash), false) => format!(
+            "$.attribute_effect({var}, () => ({{ {fold_body} }}), void 0, void 0, void 0, {hash})"
+        ),
+        (None, true) => format!(
+            "$.attribute_effect({var}, () => ({{ {fold_body} }}), void 0, void 0, void 0, void 0, true)"
+        ),
+        (None, false) => format!("$.attribute_effect({var}, () => ({{ {fold_body} }}))"),
+    }
+}
+
 impl ClientEmitter<'_> {
-    /// Emit the `$.attribute_effect(el, () => ({ <body> })[, void 0, void 0, void 0,
-    /// void 0, true])` spread fold for a spread element. The trailing argument tail is
-    /// present only for a void / self-closing element (an `<input>`, whose
-    /// value/defaultValue handling the trailing `true` flags).
+    /// Emit the spread-element `$.attribute_effect` fold against the target's DOM var
+    /// — the shared [`attribute_effect_call`] argument row over `self.dom_var(target)`.
     pub(super) fn emit_attribute_effect(
         &self,
         target: NodeId,
         fold_body: &str,
         input_trailing: bool,
+        css_hash: Option<&str>,
     ) -> String {
-        let var = self.dom_var(target);
-        if input_trailing {
-            format!(
-                "$.attribute_effect({var}, () => ({{ {fold_body} }}), void 0, void 0, void 0, void 0, true)"
-            )
-        } else {
-            format!("$.attribute_effect({var}, () => ({{ {fold_body} }}))")
-        }
+        attribute_effect_call(&self.dom_var(target), fold_body, input_trailing, css_hash)
     }
 
     /// Emit the only-child `$.html(el, payload, true)` raw-markup call (the `$.reset(el)`

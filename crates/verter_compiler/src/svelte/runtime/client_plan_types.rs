@@ -253,6 +253,13 @@ pub(super) struct ClientSvelteElement {
     /// `$.attribute_effect($$element, () => ({ … }))` the callback emits. Empty when the
     /// element has no foldable attributes (no `$.attribute_effect` is emitted).
     pub(super) fold: Vec<ElementFoldItem>,
+    /// The scope-hash literal (`'svelte-<hash>'`) the FOLD threads as the official 6th
+    /// positional `$.attribute_effect` argument (`build_attribute_effect` —
+    /// `element.metadata.scoped && css.hash`), with the intermediate sync/async/blockers
+    /// slots as `void 0` — the SAME argument row the regular-element spread fold uses.
+    /// `Some` iff the host node is SCOPED; the SetClass fast path carries its hash inside
+    /// [`SetClassPieces`] instead (the fold hash is unused when `fold` is empty).
+    pub(super) css_hash: Option<String>,
     /// The element's `bind:` directives, run against the `$$element` callback param (each
     /// carries its accepted shape + the rewritten getter/setter, the proxied host setter).
     pub(super) binds: Vec<ClientElementBind>,
@@ -295,8 +302,10 @@ pub(super) struct SetClassPieces {
     /// The `value` arg (the base class value) in STRUCTURED form (see the field docs on
     /// the `ClientRuntimeOp::SetClass` op).
     pub(super) value: AttrValue,
-    /// The `css_hash` arg (`null` when directives are present, since scoped CSS is
-    /// refused upstream), or `None` when there are no directives (omitted).
+    /// The `css_hash` arg: the scope-hash literal when the host is SCOPED and
+    /// the hash did not fold into a literal `value` (the official
+    /// `build_set_class` 3-way), the `null` placeholder when directives are
+    /// present without a hash (`!css_hash && next`), or `None` (omitted).
     pub(super) css_hash: Option<String>,
     /// The directives object `{ foo: cond, … }`, or `None` for a base-only class.
     pub(super) directives: Option<String>,
@@ -1013,8 +1022,11 @@ pub(super) enum ClientRuntimeOp {
         /// EXPRESSION PART (`` `a${$0 ?? ''}b` ``, dep `() => call`) and a `$.clsx(...)`
         /// base memoizes the whole wrap — the official `build_set_class` rule.
         value: AttrValue,
-        /// The `css_hash` arg (`null` when directives are present, since scoped CSS is
-        /// refused upstream), or `None` when there are no directives (omitted).
+        /// The `css_hash` arg: the scope-hash literal when the element is
+        /// SCOPED and the hash did not fold into a literal `value` (the
+        /// official `build_set_class` 3-way), the `null` placeholder when
+        /// directives are present without a hash (`!css_hash && next`), or
+        /// `None` (omitted).
         css_hash: Option<String>,
         /// The directives object `{ foo: cond, … }`, or `None` for a base-only class.
         directives: Option<String>,
@@ -1083,6 +1095,12 @@ pub(super) enum ClientRuntimeOp {
         /// `<input>`, whose value/defaultValue handling the trailing `true` flags). A
         /// 2-argument call otherwise.
         input_trailing: bool,
+        /// The scope-hash literal argument for a SCOPED spread element — the
+        /// official `build_attribute_effect` passes `css_hash` at position 6
+        /// ("the spread method appends the hash to the end of the class
+        /// attribute on its own"). `None` for an unscoped element (the slot is
+        /// omitted, or `void 0` when the input tail follows).
+        css_hash: Option<String>,
     },
     /// An element LIFECYCLE op (`$.action` / `$.transition` / `$.animation` /
     /// `$.attach`) — the typed [`ElementLifecycleOp`] carries the target node var +

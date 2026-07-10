@@ -339,10 +339,24 @@ fn validate_committed_golden(path: &Path, raw: &str) -> Result<(), String> {
         }
     }
 
-    // The CSS topology is internally consistent: a present scope carries a
-    // hash + code; an absent scope carries neither.
+    // The CSS topology is internally consistent: a present artifact carries
+    // a code (possibly EMPTY — the official `css.code` is `""` for an
+    // existing-but-empty `<style>` body) and a hash EXACTLY when the masked
+    // code carries an observable scope token (`extractScopeHash` reads the
+    // hash from the code, so a token-less code — empty, or every rule pruned
+    // unscoped — pins `hash: null`); an absent artifact carries neither.
     match (golden.css.present, &golden.css.hash, &golden.css.code) {
-        (true, Some(_), Some(_)) => {}
+        (true, hash, Some(code)) => {
+            let has_scope_token = code.contains("svelte-<scoped>");
+            if hash.is_some() != has_scope_token {
+                return Err(format!(
+                    "{}: `css.hash` presence ({:?}) disagrees with the masked scope \
+                     token in `css.code` (token present={has_scope_token})",
+                    path.display(),
+                    golden.css.hash,
+                ));
+            }
+        }
         (false, None, None) => {}
         _ => {
             return Err(format!(

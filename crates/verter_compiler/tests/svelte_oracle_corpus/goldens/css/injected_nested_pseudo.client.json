@@ -1,0 +1,59 @@
+{
+  "slug": "css/injected_nested_pseudo.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "injected_nested_pseudo",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "append_styles",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "append_styles",
+    "from_html"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "append_styles": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<ul class=\"list svelte-<scoped>\"><li class=\"item svelte-<scoped>\">x</li></ul>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<ul class=\"list svelte-<scoped>\"><li class=\"item svelte-<scoped>\">x</li></ul>`); const $$css = {hash: 'svelte-<scoped>', code: '.list.svelte-<scoped> :is(.item:where(.svelte-<scoped>)) {color:blue;}.list.svelte-<scoped> li:where(.svelte-<scoped>):not(.off) {padding:0;}'}; export default function injected_nested_pseudo($$anchor) {$.append_styles($$anchor, $$css); var ul = root(); $.append($$anchor, ul);}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

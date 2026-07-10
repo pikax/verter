@@ -86,19 +86,20 @@ impl<'a> CssParser<'a> {
         }
     }
 
-    /// `parser.read_until(pattern)` for a SIMPLE single-char-class pattern: advance to the first
-    /// byte satisfying `pred`, returning the consumed slice; at EOF (upstream's non-loose branch)
-    /// throw `unexpected_eof`. Used for `REGEX_WHITESPACE_OR_COLON` in `read_declaration`.
-    fn read_until_char_class(
+    /// `parser.read_until(pattern)` for a single-CODEPOINT-class pattern (the JS-regex classes are
+    /// Unicode-aware — `\s` includes NBSP and the other Unicode spaces); at EOF (upstream's
+    /// non-loose branch) throw `unexpected_eof`. Used for `REGEX_WHITESPACE_OR_COLON` in
+    /// `read_declaration`.
+    fn read_until_codepoint_class(
         &mut self,
-        pred: impl Fn(u8) -> bool,
+        pred: impl Fn(u32) -> bool,
     ) -> Result<&'a str, &'static str> {
         if self.at_eof() {
             return Err("unexpected_eof");
         }
         let start = self.index;
-        while self.index < self.len() && !pred(self.src[self.index]) {
-            self.index += 1;
+        while self.index < self.len() && !pred(self.codepoint_at(self.index)) {
+            self.index += char_len(self.src[self.index]);
         }
         Ok(&self.text[start..self.index])
     }
@@ -107,6 +108,28 @@ impl<'a> CssParser<'a> {
     /// `template.codePointAt(index)` for the `>= 160` identifier-char test and whitespace.
     fn codepoint_at(&self, i: usize) -> u32 {
         self.text[i..].chars().next().map_or(0, |c| c as u32)
+    }
+
+    /// Append the WHOLE char at the current index to `out` and advance past it (by its UTF-8 byte
+    /// length) — the readers step whole scalars, never single bytes, so `codepoint_at` never lands
+    /// on a continuation byte and the accumulated value keeps valid UTF-8.
+    fn push_char(&mut self, out: &mut String) {
+        if let Some(c) = self.text[self.index..].chars().next() {
+            out.push(c);
+            self.index += c.len_utf8();
+        } else {
+            self.index += 1;
+        }
+    }
+
+    /// Advance past the WHOLE char at the current index without accumulating it (the validation
+    /// readers that do not build a value still step whole scalars).
+    fn advance_char(&mut self) {
+        self.index += self
+            .text
+            .get(self.index..)
+            .and_then(|s| s.chars().next())
+            .map_or(1, char::len_utf8);
     }
 
     /// `parser.match('</style' …)` body-loop finish predicate: at the literal `</style` or EOF.
@@ -300,7 +323,9 @@ impl<'a> CssParser<'a> {
     /// `read_declaration(parser)` — a property, `:`, a value; an empty non-`--` declaration is
     /// `css_empty_declaration`; a non-`}`-terminated declaration must `eat(';', true)`.
     fn read_declaration(&mut self) -> CssResult {
-        let property = self.read_until_char_class(|b| b.is_ascii_whitespace() || b == b':')?;
+        // `REGEX_WHITESPACE_OR_COLON = /[\s:]/` — JS `\s` is the Unicode set.
+        let property =
+            self.read_until_codepoint_class(|cp| is_css_whitespace(cp) || cp == u32::from(b':'))?;
         self.allow_whitespace();
         self.eat(b":", false)?;
         self.allow_whitespace();
@@ -326,9 +351,8 @@ impl<'a> CssParser<'a> {
             let ch = self.src[self.index];
             if escaped {
                 value.push('\\');
-                value.push(ch as char);
+                self.push_char(&mut value);
                 escaped = false;
-                self.index += 1;
                 continue;
             } else if ch == b'\\' {
                 escaped = true;
@@ -340,10 +364,10 @@ impl<'a> CssParser<'a> {
                 in_url = false;
             } else if quote_mark.is_none() && (ch == b'"' || ch == b'\'') {
                 quote_mark = Some(ch);
-            } else if ch == b'(' && value.len() >= 3 && &value[value.len() - 3..] == "url" {
+            } else if ch == b'(' && value.ends_with("url") {
                 in_url = true;
             } else if (ch == b';' || ch == b'{' || ch == b'}') && !in_url && quote_mark.is_none() {
-                return Ok(value.trim().to_string());
+                return Ok(trim_js_whitespace(&value).to_string());
             } else if ch == b'/'
                 && !in_url
                 && quote_mark.is_none()
@@ -359,8 +383,7 @@ impl<'a> CssParser<'a> {
                 }
                 continue;
             }
-            value.push(ch as char);
-            self.index += 1;
+            self.push_char(&mut value);
         }
         Err("unexpected_eof")
     }
@@ -380,21 +403,26 @@ impl<'a> CssParser<'a> {
             let ch = self.src[self.index];
             if escaped {
                 escaped = false;
+                self.advance_char();
+                continue;
             } else if ch == b'\\' {
                 escaped = true;
-            } else {
-                let closes = match quote_mark {
-                    Some(q) => ch == q,
-                    None => ch.is_ascii_whitespace() || ch == b']',
-                };
-                if closes {
-                    if let Some(q) = quote_mark {
-                        self.eat(&[q], true)?;
-                    }
-                    return Ok(());
-                }
+                self.index += 1; // `\` is ASCII (1 byte)
+                continue;
             }
-            self.index += 1;
+            // `REGEX_CLOSING_BRACKET = /[\s\]]/` — JS `\s` is the Unicode set; the reader steps
+            // whole chars so `codepoint_at` is only ever read on a char boundary.
+            let closes = match quote_mark {
+                Some(q) => ch == q,
+                None => is_css_whitespace(self.codepoint_at(self.index)) || ch == b']',
+            };
+            if closes {
+                if let Some(q) = quote_mark {
+                    self.eat(&[q], true)?;
+                }
+                return Ok(());
+            }
+            self.advance_char();
         }
         Err("unexpected_eof")
     }
@@ -415,9 +443,12 @@ impl<'a> CssParser<'a> {
                     self.index += seq_len;
                     len += 1;
                 } else {
-                    // `\` + next char (2 bytes in the ASCII case upstream slices).
-                    let next_len = self.src.get(self.index + 1).map_or(1, |&b| char_len(b));
-                    self.index += 1 + next_len;
+                    // `\` then the escaped char (a WHOLE char) — but only step it when one
+                    // EXISTS, so a trailing `\` at EOF advances by one and never overshoots `len`.
+                    self.index += 1;
+                    if self.index < self.len() {
+                        self.advance_char();
+                    }
                     len += 1;
                 }
             } else {
@@ -613,38 +644,27 @@ impl<'a> CssParser<'a> {
             // POSITIVE arm `\+?(\d+|\d*n(\s*[+-]\s*\d+)?)`.
             self.nth_positive_arm_len(rest)?
         };
-        // trailing alternation `((?=\s*[,)])|\s+of\s+)`, tried left-to-right:
+        // trailing alternation `((?=\s*[,)])|\s+of\s+)`, tried left-to-right (JS `\s` — Unicode):
         // (1) the zero-width end lookahead `\s*[,)]` — return `j` WITHOUT consuming the ws.
-        let mut k = j;
-        while matches!(rest.get(k), Some(b) if b.is_ascii_whitespace()) {
-            k += 1;
-        }
+        let k = skip_css_whitespace(rest, j);
         if matches!(rest.get(k), Some(b',' | b')')) {
             return Some(j);
         }
         // (2) the CONSUMING `\s+of\s+` arm — `\s+` (≥1), the literal `of`, `\s+` (≥1). On match,
         // return the byte length INCLUDING the trailing whitespace (so the `<selector>` after
         // `of` is read by the normal selector loop).
-        let mut m = j;
-        let ws_before = m;
-        while matches!(rest.get(m), Some(b) if b.is_ascii_whitespace()) {
-            m += 1;
-        }
-        if m == ws_before {
+        let m = skip_css_whitespace(rest, j);
+        if m == j {
             return None; // `\s+` needs ≥1 whitespace before `of`
         }
         if !rest[m..].starts_with(b"of") {
             return None;
         }
-        m += 2;
-        let ws_after = m;
-        while matches!(rest.get(m), Some(b) if b.is_ascii_whitespace()) {
-            m += 1;
-        }
-        if m == ws_after {
+        let after_of = skip_css_whitespace(rest, m + 2);
+        if after_of == m + 2 {
             return None; // `\s+` needs ≥1 whitespace after `of`
         }
-        Some(m)
+        Some(after_of)
     }
 
     /// The byte length of the POSITIVE An+B arm `\+?(\d+|\d*n(\s*[+-]\s*\d+)?)` at the start of
@@ -700,10 +720,8 @@ impl<'a> CssParser<'a> {
     /// (the negative arm's `\+`). An offset requires the sign AND ≥1 trailing digit; a sign with no
     /// digit (e.g. `2n+`) is not a match.
     fn nth_offset_len(&self, rest: &[u8], from: usize, plus_or_minus: bool) -> Option<usize> {
-        let mut k = from;
-        while matches!(rest.get(k), Some(b) if b.is_ascii_whitespace()) {
-            k += 1;
-        }
+        // `\s*<sign>\s*\d+` — the `\s*` runs are JS `\s` (Unicode).
+        let mut k = skip_css_whitespace(rest, from);
         let sign_ok = match rest.get(k) {
             Some(b'+') => true,
             Some(b'-') => plus_or_minus,
@@ -712,10 +730,7 @@ impl<'a> CssParser<'a> {
         if !sign_ok {
             return None;
         }
-        k += 1;
-        while matches!(rest.get(k), Some(b) if b.is_ascii_whitespace()) {
-            k += 1;
-        }
+        k = skip_css_whitespace(rest, k + 1);
         let ds = k;
         while matches!(rest.get(k), Some(b) if b.is_ascii_digit()) {
             k += 1;
@@ -741,14 +756,47 @@ impl<'a> CssParser<'a> {
         if j == hex_start {
             return None; // need ≥1 hex digit
         }
-        // optional trailing `\r\n` or a single whitespace.
+        // optional trailing `\r\n` or a single whitespace (JS `\s` — Unicode).
         if self.src.get(j) == Some(&b'\r') && self.src.get(j + 1) == Some(&b'\n') {
             j += 2;
-        } else if matches!(self.src.get(j), Some(b) if is_css_whitespace(*b as u32)) {
-            j += 1;
+        } else if j < self.len() && is_css_whitespace(self.codepoint_at(j)) {
+            j += char_len(self.src[j]);
         }
         Some(j - self.index)
     }
+}
+
+/// The JS `String.prototype.trim()` set — identical to the JS `\s` set (WhiteSpace ∪
+/// LineTerminator): INCLUDES U+FEFF, EXCLUDES U+0085. Rust `str::trim` (Unicode `White_Space`)
+/// diverges on exactly those two, so the official `value.trim()` routes here.
+fn trim_js_whitespace(s: &str) -> &str {
+    s.trim_matches(|c: char| is_css_whitespace(c as u32))
+}
+
+/// Advance `k` past the JS-`\s` whitespace run in `rest` (a valid-UTF-8 suffix of the source; `k`
+/// on a char boundary), decoding codepoints — the `\s*` / `\s+` scans of `REGEX_NTH_OF` are
+/// Unicode-aware.
+fn skip_css_whitespace(rest: &[u8], mut k: usize) -> usize {
+    while let Some((cp, len)) = codepoint_with_len(rest, k) {
+        if !is_css_whitespace(cp) {
+            break;
+        }
+        k += len;
+    }
+    k
+}
+
+/// Decode the UTF-8 codepoint starting at byte `i` of `bytes`, returning `(codepoint, byte
+/// length)` — `None` at EOF or on undecodable bytes (a mid-character `i`; never produced by the
+/// boundary-preserving scans).
+fn codepoint_with_len(bytes: &[u8], i: usize) -> Option<(u32, usize)> {
+    let &lead = bytes.get(i)?;
+    if lead < 0x80 {
+        return Some((u32::from(lead), 1));
+    }
+    let slice = bytes.get(i..i + char_len(lead))?;
+    let c = std::str::from_utf8(slice).ok()?.chars().next()?;
+    Some((c as u32, c.len_utf8()))
 }
 
 /// Whether `cp` is in the official parser's whitespace set (`is_whitespace` in `index.js`): the

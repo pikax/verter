@@ -75,6 +75,58 @@ fn nth_child_an_b_terminator_lookahead_is_clean() {
     assert_eq!(code("<style>p:nth-child(2n+1) {}</style>"), None);
 }
 
+// ── JS-`\s` (Unicode) whitespace parity in the reject reader ──
+// The reject reader mirrors `read/style.js`, whose `\s`-bearing scans (`REGEX_NTH_OF`, the
+// declaration-property `/[\s:]/`, the unquoted-attribute close `/[\s\]]/`, the `value.trim()`, and
+// the unicode-escape trailing `(\r\n|\s)?`) all use JS `\s` (Unicode: NBSP + the other Unicode
+// spaces). A byte-ASCII scan in THIS reject reader can wrongly REJECT a body the pinned compiler
+// ACCEPTS. The `REGEX_NTH_OF` site is the OBSERVABLE divergence (the nth grammar is strictly
+// validated, so a missed Unicode space falls through to the digit-leading identifier reject); the
+// other swept sites parse clean both ways in the reject-only contract, so they carry no separate
+// (non-discriminating) case here — they are routed through the same codepoint-aware primitives as
+// `css/parse.rs` to keep the two CSS-parser ports uniform (no lingering byte-ASCII whitespace).
+#[test]
+fn nth_child_an_b_offset_with_nbsp_is_clean_like_svelte() {
+    // NBSP (U+00A0) around the `+` offset — svelte's `\s*[+-]\s*` matches it; a byte-ASCII scan
+    // misses the offset, the selector loop reads `2n␠…` as a digit-leading identifier and throws
+    // `css_expected_identifier`. Oracle-confirmed: svelte@5.56.3 compiles `p:nth-child(2n␠+␠1)` to
+    // `p.svelte-…:nth-child(2n + 1){…}` (no throw). Clean here iff the reject reader is
+    // codepoint-aware — RED (`Some("css_expected_identifier")`) against the byte-ASCII scan.
+    assert_eq!(
+        code("<style>p:nth-child(2n\u{a0}+\u{a0}1) {}</style>"),
+        None
+    );
+    // The `\s+of\s+` arm with NBSP separators is likewise clean.
+    assert_eq!(
+        code("<style>p:nth-child(2n\u{a0}of\u{a0}.x) {}</style>"),
+        None
+    );
+}
+
+// ── UTF-8 boundary safety in the reject reader (the readers step whole chars, not bytes) ──
+// The reject reader mirrors `read/style.js`, which iterates JS string CHARACTERS. Verter's readers
+// must step whole UTF-8 scalars and build the value with whole chars — a byte-step (`index += 1`)
+// or a byte→char cast (`push(byte as char)`) either PANICS on a multibyte char (`codepoint_at` on
+// a continuation byte / a mid-char `value[len-3..]` slice) or corrupts the value. Oracle-grounded
+// against pinned svelte@5.56.3 (which ACCEPTS the first three and REJECTS the NBSP-only value).
+
+#[test]
+fn unquoted_attribute_value_with_non_ascii_char_is_clean_not_a_panic() {
+    // svelte@5.56.3 accepts + scopes `[data-x=café]` and `[lang=中文]`. A byte-advancing
+    // `read_attribute_value` lands `codepoint_at` on a UTF-8 continuation byte → char-boundary
+    // panic. Clean iff the reader steps whole chars.
+    assert_eq!(code("<style>[data-x=café]{color:red}</style>"), None);
+    assert_eq!(code("<style>[lang=中文]{color:red}</style>"), None);
+}
+
+#[test]
+fn declaration_value_with_non_ascii_before_paren_is_clean_not_a_panic() {
+    // svelte@5.56.3 accepts `a{color:é(foo)}` (marks it unused). The `url(` lookbehind must use
+    // `ends_with("url")` (not a byte-index slice `value[len-3..]`, which panics mid-char) and the
+    // value must accumulate whole chars (not `byte as char`).
+    assert_eq!(code("<style>a{color:é(foo)}</style>"), None);
+}
+
 // ── An+B negative-form discrimination (REGEX_NTH_OF two-branch structure) ──
 // `REGEX_NTH_OF` (`read/style.js:10`) is
 // `(even|odd|\+?(\d+|\d*n(\s*[+-]\s*\d+)?)|-\d*n(\s*\+\s*\d+))((?=\s*[,)])|\s+of\s+)`. The leading

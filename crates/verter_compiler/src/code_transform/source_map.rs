@@ -232,11 +232,12 @@ impl<'a> CodeTransform<'a> {
                         &mut generated_column,
                     );
                 }
-                Chunk::Inserted { content } => {
+                Chunk::Inserted { content } | Chunk::InsertedAnchored { content, .. } => {
                     if content.is_empty() {
                         continue;
                     }
-                    // Pure insertion — unmapped
+                    // Pure insertion — unmapped (an anchored insertion's
+                    // affinity only affects edit semantics, not mapping)
                     tokens.push(Token::new(
                         generated_line,
                         generated_column,

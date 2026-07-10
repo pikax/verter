@@ -1,0 +1,31 @@
+{
+  "slug": "css/scope_hash_fallback_no_filename.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "scope_hash_fallback_no_filename",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [],
+  "helperSet": [],
+  "helperCounts": {},
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": true,
+    "hash": "svelte-y2wdon",
+    "code": "\n\t.card.svelte-<scoped> {\n\t\tcolor: blue;\n\t}\n"
+  }
+}

@@ -14,7 +14,7 @@
 
 use verter_span::Span;
 
-use super::entity_decode::decode_attr_entities;
+use super::entity_decode::{decode_attr_entities, DecodedAttrValue};
 use super::events::{can_delegate_event, is_passive_event, normalize_event_name};
 use super::expr::ScopeId;
 use super::ir::{
@@ -212,10 +212,15 @@ fn lower_plain_attr(
         }
     }
     match value {
+        // A static text value is ENTITY-DECODED HERE, at the attribute-IR
+        // producer boundary — the IR carries the SEMANTIC value (the official
+        // parse-time decoded `Text.data`), so the CSS scope matcher and the
+        // client emitters read one shared meaning; emitters re-serialize
+        // ESCAPE-ONLY (never a second decode).
         Some(SvelteAttributeValue::Text(span)) => AttrIr::Static {
             name: name.to_string(),
             value: Some(StaticAttrValue {
-                value: span_text(ctx.source, *span).to_string(),
+                value: DecodedAttrValue::decode(span_text(ctx.source, *span)),
             }),
         },
         Some(SvelteAttributeValue::Expression(span)) => {
@@ -297,8 +302,8 @@ fn single_expression_value_span(
 /// The literal decode is DECODE-ONLY (NO re-escaping): a mixed-attribute value is a
 /// runtime STRING the backend concatenates, never re-serialized HTML — so `&lt;`
 /// decodes to `<` and stays `<` (verified against svelte@5.56.3), NOT the skeleton
-/// re-escape path [`super::entity_decode::escape_html_attr`] uses for the static
-/// `from_html` template.
+/// re-escape path [`super::entity_decode::escape_decoded_attr`] applies to a static
+/// attribute in the `from_html` template.
 ///
 /// The `{…}` close is located through the SHARED JS-aware brace scanner
 /// ([`find_matching_brace_in`]) the parser's interpolation tokenizer also uses, so

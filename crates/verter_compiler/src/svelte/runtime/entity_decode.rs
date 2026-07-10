@@ -3,30 +3,63 @@
 //! A faithful port of `svelte@5.56.3`'s `decode_character_references` +
 //! `validate_code` (`phases/1-parse/utils/html.js`) plus the double-quoted
 //! attribute-value re-escape (`escape_html(value, is_attr)`). The parser-stored
-//! RAW attribute span is DECODED (named longest-match against the vendored HTML5
-//! table + numeric refs with an OPTIONAL trailing `;`, the legacy no-`;` boundary
-//! treating `_` as a word char) then RE-ESCAPED for the `[&"<]` context.
+//! RAW attribute span is DECODED ONCE at the attribute-IR producer boundary
+//! (named longest-match against the vendored HTML5 table + numeric refs with an
+//! OPTIONAL trailing `;`, the legacy no-`;` boundary treating `_` as a word
+//! char) into the opaque [`DecodedAttrValue`]; skeleton serializers RE-ESCAPE
+//! the decoded value for the `[&"<]` context via [`escape_decoded_attr`]
+//! (escape-only — never a second decode).
 
-/// HTML-escape a static ATTRIBUTE VALUE for the double-quoted skeleton, matching
-/// the official `escape_html(decode_character_references(raw, true), /*is_attr*/ true)`:
-/// the parser-stored RAW attribute span is first DECODED (named + numeric entity
-/// references resolve to their characters), then re-escaped for the double-quoted
-/// context (`[&"<]` → `&amp;` / `&quot;` / `&lt;`).
+/// A static attribute value DECODED at the attribute-IR producer boundary — the
+/// single semantic value the CSS scope matcher and every client emitter consume,
+/// so the two can never disagree on what the attribute "means" (`class="a&#32;b"`
+/// is the word list `a b` for BOTH the `.b` selector match and the serialized
+/// skeleton). Constructed ONLY via [`DecodedAttrValue::decode`] (decode once, at
+/// construction); consumers read the decoded text via [`as_str`](Self::as_str)
+/// and re-escape via [`escape_decoded_attr`] — NEVER a second decode (an
+/// already-decoded `&amp;` re-decoding to `&` is the double-decode bug this
+/// newtype exists to prevent).
 ///
-/// Decode behavior (matching `svelte@5.56.3`'s `decode_character_references`):
-///
-/// - A NUMERIC reference (`&#65;` decimal / `&#x41;` hex) resolves to its code
-///   point via [`validate_code`] (line feed → space, `128..=159` → the Windows-1252
-///   remap, surrogate halves / out-of-range → `NUL`, everything else passes through).
-/// - A NAMED reference resolves through the canonical HTML5 named-character-reference
-///   table ([`super::entity_table`], the vendored official svelte table) by
-///   LONGEST match; a legacy no-`;` form decodes only when NOT followed by `=` or an
-///   alphanumeric (the HTML attribute-value named-reference rule).
-/// - An UNKNOWN reference (`&bogus;`) is NOT decoded — its leading `&` is kept
-///   literal, so the re-escape turns it into `&amp;bogus;` (the official behavior).
-/// - A bare `&` (no reference) is kept literal → re-escaped to `&amp;`.
-pub(super) fn escape_html_attr(value: &str) -> String {
-    escape_html_attr_context(&decode_attr_entities(value))
+/// The struct is declared `pub` inside this PRIVATE module so the `pub` field
+/// `StaticAttrValue::value` may carry it (the interface-visibility rule); it
+/// stays unnameable — and its accessors uncallable — outside the runtime
+/// module, keeping the newtype opaque at the crate surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedAttrValue(String);
+
+impl DecodedAttrValue {
+    /// Decode a RAW parser attribute span into its semantic value — the official
+    /// `decode_character_references(raw, true)` run ONCE, at IR construction.
+    #[must_use]
+    pub(super) fn decode(raw: &str) -> Self {
+        Self(decode_attr_entities(raw))
+    }
+
+    /// The decoded attribute text (already-decoded; never decode it again).
+    #[must_use]
+    pub(super) fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Whether the decoded value is the empty string (the `class=""` /
+    /// `disabled=""` present-but-empty distinction the emitters test).
+    #[must_use]
+    pub(super) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+/// ESCAPE-ONLY serialization of an already-decoded attribute value for the
+/// double-quoted static skeleton, matching the official
+/// `escape_html(decode_character_references(raw, true), /*is_attr*/ true)`
+/// pipeline with the DECODE half owned by the producer boundary
+/// ([`DecodedAttrValue::decode`]) and only the re-escape (`[&"<]` → `&amp;` /
+/// `&quot;` / `&lt;`) applied here. Escaping performs NO decode — a second
+/// decode over an already-decoded value would double-decode (`&amp;amp;` raw →
+/// decoded `&amp;` → wrongly `&`).
+#[must_use]
+pub(super) fn escape_decoded_attr(v: &DecodedAttrValue) -> String {
+    escape_html_attr_context(v.as_str())
 }
 
 /// Decode the named + numeric HTML entity references in a raw attribute value into
@@ -39,7 +72,8 @@ pub(super) fn escape_html_attr(value: &str) -> String {
 /// (`[A-Za-z0-9_]`, so `_` blocks) or `=` prevents the match.
 ///
 /// This is the DECODE-ONLY step (NO re-escaping). It is used both by
-/// [`escape_html_attr`] (which then re-escapes for the double-quoted skeleton) and
+/// [`DecodedAttrValue::decode`] (the attribute-IR producer boundary; skeleton
+/// serializers later re-escape via [`escape_decoded_attr`]) and
 /// directly by the runtime attribute lowering for a MIXED-attribute LITERAL chunk
 /// (`title="&copy; {x} &bogus;"` → the literal `&copy; ` decodes to `© `, the
 /// `&bogus;` stays literal, and the runtime concatenates `'© ' + x + ' &bogus;'` —
@@ -129,11 +163,15 @@ fn decode_one_entity(s: &str, is_attribute_value: bool) -> Option<(String, usize
     // OPTIONAL — the numeric run ends at the first non-matching char (or `;`).
     if s.as_bytes().get(1) == Some(&b'#') {
         // Determine the radix + the digit run length after `&#` (and an optional
-        // `x`/`X`). The run ends at the first non-digit; a trailing `;` (if present)
-        // is consumed as part of the reference.
+        // LOWERCASE `x` — the official pattern `#(?:x[a-fA-F\d]+|\d+)(?:;)?`
+        // accepts a lowercase hex PREFIX only; an uppercase `X` falls through
+        // to the decimal arm, matches no digits, and the reference is kept
+        // literal — `&#X41;` never decodes. Hex DIGITS keep both cases.). The
+        // run ends at the first non-digit; a trailing `;` (if present) is
+        // consumed as part of the reference.
         let after_hash = &s[2..];
         let (radix, digits_off) = match after_hash.as_bytes().first() {
-            Some(b'x' | b'X') => (16u32, 1usize),
+            Some(b'x') => (16u32, 1usize),
             _ => (10u32, 0usize),
         };
         let digits_str = &after_hash[digits_off..];

@@ -1398,6 +1398,140 @@ const SUPPORTED_LEGACY: &[&str] = &[
     "legacy/reactive_paren_assign",
 ];
 
+/// The css scoping corpus (5l) — a top-level `<style>` compiles to the scoped
+/// module: the scope class bakes into the static skeleton / threads through
+/// `$.set_class` and the spread `$.attribute_effect`, the scoped `css.code`
+/// routes external-vs-injected, unused selectors prune, and `@keyframes`
+/// rename. Every fixture asserts the FULL emitted-module structural equality
+/// against the official golden (hash-masked on both sides) plus the css-field
+/// parity below.
+const SUPPORTED_CSS: &[&str] = &[
+    // The two-injection-site agreement fixture: a STATIC `<h2>` (no class)
+    // synthesizes the baked scope class while the `class:active` div threads
+    // the SAME hash through `$.set_class`'s value literal.
+    "css/scoped_styles",
+    // NO filename ⇒ the css-hash input falls back to the css TEXT (the golden
+    // css.hash pins the fallback — a filename-hash regression diverges).
+    "css/scope_hash_fallback_no_filename",
+    // A DYNAMIC `class={c}` on a scoped element ⇒ the hash rides the
+    // `css_hash` argument (`$.set_class(button, 1, $.clsx($.get(c)),
+    // 'svelte-<hash>')`), NOT the value literal.
+    "css/dynamic_class_expression",
+    // `:global(.x)` unwraps un-scoped; the `:global { … }` block comment-wraps
+    // its wrapper; the `.card` rule still scopes.
+    "css/global_selectors",
+    // Child combinator + attribute operator/case-insensitivity matching
+    // (`.list > li[data-kind="a" i]`, `p[title^="no"]`).
+    "css/combinators_attributes",
+    // `{#if}` / `{#each}` bodies: block-nested elements match through the
+    // existence-probability walk; `.gone` prunes.
+    "css/blocks_existence",
+    // Unused-selector pruning (`.missing` comment-wraps) beside a used rule
+    // and a used `:hover` variant.
+    "css/unused_pruning",
+    // `@keyframes` rename + `-global-` prefix strip + `animation` /
+    // `animation-name` token rewrite.
+    "css/keyframes_animation",
+    // `<svelte:options css="injected">` ⇒ the module hoists `$$css` (the
+    // MINIFIED payload) + prepends `$.append_styles`; NO external artifact.
+    "css/injected_mode",
+    // A SCOPED spread element ⇒ the hash rides `$.attribute_effect`'s
+    // `css_hash` argument slot.
+    "css/spread_scoped",
+    // `<style></style>` ⇒ empty render, but the artifact STILL publishes —
+    // official `compiled.css` is NON-null (`{ code: '', hasGlobal: false,
+    // map }`) on BOTH backends; only the ABSENCE of a style block yields
+    // `css === null`. No inject machinery.
+    "css/style_empty_body",
+    // An UPPERCASE `&#X20;` prefix is NOT a character reference (the official
+    // numeric-entity pattern accepts a lowercase `x` only): the class value
+    // stays the literal `a&#X20;b` (markup-escaped `a&amp;#X20;b`), `.b`
+    // prunes as unused, and the div is NOT scoped — the two-sided
+    // discriminator against `entity_class_scoped` (`&#32;` decodes → scoped).
+    "css/entity_uppercase_x_not_decoded",
+    // A SCOPED class-less `<svelte:element>` ⇒ the synthesized empty class
+    // takes the lone-class route: `$.set_class($$element, 0, 'svelte-<hash>')`.
+    "css/svelte_element_scoped",
+    // A SCOPED `<svelte:element>` WITH a static attr ⇒ the fold appends the
+    // synthetic `class: ''` and threads the hash as `$.attribute_effect`'s
+    // official 6th positional argument.
+    "css/svelte_element_scoped_attr",
+    // A SCOPED spread `<svelte:element>` ⇒ NO synthetic class (the runtime
+    // spread path appends the hash itself); the hash rides the 6th argument.
+    "css/svelte_element_scoped_spread",
+    // INJECTED minify: the `:global { … }` wrapper tokens are REMOVED outright
+    // (the external artifact comment-wraps them); the body stays unscoped.
+    "css/injected_global_block",
+    // INJECTED minify: unused rules and empty rules are REMOVED outright
+    // (never comment-wrapped).
+    "css/injected_unused_empty",
+    // INJECTED minify: a mixed used/unused selector LIST prunes by REMOVAL —
+    // the mid-list and leading unused selectors drop with their commas.
+    "css/injected_selector_list_prune",
+    // INJECTED minify: local `@keyframes` rename + `-global-` strip +
+    // animation token rewrite — the keyframes body and the animation
+    // declaration keep their whitespace (the official minify strips only
+    // NON-animation declarations and never recurses into keyframes).
+    "css/injected_keyframes",
+    // INJECTED minify: a custom `--` property PRESERVES its value whitespace
+    // (the official Chromium `--foo: ;` caveat) while sibling declarations
+    // collapse.
+    "css/injected_custom_property",
+    // INJECTED minify: pseudo-class ARGUMENT lists (`:is`/`:not`) recurse —
+    // an unused `:is(...)` arg prunes by removal and the used arg scopes with
+    // the inner `:where(.svelte-<hash>)`.
+    "css/injected_nested_pseudo",
+    // ENTITY-DECODED class matching: `class="a&#32;b"` decodes to the word
+    // list `a b`, so `.b` retains+scopes (the div bakes the decoded
+    // `class="a b svelte-<hash>"`) and the mismatching `.c` prunes — the
+    // matcher and the skeleton emitter consume the SAME decoded value.
+    "css/entity_class_scoped",
+    // DECODE-ONCE protection: `class="a&amp;#32;b"` decodes ONCE to the single
+    // token `a&#32;b` (the `&amp;` protects the `#32;` — NO space), so `.b`
+    // prunes `/* (unused) */`, the div is NOT scoped, and the skeleton
+    // re-escapes the decoded `&` back to `class="a&amp;#32;b"`. A consumer
+    // DOUBLE-decode would yield the word list `a b` → `.b` wrongly scopes and
+    // the markup bakes `a b svelte-<hash>` — byte-divergent on BOTH the
+    // css.code and the template golden.
+    "css/entity_amp_escaped_class_not_double_decoded",
+    // ENTITY-DECODED id matching: `id="a&#45;b"` decodes to `a-b`, so `#a-b`
+    // retains+scopes and `#a-z` prunes.
+    "css/entity_id_scoped",
+    // ENTITY-DECODED attribute-selector matching: `data-token="a&#32;b"`
+    // decodes to the word list `a b`, so `[data-token~="b"]` retains+scopes
+    // and `[data-token~="z"]` prunes.
+    "css/entity_attr_selector_scoped",
+    // INJECTED minify over the ENTITY-DECODED class: the unused `.c` rule is
+    // REMOVED outright (not comment-wrapped) while `.b` scopes and the div
+    // bakes the decoded `class="a b svelte-<hash>"`.
+    "css/injected_entity_class_scoped",
+    // JS-`\s` (Unicode) WHITESPACE in the declaration-property scan: NBSP
+    // between `animation` and `:` still parses the property as `animation`
+    // (the official `/[\s:]/` read stops at NBSP), so the keyframes rename
+    // rewrites BOTH the `@keyframes` name and the value reference — a
+    // byte-ASCII property scan fails open (renamed keyframes, un-renamed
+    // reference).
+    "css/nbsp_keyframes_animation",
+    // JS-`\s` (Unicode) WHITESPACE closing an UNQUOTED attribute value: NBSP
+    // in `[data-x=a\u{a0}b]` ends the value at `a` (official
+    // `REGEX_CLOSING_BRACKET /[\s\]]/`) with `b` read as flags, so the `a`
+    // rule matches `data-x="a"` (retains+scopes) and the `z` rule prunes — a
+    // byte-ASCII close reads value `a\u{a0}b` and wrongly prunes both.
+    "css/nbsp_attr_selector_value",
+    // JS-`\s` (Unicode) WHITESPACE inside `REGEX_NTH_OF`: NBSP around the An+B
+    // offset (`li:nth-child(2n\u{a0}+\u{a0}1)`) is matched by the official
+    // `\s*[+-]\s*` so the rule scopes; a byte-ASCII nth scan misses the offset,
+    // the reject reader falls through to the digit-leading identifier reject,
+    // and the whole component is WRONGLY refused (css_expected_identifier).
+    // Exercises the reject-gate + scoping path end-to-end (both CSS parsers).
+    "css/nbsp_nth_child",
+    // NON-ASCII in an UNQUOTED attribute-selector value (`[data-x=café]`): the
+    // reject-reader + the scoping parser must step whole UTF-8 chars (a byte
+    // step lands `codepoint_at` on a continuation byte → char-boundary panic).
+    // svelte@5.56.3 accepts + scopes; the div retains + bakes the hash.
+    "css/nonascii_attr_selector_value",
+];
+
 /// The repository root (two levels up from this crate's `tests/` dir).
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1449,7 +1583,10 @@ fn component_name_for(slug: &str) -> String {
 /// the golden was generated with.
 fn compile_options_for(slug: &str) -> SvelteRuntimeOptions {
     SvelteRuntimeOptions {
-        filename: Some(format!("{slug}.svelte")),
+        // The css-hash FALLBACK fixture compiles with NO filename (the golden
+        // was generated with `filename: undefined`, so its css hash is the
+        // css-TEXT fallback, not the filename hash).
+        filename: (slug != "css/scope_hash_fallback_no_filename").then(|| format!("{slug}.svelte")),
         name: Some(component_name_for(slug)),
         // The `customElement: true` compile-option fixture.
         custom_element: slug == "options/custom_element_option_true",
@@ -1463,12 +1600,41 @@ fn emit(slug: &str) -> String {
     let alloc = Allocator::default();
     let parsed = parse_svelte(&source);
     let opts = compile_options_for(slug);
-    compile_client(&source, &parsed, &opts, &alloc, false)
+    compile_client(&source, &parsed, &opts, &alloc, false, false)
         .unwrap_or_else(|e| panic!("client emission failed for {slug}: {e:?}"))
         .code
 }
 
 // ── Topology extraction (a faithful Rust port of the svelte-golden-lib concepts) ──
+
+/// Mask every `svelte-<hash>` scope token to the golden's `svelte-<scoped>`
+/// placeholder — the Rust port of the golden lib's `maskScopeHash`
+/// (`/svelte-[0-9a-z]+/g`).
+fn mask_scope_hash(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if text[i..].starts_with("svelte-") {
+            let start = i + "svelte-".len();
+            let mut end = start;
+            while end < bytes.len()
+                && (bytes[end].is_ascii_digit() || bytes[end].is_ascii_lowercase())
+            {
+                end += 1;
+            }
+            if end > start {
+                out.push_str("svelte-<scoped>");
+                i = end;
+                continue;
+            }
+        }
+        let ch = text[i..].chars().next().expect("in-bounds char");
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
 
 /// Mask the non-code regions of a JS module — string literals, template-literal
 /// TEXT spans, and line/block comments — to spaces, so a `$.<helper>` scan keys on
@@ -6486,8 +6652,59 @@ fn all_supported_slugs() -> Vec<&'static str> {
         .chain(SUPPORTED_OPTIONS.iter())
         .chain(SUPPORTED_STORES.iter())
         .chain(SUPPORTED_LEGACY.iter())
+        .chain(SUPPORTED_CSS.iter())
         .copied()
         .collect()
+}
+
+/// Every corpus const MUST be wired into `all_supported_slugs()`. The per-corpus
+/// coverage tests iterate their const DIRECTLY, and the full-topology suite
+/// (`emitted_client_topology_matches_official_goldens`,
+/// `every_supported_fixture_emits_valid_js`) is the ONLY consumer that actually
+/// compiles each fixture — so a dropped `.chain(CONST.iter())` silently removes
+/// that whole corpus's behavioral/topology coverage while every other test stays
+/// green. This guard fails closed on a missing chain: it asserts each const's
+/// slugs are enumerated by `all_supported_slugs()` AND that the aggregate length
+/// is exactly the sum of the corpora (a dropped/duplicated chain shifts the
+/// count), so no sub-corpus can fall out of the full suite unnoticed.
+#[test]
+fn all_supported_slugs_wires_every_corpus_const() {
+    let corpora: &[(&str, &[&str])] = &[
+        ("SUPPORTED_FIXTURES", SUPPORTED_FIXTURES),
+        ("SUPPORTED_MATRIX", SUPPORTED_MATRIX),
+        ("SUPPORTED_ATTRIBUTES", SUPPORTED_ATTRIBUTES),
+        ("SUPPORTED_EVENTS", SUPPORTED_EVENTS),
+        ("SUPPORTED_BLOCKS", SUPPORTED_BLOCKS),
+        ("SUPPORTED_DECLARATION_TAGS", SUPPORTED_DECLARATION_TAGS),
+        ("SUPPORTED_COMPONENTS", SUPPORTED_COMPONENTS),
+        ("SUPPORTED_SPECIALS", SUPPORTED_SPECIALS),
+        ("SUPPORTED_LIFECYCLE", SUPPORTED_LIFECYCLE),
+        ("SUPPORTED_OPTIONS", SUPPORTED_OPTIONS),
+        ("SUPPORTED_STORES", SUPPORTED_STORES),
+        ("SUPPORTED_LEGACY", SUPPORTED_LEGACY),
+        ("SUPPORTED_CSS", SUPPORTED_CSS),
+    ];
+    let all = all_supported_slugs();
+    let all_set: std::collections::HashSet<&str> = all.iter().copied().collect();
+    for (name, corpus) in corpora {
+        for &slug in *corpus {
+            assert!(
+                all_set.contains(slug),
+                "corpus const `{name}` slug `{slug}` is not enumerated by \
+                 all_supported_slugs() — a `.chain({name}.iter())` wiring is missing, \
+                 silently dropping this corpus's full-topology coverage"
+            );
+        }
+    }
+    let total: usize = corpora.iter().map(|(_, corpus)| corpus.len()).sum();
+    assert_eq!(
+        all.len(),
+        total,
+        "all_supported_slugs() enumerates {} slugs but the corpus consts sum to {} \
+         — a `.chain(...)` was dropped or duplicated",
+        all.len(),
+        total
+    );
 }
 
 #[test]
@@ -7063,7 +7280,12 @@ fn supported_attributes_cover_the_full_attribute_corpus() {
 #[test]
 fn emitted_client_topology_matches_official_goldens() {
     for &slug in &all_supported_slugs() {
-        let code = emit(slug);
+        // The scope hash is masked to `svelte-<scoped>` on BOTH sides (the
+        // golden pipeline masks it at generation; Verter's emitted module
+        // carries the real hash) — the comparisons pin the scope-class
+        // TOPOLOGY, and the hash VALUE is pinned by the css-field parity gate
+        // (`css_client_artifact_matches_golden_and_native_server_fails_closed`).
+        let code = mask_scope_hash(&emit(slug));
         let golden = client_golden(slug);
 
         // (1) The helper SEQUENCE (the load-bearing oracle: the helper families
@@ -7803,7 +8025,7 @@ fn codegen_try_emit(slug: &str) -> Result<String, ClientCompileError> {
         name: Some(component_name_for(slug)),
         ..Default::default()
     };
-    compile_client(&source, &parsed, &opts, &alloc, false).map(|m| m.code)
+    compile_client(&source, &parsed, &opts, &alloc, false, false).map(|m| m.code)
 }
 
 /// The codegen corpus manifest (the coverage authority).
@@ -8564,4 +8786,271 @@ fn const_fold_buckets_cover_every_required_family_and_eagerness() {
         refuse_slugs.iter().any(|s| s.contains("eager")),
         "the refuse bucket must contain a concrete eagerness cell"
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The css scoping corpus (5l): coverage, css-field parity (BOTH backends), the
+// two-injection-site agreement, and the external-vs-injected routing proof.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn supported_css_covers_the_full_css_corpus() {
+    // The css corpus is the structural oracle for scope-class injection +
+    // scoped-css routing; a dropped row is a coverage regression. The count
+    // gate fails LOUDLY if a row is dropped; the directory walk catches a new
+    // fixture that silently skips the gate.
+    assert_eq!(
+        SUPPORTED_CSS.len(),
+        30,
+        "the css corpus must enumerate all 30 `css/*` fixtures"
+    );
+    let mut seen = std::collections::BTreeSet::new();
+    for &slug in SUPPORTED_CSS {
+        assert!(slug.starts_with("css/"), "css slug {slug} must be css/*");
+        assert!(seen.insert(slug), "duplicate css slug {slug}");
+    }
+    let fixtures =
+        repo_root().join("crates/verter_compiler/tests/svelte_oracle_corpus/fixtures/css");
+    for entry in std::fs::read_dir(&fixtures).expect("read css fixtures") {
+        let name = entry.expect("dir entry").file_name();
+        let name = name.to_string_lossy().into_owned();
+        let Some(stem) = name.strip_suffix(".svelte") else {
+            continue;
+        };
+        let slug = format!("css/{stem}");
+        assert!(
+            seen.contains(slug.as_str()),
+            "css fixture {slug} is not enumerated in SUPPORTED_CSS"
+        );
+    }
+}
+
+/// Compile a css fixture to the FULL `ClientModule` (code + external css
+/// artifact) under the SAME options the golden was generated with.
+fn compile_css_fixture(slug: &str) -> verter_compiler::svelte::runtime::client::ClientModule {
+    let source = fixture_source(slug);
+    let alloc = Allocator::default();
+    let parsed = parse_svelte(&source);
+    let opts = compile_options_for(slug);
+    compile_client(&source, &parsed, &opts, &alloc, false, false)
+        .unwrap_or_else(|e| panic!("client emission failed for {slug}: {e:?}"))
+}
+
+/// The committed SERVER golden JSON for a slug.
+fn server_golden(slug: &str) -> serde_json::Value {
+    let path = repo_root()
+        .join("crates/verter_compiler/tests/svelte_oracle_corpus/goldens")
+        .join(format!("{slug}.server.json"));
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read golden {slug}: {e}"));
+    serde_json::from_str(&text).unwrap_or_else(|e| panic!("parse golden {slug}: {e}"))
+}
+
+/// Normalize line endings (CRLF → LF) for the cross-platform byte compare.
+fn normalize_eol(text: &str) -> String {
+    text.replace("\r\n", "\n")
+}
+
+#[test]
+fn css_client_artifact_matches_golden_and_native_server_fails_closed() {
+    // Three claims, kept distinct so the test discriminates real behavior:
+    //   (1) GOLDEN-CORPUS invariant — svelte's OWN scoped css artifact is
+    //       backend-independent (`.client.json` `css` == `.server.json`
+    //       `css`); a golden regen that diverged them is a corpus bug. This
+    //       is a property of the committed goldens, NOT of Verter's server
+    //       backend.
+    //   (2) VERTER CLIENT parity — Verter's external css artifact matches the
+    //       committed client golden byte-exactly: the REAL hash against the
+    //       golden's UNMASKED `css.hash`, and the masked + EOL-normalized
+    //       `css.code` against the golden's code.
+    //   (3) VERTER NATIVE SERVER is FAIL-CLOSED — native server css emission
+    //       is a dedicated future surface (SSR), so `ssr=true` refuses with
+    //       `ServerGenerate` BEFORE any css work rather than the test
+    //       silently golden-matching a native-server path Verter does not yet
+    //       emit. When native server emission lands, this refusal flips and
+    //       forces the test to assert real native-server css output.
+    for &slug in SUPPORTED_CSS {
+        let client = client_golden(slug);
+        let server = server_golden(slug);
+        // (1) golden-corpus backend-independence.
+        assert_eq!(
+            client["css"], server["css"],
+            "the golden css field must be backend-independent for {slug}"
+        );
+
+        // (3) Verter's native server path fails closed today.
+        let source = fixture_source(slug);
+        let alloc = Allocator::default();
+        let parsed = parse_svelte(&source);
+        let opts = compile_options_for(slug);
+        match compile_client(&source, &parsed, &opts, &alloc, true, false) {
+            Err(ClientCompileError::Unsupported(
+                UnsupportedSvelteRuntimeSurface::ServerGenerate { .. },
+            )) => {}
+            other => panic!(
+                "native server css must fail closed to ServerGenerate for {slug} \
+                 (native server SSR emission is a dedicated future surface), got: {other:?}"
+            ),
+        }
+
+        // (2) Verter client artifact parity.
+        let module = compile_css_fixture(slug);
+        let present = client["css"]["present"].as_bool().expect("css.present");
+        match (&module.css, present) {
+            (Some(css), true) => {
+                // The golden hash is the FIRST observable `svelte-<hash>`
+                // token in the official `css.code` — NULL when the code
+                // carries none (an EMPTY render, or a stylesheet whose every
+                // rule pruned unscoped). A null-hash golden pins nothing
+                // about the artifact's hash (it is UNOBSERVABLE in official
+                // output); the masked-code compare below stays fully
+                // discriminating either way.
+                match client["css"]["hash"].as_str() {
+                    Some(golden_hash) => assert_eq!(
+                        css.hash, golden_hash,
+                        "the scope hash must match the oracle hash for {slug}"
+                    ),
+                    None => assert!(
+                        !mask_scope_hash(&css.code).contains("svelte-<scoped>"),
+                        "a null-hash golden means NO observable hash token in the css code for {slug}: {}",
+                        css.code
+                    ),
+                }
+                let golden_code = client["css"]["code"].as_str().expect("css.code");
+                assert_eq!(
+                    normalize_eol(&mask_scope_hash(&css.code)),
+                    normalize_eol(golden_code),
+                    "the scoped css.code must match the oracle render for {slug}"
+                );
+            }
+            (None, false) => {}
+            (got, want) => panic!(
+                "css artifact presence diverges for {slug}: Verter {}, golden {want}",
+                if got.is_some() { "present" } else { "absent" }
+            ),
+        }
+    }
+}
+
+#[test]
+fn scoped_styles_two_injection_sites_agree_on_one_hash() {
+    // THE two-injection-site agreement proof (`css/scoped_styles`): the STATIC
+    // site bakes `svelte-c4vjvh` (the filename hash of
+    // `css/scoped_styles.svelte`) into the `<h2>` skeleton, and the DYNAMIC
+    // site threads the SAME hash through the `class:active` div's
+    // `$.set_class` value literal. A divergence between the sites is a
+    // mis-scope and fails here.
+    let module = compile_css_fixture("css/scoped_styles");
+    // The STATIC bake (the synthesized class on the class-less scoped <h2>).
+    assert!(
+        module
+            .code
+            .contains("<h2 class=\"svelte-c4vjvh\">title</h2>"),
+        "the static site bakes the hash into the skeleton:\n{}",
+        module.code
+    );
+    // The DYNAMIC set_class (the literal-string arm: base + ' ' + hash), with
+    // the directive `null` placeholder and the `{ active }` next object.
+    assert!(
+        module
+            .code
+            .contains("$.set_class(div, 1, 'card svelte-c4vjvh', null, {}, { active })"),
+        "the dynamic site threads the SAME hash through $.set_class:\n{}",
+        module.code
+    );
+    // The artifact carries the SAME hash (third reader of the one fact).
+    let css = module.css.as_ref().expect("external artifact");
+    assert_eq!(css.hash, "svelte-c4vjvh");
+    // NEGATIVE: every `svelte-<hash>` token in the emitted module is the ONE
+    // scope hash — no second hash, no `(unknown)` fallback (which would hash the
+    // css text to a DIFFERENT value). Collected from the UNMASKED code so a
+    // divergent token stays visible (masking would collapse them together).
+    let distinct_hashes: std::collections::BTreeSet<&str> = module
+        .code
+        .match_indices("svelte-")
+        .map(|(i, _)| {
+            let start = i + "svelte-".len();
+            let len = module.code[start..]
+                .find(|c: char| !c.is_ascii_alphanumeric())
+                .unwrap_or(module.code.len() - start);
+            &module.code[i..start + len]
+        })
+        .collect();
+    assert_eq!(
+        distinct_hashes,
+        std::collections::BTreeSet::from(["svelte-c4vjvh"]),
+        "exactly one distinct scope hash (no second hash, no `(unknown)` leak):\n{}",
+        module.code
+    );
+    // NEGATIVE: the unmatched `<p>` is NOT scoped.
+    assert!(
+        module.code.contains("<p>body</p>"),
+        "the unmatched <p> stays unscoped:\n{}",
+        module.code
+    );
+}
+
+#[test]
+fn external_vs_injected_routing_matches_the_goldens() {
+    // EXTERNAL (`css/scoped_styles`): the artifact publishes, the module has
+    // NO inject machinery; the golden css.present is true on BOTH backends.
+    let external = compile_css_fixture("css/scoped_styles");
+    assert!(external.css.is_some());
+    assert!(!external.code.contains("$$css"));
+    assert!(!external.code.contains("$.append_styles"));
+    assert_eq!(
+        client_golden("css/scoped_styles")["css"]["present"],
+        serde_json::json!(true)
+    );
+    assert_eq!(
+        server_golden("css/scoped_styles")["css"]["present"],
+        serde_json::json!(true)
+    );
+
+    // INJECTED (`css/injected_mode`): the module hoists `$$css` + prepends
+    // `$.append_styles($$anchor, $$css)`, publishes NO artifact; the golden
+    // css.present is false on BOTH backends (compiled.css is null).
+    let injected = compile_css_fixture("css/injected_mode");
+    assert!(injected.css.is_none());
+    assert!(injected.code.contains("const $$css = {"));
+    assert!(injected.code.contains("$.append_styles($$anchor, $$css);"));
+    assert_eq!(
+        client_golden("css/injected_mode")["css"]["present"],
+        serde_json::json!(false)
+    );
+    assert_eq!(
+        server_golden("css/injected_mode")["css"]["present"],
+        serde_json::json!(false)
+    );
+}
+
+#[test]
+fn keyframes_rename_reaches_the_positive_golden() {
+    // `css/keyframes_animation` is the POSITIVE @keyframes golden: the local
+    // `spin` renames to `<hash>-spin` (at-rule + both animation references),
+    // the `-global-fade` prefix strips WITHOUT a rename, and the scoped
+    // `.spinner` rule carries the scope class.
+    let module = compile_css_fixture("css/keyframes_animation");
+    let css = module.css.as_ref().expect("external artifact");
+    let masked = mask_scope_hash(&css.code);
+    assert!(
+        masked.contains("@keyframes svelte-<scoped>-spin"),
+        "the local keyframes renames: {masked}"
+    );
+    assert!(
+        masked.contains("animation: svelte-<scoped>-spin 1s linear infinite;"),
+        "the animation shorthand token rewrites: {masked}"
+    );
+    assert!(
+        masked.contains("animation-name: svelte-<scoped>-spin;"),
+        "the animation-name token rewrites: {masked}"
+    );
+    assert!(
+        masked.contains("@keyframes fade"),
+        "the -global- prefix strips without a rename: {masked}"
+    );
+    // NEGATIVE: no un-renamed local reference survives, and the global name
+    // is never hash-prefixed.
+    assert!(!masked.contains("animation-name: spin"), "{masked}");
+    assert!(!masked.contains("-global-"), "{masked}");
+    assert!(!masked.contains("svelte-<scoped>-fade"), "{masked}");
 }

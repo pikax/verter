@@ -1,0 +1,40 @@
+{
+  "slug": "css/dynamic_class_expression.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "dynamic_class_expression",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [
+    "attr_class",
+    "clsx"
+  ],
+  "helperSet": [
+    "attr_class",
+    "clsx"
+  ],
+  "helperCounts": {
+    "attr_class": 1,
+    "clsx": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": true,
+    "hash": "svelte-1nkhqch",
+    "code": "\n\tbutton.svelte-<scoped> {\n\t\tcolor: red;\n\t}\n"
+  }
+}

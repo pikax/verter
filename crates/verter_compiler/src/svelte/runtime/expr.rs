@@ -461,6 +461,17 @@ pub struct AnalyzedExpr<'a> {
     /// reads instead of re-parsing the expression per consumer. Empty (default) for a
     /// non-bind expression (no `bind:` consumer reads it).
     pub bind_target: BindTargetFact,
+    /// The OWNED, arena-independent typed projection of the expression's structure
+    /// ([`MatcherExpr`]) the CSS selector-to-template matcher walks — lowered from the
+    /// SAME parse that produced this expression, so the matcher never re-parses
+    /// expression source. [`MatcherExpr::Other`] for a torn parse.
+    pub matcher_expr: MatcherExpr,
+    /// The `{@render}` callee classification ([`RenderCalleeShape`]), computed ONCE
+    /// from the SAME parse — the single authority both the render-callee resolution
+    /// pass and the CSS matcher's renderer planning read. `Err(())` = the fragment did
+    /// not parse (a torn expression); consumers fail closed exactly as a per-consumer
+    /// reparse failure did.
+    pub render_callee: Result<RenderCalleeShape, ()>,
 }
 
 /// The KIND of a value expression's transparent-paren-unwrapped root, restricted to the
@@ -482,6 +493,95 @@ pub enum UnwrappedRootKind {
     Other,
 }
 
+/// An OWNED, arena-independent typed projection of a template expression's
+/// structure — exactly the shape the CSS selector-to-template matcher's value
+/// enumeration (`gather_possible_values`) and expression-attribute
+/// classification (`expression_attr_shape`) walk. Lowered ONCE from the
+/// transparent-paren-PEELED OXC node at every level during
+/// [`collect_expr_references`]'s single parse (estree has no paren nodes, so
+/// peeling before classifying matches the official walk); the matcher READS
+/// this projection and never re-parses expression source.
+///
+/// The projection stores the typed expression SHAPE (with literal `String()`
+/// forms computed at lowering), NOT CSS-specific verdicts — the matcher
+/// implements the CSS semantics (`is_class` array/object enumeration, the
+/// `&&`/`||` falsy fill, UNKNOWN stickiness) over it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MatcherExpr {
+    /// A bare identifier reference (transparent parens peeled).
+    Identifier(String),
+    /// An estree `Literal` (string / number / boolean / null / bigint /
+    /// regexp) with its exact JS `String(value)` form — or a typed refusal
+    /// when that form cannot be reproduced exactly.
+    Literal(MatcherLiteral),
+    /// A `ConditionalExpression` — only the two RESULT branches contribute
+    /// values (the test never does).
+    Conditional {
+        /// The `?` branch.
+        consequent: Box<MatcherExpr>,
+        /// The `:` branch.
+        alternate: Box<MatcherExpr>,
+    },
+    /// A `LogicalExpression`. `and` = the `&&` operator (the falsy-fill rule);
+    /// `||` and `??` both enumerate both sides plainly (`and == false`).
+    Logical {
+        /// Whether the operator is `&&`.
+        and: bool,
+        /// The left operand.
+        left: Box<MatcherExpr>,
+        /// The right operand.
+        right: Box<MatcherExpr>,
+    },
+    /// An `ArrayExpression`'s elements (the matcher enumerates them only for
+    /// `class` values).
+    Array(Vec<MatcherArrayElement>),
+    /// An `ObjectExpression`'s static key inventory (the matcher enumerates
+    /// keys only for `class` values).
+    Object(Vec<MatcherObjectKey>),
+    /// Every other expression shape — and the torn-parse default. The matcher
+    /// maps it to UNKNOWN ("may match anything") / attr-shape `Other`.
+    Other,
+}
+
+/// One projected literal: the exact JS `String(value)` form computed at
+/// lowering, or a typed refusal (a value whose exact JS stringification
+/// cannot be reproduced — the matcher fails closed, never guesses).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MatcherLiteral {
+    /// The exact `String(value)` form.
+    Value(String),
+    /// The construct description of a literal whose stringification cannot be
+    /// reproduced exactly (bigint beyond the convertible range, a literal
+    /// without source text).
+    Refusal(&'static str),
+}
+
+/// One projected `ArrayExpression` element.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MatcherArrayElement {
+    /// An elision (`[a, , b]`) — contributes nothing.
+    Elision,
+    /// A spread (`[...xs]`) — or any non-expression element shape: the
+    /// element set is not enumerable (the matcher maps it to UNKNOWN).
+    Spread,
+    /// A plain element expression.
+    Expr(MatcherExpr),
+}
+
+/// One projected `ObjectExpression` property key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MatcherObjectKey {
+    /// A non-computed static key's exact `String()` form (identifier /
+    /// string / numeric / bigint key).
+    Value(String),
+    /// A static key whose exact stringification cannot be reproduced
+    /// (bigint overflow / missing source text) — the matcher fails closed.
+    Refusal(&'static str),
+    /// A computed key, a spread property, or any other non-static shape —
+    /// the key set is not enumerable (the matcher maps it to UNKNOWN).
+    Unknown,
+}
+
 impl<'a> AnalyzedExpr<'a> {
     /// Build an analyzed expression from the per-parse [`ExprAnalysisFacts`].
     pub(crate) fn interned(source: &'a str, scope: ScopeId, facts: ExprAnalysisFacts) -> Self {
@@ -493,12 +593,15 @@ impl<'a> AnalyzedExpr<'a> {
             unwrapped_is_sequence: facts.unwrapped_is_sequence,
             unwrapped_root_kind: facts.unwrapped_root_kind,
             bind_target: facts.bind_target,
+            matcher_expr: facts.matcher_expr,
+            render_callee: Ok(facts.render_callee),
         }
     }
 
     /// Build the analyzed expression for a TORN parse (the fragment did not parse cleanly):
-    /// no references, treated as a non-sequence root with an unknown root kind and an empty
-    /// bind-target fact (a torn bind target fails closed downstream).
+    /// no references, treated as a non-sequence root with an unknown root kind, an empty
+    /// bind-target fact, a [`MatcherExpr::Other`] matcher projection, and an `Err(())`
+    /// render-callee fact (a torn expression fails closed downstream).
     pub(crate) fn torn(source: &'a str, scope: ScopeId) -> Self {
         Self {
             source,
@@ -508,6 +611,8 @@ impl<'a> AnalyzedExpr<'a> {
             unwrapped_is_sequence: false,
             unwrapped_root_kind: UnwrappedRootKind::Other,
             bind_target: BindTargetFact::default(),
+            matcher_expr: MatcherExpr::Other,
+            render_callee: Err(()),
         }
     }
 }
@@ -1686,7 +1791,11 @@ pub enum RenderCalleeShape {
     SpreadArguments,
 }
 
-/// Parse a `{@render …}` tag's inner text into its callee shape.
+/// Classify the ALREADY-PARSED body of a `{@render …}` tag's inner expression
+/// into its callee shape — the classification half of the retired
+/// parse-then-classify helper, operating on the SAME parsed `body_expr`
+/// [`collect_expr_references`] harvests every other expression fact from (no
+/// second reparse, no synthesize-then-reparse).
 ///
 /// A call whose callee peels (through transparent author parens) to a plain
 /// identifier — `row(1)`, `(row)(1)`, or the optional `row?.(1)` — yields
@@ -1697,19 +1806,10 @@ pub enum RenderCalleeShape {
 /// In BOTH call shapes the trailing call's ARGUMENT spans (relative to the inner
 /// text) are carried, so a prop/member/optional callee keeps its argument thunks
 /// (the official `$.snippet(node, callee, …args)` shape). This is purely structural
-/// (no text matching): it inspects the OXC-parsed `CallExpression`. A fragment that
-/// does not parse yields `Err(())`.
-pub(crate) fn parse_render_call(inner_text: &str) -> Result<RenderCalleeShape, ()> {
-    let alloc = Allocator::default();
-    let wrapped = format!("({inner_text});");
-    let parsed = Parser::new(&alloc, &wrapped, SourceType::tsx()).parse();
-    if parsed.panicked || !parsed.errors.is_empty() {
-        return Err(());
-    }
-    // The single wrapped expression statement.
-    let Some(Statement::ExpressionStatement(stmt)) = parsed.program.body.first() else {
-        return Ok(RenderCalleeShape::Dynamic { args: Vec::new() });
-    };
+/// (no text matching): it inspects the OXC-parsed `CallExpression`. `expr` is the
+/// lone expression of the `({text});` wrapper parse, so every argument span is
+/// rebased by the single `(` wrapper prefix to inner-text-relative offsets.
+fn classify_render_callee(expr: &Expression<'_>) -> RenderCalleeShape {
     // Peel ALL outer parenthesised layers — the synthetic wrapper paren plus any author
     // parens wrapping the WHOLE call — so the trailing-call peel and the per-argument
     // spread scan reach the call's top-level arguments. A single unwrap would leave an
@@ -1717,7 +1817,7 @@ pub(crate) fn parse_render_call(inner_text: &str) -> Result<RenderCalleeShape, (
     // as a residual `ParenthesizedExpression` that matches neither a Call nor a Chain and
     // falls through to the empty-args dynamic shape, silently DROPPING a spread argument
     // the caller must instead fail closed on.
-    let mut inner_expr = &stmt.expression;
+    let mut inner_expr = expr;
     while let Expression::ParenthesizedExpression(p) = inner_expr {
         inner_expr = &p.expression;
     }
@@ -1728,9 +1828,9 @@ pub(crate) fn parse_render_call(inner_text: &str) -> Result<RenderCalleeShape, (
         Expression::CallExpression(call) => call,
         Expression::ChainExpression(chain) => match &chain.expression {
             ChainElement::CallExpression(call) => call,
-            _ => return Ok(RenderCalleeShape::Dynamic { args: Vec::new() }),
+            _ => return RenderCalleeShape::Dynamic { args: Vec::new() },
         },
-        _ => return Ok(RenderCalleeShape::Dynamic { args: Vec::new() }),
+        _ => return RenderCalleeShape::Dynamic { args: Vec::new() },
     };
     // The wrapper prefix is a single `(`.
     let prefix_len = 1u32;
@@ -1741,7 +1841,7 @@ pub(crate) fn parse_render_call(inner_text: &str) -> Result<RenderCalleeShape, (
             // (`render_tag_invalid_spread_argument`). Signal the fail-closed shape so
             // the caller refuses, rather than silently dropping the (un-thunk-able)
             // spread and emitting a wrong-arity `$.snippet` call.
-            return Ok(RenderCalleeShape::SpreadArguments);
+            return RenderCalleeShape::SpreadArguments;
         };
         let span = expr.span();
         args.push((
@@ -1760,13 +1860,13 @@ pub(crate) fn parse_render_call(inner_text: &str) -> Result<RenderCalleeShape, (
         callee = &p.expression;
     }
     if let Expression::Identifier(ident) = callee {
-        return Ok(RenderCalleeShape::StaticName {
+        return RenderCalleeShape::StaticName {
             name: ident.name.to_string(),
             optional: call.optional,
             args,
-        });
+        };
     }
-    Ok(RenderCalleeShape::Dynamic { args })
+    RenderCalleeShape::Dynamic { args }
 }
 
 /// A use-collector over a script body: it records, per tracked `$state` binding
@@ -2153,6 +2253,13 @@ pub(crate) struct ExprAnalysisFacts {
     /// structural fields reuse this parse; the function-pair plain-JS slices come from one
     /// optional `mjs` parse gated on sequence presence).
     pub bind_target: BindTargetFact,
+    /// The owned typed matcher projection ([`MatcherExpr`]), lowered from the SAME
+    /// parsed expression — the CSS selector-to-template matcher's sole structural
+    /// input (it never re-parses expression source).
+    pub matcher_expr: MatcherExpr,
+    /// The `{@render}` callee classification, computed from the SAME parsed
+    /// expression (argument spans rebased to inner-text-relative offsets).
+    pub render_callee: RenderCalleeShape,
 }
 
 /// Collect the FREE identifier references of a single template-expression text,
@@ -2239,13 +2346,165 @@ pub(crate) fn collect_expr_references(text: &str) -> Result<ExprAnalysisFacts, (
     let bind_target = body_expr
         .map(|expr| BindTargetFact::from_parsed_target(expr, &alloc, text))
         .unwrap_or_default();
+    // The owned matcher projection + the `{@render}` callee classification — both
+    // lowered from the SAME parsed `body_expr` (the CSS selector-to-template matcher
+    // and the render-callee resolution pass read these stored facts; neither ever
+    // re-parses the expression source). A missing body expression (defensive: the
+    // wrapped parse succeeded but yielded no lone expression statement) degrades to
+    // the same shapes the old per-consumer reparse produced for it.
+    let matcher_expr = body_expr.map_or(MatcherExpr::Other, build_matcher_expr);
+    let render_callee = body_expr.map_or(
+        RenderCalleeShape::Dynamic { args: Vec::new() },
+        classify_render_callee,
+    );
     Ok(ExprAnalysisFacts {
         references: collector.refs,
         direct_zero_arg_call_callee,
         unwrapped_is_sequence,
         unwrapped_root_kind,
         bind_target,
+        matcher_expr,
+        render_callee,
     })
+}
+
+/// Lower one OXC expression node into the owned [`MatcherExpr`] projection,
+/// peeling transparent `ParenthesizedExpression` wrappers BEFORE classifying
+/// at every level (estree has no paren nodes, so the official matcher walk
+/// never sees them). Literal `String(value)` forms are computed HERE, at
+/// lowering — via [`crate::js_number::js_number_to_string`] /
+/// [`js_bigint_to_string`] — so the matcher holds no number/bigint
+/// stringification logic of its own; an unreproducible stringification lowers
+/// to a typed [`MatcherLiteral::Refusal`] the matcher fails closed on.
+fn build_matcher_expr(expr: &Expression<'_>) -> MatcherExpr {
+    use oxc_ast::ast::{ArrayExpressionElement, LogicalOperator, ObjectPropertyKind, PropertyKey};
+    let mut expr = expr;
+    while let Expression::ParenthesizedExpression(paren) = expr {
+        expr = &paren.expression;
+    }
+    match expr {
+        Expression::Identifier(id) => MatcherExpr::Identifier(id.name.to_string()),
+        // The estree `Literal` family — the exact `String(node.value)`.
+        Expression::StringLiteral(lit) => {
+            MatcherExpr::Literal(MatcherLiteral::Value(lit.value.to_string()))
+        }
+        Expression::BooleanLiteral(lit) => {
+            MatcherExpr::Literal(MatcherLiteral::Value(lit.value.to_string()))
+        }
+        Expression::NullLiteral(_) => {
+            MatcherExpr::Literal(MatcherLiteral::Value("null".to_string()))
+        }
+        Expression::NumericLiteral(lit) => MatcherExpr::Literal(MatcherLiteral::Value(
+            crate::js_number::js_number_to_string(lit.value),
+        )),
+        Expression::BigIntLiteral(lit) => MatcherExpr::Literal(match &lit.raw {
+            None => MatcherLiteral::Refusal("a bigint literal without source text"),
+            Some(raw) => match js_bigint_to_string(raw) {
+                Ok(value) => MatcherLiteral::Value(value),
+                Err(construct) => MatcherLiteral::Refusal(construct),
+            },
+        }),
+        Expression::RegExpLiteral(lit) => MatcherExpr::Literal(
+            // The exact `String(node.value)`: JS canonicalizes the FLAG ORDER
+            // through the `RegExp.prototype.flags` getter (`d g i m s u v y`),
+            // so `String(/a/ig) === "/a/gi"` regardless of the written order.
+            // OXC's `RegExpFlags` Display emits that same canonical
+            // (alphabetical) order and a literal's `source` is exactly its
+            // written pattern text, so `regex.to_string()` (`/{pattern}/{flags}`)
+            // IS the canonical spelling — never the raw source text.
+            if lit.regex.pattern.text.is_empty() {
+                // A parsed literal always carries its pattern source (`//` is
+                // a comment, not a regex); an empty text is a synthesized or
+                // corrupt node — refuse rather than emit the non-regex `//`.
+                MatcherLiteral::Refusal("a regular-expression literal without source text")
+            } else {
+                MatcherLiteral::Value(lit.regex.to_string())
+            },
+        ),
+        Expression::ConditionalExpression(cond) => MatcherExpr::Conditional {
+            consequent: Box::new(build_matcher_expr(&cond.consequent)),
+            alternate: Box::new(build_matcher_expr(&cond.alternate)),
+        },
+        Expression::LogicalExpression(logical) => MatcherExpr::Logical {
+            and: logical.operator == LogicalOperator::And,
+            left: Box::new(build_matcher_expr(&logical.left)),
+            right: Box::new(build_matcher_expr(&logical.right)),
+        },
+        Expression::ArrayExpression(array) => MatcherExpr::Array(
+            array
+                .elements
+                .iter()
+                .map(|entry| match entry {
+                    ArrayExpressionElement::Elision(_) => MatcherArrayElement::Elision,
+                    ArrayExpressionElement::SpreadElement(_) => MatcherArrayElement::Spread,
+                    _ => match entry.as_expression() {
+                        Some(element) => MatcherArrayElement::Expr(build_matcher_expr(element)),
+                        // Defensive: a non-expression, non-spread, non-elision
+                        // element shape — projected as the unknown-making
+                        // element (the matcher maps it to UNKNOWN, exactly as
+                        // the old walk's add_unknown did).
+                        None => MatcherArrayElement::Spread,
+                    },
+                })
+                .collect(),
+        ),
+        Expression::ObjectExpression(object) => MatcherExpr::Object(
+            object
+                .properties
+                .iter()
+                .map(|property| match property {
+                    ObjectPropertyKind::ObjectProperty(prop) if !prop.computed => match &prop.key {
+                        PropertyKey::StaticIdentifier(id) => {
+                            MatcherObjectKey::Value(id.name.to_string())
+                        }
+                        PropertyKey::StringLiteral(lit) => {
+                            MatcherObjectKey::Value(lit.value.to_string())
+                        }
+                        PropertyKey::NumericLiteral(lit) => MatcherObjectKey::Value(
+                            crate::js_number::js_number_to_string(lit.value),
+                        ),
+                        PropertyKey::BigIntLiteral(lit) => match &lit.raw {
+                            None => {
+                                MatcherObjectKey::Refusal("a bigint literal without source text")
+                            }
+                            Some(raw) => match js_bigint_to_string(raw) {
+                                Ok(value) => MatcherObjectKey::Value(value),
+                                Err(construct) => MatcherObjectKey::Refusal(construct),
+                            },
+                        },
+                        _ => MatcherObjectKey::Unknown,
+                    },
+                    _ => MatcherObjectKey::Unknown,
+                })
+                .collect(),
+        ),
+        _ => MatcherExpr::Other,
+    }
+}
+
+/// JS `String(bigint)` from the literal's raw text: strip the `n` suffix and
+/// numeric separators; a radix-prefixed payload converts through `u128`
+/// (overflow fails closed rather than guessing).
+fn js_bigint_to_string(raw: &str) -> Result<String, &'static str> {
+    let body = raw.strip_suffix('n').unwrap_or(raw);
+    let body: String = body.chars().filter(|c| *c != '_').collect();
+    let radix_value = |digits: &str, radix: u32| -> Result<String, &'static str> {
+        u128::from_str_radix(digits, radix)
+            .map(|v| v.to_string())
+            .map_err(|_| "a bigint literal beyond the reproducible stringification range")
+    };
+    if let Some(hex) = body.strip_prefix("0x").or_else(|| body.strip_prefix("0X")) {
+        return radix_value(hex, 16);
+    }
+    if let Some(oct) = body.strip_prefix("0o").or_else(|| body.strip_prefix("0O")) {
+        return radix_value(oct, 8);
+    }
+    if let Some(bin) = body.strip_prefix("0b").or_else(|| body.strip_prefix("0B")) {
+        return radix_value(bin, 2);
+    }
+    // A decimal bigint literal has no leading zeros — the digits ARE the
+    // canonical decimal form.
+    Ok(body)
 }
 
 /// Classify a value expression's transparent-paren-unwrapped root into the

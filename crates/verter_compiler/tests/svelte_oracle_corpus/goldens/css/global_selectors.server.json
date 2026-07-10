@@ -1,0 +1,31 @@
+{
+  "slug": "css/global_selectors.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "global_selectors",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [],
+  "helperSet": [],
+  "helperCounts": {},
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": true,
+    "hash": "svelte-863rb6",
+    "code": "\n\t.card.svelte-<scoped> {\n\t\tcolor: blue;\n\t}\n\n\t.x {\n\t\tcolor: green;\n\t}\n\n\t/* :global {*/\n\t\t.y {\n\t\t\tcolor: red;\n\t\t}\n\t/*}*/\n"
+  }
+}

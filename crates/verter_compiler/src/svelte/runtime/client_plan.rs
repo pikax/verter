@@ -381,6 +381,16 @@ pub(super) struct SupportedClientIr<'a> {
     /// is a stable INDEX, NOT a name: the names are minted at emit time, never here.
     /// Interior-mutable because the projection walks nodes through `&self`.
     pub(super) fn_pair_bind_seq: std::cell::Cell<usize>,
+    /// The css scope-injection facts (hash + scoped NodeIds) of the component's
+    /// PROVEN `<style>` plan, or `None` for a style-less component. The DYNAMIC
+    /// injection sites read per-element through
+    /// [`CssScopeFacts::hash_for`](super::css::types::CssScopeFacts::hash_for):
+    /// the coalesced `$.set_class` 3-way (value literal vs `css_hash` arg) and
+    /// the spread `$.attribute_effect` hash argument; the emitter's region
+    /// re-synthesis reads it for the static skeleton bake. The SAME fact value
+    /// `compile_client` threads into `plan_static_templates` — one source, so
+    /// the injection sites cannot disagree.
+    pub(super) css_scope: Option<super::css::types::CssScopeFacts>,
 }
 
 impl<'a> ClientModulePlan<'a> {
@@ -420,9 +430,12 @@ impl<'a> SupportedClientIr<'a> {
     /// Build the semantic projection and the narrow plan from the classified
     /// surface and the broad IR. A refusal (a non-reactive interpolation, an
     /// unsupported expression in a script item / op) short-circuits the build.
+    /// `css_scope` is the proven `<style>` plan's scope-injection facts (`None`
+    /// for a style-less component) — the dynamic scope-class sites read it.
     pub(super) fn build(
         classified: &ClassifiedClientSurface,
         ir: &'a SvelteRuntimeIr<'a>,
+        css_scope: Option<super::css::types::CssScopeFacts>,
     ) -> Result<ClientModulePlan<'a>, UnsupportedSvelteRuntimeSurface> {
         let alloc = Allocator::default();
         // A CUSTOM ELEMENT compiles with `accessors` (the official
@@ -503,6 +516,7 @@ impl<'a> SupportedClientIr<'a> {
             html_nodes: classified.html_nodes.clone(),
             spread_elements: classified.spread_elements.clone(),
             fn_pair_bind_seq: std::cell::Cell::new(0),
+            css_scope,
         };
         // The `bind:group` DYNAMIC/mixed values — built here (not in the classifier) because
         // it needs the rewriter + reactivity analysis the projection owns. Each node's `value`
@@ -896,9 +910,11 @@ impl<'a> SupportedClientIr<'a> {
         attr: &AttrIr,
     ) -> Result<ClientAttr, UnsupportedSvelteRuntimeSurface> {
         match attr {
+            // The structural-mirror literal is the producer-DECODED semantic
+            // value (the same text the skeleton serializes escape-only).
             AttrIr::Static { name, value } => Ok(ClientAttr::Static {
                 name: name.clone(),
-                value: value.as_ref().map(|v| v.value.clone()),
+                value: value.as_ref().map(|v| v.value.as_str().to_string()),
             }),
             AttrIr::Bind { target, .. } => {
                 // The COARSE structural-mirror kind: `bind:this` (render-side, emitted

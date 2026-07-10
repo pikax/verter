@@ -32,7 +32,11 @@ impl<'a> ClientEmitter<'a> {
     pub(super) fn plan_region_factories(&mut self, out: &mut String) {
         let (regions, each_scopes) = self.post_order_regions();
         for scope_id in regions {
-            let factory = synthesize_region(self.ir(), self.ir().template_scope(scope_id));
+            let factory = synthesize_region(
+                self.ir(),
+                self.ir().template_scope(scope_id),
+                self.plan.build.css_scope.as_ref(),
+            );
             let region_frame = match &factory {
                 // ONLY a `$.from_html(...)` clone factory is module-hoisted + factory-called.
                 TemplateFactory::FromHtml {

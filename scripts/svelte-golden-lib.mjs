@@ -73,7 +73,11 @@ export function loadPinnedCompiler(repoRoot) {
 const SCOPE_HASH_RE = /svelte-[0-9a-z]+/g;
 const SCOPE_HASH_PLACEHOLDER = "svelte-<scoped>";
 
-/** First `svelte-<hash>` token in the source, or `null`. Topology, not bytes. */
+/**
+ * First `svelte-<hash>` token in the source, or `null` — the REAL hash value
+ * the golden's `css.hash` field pins (the hash INPUT rule: filename vs
+ * css-text fallback); only embedded occurrences elsewhere are masked.
+ */
 export function extractScopeHash(text) {
   const m = text.match(/svelte-[0-9a-z]+/);
   return m ? m[0] : null;
@@ -504,13 +508,23 @@ export function normalizeModuleForComparison(code) {
   return out.trim();
 }
 
-/** Normalize the compiled CSS to `{present, hash, code}` (scope hash masked). */
+/**
+ * Normalize the compiled CSS to `{present, hash, code}` (scope hash masked).
+ *
+ * Presence is `compiled.css !== null` — NEVER `css.code` truthiness: the
+ * official compiler emits a REAL artifact (`{ code: "", hasGlobal, map }`)
+ * for an existing-but-empty `<style>` body, and only the ABSENCE of a style
+ * block (or injected mode) yields `css === null`. An empty-code artifact
+ * normalizes as `{present: true, hash: null, code: ""}` (no observable
+ * `svelte-<hash>` token to extract, the empty code preserved faithfully).
+ */
 export function normalizeCss(compiled) {
-  const cssCode = compiled.css && compiled.css.code ? compiled.css.code : null;
+  const css = compiled.css ?? null;
+  if (css === null) return { present: false, hash: null, code: null };
   return {
-    present: !!cssCode,
-    hash: cssCode ? extractScopeHash(cssCode) : null,
-    code: cssCode ? maskScopeHash(cssCode) : null,
+    present: true,
+    hash: extractScopeHash(css.code),
+    code: maskScopeHash(css.code),
   };
 }
 

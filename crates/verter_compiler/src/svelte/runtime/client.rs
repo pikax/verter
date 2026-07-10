@@ -76,6 +76,37 @@ pub(super) const FN_PAIR_BIND_SET_NAME: &str = "bind_set";
 pub struct ClientModule {
     /// The full emitted JS module source.
     pub code: String,
+    /// The EXTERNAL scoped-css artifact (the official `compiled.css` — the
+    /// scoped `css.code` + its scope hash), produced for an external-mode
+    /// scoped `<style>`. `Some` whenever an external-mode `<style>` exists —
+    /// even when the rendered css is empty (the official `compiled.css` is
+    /// NON-null: `{ code: '', hasGlobal: false, map }`). `None` only when the
+    /// component has no `<style>` block, or in INJECTED mode (the injected css
+    /// is inlined into [`code`](Self::code) as the `$$css` hoist +
+    /// `$.append_styles` prelude — the official `inject_styles` routing nulls
+    /// the artifact).
+    pub css: Option<ScopedCssArtifact>,
+}
+
+/// The scoped-css payload of one compiled component — the official
+/// `{ code, map, hasGlobal }` external `compiled.css` artifact plus the
+/// scope hash. The INJECTED `$$css` object reads only the `{ hash, code }`
+/// pair (the official inline shape carries no map and no global fact); the
+/// map + `has_global` ride the EXTERNAL artifact out to the carrier's style
+/// block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedCssArtifact {
+    /// The scope hash (`svelte-<djb2>`).
+    pub hash: String,
+    /// The rendered scoped stylesheet (the official `css.code`).
+    pub code: String,
+    /// The css source-map JSON (the official `css.map`) — `Some` ONLY when
+    /// the compile demanded it (`want_source_map`), generated from the SAME
+    /// shared transform that rendered [`code`](Self::code).
+    pub source_map: Option<String>,
+    /// Whether the component's css includes GLOBAL css (the official
+    /// `css.hasGlobal` — `analysis.css.has_global`).
+    pub has_global: bool,
 }
 
 /// Emit the `svelte/internal/client` module for a NARROW client module plan.
@@ -88,14 +119,22 @@ pub struct ClientModule {
 /// unsupported surface has NO place in the narrow plan, emit-by-default is
 /// structurally impossible.
 ///
+/// `injected_css` is the INJECTED-mode scoped css (options `css="injected"` /
+/// custom element): the module hoists `const $$css = { hash, code }` and
+/// prepends `$.append_styles($$anchor, $$css)` to the component body
+/// (`transform-client.js`). `None` for the external default (the artifact
+/// routes through [`ClientModule::css`] instead).
+///
 /// Returns the emitted module — the plan was built only from a classified surface,
 /// so emission itself is infallible (every fail-closed decision happened upstream).
 pub(super) fn emit_client_module(
     plan: &ClientModulePlan,
     html_plan: &StaticTemplatePlan,
     topology: &ClientTopologyPlan,
+    injected_css: Option<&ScopedCssArtifact>,
 ) -> ClientModule {
     let mut emitter = ClientEmitter::new(plan);
+    emitter.injected_css = injected_css;
     emitter.emit(html_plan, topology)
 }
 
@@ -182,6 +221,11 @@ pub(super) struct ClientEmitter<'a> {
     /// parent's, matching the official depth-first hoist order), so every region's frame is
     /// looked up here, never re-synthesized.
     pub(super) region_frame: rustc_hash::FxHashMap<TemplateScopeId, RegionFrame>,
+    /// The INJECTED-mode scoped css (`None` for the external default / no
+    /// style): the module hoists `const $$css = { hash, code }` after the
+    /// template factories and prepends `$.append_styles($$anchor, $$css)` to
+    /// the component body — the official `transform-client.js` inject shape.
+    pub(super) injected_css: Option<&'a ScopedCssArtifact>,
 }
 
 /// One template-scope region's clone frame — HOW the region's body materializes its root
@@ -275,6 +319,7 @@ impl<'a> ClientEmitter<'a> {
             after_update_rank: super::client_lifecycle::after_update_ranks(plan),
             region_frame: rustc_hash::FxHashMap::default(),
             fn_pair_bind_names: rustc_hash::FxHashMap::default(),
+            injected_css: None,
         };
         // Allocate ONE collision-safe `bind:group` accumulator per DISTINCT group (keyed by
         // the structural bind target + scope), in source order, through the seeded DOM-var
@@ -381,6 +426,18 @@ impl<'a> ClientEmitter<'a> {
             out.push_str(&format!("var {} = new Set([{}]);\n", rest.set_name, keys));
         }
         out.push_str(&hoists);
+        // (2c) The INJECTED-mode `$$css` hoist — the LAST module hoist (the
+        // official `transform-client.js` pushes it onto `state.hoisted` after
+        // every template factory): `const $$css = { hash, code }`. The code
+        // payload is a plain JS string literal; the object is read by the
+        // `$.append_styles($$anchor, $$css)` body prelude.
+        if let Some(css) = self.injected_css {
+            out.push_str(&format!(
+                "const $$css = {{ hash: {}, code: {} }};\n",
+                js_single_quoted(&css.hash),
+                js_single_quoted(&css.code)
+            ));
+        }
         out.push('\n');
 
         // (3) The component body (the root region plus every nested block body, recursive).
@@ -408,7 +465,12 @@ impl<'a> ClientEmitter<'a> {
             );
         }
 
-        ClientModule { code: out }
+        ClientModule {
+            code: out,
+            // The EXTERNAL css artifact is attached by `compile_client` (the
+            // routing decision lives with the plan's output mode, not here).
+            css: None,
+        }
     }
 
     /// Emit the component function shell + the ROOT region (which recursively emits every
@@ -446,6 +508,14 @@ impl<'a> ClientEmitter<'a> {
         if needs_push {
             let flag = if legacy_mode { "false" } else { "true" };
             out.push_str(&format!("\t$.push($$props, {flag});\n"));
+        }
+
+        // The INJECTED-mode style prelude — `$.append_styles($$anchor, $$css)`
+        // as the first body statement after the `$.push` frame line (the
+        // official `component_block.body.unshift` lands it above the store
+        // setup and below the frame).
+        if self.injected_css.is_some() {
+            out.push_str("\t$.append_styles($$anchor, $$css);\n");
         }
 
         // The `$store` auto-subscription setup — driven SOLELY by
@@ -1298,9 +1368,15 @@ impl<'a> ClientEmitter<'a> {
                     target,
                     fold_body,
                     input_trailing,
-                } if NodeId(target.0) == node => Some(InlineInit::Stmt(
-                    self.emit_attribute_effect(node, fold_body, *input_trailing),
-                )),
+                    css_hash,
+                } if NodeId(target.0) == node => {
+                    Some(InlineInit::Stmt(self.emit_attribute_effect(
+                        node,
+                        fold_body,
+                        *input_trailing,
+                        css_hash.as_deref(),
+                    )))
+                }
                 // A `{@html}` that is the SOLE controlled child of THIS element — emitted
                 // at the element's init position, operating on the element var with the
                 // trailing `true` (the `$.reset(element)` follows via the child walk).

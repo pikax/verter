@@ -1,0 +1,56 @@
+{
+  "slug": "css/nonascii_attr_selector_value.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "nonascii_attr_selector_value",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "from_html"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div data-x=\"café\" class=\"svelte-<scoped>\">y</div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div data-x=\"café\" class=\"svelte-<scoped>\">y</div>`); export default function nonascii_attr_selector_value($$anchor) {var div = root(); $.append($$anchor, div);}",
+  "css": {
+    "present": true,
+    "hash": "svelte-1a0qwvy",
+    "code": "\n\t[data-x=café].svelte-<scoped> {\n\t\tcolor: red;\n\t}\n"
+  }
+}

@@ -181,9 +181,42 @@ pub enum UnsupportedSvelteRuntimeSurface {
         /// The source span.
         span: Span,
     },
-    /// A top-level `<style>` / CSS scoping surface.
-    Style {
-        /// The source span.
+    /// A `<style>` css body the scoping analyzer cannot PARSE or PROVE — a
+    /// span-bearing CSS body-parse failure past the official-reject body
+    /// probe, or an official `css_*` validation reject (`:global` / nesting
+    /// placement), or a fail-closed render refusal (`css_render_failed`).
+    /// Refused rather than emitted unscoped.
+    StyleCssAnalysis {
+        /// The PRECISE diagnostic code threaded from the typed style-plan
+        /// failure (`css_expected_identifier` /
+        /// `css_global_invalid_placement` / … / `css_render_failed`) —
+        /// carried unchanged, never replaced by a generic surface id.
+        code: &'static str,
+        /// The source span of the offending css construct.
+        span: Span,
+    },
+    /// A CLEAN-analyzed `<style>` whose selector⇄template relation the
+    /// selector-to-template matcher cannot PROVE (a template construct outside
+    /// the matcher's provable set — a legacy `<slot>`, hoisted slot content):
+    /// without proven scope facts no faithful scoped emission exists, so the
+    /// style refuses instead of emitting a guessed scope or unscoped output.
+    StyleSelectorUnsupported {
+        /// The selector-refusal diagnostic code threaded from the typed
+        /// style-plan failure (`svelte-runtime-unsupported-style-selector`)
+        /// — carried unchanged.
+        code: &'static str,
+        /// The source span of the UNPROVABLE construct itself.
+        span: Span,
+        /// The matcher's stable description of the unprovable construct
+        /// class, when the refusal named one.
+        construct: Option<&'static str>,
+    },
+    /// A css OUTPUT MODE the parse-domain detection cannot PROVE (a broken
+    /// upstream invariant — the official rule is `inject_styles = css ===
+    /// 'injected' || is_custom_element`, and both provable modes emit): an
+    /// unprovable mode refuses rather than guessing a routing.
+    StyleCssModeUnsupported {
+        /// The source span (the `<style>` content).
         span: Span,
     },
     /// `<svelte:options>` / a compile-option axis beyond name/runes/client.
@@ -389,7 +422,13 @@ impl UnsupportedSvelteRuntimeSurface {
             Self::LegacyRuneReference { .. } => "svelte-runtime-unsupported-legacy-rune-reference",
             Self::ExperimentalAsync { .. } => "svelte-runtime-unsupported-experimental-async",
             Self::DevMode { .. } => "svelte-runtime-unsupported-dev-mode",
-            Self::Style { .. } => "svelte-runtime-unsupported-style",
+            // The two style PLAN-FAILURE surfaces surface the CARRIED code —
+            // the precise official css code (`css_global_invalid_placement` /
+            // … / `css_render_failed`) or the fixed selector-refusal id —
+            // threaded unchanged from the typed style-plan failure.
+            Self::StyleCssAnalysis { code, .. } => code,
+            Self::StyleSelectorUnsupported { code, .. } => code,
+            Self::StyleCssModeUnsupported { .. } => "svelte-runtime-unsupported-style-css-mode",
             Self::OptionsAxis { .. } => "svelte-runtime-unsupported-options",
             Self::StaticInterpolation { .. } => "svelte-runtime-unsupported-static-interpolation",
             Self::DestructuringWrite { .. } => "svelte-runtime-unsupported-destructuring-write",
@@ -458,7 +497,26 @@ impl UnsupportedSvelteRuntimeSurface {
                 format!("the experimental-async `{surface}` surface")
             }
             Self::DevMode { .. } => "dev-mode (`dev: true`) codegen".to_string(),
-            Self::Style { .. } => "a `<style>` / CSS-scoping surface".to_string(),
+            Self::StyleCssAnalysis { code, .. } => {
+                format!(
+                    "a `<style>` css construct the scoping analysis cannot parse or \
+                     prove (a css body-parse failure, a `:global` / nesting placement \
+                     violation, or a render refusal; `{code}`)"
+                )
+            }
+            Self::StyleSelectorUnsupported { construct, .. } => {
+                let named = construct.map(|c| format!(" ({c})")).unwrap_or_default();
+                format!(
+                    "a `<style>` selector/template relation the selector-to-template \
+                     matcher cannot prove{named}; the style is refused rather than \
+                     emitted with a guessed scope"
+                )
+            }
+            Self::StyleCssModeUnsupported { .. } => {
+                "a css output mode the parse-domain detection cannot prove (neither \
+                 the external default nor `css=\"injected\"`/custom-element injection)"
+                    .to_string()
+            }
             Self::OptionsAxis { .. } => "a `<svelte:options>` / compile-option surface".to_string(),
             Self::StaticInterpolation { .. } => {
                 "a non-reactive interpolation (the official compiler static-folds it to a \
@@ -563,7 +621,9 @@ impl UnsupportedSvelteRuntimeSurface {
             | Self::LegacyRuneReference { span, .. }
             | Self::ExperimentalAsync { span, .. }
             | Self::DevMode { span }
-            | Self::Style { span }
+            | Self::StyleCssAnalysis { span, .. }
+            | Self::StyleSelectorUnsupported { span, .. }
+            | Self::StyleCssModeUnsupported { span }
             | Self::OptionsAxis { span }
             | Self::StaticInterpolation { span }
             | Self::DestructuringWrite { span }

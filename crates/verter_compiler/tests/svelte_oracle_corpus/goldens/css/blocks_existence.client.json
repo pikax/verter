@@ -1,0 +1,97 @@
+{
+  "slug": "css/blocks_existence.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "blocks_existence",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "from_html",
+    "from_html",
+    "first_child",
+    "append",
+    "if",
+    "sibling",
+    "each",
+    "index",
+    "child",
+    "reset",
+    "template_effect",
+    "set_text",
+    "get",
+    "append",
+    "reset",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "each",
+    "first_child",
+    "from_html",
+    "get",
+    "if",
+    "index",
+    "reset",
+    "set_text",
+    "sibling",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 3,
+    "first_child": 1,
+    "append": 3,
+    "if": 1,
+    "sibling": 1,
+    "each": 1,
+    "index": 1,
+    "child": 1,
+    "reset": 2,
+    "template_effect": 1,
+    "set_text": 1,
+    "get": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<p class=\"note svelte-<scoped>\">shown</p>",
+      "flag": null
+    },
+    {
+      "factory": "from_html",
+      "html": "<li class=\"row svelte-<scoped>\"> </li>",
+      "flag": null
+    },
+    {
+      "factory": "from_html",
+      "html": "<!> <ul></ul>",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<p class=\"note svelte-<scoped>\">shown</p>`); var root_1 = $.from_html(`<li class=\"row svelte-<scoped>\"> </li>`); var root_2 = $.from_html(`<!> <ul></ul>`, 1); export default function blocks_existence($$anchor, $$props) {let open = true; var fragment = root_2(); var node = $.first_child(fragment); {var consequent = ($$anchor) => {var p = root(); $.append($$anchor, p);}; $.if(node, ($$render) => {if (open) $$render(consequent);});} var ul = $.sibling(node, 2); $.each(ul, 21, () => $$props.rows, $.index, ($$anchor, row) => {var li = root_1(); var text = $.child(li, true); $.reset(li); $.template_effect(() => $.set_text(text, $.get(row))); $.append($$anchor, li);}); $.reset(ul); $.append($$anchor, fragment);}",
+  "css": {
+    "present": true,
+    "hash": "svelte-19ozxcl",
+    "code": "\n\t.note.svelte-<scoped> {\n\t\tcolor: red;\n\t}\n\n\t.row.svelte-<scoped> {\n\t\tcolor: blue;\n\t}\n\n\t/* (unused) .gone {\n\t\tcolor: green;\n\t}*/\n"
+  }
+}

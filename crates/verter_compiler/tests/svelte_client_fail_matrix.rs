@@ -39,7 +39,7 @@ fn compile(source: &str) -> Result<String, ClientCompileError> {
         filename: Some("App.svelte".to_string()),
         ..Default::default()
     };
-    compile_client(source, &parsed, &opts, &alloc, false).map(|m| m.code)
+    compile_client(source, &parsed, &opts, &alloc, false, false).map(|m| m.code)
 }
 
 /// The FAIL MATRIX rows — every fail-closed sub-shape per the supported boundary.

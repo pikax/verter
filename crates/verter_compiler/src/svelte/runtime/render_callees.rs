@@ -3,8 +3,9 @@
 //! Template lowering interns every `{@render callee(args)}` tag as a
 //! provisional [`RenderCallee::Dynamic`] node and records a pending row; once
 //! the FULL scope graph exists (a forward-referenced `{#snippet}` declared
-//! later in the same scope must resolve), this pass parses each pending render
-//! expression through the shared [`parse_render_call`] classifier and
+//! later in the same scope must resolve), this pass reads each pending render
+//! expression's stored `render_callee` fact — classified ONCE by the same
+//! parse that interned the provisional expression (no second reparse) — and
 //! finalizes the callee: a static name resolving to a `{#snippet}` NAME
 //! binding becomes [`RenderCallee::Snippet`]; everything else stays the
 //! provisional dynamic callee. A spread argument marks the node for the
@@ -13,7 +14,7 @@
 
 use verter_span::Span;
 
-use super::expr::{parse_render_call, BindingRuntimeKind, RenderCalleeShape};
+use super::expr::{BindingRuntimeKind, RenderCalleeShape};
 use super::ir::{ExprId, IrNode, RenderCallee, TagIr};
 use super::{span_text, LoweringCtx};
 
@@ -28,10 +29,12 @@ pub(super) fn resolve_render_callees(ctx: &mut LoweringCtx) {
     let pending = std::mem::take(&mut ctx.pending_renders);
     for render in pending {
         let node = render.node;
-        let text = span_text(ctx.source, render.inner);
-        let shape = match parse_render_call(text) {
+        let shape = match ctx.expressions.get(render.expr).render_callee.clone() {
             Ok(shape) => shape,
             Err(()) => {
+                // The provisional expression was TORN — surface the render-tag
+                // diagnostic exactly as the old reparse failure did.
+                let text = span_text(ctx.source, render.inner);
                 ctx.errors.push(
                     "svelte-runtime-render-parse",
                     format!("could not parse `{{@render}}` expression `{text}`"),

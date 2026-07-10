@@ -1,0 +1,31 @@
+{
+  "slug": "css/entity_attr_selector_scoped.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "entity_attr_selector_scoped",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [],
+  "helperSet": [],
+  "helperCounts": {},
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": true,
+    "hash": "svelte-sxbng6",
+    "code": "\n\t[data-token~=\"b\"].svelte-<scoped> {\n\t\tcolor: red;\n\t}\n\n\t/* (unused) [data-token~=\"z\"] {\n\t\tcolor: blue;\n\t}*/\n"
+  }
+}

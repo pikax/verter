@@ -20,63 +20,6 @@ enum SplitResult {
     End,
 }
 
-/// Two-channel merge cursor over already-sorted prepend slices.
-///
-/// Yields insertions in non-decreasing position order; at an equal position the
-/// unmapped `plain` item precedes the source-mapped item — matching the order
-/// of a concatenated `[plain.., mapped..]` list stably sorted by position.
-/// Used by [`CodeTransform::batch_prepend_left_merged`] to fold the two prepend
-/// channels into one chunk rebuild without materializing a combined Vec.
-struct PrependMerge<'s, 'a> {
-    /// Unmapped insertions: `(position, content)`, sorted by position.
-    plain: &'s [(u32, &'a str)],
-    /// Source-mapped insertions: `(position, source_start, content_offset, content)`,
-    /// sorted by position.
-    mapped: &'s [(u32, u32, u32, &'a str)],
-    /// Cursor into `plain`.
-    pi: usize,
-    /// Cursor into `mapped`.
-    mi: usize,
-}
-
-impl<'a> PrependMerge<'_, 'a> {
-    /// Position of the next pending item, or `None` when both channels are
-    /// exhausted.
-    #[inline]
-    fn peek_pos(&self) -> Option<u32> {
-        match (self.plain.get(self.pi), self.mapped.get(self.mi)) {
-            (Some(p), Some(m)) => Some(p.0.min(m.0)),
-            (Some(p), None) => Some(p.0),
-            (None, Some(m)) => Some(m.0),
-            (None, None) => None,
-        }
-    }
-
-    /// Consume the next pending item and return its chunk, advancing the
-    /// cursor. The caller must confirm an item is available via
-    /// [`peek_pos`](Self::peek_pos) first.
-    #[inline]
-    fn take_chunk(&mut self) -> Chunk<'a> {
-        let take_plain = match (self.plain.get(self.pi), self.mapped.get(self.mi)) {
-            // Tie → plain (unmapped) first: at an equal anchor an unmapped
-            // prepend ranks ahead of a mapped one.
-            (Some(p), Some(m)) => p.0 <= m.0,
-            (Some(_), None) => true,
-            (None, Some(_)) => false,
-            (None, None) => unreachable!("take_chunk called with both channels exhausted"),
-        };
-        if take_plain {
-            let (_, content) = self.plain[self.pi];
-            self.pi += 1;
-            Chunk::inserted(content)
-        } else {
-            let (_, source_start, content_offset, content) = self.mapped[self.mi];
-            self.mi += 1;
-            Chunk::inserted_mapped_with_offset(content, source_start, content_offset)
-        }
-    }
-}
-
 /// A code transformation helper for efficient string manipulation with source map support.
 ///
 /// This allows you to:
@@ -103,27 +46,27 @@ impl<'a> PrependMerge<'_, 'a> {
 /// ```
 pub struct CodeTransform<'a> {
     /// The original source text (never modified)
-    original: &'a str,
+    pub(super) original: &'a str,
     /// List of chunks representing the output content.
     /// Positioned chunks (Original and Overwritten) maintain monotonically
     /// increasing source positions.
-    chunks: Vec<Chunk<'a>>,
+    pub(super) chunks: Vec<Chunk<'a>>,
     /// Scratch buffer for batch operations. Swapped with `chunks` to avoid
     /// allocating a new Vec on each batch call — after the first batch op,
     /// both Vecs retain their capacity.
-    scratch: Vec<Chunk<'a>>,
+    pub(super) scratch: Vec<Chunk<'a>>,
     /// Content to prepend before everything
     intro: &'a str,
     /// Content to append after everything
     outro: &'a str,
     /// The bump allocator for string allocations
-    allocator: &'a Allocator,
+    pub(super) allocator: &'a Allocator,
     /// Cursor hint: last known chunk index for a given position.
     /// Used to accelerate forward-progressing access patterns.
-    cursor_hint: usize,
+    pub(super) cursor_hint: usize,
     /// Running delta between output length and original length (excluding intro/outro).
     /// Tracked incrementally by each mutation to avoid a full scan in build_string().
-    output_delta: i64,
+    pub(super) output_delta: i64,
     /// Whether the original source is pure ASCII.
     /// Precomputed once in `new()` to let source map generation skip `utf16_len()`
     /// calls (where byte length == UTF-16 length) for Original/Moved chunks.
@@ -145,6 +88,11 @@ pub struct CodeTransform<'a> {
     /// immediately AFTER it — the typed helper-import-preamble end boundary. `None` when no
     /// preamble was recorded (non-IDE transforms, or codegen that emitted no helper imports).
     helper_preamble_content: Option<&'a str>,
+    /// Whether any affinity-anchored insertion (from the checked insertion
+    /// operations) exists. Gates the boundary-attachment passes in the range
+    /// replacements so transforms that only use the positional insertion API
+    /// keep their historical code path with zero extra work.
+    pub(super) anchored_present: bool,
 }
 
 #[allow(dead_code)] // Many API methods only exercised by tests currently
@@ -180,6 +128,7 @@ impl<'a> CodeTransform<'a> {
             #[cfg(test)]
             last_reserved_token_capacity: std::cell::Cell::new(0),
             helper_preamble_content: None,
+            anchored_present: false,
         }
     }
 
@@ -256,7 +205,7 @@ impl<'a> CodeTransform<'a> {
     /// callers off the per-element / per-attribute inner loops; this
     /// method itself is the boundary that satisfies the per-op contract.
     #[inline]
-    fn record_audit_op(&self) {
+    pub(super) fn record_audit_op(&self) {
         if let Some(observer) = verter_audit::current_observer() {
             observer.record_event(verter_audit::AuditEvent::CompileCodeTransformOp);
         }
@@ -357,7 +306,10 @@ impl<'a> CodeTransform<'a> {
     fn chunk_position(chunk: &Chunk) -> Option<u32> {
         match chunk {
             Chunk::Original { start, .. } | Chunk::Overwritten { start, .. } => Some(*start),
-            Chunk::Inserted { .. } | Chunk::Moved { .. } | Chunk::InsertedMapped { .. } => None,
+            Chunk::Inserted { .. }
+            | Chunk::Moved { .. }
+            | Chunk::InsertedMapped { .. }
+            | Chunk::InsertedAnchored { .. } => None,
         }
     }
 
@@ -369,7 +321,7 @@ impl<'a> CodeTransform<'a> {
     /// position is >= `index`. This means we may return an index that's slightly before
     /// the target, but NEVER after it.
     #[inline]
-    fn search_start_for(&self, index: u32) -> usize {
+    pub(super) fn search_start_for(&self, index: u32) -> usize {
         let hint = self.cursor_hint.min(self.chunks.len().saturating_sub(1));
         if hint == 0 || self.chunks.is_empty() {
             return 0;
@@ -434,7 +386,10 @@ impl<'a> CodeTransform<'a> {
                         return SplitResult::PastTarget { chunk_index: i };
                     }
                 }
-                Chunk::Inserted { .. } | Chunk::Moved { .. } | Chunk::InsertedMapped { .. } => {}
+                Chunk::Inserted { .. }
+                | Chunk::Moved { .. }
+                | Chunk::InsertedMapped { .. }
+                | Chunk::InsertedAnchored { .. } => {}
             }
         }
         SplitResult::End
@@ -448,7 +403,9 @@ impl<'a> CodeTransform<'a> {
         for j in from..self.chunks.len() {
             if matches!(
                 &self.chunks[j],
-                Chunk::Inserted { .. } | Chunk::InsertedMapped { .. }
+                Chunk::Inserted { .. }
+                    | Chunk::InsertedMapped { .. }
+                    | Chunk::InsertedAnchored { .. }
             ) {
                 pos = j + 1;
             } else {
@@ -558,7 +515,10 @@ impl<'a> CodeTransform<'a> {
                         return false;
                     }
                 }
-                Chunk::Inserted { .. } | Chunk::Moved { .. } | Chunk::InsertedMapped { .. } => {}
+                Chunk::Inserted { .. }
+                | Chunk::Moved { .. }
+                | Chunk::InsertedMapped { .. }
+                | Chunk::InsertedAnchored { .. } => {}
             }
         }
         false
@@ -566,7 +526,12 @@ impl<'a> CodeTransform<'a> {
 
     /// Overwrite a range with new content.
     ///
-    /// Uses in-place splice instead of drain+rebuild.
+    /// Clears any boundary insertions attached to the replaced range by the
+    /// checked insertion operations (see [`update`](Self::update) for the
+    /// content-only twin that preserves them). Explicitly unchecked: offsets
+    /// are trusted, matching the historical behavior for every existing
+    /// caller; use [`try_overwrite`](Self::try_overwrite) for typed refusals
+    /// of malformed offsets.
     pub fn overwrite(&mut self, start: u32, end: u32, content: &str) -> &mut Self {
         self.record_audit_op();
         if start >= end {
@@ -580,12 +545,56 @@ impl<'a> CodeTransform<'a> {
             self.allocator.alloc_str(content)
         };
 
-        // Track the output length change: new content minus removed original
-        self.output_delta += content_ref.len() as i64 - (end - start) as i64;
+        self.replace_range_impl(start, end, content_ref, false);
+        self
+    }
 
-        // Fast path: single Original chunk contains the entire range
-        if self.try_fast_overwrite(start, end, content_ref) {
+    /// Content-only replacement: overwrite the range's content while
+    /// PRESERVING the boundary insertions the checked insertion operations
+    /// attached to the range (RIGHT-affinity content at `start`, and the
+    /// first chunk's end-boundary LEFT-affinity content), clearing interior
+    /// insertions. This is the `magic-string` `update` vs `overwrite`
+    /// distinction; for insertions made through the positional API the two
+    /// operations coincide.
+    ///
+    /// Explicitly unchecked like [`overwrite`](Self::overwrite) (zero-length
+    /// ranges are a silent no-op; offsets are trusted); use
+    /// [`try_update`](Self::try_update) for typed refusals.
+    pub fn update(&mut self, start: u32, end: u32, content: &str) -> &mut Self {
+        self.record_audit_op();
+        if start >= end {
             return self;
+        }
+
+        let content_ref = if content.is_empty() {
+            ""
+        } else {
+            self.allocator.alloc_str(content)
+        };
+
+        self.replace_range_impl(start, end, content_ref, true);
+        self
+    }
+
+    /// The splice engine shared by every range replacement: replaces the
+    /// positioned chunks covering `[start, end)` with a single `Overwritten`
+    /// chunk (plus preserved partial edges), removing free-standing insertion
+    /// chunks strictly inside the range. Returns `false` when the
+    /// nested-overwrite no-op fired (a strictly larger replaced range already
+    /// covers this one — nothing changed), `true` otherwise.
+    /// Boundary-affinity handling lives in
+    /// [`replace_range_impl`](Self::replace_range_impl).
+    pub(super) fn splice_replace_range(
+        &mut self,
+        start: u32,
+        end: u32,
+        content_ref: &'a str,
+    ) -> bool {
+        // Fast path: single Original chunk contains the entire range — every
+        // replaced byte is live original text, so the delta is exact.
+        if self.try_fast_overwrite(start, end, content_ref) {
+            self.output_delta += content_ref.len() as i64 - (end - start) as i64;
+            return true;
         }
 
         let search_start = self.search_start_for(start);
@@ -593,6 +602,14 @@ impl<'a> CodeTransform<'a> {
         let mut last_affected: Option<usize> = None;
         let mut replacement_chunks: SmallVec<[Chunk<'a>; 4]> = SmallVec::new();
         let mut handled = false;
+        // The output bytes the splice actually deletes — LIVE original text
+        // still covered by `Original` chunks plus replacement content of
+        // subsumed `Overwritten` chunks. Counting per affected chunk (never
+        // the nominal `end - start`) keeps overlapping edits from
+        // double-charging bytes an earlier edit already removed, which would
+        // drive `original.len() + output_delta` negative and wrap
+        // `build_string`'s capacity.
+        let mut removed_output: i64 = 0;
 
         for i in search_start..self.chunks.len() {
             let chunk = self.chunks[i];
@@ -616,6 +633,9 @@ impl<'a> CodeTransform<'a> {
                         first_affected = Some(i);
                     }
                     last_affected = Some(i);
+                    // Live original bytes inside the range.
+                    removed_output +=
+                        i64::from(chunk_end.min(end)) - i64::from(chunk_start.max(start));
 
                     if !handled {
                         if chunk_start < start {
@@ -633,7 +653,7 @@ impl<'a> CodeTransform<'a> {
                 Chunk::Overwritten {
                     start: chunk_start,
                     end: chunk_end,
-                    ..
+                    content,
                 } => {
                     if chunk_end <= start {
                         continue;
@@ -658,29 +678,48 @@ impl<'a> CodeTransform<'a> {
                         && chunk_end >= end
                         && (chunk_start < start || chunk_end > end)
                     {
-                        // Undo the output_delta we already added for this overwrite
-                        self.output_delta -= content_ref.len() as i64 - (end - start) as i64;
-                        return self;
+                        // Nothing was charged yet — the no-op changes nothing.
+                        return false;
                     }
 
                     if first_affected.is_none() {
                         first_affected = Some(i);
                     }
                     last_affected = Some(i);
+                    // The subsumed chunk's replacement content leaves the
+                    // output (its ORIGINAL bytes were already charged by the
+                    // edit that produced it).
+                    removed_output += content.len() as i64;
 
                     if !handled {
                         replacement_chunks.push(Chunk::overwritten(start, end, content_ref));
                         handled = true;
                     }
                 }
-                // Moved, Inserted, and InsertedMapped chunks don't participate in overwrite resolution
-                Chunk::Moved { .. } | Chunk::Inserted { .. } | Chunk::InsertedMapped { .. } => {
+                // Moved and pure-insertion chunks don't participate in overwrite resolution
+                Chunk::Moved { .. }
+                | Chunk::Inserted { .. }
+                | Chunk::InsertedMapped { .. }
+                | Chunk::InsertedAnchored { .. } => {
                     continue;
                 }
             }
         }
 
         if let (Some(first), Some(last)) = (first_affected, last_affected) {
+            // Insertion-family chunks positioned between the affected chunks
+            // are spliced out with them — their content leaves the output.
+            for chunk in &self.chunks[first..=last] {
+                match chunk {
+                    Chunk::Moved { content, .. }
+                    | Chunk::Inserted { content }
+                    | Chunk::InsertedMapped { content, .. }
+                    | Chunk::InsertedAnchored { content, .. } => {
+                        removed_output += content.len() as i64;
+                    }
+                    Chunk::Original { .. } | Chunk::Overwritten { .. } => {}
+                }
+            }
             self.chunks.splice(first..=last, replacement_chunks);
             self.cursor_hint = first;
         } else if !handled {
@@ -694,7 +733,8 @@ impl<'a> CodeTransform<'a> {
             self.cursor_hint = insert_at + num.saturating_sub(1);
         }
 
-        self
+        self.output_delta += content_ref.len() as i64 - removed_output;
+        true
     }
 
     /// Replace a range with new content (alias for overwrite)
@@ -873,7 +913,10 @@ impl<'a> CodeTransform<'a> {
                     current_pos = oe;
                     i += 1;
                 }
-                Chunk::Moved { .. } | Chunk::Inserted { .. } | Chunk::InsertedMapped { .. } => {
+                Chunk::Moved { .. }
+                | Chunk::Inserted { .. }
+                | Chunk::InsertedMapped { .. }
+                | Chunk::InsertedAnchored { .. } => {
                     if (past_start || current_pos >= start) && current_pos < end {
                         indices_to_move.push(i);
                     }
@@ -924,6 +967,12 @@ impl<'a> CodeTransform<'a> {
                 Chunk::InsertedMapped { content, .. } => {
                     // When moved, InsertedMapped loses its source mapping
                     // (the mapping was relative to the original insertion site)
+                    chunks_to_move.push(Chunk::inserted(content));
+                }
+                Chunk::InsertedAnchored { content, .. } => {
+                    // When moved, an anchored insertion loses its boundary
+                    // attachment (the anchor was relative to the original
+                    // insertion site) and travels as a plain insertion.
                     chunks_to_move.push(Chunk::inserted(content));
                 }
             }
@@ -993,420 +1042,6 @@ impl<'a> CodeTransform<'a> {
     pub(super) fn outro(&self) -> &str {
         self.outro
     }
-
-    /// Apply multiple prepend_left operations in a single O(n+m) pass.
-    ///
-    /// `items` must be sorted by position (ascending). Content strings must
-    /// outlive the CodeTransform (e.g. `&'static str` for binding prefixes).
-    ///
-    /// This avoids O(n*m) Vec::insert cost by rebuilding the chunks Vec once.
-    /// Specifically designed for batch-applying binding prefixes (`_ctx.`,
-    /// `$setup.`, etc.) after all overwrites are complete.
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    pub fn batch_prepend_left_static(&mut self, items: &[(u32, &'a str)]) -> &mut Self {
-        self.record_audit_op();
-        if items.is_empty() {
-            return self;
-        }
-
-        // Track output delta for all insertions
-        for &(_, content) in items {
-            self.output_delta += content.len() as i64;
-        }
-
-        // Use scratch buffer to avoid allocation on second+ batch call
-        let mut result = std::mem::take(&mut self.scratch);
-        result.clear();
-        let needed = self.chunks.len() + items.len() * 2;
-        if result.capacity() < needed {
-            result.reserve(needed - result.capacity());
-        }
-        let mut item_idx = 0;
-
-        for &chunk in &self.chunks {
-            match chunk {
-                Chunk::Original { start: cs, end: ce } => {
-                    // Emit items that fall before this chunk (in gaps between chunks)
-                    while item_idx < items.len() && items[item_idx].0 < cs {
-                        result.push(Chunk::inserted(items[item_idx].1));
-                        item_idx += 1;
-                    }
-
-                    // Items at cs or inside (cs, ce) — split and insert
-                    if item_idx < items.len() && items[item_idx].0 >= cs && items[item_idx].0 < ce {
-                        let mut prev = cs;
-                        while item_idx < items.len() && items[item_idx].0 < ce {
-                            let pos = items[item_idx].0;
-                            if pos > prev {
-                                result.push(Chunk::from_source(prev, pos));
-                            }
-                            while item_idx < items.len() && items[item_idx].0 == pos {
-                                result.push(Chunk::inserted(items[item_idx].1));
-                                item_idx += 1;
-                            }
-                            prev = pos;
-                        }
-                        if prev < ce {
-                            result.push(Chunk::from_source(prev, ce));
-                        }
-                        continue; // Don't add original chunk
-                    }
-
-                    result.push(chunk);
-                }
-                Chunk::Overwritten { start: cp, .. } => {
-                    // For positioned non-original chunks, emit items at/before position
-                    while item_idx < items.len() && items[item_idx].0 <= cp {
-                        result.push(Chunk::inserted(items[item_idx].1));
-                        item_idx += 1;
-                    }
-                    result.push(chunk);
-                }
-                Chunk::Inserted { .. } | Chunk::Moved { .. } | Chunk::InsertedMapped { .. } => {
-                    result.push(chunk);
-                }
-            }
-        }
-
-        // Remaining items go at the end
-        while item_idx < items.len() {
-            result.push(Chunk::inserted(items[item_idx].1));
-            item_idx += 1;
-        }
-
-        // Swap: old chunks become scratch for next batch call (retains capacity)
-        self.scratch = std::mem::replace(&mut self.chunks, result);
-        self.cursor_hint = 0;
-        self
-    }
-
-    /// Apply multiple prepend_left operations with optional source map positions.
-    ///
-    /// Like `batch_prepend_left_static`, but each item has an optional source mapping.
-    /// When `Some((source_pos, content_offset))`, creates an `InsertedMapped` chunk
-    /// that emits a source map token at `source_pos`, offset within the content by
-    /// `content_offset` bytes. When `None`, creates a regular `Inserted` chunk (unmapped).
-    ///
-    /// `items` must be sorted by insertion position (ascending).
-    ///
-    /// Tuple: `(insertion_pos, source_mapping, content)`
-    #[allow(clippy::type_complexity)]
-    pub fn batch_prepend_left_with_source_map(
-        &mut self,
-        items: &[(u32, Option<(u32, u32)>, &'a str)],
-    ) -> &mut Self {
-        self.record_audit_op();
-        if items.is_empty() {
-            return self;
-        }
-
-        // Track output delta for all insertions
-        for &(_, _, content) in items {
-            self.output_delta += content.len() as i64;
-        }
-
-        let mut result = std::mem::take(&mut self.scratch);
-        result.clear();
-        let needed = self.chunks.len() + items.len() * 2;
-        if result.capacity() < needed {
-            result.reserve(needed - result.capacity());
-        }
-        let mut item_idx = 0;
-
-        for &chunk in &self.chunks {
-            match chunk {
-                Chunk::Original { start: cs, end: ce } => {
-                    // Emit items that fall before this chunk
-                    while item_idx < items.len() && items[item_idx].0 < cs {
-                        let (_, source_info, content) = items[item_idx];
-                        result.push(Self::make_insert_chunk(content, source_info));
-                        item_idx += 1;
-                    }
-
-                    // Items at cs or inside (cs, ce) — split and insert
-                    if item_idx < items.len() && items[item_idx].0 >= cs && items[item_idx].0 < ce {
-                        let mut prev = cs;
-                        while item_idx < items.len() && items[item_idx].0 < ce {
-                            let pos = items[item_idx].0;
-                            if pos > prev {
-                                result.push(Chunk::from_source(prev, pos));
-                            }
-                            while item_idx < items.len() && items[item_idx].0 == pos {
-                                let (_, source_info, content) = items[item_idx];
-                                result.push(Self::make_insert_chunk(content, source_info));
-                                item_idx += 1;
-                            }
-                            prev = pos;
-                        }
-                        if prev < ce {
-                            result.push(Chunk::from_source(prev, ce));
-                        }
-                        continue;
-                    }
-
-                    result.push(chunk);
-                }
-                Chunk::Overwritten { start: cp, .. } => {
-                    while item_idx < items.len() && items[item_idx].0 <= cp {
-                        let (_, source_info, content) = items[item_idx];
-                        result.push(Self::make_insert_chunk(content, source_info));
-                        item_idx += 1;
-                    }
-                    result.push(chunk);
-                }
-                Chunk::Inserted { .. } | Chunk::Moved { .. } | Chunk::InsertedMapped { .. } => {
-                    result.push(chunk);
-                }
-            }
-        }
-
-        // Remaining items go at the end
-        while item_idx < items.len() {
-            let (_, source_info, content) = items[item_idx];
-            result.push(Self::make_insert_chunk(content, source_info));
-            item_idx += 1;
-        }
-
-        self.scratch = std::mem::replace(&mut self.chunks, result);
-        self.cursor_hint = 0;
-        self
-    }
-
-    /// Helper to create either an InsertedMapped or Inserted chunk.
-    #[inline]
-    fn make_insert_chunk(content: &'a str, source_info: Option<(u32, u32)>) -> Chunk<'a> {
-        match source_info {
-            Some((sp, offset)) => Chunk::inserted_mapped_with_offset(content, sp, offset),
-            None => Chunk::inserted(content),
-        }
-    }
-
-    /// Apply the unmapped and source-mapped prepend channels in a single
-    /// O(n+m) pass, merging the two already-sorted slices directly — without
-    /// materializing a combined Vec.
-    ///
-    /// Both `plain` and `mapped` must be sorted by insertion position
-    /// (ascending), each with its internal order preserved (use a stable sort).
-    /// At an equal position every `plain` (unmapped) item is emitted before any
-    /// `mapped` item, matching the ordering of a concatenated `[plain.., mapped..]`
-    /// list stably sorted by position. `plain` items become `Inserted` chunks;
-    /// `mapped` items become `InsertedMapped` chunks carrying their
-    /// `(source_start, content_offset)` mapping.
-    ///
-    /// This is the merge counterpart of [`batch_prepend_left_static`](Self::batch_prepend_left_static)
-    /// and [`batch_prepend_left_with_source_map`](Self::batch_prepend_left_with_source_map):
-    /// it removes the per-apply temporary Vec that would otherwise be needed to
-    /// concatenate the two channels before a single source-map-aware batch.
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    pub fn batch_prepend_left_merged(
-        &mut self,
-        plain: &[(u32, &'a str)],
-        mapped: &[(u32, u32, u32, &'a str)],
-    ) -> &mut Self {
-        self.record_audit_op();
-        if plain.is_empty() && mapped.is_empty() {
-            return self;
-        }
-
-        debug_assert!(
-            plain.windows(2).all(|w| w[0].0 <= w[1].0),
-            "batch_prepend_left_merged requires a sorted plain channel"
-        );
-        debug_assert!(
-            mapped.windows(2).all(|w| w[0].0 <= w[1].0),
-            "batch_prepend_left_merged requires a sorted mapped channel"
-        );
-
-        // Track output delta for all insertions across both channels.
-        for &(_, content) in plain {
-            self.output_delta += content.len() as i64;
-        }
-        for &(_, _, _, content) in mapped {
-            self.output_delta += content.len() as i64;
-        }
-
-        // Reuse the scratch buffer to avoid allocation on second+ batch call.
-        let mut result = std::mem::take(&mut self.scratch);
-        result.clear();
-        let needed = self.chunks.len() + (plain.len() + mapped.len()) * 2;
-        if result.capacity() < needed {
-            result.reserve(needed - result.capacity());
-        }
-
-        let mut merge = PrependMerge {
-            plain,
-            mapped,
-            pi: 0,
-            mi: 0,
-        };
-
-        for &chunk in &self.chunks {
-            match chunk {
-                Chunk::Original { start: cs, end: ce } => {
-                    // Emit items that fall before this chunk (gaps between chunks).
-                    while merge.peek_pos().is_some_and(|p| p < cs) {
-                        result.push(merge.take_chunk());
-                    }
-
-                    // Items at cs or inside (cs, ce) — split and insert.
-                    if merge.peek_pos().is_some_and(|p| p >= cs && p < ce) {
-                        let mut prev = cs;
-                        while let Some(pos) = merge.peek_pos() {
-                            if pos >= ce {
-                                break;
-                            }
-                            if pos > prev {
-                                result.push(Chunk::from_source(prev, pos));
-                            }
-                            while merge.peek_pos() == Some(pos) {
-                                result.push(merge.take_chunk());
-                            }
-                            prev = pos;
-                        }
-                        if prev < ce {
-                            result.push(Chunk::from_source(prev, ce));
-                        }
-                        continue;
-                    }
-
-                    result.push(chunk);
-                }
-                Chunk::Overwritten { start: cp, .. } => {
-                    while merge.peek_pos().is_some_and(|p| p <= cp) {
-                        result.push(merge.take_chunk());
-                    }
-                    result.push(chunk);
-                }
-                Chunk::Inserted { .. } | Chunk::Moved { .. } | Chunk::InsertedMapped { .. } => {
-                    result.push(chunk);
-                }
-            }
-        }
-
-        // Remaining items go at the end.
-        while merge.peek_pos().is_some() {
-            result.push(merge.take_chunk());
-        }
-
-        // Swap: old chunks become scratch for next batch call (retains capacity).
-        self.scratch = std::mem::replace(&mut self.chunks, result);
-        self.cursor_hint = 0;
-        self
-    }
-
-    /// Apply multiple overwrite operations in a single O(n+m) pass.
-    ///
-    /// `overwrites` must be sorted by start position (ascending) and non-overlapping.
-    /// Each entry is `(start, end, content)` — replaces source range `[start, end)`.
-    ///
-    /// Only affects `Original` chunks; existing `Edited` chunks pass through unchanged.
-    /// This avoids O(n*m) splice cost by rebuilding the chunks Vec once.
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    pub fn batch_overwrite(&mut self, overwrites: &[(u32, u32, &'a str)]) -> &mut Self {
-        self.record_audit_op();
-        if overwrites.is_empty() {
-            return self;
-        }
-
-        // Precondition: inputs must be sorted by start position.
-        // Overlapping ranges are tolerated — the chunk-processing loop already
-        // handles them gracefully, and output_delta accounts for skipped regions.
-        debug_assert!(
-            overwrites.windows(2).all(|w| w[0].0 <= w[1].0),
-            "batch_overwrite requires sorted ranges"
-        );
-
-        // Track output delta, accounting for overlapping ranges.
-        //
-        // The chunk-processing loop handles overlaps gracefully: it tracks a
-        // `prev` cursor and uses `max()` to prevent it from moving backward.
-        // When a later range overlaps an earlier one:
-        //   - Fully contained (end <= max_end): skipped entirely, delta = 0.
-        //   - Extends past max_end: content is emitted, but only the extension
-        //     [max_end, end) is effectively removed from the original.
-        {
-            let mut max_end: u32 = 0;
-            for &(start, end, content) in overwrites {
-                if start >= max_end {
-                    // Non-overlapping: full delta
-                    self.output_delta += content.len() as i64 - (end - start) as i64;
-                    max_end = end;
-                } else if end > max_end {
-                    // Partially overlapping but extends past max_end:
-                    // content is fully emitted, only [max_end, end) is removed.
-                    self.output_delta += content.len() as i64 - (end - max_end) as i64;
-                    max_end = end;
-                }
-                // Fully contained (end <= max_end): delta = 0
-            }
-        }
-
-        // Use scratch buffer to avoid allocation on second+ batch call
-        let mut result = std::mem::take(&mut self.scratch);
-        result.clear();
-        let needed = self.chunks.len() + overwrites.len() * 2;
-        if result.capacity() < needed {
-            result.reserve(needed - result.capacity());
-        }
-        let mut ow_idx = 0;
-
-        for &chunk in &self.chunks {
-            match chunk {
-                Chunk::Original { start: cs, end: ce } => {
-                    // Check if any overwrites fall within [cs, ce)
-                    if ow_idx < overwrites.len() && overwrites[ow_idx].0 < ce {
-                        let mut prev = cs;
-                        while ow_idx < overwrites.len() && overwrites[ow_idx].0 < ce {
-                            let (ow_start, ow_end, ow_content) = overwrites[ow_idx];
-
-                            // Skip overwrites that end before this chunk's start
-                            if ow_end <= cs {
-                                ow_idx += 1;
-                                continue;
-                            }
-
-                            // Emit original content before the overwrite
-                            let effective_start = ow_start.max(prev);
-                            if prev < effective_start {
-                                result.push(Chunk::from_source(prev, effective_start));
-                            }
-
-                            // Emit the overwritten chunk (skip empty-content deletions
-                            // to reduce chunk count — the source range is still removed
-                            // because prev advances past it)
-                            if !ow_content.is_empty() {
-                                result.push(Chunk::overwritten(ow_start, ow_end, ow_content));
-                            }
-                            // Use max() to prevent prev from moving backward when
-                            // a later overwrite is fully contained within an earlier
-                            // one's range (e.g., comment deletion inside a close-tag
-                            // overwrite).
-                            prev = prev.max(ow_end);
-                            ow_idx += 1;
-                        }
-
-                        // Emit remaining original content after last overwrite
-                        if prev < ce {
-                            result.push(Chunk::from_source(prev, ce));
-                        }
-                    } else {
-                        result.push(chunk);
-                    }
-                }
-                Chunk::Inserted { .. }
-                | Chunk::Overwritten { .. }
-                | Chunk::Moved { .. }
-                | Chunk::InsertedMapped { .. } => {
-                    result.push(chunk);
-                }
-            }
-        }
-
-        // Swap: old chunks become scratch for next batch call (retains capacity)
-        self.scratch = std::mem::replace(&mut self.chunks, result);
-        self.cursor_hint = 0;
-        self
-    }
 }
 
 impl<'a> CodeTransform<'a> {
@@ -1429,7 +1064,8 @@ impl<'a> CodeTransform<'a> {
                 Chunk::Inserted { content }
                 | Chunk::Overwritten { content, .. }
                 | Chunk::Moved { content, .. }
-                | Chunk::InsertedMapped { content, .. } => {
+                | Chunk::InsertedMapped { content, .. }
+                | Chunk::InsertedAnchored { content, .. } => {
                     out.push_str(content);
                 }
             }
@@ -1451,7 +1087,8 @@ impl<'a> CodeTransform<'a> {
                 Chunk::Inserted { content }
                 | Chunk::Overwritten { content, .. }
                 | Chunk::Moved { content, .. }
-                | Chunk::InsertedMapped { content, .. } => {
+                | Chunk::InsertedMapped { content, .. }
+                | Chunk::InsertedAnchored { content, .. } => {
                     w.write_str(content)?;
                 }
             }

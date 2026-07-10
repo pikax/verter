@@ -9,14 +9,14 @@
 
 use super::client::UnsupportedSvelteRuntimeSurface;
 use super::client_codegen_helpers::{
-    escape_template_text, js_single_quoted, object_key, style_object,
+    escape_template_text, js_single_quoted, object_key, object_property, style_object,
 };
 use super::client_plan::SupportedClientIr;
 use super::client_plan_types::{
     AttrValue, AttrValuePart, ClientDynAttrEmit, ClientNodeId, ClientRuntimeOp,
 };
 use super::client_shapes::ClientDynamicAttrShape;
-use super::entity_decode::decode_attr_entities;
+use super::entity_decode::escape_decoded_attr;
 use super::ir::{
     AttrIr, IrNode, NodeId, NonStaticPropertyKind, NonStaticPropertyValue, StyleDirectiveValue,
 };
@@ -194,7 +194,7 @@ impl<'a> SupportedClientIr<'a> {
         target: NodeId,
     ) -> Result<ClientRuntimeOp, UnsupportedSvelteRuntimeSurface> {
         let el = self.element_for(target)?;
-        let pieces = self.project_set_class_pieces(&el.attrs)?;
+        let pieces = self.project_set_class_pieces(target, &el.attrs)?;
         Ok(ClientRuntimeOp::SetClass {
             target: ClientNodeId(target.0),
             value: pieces.value,
@@ -209,17 +209,37 @@ impl<'a> SupportedClientIr<'a> {
     /// Project the SEMANTIC pieces of one coalesced `$.set_class` write over an
     /// element's typed attribute set. Merges the `class={…}` base attribute (if any —
     /// a missing base is the directive-synthesized `''`) with EVERY `class:` directive
-    /// into ONE call, matching the official `build_set_class`. Scoped CSS is refused
-    /// upstream (5l), so `css_hash` is `null` only when directives are present (the
-    /// official `!css_hash && next` rule), else absent. Host-independent: SHARED by the
+    /// into ONE call, matching the official `build_set_class`.
+    ///
+    /// `target` is the HOST node — the DYNAMIC scope-class injection site reads
+    /// its scope hash from the shared [`CssScopeFacts`] and applies the official
+    /// `build_set_class` 3-way: a LITERAL empty/missing base becomes the bare
+    /// hash literal; a LITERAL string base appends ` <hash>` (attr-escaped); any
+    /// other base (a dynamic expression / mixed template / boolean `true`)
+    /// leaves the value untouched and passes the hash as the `css_hash` arg.
+    /// When no hash lands in `css_hash`, directives still force the official
+    /// `null` placeholder (`!css_hash && next`). Host-independent: SHARED by the
     /// regular-element class op ([`Self::project_set_class_op`]) and the
     /// `<svelte:element>` lone-class fast path — one class-merge substrate; the emitters
     /// assemble the final call with their real host expression + `is_html` flag +
     /// accumulator name.
+    ///
+    /// [`CssScopeFacts`]: super::css::types::CssScopeFacts
     pub(super) fn project_set_class_pieces(
         &self,
+        target: NodeId,
         attrs: &[AttrIr],
     ) -> Result<super::client_plan_types::SetClassPieces, UnsupportedSvelteRuntimeSurface> {
+        // The scope hash for THIS element — `Some` iff the selector-to-template
+        // matcher marked the host node scoped (the shared per-element read).
+        let scope_hash = self
+            .css_scope
+            .as_ref()
+            .and_then(|facts| facts.hash_for(target));
+        // Whether the scope hash was folded INTO the value literal (the first
+        // two arms of the official 3-way); when it was not and the element is
+        // scoped, the hash rides the `css_hash` argument instead.
+        let mut hash_in_value = false;
         // The base `class` attribute (a `Static` / `Dynamic` / `Mixed` named `class` —
         // matched case-insensitively, the official `get_attribute_name` normalization),
         // and every `class:` directive, in source order.
@@ -232,17 +252,38 @@ impl<'a> SupportedClientIr<'a> {
             match attr {
                 AttrIr::Static { name, value } if name.eq_ignore_ascii_case("class") => {
                     // A static `class` consumed as the `$.set_class` BASE value is a
-                    // runtime JS-STRING argument (NOT a baked skeleton attr), so its
-                    // HTML entities DECODE — the same `decode_attr_entities` the mixed
-                    // literal chunks already use (`class="a&amp;b"` → base `'a&b'`). A
-                    // VALUELESS `class` (`value: None` — `<div class class:on={c}>`) is the
-                    // RAW boolean base `true`, distinct from a present empty-string `class=""`
-                    // (`Some("")`) which stays `''`.
+                    // runtime JS-STRING argument (NOT a baked skeleton attr) carrying
+                    // the DECODED semantic value the producer boundary stored
+                    // (`class="a&amp;b"` → base `'a&b'` — read via `as_str`, never a
+                    // second decode). A VALUELESS `class` (`value: None` —
+                    // `<div class class:on={c}>`) is the RAW boolean base `true`,
+                    // distinct from a present empty-string `class=""` (`Some("")`)
+                    // which stays `''`.
+                    //
+                    // The DYNAMIC scope-class injection's literal arms (official
+                    // `build_set_class`): a scoped element's EMPTY literal becomes
+                    // the bare hash; a non-empty literal appends ` <hash>` over the
+                    // ATTR-ESCAPED value (`escape_html(value, true)` — the official
+                    // literal-arm escape, ESCAPE-ONLY over the already-decoded
+                    // value). The boolean `true` base is NOT a string literal — its
+                    // hash rides the `css_hash` arg.
                     base_value = Some(match value {
                         None => AttrValue::Const("true".to_string()),
-                        Some(v) => {
-                            AttrValue::Const(js_single_quoted(&decode_attr_entities(&v.value)))
-                        }
+                        Some(v) => match scope_hash {
+                            Some(hash) if v.value.is_empty() => {
+                                hash_in_value = true;
+                                AttrValue::Const(js_single_quoted(hash))
+                            }
+                            Some(hash) => {
+                                hash_in_value = true;
+                                AttrValue::Const(js_single_quoted(&format!(
+                                    "{} {}",
+                                    escape_decoded_attr(&v.value),
+                                    hash
+                                )))
+                            }
+                            None => AttrValue::Const(js_single_quoted(v.value.as_str())),
+                        },
                     });
                 }
                 AttrIr::Dynamic { name, expr } if name.eq_ignore_ascii_case("class") => {
@@ -304,22 +345,37 @@ impl<'a> SupportedClientIr<'a> {
             }
         }
         let has_directives = !directives.is_empty();
-        // The `value` arg: the structured base value, or `''` when only directives are
-        // present.
-        let value = base_value.unwrap_or_else(|| AttrValue::Const("''".to_string()));
+        // The `value` arg: the structured base value, or the directive-synthesized
+        // `''` when only directives are present — which, on a SCOPED element, is
+        // the official synthetic empty class whose empty literal becomes the bare
+        // hash (the `value === '' → value = hash` arm).
+        let value = base_value.unwrap_or_else(|| match scope_hash {
+            Some(hash) => {
+                hash_in_value = true;
+                AttrValue::Const(js_single_quoted(hash))
+            }
+            None => AttrValue::Const("''".to_string()),
+        });
         let directives_has_call = directives_has_call && has_directives;
         // The op is REACTIVE when any contributor references state OR `has_call` (the
         // base or any directive) — the official rule that forces the effect +
         // memoization (and the accumulator) even over a pure-call/plain-let surface.
         let reactive = base_has_state || dir_has_state || value.has_call() || directives_has_call;
-        // css_hash: `null` when directives are present (scoped CSS is refused upstream,
-        // so there is never a real hash); absent otherwise.
-        let css_hash = has_directives.then(|| "null".to_string());
-        // The directives object `{ foo: cond, ... }`; absent when no directives.
+        // The `css_hash` arg (official `build_set_class`): the hash literal when
+        // the element is scoped and the hash did NOT fold into the value (a
+        // dynamic/mixed/boolean-true base); else the `null` placeholder when
+        // directives are present (`!css_hash && next`); else absent.
+        let css_hash = match scope_hash {
+            Some(hash) if !hash_in_value => Some(js_single_quoted(hash)),
+            _ => has_directives.then(|| "null".to_string()),
+        };
+        // The directives object `{ foo: cond, ... }` (a same-named condition
+        // collapses to the official printer's shorthand `{ foo }` via the
+        // shared `object_property`); absent when no directives.
         let directives_obj = has_directives.then(|| {
             let entries = directives
                 .iter()
-                .map(|(k, v)| format!("{k}: {v}"))
+                .map(|(k, v)| object_property(k, v))
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("{{ {entries} }}")
@@ -359,16 +415,15 @@ impl<'a> SupportedClientIr<'a> {
             match attr {
                 AttrIr::Static { name, value } if name.eq_ignore_ascii_case("style") => {
                     // A static `style` consumed as the `$.set_style` BASE value is a
-                    // runtime JS-STRING argument (NOT a baked skeleton attr), so its
-                    // HTML entities DECODE (`style="q:'&quot;'"` → base `'q:\'"\''`). A
+                    // runtime JS-STRING argument (NOT a baked skeleton attr) carrying
+                    // the producer-DECODED value (`style="q:'&quot;'"` → base
+                    // `'q:\'"\''` — read via `as_str`, never a second decode). A
                     // VALUELESS `style` (`value: None` — `<div style style:color={c}>`) is the
                     // RAW boolean base `true`, distinct from a present empty-string `style=""`
                     // (`Some("")`) which stays `''`.
                     base_value = Some(match value {
                         None => AttrValue::Const("true".to_string()),
-                        Some(v) => {
-                            AttrValue::Const(js_single_quoted(&decode_attr_entities(&v.value)))
-                        }
+                        Some(v) => AttrValue::Const(js_single_quoted(v.value.as_str())),
                     });
                 }
                 AttrIr::Dynamic { name, expr } if name.eq_ignore_ascii_case("style") => {

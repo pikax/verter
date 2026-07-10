@@ -49,18 +49,16 @@ enum HostAttr {
 /// Read the typed presence/value of the host attribute `name` from the host
 /// element's `AttrIr` inventory. A `Static`/`Dynamic`/`Mixed` attribute maps to
 /// the corresponding [`HostAttr`]; a `bind:` / event / directive of the same name
-/// is NOT a plain attribute and does not count. A STATIC value is ENTITY-DECODED
-/// (the official `Text.data` view the gates compare). Decided over the typed IR,
-/// never a source scan.
+/// is NOT a plain attribute and does not count. A STATIC value is read verbatim —
+/// the lowered IR value is ALREADY entity-decoded at the attribute-IR producer
+/// boundary (the official `Text.data` view the gates compare; a second decode
+/// here would double-decode `&amp;amp;`). Decided over the typed IR, never a
+/// source scan.
 fn host_attr(attrs: &[AttrIr], name: &str) -> HostAttr {
     for attr in attrs {
         match attr {
             AttrIr::Static { name: n, value } if n == name => {
-                return HostAttr::Static(
-                    value
-                        .as_ref()
-                        .map(|v| super::entity_decode::decode_attr_entities(&v.value)),
-                );
+                return HostAttr::Static(value.as_ref().map(|v| v.value.as_str().to_string()));
             }
             AttrIr::Dynamic { name: n, .. } | AttrIr::Mixed { name: n, .. } if n == name => {
                 return HostAttr::Dynamic;

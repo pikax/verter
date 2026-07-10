@@ -67,6 +67,7 @@ mod client_svelte_element;
 mod client_svelte_head;
 mod client_walk;
 mod cross_slot_redeclaration;
+mod css;
 mod css_reject;
 mod custom_element;
 mod entity_decode;
@@ -270,11 +271,16 @@ pub(super) struct LoweringCtx<'a> {
     pub(super) direct_snippet_slot_attr_child_hosts: rustc_hash::FxHashSet<NodeId>,
 }
 
-/// A `{@render}` tag awaiting callee resolution: the node to finalize, the inner
-/// expression span, and the scope it renders in.
+/// A `{@render}` tag awaiting callee resolution: the node to finalize, the
+/// interned provisional expression (whose stored `render_callee` fact the
+/// resolution pass reads), the inner expression span, and the scope it
+/// renders in.
 struct PendingRender {
     /// The `IrNode::Tag(TagIr::Render { .. })` node to finalize.
     node: NodeId,
+    /// The interned provisional callee expression (the whole inner text) —
+    /// its stored `render_callee` fact drives the resolution (no reparse).
+    expr: ExprId,
     /// The tag's inner expression span (the `callee(args)` text).
     inner: Span,
     /// The scope the render expression evaluates in.
@@ -1261,6 +1267,7 @@ fn lower_tag(ctx: &mut LoweringCtx, tag: &SvelteTag, scope: ScopeId) -> Option<N
             }));
             ctx.pending_renders.push(PendingRender {
                 node,
+                expr: provisional,
                 inner: tag.inner,
                 scope,
             });
@@ -1461,8 +1468,14 @@ fn lower_declaration_tag(
 
 /// Plan the static templates, dynamic slots, and client-side node paths for a
 /// component's runtime IR. (A thin re-export of [`html::plan_static_templates`]
-/// at the module's public surface.)
+/// at the module's public surface.) `css` is the proven `<style>` plan's
+/// scope-injection facts — the skeleton serializer bakes the scope class into
+/// scoped elements' static `class` attributes; `None` for a style-less
+/// component.
 #[must_use]
-pub fn plan_static_templates(ir: &SvelteRuntimeIr) -> StaticTemplatePlan {
-    html::plan_static_templates(ir)
+pub fn plan_static_templates(
+    ir: &SvelteRuntimeIr,
+    css: Option<&css::types::CssScopeFacts>,
+) -> StaticTemplatePlan {
+    html::plan_static_templates(ir, css)
 }

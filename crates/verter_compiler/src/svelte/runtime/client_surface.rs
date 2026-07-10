@@ -494,7 +494,9 @@ fn refuse_unsupported_root_region(ir: &SvelteRuntimeIr) -> Option<UnsupportedSve
     {
         return None;
     }
-    match synthesize_region(ir, scope) {
+    // Classification reads only the FACTORY SHAPE (clone frame vs anchor vs
+    // standalone), which is independent of scope-class baking — no css facts.
+    match synthesize_region(ir, scope, None) {
         // The supported clone-frame shapes — `root()` is a valid factory call (or
         // the standalone root, already refused upstream).
         TemplateFactory::FromHtml { .. } | TemplateFactory::Standalone { .. } => None,
@@ -1254,18 +1256,19 @@ fn classify_attr(
             // `__value`. (A static `value` on a NON-group input is still the
             // form-control deferral and fails closed at (b).)
             //
-            // The RAW attribute span is ENTITY-DECODED here (the storage site) before it
-            // becomes the group-value fact — official runs the static value through the
-            // attribute-value entity decoder, so `value="a&amp;b"` writes `'a&b'`. The
-            // emitter (`client_bind.rs`) is the QUOTING point; storing the decoded value
-            // keeps decoding owned at one place and matches every other static attribute.
+            // The IR value is ALREADY entity-decoded (the attribute-IR producer
+            // boundary owns the decode), so the group-value fact reads it verbatim —
+            // official runs the static value through the attribute-value entity
+            // decoder, so `value="a&amp;b"` writes `'a&b'`. The emitter
+            // (`client_bind.rs`) is the QUOTING point; the producer-owned decode
+            // keeps decoding at one place and matches every other static attribute.
             if name == "value"
                 && element == SupportedHtmlElement::Input
                 && element_has_group_bind(ir, node_id)
             {
                 let literal = value
                     .as_ref()
-                    .map(|v| super::entity_decode::decode_attr_entities(&v.value))
+                    .map(|v| v.value.as_str().to_string())
                     .unwrap_or_default();
                 facts.borrow_mut().group_values.push((node_id, literal));
                 return Ok(());

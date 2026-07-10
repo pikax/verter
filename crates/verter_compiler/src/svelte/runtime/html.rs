@@ -14,7 +14,8 @@
 //! zero-element / block-only root becomes a comment-anchor factory, not a
 //! `from_html`.
 
-use super::entity_decode::{decode_text_entities, escape_html_attr};
+use super::css::types::CssScopeFacts;
+use super::entity_decode::{decode_text_entities, escape_decoded_attr};
 use super::ir::{
     AttrIr, EscapeMode, ExprId, IrNode, NodeId, SpecialKind, StaticAttrValue, StyleDirectiveValue,
     SvelteRuntimeIr, TemplateScope, TemplateScopeId,
@@ -394,13 +395,14 @@ fn serialize_clean_items(
     ir: &SvelteRuntimeIr,
     items: &[CleanItem],
     ctx: CleanContext,
+    css: Option<&CssScopeFacts>,
     html: &mut String,
 ) {
     for item in items {
         match item {
             CleanItem::TextRun { text, .. } => html.push_str(text),
             CleanItem::Node(id) => match ir.node(*id) {
-                IrNode::Element(el) => serialize_element(ir, el, ctx, html),
+                IrNode::Element(el) => serialize_element(ir, el, *id, ctx, css, html),
                 // A component / renderable special / block / tag / comment at a
                 // rendered position is a `<!>` anchor the DOM walk resolves.
                 _ => html.push_str("<!>"),
@@ -417,7 +419,9 @@ fn serialize_clean_items(
 fn serialize_element(
     ir: &SvelteRuntimeIr,
     el: &crate::svelte::runtime::ir::ElementIr,
+    node: NodeId,
     ctx: CleanContext,
+    css: Option<&CssScopeFacts>,
     html: &mut String,
 ) {
     html.push('<');
@@ -429,13 +433,18 @@ fn serialize_element(
     // `is` attribute is the one exception kept in the template). A plain element
     // (including `<video>`, which needs `importNode` but is NOT a custom element)
     // serializes its static attributes normally.
-    serialize_static_attrs(&el.attrs, is_custom_element(el), html);
+    //
+    // The SCOPE HASH for THIS element — `Some` iff the selector-to-template
+    // matcher marked this NodeId scoped (the shared per-element read of the ONE
+    // scope-injection fact pair).
+    let scope_hash = css.and_then(|facts| facts.hash_for(node));
+    serialize_static_attrs(&el.attrs, is_custom_element(el), scope_hash, html);
     if el.children.is_empty() && is_void_element(&el.tag) {
         html.push_str("/>");
         return;
     }
     html.push('>');
-    serialize_element_children(ir, &el.children, ctx.for_children_of(&el.tag), html);
+    serialize_element_children(ir, &el.children, ctx.for_children_of(&el.tag), css, html);
     html.push_str("</");
     html.push_str(&el.tag);
     html.push('>');
@@ -453,13 +462,14 @@ fn serialize_element_children(
     ir: &SvelteRuntimeIr,
     children: &[NodeId],
     ctx: CleanContext,
+    css: Option<&CssScopeFacts>,
     html: &mut String,
 ) {
     let items = clean_nodes(ir, children, ctx);
     if is_sole_controlled(ir, &items) {
         return;
     }
-    serialize_clean_items(ir, &items, ctx, html);
+    serialize_clean_items(ir, &items, ctx, css, html);
 }
 
 /// Whether a cleaned child sequence is EXACTLY one controlled `{#each}` / `{@html}`
@@ -479,6 +489,17 @@ fn is_sole_controlled(ir: &SvelteRuntimeIr, items: &[CleanItem]) -> bool {
 /// Append the static attributes of an element to the skeleton (`class="x"`),
 /// eliding dynamic / directive attributes (resolved by the DOM walk + ops).
 ///
+/// `scope_hash` is `Some(hash)` when THIS element is css-scoped: the STATIC
+/// scope-class injection site (the official `RegularElement.js` bake — one of
+/// the two must-agree injection sites). A static/valueless `class` gets the
+/// hash appended into its literal (`class="card"` → `class="card svelte-<hash>"`;
+/// an empty/valueless class becomes `class="svelte-<hash>"`), and a scoped
+/// element with NO class attribute at all synthesizes `class="svelte-<hash>"`
+/// (the official synthetic empty-class attribute the analysis pushes for a
+/// scoped element, flowing through the same bake). A DYNAMIC/mixed class or a
+/// `class:` directive routes the hash through `$.set_class` instead (the
+/// dynamic injection site); a spread routes it through `$.attribute_effect`.
+///
 /// This handles the GENERAL static-attribute case (escaping, quoting). It does
 /// NOT special-case bind-driven input-default removal: the official compiler
 /// strips a static `value` / `checked` / `group` default from the template when a
@@ -490,11 +511,17 @@ fn is_sole_controlled(ir: &SvelteRuntimeIr, items: &[CleanItem]) -> bool {
 /// part of the dedicated bindings-breadth work and is intentionally out of scope
 /// for this serializer — the static default is preserved here, and the
 /// bind-aware stripping is owned by the bindings layer.
-fn serialize_static_attrs(attrs: &[AttrIr], is_custom: bool, html: &mut String) {
+fn serialize_static_attrs(
+    attrs: &[AttrIr],
+    is_custom: bool,
+    scope_hash: Option<&str>,
+    html: &mut String,
+) {
     // A SPREAD on the element switches its WHOLE attribute strategy to the single
     // `$.attribute_effect` fold: EVERY co-located attribute — including the static ones —
     // moves into the runtime object literal, so NONE is baked into the cloned skeleton
-    // (the official `Element.js` spread path emits a bare `<div></div>`).
+    // (the official `Element.js` spread path emits a bare `<div></div>`; the scope
+    // hash rides the fold's `css_hash` argument, never the skeleton).
     if attrs.iter().any(|a| matches!(a, AttrIr::Spread { .. })) {
         return;
     }
@@ -504,6 +531,22 @@ fn serialize_static_attrs(attrs: &[AttrIr], is_custom: bool, html: &mut String) 
     // / `$.set_style` (the base value becomes the call's `value` arg). Scan once.
     let has_class_directive = attrs.iter().any(|a| matches!(a, AttrIr::Class { .. }));
     let has_style_directive = attrs.iter().any(|a| matches!(a, AttrIr::Style { .. }));
+    // Whether ANY `class` ATTRIBUTE exists (static / dynamic / mixed — the official
+    // synthetic-class check is over every `Attribute` named `class`): a scoped
+    // element with NO class attribute synthesizes `class="svelte-<hash>"` at the
+    // end of the attribute run; one with a DYNAMIC/mixed class leaves the hash to
+    // the `$.set_class` site.
+    let has_class_attr = attrs.iter().any(|a| {
+        matches!(
+            a,
+            AttrIr::Static { name, .. } | AttrIr::Dynamic { name, .. } | AttrIr::Mixed { name, .. }
+                if name.eq_ignore_ascii_case("class")
+        )
+    });
+    // The static-bake hash applies only on the STATIC class path (no `class:`
+    // directive — a directive routes the base through `$.set_class`) and never
+    // on a custom element (whose attributes are runtime property writes).
+    let bake_hash = scope_hash.filter(|_| !has_class_directive && !is_custom);
     // The official `bind:group` form emits a static `value="X"` as a runtime
     // `input.value = input.__value = 'X'` write (the group-value `__value` source),
     // NOT a baked static `value` attr — so a `value` on a `bind:group` input is pulled
@@ -543,6 +586,25 @@ fn serialize_static_attrs(attrs: &[AttrIr], is_custom: bool, html: &mut String) 
             if is_custom && name != "is" {
                 continue;
             }
+            // The STATIC scope-class bake (the official `RegularElement.js`
+            // rule over the scoped element): a valueless/empty class becomes
+            // the bare hash; a valued class appends ` <hash>` after its
+            // re-escaped value (the IR value is ALREADY decoded at the
+            // producer boundary — the serialize is ESCAPE-ONLY). The hash
+            // itself is plain ASCII (no escapable characters).
+            if let (Some(hash), true) = (bake_hash, name.eq_ignore_ascii_case("class")) {
+                html.push_str(" class=\"");
+                match value {
+                    Some(StaticAttrValue { value }) if !value.is_empty() => {
+                        html.push_str(&escape_decoded_attr(value));
+                        html.push(' ');
+                        html.push_str(hash);
+                    }
+                    _ => html.push_str(hash),
+                }
+                html.push('"');
+                continue;
+            }
             // The official compiler DROPS a static `class` whose value is the EXACTLY
             // EMPTY string (`<div class="">` → `<div>`) — an empty class has no
             // effect. A valueless `class` (`<div class>`, `value: None`) is NOT this
@@ -565,15 +627,27 @@ fn serialize_static_attrs(attrs: &[AttrIr], is_custom: bool, html: &mut String) 
             // The official skeleton emits an EMPTY double-quoted value for a
             // valueless boolean attribute (`<input disabled>` → `disabled=""`) — the
             // attribute is present in the cloned HTML as `name=""`, NOT bare `name`.
-            // A valued attribute serializes its decoded + re-escaped value.
+            // A valued attribute serializes its (producer-decoded) value with the
+            // ESCAPE-ONLY re-escape.
             match value {
                 Some(StaticAttrValue { value }) => {
                     html.push_str("=\"");
-                    html.push_str(&escape_html_attr(value));
+                    html.push_str(&escape_decoded_attr(value));
                     html.push('"');
                 }
                 None => html.push_str("=\"\""),
             }
+        }
+    }
+    // A scoped element with NO class attribute at all synthesizes the scope
+    // class at the END of the attribute run — the official synthetic empty
+    // class attribute (pushed onto `node.attributes` by the analysis) baked
+    // through the same `value === '' → value = hash` rule.
+    if let Some(hash) = bake_hash {
+        if !has_class_attr {
+            html.push_str(" class=\"");
+            html.push_str(hash);
+            html.push('"');
         }
     }
 }
@@ -684,7 +758,11 @@ fn is_whitespace_text(ir: &SvelteRuntimeIr, node_id: NodeId) -> bool {
 /// `clean_nodes` at every level). There is NO inter-root separator: the cleaned
 /// sequence's `TextRun`s are the ONLY source of inter-node whitespace (adjacent
 /// element roots concatenate directly, matching `svelte@5.56.3`).
-pub(super) fn synthesize_region(ir: &SvelteRuntimeIr, scope: &TemplateScope) -> TemplateFactory {
+pub(super) fn synthesize_region(
+    ir: &SvelteRuntimeIr,
+    scope: &TemplateScope,
+    css: Option<&CssScopeFacts>,
+) -> TemplateFactory {
     // A region's roots are at the fragment level (HTML namespace, no parent
     // element, never inside a `<pre>`), so cleaning starts from the region-root
     // context.
@@ -746,7 +824,7 @@ pub(super) fn synthesize_region(ir: &SvelteRuntimeIr, scope: &TemplateScope) -> 
         }
     }
     let mut html = String::new();
-    serialize_clean_items(ir, &items, ctx, &mut html);
+    serialize_clean_items(ir, &items, ctx, css, &mut html);
     // The trailing flag is the official `from_html` bitmask: TEMPLATE_FRAGMENT (1)
     // for a MULTI-ROOT template (2+ cleaned DOM positions), OR'd with
     // TEMPLATE_USE_IMPORT_NODE (2) when the template contains a `<video>` or a
@@ -1308,7 +1386,10 @@ fn region_has_no_dom_host_special(ir: &SvelteRuntimeIr, scope: &TemplateScope) -
     })
 }
 
-pub fn plan_static_templates(ir: &SvelteRuntimeIr) -> StaticTemplatePlan {
+pub fn plan_static_templates(
+    ir: &SvelteRuntimeIr,
+    css: Option<&CssScopeFacts>,
+) -> StaticTemplatePlan {
     let mut plan = StaticTemplatePlan::default();
     let mut scopes = Vec::new();
     collect_template_scopes(ir, ir.root, &mut scopes);
@@ -1332,7 +1413,7 @@ pub fn plan_static_templates(ir: &SvelteRuntimeIr) -> StaticTemplatePlan {
         if scope_id != ir.root && region_empty {
             continue;
         }
-        plan.templates.push(synthesize_region(ir, scope));
+        plan.templates.push(synthesize_region(ir, scope, css));
     }
     // Walk EVERY region for its dynamic slots + client paths (the nested-block
     // bodies are not reachable from the root region's element-child recursion — a

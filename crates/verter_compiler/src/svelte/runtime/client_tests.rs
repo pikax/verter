@@ -23,7 +23,7 @@ fn emit(source: &str, filename: &str) -> String {
         filename: Some(filename.to_string()),
         ..Default::default()
     };
-    compile_client(source, &parsed, &opts, &alloc, false)
+    compile_client(source, &parsed, &opts, &alloc, false, false)
         .unwrap_or_else(|e| panic!("client emission failed for {filename}: {e:?}"))
         .code
 }
@@ -37,7 +37,7 @@ fn emit_result(source: &str) -> Result<String, ClientCompileError> {
         filename: Some("App.svelte".to_string()),
         ..Default::default()
     };
-    compile_client(source, &parsed, &opts, &alloc, false).map(|m| m.code)
+    compile_client(source, &parsed, &opts, &alloc, false, false).map(|m| m.code)
 }
 
 /// [`emit_result`] with an explicit `runes` COMPILE-OPTION override (for the
@@ -50,7 +50,7 @@ fn emit_result_with_runes(source: &str, runes: Option<bool>) -> Result<String, C
         runes,
         ..Default::default()
     };
-    compile_client(source, &parsed, &opts, &alloc, false).map(|m| m.code)
+    compile_client(source, &parsed, &opts, &alloc, false, false).map(|m| m.code)
 }
 
 /// The §1.2 conformance fixture.
@@ -995,7 +995,7 @@ fn component_naming_matches_official() {
             name: name_opt.map(|s| s.to_string()),
             ..Default::default()
         };
-        let js = compile_client(base, &parsed, &opts, &alloc, false)
+        let js = compile_client(base, &parsed, &opts, &alloc, false, false)
             .unwrap()
             .code;
         let after = js.split("export default function ").nth(1).unwrap();
@@ -1021,7 +1021,7 @@ fn no_filename_derives_unknown() {
     let base = "<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n";
     let parsed = parse_svelte(base);
     let opts = SvelteRuntimeOptions::default();
-    let js = compile_client(base, &parsed, &opts, &alloc, false)
+    let js = compile_client(base, &parsed, &opts, &alloc, false, false)
         .unwrap()
         .code;
     assert!(
@@ -1063,14 +1063,28 @@ fn assert_fail_closed_labeled(
                 "wrong fail-closed surface{ctx}: {surface:?} (code {})",
                 surface.diagnostic_code()
             );
-            // The diagnostic id has the `svelte-runtime-unsupported-` prefix.
-            assert!(
-                surface
-                    .diagnostic_code()
-                    .starts_with("svelte-runtime-unsupported-"),
-                "diagnostic id shape{ctx}: {}",
-                surface.diagnostic_code()
-            );
+            // The diagnostic id has the `svelte-runtime-unsupported-` prefix —
+            // except the css-analysis surface, which CARRIES the precise
+            // official css code (`css_expected_identifier` /
+            // `css_global_invalid_placement` / … / `css_render_failed`).
+            if matches!(
+                surface,
+                UnsupportedSvelteRuntimeSurface::StyleCssAnalysis { .. }
+            ) {
+                assert!(
+                    surface.diagnostic_code().starts_with("css_"),
+                    "css-analysis diagnostic id shape{ctx}: {}",
+                    surface.diagnostic_code()
+                );
+            } else {
+                assert!(
+                    surface
+                        .diagnostic_code()
+                        .starts_with("svelte-runtime-unsupported-"),
+                    "diagnostic id shape{ctx}: {}",
+                    surface.diagnostic_code()
+                );
+            }
         }
         Ok(js) => panic!("expected fail-closed{ctx}, got a module:\n{js}"),
         Err(other) => panic!("expected an unsupported-surface error{ctx}, got: {other:?}"),
@@ -1862,7 +1876,7 @@ fn global_host_bind_this_creates_no_stale_inline_index_entry() {
     };
     let ir = lower_parsed_svelte_to_ir(source, &parsed, &opts, &alloc).expect("lowering succeeds");
     let classified = ClientSyntaxSurface::classify(&ir).expect("the surface classifies");
-    let plan = SupportedClientIr::build(&classified, &ir).expect("the plan builds");
+    let plan = SupportedClientIr::build(&classified, &ir, None).expect("the plan builds");
     let hosts = action_host_nodes(&plan);
     let index = build_inline_render_index(&plan, &hosts);
     // NEGATIVE: the global-host node has NO inline render sequence at all.
@@ -9615,14 +9629,687 @@ fn state_raw_emits_signal_no_proxy() {
     );
 }
 
+/// Compile to the FULL [`ClientModule`] (code + the external css artifact),
+/// under the fixed `App.svelte` filename — the scoped-style tests read both.
+fn module_result(source: &str) -> Result<super::ClientModule, ClientCompileError> {
+    let alloc = Allocator::default();
+    let parsed = parse_svelte(source);
+    let opts = SvelteRuntimeOptions {
+        filename: Some("App.svelte".to_string()),
+        ..Default::default()
+    };
+    compile_client(source, &parsed, &opts, &alloc, false, false)
+}
+
 #[test]
-fn top_level_style_fails_closed() {
-    // F4: a top-level `<style>` (CSS scoping) fails closed — it is NOT accepted
-    // as a runtime Main. RED against the pre-fix emitter (which emitted a Main and
-    // silently dropped the style / its scoping).
-    assert_fail_closed(
+fn provable_external_style_compiles_with_scoped_css_artifact() {
+    // A PROVABLE external-mode `<style>` compiles: the module bakes the scope
+    // class into the matched element's skeleton, and the scoped `css.code` +
+    // hash publish as the module's EXTERNAL css artifact. `App.svelte` hashes
+    // to `svelte-n50uah` (the pinned djb2 vector).
+    let module = module_result(
+        "<script>let c = $state(0);</script>\n<style>.r{color:red}\nbutton{padding:0}</style>\n<button class=\"r\" onclick={() => c++}>{c}</button>\n",
+    )
+    .expect("a provable external style compiles");
+    // The STATIC injection site: the skeleton's literal class carries the hash.
+    assert!(
+        module.code.contains("<button class=\"r svelte-n50uah\">"),
+        "the skeleton bakes the scope class into the static class literal:\n{}",
+        module.code
+    );
+    // The EXTERNAL routing: the scoped stylesheet + the SAME hash on the artifact.
+    let css = module.css.as_ref().expect("an external css artifact");
+    assert_eq!(css.hash, "svelte-n50uah");
+    assert!(
+        css.code.contains(".r.svelte-n50uah{color:red}"),
+        "the class rule is scope-classed: {}",
+        css.code
+    );
+    assert!(
+        css.code.contains("button.svelte-n50uah{padding:0}"),
+        "the type rule is scope-classed: {}",
+        css.code
+    );
+    // NEGATIVE: external mode inlines nothing — no `$$css`, no `$.append_styles`.
+    assert!(!module.code.contains("$$css"), "{}", module.code);
+    assert!(!module.code.contains("$.append_styles"), "{}", module.code);
+}
+
+#[test]
+fn unmatched_selectors_still_compile_and_prune_unused() {
+    // A style whose selector matches NO template element compiles: nothing is
+    // scoped in the skeleton, and the unused rule is comment-pruned in the
+    // artifact (never silently dropped, never unscoped output).
+    let module = module_result(
         "<script>let c = $state(0);</script>\n<style>.r{color:red}</style>\n<button onclick={() => c++}>{c}</button>\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Style { .. }),
+    )
+    .expect("an unmatched selector still compiles");
+    assert!(
+        !module.code.contains("svelte-n50uah"),
+        "no element is scoped, so the skeleton carries no hash:\n{}",
+        module.code
+    );
+    let css = module.css.as_ref().expect("the artifact still publishes");
+    assert!(
+        css.code.contains("/* (unused) .r{color:red}*/"),
+        "the unused rule is comment-pruned: {}",
+        css.code
+    );
+}
+
+#[test]
+fn external_css_artifact_carries_has_global_and_the_demanded_source_map() {
+    // The artifact is the plan-mandated `{ hash, code, map, has_global }`
+    // payload: `:global(...)` css marks `has_global`, and the
+    // `want_source_map` demand rides `compile_client` into the artifact's
+    // `source_map`.
+    let source = "<script>let c = $state(0);</script>\n<style>.r{color:red}\n:global(.x){margin:0}</style>\n<button class=\"r\" onclick={() => c++}>{c}</button>\n";
+    let alloc = Allocator::default();
+    let parsed = parse_svelte(source);
+    let opts = SvelteRuntimeOptions {
+        filename: Some("App.svelte".to_string()),
+        ..Default::default()
+    };
+    let module = compile_client(source, &parsed, &opts, &alloc, false, true)
+        .expect("a provable global+scoped style compiles");
+    let css = module.css.as_ref().expect("an external css artifact");
+    assert!(
+        css.has_global,
+        "`:global(.x)` css must mark the artifact has_global"
+    );
+    let map = css
+        .source_map
+        .as_deref()
+        .expect("the demanded css source map rides the artifact");
+    let parsed_map =
+        oxc_sourcemap::OwnedSourceMap::from_json_string(map).expect("valid source-map JSON");
+    assert_eq!(
+        parsed_map.get_sources().collect::<Vec<_>>(),
+        ["App.svelte"],
+        "the css map names the component source"
+    );
+}
+
+#[test]
+fn non_global_css_artifact_reports_has_global_false_and_no_undemanded_map() {
+    // A/B negative: css without `:global` publishes `has_global == false`,
+    // and an undemanded map stays `None` (`module_result` compiles with
+    // `want_source_map` off).
+    let module = module_result(
+        "<script>let c = $state(0);</script>\n<style>.r{color:red}</style>\n<button class=\"r\" onclick={() => c++}>{c}</button>\n",
+    )
+    .expect("a provable external style compiles");
+    let css = module.css.as_ref().expect("an external css artifact");
+    assert!(
+        !css.has_global,
+        "css without `:global` must not claim has_global"
+    );
+    assert_eq!(css.source_map, None, "no demand, no css map");
+}
+
+#[test]
+fn matcher_unprovable_template_fails_closed_on_the_selector_surface() {
+    // A template construct the selector-to-template matcher cannot PROVE (a
+    // legacy `<slot>` re-parents unpredictably) keeps the style fail-closed on
+    // the selector surface — never a guessed scope, never unscoped output.
+    assert_fail_closed(
+        "<div><slot></slot></div>\n<style>div { color: red; }</style>\n",
+        |s| {
+            matches!(
+                s,
+                UnsupportedSvelteRuntimeSurface::StyleSelectorUnsupported { .. }
+            )
+        },
+    );
+}
+
+#[test]
+fn css_analysis_failure_beats_a_template_lowering_failure() {
+    // The css-first diagnostic order: a component whose css body FAILS the
+    // scoping analysis AND whose template fails to lower (the `readonly`
+    // param modifier trips the expr-parse lowering channel) reports the css
+    // failure (the analysis runs before lowering). NEGATIVE: never the
+    // lowering error, never the selector surface.
+    let err = emit_result(
+        "<script>let value = $state(0);</script>\n<style>.a :global(.x) .b { color: red }</style>\n<input bind:value={() => value, (readonly x) => value = x} />\n",
+    )
+    .expect_err("a bad css body + an unlowerable template must not compile");
+    let ClientCompileError::Unsupported(surface) = &err else {
+        panic!("expected the css-analysis refusal, got {err:?}");
+    };
+    assert!(
+        matches!(
+            surface,
+            UnsupportedSvelteRuntimeSurface::StyleCssAnalysis { .. }
+        ),
+        "the css-analysis failure is reported FIRST, got {surface:?}"
+    );
+}
+
+#[test]
+fn style_analysis_failure_fails_closed_with_the_css_analysis_surface() {
+    // A css body the scoping analyzer REJECTS (`:global.x` — the official
+    // `css_global_block_invalid_modifier_start`) refuses on the ANALYSIS
+    // surface, distinct from the clean-analyzed selector-emission refusal.
+    // (The body PARSES clean, so the official-reject CSS body-parse gate does
+    // not fire first.)
+    assert_fail_closed(
+        "<script>let c = $state(0);</script>\n<style>:global.x { color: red; }</style>\n<button onclick={() => c++}>{c}</button>\n",
+        |s| matches!(s, UnsupportedSvelteRuntimeSurface::StyleCssAnalysis { .. }),
+    );
+}
+
+#[test]
+fn injected_css_mode_option_inlines_css_and_produces_no_external_artifact() {
+    // A `<svelte:options css="injected">` component with a `<style>` records
+    // the INJECTED css mode: the compiled module hoists `const $$css = { hash,
+    // code }` and prepends `$.append_styles($$anchor, $$css)` to the component
+    // body, and the external css artifact is NULL (the official
+    // `inject_styles` routing).
+    let module = module_result(
+        "<svelte:options css=\"injected\" />\n<script>let c = $state(0);</script>\n<style>.r{color:red}</style>\n<button class=\"r\" onclick={() => c++}>{c}</button>\n",
+    )
+    .expect("an injected-mode style compiles");
+    assert!(
+        module.code.contains(
+            "const $$css = { hash: 'svelte-n50uah', code: '.r.svelte-n50uah{color:red}' };"
+        ),
+        "the module hoists the $$css object:\n{}",
+        module.code
+    );
+    assert!(
+        module.code.contains("$.append_styles($$anchor, $$css);"),
+        "the component body prepends the append_styles call:\n{}",
+        module.code
+    );
+    // The static bake still runs — the two injection sites agree in injected
+    // mode too.
+    assert!(
+        module.code.contains("<button class=\"r svelte-n50uah\">"),
+        "the skeleton still bakes the scope class:\n{}",
+        module.code
+    );
+    // NEGATIVE: injected mode produces NO external artifact.
+    assert!(
+        module.css.is_none(),
+        "injected css must not publish an external artifact"
+    );
+}
+
+// ─── the SCOPED `<svelte:element>` dynamic-element injection family ─────────
+//
+// Official svelte@5.56.3 scopes a dynamic element exactly like a regular
+// element: the analyze pass synthesizes an empty `class` for a scoped node
+// with no spread and no class attribute (`phases/2-analyze/index.js`), the
+// lone synthetic class routes to `$.set_class($$element, 0, …)` with the hash
+// folded per the `build_set_class` 3-way, and the `$.attribute_effect` fold
+// carries the hash as its OFFICIAL 6th positional argument
+// (`build_attribute_effect` — `shared/element.js`). Every test pins the exact
+// emitted argument topology (`App.svelte` ⇒ the pinned djb2 hash
+// `svelte-n50uah`) plus a NEGATIVE (no hash for the non-scoped control, no
+// stray second route).
+
+#[test]
+fn scoped_svelte_element_without_attrs_emits_the_bare_hash_set_class() {
+    // A SCOPED class-less `<svelte:element>` synthesizes the empty class and
+    // takes the lone-class fast path — the empty literal becomes the bare
+    // hash. Official: `$.set_class($$element, 0, 'svelte-n50uah');`.
+    let js = emit(
+        "<script>let tag = $state('div');</script>\n<svelte:element this={tag}>x</svelte:element>\n<style>div { color: blue; }</style>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("$.set_class($$element, 0, 'svelte-n50uah');")),
+        "a scoped class-less <svelte:element> takes the set_class fast path with the bare hash:\n{js}"
+    );
+    // NEGATIVE: the lone synthetic class never folds — no attribute_effect.
+    assert!(
+        !js.contains("$.attribute_effect"),
+        "the lone synthetic class routes to set_class, not the fold:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn scoped_svelte_element_with_static_attr_folds_synthetic_class_and_hash_sixth_arg() {
+    // A SCOPED `<svelte:element>` WITH another attribute folds: the synthetic
+    // `class: ''` appends AFTER the real attributes and the hash rides the
+    // official 6th positional `$.attribute_effect` argument (the intermediate
+    // sync/async/blockers slots are `void 0`). Official:
+    // `$.attribute_effect($$element, () => ({ id: 'x', class: '' }), void 0,
+    // void 0, void 0, 'svelte-n50uah');`.
+    let js = emit(
+        "<script>let tag = $state('div');</script>\n<svelte:element this={tag} id=\"x\">x</svelte:element>\n<style>div { color: blue; }</style>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.attribute_effect($$element, () => ({ id: 'x', class: '' }), void 0, void 0, void 0, 'svelte-n50uah');"
+        )),
+        "the fold appends the synthetic class and threads the hash as the 6th arg:\n{js}"
+    );
+    // NEGATIVE: no set_class (the fold consumed the synthetic), and the class
+    // entry is EMPTY (the hash lands in the 6th arg, never the class value).
+    assert!(!js.contains("$.set_class"), "no second class route:\n{js}");
+    assert!(
+        !n.contains(&nc("class: 'svelte-n50uah'")),
+        "the hash never folds into the class VALUE on the fold route:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn scoped_svelte_element_spread_threads_hash_without_synthesizing_class() {
+    // A SCOPED spread `<svelte:element>`: the spread suppresses the synthetic
+    // class (official `!has_spread` guard — the runtime spread path appends
+    // the hash itself) and the hash rides the 6th argument. Official:
+    // `$.attribute_effect($$element, () => ({ ...$$props.p }), void 0, void 0,
+    // void 0, 'svelte-n50uah');`.
+    let js = emit(
+        "<script>let tag = $state('div');\nlet { p } = $props();</script>\n<svelte:element this={tag} {...p}>x</svelte:element>\n<style>div { color: blue; }</style>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.attribute_effect($$element, () => ({ ...$$props.p }), void 0, void 0, void 0, 'svelte-n50uah');"
+        )),
+        "the scoped spread fold threads the hash as the 6th arg:\n{js}"
+    );
+    // NEGATIVE: no synthetic class beside a spread.
+    assert!(
+        !n.contains(&nc("class: ''")),
+        "a spread suppresses the synthetic class:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn scoped_svelte_element_class_directive_merges_hash_into_set_class_value() {
+    // A SCOPED `<svelte:element>` with a lone `class:` directive: the
+    // synthesized empty class becomes the bare hash VALUE and the directive
+    // rides the `next` object with the official `null` css_hash placeholder +
+    // `{}` prev. Official (demoted non-reactive `on`):
+    // `$.set_class($$element, 0, 'svelte-n50uah', null, {}, { on });`.
+    let js = emit(
+        "<script>let tag = $state('div');\nlet on = $state(false);</script>\n<svelte:element this={tag} class:on>x</svelte:element>\n<style>div { color: blue; }</style>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.set_class($$element, 0, 'svelte-n50uah', null, {}, { on });"
+        )),
+        "the scoped class-directive set_class folds the hash into the value:\n{js}"
+    );
+    assert!(!js.contains("$.attribute_effect"), "no fold route:\n{js}");
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn scoped_svelte_element_valueless_class_folds_boolean_true_with_hash_arg() {
+    // A VALUELESS `class` on a scoped `<svelte:element>` is the RAW boolean
+    // `class: true` (has_class ⇒ NO synthesis; not a text attribute ⇒ the fold
+    // route), so the hash CANNOT fold into the value — it rides the 6th arg.
+    // Official: `$.attribute_effect($$element, () => ({ class: true }), void 0,
+    // void 0, void 0, 'svelte-n50uah');`.
+    let js = emit(
+        "<script>let tag = $state('div');</script>\n<svelte:element this={tag} class>x</svelte:element>\n<style>div { color: blue; }</style>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.attribute_effect($$element, () => ({ class: true }), void 0, void 0, void 0, 'svelte-n50uah');"
+        )),
+        "a valueless class folds as `true` with the hash in the 6th arg:\n{js}"
+    );
+    assert!(!js.contains("$.set_class"), "no set_class route:\n{js}");
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn scoped_svelte_element_empty_text_class_takes_the_bare_hash_set_class() {
+    // An EMPTY-text `class=""` on a scoped `<svelte:element>` is a lone text
+    // class ⇒ the fast path; the empty literal becomes the bare hash (the
+    // official `value === '' → value = hash` arm). Official:
+    // `$.set_class($$element, 0, 'svelte-n50uah');`.
+    let js = emit(
+        "<script>let tag = $state('div');</script>\n<svelte:element this={tag} class=\"\">x</svelte:element>\n<style>div { color: blue; }</style>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("$.set_class($$element, 0, 'svelte-n50uah');")),
+        "an empty text class becomes the bare hash:\n{js}"
+    );
+    assert!(!js.contains("$.attribute_effect"), "no fold route:\n{js}");
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn scoped_svelte_element_lone_text_class_appends_hash_to_the_literal() {
+    // A NON-empty lone text class on a scoped `<svelte:element>` appends
+    // ` <hash>` to the literal (the official literal arm). Official:
+    // `$.set_class($$element, 0, 'known svelte-n50uah');`.
+    let js = emit(
+        "<script>let tag = $state('div');</script>\n<svelte:element this={tag} class=\"known\">x</svelte:element>\n<style>div { color: blue; }</style>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc("$.set_class($$element, 0, 'known svelte-n50uah');")),
+        "the literal class appends the hash:\n{js}"
+    );
+    assert!(!js.contains("$.attribute_effect"), "no fold route:\n{js}");
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn scoped_svelte_element_dynamic_class_folds_raw_with_hash_sixth_arg() {
+    // A DYNAMIC `class={cls}` on a scoped `<svelte:element>` folds RAW (the
+    // official fold rule — no `$.clsx` wrap in the fold) and the hash rides
+    // the 6th argument (never the value). Official:
+    // `$.attribute_effect($$element, () => ({ class: cls }), void 0, void 0,
+    // void 0, 'svelte-n50uah');`.
+    let js = emit(
+        "<script>let tag = $state('div');\nlet cls = $state('a');</script>\n<svelte:element this={tag} class={cls}>x</svelte:element>\n<style>div { color: blue; }</style>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.attribute_effect($$element, () => ({ class: cls }), void 0, void 0, void 0, 'svelte-n50uah');"
+        )),
+        "a dynamic class folds raw with the hash in the 6th arg:\n{js}"
+    );
+    assert!(!js.contains("$.set_class"), "no set_class route:\n{js}");
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn scoped_svelte_element_style_directive_synthesizes_class_before_style() {
+    // A SCOPED `<svelte:element>` with a lone `style:` directive synthesizes
+    // BOTH the scoped empty class AND the directive empty style, in the
+    // official analyze order (class BEFORE style), then the `[$.STYLE]` entry
+    // — with the hash 6th. Official: `$.attribute_effect($$element, () =>
+    // ({ class: '', style: '', [$.STYLE]: { color: c } }), void 0, void 0,
+    // void 0, 'svelte-n50uah');`.
+    let js = emit(
+        "<script>let tag = $state('div');\nlet c = $state('red');</script>\n<svelte:element this={tag} style:color={c}>x</svelte:element>\n<style>div { color: blue; }</style>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.attribute_effect($$element, () => ({ class: '', style: '', [$.STYLE]: { color: c } }), void 0, void 0, void 0, 'svelte-n50uah');"
+        )),
+        "the scoped style-directive fold synthesizes class BEFORE style with the hash 6th:\n{js}"
+    );
+    assert!(!js.contains("$.set_class"), "no set_class route:\n{js}");
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn scoped_svelte_element_class_directive_beside_attr_folds_with_hash() {
+    // A SCOPED `<svelte:element>` with a `class:` directive BESIDE another
+    // attribute: the fold appends the synthetic `class: ''` after the real
+    // attributes, then the `[$.CLASS]` directive object, hash 6th. Official:
+    // `$.attribute_effect($$element, () => ({ id: 'x', class: '', [$.CLASS]:
+    // { on } }), void 0, void 0, void 0, 'svelte-n50uah');`.
+    let js = emit(
+        "<script>let tag = $state('div');\nlet on = $state(false);</script>\n<svelte:element this={tag} id=\"x\" class:on>x</svelte:element>\n<style>div { color: blue; }</style>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        n.contains(&nc(
+            "$.attribute_effect($$element, () => ({ id: 'x', class: '', [$.CLASS]: { on } }), void 0, void 0, void 0, 'svelte-n50uah');"
+        )),
+        "the fold orders real attrs, synthetic class, [$.CLASS], hash 6th:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn scoped_svelte_element_set_class_precedes_measurement_binds_and_events() {
+    // ORDER: the synthesized `$.set_class` runs BEFORE the measurement bind
+    // (the official init → after_update order) and BEFORE a legacy `on:`
+    // registration.
+    let js = emit(
+        "<script>let tag = $state('div');\nlet w = $state(0);</script>\n<svelte:element this={tag} bind:clientWidth={w}>x</svelte:element>\n<style>div { color: blue; }</style>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    let set_class_pos = n
+        .find(&nc("$.set_class($$element, 0, 'svelte-n50uah');"))
+        .unwrap_or_else(|| panic!("scoped bind-only <svelte:element> emits the set_class:\n{js}"));
+    let bind_pos = n
+        .find(&nc("$.bind_element_size($$element, 'clientWidth',"))
+        .unwrap_or_else(|| panic!("the measurement bind emits:\n{js}"));
+    assert!(
+        set_class_pos < bind_pos,
+        "set_class precedes the measurement bind (official init order):\n{js}"
+    );
+
+    let js = emit(
+        "<script>let tag = $state('div');\nlet n = $state(0);</script>\n<svelte:element this={tag} on:click={() => n++}>x</svelte:element>\n<style>div { color: blue; }</style>\n",
+        "App.svelte",
+    );
+    let norm = normalize_js_cosmetics(&js);
+    let set_class_pos = norm
+        .find(&nc("$.set_class($$element, 0, 'svelte-n50uah');"))
+        .unwrap_or_else(|| panic!("scoped legacy-on <svelte:element> emits the set_class:\n{js}"));
+    let event_pos = norm
+        .find(&nc("$.event('click', $$element,"))
+        .unwrap_or_else(|| panic!("the legacy on: registration emits:\n{js}"));
+    assert!(
+        set_class_pos < event_pos,
+        "set_class precedes the legacy on: registration:\n{js}"
+    );
+}
+
+#[test]
+fn unscoped_svelte_element_emits_no_hash_anywhere() {
+    // The NON-scoped control: an UNMATCHED selector leaves the dynamic element
+    // unscoped — the 2-argument fold, NO set_class, NO hash token anywhere in
+    // the module code.
+    let module = module_result(
+        "<script>let tag = $state('div');</script>\n<svelte:element this={tag} id=\"x\">x</svelte:element>\n<style>.zzz { color: blue; }</style>\n",
+    )
+    .expect("an unmatched selector still compiles");
+    let n = normalize_js_cosmetics(&module.code);
+    assert!(
+        n.contains(&nc("$.attribute_effect($$element, () => ({ id: 'x' }));")),
+        "a non-scoped <svelte:element> keeps the 2-argument fold:\n{}",
+        module.code
+    );
+    assert!(
+        !module.code.contains("svelte-n50uah"),
+        "no hash token reaches an unscoped dynamic element:\n{}",
+        module.code
+    );
+    assert!(
+        !module.code.contains("$.set_class"),
+        "no synthetic class on an unscoped attr-bearing element:\n{}",
+        module.code
+    );
+
+    // And a fully bare non-scoped `<svelte:element>` (no attrs at all) emits
+    // NO attribute machinery whatsoever.
+    let bare = module_result(
+        "<script>let tag = $state('div');</script>\n<svelte:element this={tag}>x</svelte:element>\n<style>.zzz { color: blue; }</style>\n",
+    )
+    .expect("an unmatched selector still compiles");
+    assert!(
+        !bare.code.contains("$.set_class") && !bare.code.contains("$.attribute_effect"),
+        "an unscoped attr-less dynamic element emits no class machinery:\n{}",
+        bare.code
+    );
+}
+
+#[test]
+fn injected_css_string_expression_option_runs_css_analysis() {
+    // `<svelte:options css={'injected'}>` / `css={"injected"}` carry the SAME
+    // static string the official compiler accepts as `css="injected"` (its
+    // `get_static_value` reads a single string-literal expression), so the css
+    // body must route through the scoping analysis: an invalid `:global`
+    // placement refuses on the ANALYSIS surface. NEGATIVE: never the css-MODE
+    // surface — that would mean the mode detection dropped the expression form
+    // and the analysis never ran.
+    for (label, src) in [
+        (
+            "single-quote",
+            "<svelte:options css={'injected'} />\n<script>let c = $state(0);</script>\n<style>:global.x { color: red; }</style>\n<button onclick={() => c++}>{c}</button>\n",
+        ),
+        (
+            "double-quote",
+            "<svelte:options css={\"injected\"} />\n<script>let c = $state(0);</script>\n<style>:global.x { color: red; }</style>\n<button onclick={() => c++}>{c}</button>\n",
+        ),
+    ] {
+        assert_fail_closed_labeled(label, src, |s| {
+            matches!(s, UnsupportedSvelteRuntimeSurface::StyleCssAnalysis { .. })
+        });
+    }
+}
+
+#[test]
+fn injected_css_string_expression_option_inlines_css_like_the_text_form() {
+    // The string-expression option forms (`css={'injected'}` / `css={"injected"}`)
+    // carry the SAME static string official accepts as `css="injected"`, so a
+    // clean body compiles down the SAME injected route — `$$css` hoist +
+    // `$.append_styles`, no external artifact — exact parity with the Text form.
+    for (label, src) in [
+        (
+            "single-quote",
+            "<svelte:options css={'injected'} />\n<script>let c = $state(0);</script>\n<style>.r{color:red}</style>\n<button class=\"r\" onclick={() => c++}>{c}</button>\n",
+        ),
+        (
+            "double-quote",
+            "<svelte:options css={\"injected\"} />\n<script>let c = $state(0);</script>\n<style>.r{color:red}</style>\n<button class=\"r\" onclick={() => c++}>{c}</button>\n",
+        ),
+    ] {
+        let module = module_result(src)
+            .unwrap_or_else(|e| panic!("[{label}] an injected-mode style compiles: {e:?}"));
+        assert!(
+            module.code.contains("$.append_styles($$anchor, $$css);"),
+            "[{label}] the injected prelude is emitted:\n{}",
+            module.code
+        );
+        assert!(
+            module.css.is_none(),
+            "[{label}] injected css must not publish an external artifact"
+        );
+    }
+}
+
+#[test]
+fn dynamic_css_option_value_stays_the_official_options_reject() {
+    // A NON-static `css` value (`css={someVar}`) is NOT a resolved static
+    // string: upstream rejects it (`svelte_options_invalid_attribute_value`),
+    // and the official-reject gate keeps minting that exact code. NEGATIVE: the
+    // static string-expression acceptance must never widen to a dynamic
+    // expression — a dynamic value is never silently treated as injected.
+    let err = emit_result(
+        "<svelte:options css={someVar} />\n<script>let c = $state(0);</script>\n<style>.r{color:red}</style>\n<button onclick={() => c++}>{c}</button>\n",
+    )
+    .expect_err("a dynamic css option value must not compile");
+    let ClientCompileError::OfficialReject(rejection) = err else {
+        panic!("expected the official options reject, got {err:?}");
+    };
+    assert_eq!(
+        rejection.official_code,
+        "svelte_options_invalid_attribute_value"
+    );
+}
+
+#[test]
+fn style_refusal_surfaces_pin_their_diagnostic_codes() {
+    // The three precise style surfaces carry machine-stable diagnostic ids:
+    // the two plan-failure surfaces CARRY the failure's precise code (the
+    // official css code for an analysis/render failure; the fixed selector
+    // id for a matcher refusal), and the pre-plan mode surface keeps its own.
+    let span = verter_span::Span::new(0, 0);
+    assert_eq!(
+        UnsupportedSvelteRuntimeSurface::StyleCssAnalysis {
+            code: "css_global_invalid_placement",
+            span
+        }
+        .diagnostic_code(),
+        "css_global_invalid_placement"
+    );
+    assert_eq!(
+        UnsupportedSvelteRuntimeSurface::StyleSelectorUnsupported {
+            code: "svelte-runtime-unsupported-style-selector",
+            span,
+            construct: Some("a legacy `<slot>` element")
+        }
+        .diagnostic_code(),
+        "svelte-runtime-unsupported-style-selector"
+    );
+    assert_eq!(
+        UnsupportedSvelteRuntimeSurface::StyleCssModeUnsupported { span }.diagnostic_code(),
+        "svelte-runtime-unsupported-style-css-mode"
+    );
+}
+
+#[test]
+fn style_css_analysis_refusal_carries_the_precise_css_code_and_span() {
+    // Code/span propagation (analysis failure): the css-analysis refusal
+    // carries the PRECISE official css code (`css_global_invalid_placement`)
+    // and the offending construct's exact span, threaded unchanged from the
+    // typed plan failure through `compile_client` into the diagnostic surface.
+    // NEGATIVE: never the generic fixed `svelte-runtime-unsupported-style-css-analysis`.
+    let source = "<script>let c = $state(0);</script>\n<style>.a :global(.x) .b { color: red }</style>\n<button onclick={() => c++}>{c}</button>\n";
+    let err = emit_result(source).expect_err("an invalid :global placement must not compile");
+    let ClientCompileError::Unsupported(surface) = err else {
+        panic!("expected the css-analysis refusal, got {err:?}");
+    };
+    assert!(
+        matches!(
+            surface,
+            UnsupportedSvelteRuntimeSurface::StyleCssAnalysis { .. }
+        ),
+        "the analysis failure refuses on the css-analysis surface: {surface:?}"
+    );
+    assert_eq!(surface.diagnostic_code(), "css_global_invalid_placement");
+    let global = source.find(":global(.x)").unwrap() as u32;
+    assert_eq!(
+        surface.span(),
+        verter_span::Span::new(global, global + ":global(.x)".len() as u32),
+        "the refusal span is the offending `:global(...)` node's own span"
+    );
+}
+
+#[test]
+fn style_selector_refusal_carries_the_construct_span_and_selector_code() {
+    // Code/span propagation (matcher refusal): the selector-unprovable
+    // refusal reports the UNPROVABLE CONSTRUCT's exact span (the `<slot>`
+    // open tag) with the fixed selector-surface code. NEGATIVE: never the
+    // whole `<style>` content span (the pre-F4 secondary-check span).
+    let source = "<div><slot></slot></div>\n<style>div { color: red; }</style>\n";
+    let err = emit_result(source).expect_err("an unprovable template must not compile");
+    let ClientCompileError::Unsupported(surface) = err else {
+        panic!("expected the selector refusal, got {err:?}");
+    };
+    assert!(
+        matches!(
+            surface,
+            UnsupportedSvelteRuntimeSurface::StyleSelectorUnsupported { .. }
+        ),
+        "the matcher refusal lands on the selector surface: {surface:?}"
+    );
+    assert_eq!(
+        surface.diagnostic_code(),
+        "svelte-runtime-unsupported-style-selector"
+    );
+    let slot = source.find("<slot>").unwrap() as u32;
+    assert_eq!(
+        surface.span(),
+        verter_span::Span::new(slot, slot + "<slot>".len() as u32),
+        "the refusal span is the unprovable construct's own span"
     );
 }
 
@@ -11296,7 +11983,7 @@ fn custom_element_compile_option_creates_without_define() {
         custom_element: true,
         ..Default::default()
     };
-    let js = compile_client(source, &parsed, &opts, &alloc, false)
+    let js = compile_client(source, &parsed, &opts, &alloc, false, false)
         .expect("the customElement compile option compiles")
         .code;
     assert!(
@@ -11322,7 +12009,7 @@ fn custom_element_null_value_falls_back_to_the_compile_option() {
         custom_element: true,
         ..Default::default()
     };
-    let js = compile_client(source, &parsed, &opts, &alloc, false)
+    let js = compile_client(source, &parsed, &opts, &alloc, false, false)
         .expect("null customElement + compile option compiles")
         .code;
     assert!(
@@ -11348,7 +12035,7 @@ fn custom_element_options_value_wins_over_the_compile_option() {
         custom_element: true,
         ..Default::default()
     };
-    let js = compile_client(source, &parsed, &opts, &alloc, false)
+    let js = compile_client(source, &parsed, &opts, &alloc, false, false)
         .expect("the options value + compile option compiles")
         .code;
     assert!(
@@ -11431,14 +12118,35 @@ fn custom_element_records_the_injected_css_mode() {
 }
 
 #[test]
-fn custom_element_with_style_block_still_fails_closed() {
-    // The css-mode RECORDING does not open style compilation: a customElement
-    // with a `<style>` block still fails closed on the style rail (the CSS
-    // vertical owns compilation/scoping/injection).
-    assert_fail_closed(
+fn custom_element_with_style_block_injects_its_css() {
+    // A customElement ALWAYS injects its styles (the official `inject_styles =
+    // css === 'injected' || is_custom_element` rule): the compiled module
+    // carries the `$$css` hoist + the `$.append_styles` prelude alongside the
+    // custom-element epilogue, and NO external css artifact.
+    let module = module_result(
         "<svelte:options customElement=\"x-css\" />\n<script>let c = $state(0);</script>\n<style>p { color: red; }</style>\n<button onclick={() => c++}>{c}</button>\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::Style { .. }),
+    )
+    .expect("a customElement with a style compiles down the injected route");
+    assert!(
+        module.code.contains("$.append_styles($$anchor, $$css);"),
+        "the injected prelude is emitted:\n{}",
+        module.code
     );
+    assert!(
+        module
+            .code
+            .contains("const $$css = { hash: 'svelte-n50uah', code:"),
+        "the $$css object hoists with the scope hash:\n{}",
+        module.code
+    );
+    assert!(
+        module.code.contains("$.create_custom_element"),
+        "the custom-element epilogue survives:\n{}",
+        module.code
+    );
+    // NEGATIVE: no external artifact; the unused `p` rule is comment-pruned in
+    // the inlined payload, not published separately.
+    assert!(module.css.is_none());
 }
 
 #[test]
@@ -12403,7 +13111,7 @@ fn dev_codegen_request_fails_closed() {
         dev_codegen: true,
         ..Default::default()
     };
-    match compile_client(HELLO_INPUT, &parsed, &opts, &alloc, false) {
+    match compile_client(HELLO_INPUT, &parsed, &opts, &alloc, false, false) {
         Err(ClientCompileError::Unsupported(
             surface @ UnsupportedSvelteRuntimeSurface::DevMode { .. },
         )) => {
@@ -12426,6 +13134,7 @@ fn dev_codegen_request_fails_closed() {
             &parse_svelte(HELLO_INPUT),
             &prod_opts,
             &alloc,
+            false,
             false
         )
         .is_ok(),
@@ -12441,7 +13150,14 @@ fn ssr_fails_closed_to_block_8() {
         filename: Some("App.svelte".to_string()),
         ..Default::default()
     };
-    match compile_client(HELLO_INPUT, &parsed, &opts, &alloc, /*ssr*/ true) {
+    match compile_client(
+        HELLO_INPUT,
+        &parsed,
+        &opts,
+        &alloc,
+        /*ssr*/ true,
+        false,
+    ) {
         Err(ClientCompileError::Unsupported(UnsupportedSvelteRuntimeSurface::ServerGenerate {
             ..
         })) => {}
@@ -15916,7 +16632,7 @@ fn validate_slot_placement_disposition_is_exhaustive_per_host_kind() {
     let static_slot = || AttrIr::Static {
         name: "slot".to_string(),
         value: Some(StaticAttrValue {
-            value: "x".to_string(),
+            value: crate::svelte::runtime::entity_decode::DecodedAttrValue::decode("x"),
         }),
     };
     let dynamic_slot = || AttrIr::Dynamic {
@@ -16347,7 +17063,7 @@ fn validate_slot_placement_disposition_is_exhaustive_per_host_kind() {
     let plain_attr = || AttrIr::Static {
         name: "class".to_string(),
         value: Some(StaticAttrValue {
-            value: "c".to_string(),
+            value: crate::svelte::runtime::entity_decode::DecodedAttrValue::decode("c"),
         }),
     };
     let no_placement = SlotPlacementFacts {
@@ -16674,7 +17390,7 @@ fn every_after_update_op_target_is_ranked_across_representative_scopes() {
             .unwrap_or_else(|e| panic!("[{label}] lowering: {e:?}"));
         let classified = super::super::client_surface::ClientSyntaxSurface::classify(&ir)
             .unwrap_or_else(|e| panic!("[{label}] classify: {e:?}"));
-        let plan = super::super::client_plan::SupportedClientIr::build(&classified, &ir)
+        let plan = super::super::client_plan::SupportedClientIr::build(&classified, &ir, None)
             .unwrap_or_else(|e| panic!("[{label}] plan build: {e:?}"));
         let ranks = client_lifecycle::after_update_ranks(&plan);
         let mut streamed_ops = 0usize;
@@ -16749,10 +17465,10 @@ fn emit_with_after_update_ranks_cleared(source: &str) -> String {
         .expect("lowering succeeds for the ranked-op fixture");
     let classified = super::super::client_surface::ClientSyntaxSurface::classify(&ir)
         .expect("classification succeeds for the ranked-op fixture");
-    let plan = super::super::client_plan::SupportedClientIr::build(&classified, &ir)
+    let plan = super::super::client_plan::SupportedClientIr::build(&classified, &ir, None)
         .expect("plan build succeeds for the ranked-op fixture");
-    let html_plan = crate::svelte::runtime::plan_static_templates(&ir);
-    let topology = crate::svelte::runtime::plan_client_topology(&ir, &html_plan);
+    let html_plan = crate::svelte::runtime::plan_static_templates(&ir, None);
+    let topology = crate::svelte::runtime::plan_client_topology(&ir, &html_plan, None);
     let mut emitter = super::ClientEmitter::new(&plan);
     emitter.after_update_rank.clear();
     emitter.emit(&html_plan, &topology).code
@@ -22806,6 +23522,7 @@ fn undeclared_store_subscription_stays_the_official_global_reference_reject() {
         &SvelteRuntimeOptions::default(),
         &alloc,
         false,
+        false,
     ) {
         Err(ClientCompileError::OfficialReject(rejection)) => {
             assert_eq!(rejection.official_code, "global_reference_invalid");
@@ -22951,7 +23668,7 @@ fn nonconst_store_source_declaration_kind_fails_closed() {
     // instance-script `plain let with call init` gate and fails CLOSED — never an admitted
     // (mis-emitted) subscription. `assert_fail_closed` panics on ANY emitted module, so it
     // doubles as the negative "no subscription mis-emitted" assertion. This declaration-KIND
-    // completeness gap is a fail-closed DEFER, tracked by debt row D-51 in
+    // completeness gap fails closed; the follow-up is tracked in
     // `docs/arch/svelte-native-compiler-plan.md`.
     assert_fail_closed(
         "<script>import { writable } from 'svelte/store'; let c = writable(0);</script>\n<p>{$c}</p>\n",

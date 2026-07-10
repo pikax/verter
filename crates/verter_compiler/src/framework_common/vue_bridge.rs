@@ -512,7 +512,15 @@ fn vue_result_to_runtime_bundle(
         .into_iter()
         .map(|s| RuntimeStyleBlock {
             code: s.code,
+            // Vue's style pipeline produces no per-block css map here (style
+            // post-processing happens host/JS-side), and carries no
+            // `:global` fact.
+            source_map: None,
             lang: s.lang,
+            // Vue scoping rides the `data-v-…` attribute on `scope_id`, not a
+            // per-block class hash.
+            scope_hash: None,
+            has_global: false,
         })
         .collect();
     let custom_blocks = result

@@ -1,0 +1,59 @@
+{
+  "slug": "css/injected_mode.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "injected_mode",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "append_styles",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "append_styles",
+    "from_html"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "append_styles": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div class=\"card svelte-<scoped>\">x</div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div class=\"card svelte-<scoped>\">x</div>`); const $$css = {hash: 'svelte-<scoped>', code: '.card.svelte-<scoped> {color:blue;}'}; export default function injected_mode($$anchor) {$.append_styles($$anchor, $$css); var div = root(); $.append($$anchor, div);}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

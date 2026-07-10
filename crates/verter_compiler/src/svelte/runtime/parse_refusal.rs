@@ -1,11 +1,14 @@
 //! Fail-closed refusal of the PARSE-DOMAIN unsupported Svelte runtime surfaces
 //! (the ones not carried on the runtime IR): a DUPLICATE attribute / directive
 //! (5a, the official `attribute_duplicate` parse error), a top-level `<style>`
-//! (5l), a `<svelte:options>` axis beyond `runes` / `customElement` (5m —
-//! including `name`, which official rejects as an unknown attribute), and a
-//! dev-mode codegen request (5k). A VALID `customElement` value is supported
-//! (the lowering resolves it into the custom-element descriptor); its invalid
-//! forms are exact-code official rejects caught before this gate.
+//! whose css output mode is unprovable or whose body fails the scoping
+//! analysis (an ACCEPTED style hands its parsed + analyzed body forward as
+//! the pre-lowering style stage), a `<svelte:options>` axis beyond `runes` /
+//! `customElement` / `css="injected"` (including `name`, which official
+//! rejects as an unknown attribute), and a dev-mode codegen request (5k). A
+//! VALID `customElement` value is supported (the lowering resolves it into
+//! the custom-element descriptor); its invalid forms are exact-code official
+//! rejects caught before this gate.
 
 use verter_span::Span;
 
@@ -13,18 +16,35 @@ use super::SvelteRuntimeOptions;
 use super::UnsupportedSvelteRuntimeSurface;
 use crate::svelte::parser::{
     ParsedSvelte, SvelteAttribute, SvelteElement, SvelteElementKind, SvelteNode, SvelteSpecialKind,
+    SvelteStyle,
 };
 
+/// The pre-lowering style stage a top-level `<style>` produces when the
+/// parse-domain gate ACCEPTS it: the detected css output mode plus the parsed
+/// and analyzed css body. The pipeline completes it into the full
+/// [`ProvenStyleScopePlan`](super::css::types::ProvenStyleScopePlan) once the
+/// runtime IR exists (the selector-to-template matcher consumes the IR); a
+/// downstream plan failure reports its OWN precise code + span.
+pub(super) struct PreparedComponentStyle {
+    /// The detected css output mode.
+    pub(super) mode: super::css::types::CssMode,
+    /// The parsed + analyzed css body (the css-domain half of the plan build).
+    pub(super) analyzed: super::css::AnalyzedStyleBody,
+}
+
 /// The PARSE-DOMAIN gate (choke point 1 of the refuse-by-default pipeline): refuse
-/// the unsupported surfaces the runtime IR does not carry (a top-level `<style>`
-/// (5l), a `<svelte:options>` axis beyond `runes` / `customElement` (5m), and a
-/// dev-mode codegen request (5k)) BEFORE lowering. Returns the FIRST one found,
-/// or `None`.
+/// the unsupported surfaces the runtime IR does not carry (a `<style>` css body
+/// that fails the scoping analysis or an unprovable css output mode, a
+/// `<svelte:options>` axis beyond `runes` / `customElement`, and a dev-mode
+/// codegen request (5k)) BEFORE lowering. Returns the FIRST refusal found as
+/// `Err`; on acceptance returns the component's pre-lowering style stage
+/// (`Some` when a top-level `<style>` is present — its mode detection and css
+/// analysis passed; the matcher + render complete downstream over the real IR).
 pub(super) fn parse_domain_gate(
     source: &str,
     parsed: &ParsedSvelte,
     opts: &SvelteRuntimeOptions,
-) -> Option<UnsupportedSvelteRuntimeSurface> {
+) -> Result<Option<PreparedComponentStyle>, UnsupportedSvelteRuntimeSurface> {
     // NOTE: a template-element `attribute_duplicate` and a duplicate `<svelte:options>` are
     // official EXACT-CODE parse errors minted by the parser (the encounter-ordered
     // `parse_reject_facts` rail), caught by the official-reject gate that runs BEFORE this
@@ -37,11 +57,11 @@ pub(super) fn parse_domain_gate(
     // official-reject gate already rejected the EXPLICIT-`</p>` autoclose case, so a
     // `<p>` block-child reaching here is the implicit case.
     if let Some(surface) = refuse_implicit_paragraph_autoclose(&parsed.template) {
-        return Some(surface);
+        return Err(surface);
     }
     // A dev-mode codegen request: the dev-mode output axis is not emitted (5k).
     if opts.dev_codegen {
-        return Some(UnsupportedSvelteRuntimeSurface::DevMode {
+        return Err(UnsupportedSvelteRuntimeSurface::DevMode {
             span: Span::new(0, 0),
         });
     }
@@ -60,30 +80,151 @@ pub(super) fn parse_domain_gate(
     {
         if let Some(lang) = &script.lang {
             if matches!(lang.as_str(), "ts" | "tsx" | "typescript") {
-                return Some(UnsupportedSvelteRuntimeSurface::TypeScript {
+                return Err(UnsupportedSvelteRuntimeSurface::TypeScript {
                     span: script.content.unwrap_or(script.tag_open),
                 });
             }
         }
     }
-    // A top-level `<style>` block — CSS scoping is the 5l vertical. `<style>` is
-    // parsed into `parsed.styles` (never a template node), so the IR walk does not
-    // see it; refuse it here.
-    if let Some(style) = parsed.styles.first() {
-        return Some(UnsupportedSvelteRuntimeSurface::Style {
-            span: style.content.unwrap_or(style.tag_open),
-        });
-    }
+    // A top-level `<style>` block: `<style>` is parsed into `parsed.styles`
+    // (never a template node), so the IR walk does not see it. Detect the css
+    // output mode and run the scoping parse + analysis NOW — css analysis runs
+    // before template lowering, so a css failure is reported before any
+    // template-lowering failure — and hand
+    // the accepted stage to the pipeline (the matcher + scoped render complete
+    // over the real runtime IR downstream). Never fails open: an unprovable
+    // mode or a failed analysis refuses here; an unprovable matcher outcome
+    // refuses downstream.
+    let prepared_style = match parsed.styles.first() {
+        Some(style) => Some(prepare_style_surface(source, style, parsed, opts)?),
+        None => None,
+    };
     // The STRICT `<svelte:options>` gate: allow ONLY an ABSENT options element, or at
     // most ONE top-level `<svelte:options>` carrying the supported axes (a boolean
     // `runes` literal — BOTH values are valid mode selections — and a VALID
     // `customElement` value). Fail closed on a duplicate / nested / non-root options
-    // element, a non-boolean `runes` value, any other axis (`namespace`/`css`/…),
+    // element, a non-boolean `runes` value, any other axis (`namespace`/…),
     // a spread / directive, or child content.
     if let Some(surface) = refuse_unsupported_options(source, parsed) {
-        return Some(surface);
+        return Err(surface);
     }
-    None
+    Ok(prepared_style)
+}
+
+/// Run the PARSE-DOMAIN half of a top-level `<style>`'s scoping pipeline —
+/// css output-mode detection plus the css body parse + scoping analysis (the
+/// css-domain half of the plan build) — and return the accepted pre-lowering
+/// stage, or the PRECISE fail-closed surface:
+///
+/// - an UNPROVABLE css output mode → [`StyleCssModeUnsupported`];
+/// - a css body the analyzer cannot parse / prove → [`StyleCssAnalysis`]
+///   (span-precise to the offending construct).
+///
+/// Both checks run BEFORE template lowering (the css-first diagnostic order:
+/// a css failure is reported even when the template would also fail to
+/// lower). The selector-to-template matcher and the scoped render complete
+/// downstream over the real runtime IR; a matcher-unprovable plan refuses
+/// there on [`StyleSelectorUnsupported`].
+///
+/// [`StyleCssAnalysis`]: UnsupportedSvelteRuntimeSurface::StyleCssAnalysis
+/// [`StyleCssModeUnsupported`]: UnsupportedSvelteRuntimeSurface::StyleCssModeUnsupported
+/// [`StyleSelectorUnsupported`]: UnsupportedSvelteRuntimeSurface::StyleSelectorUnsupported
+fn prepare_style_surface(
+    source: &str,
+    style: &SvelteStyle,
+    parsed: &ParsedSvelte,
+    opts: &SvelteRuntimeOptions,
+) -> Result<PreparedComponentStyle, UnsupportedSvelteRuntimeSurface> {
+    // An absent content span (a defensive case — a content-less `<style>` is
+    // an official reject caught before this gate) plans an EMPTY body at the
+    // open tag's end.
+    let content = style
+        .content
+        .unwrap_or(Span::new(style.tag_open.end, style.tag_open.end));
+
+    // The css output mode is a PARSE-DOMAIN fact (options element + compile
+    // option); an unprovable mode fails closed on the mode surface (the
+    // `<style>` content, or the open tag when content is absent).
+    let Some(mode) = detect_css_mode(source, parsed, opts) else {
+        return Err(UnsupportedSvelteRuntimeSurface::StyleCssModeUnsupported {
+            span: style.content.unwrap_or(style.tag_open),
+        });
+    };
+
+    // The css-domain half of the plan build: parse + analyze the css body. A
+    // body-parse or scoping-analysis failure threads its PRECISE official
+    // css code + span unchanged into the refusal.
+    let analyzed = super::css::analyze_style_body(source, content).map_err(|err| {
+        UnsupportedSvelteRuntimeSurface::StyleCssAnalysis {
+            code: err.code,
+            span: err.span,
+        }
+    })?;
+
+    Ok(PreparedComponentStyle { mode, analyzed })
+}
+
+/// Detect the component's css OUTPUT MODE — the official `inject_styles =
+/// css === 'injected' || is_custom_element` rule over the parse-domain facts:
+///
+/// - a custom element (the `<svelte:options customElement>` value or the
+///   `customElement: true` compile option, with the official
+///   `customElementOptions ?? custom_element_from_option` precedence) ⇒
+///   [`Injected`](super::css::types::CssMode::Injected);
+/// - a `<svelte:options css>` attribute ⇒ `Injected` when its value is the
+///   official-accepted static `"injected"` — a Text value OR a single static
+///   STRING-LITERAL expression (`css={'injected'}` / `css={"injected"}`), the
+///   upstream `get_static_value` rule (the ONLY value upstream accepts on the
+///   options element; every other shape is an official reject caught before
+///   this gate — defensively `None` here);
+/// - otherwise the `External` default.
+///
+/// `None` means the mode is UNPROVABLE (a broken upstream invariant) — the
+/// caller fails closed.
+fn detect_css_mode(
+    source: &str,
+    parsed: &ParsedSvelte,
+    opts: &SvelteRuntimeOptions,
+) -> Option<super::css::types::CssMode> {
+    use super::css::types::CssMode;
+    use crate::svelte::parser::SvelteAttributeKind;
+
+    // The custom-element half of the official rule (the resolver mirrors the
+    // `customElementOptions ?? custom_element_from_option` precedence,
+    // including the `customElement={null}` fallback). A resolution failure is
+    // a broken invariant — unprovable.
+    match super::custom_element::resolve_custom_element(parsed, opts.custom_element) {
+        Ok(Some(_)) => return Some(CssMode::Injected),
+        Ok(None) => {}
+        Err(_) => return None,
+    }
+
+    // The `css === 'injected'` half: the first ROOT `<svelte:options>`
+    // element's `css` attribute. Upstream accepts ONLY the static `"injected"`
+    // (a Text value or a single string-literal expression) on the options
+    // element, so a surviving attribute IS the injected mode; re-run the ONE
+    // shared static-value check defensively (the same authority the options
+    // official-reject classification uses — a Text / string-literal-expression
+    // value resolves, a dynamic or mixed value never does) and treat any other
+    // surviving shape as unprovable.
+    let mut options_elements = Vec::new();
+    collect_options_elements(&parsed.template, 0, &mut options_elements);
+    let css_attr = options_elements
+        .iter()
+        .find(|(_, depth)| *depth == 0)
+        .and_then(|(element, _)| {
+            element.attributes.iter().find_map(|attr| match &attr.kind {
+                SvelteAttributeKind::Plain { name, value, .. } if name == "css" => Some(value),
+                _ => None,
+            })
+        });
+    match css_attr {
+        Some(value) if crate::svelte::parser::tokenizer::options_css_is_injected(source, value) => {
+            Some(CssMode::Injected)
+        }
+        Some(_) => None,
+        None => Some(CssMode::External),
+    }
 }
 
 /// Recursively refuse the FIRST `<p>` element (document order, descending element
@@ -149,7 +290,8 @@ fn refuse_implicit_paragraph_autoclose(
 ///   boolean values are valid mode selections (`runes={false}` forces legacy mode,
 ///   whose not-yet-lowered surfaces classify per surface downstream);
 /// - `tag` (always an official reject upstream; defensive here) and every OTHER
-///   axis (`namespace`, `css`, `name`, …, a spread, a directive);
+///   axis (`namespace`, `name`, …, a spread, a directive) — `css` is supported
+///   (the injected-mode selector [`detect_css_mode`] consumes);
 /// - child content (a `<svelte:options>` is a self-closing marker; content is invalid).
 fn refuse_unsupported_options(
     source: &str,
@@ -192,8 +334,9 @@ fn refuse_unsupported_options(
     // `official_reject.rs` + the parser `read_options` finalization). So the only inputs reaching
     // here are the officially-ACCEPTED options axes: a boolean `runes` literal (BOTH values —
     // `runes={true}` forces runes mode, `runes={false}` forces legacy mode; the legacy
-    // component's unsupported surfaces are classified per surface downstream) and a valid
-    // `customElement` value are SUPPORTED; every OTHER accepted axis (a valid `namespace`/`css`,
+    // component's unsupported surfaces are classified per surface downstream), a valid
+    // `customElement` value, and the static `css="injected"` output-mode axis are SUPPORTED;
+    // every OTHER accepted axis (a valid `namespace`,
     // `immutable`/`accessors`/`preserveWhitespace`) is a later options vertical. The
     // non-supported arms below stay as a defensive fail-closed for anything an upstream change
     // might newly accept.
@@ -222,6 +365,13 @@ fn refuse_unsupported_options(
             // is official-ACCEPTED and the lowering resolves it into the
             // [`CustomElementDescriptor`](crate::svelte::parser::CustomElementDescriptor).
             Some("customElement") => {}
+            // A surviving `css` axis is SUPPORTED: official accepts ONLY the
+            // static `"injected"` value on the options element (anything else —
+            // including `"external"` — is the exact-code
+            // `svelte_options_invalid_attribute_value` reject minted upstream),
+            // and [`detect_css_mode`] consumes it as the injected output mode
+            // (re-checking the static value defensively).
+            Some("css") => {}
             // The deprecated `tag` axis is ALWAYS an official reject
             // (`svelte_options_deprecated_tag`, minted by the parser and caught by
             // the official-reject gate) — it never reaches this gate; the arm
@@ -317,13 +467,13 @@ fn collect_options_elements<'a>(
 
 /// The attribute NAME of a `<svelte:options>` attribute (a plain attribute name),
 /// or `None` for a non-plain form (a spread / directive — neither is a supported
-/// name/runes axis, so the caller treats it as an unrecognised 5m axis).
+/// name/runes axis, so the caller treats it as an unrecognised options axis).
 fn options_attr_name(attr: &SvelteAttribute) -> Option<String> {
     use crate::svelte::parser::SvelteAttributeKind;
     match &attr.kind {
         SvelteAttributeKind::Plain { name, .. } => Some(name.clone()),
         // A spread / directive / `{@attach}` on `<svelte:options>` is never the
-        // supported `runes` axis — `None` routes it to the 5m unsupported-options arm.
+        // supported `runes` axis — `None` routes it to the unsupported-options arm.
         SvelteAttributeKind::Spread(_)
         | SvelteAttributeKind::Directive(_)
         | SvelteAttributeKind::Attach { .. } => None,
