@@ -205,15 +205,21 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
         }
     }
 
-    /// Drop a carrier's recorded content on close.
-    pub(crate) fn remove_content(&self, path: &str) {
-        self.state.lock().content.remove(path);
+    /// Remove and return a carrier's recorded state on close. The removal and the capture of
+    /// the record (including its injection marker) are ONE atomic state mutation, so a
+    /// concurrent inject commit can never land a marker between the capture and the erase:
+    /// the caller sees either the committed marker (and owns compensating for its physical
+    /// overlay) or no marker (an in-flight inject transaction observes the removed record at
+    /// its commit and compensates its own landing).
+    fn take_content(&self, path: &str) -> Option<ContentRecord> {
+        let removed = self.state.lock().content.remove(path);
         // Prune dead carrier-gate registry entries on the close path too (not only on a fresh
         // gate mint) — a completed operation leaves a dead `Weak`, and close churn should not
         // leak those between mints. A gate a live operation still holds is retained.
         self.carrier_gates
             .lock()
             .retain(|_, weak| weak.strong_count() > 0);
+        removed
     }
 
     /// The live transport if already established, else `None` — NEVER establishes
@@ -697,25 +703,78 @@ impl<T: OverlayTransport> LazyOverlayCore<T> {
     /// trigger — or head-of-line-block on — an establishment).
     ///
     /// The carrier gate orders the close w.r.t. any in-flight injection / reopen of the same
-    /// path. After acquiring the gate the close retracts ONLY IF the path is still ABSENT from
-    /// the content map: a reopen that re-inserted the content owns the carrier now, so this
-    /// stale close does nothing (never clobbers the reopened overlay). A gate-acquire timeout
-    /// fails closed within the deadline — an in-flight gated inject will observe the absence
-    /// and compensate, and a reopen's inject is ordered behind this gate.
+    /// path, and after acquiring it the close decides from ONE state read:
+    ///
+    /// - the path is still ABSENT from the content map ⇒ the plain close: retract.
+    /// - the path was REOPENED and the reopened record carries a COMMITTED injection marker
+    ///   (the reopen's own inject landed + committed while this close was parked; any marker
+    ///   on the reopened record post-dates the reopen) ⇒ do nothing: the reopen's physical
+    ///   inject refreshed the path, so the overlay this close's erase untracked no longer
+    ///   exists, and a retract here would delete the reopen's NEW overlay.
+    /// - the path was REOPENED with NO committed marker (the reopen is shadow-unsafe, or its
+    ///   inject has not run yet — it is queued behind this gate) ⇒ the overlay whose marker
+    ///   the erase removed is ORPHANED — a marker-less unsafe sweep is inert on it — so
+    ///   dispatch the compensating retract (bounded by the same close deadline), IFF the
+    ///   captured marker's transport epoch is still current at that state read (an epoch
+    ///   already advanced at the read means the overlay is on a since-replaced transport
+    ///   instance, whose teardown/replacement lifecycle owns removal — mirroring the inject
+    ///   commit classification). The epoch guard gates only that DECISION: the retract itself
+    ///   dispatches on the CURRENTLY-established transport ([`Self::current`]) after the
+    ///   state lock is released, which reaches the shared, transport-persistent Program — so
+    ///   a transport replacement landing between the epoch read and the dispatch still
+    ///   removes the orphaned overlay, and the held carrier gate keeps any reopen from
+    ///   committing a NEW overlay at the path in that window, so no live overlay is wrongly
+    ///   removed.
+    ///
+    /// The pre-erase injection marker (content incarnation + run epoch), captured atomically
+    /// with the erase, is what tells OUR orphaned overlay apart from a different overlay a
+    /// reopen committed. This compensates the demonstrated shadow-unsafe reopen orphan; it is
+    /// NOT a "never orphaned" guarantee. TODO(follow-up): ownership of a physically-landed
+    /// overlay is still lost when the close deadline expires before the gated section runs;
+    /// when no transport is currently established at retract time (`current()` returns
+    /// `None`); and when the dispatched retract itself times out or is cancelled with an
+    /// unknown outcome. An epoch advance retires markers without sweeping the replaced
+    /// instance's overlays ([`Self::observe_transport_identity`]), the dispatched retract is
+    /// not transport-identity-bound (the dispatched transport's epoch/identity is never
+    /// re-verified against the one the compensation decision was read under), and the
+    /// transport wire carries no lease/incarnation token, so an overlay recreated at the
+    /// same path is not distinguishable end-to-end. Each remains a tracked follow-up for a
+    /// systematic ownership ledger rather than point compensation here.
+    ///
+    /// A gate-acquire timeout fails closed within the deadline — an in-flight gated inject
+    /// will observe the absence and compensate, and a reopen's inject is ordered behind this
+    /// gate.
     pub(crate) async fn retract_bounded(&self, path: &str, timeout: Duration) {
         // Drop the recorded content immediately so the carrier is closed locally regardless
-        // of the transport retract outcome.
-        self.remove_content(path);
+        // of the transport retract outcome — capturing, atomically with the erase, the
+        // injection marker the erase removes (the committed content incarnation + the
+        // transport epoch it was injected into). Together with `path` it identifies the
+        // physical overlay this close untracks; the reopened branch below needs it to tell
+        // that orphan apart from a different overlay a reopen may have committed.
+        let prior_overlay = self.take_content(path).and_then(|rec| rec.injected);
         // Bound the ENTIRE physical close by the ORIGINAL deadline computed ONCE — the gate
         // acquisition and the retract share it, never additive.
         let deadline = tokio::time::Instant::now() + timeout;
         let gate = self.carrier_gate(path);
         let _ = tokio::time::timeout_at(deadline, async {
             let _gate = gate.lock().await;
-            // A reopen that re-inserted the content between `remove_content` and acquiring the
-            // gate makes THIS close stale — the reopen owns the carrier now; do nothing.
-            let reopened = { self.state.lock().content.contains_key(path) };
-            if reopened {
+            let should_retract = {
+                let state = self.state.lock();
+                match state.content.get(path) {
+                    // Still absent: the plain close retracts.
+                    None => true,
+                    // Reopened + a committed marker: the reopen's NEW overlay owns the
+                    // path — never delete it.
+                    Some(rec) if rec.injected.is_some() => false,
+                    // Reopened, no committed overlay: compensate OUR orphaned overlay iff
+                    // one was physically landed and its transport instance is still
+                    // current.
+                    Some(_) => prior_overlay
+                        .as_ref()
+                        .is_some_and(|prior| state.active_epoch == Some(prior.epoch)),
+                }
+            };
+            if !should_retract {
                 return;
             }
             if let Some(transport) = self.current().await {

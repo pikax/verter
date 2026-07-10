@@ -12,7 +12,7 @@ use tokio::sync::Notify;
 use verter_type_runtime::protocol::TypeProviderError;
 use verter_type_runtime::traits::ProviderFuture;
 
-use super::{LazyOverlayCore, OverlayTransport};
+use super::{InjectedRecord, LazyOverlayCore, OverlayTransport};
 use crate::tsgo::transport_cell::EstablishedTransport;
 
 /// A transport double: records each injection/retraction and reports controllable
@@ -1275,13 +1275,16 @@ async fn stale_observe_of_older_epoch_does_not_regress_active_epoch_or_reset_mar
 
 /// The OWNED-close retract (`retract_bounded`) must be ordered w.r.t. a concurrent reopen of
 /// the same path: after removing the content it acquires the per-path carrier gate and
-/// retracts ONLY IF the path is still ABSENT from the content map. A reopen that re-inserted
-/// the content between the close's `remove_content` and its gated revalidation makes THIS
-/// close stale — its retract must NOT clobber the reopened overlay.
+/// revalidates. A reopen that re-inserted the content between the close's content removal
+/// (`take_content`) and its gated revalidation owns the carrier RECORD — the close must never clobber it: the
+/// only retract the stale close may dispatch is the compensating one for the ORPHANED
+/// pre-erase overlay (the reopen has not re-injected yet — its inject is queued behind the
+/// gate), ordered BEFORE the reopen's inject lands. The reopened content stays intact and
+/// injects cleanly afterwards.
 ///
-/// RED before the fix (`retract_bounded` removed content then unconditionally retracted,
-/// with no gate and no reopen revalidation): the stale close retracts the just-reopened
-/// carrier, clobbering the reopen's overlay in the SHARED Program.
+/// RED before the gate + revalidation existed (`retract_bounded` removed content then
+/// unconditionally retracted): the stale close's retract could land AFTER the reopen's
+/// inject, clobbering the reopen's overlay in the SHARED Program.
 #[tokio::test]
 async fn retract_bounded_does_not_clobber_a_reopen_that_re_inserted_content() {
     let core = Arc::new(LazyOverlayCore::<FakeTransport>::new());
@@ -1294,7 +1297,7 @@ async fn retract_bounded_does_not_clobber_a_reopen_that_re_inserted_content() {
     assert_eq!(transport.ops(), vec!["/ws/Foo.vue.tsx=v1".to_string()]);
 
     // Hold the carrier gate so a concurrent retract_bounded blocks in its gated section AFTER
-    // its remove_content but BEFORE the reopen-presence revalidation — the exact
+    // its content removal but BEFORE the reopen-presence revalidation — the exact
     // close/remove → reopen ordering window.
     let gate = core.carrier_gate("/ws/Foo.vue.tsx");
     let held = gate.lock().await;
@@ -1309,37 +1312,292 @@ async fn retract_bounded_does_not_clobber_a_reopen_that_re_inserted_content() {
         })
     };
 
-    // Wait until the close's remove_content has run (the content map no longer holds it) — the
-    // close is now parked on the held gate, inside the window.
+    // Wait until the close's content removal has run (the content map no longer holds it) —
+    // the close is now parked on the held gate, inside the window.
     let mut spins = 0;
     while core.state.lock().content.contains_key("/ws/Foo.vue.tsx") {
         tokio::task::yield_now().await;
         spins += 1;
-        assert!(spins < 100_000, "the close's remove_content did not run");
+        assert!(spins < 100_000, "the close's content removal did not run");
     }
 
-    // The REOPEN re-inserts content AFTER the close's remove (the exact race). The close must
-    // now observe the carrier is present again and SKIP its retract.
+    // The REOPEN re-inserts content AFTER the close's remove (the exact race). The close now
+    // observes the carrier is present again with NO committed marker: the reopen owns the
+    // RECORD; the pre-erase overlay is the close's to compensate.
     core.record_content("/ws/Foo.vue.tsx", "v2-reopened");
 
-    // Release the gate; the close acquires it, sees content present, and does nothing.
+    // Release the gate; the close acquires it and compensates ONLY the orphaned pre-reopen
+    // overlay — it never touches the reopen's record.
+    drop(held);
+    close.await.unwrap();
+
+    assert_eq!(
+        transport
+            .ops()
+            .iter()
+            .filter(|o| o.as_str() == "close:/ws/Foo.vue.tsx")
+            .count(),
+        1,
+        "the stale close retracts ONLY the orphaned pre-reopen overlay (exactly one close)"
+    );
+
+    // The reopened content is intact and re-injects cleanly (self-heal) — and no close is
+    // dispatched after the reopened overlay lands (the reopen is never clobbered).
+    core.inject_dirty(&established, "/ws/Foo.vue.tsx", 1).await;
+    assert!(core.is_synced("/ws/Foo.vue.tsx"));
+    let ops = transport.ops();
+    let reinject_pos = ops
+        .iter()
+        .position(|o| o == "/ws/Foo.vue.tsx=v2-reopened")
+        .expect("the reopened overlay is injected");
+    assert!(
+        !ops[reinject_pos..]
+            .iter()
+            .any(|o| o == "close:/ws/Foo.vue.tsx"),
+        "no close is dispatched AFTER the reopened overlay lands (the reopen is never clobbered)"
+    );
+}
+
+/// Upholds `carrier_never_shadows_real_user_file` for the OWNED-close/reopen window: a close
+/// whose content removal erased the committed injection marker, followed by a reopen that
+/// re-inserts the content but does NOT re-inject (the reopen is shadow-UNSAFE — a real user
+/// file now occupies the companion path), must NOT orphan the physically-landed overlay: the
+/// close's gated section dispatches a compensating bounded retract of the erased-marker
+/// overlay. Without it the overlay has NO owner — the marker is already gone, so the unsafe
+/// sweep finds no run-epoch marker and is inert — and the overlay keeps shadowing the real
+/// user file for every other shared-Program consumer.
+///
+/// RED before the fix (`if reopened { return; }` with the marker already erased): the close
+/// returns without retracting and the marker-less unsafe sweep is inert → ops end at
+/// `[inject]` with NO `close` — the orphan.
+#[tokio::test]
+async fn retract_bounded_compensates_the_orphaned_overlay_on_a_shadow_unsafe_reopen() {
+    let core = Arc::new(LazyOverlayCore::<FakeTransport>::new());
+    core.record_content("/ws/Foo.vue.tsx", "v1");
+    let established = establish_alive(&core, 1, "nonce-1").await;
+    let transport = Arc::clone(&established.transport);
+
+    // Inject + commit v1 at generation 1: the overlay physically LANDS and the marker is SET.
+    core.inject_dirty(&established, "/ws/Foo.vue.tsx", 1).await;
+    assert_eq!(transport.ops(), vec!["/ws/Foo.vue.tsx=v1".to_string()]);
+
+    // Hold the carrier gate so the close parks in its gated section AFTER its
+    // its content removal (the marker is erased) but BEFORE its reopen revalidation.
+    let gate = core.carrier_gate("/ws/Foo.vue.tsx");
+    let held = gate.lock().await;
+    let close = {
+        let core = Arc::clone(&core);
+        tokio::spawn(async move {
+            core.retract_bounded("/ws/Foo.vue.tsx", Duration::from_secs(5))
+                .await;
+        })
+    };
+    // Wait until the close's content removal has run — the close is parked on the held gate.
+    let mut spins = 0;
+    while core.state.lock().content.contains_key("/ws/Foo.vue.tsx") {
+        tokio::task::yield_now().await;
+        spins += 1;
+        assert!(spins < 100_000, "the close's content removal did not run");
+    }
+
+    // The REOPEN re-inserts the content — but it is shadow-UNSAFE: a real user file
+    // materialized at the companion path, so the reopen never re-injects. The unsafe sweep
+    // at the advanced generation caches `{safe:false}`; its own retract is INERT because
+    // the close's content removal already erased the run-epoch marker.
+    core.record_content("/ws/Foo.vue.tsx", "reopened");
+    let sweep = {
+        let core = Arc::clone(&core);
+        let est = EstablishedTransport {
+            transport: Arc::clone(&transport),
+            identity: established.identity.clone(),
+        };
+        tokio::spawn(async move {
+            core.inject_all_dirty(&est, 2, |_| false).await;
+        })
+    };
+
+    // Release the gate: the close and the (inert) unsafe sweep proceed in gate order.
+    drop(held);
+    close.await.unwrap();
+    sweep.await.unwrap();
+
+    // THE ORPHAN GUARD: the physically-landed v1 overlay lost its marker to the close and is
+    // never re-injected by the shadow-unsafe reopen — a close/retract for it MUST be
+    // dispatched, exactly once (the close's compensation; the marker-less unsafe sweep stays
+    // inert, so no double-close).
+    assert_eq!(
+        transport
+            .ops()
+            .iter()
+            .filter(|o| o.as_str() == "close:/ws/Foo.vue.tsx")
+            .count(),
+        1,
+        "the shadow-unsafe reopen must not orphan the physically-landed overlay: the close \
+         dispatches exactly one compensating retract for the erased-marker overlay"
+    );
+    assert!(
+        !core.is_synced("/ws/Foo.vue.tsx"),
+        "the shadow-unsafe reopened carrier is not synced"
+    );
+}
+
+/// The plain OWNED close (no reopen) retracts the committed overlay: `retract_bounded` drops
+/// the record and dispatches the bounded retract — ops end exactly `[inject, close]`. The
+/// marker-intact control for the reopen-window tests: the everyday close path keeps issuing
+/// its retract, no more and no fewer.
+#[tokio::test]
+async fn retract_bounded_retracts_the_committed_overlay_when_not_reopened() {
+    let core = LazyOverlayCore::<FakeTransport>::new();
+    core.record_content("/ws/Foo.vue.tsx", "v1");
+    let established = establish_alive(&core, 1, "nonce-1").await;
+    let transport = Arc::clone(&established.transport);
+
+    core.inject_dirty(&established, "/ws/Foo.vue.tsx", 1).await;
+    assert!(core.is_synced("/ws/Foo.vue.tsx"));
+
+    core.retract_bounded("/ws/Foo.vue.tsx", Duration::from_secs(5))
+        .await;
+
+    assert_eq!(
+        transport.ops(),
+        vec![
+            "/ws/Foo.vue.tsx=v1".to_string(),
+            "close:/ws/Foo.vue.tsx".to_string()
+        ],
+        "a plain close (no reopen) retracts the committed overlay: ops end exactly [inject, close]"
+    );
+    assert!(
+        !core.is_synced("/ws/Foo.vue.tsx"),
+        "the closed carrier is not synced"
+    );
+}
+
+/// Negative control guarding the close's compensation condition: the stale close must tell
+/// OUR orphaned overlay apart from a DIFFERENT overlay the reopen already committed. When the
+/// close's gated check finds the reopened record carrying a COMMITTED injection marker (the
+/// reopen's own inject landed + committed a new shadow-safe overlay at this path/epoch while
+/// the close was parked — reachable when the close is preempted between its marker erase and
+/// its gate registration, leaving the gate free for the reopen's full inject transaction),
+/// the close must NOT retract: the reopen's physical inject refreshed the path, so the
+/// erased-marker overlay no longer exists and a retract would delete the reopen's NEW
+/// overlay. The committed reopen state is written directly onto the reopened record because
+/// the current-thread FIFO carrier gate cannot park the close BEHIND a later-arriving full
+/// inject transaction.
+#[tokio::test]
+async fn reopen_that_committed_a_new_overlay_is_not_retracted_by_the_stale_close() {
+    let core = Arc::new(LazyOverlayCore::<FakeTransport>::new());
+    core.record_content("/ws/Foo.vue.tsx", "v1");
+    let established = establish_alive(&core, 1, "nonce-1").await;
+    let transport = Arc::clone(&established.transport);
+
+    core.inject_dirty(&established, "/ws/Foo.vue.tsx", 1).await;
+    assert_eq!(transport.ops(), vec!["/ws/Foo.vue.tsx=v1".to_string()]);
+
+    // Park the close between its marker erase and its gated revalidation.
+    let gate = core.carrier_gate("/ws/Foo.vue.tsx");
+    let held = gate.lock().await;
+    let close = {
+        let core = Arc::clone(&core);
+        tokio::spawn(async move {
+            core.retract_bounded("/ws/Foo.vue.tsx", Duration::from_secs(5))
+                .await;
+        })
+    };
+    let mut spins = 0;
+    while core.state.lock().content.contains_key("/ws/Foo.vue.tsx") {
+        tokio::task::yield_now().await;
+        spins += 1;
+        assert!(spins < 100_000, "the close's content removal did not run");
+    }
+
+    // The reopen re-inserts the content AND its inject has already landed + committed a new
+    // shadow-safe overlay at this path under the CURRENT epoch.
+    core.record_content("/ws/Foo.vue.tsx", "v2-reopened");
+    {
+        let mut state = core.state.lock();
+        let rec = state
+            .content
+            .get_mut("/ws/Foo.vue.tsx")
+            .expect("the reopened record is present");
+        rec.injected = Some(InjectedRecord {
+            content: Arc::from("v2-reopened"),
+            epoch: established.identity.epoch,
+        });
+    }
+
+    drop(held);
+    close.await.unwrap();
+
+    // NO extra close of the re-injected overlay: the reopen's committed overlay owns the
+    // path now; the stale close leaves it intact.
+    assert!(
+        !transport.ops().iter().any(|o| o == "close:/ws/Foo.vue.tsx"),
+        "a stale close must NOT retract the reopen's committed shadow-safe overlay (no extra \
+         close of the re-injected overlay)"
+    );
+    assert!(
+        core.is_synced("/ws/Foo.vue.tsx"),
+        "the reopen's committed overlay stays synced/intact after the stale close"
+    );
+}
+
+/// The close's compensation is scoped to an orphan on the STILL-CURRENT transport instance:
+/// when the transport was replaced while the close was parked (the epoch advanced past the
+/// erased marker's run epoch), the erased-marker overlay lives on the REPLACED instance,
+/// whose teardown/replacement lifecycle owns its removal — the close must NOT dispatch a
+/// retract on the NEW transport (path never injected there; a retract would target an
+/// overlay that is not ours).
+#[tokio::test]
+async fn stale_close_after_a_reconnect_does_not_retract_on_the_new_transport() {
+    let core = Arc::new(LazyOverlayCore::<FakeTransport>::new());
+    core.record_content("/ws/Foo.vue.tsx", "v1");
+    let est_a = establish_alive(&core, 1, "nonce-1").await;
+    let transport_a = Arc::clone(&est_a.transport);
+    core.inject_dirty(&est_a, "/ws/Foo.vue.tsx", 1).await;
+    assert_eq!(transport_a.ops(), vec!["/ws/Foo.vue.tsx=v1".to_string()]);
+
+    // Park the close between its marker erase and its gated revalidation.
+    let gate = core.carrier_gate("/ws/Foo.vue.tsx");
+    let held = gate.lock().await;
+    let close = {
+        let core = Arc::clone(&core);
+        tokio::spawn(async move {
+            core.retract_bounded("/ws/Foo.vue.tsx", Duration::from_secs(5))
+                .await;
+        })
+    };
+    let mut spins = 0;
+    while core.state.lock().content.contains_key("/ws/Foo.vue.tsx") {
+        tokio::task::yield_now().await;
+        spins += 1;
+        assert!(spins < 100_000, "the close's content removal did not run");
+    }
+
+    // While the close is parked, transport A dies and a reconnect mints transport B (a newer
+    // epoch); a reopen re-inserts the content (uncommitted — no new overlay yet).
+    transport_a.set_dead();
+    let est_b = reestablish_after_death(&core).await;
+    let transport_b = Arc::clone(&est_b.transport);
+    core.record_content("/ws/Foo.vue.tsx", "v2-reopened");
+
     drop(held);
     close.await.unwrap();
 
     assert!(
-        !transport.ops().iter().any(|o| o == "close:/ws/Foo.vue.tsx"),
-        "a stale close whose path was reopened must NOT retract (never clobber the reopen)"
-    );
-
-    // The reopened content is intact and re-injects cleanly (self-heal).
-    core.inject_dirty(&established, "/ws/Foo.vue.tsx", 1).await;
-    assert!(core.is_synced("/ws/Foo.vue.tsx"));
-    assert!(
-        transport
+        !transport_b
             .ops()
             .iter()
-            .any(|o| o == "/ws/Foo.vue.tsx=v2-reopened"),
-        "the reopened overlay is injected"
+            .any(|o| o == "close:/ws/Foo.vue.tsx"),
+        "a stale close whose erased-marker overlay lives on the REPLACED transport instance \
+         must NOT dispatch a retract on the NEW transport"
+    );
+    assert!(
+        !transport_a
+            .ops()
+            .iter()
+            .any(|o| o == "close:/ws/Foo.vue.tsx"),
+        "no retract is dispatched to the dead replaced instance either (its \
+         teardown/replacement lifecycle owns its overlays)"
     );
 }
 
@@ -1448,14 +1706,15 @@ async fn inflight_inject_commit_veto_retracts_exactly_once_on_direct_unsafe_cach
     );
 }
 
-/// The carrier-gate registry is pruned of DEAD weak entries on `remove_content` too, not only
-/// when a fresh gate is minted — so close churn cannot leak dead registry entries between
-/// mints.
+/// The carrier-gate registry is pruned of DEAD weak entries on the close path's content
+/// removal (`take_content`) too, not only when a fresh gate is minted — so close churn
+/// cannot leak dead registry entries between mints.
 ///
-/// RED before the fix (`remove_content` dropped the content record but never swept the gate
-/// registry): the dead gate entry left by a completed inject survives the close.
+/// RED before the fix (the close-path content removal dropped the content record but never
+/// swept the gate registry): the dead gate entry left by a completed inject survives the
+/// close.
 #[tokio::test]
-async fn remove_content_prunes_dead_carrier_gate_entries() {
+async fn take_content_prunes_dead_carrier_gate_entries() {
     let core = LazyOverlayCore::<FakeTransport>::new();
     core.record_content("/ws/A.vue.tsx", "v1");
     let established = establish_alive(&core, 1, "nonce-1").await;
@@ -1469,11 +1728,11 @@ async fn remove_content_prunes_dead_carrier_gate_entries() {
         "the injected carrier left a (now dead) gate registry entry"
     );
 
-    // remove_content prunes the dead entry (not only a fresh gate mint does).
-    core.remove_content("/ws/A.vue.tsx");
+    // take_content prunes the dead entry (not only a fresh gate mint does).
+    let _ = core.take_content("/ws/A.vue.tsx");
     assert_eq!(
         core.carrier_gates.lock().len(),
         0,
-        "remove_content prunes dead carrier-gate registry entries"
+        "take_content prunes dead carrier-gate registry entries"
     );
 }
