@@ -45,8 +45,9 @@ use tokio::sync::Mutex;
 /// A monotonic transport-identity epoch, minted ONLY when a transport is successfully
 /// committed to `Live`. A consumer observes it to detect a transport RE-establishment
 /// (a reconnect mints a new epoch) and react — e.g. replay an open document set into
-/// the fresh transport.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+/// the fresh transport. `Ord` compares the inner counter, so a consumer can distinguish a
+/// strictly-newer epoch from a stale/older one (a late observe must not regress).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub(crate) struct TransportEpoch(u64);
 
 /// The identity of a successfully-established transport: its monotonic epoch plus the

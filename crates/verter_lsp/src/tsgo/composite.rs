@@ -66,6 +66,7 @@ use verter_type_runtime::traits::{ProviderFuture, TypeProvider};
 use crate::tsgo::overlay_core::{LazyOverlayCore, OverlayTransport};
 use crate::tsgo::project_binding::{self, BoundCarrier, CarrierAdmissionCache};
 use crate::tsgo::shared::{EstablishSharedParams, TsgoSharedProvider};
+use crate::tsgo::transport_cell::EstablishedTransport;
 
 /// The bound on the lazy SHARED-attach establishment: a slow or never-initializing
 /// editor tsgo cannot stall a carrier diagnostics query beyond this — on elapse the
@@ -217,8 +218,10 @@ impl SharedTsgoOverlay {
     ) -> Option<Vec<TypeDiagnostic>> {
         // Lazily establish (once) the SHARED relay-attach transport for the
         // ALREADY-resolved binding — at QUERY time, OFF the OWNED lifecycle critical
-        // path (SHARED is never fabricated; the binding is the gate's resolved one).
-        let transport = self
+        // path (SHARED is never fabricated; the binding is the gate's resolved one). The
+        // identity-bound object is retained so injection is attributed to THIS transport
+        // instance's epoch (never a re-read of the overlay's current active epoch).
+        let established = self
             .ensure_transport(carrier.binding().clone(), carrier.generation())
             .await?;
 
@@ -242,7 +245,7 @@ impl SharedTsgoOverlay {
         let shadow_generation = self.inner.host.workspace_read().content_generation();
         self.inner
             .core
-            .inject_all_dirty(&transport, Some(shadow_generation), |companion| {
+            .inject_all_dirty(&established, shadow_generation, |companion| {
                 self.injection_is_shadow_safe(companion)
             })
             .await;
@@ -258,7 +261,8 @@ impl SharedTsgoOverlay {
         // Re-decide the serve mode through the live controller at the resolved
         // snapshot/config generation, reusing the SAME binding — a not-SHARED decision
         // falls back to OWNED.
-        if transport
+        if established
+            .transport
             .redecide_for_binding(carrier.binding(), carrier.generation())
             .mode()
             != ServeMode::Shared
@@ -270,7 +274,8 @@ impl SharedTsgoOverlay {
         // BoundProject (version-independent) — is the `--api` overlay target. No second
         // resolution, no witness re-mint (the `--api` snapshot rail keys on the
         // transport's own gate-observed version downstream).
-        match transport
+        match established
+            .transport
             .overlay_diagnostics_in_project(provider_path, carrier.bound().project())
             .await
         {
@@ -351,10 +356,12 @@ impl SharedTsgoOverlay {
         &self,
         binding: ProjectBinding,
         generation: u64,
-    ) -> Option<Arc<TsgoSharedProvider>> {
+    ) -> Option<EstablishedTransport<TsgoSharedProvider>> {
         // The binding is pre-resolved (bound) — pass it straight to the cell. The core
         // supplies the live-death eviction predicate; a no-binding carrier never
-        // reaches here, so the cell is never poisoned by a transient non-binding.
+        // reaches here, so the cell is never poisoned by a transient non-binding. The
+        // identity-bound object is returned so the injection path attributes work to the
+        // exact transport instance's epoch.
         self.inner
             .core
             .ensure(
