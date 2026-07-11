@@ -25,6 +25,7 @@ jobs:
       native: ${{ steps.filter.outputs.native }}
       dx: ${{ steps.filter.outputs.dx }}
       svelte_oracle: ${{ steps.filter.outputs.svelte_oracle }}
+      svelte_client_smokes: ${{ steps.filter.outputs.svelte_client_smokes }}
     steps:
       - uses: actions/checkout@v5
       - uses: dorny/paths-filter@v3
@@ -36,6 +37,7 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.cargo/**'
+              - '.config/nextest.toml'
               - 'rust-toolchain.toml'
               - 'scripts/v5-process/**'
               - '.github/workflows/ci.yml'
@@ -132,6 +134,16 @@ jobs:
               - 'crates/verter_compiler/Cargo.toml'
               - 'pnpm-lock.yaml'
               - '.github/workflows/ci.yml'
+            svelte_client_smokes:
+              - 'crates/verter_compiler/src/svelte/**'
+              - 'packages/core/test/svelte-client*-smoke.spec.ts'
+              - 'packages/core/test/fixtures/svelte/**'
+              - 'packages/core/package.json'
+              - 'packages/core/vitest.config.ts'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
+              - 'pnpm-workspace.yaml'
+              - '.github/workflows/ci.yml'
 
   terminology-check:
     name: Four-mode terminology check
@@ -203,6 +215,10 @@ jobs:
         env:
           VERTER_REQUIRE_TSGO: "1"
         run: cargo nextest run --workspace --profile ci
+      - name: Verter session shared-process integration tests
+        env:
+          VERTER_REQUIRE_TSGO: "1"
+        run: cargo test -p verter_session --tests
       - name: Test report
         if: always()
         uses: dorny/test-reporter@v1
@@ -322,6 +338,27 @@ jobs:
       # stays node-free + hermetic.
       - name: Svelte oracle harness (live)
         run: cargo test -p verter_compiler --features svelte-oracle
+
+  svelte-client-smokes:
+    name: Svelte Client Behavioral Smokes
+    needs: detect-changes
+    if: needs.detect-changes.outputs.svelte_client_smokes == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Run Svelte client behavioral smokes
+        shell: bash
+        working-directory: packages/core
+        run: |
+          shopt -s failglob
+          export LC_ALL=C
+          pnpm exec vitest run test/svelte-client*-smoke.spec.ts
 
   playground-test:
     name: Playground Unit Tests

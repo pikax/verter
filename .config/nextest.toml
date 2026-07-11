@@ -8,10 +8,10 @@
 # the whole `--workspace` run indefinitely. Every test in this workspace
 # completes in seconds; 60s × 3 = 180s is far past any legitimate test, so a
 # trip is always a genuine hang, never a slow-but-valid test.
-slow-timeout = { period = "5s", terminate-after = 3 }
+slow-timeout = { period = "60s", terminate-after = 3 }
 
 [profile.ci]
-slow-timeout = { period = "5s", terminate-after = 3 }
+slow-timeout = { period = "60s", terminate-after = 3 }
 # Produce JUnit XML for dorny/test-reporter in CI
 [profile.ci.junit]
 path = "junit.xml"
