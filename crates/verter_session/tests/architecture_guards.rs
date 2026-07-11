@@ -5027,6 +5027,12 @@ mod foundations_guards {
             // `verter_session::component_meta_audit::mod` exemption
             // that lived here before the substrate split.
             "crates/verter_audit/src/memory.rs",
+            // dev/CI-only, non-published Svelte CSS-conformance corpus
+            // generator — reads/writes ONLY the crate-owned committed corpus
+            // (`env!("CARGO_MANIFEST_DIR")/corpus`), never workspace/semantic/
+            // overlay/VFS state. `D14_ALLOW_LIST` carries the full per-callsite
+            // rationale (tool/output I/O stays on `std::fs`).
+            "crates/verter_svelte_conformance/src/generate.rs",
         ]
         .into_iter()
         .map(String::from)
@@ -9048,6 +9054,10 @@ mod foundations_guards {
         (
             "crates/verter_compiler/src/svelte_oracle.rs",
             "Svelte conformance-oracle comparison engine, gated behind the `svelte-oracle` feature (excluded from the default gate). `load_golden` / `load_all_goldens` read the committed golden JSON TEST FIXTURES off disk for the conformance consumers to diff a normalized candidate against — in-repo test corpus, never workspace/semantic state, with no `VerterHost` / `WorkspaceAccess` context. Not a NativeFs/VFS disk-boundary bypass.",
+        ),
+        (
+            "crates/verter_svelte_conformance/src/generate.rs",
+            "dev/CI-only, non-published (`publish = false`) Svelte CSS-conformance corpus generator. `write_corpus` / `check_corpus` materialize and reconcile ONLY the crate-owned committed corpus under `env!(\"CARGO_MANIFEST_DIR\")/corpus` for the CLI (`cargo run -p verter_svelte_conformance -- write`) and the crate's own tests — never user workspace, semantic, overlay, or VFS state. `WorkspaceAccess` governs user workspace source/config; tool/output I/O stays on `std::fs` (the same tooling precedent as the `oracle-gen` snapshot generator and `verter_tsc`). Not a NativeFs/VFS disk-boundary bypass.",
         ),
     ];
 

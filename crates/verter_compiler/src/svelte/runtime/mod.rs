@@ -66,6 +66,12 @@ mod client_svelte_boundary;
 mod client_svelte_element;
 mod client_svelte_head;
 mod client_walk;
+/// The OPT-IN conformance-observability side channel — feature-gated so the
+/// DEFAULT build compiles it (and every producer hook referencing it) out
+/// entirely; an ungated production reference cannot compile without the
+/// feature.
+#[cfg(feature = "conformance-trace")]
+pub mod conformance_trace;
 mod cross_slot_redeclaration;
 mod css;
 mod css_reject;

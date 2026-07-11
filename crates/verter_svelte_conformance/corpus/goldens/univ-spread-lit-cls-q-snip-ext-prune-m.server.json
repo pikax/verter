@@ -1,0 +1,38 @@
+{
+  "slug": "univ-spread-lit-cls-q-snip-ext-prune-m",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "univ_spread_lit_cls_q_snip_ext_prune_m",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "attributes"
+  ],
+  "helperSet": [
+    "attributes"
+  ],
+  "helperCounts": {
+    "attributes": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": true,
+    "hash": "svelte-15pbrrb",
+    "code": "\n\t.svelte-<scoped> {\n\t\tcolor: red;\n\t}\n\n\t.unused-prune.svelte-<scoped> {\n\t\tcolor: blue;\n\t}\n"
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "slug": "attr-lit-lit-attr-bool-snip-ext-plain-m",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "attr_lit_lit_attr_bool_snip_ext_plain_m",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [],
+  "helperSet": [],
+  "helperCounts": {},
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": true,
+    "hash": "svelte-vlkkqa",
+    "code": "\n\t[data-x].svelte-<scoped> {\n\t\tcolor: red;\n\t}\n"
+  }
+}

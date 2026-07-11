@@ -1,0 +1,31 @@
+{
+  "slug": "cls-mixent-escmix-cls-q-el-ext-comb-m",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "cls_mixent_escmix_cls_q_el_ext_comb_m",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [],
+  "helperSet": [],
+  "helperCounts": {},
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": true,
+    "hash": "svelte-ladxy3",
+    "code": "\n\t.wrap.svelte-<scoped> .a\\26 b\\&c:where(.svelte-<scoped>) {\n\t\tcolor: red;\n\t}\n"
+  }
+}

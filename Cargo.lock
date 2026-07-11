@@ -4172,6 +4172,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "verter_svelte_conformance"
+version = "0.0.1-beta.1"
+dependencies = [
+ "oxc_allocator",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "verter_compiler",
+]
+
+[[package]]
 name = "verter_tsc"
 version = "0.0.1-beta.1"
 dependencies = [

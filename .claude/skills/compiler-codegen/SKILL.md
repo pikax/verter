@@ -190,6 +190,16 @@ Default is parity with official's observable-correct behavior. A deviation is a 
 
 Guards: `svelte_structural_conformance_discriminates_cosmetic_from_behavioral_diffs`, `no_compiled_output_cosmetic_reprinter_path`.
 
+## Svelte Conformance Trace (`conformance-trace` feature)
+
+`verter_compiler`'s `conformance-trace` Cargo feature (default OFF) enables the typed conformance-observability side channel `verter_compiler::svelte::runtime::conformance_trace` — CONFORMANCE-TOOLING-ONLY, consumed by the `verter_svelte_conformance` crate (which dev-deps `verter_compiler` with the feature on). It is not a production API surface: the default build compiles the module, its producer hooks, and every trace collection site out entirely, and production IR structs carry no trace state under either setting.
+
+**API surface** (feature-gated): `compile_client_with_conformance_trace(...)` runs the production `compile_client` pipeline under a capture and returns the compile outcome together with the trace (a refused/rejected fixture still returns what was observed up to the failure); `capture(f)` installs a thread-local trace around a closure (captures nest, unwind-safe restore); `ConformanceTrace { static_attrs, style_matches }` carries static-attribute lexical provenance (quoting + HTML entity source representation, folded from the attribute-lowering producer boundary's single decode pass — never a second source scan) plus per-`<style>` matcher facts (per-selector tri-state certainty rows, used/scoped selector spans, scoped element identities); `MatchCertainty` is re-exported.
+
+**`MatchCertainty` tri-state** (`svelte/runtime/css/match.rs`, always-on — NOT feature-gated): `No < Maybe < Yes`, `and` = min, `or` = max. Production projects through `might_match()`: `Yes | Maybe ⇒ true`, `No ⇒ false` — byte-identical to the pre-tri-state boolean matcher (`Maybe` was `true`; it is never treated as `No`). The per-selector certainty rows on the match sink exist only under `cfg(any(test, feature = "conformance-trace"))`.
+
+**Zero cost when off**: by `#[cfg]` gating plus a monomorphized no-op entity-decode observer that compiles away in the default path. Guarded by `crates/verter_compiler/tests/svelte_conformance_trace_zero_cost_guard.rs` (prod-IR trace-mention ban, feature-gated module declaration, closed `AttrIr`/match-sink field inventories, decoder-mention ban, manifest keeps the default build feature-off with no dev-dependency re-enable channel) and an isolated feature-off CI gate (`cargo build`/`cargo test -p verter_compiler --lib` with no conformance crate in the dependency graph, so workspace feature unification cannot mask the default build).
+
 ## Strict Slot Children Type Checking (Experimental)
 
 When `strict_slots: true` (VS Code: `verter.experimental.strictSlots`), the IDE template codegen emits `strictRenderSlot` calls after the JSX tree, enforcing that slot children match the parent component's `defineSlots()` type signature ([RFC #733](https://github.com/vuejs/rfcs/discussions/733)).

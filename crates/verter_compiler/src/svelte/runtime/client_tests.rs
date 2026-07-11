@@ -16632,7 +16632,10 @@ fn validate_slot_placement_disposition_is_exhaustive_per_host_kind() {
     let static_slot = || AttrIr::Static {
         name: "slot".to_string(),
         value: Some(StaticAttrValue {
-            value: crate::svelte::runtime::entity_decode::DecodedAttrValue::decode("x"),
+            value: crate::svelte::runtime::entity_decode::DecodedAttrValue::decode(
+                "x",
+                &mut |_| {},
+            ),
         }),
     };
     let dynamic_slot = || AttrIr::Dynamic {
@@ -17063,7 +17066,10 @@ fn validate_slot_placement_disposition_is_exhaustive_per_host_kind() {
     let plain_attr = || AttrIr::Static {
         name: "class".to_string(),
         value: Some(StaticAttrValue {
-            value: crate::svelte::runtime::entity_decode::DecodedAttrValue::decode("c"),
+            value: crate::svelte::runtime::entity_decode::DecodedAttrValue::decode(
+                "c",
+                &mut |_| {},
+            ),
         }),
     };
     let no_placement = SlotPlacementFacts {

@@ -1,0 +1,74 @@
+{
+  "slug": "id-dyn-eschex-attr-uq-blk-ext-comb-n",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "id_dyn_eschex_attr_uq_blk_ext_comb_n",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "comment",
+    "first_child",
+    "child",
+    "reset",
+    "template_effect",
+    "set_attribute",
+    "append",
+    "if",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "comment",
+    "first_child",
+    "from_html",
+    "if",
+    "reset",
+    "set_attribute",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "comment": 1,
+    "first_child": 1,
+    "child": 1,
+    "reset": 1,
+    "template_effect": 1,
+    "set_attribute": 1,
+    "append": 2,
+    "if": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div class=\"wrap\"><div>x</div></div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div class=\"wrap\"><div>x</div></div>`); export default function id_dyn_eschex_attr_uq_blk_ext_comb_n($$anchor, $$props) {let open = true; var fragment = $.comment(); var node = $.first_child(fragment); {var consequent = ($$anchor) => {var div = root(); var div_1 = $.child(div); $.reset(div); $.template_effect(() => $.set_attribute(div_1, 'data-x', $$props.flag ? 'a&b' : 'a\\u0026b')); $.append($$anchor, div);}; $.if(node, ($$render) => {if (open) $$render(consequent);});} $.append($$anchor, fragment);}",
+  "css": {
+    "present": true,
+    "hash": null,
+    "code": "\n\t/* (unused) .wrap #\\7a z {\n\t\tcolor: red;\n\t}*/\n"
+  }
+}

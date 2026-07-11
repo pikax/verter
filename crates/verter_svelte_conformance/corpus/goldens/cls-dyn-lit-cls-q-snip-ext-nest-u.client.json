@@ -1,0 +1,58 @@
+{
+  "slug": "cls-dyn-lit-cls-q-snip-ext-nest-u",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "cls_dyn_lit_cls_q_snip_ext_nest_u",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "template_effect",
+    "set_class",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "from_html",
+    "set_class",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "template_effect": 1,
+    "set_class": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div>x</div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div>x</div>`); export default function cls_dyn_lit_cls_q_snip_ext_nest_u($$anchor, $$props) {const subject = ($$anchor) => {var div = root(); $.template_effect(() => $.set_class(div, 1, $$props.value, 'svelte-<scoped>')); $.append($$anchor, div);}; subject($$anchor);}",
+  "css": {
+    "present": true,
+    "hash": "svelte-eurfxv",
+    "code": "\n\t.b.svelte-<scoped> {\n\t\tcolor: red;\n\n\t\t&:hover {\n\t\t\tcolor: blue;\n\t\t}\n\t}\n"
+  }
+}

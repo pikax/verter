@@ -1,0 +1,65 @@
+{
+  "slug": "id-dyn-lit-id-q-comp-ext-plain-u",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "./Child.svelte",
+      "kind": "default",
+      "names": [
+        "default:Child"
+      ]
+    },
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "id_dyn_lit_id_q_comp_ext_plain_u",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "template_effect",
+    "set_attribute",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "from_html",
+    "set_attribute",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "template_effect": 1,
+    "set_attribute": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div class=\"svelte-<scoped>\">x</div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; import Child from './Child.svelte'; var root = $.from_html(`<div class=\"svelte-<scoped>\">x</div>`); export default function id_dyn_lit_id_q_comp_ext_plain_u($$anchor, $$props) {Child($$anchor, {children: ($$anchor, $$slotProps) => {var div = root(); $.template_effect(() => $.set_attribute(div, 'id', $$props.value)); $.append($$anchor, div);}, $$slots: {default: true}});}",
+  "css": {
+    "present": true,
+    "hash": "svelte-19bayke",
+    "code": "\n\t#b.svelte-<scoped> {\n\t\tcolor: red;\n\t}\n"
+  }
+}

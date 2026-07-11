@@ -1,0 +1,61 @@
+{
+  "slug": "type-dyn-lit-cls-uq-el-ext-prune-m",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "type_dyn_lit_cls_uq_el_ext_prune_m",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "template_effect",
+    "set_class",
+    "clsx",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "clsx",
+    "from_html",
+    "set_class",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "template_effect": 1,
+    "set_class": 1,
+    "clsx": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div>x</div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div>x</div>`); export default function type_dyn_lit_cls_uq_el_ext_prune_m($$anchor, $$props) {var div = root(); $.template_effect(() => $.set_class(div, 1, $.clsx($$props.flag ? 'a b' : '\\u0062'), 'svelte-<scoped>')); $.append($$anchor, div);}",
+  "css": {
+    "present": true,
+    "hash": "svelte-dcg6bf",
+    "code": "\n\tdiv.svelte-<scoped> {\n\t\tcolor: red;\n\t}\n\n\t/* (unused) .unused-prune {\n\t\tcolor: blue;\n\t}*/\n"
+  }
+}

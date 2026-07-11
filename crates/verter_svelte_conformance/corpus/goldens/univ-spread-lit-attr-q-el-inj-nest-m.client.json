@@ -1,0 +1,58 @@
+{
+  "slug": "univ-spread-lit-attr-q-el-inj-nest-m",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "univ_spread_lit_attr_q_el_inj_nest_m",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "append_styles",
+    "attribute_effect",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "append_styles",
+    "attribute_effect",
+    "from_html"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "append_styles": 1,
+    "attribute_effect": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div>x</div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div>x</div>`); const $$css = {hash: 'svelte-<scoped>', code: '.svelte-<scoped> {color:red;&:hover {color:blue;}}'}; export default function univ_spread_lit_attr_q_el_inj_nest_m($$anchor, $$props) {$.append_styles($$anchor, $$css); var div = root(); $.attribute_effect(div, () => ({...$$props.rest}), void 0, void 0, void 0, 'svelte-<scoped>'); $.append($$anchor, div);}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

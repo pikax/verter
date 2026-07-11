@@ -1,0 +1,4717 @@
+{
+  "schemaVersion": 1,
+  "manifestHash": "fnv1a64-527c96f87a2bfda7",
+  "cases": [
+    {
+      "slug": "attr-dec-eschar-id-q-el-inj-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-dec-eschex-id-q-dynel-ext-nest-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-dec-escmix-id-q-snip-ext-comb-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-dec-lit-attr-q-comp-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-dec-lit-attr-q-el-ext-comb-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-dec-lit-attr-q-snip-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-dec-lit-attr-uq-blk-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-dec-lit-attr-uq-comp-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-dec-lit-attr-uq-dynel-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-dec-lit-attr-uq-el-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-dec-lit-cls-q-comp-ext-nest-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-dec-lit-cls-uq-blk-ext-prune-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-dyn-eschar-attr-q-comp-ext-nest-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-dyn-eschar-attr-uq-blk-ext-comb-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-dyn-eschar-attr-uq-comp-ext-plain-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-dyn-eschex-attr-q-dynel-inj-comb-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-dyn-eschex-attr-uq-dynel-ext-nest-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-dyn-eschex-attr-uq-el-ext-prune-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-dyn-escmix-attr-q-el-ext-plain-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-dyn-escmix-attr-uq-snip-inj-prune-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-dyn-escmix-id-q-comp-ext-prune-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-dyn-lit-attr-q-blk-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-dyn-lit-attr-q-dynel-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-dyn-lit-attr-q-el-ext-nest-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-dyn-lit-attr-q-el-inj-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-dyn-lit-attr-q-snip-ext-comb-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-dyn-lit-attr-q-snip-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-dyn-lit-attr-uq-blk-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-dyn-lit-attr-uq-dynel-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-dyn-lit-attr-uq-el-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-dyn-lit-attr-uq-snip-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-dyn-lit-cls-uq-blk-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-hex-eschar-attr-uq-dynel-ext-prune-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-hex-eschex-attr-q-blk-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-hex-eschex-id-uq-snip-ext-comb-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-hex-escmix-cls-q-el-ext-nest-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-hex-lit-attr-q-dynel-inj-prune-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-hex-lit-attr-q-snip-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-hex-lit-attr-uq-blk-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-hex-lit-attr-uq-comp-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-hex-lit-attr-uq-dynel-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-hex-lit-attr-uq-el-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-hex-lit-attr-uq-snip-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-lit-eschar-attr-q-snip-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-lit-eschex-cls-uq-comp-inj-nest-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-lit-eschex-id-q-el-inj-prune-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-lit-escmix-cls-q-snip-inj-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-lit-lit-attr-bool-blk-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-lit-lit-attr-bool-comp-ext-comb-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-lit-lit-attr-bool-dynel-inj-nest-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-lit-lit-attr-bool-el-ext-prune-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-lit-lit-attr-bool-snip-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-lit-lit-attr-q-blk-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-lit-lit-attr-q-comp-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-lit-lit-attr-q-dynel-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-lit-lit-attr-q-el-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-lit-lit-attr-q-snip-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-lit-lit-attr-uq-blk-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-lit-lit-attr-uq-comp-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-lit-lit-attr-uq-dynel-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-lit-lit-attr-uq-el-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-mixent-eschar-attr-q-dynel-ext-prune-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-mixent-eschar-cls-q-snip-ext-nest-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-mixent-eschar-id-q-blk-inj-comb-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-mixent-eschex-attr-uq-snip-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-mixent-escmix-cls-uq-comp-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-mixent-lit-attr-q-comp-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-mixent-lit-attr-q-dynel-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-mixent-lit-attr-q-el-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-mixent-lit-attr-q-snip-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-mixent-lit-attr-uq-blk-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-mixent-lit-attr-uq-comp-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-mixent-lit-attr-uq-el-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-mixent-lit-attr-uq-snip-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-mixent-lit-cls-uq-el-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-named-eschar-attr-uq-el-inj-nest-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-named-eschex-attr-q-el-ext-prune-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-named-escmix-attr-uq-snip-ext-nest-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-named-escmix-cls-q-dynel-ext-comb-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-named-escmix-id-uq-blk-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-named-lit-attr-q-blk-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-named-lit-attr-q-dynel-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-named-lit-attr-q-el-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-named-lit-attr-q-snip-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-named-lit-attr-uq-comp-inj-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-named-lit-attr-uq-dynel-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-named-lit-attr-uq-el-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-named-lit-attr-uq-snip-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-spread-eschar-cls-q-el-ext-prune-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-spread-eschex-attr-q-el-ext-plain-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-spread-escmix-cls-q-blk-ext-nest-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-spread-escmix-id-q-comp-inj-comb-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-spread-lit-cls-q-dynel-ext-prune-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "attr-spread-lit-id-q-snip-ext-plain-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dec-eschar-cls-uq-comp-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dec-eschar-cls-uq-dynel-inj-nest-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dec-eschex-attr-uq-comp-ext-prune-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dec-eschex-cls-uq-blk-inj-comb-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dec-escmix-cls-q-blk-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dec-escmix-cls-q-dynel-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dec-escmix-cls-q-el-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dec-escmix-cls-q-el-ext-prune-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dec-escmix-id-uq-comp-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dec-lit-attr-q-blk-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dec-lit-attr-q-el-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dec-lit-attr-q-snip-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dec-lit-attr-uq-blk-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dec-lit-attr-uq-el-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dec-lit-attr-uq-snip-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dec-lit-cls-q-dynel-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dec-lit-cls-uq-dynel-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dec-lit-cls-uq-snip-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dec-lit-id-q-comp-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dec-lit-id-uq-blk-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dec-lit-id-uq-dynel-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dec-lit-id-uq-el-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dec-lit-id-uq-snip-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dyn-eschar-attr-q-snip-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dyn-eschar-cls-q-dynel-ext-prune-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dyn-eschar-cls-q-el-ext-comb-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dyn-eschar-cls-q-el-ext-nest-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dyn-eschex-cls-uq-comp-ext-plain-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dyn-eschex-cls-uq-dynel-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dyn-eschex-cls-uq-snip-ext-comb-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dyn-escmix-cls-q-blk-ext-comb-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dyn-escmix-cls-q-comp-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dyn-escmix-cls-uq-el-inj-nest-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dyn-lit-attr-q-blk-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dyn-lit-attr-q-comp-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dyn-lit-attr-q-dynel-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dyn-lit-attr-q-el-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dyn-lit-attr-uq-comp-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dyn-lit-attr-uq-dynel-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dyn-lit-attr-uq-el-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dyn-lit-attr-uq-snip-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dyn-lit-cls-q-blk-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dyn-lit-cls-q-comp-ext-plain-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dyn-lit-cls-q-dynel-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dyn-lit-cls-q-snip-ext-nest-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dyn-lit-cls-q-snip-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dyn-lit-cls-uq-blk-ext-comb-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dyn-lit-cls-uq-blk-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dyn-lit-cls-uq-comp-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dyn-lit-cls-uq-comp-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dyn-lit-cls-uq-dynel-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dyn-lit-cls-uq-snip-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dyn-lit-id-q-blk-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dyn-lit-id-q-dynel-ext-prune-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dyn-lit-id-q-el-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dyn-lit-id-uq-blk-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dyn-lit-id-uq-comp-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dyn-lit-id-uq-dynel-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dyn-lit-id-uq-el-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-dyn-lit-id-uq-snip-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-hex-eschar-cls-q-blk-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-hex-eschar-cls-q-comp-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-hex-eschar-id-q-snip-inj-nest-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-hex-eschex-cls-q-comp-ext-prune-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-hex-eschex-cls-uq-el-inj-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-hex-escmix-attr-q-el-ext-prune-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-hex-escmix-cls-q-snip-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-hex-escmix-cls-uq-dynel-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-hex-lit-attr-q-comp-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-hex-lit-attr-q-dynel-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-hex-lit-attr-uq-blk-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-hex-lit-attr-uq-el-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-hex-lit-attr-uq-snip-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-hex-lit-cls-q-blk-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-hex-lit-cls-q-dynel-ext-comb-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-hex-lit-cls-q-dynel-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-hex-lit-cls-uq-dynel-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-hex-lit-id-q-blk-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-hex-lit-id-q-comp-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-hex-lit-id-q-el-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-hex-lit-id-uq-blk-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-hex-lit-id-uq-comp-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-hex-lit-id-uq-dynel-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-hex-lit-id-uq-el-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-lit-eschar-attr-bool-comp-ext-comb-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-lit-eschar-attr-bool-dynel-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-lit-eschar-attr-bool-el-ext-prune-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-lit-eschar-attr-bool-snip-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-lit-eschex-attr-bool-blk-ext-prune-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-lit-eschex-attr-bool-comp-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-lit-eschex-attr-bool-snip-ext-nest-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-lit-eschex-cls-uq-blk-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-lit-eschex-cls-uq-snip-ext-prune-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-lit-escmix-attr-bool-blk-inj-comb-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-lit-escmix-attr-bool-comp-ext-nest-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-lit-escmix-attr-bool-dynel-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-lit-escmix-cls-q-comp-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-lit-escmix-cls-uq-dynel-ext-nest-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-lit-lit-attr-bool-blk-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-lit-lit-attr-q-blk-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-lit-lit-attr-q-comp-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-lit-lit-attr-q-dynel-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-lit-lit-attr-q-el-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-lit-lit-attr-uq-blk-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-lit-lit-attr-uq-comp-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-lit-lit-attr-uq-dynel-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-lit-lit-attr-uq-el-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-lit-lit-attr-uq-snip-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-lit-lit-cls-q-blk-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-lit-lit-cls-q-dynel-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-lit-lit-cls-q-el-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-lit-lit-cls-q-el-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-lit-lit-cls-q-slot-ext-plain-m",
+      "disposition": "refused:legacy-slot-scope-unprovable",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-lit-lit-cls-q-snip-ext-nest-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-lit-lit-cls-uq-blk-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-lit-lit-cls-uq-dynel-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-lit-lit-cls-uq-el-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-lit-lit-cls-uq-snip-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-lit-lit-id-q-blk-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-lit-lit-id-q-comp-ext-nest-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-lit-lit-id-q-snip-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-lit-lit-id-uq-blk-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-lit-lit-id-uq-comp-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-lit-lit-id-uq-dynel-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-lit-lit-id-uq-el-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-lit-lit-id-uq-snip-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-mixent-eschar-cls-uq-comp-inj-prune-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-mixent-eschar-cls-uq-el-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-mixent-eschex-cls-q-blk-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-mixent-eschex-cls-q-comp-inj-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-mixent-escmix-attr-uq-comp-inj-nest-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-mixent-escmix-cls-q-dynel-ext-prune-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-mixent-escmix-cls-q-el-ext-comb-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-mixent-escmix-cls-uq-snip-ext-comb-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-mixent-lit-attr-q-comp-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-mixent-lit-attr-q-snip-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-mixent-lit-attr-uq-blk-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-mixent-lit-attr-uq-dynel-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-mixent-lit-attr-uq-el-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-mixent-lit-cls-uq-blk-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-mixent-lit-cls-uq-blk-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-mixent-lit-cls-uq-dynel-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-mixent-lit-cls-uq-snip-ext-prune-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-mixent-lit-id-q-dynel-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-mixent-lit-id-q-el-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-mixent-lit-id-uq-blk-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-mixent-lit-id-uq-comp-ext-comb-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-mixent-lit-id-uq-dynel-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-mixent-lit-id-uq-el-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-mixent-lit-id-uq-snip-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-named-eschar-cls-q-dynel-ext-comb-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-named-eschar-cls-q-snip-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-named-eschar-id-q-blk-inj-prune-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-named-eschex-attr-q-comp-ext-comb-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-named-eschex-cls-q-blk-ext-nest-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-named-escmix-cls-q-comp-ext-prune-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-named-escmix-cls-uq-snip-inj-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-named-lit-attr-q-blk-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-named-lit-attr-q-dynel-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-named-lit-attr-uq-blk-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-named-lit-attr-uq-comp-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-named-lit-attr-uq-dynel-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-named-lit-cls-q-el-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-named-lit-cls-uq-comp-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-named-lit-cls-uq-dynel-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-named-lit-cls-uq-el-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-named-lit-cls-uq-snip-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-named-lit-id-q-comp-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-named-lit-id-q-dynel-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-named-lit-id-q-el-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-named-lit-id-uq-comp-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-named-lit-id-uq-snip-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-spread-eschar-attr-q-snip-inj-comb-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-spread-eschar-cls-q-comp-ext-plain-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-spread-eschex-cls-q-dynel-ext-nest-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-spread-eschex-id-q-blk-ext-prune-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-spread-escmix-cls-q-snip-ext-plain-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-spread-escmix-id-q-el-ext-prune-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "cls-spread-lit-attr-q-blk-inj-prune-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-dec-eschar-attr-uq-dynel-ext-comb-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-dec-eschar-cls-q-snip-ext-prune-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-dec-eschar-id-q-blk-ext-prune-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-dec-eschex-id-q-snip-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-dec-eschex-id-uq-el-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-dec-escmix-attr-q-comp-inj-nest-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-dec-lit-cls-q-blk-ext-nest-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-dec-lit-id-q-dynel-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-dec-lit-id-uq-comp-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-dec-lit-id-uq-dynel-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-dyn-eschar-id-uq-blk-inj-plain-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-dyn-eschar-id-uq-comp-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-dyn-eschar-id-uq-dynel-ext-prune-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-dyn-eschex-attr-uq-blk-ext-comb-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-dyn-eschex-cls-uq-el-ext-prune-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-dyn-eschex-id-q-snip-ext-nest-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-dyn-eschex-id-uq-el-ext-plain-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-dyn-escmix-id-q-el-ext-comb-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-dyn-escmix-id-uq-comp-ext-prune-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-dyn-escmix-id-uq-dynel-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-dyn-escmix-id-uq-snip-ext-nest-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-dyn-lit-id-q-blk-ext-prune-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-dyn-lit-id-q-comp-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-dyn-lit-id-q-comp-ext-plain-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-dyn-lit-id-q-dynel-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-dyn-lit-id-q-el-ext-nest-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-dyn-lit-id-q-el-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-dyn-lit-id-uq-blk-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-dyn-lit-id-uq-el-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-dyn-lit-id-uq-snip-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-hex-eschar-id-uq-el-ext-comb-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-hex-eschex-id-q-comp-inj-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-hex-eschex-id-q-dynel-ext-nest-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-hex-eschex-id-q-snip-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-hex-escmix-cls-uq-comp-inj-comb-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-hex-escmix-id-uq-blk-inj-prune-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-hex-lit-attr-q-snip-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-hex-lit-id-q-blk-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-hex-lit-id-q-el-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-hex-lit-id-uq-comp-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-hex-lit-id-uq-snip-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-lit-eschar-attr-bool-blk-inj-nest-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-lit-eschar-cls-q-comp-ext-comb-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-lit-eschar-cls-uq-el-ext-prune-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-lit-eschar-id-q-dynel-inj-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-lit-eschex-attr-bool-dynel-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-lit-eschex-attr-bool-el-inj-comb-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-lit-escmix-attr-bool-el-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-lit-escmix-attr-bool-snip-inj-prune-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-lit-escmix-id-uq-snip-ext-nest-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-lit-lit-attr-bool-comp-ext-prune-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-lit-lit-id-q-blk-ext-nest-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-lit-lit-id-q-comp-ext-prune-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-lit-lit-id-q-el-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-lit-lit-id-q-snip-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-lit-lit-id-uq-comp-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-lit-lit-id-uq-dynel-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-lit-lit-id-uq-el-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-mixent-eschar-id-uq-snip-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-mixent-eschex-attr-q-el-inj-nest-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-mixent-eschex-id-q-comp-ext-comb-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-mixent-eschex-id-q-dynel-ext-prune-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-mixent-escmix-id-q-blk-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-mixent-lit-cls-uq-dynel-inj-comb-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-mixent-lit-id-uq-dynel-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-named-eschar-cls-q-comp-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-named-eschar-id-q-snip-ext-nest-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-named-eschex-attr-q-snip-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-named-eschex-id-q-dynel-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-named-eschex-id-uq-dynel-inj-prune-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-named-escmix-id-uq-el-inj-comb-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-named-lit-id-q-blk-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-named-lit-id-uq-blk-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-named-lit-id-uq-comp-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-named-lit-id-uq-snip-ext-comb-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-spread-eschar-cls-q-blk-ext-comb-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-spread-eschar-id-q-dynel-ext-nest-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-spread-eschex-attr-q-comp-ext-prune-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-spread-eschex-cls-q-snip-inj-comb-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-spread-escmix-attr-q-dynel-inj-plain-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "id-spread-lit-cls-q-el-ext-comb-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "nest-dec-lit-attr-q-dynel-ext-nest-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "nest-dec-lit-cls-q-snip-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "nest-dec-lit-cls-uq-comp-ext-nest-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "nest-dec-lit-id-q-el-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "nest-dec-lit-id-uq-blk-inj-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "nest-dyn-lit-attr-q-blk-ext-nest-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "nest-dyn-lit-cls-q-comp-ext-nest-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "nest-dyn-lit-cls-q-el-ext-nest-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "nest-dyn-lit-cls-uq-dynel-ext-nest-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "nest-dyn-lit-cls-uq-snip-inj-nest-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "nest-dyn-lit-id-q-snip-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "nest-hex-lit-attr-q-el-inj-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "nest-hex-lit-cls-uq-blk-ext-nest-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "nest-hex-lit-cls-uq-comp-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "nest-hex-lit-cls-uq-snip-ext-nest-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "nest-hex-lit-id-q-dynel-ext-nest-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "nest-lit-lit-attr-bool-blk-ext-nest-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "nest-lit-lit-attr-bool-comp-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "nest-lit-lit-attr-bool-dynel-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "nest-lit-lit-attr-bool-el-inj-nest-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "nest-lit-lit-attr-bool-snip-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "nest-lit-lit-cls-q-el-ext-plain-m",
+      "disposition": "oracle-rejected:css-nesting-selector-invalid-placement",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "nest-lit-lit-cls-uq-comp-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "nest-lit-lit-id-q-dynel-ext-nest-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "nest-mixent-lit-attr-uq-dynel-inj-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "nest-mixent-lit-cls-q-blk-ext-nest-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "nest-mixent-lit-cls-q-comp-ext-nest-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "nest-mixent-lit-id-q-el-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "nest-mixent-lit-id-q-snip-ext-nest-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "nest-named-lit-attr-q-comp-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "nest-named-lit-cls-q-el-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "nest-named-lit-cls-q-snip-ext-nest-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "nest-named-lit-cls-uq-blk-ext-nest-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "nest-named-lit-cls-uq-dynel-ext-nest-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "nest-named-lit-id-uq-el-inj-nest-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "nest-spread-lit-attr-q-el-ext-nest-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "nest-spread-lit-cls-q-blk-ext-nest-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "nest-spread-lit-cls-q-dynel-ext-nest-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "nest-spread-lit-cls-q-snip-ext-nest-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "nest-spread-lit-id-q-comp-inj-nest-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-dec-lit-attr-q-dynel-ext-nest-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-dec-lit-attr-uq-dynel-ext-plain-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-dec-lit-attr-uq-snip-inj-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-dec-lit-cls-q-comp-ext-comb-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-dec-lit-cls-q-dynel-ext-plain-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-dec-lit-cls-uq-dynel-ext-comb-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-dec-lit-cls-uq-el-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-dec-lit-cls-uq-snip-ext-nest-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-dec-lit-id-q-blk-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-dec-lit-id-q-dynel-ext-plain-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-dec-lit-id-uq-dynel-inj-prune-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-dyn-lit-attr-q-comp-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-dyn-lit-cls-q-blk-inj-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-dyn-lit-cls-uq-el-ext-prune-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-dyn-lit-id-q-dynel-ext-nest-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-dyn-lit-id-q-snip-ext-comb-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-hex-lit-attr-q-blk-inj-comb-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-hex-lit-attr-q-dynel-ext-nest-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-hex-lit-attr-uq-comp-ext-nest-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-hex-lit-attr-uq-dynel-ext-plain-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-hex-lit-cls-q-dynel-ext-comb-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-hex-lit-cls-uq-dynel-ext-plain-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-hex-lit-cls-uq-el-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-hex-lit-cls-uq-snip-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-hex-lit-id-q-dynel-inj-prune-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-hex-lit-id-uq-dynel-ext-plain-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-lit-lit-attr-bool-blk-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-lit-lit-attr-bool-comp-inj-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-lit-lit-attr-bool-dynel-ext-comb-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-lit-lit-attr-bool-dynel-ext-nest-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-lit-lit-attr-bool-dynel-ext-plain-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-lit-lit-attr-bool-dynel-inj-prune-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-lit-lit-attr-bool-el-ext-nest-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-lit-lit-attr-bool-snip-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-lit-lit-attr-q-dynel-ext-plain-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-lit-lit-attr-uq-dynel-ext-plain-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-lit-lit-cls-q-blk-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-lit-lit-cls-q-dynel-ext-plain-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-lit-lit-cls-uq-dynel-ext-nest-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-lit-lit-id-q-dynel-ext-plain-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-lit-lit-id-uq-dynel-ext-comb-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-mixent-lit-attr-q-blk-ext-prune-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-mixent-lit-attr-q-dynel-ext-plain-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-mixent-lit-attr-uq-dynel-ext-comb-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-mixent-lit-cls-q-dynel-inj-nest-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-mixent-lit-cls-q-el-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-mixent-lit-cls-uq-dynel-ext-prune-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-mixent-lit-id-q-comp-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-mixent-lit-id-q-dynel-ext-plain-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-mixent-lit-id-q-snip-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-mixent-lit-id-uq-blk-ext-nest-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-mixent-lit-id-uq-dynel-ext-plain-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-named-lit-attr-q-dynel-ext-nest-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-named-lit-attr-uq-dynel-ext-plain-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-named-lit-cls-q-blk-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-named-lit-cls-q-dynel-ext-comb-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-named-lit-cls-uq-comp-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-named-lit-cls-uq-dynel-ext-prune-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-named-lit-cls-uq-el-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-named-lit-id-q-dynel-ext-plain-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-named-lit-id-q-snip-ext-prune-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-named-lit-id-uq-dynel-inj-plain-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-spread-lit-attr-q-blk-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-spread-lit-attr-q-blk-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-spread-lit-attr-q-comp-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-spread-lit-attr-q-comp-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-spread-lit-attr-q-el-ext-comb-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-spread-lit-attr-q-snip-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-spread-lit-attr-q-snip-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-spread-lit-cls-q-blk-ext-nest-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-spread-lit-cls-q-comp-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-spread-lit-cls-q-dynel-ext-plain-u",
+      "disposition": "supported",
+      "expectedOutcome": "maybe",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-spread-lit-cls-q-el-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-spread-lit-cls-q-el-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-spread-lit-cls-q-snip-inj-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-spread-lit-id-q-blk-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-spread-lit-id-q-blk-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-spread-lit-id-q-comp-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-spread-lit-id-q-comp-ext-prune-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-spread-lit-id-q-el-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-spread-lit-id-q-el-inj-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-spread-lit-id-q-snip-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "type-spread-lit-id-q-snip-ext-plain-n",
+      "disposition": "supported",
+      "expectedOutcome": "no-match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "univ-dec-lit-attr-q-blk-inj-prune-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "univ-dec-lit-attr-q-dynel-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "univ-dec-lit-cls-uq-el-ext-nest-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "univ-dec-lit-id-q-comp-ext-comb-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "univ-dec-lit-id-uq-snip-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "univ-dyn-lit-attr-uq-comp-inj-comb-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "univ-dyn-lit-cls-q-dynel-ext-nest-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "univ-dyn-lit-cls-q-el-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "univ-dyn-lit-cls-q-snip-ext-prune-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "univ-dyn-lit-id-q-blk-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "univ-hex-lit-attr-q-comp-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "univ-hex-lit-cls-q-el-ext-comb-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "univ-hex-lit-cls-q-snip-ext-prune-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "univ-hex-lit-cls-uq-blk-ext-nest-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "univ-hex-lit-id-uq-dynel-inj-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "univ-lit-lit-attr-bool-blk-ext-nest-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "univ-lit-lit-attr-bool-comp-ext-prune-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "univ-lit-lit-attr-bool-dynel-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "univ-lit-lit-attr-bool-el-inj-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "univ-lit-lit-attr-bool-snip-ext-comb-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "univ-lit-lit-attr-uq-snip-ext-nest-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "univ-lit-lit-cls-q-dynel-ext-prune-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "univ-lit-lit-id-uq-blk-inj-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "univ-mixent-lit-attr-q-blk-ext-nest-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "univ-mixent-lit-cls-q-dynel-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "univ-mixent-lit-cls-q-snip-inj-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "univ-mixent-lit-id-uq-comp-ext-comb-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "univ-mixent-lit-id-uq-el-ext-prune-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "univ-named-lit-attr-uq-blk-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "univ-named-lit-cls-q-snip-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "univ-named-lit-cls-uq-blk-ext-comb-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "univ-named-lit-id-q-comp-inj-nest-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "univ-named-lit-id-q-el-ext-prune-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "univ-named-lit-id-uq-dynel-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "univ-spread-lit-attr-q-dynel-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "univ-spread-lit-attr-q-el-inj-nest-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "univ-spread-lit-cls-q-blk-ext-plain-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "univ-spread-lit-cls-q-comp-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "univ-spread-lit-cls-q-dynel-ext-glob-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "univ-spread-lit-cls-q-snip-ext-prune-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    },
+    {
+      "slug": "univ-spread-lit-id-q-dynel-ext-comb-m",
+      "disposition": "supported",
+      "expectedOutcome": "match",
+      "backends": [
+        "client",
+        "server"
+      ]
+    }
+  ],
+  "proof": {
+    "selectedCases": 518,
+    "fullProduct": 272160,
+    "compression": "518/272160",
+    "partitions": {
+      "supported": 31890,
+      "refused": {
+        "legacy-slot-scope-unprovable": 6458
+      },
+      "oracleRejected": {
+        "css-nesting-selector-invalid-placement": 4320
+      },
+      "invalid": {
+        "attr-selector-value-escape-never-matches": 2340,
+        "boolean-quoting-carries-no-value": 25920,
+        "boolean-quoting-on-valued-target": 60480,
+        "global-selector-never-prunes": 13368,
+        "maybe-needs-uncertain-source": 21988,
+        "selector-cannot-read-target": 19200,
+        "selector-escape-on-valueless-selector": 65340,
+        "spread-carries-no-quoting": 12960,
+        "spread-outcome-always-uncertain": 2376,
+        "svelte-element-tag-uncertain": 720,
+        "universal-selector-always-matches": 4800
+      }
+    },
+    "groups": [
+      {
+        "factors": [
+          "template-value",
+          "target",
+          "quoting",
+          "element-region",
+          "match-outcome"
+        ],
+        "strength": 5
+      },
+      {
+        "factors": [
+          "selector-kind",
+          "selector-value",
+          "structural-kind",
+          "match-outcome"
+        ],
+        "strength": 4
+      }
+    ],
+    "coveringProof": "covering-array proof\ncandidates: 272160\nselected-rows: 518\nglobal: required=5194 covered=5194\ngroup[0]: required=473 covered=473\ngroup[1]: required=163 covered=163\nfocus-cells: 38\nrefusal-partitions: 2\n"
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "slug": "cls-lit-lit-cls-uq-el-ext-plain-m",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "cls_lit_lit_cls_uq_el_ext_plain_m",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [],
+  "helperSet": [],
+  "helperCounts": {},
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": true,
+    "hash": "svelte-15l6ohj",
+    "code": "\n\t.b.svelte-<scoped> {\n\t\tcolor: red;\n\t}\n"
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "slug": "nest-dyn-lit-cls-uq-snip-inj-nest-n",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "nest_dyn_lit_cls_uq_snip_inj_nest_n",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "attr_class",
+    "clsx"
+  ],
+  "helperSet": [
+    "attr_class",
+    "clsx"
+  ],
+  "helperCounts": {
+    "attr_class": 1,
+    "clsx": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

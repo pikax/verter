@@ -189,6 +189,25 @@ pub fn complete_style_scope_plan(
     })
 }
 
+/// Test hook: parse + analyze the css body and return the matcher's
+/// per-TOP-LEVEL-complex-selector [`MatchCertainty`](matcher::MatchCertainty)
+/// rows (prune visit order, `No` rows included) — the tri-state observability
+/// behind the production used/scoped projection.
+#[cfg(test)]
+pub(crate) fn style_selector_certainties_for_test(
+    source: &str,
+    content: Span,
+    ir: &SvelteRuntimeIr<'_>,
+) -> Result<Vec<(Span, matcher::MatchCertainty)>, StylePlanFailure> {
+    let AnalyzedStyleBody { ast, .. } = analyze_style_body(source, content)?;
+    matcher::match_stylesheet_certainties_for_test(&ast, ir).map_err(|refusal| StylePlanFailure {
+        class: StylePlanFailureClass::SelectorUnprovable,
+        code: "svelte-runtime-unsupported-style-selector",
+        span: refusal.span,
+        construct: Some(refusal.construct),
+    })
+}
+
 /// Build the per-`<style>` scope plan in one call — [`analyze_style_body`]
 /// then [`complete_style_scope_plan`] (the two halves exist so the production
 /// pipeline can surface a css-analysis failure BEFORE template lowering; this

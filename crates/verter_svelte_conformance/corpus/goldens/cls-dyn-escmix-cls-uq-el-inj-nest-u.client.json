@@ -1,0 +1,64 @@
+{
+  "slug": "cls-dyn-escmix-cls-uq-el-inj-nest-u",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "cls_dyn_escmix_cls_uq_el_inj_nest_u",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "append_styles",
+    "template_effect",
+    "set_class",
+    "clsx",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "append_styles",
+    "clsx",
+    "from_html",
+    "set_class",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "append_styles": 1,
+    "template_effect": 1,
+    "set_class": 1,
+    "clsx": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div>x</div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div>x</div>`); const $$css = {hash: 'svelte-<scoped>', code: '.a\\\\26 b\\\\&c.svelte-<scoped> {color:red;&:hover {color:blue;}}'}; export default function cls_dyn_escmix_cls_uq_el_inj_nest_u($$anchor, $$props) {$.append_styles($$anchor, $$css); var div = root(); $.template_effect(() => $.set_class(div, 1, $.clsx($$props.value), 'svelte-<scoped>')); $.append($$anchor, div);}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

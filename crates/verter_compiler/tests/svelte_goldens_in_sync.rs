@@ -22,7 +22,8 @@
 //!   file reads — no node, no live compiler.
 //! - `svelte_lockfile_matches_oracle_pin` — asserts the resolved `svelte`
 //!   version in `pnpm-lock.yaml` EQUALS the `SVELTE_ORACLE_VERSION` pin
-//!   declared in `scripts/gen-svelte-goldens.mjs`. A `svelte` bump without a
+//!   declared in `scripts/svelte-golden-lib.mjs` (the single JS pin authority
+//!   every Svelte golden generator imports). A `svelte` bump without a
 //!   re-pin (+ golden regen) fails — silent drift is impossible.
 
 use std::path::{Path, PathBuf};
@@ -49,11 +50,12 @@ fn fixtures_dir() -> PathBuf {
 /// for. Mirrors `BACKENDS` in `scripts/gen-svelte-goldens.mjs`.
 const EXPECTED_BACKENDS: [&str; 2] = ["client", "server"];
 
-/// Read the `SVELTE_ORACLE_VERSION = "x.y.z"` pin constant from the generator
-/// script (the single source of truth). Parsing the script keeps ONE
-/// authority — the guard does not re-declare the version.
-fn oracle_pin_version(generator_src: &str) -> String {
-    for line in generator_src.lines() {
+/// Read the `SVELTE_ORACLE_VERSION = "x.y.z"` pin constant from
+/// `scripts/svelte-golden-lib.mjs` — the single JS pin authority every Svelte
+/// golden generator imports. Parsing the lib keeps ONE authority — the guard
+/// does not re-declare the version.
+fn oracle_pin_version(lib_src: &str) -> String {
+    for line in lib_src.lines() {
         let t = line.trim();
         // `export const SVELTE_ORACLE_VERSION = "5.56.3";`
         if let Some(rest) = t.strip_prefix("export const SVELTE_ORACLE_VERSION") {
@@ -62,7 +64,7 @@ fn oracle_pin_version(generator_src: &str) -> String {
             return quoted.trim_matches('"').to_string();
         }
     }
-    panic!("SVELTE_ORACLE_VERSION pin constant not found in gen-svelte-goldens.mjs");
+    panic!("SVELTE_ORACLE_VERSION pin constant not found in svelte-golden-lib.mjs");
 }
 
 /// Extract the resolved `svelte` version from `pnpm-lock.yaml`. The lockfile
@@ -533,9 +535,9 @@ fn committed_svelte_goldens_are_structurally_valid() {
 fn svelte_lockfile_matches_oracle_pin() {
     let root = workspace_root();
 
-    let generator_src = std::fs::read_to_string(root.join("scripts/gen-svelte-goldens.mjs"))
-        .expect("read gen-svelte-goldens.mjs");
-    let pin = oracle_pin_version(&generator_src);
+    let lib_src = std::fs::read_to_string(root.join("scripts/svelte-golden-lib.mjs"))
+        .expect("read svelte-golden-lib.mjs");
+    let pin = oracle_pin_version(&lib_src);
 
     let lock_src =
         std::fs::read_to_string(root.join("pnpm-lock.yaml")).expect("read pnpm-lock.yaml");
@@ -545,7 +547,7 @@ fn svelte_lockfile_matches_oracle_pin() {
     assert_eq!(
         resolved, pin,
         "the resolved `svelte` version in pnpm-lock.yaml ({resolved}) does NOT equal \
-         the oracle pin SVELTE_ORACLE_VERSION ({pin}) in gen-svelte-goldens.mjs. A \
+         the oracle pin SVELTE_ORACLE_VERSION ({pin}) in svelte-golden-lib.mjs. A \
          `svelte` bump is a reviewed oracle delta: re-pin SVELTE_ORACLE_VERSION, \
          bump the lockfile, run `node scripts/gen-svelte-goldens.mjs`, and review \
          the golden diff."
@@ -555,9 +557,9 @@ fn svelte_lockfile_matches_oracle_pin() {
 #[test]
 fn committed_svelte_goldens_match_oracle_pin() {
     let root = workspace_root();
-    let generator_src = std::fs::read_to_string(root.join("scripts/gen-svelte-goldens.mjs"))
-        .expect("read gen-svelte-goldens.mjs");
-    let pin = oracle_pin_version(&generator_src);
+    let lib_src = std::fs::read_to_string(root.join("scripts/svelte-golden-lib.mjs"))
+        .expect("read svelte-golden-lib.mjs");
+    let pin = oracle_pin_version(&lib_src);
 
     let dir = goldens_dir();
     let paths = collect_golden_paths(&dir);
@@ -580,7 +582,7 @@ fn committed_svelte_goldens_match_oracle_pin() {
     assert!(
         failures.is_empty(),
         "{} committed Svelte golden(s) carry an `oracleVersion` that does NOT equal \
-         the oracle pin SVELTE_ORACLE_VERSION ({pin}) in gen-svelte-goldens.mjs. A \
+         the oracle pin SVELTE_ORACLE_VERSION ({pin}) in svelte-golden-lib.mjs. A \
          `svelte` bump is a reviewed oracle delta: re-pin SVELTE_ORACLE_VERSION, \
          bump the lockfile, run `node scripts/gen-svelte-goldens.mjs` (which restamps \
          every golden with the new pin), and review the golden diff. Do NOT hand-edit \
@@ -604,9 +606,9 @@ fn version_stamp_guard_discriminates_a_mismatched_oracle_version() {
     // lockfile bump that leaves STALE goldens (carrying the old version) cannot
     // slip through the default hermetic suite. Pure file reads, no node.
     let root = workspace_root();
-    let generator_src = std::fs::read_to_string(root.join("scripts/gen-svelte-goldens.mjs"))
-        .expect("read gen-svelte-goldens.mjs");
-    let pin = oracle_pin_version(&generator_src);
+    let lib_src = std::fs::read_to_string(root.join("scripts/svelte-golden-lib.mjs"))
+        .expect("read svelte-golden-lib.mjs");
+    let pin = oracle_pin_version(&lib_src);
 
     let dir = goldens_dir();
     let paths = collect_golden_paths(&dir);

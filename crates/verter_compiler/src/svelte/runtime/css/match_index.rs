@@ -66,8 +66,12 @@ impl NodeExistMap {
             .map(|(_, e)| *e)
     }
 
-    pub(super) fn keys(&self) -> impl Iterator<Item = NodeId> + '_ {
-        self.entries.iter().map(|(n, _)| *n)
+    /// The `(node, existence)` entries in insertion order — the sibling walk
+    /// reads the existence alongside the node (a PROBABLY sibling relation
+    /// caps the match certainty; the official walk iterated `keys()` and
+    /// ignored the values).
+    pub(super) fn entries(&self) -> impl Iterator<Item = (NodeId, Existence)> + '_ {
+        self.entries.iter().copied()
     }
 
     /// The official `add_to_map(from, to)` — merge via `higher_existence`.

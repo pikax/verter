@@ -1,0 +1,56 @@
+{
+  "slug": "cls-named-eschar-cls-q-snip-ext-glob-m",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "cls_named_eschar_cls_q_snip_ext_glob_m",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "append",
+    "from_html"
+  ],
+  "helperSet": [
+    "append",
+    "from_html"
+  ],
+  "helperCounts": {
+    "append": 1,
+    "from_html": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div class=\"a a&amp;b\">x</div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; const subject = ($$anchor) => {var div = root(); $.append($$anchor, div);}; var root = $.from_html(`<div class=\"a a&amp;b\">x</div>`); export default function cls_named_eschar_cls_q_snip_ext_glob_m($$anchor) {subject($$anchor);}",
+  "css": {
+    "present": true,
+    "hash": null,
+    "code": "\n\t.a\\&b {\n\t\tcolor: red;\n\t}\n"
+  }
+}

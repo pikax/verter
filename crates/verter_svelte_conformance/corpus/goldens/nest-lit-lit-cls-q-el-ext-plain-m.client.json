@@ -1,0 +1,10 @@
+{
+  "slug": "nest-lit-lit-cls-q-el-ext-plain-m",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "rejected": true,
+  "diagnostic": {
+    "code": "css_nesting_selector_invalid_placement",
+    "message": "Nesting selectors can only be used inside a rule or as the first selector inside a lone `:global(...)`"
+  }
+}

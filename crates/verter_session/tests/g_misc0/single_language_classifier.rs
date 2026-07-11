@@ -77,6 +77,13 @@ const CARRIER_LITERAL_ALLOWLIST: &[&str] = &[
     // `LanguageRegistry`. Frozen here so no NEW production literal grows.
     "crates/verter_dx_baseline/src/artifact_overlay.rs",
     "crates/verter_dx_baseline/src/materialize.rs",
+    // The Svelte CSS-conformance corpus generator — a dev/CI-only,
+    // non-published tooling crate. Its lone `.svelte` literal COUNTS the
+    // fixtures the generator EMITS (the generator's fixed output format); it
+    // performs no production language routing and never feeds the production
+    // `LanguageRegistry` (the same self-contained-tooling distinction as
+    // `verter_dx_baseline`). Frozen here so no NEW production literal grows.
+    "crates/verter_svelte_conformance/src/generate.rs",
 ];
 
 #[test]

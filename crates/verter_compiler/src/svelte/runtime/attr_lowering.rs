@@ -217,12 +217,28 @@ fn lower_plain_attr(
         // parse-time decoded `Text.data`), so the CSS scope matcher and the
         // client emitters read one shared meaning; emitters re-serialize
         // ESCAPE-ONLY (never a second decode).
-        Some(SvelteAttributeValue::Text(span)) => AttrIr::Static {
-            name: name.to_string(),
-            value: Some(StaticAttrValue {
-                value: DecodedAttrValue::decode(span_text(ctx.source, *span)),
-            }),
-        },
+        Some(SvelteAttributeValue::Text(span)) => {
+            let raw = span_text(ctx.source, *span);
+            #[cfg(not(feature = "conformance-trace"))]
+            let value = DecodedAttrValue::decode(raw, &mut |_| {});
+            // Conformance provenance (quoting + entity source representation)
+            // is captured HERE, at the same producer boundary: the SINGLE
+            // decode pass that produces the semantic value also emits each
+            // consumed reference's spelled form — one scan, two outputs,
+            // never a second pass over the raw value. Compiled out without
+            // the feature.
+            #[cfg(feature = "conformance-trace")]
+            let value = {
+                let mut forms = super::conformance_trace::SeenEntityForms::default();
+                let value = DecodedAttrValue::decode(raw, &mut |form| forms.observe(form));
+                super::conformance_trace::record_static_attr(ctx.source, name, *span, forms);
+                value
+            };
+            AttrIr::Static {
+                name: name.to_string(),
+                value: Some(StaticAttrValue { value }),
+            }
+        }
         Some(SvelteAttributeValue::Expression(span)) => {
             let expr = ctx.push_expr(*span, scope);
             AttrIr::Dynamic {
@@ -240,10 +256,14 @@ fn lower_plain_attr(
             }
         }
         // A valueless attribute is a static boolean attribute.
-        None => AttrIr::Static {
-            name: name.to_string(),
-            value: None,
-        },
+        None => {
+            #[cfg(feature = "conformance-trace")]
+            super::conformance_trace::record_boolean_attr(name);
+            AttrIr::Static {
+                name: name.to_string(),
+                value: None,
+            }
+        }
     }
 }
 

@@ -1,0 +1,61 @@
+{
+  "slug": "attr-dyn-escmix-attr-uq-snip-inj-prune-u",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "attr_dyn_escmix_attr_uq_snip_inj_prune_u",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "append_styles",
+    "template_effect",
+    "set_attribute",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "append_styles",
+    "from_html",
+    "set_attribute",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "append_styles": 1,
+    "template_effect": 1,
+    "set_attribute": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div class=\"svelte-<scoped>\">x</div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div class=\"svelte-<scoped>\">x</div>`); const $$css = {hash: 'svelte-<scoped>', code: '[data-x=\"a\\\\26 b\\\\&c\"].svelte-<scoped> {color:red;}'}; export default function attr_dyn_escmix_attr_uq_snip_inj_prune_u($$anchor, $$props) {$.append_styles($$anchor, $$css); const subject = ($$anchor) => {var div = root(); $.template_effect(() => $.set_attribute(div, 'data-x', $$props.value)); $.append($$anchor, div);}; subject($$anchor);}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

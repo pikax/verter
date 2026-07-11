@@ -30,9 +30,19 @@ pub struct DecodedAttrValue(String);
 impl DecodedAttrValue {
     /// Decode a RAW parser attribute span into its semantic value — the official
     /// `decode_character_references(raw, true)` run ONCE, at IR construction.
+    ///
+    /// The SAME single pass that produces the semantic value reports each
+    /// decoded reference's spelled [`EntityRefForm`] to `observe` as it
+    /// consumes it — the producer-boundary provenance hook: one scan yields
+    /// both the decoded value and the lexical form facts, so no consumer
+    /// ever re-scans the raw bytes. A caller with no provenance consumer
+    /// passes a no-op closure, which monomorphizes to the exact
+    /// observer-free loop.
     #[must_use]
-    pub(super) fn decode(raw: &str) -> Self {
-        Self(decode_attr_entities(raw))
+    pub(super) fn decode(raw: &str, observe: &mut impl FnMut(EntityRefForm)) -> Self {
+        Self(decode_entities_observing(
+            raw, /* is_attribute_value */ true, observe,
+        ))
     }
 
     /// The decoded attribute text (already-decoded; never decode it again).
@@ -71,9 +81,10 @@ pub(super) fn escape_decoded_attr(v: &DecodedAttrValue) -> String {
 /// at the official attribute-value boundary `\b(?!=)` — a following WORD char
 /// (`[A-Za-z0-9_]`, so `_` blocks) or `=` prevents the match.
 ///
-/// This is the DECODE-ONLY step (NO re-escaping). It is used both by
-/// [`DecodedAttrValue::decode`] (the attribute-IR producer boundary; skeleton
-/// serializers later re-escape via [`escape_decoded_attr`]) and
+/// This is the DECODE-ONLY step (NO re-escaping). It shares the single
+/// decode core with [`DecodedAttrValue::decode`] (the attribute-IR producer
+/// boundary; skeleton serializers later re-escape via
+/// [`escape_decoded_attr`]) and is called
 /// directly by the runtime attribute lowering for a MIXED-attribute LITERAL chunk
 /// (`title="&copy; {x} &bogus;"` → the literal `&copy; ` decodes to `© `, the
 /// `&bogus;` stays literal, and the runtime concatenates `'© ' + x + ' &bogus;'` —
@@ -95,6 +106,21 @@ pub(super) fn decode_text_entities(value: &str) -> String {
     decode_entities(value, /* is_attribute_value */ false)
 }
 
+/// The spelled FORM of ONE decoded entity reference — the lexical fact the
+/// single decode pass reports to its observer as it consumes the reference
+/// (an UNDECODABLE `&…` reports nothing; it stays literal text). Numeric
+/// forms split by radix prefix: `&#32`/`&#32;` is [`Decimal`](Self::Decimal),
+/// `&#x20`/`&#x20;` (lowercase-`x` prefix only) is [`Hex`](Self::Hex).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum EntityRefForm {
+    /// A named reference (`&amp;` / the legacy no-`;` `&amp`).
+    Named,
+    /// A decimal numeric reference (`&#32` / `&#32;`).
+    Decimal,
+    /// A hex numeric reference (`&#x20` / `&#x20;`).
+    Hex,
+}
+
 /// The shared decode core for both the attribute-value and text-content contexts:
 /// scan for `&`, decode each reference (named longest-match or numeric) per the
 /// official `decode_character_references`, keep an undecodable `&` literal. The
@@ -102,6 +128,18 @@ pub(super) fn decode_text_entities(value: &str) -> String {
 /// rule (the attribute-value `\b(?!=)` restriction vs the unconditional content
 /// form).
 fn decode_entities(value: &str, is_attribute_value: bool) -> String {
+    decode_entities_observing(value, is_attribute_value, &mut |_| {})
+}
+
+/// [`decode_entities`] with an OBSERVER reporting each decoded reference's
+/// spelled [`EntityRefForm`] — the SINGLE pass emits the lexical form facts
+/// while it produces the decoded value, so provenance consumers never run a
+/// second scan. The no-op-observer instantiation IS the plain decode.
+fn decode_entities_observing(
+    value: &str,
+    is_attribute_value: bool,
+    observe: &mut impl FnMut(EntityRefForm),
+) -> String {
     let bytes = value.as_bytes();
     let mut out = String::with_capacity(value.len());
     let mut i = 0;
@@ -113,7 +151,9 @@ fn decode_entities(value: &str, is_attribute_value: bool) -> String {
             continue;
         }
         // A `&` — try to decode a reference (named longest-match or numeric).
-        if let Some((decoded, consumed)) = decode_one_entity(&value[i..], is_attribute_value) {
+        if let Some((decoded, consumed, form)) = decode_one_entity(&value[i..], is_attribute_value)
+        {
+            observe(form);
             out.push_str(&decoded);
             i += consumed;
         } else {
@@ -153,10 +193,11 @@ fn is_entity_word_char(ch: char) -> bool {
 }
 
 /// Try to decode ONE entity reference starting at the leading `&` of `s` (an
-/// attribute-value context). Returns `(decoded_string, bytes_consumed)` on
-/// success, or `None` when `s` does not begin a decodable reference (the `&` is
-/// then kept literal).
-fn decode_one_entity(s: &str, is_attribute_value: bool) -> Option<(String, usize)> {
+/// attribute-value context). Returns `(decoded_string, bytes_consumed,
+/// spelled_form)` on success, or `None` when `s` does not begin a decodable
+/// reference (the `&` is then kept literal). The form is a byproduct of the
+/// arm the decode already takes — reporting it costs no extra scan.
+fn decode_one_entity(s: &str, is_attribute_value: bool) -> Option<(String, usize, EntityRefForm)> {
     debug_assert_eq!(s.as_bytes().first(), Some(&b'&'));
     // Numeric reference: `&#65` / `&#65;` (decimal) / `&#x41` / `&#x41;` (hex). The
     // official pattern `#(?:x[a-fA-F\d]+|\d+)(?:;)?` makes the trailing `;`
@@ -211,7 +252,12 @@ fn decode_one_entity(s: &str, is_attribute_value: bool) -> Option<(String, usize
         // `validate_code` may itself yield 0 (NUL) for a surrogate-half / out-of-range
         // in-`u32` code; `char::from_u32(0)` is the NUL char (`String.fromCodePoint(0)`).
         let ch = char::from_u32(validated).unwrap_or('\u{0}');
-        return Some((ch.to_string(), bytes_consumed));
+        let form = if radix == 16 {
+            EntityRefForm::Hex
+        } else {
+            EntityRefForm::Decimal
+        };
+        return Some((ch.to_string(), bytes_consumed, form));
     }
     // Named reference — LONGEST match against the canonical table. The candidate
     // name is the text after `&`; try names up to `LONGEST_ENTITY_NAME` bytes,
@@ -256,7 +302,8 @@ fn decode_one_entity(s: &str, is_attribute_value: bool) -> Option<(String, usize
     }
     let (code, name_len) = best?;
     let ch = char::from_u32(validate_code(code))?;
-    Some((ch.to_string(), 1 + name_len)) // `&` + the matched name bytes.
+    // `&` + the matched name bytes.
+    Some((ch.to_string(), 1 + name_len, EntityRefForm::Named))
 }
 
 /// Validate a numeric entity code point per the official `validate_code`
@@ -300,4 +347,81 @@ fn escape_html_attr_context(value: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The single decode pass reports each DECODED reference's spelled form,
+    /// in encounter order, while producing the decoded value — one scan, two
+    /// outputs. An undecodable reference reports nothing (it stays literal).
+    #[test]
+    fn observed_decode_reports_each_decoded_reference_form_in_one_pass() {
+        let mut forms: Vec<EntityRefForm> = Vec::new();
+        let decoded =
+            DecodedAttrValue::decode("a&amp;&#65;&#x41;b&bogus;", &mut |form| forms.push(form));
+        assert_eq!(decoded.as_str(), "a&AAb&bogus;");
+        assert_eq!(
+            forms,
+            vec![
+                EntityRefForm::Named,
+                EntityRefForm::Decimal,
+                EntityRefForm::Hex
+            ],
+            "one report per DECODED reference, encounter order; `&bogus;` \
+             stays literal and reports nothing"
+        );
+    }
+
+    /// The uppercase-`X` numeric prefix never decodes (official pattern) —
+    /// and therefore never reports a form; the legacy no-`;` named form
+    /// reports `Named` exactly when the attribute boundary rule lets it
+    /// decode.
+    #[test]
+    fn observer_mirrors_the_decode_verdict_exactly() {
+        let mut forms: Vec<EntityRefForm> = Vec::new();
+        let decoded = DecodedAttrValue::decode("a&#X41;b", &mut |form| forms.push(form));
+        assert_eq!(decoded.as_str(), "a&#X41;b", "uppercase X is not an entity");
+        assert!(forms.is_empty(), "no decode, no report");
+
+        forms.clear();
+        // `&amp` (no `;`) followed by a non-word char DECODES in attribute
+        // context — and reports Named.
+        let decoded = DecodedAttrValue::decode("a&amp b", &mut |form| forms.push(form));
+        assert_eq!(decoded.as_str(), "a& b");
+        assert_eq!(forms, vec![EntityRefForm::Named]);
+
+        forms.clear();
+        // `&amp_` is BLOCKED by the word-char boundary — no decode, no report.
+        let decoded = DecodedAttrValue::decode("a&amp_b", &mut |form| forms.push(form));
+        assert_eq!(decoded.as_str(), "a&amp_b");
+        assert!(forms.is_empty());
+    }
+
+    /// The observer never perturbs the decode: the no-op-observer
+    /// instantiation and an accumulating observer produce byte-identical
+    /// decoded values (the observer is REPORT-ONLY on the single pass).
+    #[test]
+    fn observer_never_perturbs_the_decoded_value() {
+        for raw in ["a b", "a&#32;b", "a&#x20;b", "a&amp;&bogus;b", "&#0;"] {
+            let mut forms: Vec<EntityRefForm> = Vec::new();
+            assert_eq!(
+                DecodedAttrValue::decode(raw, &mut |_| {}),
+                DecodedAttrValue::decode(raw, &mut |form| forms.push(form)),
+                "raw: {raw:?}"
+            );
+        }
+    }
+
+    /// COMPILE-TIME arity inventory: `DecodedAttrValue` is exactly ONE
+    /// decoded `String` — the tuple pattern below fails to compile if any
+    /// field (a ZST included) is added. Only this module can destructure the
+    /// private field, so the proof lives here.
+    #[test]
+    fn decoded_attr_value_is_exactly_one_decoded_string() {
+        let v = DecodedAttrValue::decode("x", &mut |_| {});
+        let DecodedAttrValue(inner) = &v;
+        assert_eq!(inner, "x");
+    }
 }

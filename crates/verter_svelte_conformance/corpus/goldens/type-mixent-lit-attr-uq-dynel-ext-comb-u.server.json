@@ -1,0 +1,37 @@
+{
+  "slug": "type-mixent-lit-attr-uq-dynel-ext-comb-u",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "type_mixent_lit_attr_uq_dynel_ext_comb_u",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [
+    "element"
+  ],
+  "helperSet": [
+    "element"
+  ],
+  "helperCounts": {
+    "element": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": true,
+    "hash": "svelte-1a65cqc",
+    "code": "\n\t.wrap.svelte-<scoped> div:where(.svelte-<scoped>) {\n\t\tcolor: red;\n\t}\n"
+  }
+}

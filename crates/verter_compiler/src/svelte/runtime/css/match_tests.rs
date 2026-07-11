@@ -1367,3 +1367,251 @@ fn external_and_injected_modes_agree_on_scoped_set_and_hash() {
         external.hash
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MatchCertainty: the matcher's internal three-valued verdict. `Yes` =
+// provably matches, `No` = provably does not match, `Maybe` = the official
+// fail-open "cannot prove" verdicts (the former unconditional `true`). The
+// PRODUCTION projection is `Yes | Maybe ⇒ used/scoped`, `No ⇒ pruned` —
+// asserted against the same plan facts the pre-tri-state bool produced.
+// ─────────────────────────────────────────────────────────────────────────────
+
+use super::MatchCertainty;
+
+/// The per-top-level-complex-selector certainties of one component, keyed by
+/// selector source text (prune visit order).
+fn certainties(source: &str) -> Vec<(String, MatchCertainty)> {
+    let alloc = Allocator::default();
+    let parsed = parse_svelte(source);
+    let opts = SvelteRuntimeOptions {
+        filename: Some("Test.svelte".to_string()),
+        runes: Some(true),
+        ..Default::default()
+    };
+    let ir = lower_parsed_svelte_to_ir(source, &parsed, &opts, &alloc)
+        .unwrap_or_else(|e| panic!("lowering succeeds: {e:?}"));
+    crate::svelte::runtime::css::style_selector_certainties_for_test(source, body_span(source), &ir)
+        .unwrap_or_else(|e| panic!("the matcher proves: {e:?}"))
+        .into_iter()
+        .map(|(span, certainty)| (slice(source, span), certainty))
+        .collect()
+}
+
+/// The certainty of the selector whose source text is `text` (panics on an
+/// unknown selector so a typo'd test fails loudly).
+fn certainty_of(rows: &[(String, MatchCertainty)], text: &str) -> MatchCertainty {
+    rows.iter()
+        .find(|(t, _)| t == text)
+        .unwrap_or_else(|| panic!("selector `{text}` not found in {rows:?}"))
+        .1
+}
+
+#[test]
+fn certainty_three_valued_logic_truth_tables() {
+    use MatchCertainty::{Maybe, No, Yes};
+    // AND = min (a compound is only as certain as its weakest constraint).
+    assert_eq!(Yes.and(Yes), Yes);
+    assert_eq!(Yes.and(Maybe), Maybe);
+    assert_eq!(Maybe.and(Yes), Maybe);
+    assert_eq!(Maybe.and(Maybe), Maybe);
+    assert_eq!(Yes.and(No), No);
+    assert_eq!(No.and(Yes), No);
+    assert_eq!(Maybe.and(No), No);
+    assert_eq!(No.and(Maybe), No);
+    assert_eq!(No.and(No), No);
+    // OR = max (one proven branch proves the disjunction).
+    assert_eq!(Yes.or(No), Yes);
+    assert_eq!(No.or(Yes), Yes);
+    assert_eq!(Maybe.or(No), Maybe);
+    assert_eq!(No.or(Maybe), Maybe);
+    assert_eq!(Yes.or(Maybe), Yes);
+    assert_eq!(Maybe.or(Yes), Yes);
+    assert_eq!(No.or(No), No);
+    // The PRODUCTION projection: exactly the pre-tri-state bool (`Maybe` used
+    // to be `true`). `Maybe` is NEVER treated as `No`.
+    assert!(Yes.might_match());
+    assert!(Maybe.might_match());
+    assert!(!No.might_match());
+}
+
+#[test]
+fn certainty_yes_for_a_provable_static_match() {
+    let source = "<div class=\"a b\">x</div>\n<style>.b { color: red; }</style>";
+    let rows = certainties(source);
+    assert_eq!(certainty_of(&rows, ".b"), MatchCertainty::Yes);
+}
+
+#[test]
+fn certainty_no_for_a_provable_static_no_match() {
+    let source = "<div class=\"a\">x</div>\n<style>.zz { color: red; }</style>";
+    let rows = certainties(source);
+    assert_eq!(certainty_of(&rows, ".zz"), MatchCertainty::No);
+    // The production projection: a provable no-match is pruned as unused.
+    let f = facts(source);
+    assert!(!f.used(".zz"));
+    assert!(!f.scoped_tag("div"));
+}
+
+#[test]
+fn certainty_maybe_for_a_dynamic_unknown_value() {
+    // `class={c}` — `expression_possible_values` returns UNKNOWN (`Ok(None)`),
+    // the official "may match anything" bail: the FORMER unconditional `true`
+    // is now OBSERVED as `Maybe`.
+    let source = "<script>let c = $state('x');</script>\n<div class={c}>x</div>\n<style>.b { color: red; }</style>";
+    let rows = certainties(source);
+    assert_eq!(certainty_of(&rows, ".b"), MatchCertainty::Maybe);
+}
+
+#[test]
+fn certainty_maybe_for_a_spread_attribute() {
+    let source = "<script>let rest = $state({});</script>\n<div {...rest}>x</div>\n<style>.b { color: red; }</style>";
+    let rows = certainties(source);
+    assert_eq!(certainty_of(&rows, ".b"), MatchCertainty::Maybe);
+}
+
+#[test]
+fn certainty_maybe_never_projects_to_no() {
+    // The Maybe verdict keeps the official fail-open behavior: the selector
+    // stays USED and the element stays SCOPED — byte-identical to the
+    // pre-tri-state `true`.
+    let source = "<script>let c = $state('x');</script>\n<div class={c}>x</div>\n<style>.b { color: red; }</style>";
+    let rows = certainties(source);
+    assert_eq!(certainty_of(&rows, ".b"), MatchCertainty::Maybe);
+    let f = facts(source);
+    assert!(f.used(".b"), "a Maybe selector is used, never pruned");
+    assert!(
+        f.scoped_tag("div"),
+        "a Maybe element is scoped, never dropped"
+    );
+}
+
+#[test]
+fn certainty_yes_for_a_provable_type_and_enumerated_values_stay_maybe() {
+    // A TYPE selector on a static intrinsic element is a proof.
+    let source = "<p>x</p>\n<style>p { color: red; }</style>";
+    assert_eq!(certainty_of(&certainties(source), "p"), MatchCertainty::Yes);
+    // An ENUMERATED dynamic value (`cond ? 'a' : 'b'`) that CAN match stays
+    // `Maybe` — the enumeration lists POSSIBLE runtime values, not a proof
+    // that the matching branch is taken.
+    let source = "<script>let cond = $state(true);</script>\n<div class={cond ? 'a' : 'b'}>x</div>\n<style>.a { color: red; }</style>";
+    assert_eq!(
+        certainty_of(&certainties(source), ".a"),
+        MatchCertainty::Maybe
+    );
+    // An enumerated value where NO possible value matches is a provable
+    // no-match: every runtime value is known and none matches.
+    let source = "<script>let cond = $state(true);</script>\n<div class={cond ? 'a' : 'b'}>x</div>\n<style>.zz { color: red; }</style>";
+    assert_eq!(
+        certainty_of(&certainties(source), ".zz"),
+        MatchCertainty::No
+    );
+}
+
+#[test]
+fn certainty_maybe_for_class_directive_and_whitelisted_attribute() {
+    // A `class:b={cond}` directive toggles at runtime — official treats it as
+    // matching without proof.
+    let source = "<script>let cond = $state(true);</script>\n<div class:b={cond}>x</div>\n<style>.b { color: red; }</style>";
+    assert_eq!(
+        certainty_of(&certainties(source), ".b"),
+        MatchCertainty::Maybe
+    );
+    // `details[open]` is officially whitelisted (the runtime may toggle it) —
+    // assumed matching even when the attribute is absent in the template.
+    let source = "<details>x</details>\n<style>details[open] { color: red; }</style>";
+    assert_eq!(
+        certainty_of(&certainties(source), "details[open]"),
+        MatchCertainty::Maybe
+    );
+    let f = facts(source);
+    assert!(
+        f.used("details[open]"),
+        "the whitelist keeps the selector used"
+    );
+}
+
+#[test]
+fn certainty_composes_across_compounds_and_combinators() {
+    // `.a .b` with both provable: Yes.
+    let source =
+        "<div class=\"a\"><p class=\"b\">x</p></div>\n<style>.a .b { color: red; }</style>";
+    assert_eq!(
+        certainty_of(&certainties(source), ".a .b"),
+        MatchCertainty::Yes
+    );
+    // `.a .b` where the ANCESTOR hop is dynamic: the compound is only as
+    // certain as its weakest constraint — Maybe, still used.
+    let source = "<script>let c = $state('x');</script>\n<div class={c}><p class=\"b\">x</p></div>\n<style>.a .b { color: red; }</style>";
+    assert_eq!(
+        certainty_of(&certainties(source), ".a .b"),
+        MatchCertainty::Maybe
+    );
+    let f = facts(source);
+    assert!(f.used(".a .b"));
+    // `.a .b` where the ancestor provably can't match: No, pruned.
+    let source =
+        "<div class=\"zz\"><p class=\"b\">x</p></div>\n<style>.a .b { color: red; }</style>";
+    assert_eq!(
+        certainty_of(&certainties(source), ".a .b"),
+        MatchCertainty::No
+    );
+    let f = facts(source);
+    assert!(!f.used(".a .b"));
+}
+
+#[test]
+fn certainty_rows_cover_every_top_level_selector_in_source_order() {
+    let source = "<div class=\"a\">x</div>\n<style>.a { color: red; } .zz { color: blue; }</style>";
+    let rows = certainties(source);
+    assert_eq!(
+        rows,
+        vec![
+            (".a".to_string(), MatchCertainty::Yes),
+            (".zz".to_string(), MatchCertainty::No),
+        ],
+        "one row per top-level complex selector, prune visit order, No included"
+    );
+}
+
+/// The production projection over the HAND-VENDORED corpus fixture
+/// `css/entity_class_scoped.svelte`: the scope-prune / used-selector output
+/// is byte-identical to the pre-tri-state matcher (`.b` used via the decoded
+/// `a&#32;b` ⇒ `a b`, `.c` pruned), and the certainties discriminate the two.
+#[test]
+fn corpus_entity_class_scoped_projection_is_unchanged_by_the_tri_state() {
+    let source = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/svelte_oracle_corpus/fixtures/css/entity_class_scoped.svelte"
+    ));
+    let f = facts(source);
+    assert!(f.used(".b"), "the decoded `a b` word list matches `.b`");
+    assert!(!f.used(".c"), "`.c` stays pruned");
+    assert!(f.scoped_selector(".b"));
+    assert!(!f.scoped_selector(".c"));
+    assert!(f.scoped_tag("div"));
+    let rows = certainties(source);
+    assert_eq!(certainty_of(&rows, ".b"), MatchCertainty::Yes);
+    assert_eq!(certainty_of(&rows, ".c"), MatchCertainty::No);
+}
+
+/// The production projection over the HAND-VENDORED corpus fixture
+/// `css/combinators_attributes.svelte` is unchanged: the case-insensitive
+/// attribute test and the `^=` prefix test keep their verdicts.
+#[test]
+fn corpus_combinators_attributes_projection_is_unchanged_by_the_tri_state() {
+    let source = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/svelte_oracle_corpus/fixtures/css/combinators_attributes.svelte"
+    ));
+    let f = facts(source);
+    assert!(f.used(".list > li[data-kind=\"a\" i]"));
+    assert!(f.used("p[title^=\"no\"]"));
+    assert!(f.scoped_tag("li"));
+    assert!(f.scoped_tag("p"));
+    let rows = certainties(source);
+    assert_eq!(
+        certainty_of(&rows, ".list > li[data-kind=\"a\" i]"),
+        MatchCertainty::Yes
+    );
+    assert_eq!(certainty_of(&rows, "p[title^=\"no\"]"), MatchCertainty::Yes);
+}

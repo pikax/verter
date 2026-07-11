@@ -1,0 +1,65 @@
+{
+  "slug": "nest-spread-lit-id-q-comp-inj-nest-u",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "./Child.svelte",
+      "kind": "default",
+      "names": [
+        "default:Child"
+      ]
+    },
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "nest_spread_lit_id_q_comp_inj_nest_u",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "append_styles",
+    "attribute_effect",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "append_styles",
+    "attribute_effect",
+    "from_html"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "append_styles": 1,
+    "attribute_effect": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div>x</div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; import Child from './Child.svelte'; var root = $.from_html(`<div>x</div>`); const $$css = {hash: 'svelte-<scoped>', code: '#b.svelte-<scoped> {& {color:red;}}'}; export default function nest_spread_lit_id_q_comp_inj_nest_u($$anchor, $$props) {$.append_styles($$anchor, $$css); Child($$anchor, {children: ($$anchor, $$slotProps) => {var div = root(); $.attribute_effect(div, () => ({...$$props.rest}), void 0, void 0, void 0, 'svelte-<scoped>'); $.append($$anchor, div);}, $$slots: {default: true}});}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

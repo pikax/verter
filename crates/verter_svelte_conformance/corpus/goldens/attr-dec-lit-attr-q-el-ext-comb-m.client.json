@@ -1,0 +1,56 @@
+{
+  "slug": "attr-dec-lit-attr-q-el-ext-comb-m",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "attr_dec_lit_attr_q_el_ext_comb_m",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "from_html"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div class=\"wrap svelte-<scoped>\"><div data-x=\"b\" class=\"svelte-<scoped>\">x</div></div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div class=\"wrap svelte-<scoped>\"><div data-x=\"b\" class=\"svelte-<scoped>\">x</div></div>`); export default function attr_dec_lit_attr_q_el_ext_comb_m($$anchor) {var div = root(); $.append($$anchor, div);}",
+  "css": {
+    "present": true,
+    "hash": "svelte-1nplhzs",
+    "code": "\n\t.wrap.svelte-<scoped> [data-x=\"b\"]:where(.svelte-<scoped>) {\n\t\tcolor: red;\n\t}\n"
+  }
+}

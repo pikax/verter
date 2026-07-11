@@ -1,0 +1,63 @@
+{
+  "slug": "nest-hex-lit-cls-uq-comp-ext-glob-m",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "./Child.svelte",
+      "kind": "default",
+      "names": [
+        "default:Child"
+      ]
+    },
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "nest_hex_lit_cls_uq_comp_ext_glob_m",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "from_html"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div class=\"a b\">x</div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; import Child from './Child.svelte'; var root = $.from_html(`<div class=\"a b\">x</div>`); export default function nest_hex_lit_cls_uq_comp_ext_glob_m($$anchor) {Child($$anchor, {children: ($$anchor, $$slotProps) => {var div = root(); $.append($$anchor, div);}, $$slots: {default: true}});}",
+  "css": {
+    "present": true,
+    "hash": null,
+    "code": "\n\t& {\n\t\tcolor: red;\n\t}\n"
+  }
+}
