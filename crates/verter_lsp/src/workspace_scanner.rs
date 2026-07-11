@@ -19,7 +19,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use tokio::sync::mpsc;
 use verter_session::{CompileProfile, UpsertRequest, VerterHost};
 
@@ -89,6 +89,15 @@ pub struct WorkspaceScannerConfig {
     /// for tsgo (whose carriers reach the engine through the project-bound `--api`
     /// direct open — `open_project` + `root_files`).
     pub carrier_publish_coordinator: Option<crate::external_ts::CarrierPublishCoordinator>,
+    /// The per-source carrier transaction coordinator (admission gate, owner-loss barrier,
+    /// non-owned retry disposition), shared with the server so the background scan's carrier
+    /// commits and non-owned settlements serialize on the ONE barrier map.
+    pub carrier_transaction_coordinator: Arc<crate::external_ts::CarrierTransactionCoordinator>,
+    /// The server's pending-provider-sync requeue set (shared). A scan-lane carrier commit
+    /// refused by the admission gate (Superseded), or a transiently not-ready / not-advertised
+    /// carrier, is re-queued here so the drain retries it through a fresh transaction — the
+    /// same interactive requeue path, never a requeue-less drop.
+    pub pending_snapshot_provider_sync: Arc<DashSet<String>>,
     /// Compile profile for IDE output.
     pub tsx_profile: CompileProfile,
     /// Coverage patterns from `verter_workspace::config::discover_tsconfigs()` (e.g., `"C:/project/src/**"`).
@@ -220,11 +229,26 @@ pub fn classify_tiers(paths: &[String], tsconfig_patterns: &[String]) -> Vec<(St
         .collect()
 }
 
-/// Classify paths into priority tiers using the published workspace snapshot.
+/// Classify paths into priority scan tiers using the published workspace snapshot.
 ///
 /// A path is `Tier::ProjectSource` if any configured project in the snapshot
-/// claims it. Otherwise it's `Tier::Other`. This replaces glob-based
-/// `classify_tiers()` with exact ownership semantics.
+/// claims it. Otherwise it's `Tier::Other`.
+///
+/// This is a scan-PRIORITIZATION hint, NOT the authoritative ownership decision.
+/// It shares the SAME F2 authority the serve path uses — the snapshot's
+/// [`configured_owner_resolution_for_file`](verter_workspace::WorkspaceSnapshot::configured_owner_resolution_for_file)
+/// (solution-graph-pruned) — so a `ProjectSource`/`Other` tier can never disagree
+/// with the serve path on whether a file is configured at all
+/// (`scanner_tier_and_resolver_ownership_are_byte_equivalent` guards this axis). But
+/// it deliberately COLLAPSES `Unique` and `Ambiguous` into one `ProjectSource` tier:
+/// for scan ORDER, both a uniquely-owned and an ambiguously-owned carrier are worth
+/// scanning early, so the fine-grained bind-vs-ambiguous distinction is not needed
+/// here. That authoritative distinction — `Bound` (serve) vs `NoProject` / `Ambiguous`
+/// (terminal, no serve) vs `NotReady` (retry) — is re-resolved per sync pass through
+/// the carrier-sync gateway's single captured
+/// [`CarrierOwnershipResolution`](crate::external_ts::CarrierOwnershipResolution),
+/// never read back from a scan tier. A stale-snapshot tier only mis-PRIORITIZES a
+/// scan; it can never cause a wrong ownership decision.
 pub fn classify_from_snapshot(
     paths: &[String],
     snapshot: &verter_workspace::WorkspaceSnapshot,
@@ -234,7 +258,9 @@ pub fn classify_from_snapshot(
         .map(|path| {
             let tier = match snapshot.configured_owner_resolution_for_file(path) {
                 verter_workspace::ConfiguredOwnerResolution::None => Tier::Other,
-                _ => Tier::ProjectSource, // Unique or Ambiguous → both are configured
+                // Unique or Ambiguous → both are configured (a scan-priority tier, not
+                // the authoritative bind decision; the gateway re-resolves at serve).
+                _ => Tier::ProjectSource,
             };
             (path.clone(), tier)
         })
@@ -447,6 +473,8 @@ async fn scanner_loop(
                     config.is_tsgo,
                     &config.provider_sync_states,
                     config.carrier_publish_coordinator.as_ref(),
+                    &config.carrier_transaction_coordinator,
+                    Some(&config.pending_snapshot_provider_sync),
                 )
                 .await;
             }
@@ -803,6 +831,8 @@ async fn sync_file_to_provider(
     is_tsgo: bool,
     sync_states: &DashMap<String, ProviderSyncState>,
     carrier_publish_coordinator: Option<&crate::external_ts::CarrierPublishCoordinator>,
+    carrier_coordinator: &crate::external_ts::CarrierTransactionCoordinator,
+    requeue: Option<&DashSet<String>>,
 ) {
     // Capture the published resolver snapshot AND the filesystem-workspace handle in
     // one read (the gateway's membership reconcile resolves ownership against the
@@ -835,15 +865,13 @@ async fn sync_file_to_provider(
     // tsserver carrier's state WITHOUT publishing its membership (and never retracted
     // on owner-loss) — gap E. The gateway closes that: the receipt is required to
     // commit, and only a reconcile mints it. `None` coordinator ⇒ tsgo direct-open.
-    let membership =
-        carrier_publish_coordinator.map(|coordinator| crate::external_ts::CarrierMembershipCtx {
-            coordinator,
-            vfs: &vfs_handle,
-            ownership_ready: snapshot.ownership_ready,
-        });
+    let membership = carrier_publish_coordinator
+        .map(|coordinator| crate::external_ts::CarrierMembershipCtx { coordinator });
     let decision =
         crate::external_ts::reconcile_carrier_source(crate::external_ts::CarrierSyncRequest {
             host,
+            vfs: Some(&vfs_handle),
+            ownership_ready: snapshot.ownership_ready,
             resolver: &snapshot.resolver,
             provider_sync_states: sync_states,
             provider_surfaces,
@@ -854,6 +882,7 @@ async fn sync_file_to_provider(
             is_jsx,
             ide: ide.as_ref(),
             membership,
+            admission: carrier_coordinator,
             reason: crate::external_ts::ReconcileReason::SourceSynced,
         })
         .await;
@@ -864,17 +893,21 @@ async fn sync_file_to_provider(
             receipt,
         } => {
             // tsserver: the plugin serves the companions as configured-project
-            // members; commit the store-resident state through the receipt gate.
-            crate::external_ts::commit_carrier_provider_state(
-                sync_states,
-                canonical_id,
-                committed_state,
-                &receipt,
-            );
+            // members; commit the store-resident state through the receipt gate. A
+            // `Superseded` commit (a newer transaction reclaimed the source, or an owner-loss
+            // advanced the barrier) is re-queued for a fresh transaction — never a
+            // requeue-less drop.
+            if carrier_coordinator.admit_owned(sync_states, canonical_id, committed_state, &receipt)
+                == crate::external_ts::AdmitOutcome::Superseded
+            {
+                if let Some(requeue) = requeue {
+                    requeue.insert(canonical_id.to_string());
+                }
+            }
         }
         crate::external_ts::CarrierSyncDecision::DirectOpen {
             transition,
-            receipt,
+            pending,
         } => {
             if is_tsgo {
                 crate::server::configure_provider_paths_for_source(
@@ -953,36 +986,59 @@ async fn sync_file_to_provider(
                 revert_unsynced_kinds(&mut committed_state, previous_state.as_ref(), &synced_kinds);
                 let genuinely_stale =
                     genuinely_stale_after_sync(&stale_paths, &committed_state, &synced_kinds);
-                crate::external_ts::commit_carrier_provider_state(
+                // A kind opened: NOW mint the receipt (post-open), attesting EXACTLY the
+                // kinds that actually opened this pass, and commit through the coordinator.
+                let receipt = pending.confirm_opened(&synced_kinds);
+                // Gate the stale-path close on ADMISSION and never drop the outcome: a
+                // `Superseded` commit (a newer transaction reclaimed the source, or an
+                // owner-loss advanced the barrier) re-queues the source and closes NOTHING —
+                // the computed stale paths may be the newer transaction's LIVE buffers. Only
+                // an admitted commit closes them.
+                if carrier_coordinator.admit_owned(
                     sync_states,
                     canonical_id,
                     committed_state,
                     &receipt,
-                );
-                close_stale_paths(
-                    sync,
-                    provider_surfaces,
-                    &non_decl_close_targets(&genuinely_stale),
-                )
-                .await;
+                ) == crate::external_ts::AdmitOutcome::Superseded
+                {
+                    if let Some(requeue) = requeue {
+                        requeue.insert(canonical_id.to_string());
+                    }
+                } else {
+                    close_stale_paths(
+                        sync,
+                        provider_surfaces,
+                        &non_decl_close_targets(&genuinely_stale),
+                    )
+                    .await;
+                }
             }
             // On total failure nothing is committed and nothing is closed: the
-            // previous state + provider paths are retained intact.
+            // previous state + provider paths are retained intact, and the pending
+            // drops unconfirmed so no receipt is minted.
         }
-        crate::external_ts::CarrierSyncDecision::Unowned => {
-            // No owner resolved: the gateway already retracted the STORE/ledger
-            // membership (tsserver). This is a BACKGROUND scan (not an open editor
-            // document), so drop any stale local provider state + close its buffers.
-            if let Some(state) = crate::provider_sync::remove_sync_state(sync_states, canonical_id)
-            {
-                // The declaration overlay (`Decl`), if any, is released by
-                // `DeclOverlayOwner` via the `did_close` lifecycle, never here.
-                close_stale_paths(sync, provider_surfaces, &state.active_non_decl_paths()).await;
+        crate::external_ts::CarrierSyncDecision::NotOwned(not_owned) => {
+            // Settle the non-owned disposition through the coordinator: the terminal
+            // `Unresolved` advances the owner-loss barrier; a transient `NotReady`/`Pending`
+            // is re-queued through the shared pending set (the same interactive requeue path)
+            // so the drain retries it — never a requeue-less drop. This is a BACKGROUND scan
+            // (not an open editor document), so for a settled no-owner class drop any stale
+            // local provider state + close its buffers. The gateway already retracted the
+            // STORE/ledger membership (tsserver).
+            let class = carrier_coordinator.settle(not_owned, canonical_id, requeue);
+            if class.runs_buffer_cleanup() {
+                // Advance-before-mutate: the coordinator advances the owner-loss barrier
+                // BEFORE it vacates the slot when the removed state was a previously-committed
+                // carrier, so a late owned token cannot resurrect the source.
+                if let Some(state) =
+                    carrier_coordinator.advance_barrier_and_remove(sync_states, canonical_id)
+                {
+                    // The declaration overlay (`Decl`), if any, is released by
+                    // `DeclOverlayOwner` via the `did_close` lifecycle, never here.
+                    close_stale_paths(sync, provider_surfaces, &state.active_non_decl_paths())
+                        .await;
+                }
             }
-        }
-        crate::external_ts::CarrierSyncDecision::Pending => {
-            // Not advertised this pass (cold defer / not-advertised / degraded): keep
-            // nothing; the next scan or snapshot retries.
         }
     }
 }
@@ -1381,6 +1437,8 @@ mod tests {
             false,
             &sync_states,
             None,
+            &crate::external_ts::CarrierTransactionCoordinator::new(),
+            None,
         )
         .await;
 
@@ -1397,7 +1455,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scanner_routes_unmatched_files_to_workspace_project_only() {
+    async fn scanner_does_not_sync_carrier_without_a_configured_owner() {
         let host = VerterHost::new_standalone(verter_session::HostConfig::default());
         let canonical_id = "/workspace/scripts/Tool.vue";
         let _ = host.upsert(UpsertRequest {
@@ -1452,16 +1510,20 @@ mod tests {
             false,
             &sync_states,
             None,
+            &crate::external_ts::CarrierTransactionCoordinator::new(),
+            None,
         )
         .await;
 
-        let state = sync_states
-            .get(canonical_id)
-            .expect("unmatched Vue files should still sync to the workspace project");
-        assert_eq!(
-            state.owner_binding,
-            crate::provider_sync::ProviderOwnerBinding::Owned("/workspace".to_string()),
-            "unmatched Vue files should have owner_binding set to the workspace root (fallback project)"
+        // A carrier under the inferred FALLBACK project (`/workspace`, no tsconfig) but
+        // OUTSIDE the configured `/workspace/src` project has NO configured owner ⇒
+        // `NoProject`. Per the Project-Bound External-TS Contract, an inferred/fallback
+        // project never owns a carrier for external-TS, so the scan syncs NOTHING (no
+        // provider state committed) — never an inferred-project overlay.
+        assert!(
+            sync_states.get(canonical_id).is_none(),
+            "a carrier with no CONFIGURED owner must NOT be synced (NoProject), not \
+             routed to the inferred fallback project"
         );
     }
 
@@ -1530,6 +1592,8 @@ defineProps<{ msg: string }>()
             &snapshot,
             true,
             &sync_states,
+            None,
+            &crate::external_ts::CarrierTransactionCoordinator::new(),
             None,
         )
         .await;
@@ -1618,7 +1682,7 @@ import Child from '@/Child.vue'
                     published
                         .snapshot
                         .resolver
-                        .owner_for_file(&canonical_id)
+                        .nearest_config_for_path(&canonical_id)
                         .cloned()
                 })
                 .is_some(),
@@ -1642,6 +1706,8 @@ import Child from '@/Child.vue'
             &snapshot,
             true,
             &sync_states,
+            None,
+            &crate::external_ts::CarrierTransactionCoordinator::new(),
             None,
         )
         .await;
@@ -2038,6 +2104,8 @@ defineProps<{ msg: string }>()
                 decl_background_loaded: false,
                 shadow_path: None,
                 shadow_background_loaded: false,
+                committed_ide_surface: None,
+                commit_stamp: None,
             },
         );
 
@@ -2054,6 +2122,8 @@ defineProps<{ msg: string }>()
             &snapshot,
             false,
             &sync_states,
+            None,
+            &crate::external_ts::CarrierTransactionCoordinator::new(),
             None,
         )
         .await;
@@ -2217,6 +2287,8 @@ defineProps<{ msg: string }>()
             false, // tsserver (not tsgo)
             &sync_states,
             Some(&coordinator),
+            &crate::external_ts::CarrierTransactionCoordinator::new(),
+            None,
         )
         .await;
 
@@ -2248,6 +2320,8 @@ defineProps<{ msg: string }>()
             false,
             &sync_states,
             Some(&coordinator),
+            &crate::external_ts::CarrierTransactionCoordinator::new(),
+            None,
         )
         .await;
 
@@ -2311,6 +2385,8 @@ defineProps<{ msg: string }>()
             &owning_vfs,
             true, // tsgo direct open
             &sync_states,
+            None,
+            &crate::external_ts::CarrierTransactionCoordinator::new(),
             None,
         )
         .await;

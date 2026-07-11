@@ -15,8 +15,8 @@ use std::sync::Arc;
 
 use verter_session::{HostConfig, VerterHost};
 use verter_workspace::{
-    IdeProjectCompilerOptions, MemoryOptions, MemoryWorkspace, ProjectGraph, ProjectMembership,
-    ProjectRank, VfsProjectConfig, WorkspaceAccess,
+    IdeProjectCompilerOptions, MemoryOptions, MemoryWorkspace, ProjectGraph, ProjectRank,
+    VfsProjectConfig, WorkspaceAccess,
 };
 
 fn build_host_with_single_project() -> (Arc<VerterHost>, &'static str) {
@@ -36,7 +36,9 @@ fn build_host_with_single_project() -> (Arc<VerterHost>, &'static str) {
             ..Default::default()
         },
         references: vec![],
-        membership: ProjectMembership::MatchAll,
+        membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+            &verter_workspace::CanonicalPath::new("/projA"),
+        ),
     }]);
     workspace.set_project_graph(graph);
     workspace.inject_file(canonical.to_string(), Arc::from("export const X = 1;\n"));

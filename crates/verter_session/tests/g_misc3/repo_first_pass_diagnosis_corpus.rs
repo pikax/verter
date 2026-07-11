@@ -28,8 +28,8 @@ use std::sync::Arc;
 use verter_session::for_tests::CaptureToken;
 use verter_session::{HostConfig, VerterHost};
 use verter_workspace::{
-    FilesystemOptions, FilesystemWorkspace, IdeProjectCompilerOptions, ProjectMembership,
-    ProjectRank, VfsProjectConfig, WorkspaceAccess,
+    FilesystemOptions, FilesystemWorkspace, IdeProjectCompilerOptions, ProjectRank,
+    VfsProjectConfig, WorkspaceAccess,
 };
 
 /// Full component list — the 12 components the diagnosis curve is
@@ -181,7 +181,9 @@ fn build_corpus_host(corpus_root: &Path) -> Arc<VerterHost> {
         workspace_aliases: vec![],
         compiler_options: IdeProjectCompilerOptions::default(),
         references: vec![],
-        membership: ProjectMembership::MatchAll,
+        membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+            &verter_workspace::CanonicalPath::new(&ws_root_str),
+        ),
     }]);
     let workspace = Arc::new(FilesystemWorkspace::new(FilesystemOptions {
         roots: vec![ws_root_str.clone()],

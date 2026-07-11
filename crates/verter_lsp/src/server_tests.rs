@@ -1066,6 +1066,62 @@ fn install_test_resolver_for_root(
     server.install_vfs_workspace(vfs_ws);
 }
 
+/// A `FilesystemWorkspace` publishing ONE `Configured` project owning everything under
+/// `root` via `tsconfig` (spec-bridge `include: {root}/**/*`), so a carrier under
+/// `root` resolves to a `Bound` project binding through the shared
+/// `WorkspaceProjectResolver` — the ownership-resolution source the carrier-sync
+/// gateway reads for BOTH engines. Mirrors [`install_test_resolver_for_root`] but
+/// returns the published workspace directly (for the direct-call background-task tests).
+fn configured_owner_vfs(root: &str, tsconfig: &str) -> Arc<verter_workspace::FilesystemWorkspace> {
+    let vfs_ws = Arc::new(verter_workspace::FilesystemWorkspace::new(
+        verter_workspace::FilesystemOptions::default(),
+    ));
+    let root_cp = verter_workspace::CanonicalPath::new(root);
+    let spec = verter_workspace::StaticMembershipSpec {
+        files: Vec::new(),
+        include: vec![verter_workspace::NormalizedGlob::from_root_and_pattern(
+            &root_cp, "**/*",
+        )],
+        exclude: vec![verter_workspace::NormalizedGlob::from_root_and_pattern(
+            &root_cp,
+            "node_modules/**",
+        )],
+    };
+    let projects = vec![verter_workspace::workspace_snapshot::OwnershipProject {
+        id: verter_workspace::workspace_snapshot::ProjectId(0),
+        root: root_cp.clone(),
+        workspace_root: root_cp.clone(),
+        payload: verter_workspace::workspace_snapshot::ProjectPayload::Configured {
+            tsconfig_path: verter_workspace::CanonicalPath::new(tsconfig),
+            membership: verter_workspace::ConfiguredMembership {
+                spec,
+                materialized_files: Default::default(),
+            },
+            compiler_options: verter_workspace::IdeProjectCompilerOptions::default(),
+            references: Vec::new(),
+            workspace_aliases: Vec::new(),
+        },
+    }];
+    let resolver = verter_workspace::ProjectResolver::new(vec![
+        crate::project_resolver::IdeProjectConfig::new(
+            root.to_string(),
+            root.to_string(),
+            Some(tsconfig.to_string()),
+        ),
+    ]);
+    let snapshot = Arc::new(verter_workspace::WorkspaceSnapshot {
+        projects,
+        resolver,
+        generation: verter_workspace::workspace_snapshot::SnapshotGeneration(1),
+    });
+    let views = crate::workspace_state::build_lsp_views(&*vfs_ws, &snapshot, vec![]);
+    vfs_ws.publish_snapshot(verter_workspace::PublishedRoot::with_ext(
+        snapshot,
+        Box::new(views),
+    ));
+    vfs_ws
+}
+
 fn open_test_vue(server: &VerterLanguageServer, path: &str, source: &str) -> Uri {
     let uri: Uri = format!("file://{path}").parse().expect("valid test uri");
     let _ = server.documents.did_open(&TextDocumentItem {
@@ -6314,6 +6370,7 @@ async fn background_init_drains_pending_snapshot_provider_sync_for_open_vue_file
         false,
         None,
         None,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
     )
     .await;
 
@@ -6426,6 +6483,7 @@ async fn drain_owner_loss_retracts_carrier_membership_from_the_ledger() {
         false,
         None,
         Some(&coordinator),
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
     )
     .await;
 
@@ -6473,6 +6531,7 @@ async fn drain_keeps_partially_failed_vue_file_queued_for_retry() {
         false,
         None,
         None,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
     )
     .await;
 
@@ -6543,6 +6602,8 @@ async fn open_vue_provider_state_survives_owner_none_snapshot_drain() {
             decl_background_loaded: false,
             shadow_path: None,
             shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
         },
     );
     let pending_snapshot_provider_sync = DashSet::new();
@@ -6557,6 +6618,7 @@ async fn open_vue_provider_state_survives_owner_none_snapshot_drain() {
         false,
         None,
         None,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
     )
     .await;
 
@@ -6576,10 +6638,15 @@ async fn open_vue_provider_state_survives_owner_none_snapshot_drain() {
         "the open file's IDE TSX path must be preserved"
     );
 
-    // Positive: stays queued for a future owner reconciliation.
+    // INV-3: the ready `/other` snapshot resolves `/workspace/src/App.vue` to a
+    // TERMINAL `NoProject`, so the drain DEQUEUES it — a terminal ownership decision
+    // is never retried into a provider on every drain. Editor-liveness is preserved
+    // above (the open file's state survives + its TSX stays live), and re-owning on a
+    // later config change is re-driven by the foreground sync's owner-mismatch
+    // reconcile, not a stale drain retry.
     assert!(
-        pending_snapshot_provider_sync.contains("/workspace/src/App.vue"),
-        "open unresolved files should stay queued for future owner reconciliation"
+        !pending_snapshot_provider_sync.contains("/workspace/src/App.vue"),
+        "a terminal NoProject carrier must be dequeued (never retried into a provider)"
     );
 
     let calls = provider.file_sync_calls();
@@ -6638,6 +6705,8 @@ async fn drain_owned_to_unowned_open_vue_converts_state_to_unresolved() {
             decl_background_loaded: false,
             shadow_path: None,
             shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
         },
     );
     let pending_snapshot_provider_sync = DashSet::new();
@@ -6653,6 +6722,7 @@ async fn drain_owned_to_unowned_open_vue_converts_state_to_unresolved() {
         false,
         None,
         None,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
     )
     .await;
 
@@ -6698,10 +6768,14 @@ async fn drain_owned_to_unowned_open_vue_converts_state_to_unresolved() {
         "owned→unowned conversion must CLOSE the dropped owner-derived `.vue.ts`, calls={calls:?}"
     );
 
-    // Positive: stays queued so a future snapshot can re-bind an owner.
+    // INV-3: under the ready `/other` snapshot the owner-lost carrier resolves to a
+    // TERMINAL `NoProject`, so the drain DEQUEUES it (a terminal ownership decision
+    // is never retried). The owner→unowned conversion + editor-liveness are asserted
+    // above; a later config change re-binds it through the foreground owner-mismatch
+    // reconcile, not a stale drain retry.
     assert!(
-        pending_snapshot_provider_sync.contains("/workspace/src/App.vue"),
-        "converted unresolved file must stay queued for future owner reconciliation"
+        !pending_snapshot_provider_sync.contains("/workspace/src/App.vue"),
+        "a terminal owner-lost carrier must be dequeued (never retried into a provider)"
     );
 }
 
@@ -6747,6 +6821,8 @@ async fn open_unresolved_carrier_no_ide_output_commits_forced_unresolved_binding
             decl_background_loaded: false,
             shadow_path: None,
             shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
         },
     );
 
@@ -6758,6 +6834,7 @@ async fn open_unresolved_carrier_no_ide_output_commits_forced_unresolved_binding
         "/workspace/src/App.vue",
         false,
         None,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
     )
     .await;
     assert!(
@@ -6857,6 +6934,8 @@ async fn open_unresolved_carrier_closes_dropped_owner_api_path_keeps_ide_tsx() {
             decl_background_loaded: false,
             shadow_path: None,
             shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
         },
     );
 
@@ -6875,6 +6954,7 @@ async fn open_unresolved_carrier_closes_dropped_owner_api_path_keeps_ide_tsx() {
         "/workspace/src/App.vue",
         false,
         Some(&ide),
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
     )
     .await;
     assert!(
@@ -7182,6 +7262,8 @@ const msg = 'hello'
             decl_background_loaded: false,
             shadow_path: None,
             shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
         },
     );
 
@@ -7276,6 +7358,8 @@ const msg = 'hello'
             decl_background_loaded: false,
             shadow_path: None,
             shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
         },
     );
 
@@ -7389,6 +7473,8 @@ const msg = 'hello'
             decl_background_loaded: false,
             shadow_path: None,
             shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
         },
     );
 
@@ -7476,6 +7562,8 @@ const msg = 'hello'
             decl_background_loaded: false,
             shadow_path: None,
             shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
         },
     );
 
@@ -7574,6 +7662,8 @@ const msg = 'hello'
             decl_background_loaded: false,
             shadow_path: None,
             shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
         },
     );
 
@@ -7669,6 +7759,7 @@ async fn drain_open_unresolved_carrier_no_ide_no_prior_commits_empty_unresolved(
         "/workspace/src/App.vue",
         false,
         None,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
     )
     .await;
     assert!(!synced, "no prior state + no IDE output must return false");
@@ -7803,6 +7894,8 @@ async fn drain_owner_transition_retains_prior_state_when_new_owner_sync_fails() 
         decl_background_loaded: false,
         shadow_path: None,
         shadow_background_loaded: false,
+        committed_ide_surface: None,
+        commit_stamp: None,
     };
     provider_sync_states.insert("/workspace/src/App.vue".to_string(), prior_state.clone());
 
@@ -7821,6 +7914,7 @@ async fn drain_owner_transition_retains_prior_state_when_new_owner_sync_fails() 
         false,
         None,
         None,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
     )
     .await;
 
@@ -7915,6 +8009,8 @@ async fn drain_owner_transition_closes_stale_path_only_after_successful_sync() {
             decl_background_loaded: false,
             shadow_path: None,
             shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
         },
     );
 
@@ -7930,6 +8026,7 @@ async fn drain_owner_transition_closes_stale_path_only_after_successful_sync() {
         false,
         None,
         None,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
     )
     .await;
 
@@ -8039,6 +8136,8 @@ async fn drain_owner_transition_partial_failure_retains_stale_path_of_failed_kin
             decl_background_loaded: false,
             shadow_path: None,
             shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
         },
     );
     let pending_snapshot_provider_sync = DashSet::new();
@@ -8053,6 +8152,7 @@ async fn drain_owner_transition_partial_failure_retains_stale_path_of_failed_kin
         false,
         None,
         None,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
     )
     .await;
 
@@ -8442,6 +8542,8 @@ async fn sync_carrier_ide_unresolved_forces_unresolved_over_prior_owned() {
             decl_background_loaded: false,
             shadow_path: None,
             shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
         },
     );
 
@@ -8487,6 +8589,8 @@ async fn sync_carrier_api_unresolved_forces_unresolved_over_prior_owned() {
             decl_background_loaded: false,
             shadow_path: None,
             shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
         },
     );
 
@@ -8549,12 +8653,17 @@ defineProps<{ msg: string }>()
     // transition through the carrier-sync gateway (which resolves the owner), so the
     // owner-resolved `.vue.tsx`/`.vue.verter.ts` paths are produced internally.
     let workspace_root = crate::test_utils::canonical_test_path(&workspace);
+    // A CONFIGURED owner (tsconfig): the carrier-sync gateway resolves ownership through
+    // the shared `WorkspaceProjectResolver` over this published vfs, so the owner key is
+    // the resolved tsconfig URI (never an inferred no-tsconfig config).
+    let tsconfig = format!("{workspace_root}/tsconfig.json");
+    let owner_vfs = configured_owner_vfs(&workspace_root, &tsconfig);
     let snapshot = PublishedResolverSnapshot {
         resolver: crate::project_resolver::NativeProjectResolver::new(vec![
             crate::project_resolver::IdeProjectConfig::new(
                 workspace_root.clone(),
                 workspace_root.clone(),
-                None,
+                Some(tsconfig.clone()),
             ),
         ]),
         ownership_ready: true,
@@ -8576,14 +8685,17 @@ defineProps<{ msg: string }>()
         decl_background_loaded: false,
         shadow_path: None,
         shadow_background_loaded: false,
+        committed_ide_surface: None,
+        commit_stamp: None,
     };
     provider_sync_states.insert(canonical_id.clone(), prior_state.clone());
 
     // Sanity: the gateway-equivalent transition marks the same-path IDE `.tsx` stale
     // (the close trigger). The task re-derives this internally; this local
-    // computation only asserts the scenario is set up correctly.
+    // computation only asserts the scenario is set up correctly. The re-derived owner
+    // key is the resolved tsconfig URI.
     let sanity_next = crate::provider_sync::ProviderSyncState {
-        owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(workspace_root.clone()),
+        owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(tsconfig.clone()),
         ide_path: Some(ide_path.clone()),
         api_path: Some(api_path.clone()),
         ..Default::default()
@@ -8605,11 +8717,14 @@ defineProps<{ msg: string }>()
         sync,
         snapshot,
         Arc::clone(&host),
+        Some(Arc::clone(&owner_vfs)),
         Arc::clone(&provider_sync_states),
         crate::provider_surface_store::ProviderSurfaceStore::new(),
         canonical_id.clone(),
         false,
         false,
+        std::sync::Arc::new(crate::external_ts::CarrierTransactionCoordinator::new()),
+        std::sync::Arc::new(dashmap::DashSet::new()),
     )
     .await;
 
@@ -8635,6 +8750,123 @@ defineProps<{ msg: string }>()
     assert!(
         state.ide_background_loaded,
         "background API sync must retain the prior IDE loaded flag"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn background_api_sync_superseded_admit_requeues_and_never_closes() {
+    // Dropped-outcome + close-race: when the background API task's owned commit
+    // is REFUSED by the admission gate (a newer transaction already committed a strictly-newer
+    // stamp), the task must REQUEUE the source and close NOTHING — the computed stale paths may
+    // be the newer transaction's live buffers.
+    //
+    // DISCRIMINATING: the pre-fix `let _ = admit_owned(..)` dropped the `Superseded` outcome —
+    // it did NOT requeue and it ran the stale-path close UNCONDITIONALLY. This forces a stale
+    // admit via a strictly-newer committed stamp and asserts the requeue happened and the stale
+    // API path was NOT closed.
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let workspace = tmp.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).expect("create src dir");
+    std::fs::write(
+        workspace.join("src/App.vue"),
+        r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><div>{{ msg }}</div></template>
+"#,
+    )
+    .expect("write App.vue");
+
+    let host = crate::test_utils::make_filesystem_test_host(&workspace);
+    let documents = DocumentRegistry::new(Arc::clone(&host));
+    let canonical_id = crate::test_utils::canonical_test_path(&workspace.join("src/App.vue"));
+    assert!(host.ensure_loaded(&canonical_id), "App.vue should load");
+    let _ = host.ensure_compiled(&canonical_id, &documents.tsx_profile.read());
+    assert!(host.get_public_api(&canonical_id).is_some());
+
+    let ide_path = format!("{canonical_id}.tsx");
+    // A DIFFERENT (stale) prior API path so the task's transition yields a genuinely-stale API
+    // path that the pre-fix unconditional close would have closed.
+    let stale_api_path = format!("{canonical_id}.OLD.verter.ts");
+
+    let provider = Arc::new(MockTypeProvider::new());
+    let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
+    let workspace_root = crate::test_utils::canonical_test_path(&workspace);
+    let tsconfig = format!("{workspace_root}/tsconfig.json");
+    let owner_vfs = configured_owner_vfs(&workspace_root, &tsconfig);
+    let snapshot = PublishedResolverSnapshot {
+        resolver: crate::project_resolver::NativeProjectResolver::new(vec![
+            crate::project_resolver::IdeProjectConfig::new(
+                workspace_root.clone(),
+                workspace_root.clone(),
+                Some(tsconfig.clone()),
+            ),
+        ]),
+        ownership_ready: true,
+    };
+
+    let provider_sync_states = Arc::new(DashMap::new());
+    // Prior committed state carrying a STRICTLY-NEWER stamp (a newer transaction already
+    // committed) so the task's owned commit is refused (Superseded) at the admission gate.
+    let prior_state = ProviderSyncState {
+        owner_binding: crate::provider_sync::ProviderOwnerBinding::Owned(tsconfig.clone()),
+        ide_path: Some(ide_path.clone()),
+        api_path: Some(stale_api_path.clone()),
+        decl_path: None,
+        ide_background_loaded: true,
+        api_background_loaded: true,
+        decl_background_loaded: false,
+        shadow_path: None,
+        shadow_background_loaded: false,
+        committed_ide_surface: None,
+        commit_stamp: Some(crate::provider_sync::CarrierCommitStamp {
+            ownership_generation: verter_workspace::workspace_snapshot::SnapshotGeneration(
+                u64::MAX,
+            ),
+            source_revision: u64::MAX,
+        }),
+    };
+    provider_sync_states.insert(canonical_id.clone(), prior_state);
+
+    let requeue = std::sync::Arc::new(dashmap::DashSet::new());
+    sync_api_to_provider_background_task(
+        sync,
+        snapshot,
+        Arc::clone(&host),
+        Some(Arc::clone(&owner_vfs)),
+        Arc::clone(&provider_sync_states),
+        crate::provider_surface_store::ProviderSurfaceStore::new(),
+        canonical_id.clone(),
+        false,
+        false,
+        std::sync::Arc::new(crate::external_ts::CarrierTransactionCoordinator::new()),
+        Arc::clone(&requeue),
+    )
+    .await;
+
+    // The refused (Superseded) commit re-queues the source for a fresh transaction (never a
+    // requeue-less drop) and does NOT overwrite the newer committed state.
+    assert!(
+        requeue.contains(&canonical_id),
+        "a Superseded background API commit must REQUEUE the source"
+    );
+    let surviving_rev = provider_sync_states
+        .get(&canonical_id)
+        .and_then(|s| s.commit_stamp.map(|c| c.source_revision));
+    assert_eq!(
+        surviving_rev,
+        Some(u64::MAX),
+        "a Superseded commit must NOT overwrite the strictly-newer committed state"
+    );
+    // No stale path was closed — the close is gated on Admitted.
+    let calls = provider.file_sync_calls();
+    assert!(
+        !calls.iter().any(|call| matches!(
+            call,
+            MockCall::CloseFile { path } if path == &stale_api_path || path == &ide_path
+        )),
+        "a Superseded commit must close NOTHING (the stale paths may be a newer transaction's \
+         live buffers), calls={calls:?}"
     );
 }
 
@@ -8675,12 +8907,16 @@ defineProps<{ msg: string }>()
     // A REAL resolver owning the workspace: the background task derives the owner-
     // resolved `.vue.verter.ts` API path (== `new_api_path`) through the gateway.
     let workspace_root = crate::test_utils::canonical_test_path(&workspace);
+    // A CONFIGURED owner (tsconfig): the gateway resolves ownership over this published
+    // vfs through the shared `WorkspaceProjectResolver`.
+    let tsconfig = format!("{workspace_root}/tsconfig.json");
+    let owner_vfs = configured_owner_vfs(&workspace_root, &tsconfig);
     let snapshot = PublishedResolverSnapshot {
         resolver: crate::project_resolver::NativeProjectResolver::new(vec![
             crate::project_resolver::IdeProjectConfig::new(
                 workspace_root.clone(),
                 workspace_root.clone(),
-                None,
+                Some(tsconfig.clone()),
             ),
         ]),
         ownership_ready: true,
@@ -8701,6 +8937,8 @@ defineProps<{ msg: string }>()
         decl_background_loaded: false,
         shadow_path: None,
         shadow_background_loaded: false,
+        committed_ide_surface: None,
+        commit_stamp: None,
     };
     provider_sync_states.insert(canonical_id.clone(), prior_state.clone());
 
@@ -8708,11 +8946,14 @@ defineProps<{ msg: string }>()
         sync,
         snapshot,
         Arc::clone(&host),
+        Some(Arc::clone(&owner_vfs)),
         Arc::clone(&provider_sync_states),
         crate::provider_surface_store::ProviderSurfaceStore::new(),
         canonical_id.clone(),
         false,
         false,
+        std::sync::Arc::new(crate::external_ts::CarrierTransactionCoordinator::new()),
+        std::sync::Arc::new(dashmap::DashSet::new()),
     )
     .await;
 
@@ -9024,6 +9265,8 @@ defineProps<{ msg: string }>()
             decl_background_loaded: false,
             shadow_path: None,
             shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
         },
     );
 
@@ -9104,6 +9347,8 @@ defineProps<{ msg: string }>()
         ide_background_loaded: false,
         shadow_path: None,
         shadow_background_loaded: false,
+        committed_ide_surface: None,
+        commit_stamp: None,
     };
     server.commit_provider_sync_state("/workspace/src/App.vue", prior_state.clone());
 
@@ -9373,6 +9618,8 @@ const msg = 'hello'
             decl_background_loaded: false,
             shadow_path: None,
             shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
         },
     );
 
@@ -9789,6 +10036,8 @@ const msg = 'hello'
             decl_background_loaded: false,
             shadow_path: None,
             shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
         },
     );
 
@@ -10818,6 +11067,15 @@ async fn sync_pending_carrier_provider_file_hydrates_codegen_blockers_before_syn
         resolver: crate::project_resolver::NativeProjectResolver::new(vec![project]),
         ownership_ready: true,
     };
+    // The drain carries a `CarrierPublishCtx` with the published vfs (the single
+    // ownership-resolution source; `coordinator: None` ⇒ direct-open).
+    let owner_vfs =
+        configured_owner_vfs(&workspace_id, &format!("{workspace_id}/tsconfig.app.json"));
+    let carrier_publish = crate::server::background_drain::CarrierPublishCtx {
+        coordinator: None,
+        vfs: Arc::clone(&owner_vfs),
+        ownership_ready: true,
+    };
     let ws = documents.host().workspace_read();
     let external_resolved = snapshot.resolver.resolve_with_reader(
         ws.as_ref(),
@@ -10852,7 +11110,8 @@ async fn sync_pending_carrier_provider_file_hydrates_codegen_blockers_before_syn
         &provider_sync_states,
         &app_id,
         false,
-        None,
+        Some(&carrier_publish),
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
     )
     .await;
     assert_eq!(
@@ -10922,14 +11181,23 @@ defineProps<{ msg: string }>()
         aliases: Vec::new(),
     });
 
+    let tsconfig = format!("{workspace_id}/tsconfig.app.json");
     let snapshot = PublishedResolverSnapshot {
         resolver: crate::project_resolver::NativeProjectResolver::new(vec![
             crate::project_resolver::IdeProjectConfig::new(
                 workspace_id.clone(),
                 workspace_id.clone(),
-                Some(format!("{workspace_id}/tsconfig.app.json")),
+                Some(tsconfig.clone()),
             ),
         ]),
+        ownership_ready: true,
+    };
+    // The tsgo drain always carries a `CarrierPublishCtx` with the published vfs (the
+    // single ownership-resolution source; its `coordinator` is `None` for tsgo).
+    let owner_vfs = configured_owner_vfs(&workspace_id, &tsconfig);
+    let carrier_publish = crate::server::background_drain::CarrierPublishCtx {
+        coordinator: None,
+        vfs: Arc::clone(&owner_vfs),
         ownership_ready: true,
     };
     let provider = Arc::new(MockTypeProvider::new());
@@ -10943,7 +11211,8 @@ defineProps<{ msg: string }>()
         &provider_sync_states,
         &app_id,
         true,
-        None,
+        Some(&carrier_publish),
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
     )
     .await;
 
@@ -12333,6 +12602,8 @@ async fn deleting_carrier_source_closes_its_companions_in_provider() {
             decl_background_loaded: false,
             shadow_path: None,
             shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
         },
     );
 
@@ -13244,6 +13515,7 @@ import Child from '@/components/Child.vue'
         None,
         &DeclOverlayOwner::default(),
         1,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
     )
     .await;
 
@@ -13445,6 +13717,7 @@ async fn declaration_closure_proactively_opens_transitive_decl_overlays() {
         None,
         &decl_overlay_owner,
         1,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
     )
     .await;
 
@@ -13587,6 +13860,7 @@ async fn lone_leaf_carrier_opens_its_own_declaration_overlay() {
         None,
         &decl_overlay_owner,
         1,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
     )
     .await;
 
@@ -13729,6 +14003,7 @@ async fn stale_pass_does_not_reopen_a_declaration_overlay_a_newer_pass_closed() 
         None,
         &decl_overlay_owner,
         5,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
     )
     .await;
     let calls_after_stale = provider.file_sync_calls();
@@ -13757,6 +14032,7 @@ async fn stale_pass_does_not_reopen_a_declaration_overlay_a_newer_pass_closed() 
         None,
         &decl_overlay_owner,
         101,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
     )
     .await;
     let calls_after_current = provider.file_sync_calls();
@@ -13865,6 +14141,7 @@ async fn stale_open_gated_when_high_water_advances_between_its_gate_and_record()
     // window between the open's gate and its record. The high-water starts at 0, so the
     // older open passes any pre-seam state and is only gated by the atomic re-read.
     let interleave = decl_overlay_owner.arm_add_gate_interleave_for_test(&root_canonical);
+    let carrier_coordinator = crate::external_ts::CarrierTransactionCoordinator::new();
     let pass = resync_aliased_imports_for_open_files(
         &documents,
         Some(&sync),
@@ -13874,6 +14151,7 @@ async fn stale_open_gated_when_high_water_advances_between_its_gate_and_record()
         None,
         &decl_overlay_owner,
         5,
+        &carrier_coordinator,
     );
     let advance_between_gate_and_record = async {
         // Wait until the older open reaches the add-gate seam (after its path-lock +
@@ -13916,6 +14194,7 @@ async fn stale_open_gated_when_high_water_advances_between_its_gate_and_record()
         None,
         &decl_overlay_owner,
         101,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
     )
     .await;
     let calls_after_current = provider.file_sync_calls();
@@ -14156,6 +14435,7 @@ async fn closure_final_reconcile_drops_root_that_closed_mid_pass() {
         None,
         &decl_overlay_owner,
         1,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
     )
     .await;
 
@@ -14937,6 +15217,7 @@ async fn closure_reconciles_dropped_import_releases_overlay() {
         None,
         &decl_overlay_owner,
         1,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
     )
     .await;
 
@@ -14970,6 +15251,7 @@ async fn closure_reconciles_dropped_import_releases_overlay() {
         None,
         &decl_overlay_owner,
         1,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
     )
     .await;
 
@@ -15442,6 +15724,8 @@ import Child from '@/components/Child.vue'
         ide_background_loaded: false,
         shadow_path: None,
         shadow_background_loaded: false,
+        committed_ide_surface: None,
+        commit_stamp: None,
     };
     provider_sync_states.insert(child_id.clone(), prior_state.clone());
 
@@ -15454,6 +15738,7 @@ import Child from '@/components/Child.vue'
         None,
         &DeclOverlayOwner::default(),
         1,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
     )
     .await;
 
@@ -15574,6 +15859,7 @@ import Child from '@/components/Child.vue'
         None,
         &DeclOverlayOwner::default(),
         1,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
     )
     .await;
 
@@ -15688,6 +15974,7 @@ import { Overlay } from './components'
         None,
         &DeclOverlayOwner::default(),
         1,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
     )
     .await;
 
@@ -15849,6 +16136,8 @@ defineProps<{ msg: string }>()
         decl_background_loaded: false,
         shadow_path: None,
         shadow_background_loaded: false,
+        committed_ide_surface: None,
+        commit_stamp: None,
     };
     provider_sync_states.insert(child_id.clone(), prior_state);
 
@@ -15862,6 +16151,7 @@ defineProps<{ msg: string }>()
         None,
         &DeclOverlayOwner::default(),
         1,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
     )
     .await;
 
@@ -16035,6 +16325,8 @@ defineProps<{ show: boolean }>()
             decl_background_loaded: false,
             shadow_path: None,
             shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
         },
     );
 
@@ -16048,6 +16340,7 @@ defineProps<{ show: boolean }>()
         None,
         &DeclOverlayOwner::default(),
         1,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
     )
     .await;
 
@@ -16153,6 +16446,8 @@ defineProps<{ msg: string }>()
             decl_background_loaded: false,
             shadow_path: None,
             shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
         },
     );
 
@@ -16259,6 +16554,8 @@ defineProps<{ msg: string }>()
             decl_background_loaded: false,
             shadow_path: None,
             shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
         },
     );
 
@@ -16577,11 +16874,14 @@ fn vfs_workspace_with_project_graph() {
         },
     ));
 
-    // Before setting a project graph, owner_for_file returns None
+    // Before setting a project graph, no fallback owner resolves.
     use verter_workspace::WorkspaceRead;
     assert!(
         workspace
-            .owner_for_file("/my-project/src/App.vue")
+            .published_root()
+            .and_then(|root| root
+                .snapshot
+                .single_fallback_owner_for_file("/my-project/src/App.vue"))
             .is_none(),
         "empty project graph should have no owner"
     );
@@ -16598,26 +16898,31 @@ fn vfs_workspace_with_project_graph() {
             workspace_aliases: vec![],
             compiler_options: Default::default(),
             references: vec![],
-            membership: verter_workspace::ProjectMembership::MatchAll,
+            membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+                &verter_workspace::CanonicalPath::new("/my-project"),
+            ),
         }]);
     workspace.set_project_graph(graph);
 
-    // Now owner_for_file should return the project
-    let owner = workspace.owner_for_file("/my-project/src/App.vue");
+    // Now the fallback resolution should return the project.
+    let root = workspace.published_root().expect("published snapshot");
+    let owner = root
+        .snapshot
+        .single_fallback_owner_for_file("/my-project/src/App.vue");
     assert!(
         owner.is_some(),
         "file under project root should have an owner after graph set"
     );
     assert_eq!(
-        owner.unwrap().project_root,
+        root.snapshot.project(owner.unwrap()).root.as_str(),
         "/my-project",
         "owner should be the correct project root"
     );
 
     // Negative: file outside project root should have no owner
     assert!(
-        workspace
-            .owner_for_file("/other-project/src/App.vue")
+        root.snapshot
+            .single_fallback_owner_for_file("/other-project/src/App.vue")
             .is_none(),
         "file outside project root should have no owner"
     );
@@ -17211,6 +17516,8 @@ async fn virtual_file_completion_routes_actionable_handle_through_envelope() {
             api_background_loaded: false,
             decl_background_loaded: false,
             shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
         },
     );
     // Record the surface a successful IDE sync would have recorded — the
@@ -17359,6 +17666,8 @@ fn active_non_decl_paths_excludes_the_declaration_overlay() {
         api_background_loaded: true,
         decl_background_loaded: true,
         shadow_background_loaded: true,
+        committed_ide_surface: None,
+        commit_stamp: None,
     };
 
     // The full active set still includes the declaration overlay.
@@ -17417,6 +17726,8 @@ async fn generic_stale_closer_never_closes_declaration_overlay() {
         api_background_loaded: true,
         decl_background_loaded: true,
         shadow_background_loaded: false,
+        committed_ide_surface: None,
+        commit_stamp: None,
     };
 
     // Exactly the call shape the removal paths use: the generic closer over the
@@ -18202,6 +18513,7 @@ async fn bootstrap_drained_carrier_records_surface_and_serves_provider_hover() {
         true,
         None,
         None,
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
     )
     .await;
 
@@ -18283,6 +18595,7 @@ async fn open_unresolved_drain_ide_sync_records_carrier_ide_surface() {
         "/workspace/src/App.vue",
         false,
         Some(&ide),
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
     )
     .await;
     assert!(
@@ -18332,6 +18645,7 @@ async fn open_unresolved_drain_ide_sync_records_carrier_ide_surface() {
         "/workspace/src/Other.vue",
         false,
         Some(&other_ide),
+        &crate::external_ts::CarrierTransactionCoordinator::new(),
     )
     .await;
     assert!(
@@ -18513,6 +18827,8 @@ async fn make_virtual_file_fixture(
             api_background_loaded: false,
             decl_background_loaded: false,
             shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
         },
     );
     server.record_carrier_ide_snapshot("/workspace/src/App.vue", &tsx_path, recorded_content, None);

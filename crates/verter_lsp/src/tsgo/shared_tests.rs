@@ -17,10 +17,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use verter_session::external_ts::{
-    resolve_reference_canonical_path, AttachFact, BindingFact, ConfigPathProbe, EditorBindingFact,
-    EngineSessionFacts, EngineWarmCache, OwnedReason, OwnedSessionFacts, ProjectBinding,
-    ProjectResolution, ProxyFact, ReferenceInput, ServeMode, ServingProvenance, SharedSessionFacts,
-    VersionGateFact,
+    resolve_reference_canonical_path, AttachFact, BindingFact, CarrierOwnershipResolution,
+    ConfigPathProbe, EditorBindingFact, EngineSessionFacts, EngineWarmCache, OwnedReason,
+    OwnedSessionFacts, ProjectBinding, ProxyFact, ReferenceInput, ServeMode, ServingProvenance,
+    SharedSessionFacts, VersionGateFact,
 };
 use verter_session::external_ts::{EnvDims, ProjectEnvDimsSource};
 use verter_session::file_artifact_store::ProjectIdentity;
@@ -46,13 +46,15 @@ fn env_dims(identity: ProjectIdentity) -> EnvDims {
     }
 }
 
-fn test_binding(identity: ProjectIdentity) -> ProjectResolution {
-    ProjectResolution::ProjectBinding(ProjectBinding::new_for_test(
+fn test_binding(identity: ProjectIdentity) -> CarrierOwnershipResolution {
+    CarrierOwnershipResolution::Bound(ProjectBinding::new_for_test(
         "/ws",
         "/ws/tsconfig.json",
         "7.0.1-rc",
         env_dims(identity),
         Vec::new(),
+        verter_workspace::ProjectId(0),
+        verter_workspace::SnapshotGeneration(1),
     ))
 }
 
@@ -160,7 +162,7 @@ fn each_missing_positive_fact_fails_closed_to_owned() {
     {
         let mut warm = EngineWarmCache::new();
         let mut p = positive(id, 1);
-        p.binding = BindingFact::from_resolution(&ProjectResolution::NoProject);
+        p.binding = BindingFact::from_resolution(&CarrierOwnershipResolution::NoProject);
         assert_eq!(
             decide(&p, &mut warm),
             ServeMode::Owned,
@@ -191,7 +193,7 @@ fn each_missing_positive_fact_fails_closed_to_owned() {
     }
 }
 
-/// An `Ambiguous`/`SyntheticScratch` resolution is NOT a binding — "tsgo seems to
+/// An `Ambiguous`/`NotReady` resolution is NOT a binding — "tsgo seems to
 /// know this file" is not eligibility.
 #[test]
 fn non_binding_resolution_is_not_bound() {
@@ -199,20 +201,21 @@ fn non_binding_resolution_is_not_bound() {
     let mut warm = EngineWarmCache::new();
     let id = pid(7);
     let mut p = positive(id, 1);
-    p.binding = BindingFact::from_resolution(&ProjectResolution::Ambiguous(
-        AmbiguityCause::MultipleOwners,
-    ));
+    p.binding = BindingFact::from_resolution(&CarrierOwnershipResolution::Ambiguous {
+        candidates: Vec::new(),
+        cause: AmbiguityCause::MultipleOwners,
+    });
     assert_eq!(
         decide(&p, &mut warm),
         ServeMode::Owned,
         "an ambiguous (non-binding) resolution must fail closed to OWNED"
     );
     let mut p = positive(id, 1);
-    p.binding = BindingFact::from_resolution(&ProjectResolution::synthetic_scratch("scratch"));
+    p.binding = BindingFact::from_resolution(&CarrierOwnershipResolution::NotReady);
     assert_eq!(
         decide(&p, &mut warm),
         ServeMode::Owned,
-        "a synthetic-scratch resolution must fail closed to OWNED"
+        "a not-yet-ready (bootstrap) resolution must fail closed to OWNED"
     );
 }
 

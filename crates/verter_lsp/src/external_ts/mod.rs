@@ -28,9 +28,11 @@ pub use carrier_publish_store::{
 #[cfg(test)]
 pub use carrier_publish_store::test_store_dir_override;
 pub(crate) use carrier_sync::{
-    carrier_close_target, commit_carrier_provider_state, reconcile_carrier_source,
-    CarrierMembershipCtx, CarrierProviderCommit, CarrierSyncDecision, CarrierSyncRequest,
+    carrier_close_target, project_ownership_diagnostic, reconcile_carrier_source, AdmitOutcome,
+    CarrierMembershipCtx, CarrierNotOwned, CarrierSyncDecision, CarrierSyncRequest,
+    CarrierTransactionCoordinator, SettleClass,
 };
+pub(crate) use publish_coordinator::resolve_carrier_ownership_over_vfs;
 pub use publish_coordinator::{CarrierCompanion, CarrierPublishCoordinator, CarrierPublishError};
 pub use tsgo_backend::TsgoEngineBackend;
 pub use tsserver_backend::TsserverEngineBackend;
@@ -40,8 +42,7 @@ pub use membership_ledger::{
     MembershipRecord, ProjectUri, SessionGen,
 };
 pub use membership_reconciler::{
-    AuthorityState, BootstrapKind, BootstrapState, CarrierMembershipCommitter, CommitErr,
-    CommitFuture, DesiredMembership, MembershipReconciler, OwnershipAuthority, OwnershipDecision,
-    PrecomputedOwnershipAuthority, ReconcileErr, ReconcileOutcome, ReconcileReason,
-    ResolverOwnershipAuthority,
+    BootstrapKind, BootstrapState, CarrierMembershipCommitter, CommitErr, CommitFuture,
+    CompanionFingerprint, DesiredMembership, MembershipReconciler, PendingProviderReady,
+    ProviderGeneration, ProviderReadyReceipt, ReconcileErr, ReconcileOutcome, ReconcileReason,
 };

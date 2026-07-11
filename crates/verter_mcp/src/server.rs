@@ -3983,22 +3983,40 @@ const msg = ref('hello')
         );
 
         // Verify the host has a workspace reference (non-standalone uses Arc<dyn WorkspaceAccess>)
-        let ws = host.workspace_read();
-        // owner_for_file returns None because no project graph was set
+        // With no project graph, the file has no configured owner and no fallback owner.
         assert!(
-            ws.owner_for_file("/test-project/Comp.vue").is_none(),
+            no_owner_for(&host, "/test-project/Comp.vue"),
             "default FilesystemWorkspace has empty project graph"
         );
     }
 
-    #[test]
-    fn host_with_filesystem_workspace_owner_for_file() {
-        let host = make_host_with_workspace(vec!["/my-project".to_string()]);
-        let ws = host.workspace_read();
+    /// Whether the workspace resolves NEITHER a configured owner NOR a single
+    /// fallback owner for `canonical` (the replacement for the retired
+    /// `WorkspaceRead::owner_for_file` smoke check).
+    fn no_owner_for(host: &verter_session::VerterHost, canonical: &str) -> bool {
+        use verter_workspace::workspace_snapshot::ConfiguredOwnerResolution;
+        match host.workspace_read().published_root() {
+            Some(root) => {
+                matches!(
+                    root.snapshot
+                        .configured_owner_resolution_for_file(canonical),
+                    ConfiguredOwnerResolution::None
+                ) && root
+                    .snapshot
+                    .single_fallback_owner_for_file(canonical)
+                    .is_none()
+            }
+            None => true,
+        }
+    }
 
-        // Before setting a project graph, owner_for_file returns None
+    #[test]
+    fn host_with_filesystem_workspace_no_owner_without_graph() {
+        let host = make_host_with_workspace(vec!["/my-project".to_string()]);
+
+        // Before setting a project graph, no configured or fallback owner resolves.
         assert!(
-            ws.owner_for_file("/my-project/src/App.vue").is_none(),
+            no_owner_for(&host, "/my-project/src/App.vue"),
             "default workspace has no project graph, so no owner"
         );
     }

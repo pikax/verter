@@ -28,8 +28,8 @@ use crate::types::{
 };
 use crate::VerterHost;
 use verter_workspace::{
-    IdeProjectCompilerOptions, MemoryOptions, MemoryWorkspace, ProjectGraph, ProjectMembership,
-    ProjectRank, VfsProjectConfig,
+    IdeProjectCompilerOptions, MemoryOptions, MemoryWorkspace, ProjectGraph, ProjectRank,
+    VfsProjectConfig,
 };
 
 const PROJECT_ROOT: &str = "/projN";
@@ -56,7 +56,9 @@ fn project_config(paths: Vec<(String, Vec<String>)>) -> VfsProjectConfig {
             ..Default::default()
         },
         references: vec![],
-        membership: ProjectMembership::MatchAll,
+        membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+            &verter_workspace::CanonicalPath::new(PROJECT_ROOT),
+        ),
     }
 }
 

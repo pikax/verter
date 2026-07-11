@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use verter_session::external_ts::{
-    BoundProject, EngineBackend, EnvDims, OpenState, ProjectBinding, ProjectResolution,
+    BoundProject, CarrierOwnershipResolution, EngineBackend, EnvDims, OpenState, ProjectBinding,
     PublishSnapshot, ScriptKind, SnapshotFile, SnapshotRole,
 };
 use verter_session::file_artifact_store::ProjectIdentity;
@@ -38,11 +38,13 @@ fn ensure(
         "7.0.1",
         env_dims(),
         Vec::new(),
+        verter_workspace::ProjectId(0),
+        verter_workspace::SnapshotGeneration(1),
     );
     // Sanity: the binding is the resolved state.
     assert!(matches!(
-        ProjectResolution::ProjectBinding(binding.clone()),
-        ProjectResolution::ProjectBinding(_)
+        CarrierOwnershipResolution::Bound(binding.clone()),
+        CarrierOwnershipResolution::Bound(_)
     ));
     backend
         .ensure_project(binding.ensure_project_request())

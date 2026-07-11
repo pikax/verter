@@ -1,5 +1,7 @@
 use crate::project_resolver::NativeProjectResolver;
 use dashmap::DashMap;
+use verter_semantic::analysis::types::Hash16;
+use verter_workspace::workspace_snapshot::SnapshotGeneration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderPathKind {
@@ -106,6 +108,73 @@ impl ProviderOwnerBinding {
     }
 }
 
+/// The receipt-attested identity of the carrier IDE provider surface that was
+/// actually committed (published to the store / opened as a direct buffer) for a
+/// source.
+///
+/// Stamped onto the committed [`ProviderSyncState`] ONLY by
+/// [`commit_carrier_provider_state`](crate::external_ts::commit_carrier_provider_state),
+/// which is gated by a validated
+/// [`ProviderReadyReceipt`](crate::external_ts::ProviderReadyReceipt); the identity is
+/// the receipt's `CarrierIde` companion fingerprint (its content + source-map hashes),
+/// i.e. the EXACT bytes the provider serves. A later capture requires the store's
+/// CURRENT IDE surface to be this exact committed one — a surface RECORDED for a
+/// publish that FAILED or never committed carries a different content/map identity and
+/// is refused, so a provider offset (produced against the last successfully published
+/// content) is never mapped through newer, uncommitted content/map.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommittedCarrierIdeSurface {
+    /// Content-addressed hash (`Hash16`) of the committed IDE companion bytes.
+    pub content_hash: Hash16,
+    /// Content-addressed hash (`Hash16`) of the committed IDE companion's source-map
+    /// JSON (`[0; 16]` when the surface carries no map).
+    pub map_hash: Hash16,
+}
+
+/// The monotonic identity of the readiness receipt a carrier provider state was last
+/// committed under — the compare-and-swap guard the receipt-gated
+/// [`commit_carrier_provider_state`](crate::external_ts::commit_carrier_provider_state)
+/// uses to REFUSE a stale receipt overwriting a newer committed state.
+///
+/// Ordered lexicographically `(ownership_generation, source_revision)`: an ownership
+/// change advances the snapshot generation; a same-owner content edit advances the
+/// per-source content-transition revision. A commit whose receipt is STRICTLY OLDER than
+/// the currently-committed stamp is refused (no state/stamp overwrite), so a
+/// prepare-then-open transaction that is superseded mid-flight can never overwrite the
+/// state a newer transaction already committed. `None` on a state that was never committed
+/// through the gate (an unresolved editor-liveness / non-carrier commit, which carries no
+/// receipt).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CarrierCommitStamp {
+    /// The owning-project ownership generation the receipt was minted at.
+    pub ownership_generation: SnapshotGeneration,
+    /// The per-source content revision the receipt attests (captured at open time).
+    pub source_revision: u64,
+}
+
+impl CarrierCommitStamp {
+    /// Whether `self` is STRICTLY OLDER than `other` in the lexicographic
+    /// `(ownership_generation, source_revision)` order — the stale-receipt predicate the
+    /// admission gate refuses on. Equal or newer receipts are admitted (a monotonic
+    /// compare-and-swap that always moves the committed identity forward, never backward).
+    #[must_use]
+    pub fn is_stale_against(&self, other: &CarrierCommitStamp) -> bool {
+        (self.ownership_generation, self.source_revision)
+            < (other.ownership_generation, other.source_revision)
+    }
+
+    /// Whether `self` and `other` carry the SAME `(ownership_generation, source_revision)`
+    /// key. At an equal key the admission gate treats a commit as idempotent ONLY when it
+    /// reproduces the identical committed artifact (the same receipt-attested IDE surface);
+    /// an equal-key commit carrying a DIFFERENT artifact is refused, so a torn/superseded
+    /// production sharing a revision can never overwrite the committed surface.
+    #[must_use]
+    pub fn is_same_key(&self, other: &CarrierCommitStamp) -> bool {
+        self.ownership_generation == other.ownership_generation
+            && self.source_revision == other.source_revision
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProviderSyncState {
     pub owner_binding: ProviderOwnerBinding,
@@ -118,6 +187,19 @@ pub struct ProviderSyncState {
     pub api_background_loaded: bool,
     pub decl_background_loaded: bool,
     pub shadow_background_loaded: bool,
+    /// The receipt-attested identity of the committed carrier IDE surface (set only by
+    /// the receipt-gated [`commit_carrier_provider_state`](crate::external_ts::commit_carrier_provider_state)).
+    /// `None` for an UNRESOLVED editor-liveness carrier and for non-carrier / self-file
+    /// commits (which record their surface only AFTER a successful direct sync and need
+    /// no membership stamp). See [`Self::authorizes_carrier_ide_capture`].
+    pub committed_ide_surface: Option<CommittedCarrierIdeSurface>,
+    /// The monotonic identity of the readiness receipt this state was last committed
+    /// under (set only by the receipt-gated
+    /// [`commit_carrier_provider_state`](crate::external_ts::commit_carrier_provider_state)).
+    /// The compare-and-swap oracle that REFUSES a stale receipt overwriting a newer
+    /// committed state — see [`CarrierCommitStamp`]. `None` for a non-carrier / unresolved
+    /// commit (which carries no receipt).
+    pub commit_stamp: Option<CarrierCommitStamp>,
 }
 
 impl ProviderSyncState {
@@ -185,6 +267,32 @@ impl ProviderSyncState {
         self.owner_binding.is_unresolved()
     }
 
+    /// Whether this committed state authorizes capturing a carrier IDE surface with
+    /// the given content / source-map identity as the source's LIVE IDE surface.
+    ///
+    /// An OWNED carrier reaches the provider only through the receipt-gated membership
+    /// commit, which stamps the exact published IDE-surface identity
+    /// ([`committed_ide_surface`](Self::committed_ide_surface)). A capture must therefore
+    /// be that exact published surface: a newer surface RECORDED for a publish that
+    /// FAILED or never committed carries a differing content/map identity and is refused
+    /// — mapping the provider's offsets (produced against the last successfully
+    /// published content) through the newer content/map would be wrong, not merely
+    /// stale. An OWNED state missing the stamp fails closed (no captured surface ⇒ no
+    /// mapping through uncommitted content).
+    ///
+    /// An UNRESOLVED (editor-liveness) carrier records its IDE surface only AFTER a
+    /// successful direct sync and carries no membership stamp, so any live surface for
+    /// it is capturable.
+    pub fn authorizes_carrier_ide_capture(&self, content_hash: Hash16, map_hash: Hash16) -> bool {
+        if self.owner_binding.is_unresolved() {
+            return true;
+        }
+        match &self.committed_ide_surface {
+            Some(stamp) => stamp.content_hash == content_hash && stamp.map_hash == map_hash,
+            None => false,
+        }
+    }
+
     /// Create an unresolved (no committed owner) IDE-only sync state for a
     /// given IDE path.
     pub fn unresolved(ide_path: String) -> Self {
@@ -198,6 +306,8 @@ impl ProviderSyncState {
             api_background_loaded: false,
             decl_background_loaded: false,
             shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
         }
     }
 
@@ -246,7 +356,7 @@ pub fn current_owner_binding_for_source(
     resolver: &NativeProjectResolver,
     source_id: &str,
 ) -> ProviderOwnerBinding {
-    match resolver.owner_for_file(source_id) {
+    match resolver.nearest_config_for_path(source_id) {
         Some(owner) => {
             let owner_key = owner
                 .tsconfig_path
@@ -298,7 +408,7 @@ pub fn non_carrier_sync_state_for_source(
     resolver: &NativeProjectResolver,
     source_id: &str,
 ) -> Option<ProviderSyncState> {
-    let owner = resolver.owner_for_file(source_id)?;
+    let owner = resolver.nearest_config_for_path(source_id)?;
     let owner_key = owner
         .tsconfig_path
         .clone()
@@ -313,6 +423,8 @@ pub fn non_carrier_sync_state_for_source(
         api_background_loaded: false,
         decl_background_loaded: false,
         shadow_background_loaded: false,
+        committed_ide_surface: None,
+        commit_stamp: None,
     })
 }
 
@@ -454,6 +566,8 @@ pub fn open_unresolved_carrier_state(
         api_background_loaded: false,
         decl_background_loaded: false,
         shadow_background_loaded: false,
+        committed_ide_surface: None,
+        commit_stamp: None,
     }
 }
 
@@ -657,6 +771,8 @@ pub fn open_unresolved_carrier_commit(
             api_background_loaded: false,
             decl_background_loaded: false,
             shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
         }
     });
 

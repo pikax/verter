@@ -52,11 +52,11 @@ use verter_tsgo_api::proto::types::OpaqueHandle;
 use verter_tsgo_api::transport::pipe_attach::connect_attach_pipe;
 
 use verter_session::external_ts::{
-    compose_eligibility, decide_live, AttachFact, BindingFact, ComponentModeDecision,
-    ConfigPathProbe, EditorBindingFact, EligibilityFacts, EngineSessionCandidates,
-    EngineSessionFacts, EngineWarmCache, LiveDecision, LiveDecisionRequest, LiveProjectInput,
-    OwnedSessionFacts, ProjectIdentitySource, ProjectResolution, ProxyFact, ReferenceInput,
-    ServeMode, SharedSessionFacts, VersionGateFact,
+    compose_eligibility, decide_live, AttachFact, BindingFact, CarrierOwnershipResolution,
+    ComponentModeDecision, ConfigPathProbe, EditorBindingFact, EligibilityFacts,
+    EngineSessionCandidates, EngineSessionFacts, EngineWarmCache, LiveDecision,
+    LiveDecisionRequest, LiveProjectInput, OwnedSessionFacts, ProjectIdentitySource, ProxyFact,
+    ReferenceInput, ServeMode, SharedSessionFacts, VersionGateFact,
 };
 use verter_session::file_artifact_store::ProjectIdentity;
 
@@ -125,9 +125,9 @@ pub struct EstablishSharedParams<'a> {
     /// The forward-slashed configured tsconfig path opened on the `--api` side.
     pub tsconfig_path: &'a str,
     /// The resolved project binding evidence for the carrier's owning project. A
-    /// real [`ProjectResolution::ProjectBinding`] is the ONLY value that yields a
+    /// real [`CarrierOwnershipResolution::Bound`] is the ONLY value that yields a
     /// [`BindingFact::Bound`]; every other state fails closed to OWNED.
-    pub resolution: ProjectResolution,
+    pub resolution: CarrierOwnershipResolution,
     /// The published snapshot / config generation the binding was resolved at — the
     /// warm-key `config_generation` dimension for the establishment decision, so a
     /// same-generation first per-query re-decision reuses the establishment's warm entry
@@ -485,7 +485,7 @@ impl TsgoSharedProvider {
         //    resolved binding, then decide the serve mode.
         let binding_fact = BindingFact::from_resolution(&params.resolution);
         let node_identity = match &params.resolution {
-            ProjectResolution::ProjectBinding(b) => b.env_dims().project_identity,
+            CarrierOwnershipResolution::Bound(b) => b.env_dims().project_identity,
             _ => stable_project_identity(params.tsconfig_path),
         };
         // The editor-binding witness, keyed on the resolved PROJECT identity (never a
@@ -542,10 +542,10 @@ impl TsgoSharedProvider {
         // component, never per single tsconfig — a references-bearing project whose
         // closure the snapshot cannot prove eligible fails closed to OWNED here.
         let references = match &params.resolution {
-            ProjectResolution::ProjectBinding(b) => redirect_on_references(b),
-            ProjectResolution::NoProject
-            | ProjectResolution::Ambiguous(_)
-            | ProjectResolution::SyntheticScratch(_) => Vec::new(),
+            CarrierOwnershipResolution::Bound(b) => redirect_on_references(b),
+            CarrierOwnershipResolution::NoProject
+            | CarrierOwnershipResolution::Ambiguous { .. }
+            | CarrierOwnershipResolution::NotReady => Vec::new(),
         };
 
         // The establishment (attach-time) decision through the ONE shared live
@@ -649,7 +649,7 @@ impl TsgoSharedProvider {
     ) -> LiveDecision {
         let references = redirect_on_references(binding);
         self.controller.decide(
-            BindingFact::from_resolution(&ProjectResolution::ProjectBinding(binding.clone())),
+            BindingFact::from_resolution(&CarrierOwnershipResolution::Bound(binding.clone())),
             binding.env_dims().project_identity,
             Arc::from(binding.tsconfig_uri()),
             &references,

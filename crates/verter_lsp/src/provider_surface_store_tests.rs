@@ -1877,3 +1877,95 @@ fn map_hash_is_none_for_a_surface_without_a_source_map_fail_closed() {
         "mapped_results_valid must fail closed when the current surface has no usable mapper"
     );
 }
+
+/// FORK-1 capture wiring: `capture_committed_carrier_ide_surface` must drop a surface
+/// whose CURRENT identity no longer matches the receipt-attested committed stamp on the
+/// OWNED state — the record-before-publish window that PERSISTS after a failed reconcile.
+///
+/// Reproduces the bug end-to-end: a committed IDE surface (V1) is capturable; a NEW sync
+/// then records a different IDE surface (V2) at the same path but its publish FAILED, so
+/// the committed state still attests V1. The store's CURRENT surface is V2, so mapping a
+/// provider offset (produced against V1) through it would be wrong — the capture MUST
+/// drop.
+///
+/// DISCRIMINATING: without the stamp gate the second capture reaches
+/// `surface_matches_open_document_source` (which passes — the open doc still matches the
+/// carrier source) and returns `Some`, so the `is_none()` assertion fails.
+#[test]
+fn committed_ide_capture_drops_a_newly_recorded_but_uncommitted_surface() {
+    use crate::provider_sync::{
+        CommittedCarrierIdeSurface, ProviderOwnerBinding, ProviderSyncState,
+    };
+    use dashmap::DashMap;
+    use tower_lsp_server::ls_types::{TextDocumentItem, Uri};
+
+    // A real open carrier document so `surface_matches_open_document_source` passes —
+    // isolating the committed-surface stamp gate as the sole reason a capture drops.
+    let host = Arc::new(verter_session::VerterHost::new_standalone(
+        verter_session::HostConfig::default(),
+    ));
+    let documents = crate::documents::DocumentRegistry::new(host);
+    let uri: Uri = "file:///ws/src/App.vue".parse().unwrap();
+    let carrier_src = "<template><div/></template>\n";
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: carrier_src.to_string(),
+    });
+    let canonical = documents
+        .get_canonical_id(&uri)
+        .expect("the open carrier has a canonical id");
+
+    let store = ProviderSurfaceStore::new();
+    let ide_path = format!("{canonical}.tsx");
+    let states: DashMap<String, ProviderSyncState> = DashMap::new();
+
+    // 1. A COMMITTED publish: record the IDE surface (V1) and stamp the OWNED state with
+    //    that receipt-attested identity (exactly as `commit_carrier_provider_state` does).
+    let v1 = store.record(RecordSurface::carrier_legacy(
+        ProviderSurfaceKind::CarrierIde,
+        ide_path.clone(),
+        canonical.clone(),
+        Arc::from("export const __IDE_V1 = 1;\n"),
+        None,
+        Arc::from(carrier_src),
+    ));
+    states.insert(
+        canonical.clone(),
+        ProviderSyncState {
+            owner_binding: ProviderOwnerBinding::Owned("/ws/tsconfig.json".to_string()),
+            ide_path: Some(ide_path.clone()),
+            ide_background_loaded: true,
+            committed_ide_surface: Some(CommittedCarrierIdeSurface {
+                content_hash: v1.stamp.content_hash.to_hash16(),
+                map_hash: v1.stamp.map_hash,
+            }),
+            ..Default::default()
+        },
+    );
+
+    // The committed surface (current == committed) IS capturable.
+    assert!(
+        capture_committed_carrier_ide_surface(&store, &states, &documents, &canonical).is_some(),
+        "the committed (published) IDE surface must be capturable"
+    );
+
+    // 2. A NEW sync records a DIFFERENT IDE surface (V2) at the same path — the
+    //    record-before-publish. Its publish FAILED, so NO commit advanced the state's
+    //    stamp (it still attests V1). The store's CURRENT surface is now V2.
+    store.record(RecordSurface::carrier_legacy(
+        ProviderSurfaceKind::CarrierIde,
+        ide_path.clone(),
+        canonical.clone(),
+        Arc::from("export const __IDE_V2_UNCOMMITTED = 2;\n"),
+        None,
+        Arc::from(carrier_src),
+    ));
+
+    // The current surface (V2) no longer matches the committed stamp (V1) ⇒ fail closed.
+    assert!(
+        capture_committed_carrier_ide_surface(&store, &states, &documents, &canonical).is_none(),
+        "a newly-recorded-but-uncommitted IDE surface must NOT be capturable (fail closed)"
+    );
+}

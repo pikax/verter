@@ -43,8 +43,9 @@
 use verter_scheduler::invalidation::Hash16;
 use xxhash_rust::xxh3::xxh3_128;
 
+use crate::membership::ConfiguredMembership;
 use crate::module_resolution::{ConditionSet, ModuleResolutionMode};
-use crate::resolver::{IdeProjectCompilerOptions, IdeProjectConfig, ProjectMembership};
+use crate::resolver::{IdeProjectCompilerOptions, IdeProjectConfig};
 
 /// Per-call inputs to the env-hash functions that are NOT part of
 /// [`IdeProjectConfig`].
@@ -304,34 +305,27 @@ fn write_compiler_options(buf: &mut Vec<u8>, opts: &IdeProjectCompilerOptions) {
     buf.push(SEP);
 }
 
-fn write_membership(buf: &mut Vec<u8>, membership: &ProjectMembership) {
-    match membership {
-        ProjectMembership::MatchAll => {
-            buf.push(0u8);
-        }
-        ProjectMembership::IncludeExclude {
-            files,
-            include,
-            exclude,
-        } => {
-            buf.push(1u8);
-            buf.push(SEP);
-            for f in files {
-                buf.extend_from_slice(f.as_bytes());
-                buf.push(SEP);
-            }
-            buf.push(SEP);
-            for inc in include {
-                buf.extend_from_slice(inc.as_bytes());
-                buf.push(SEP);
-            }
-            buf.push(SEP);
-            for exc in exclude {
-                buf.extend_from_slice(exc.as_bytes());
-                buf.push(SEP);
-            }
-        }
+fn write_membership(buf: &mut Vec<u8>, membership: &ConfiguredMembership) {
+    // Hash the static spec (files / include / exclude) — the identity-bearing
+    // membership definition. The materialized set is a disk-derived expansion of
+    // the spec, tracked by content generation elsewhere, so the spec alone keys
+    // the project-identity contribution.
+    let spec = &membership.spec;
+    for f in &spec.files {
+        buf.extend_from_slice(f.as_str().as_bytes());
+        buf.push(SEP);
     }
+    buf.push(SEP);
+    for inc in &spec.include {
+        buf.extend_from_slice(inc.as_str().as_bytes());
+        buf.push(SEP);
+    }
+    buf.push(SEP);
+    for exc in &spec.exclude {
+        buf.extend_from_slice(exc.as_str().as_bytes());
+        buf.push(SEP);
+    }
+    buf.push(SEP);
 }
 
 fn compute_hash16(bytes: &[u8]) -> Hash16 {

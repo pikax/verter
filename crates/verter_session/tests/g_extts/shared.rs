@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashSet;
 use verter_session::external_ts::{
-    EnvDims, ExternalTsProjectResolver, ProjectResolution, WorkspaceProjectResolver,
+    CarrierOwnershipResolution, EnvDims, ExternalTsProjectResolver, WorkspaceProjectResolver,
 };
 use verter_session::file_artifact_store::ProjectIdentity;
 use verter_workspace::canonical_path::CanonicalPath;
@@ -114,10 +114,15 @@ pub fn resolve_with(
     files: &[(&str, &str)],
     tsconfigs: &[&str],
     source_uri: &str,
-) -> ProjectResolution {
+) -> CarrierOwnershipResolution {
     let ws = workspace_with(files);
     let snap = snapshot_from_tsconfigs(&ws, tsconfigs);
-    let resolver =
-        WorkspaceProjectResolver::new(&snap, &ws, "7.0.1", &(test_env_dims as fn(&str) -> EnvDims));
-    resolver.resolve(source_uri)
+    let resolver = WorkspaceProjectResolver::new(
+        &snap,
+        &ws,
+        "7.0.1",
+        &(test_env_dims as fn(&str) -> EnvDims),
+        true,
+    );
+    resolver.resolve(source_uri, None)
 }

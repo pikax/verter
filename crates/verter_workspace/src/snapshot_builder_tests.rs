@@ -1,6 +1,6 @@
 use super::*;
 use crate::canonical_path::CanonicalPath;
-use crate::membership::{FallbackMembership, StaticMembershipSpec};
+use crate::membership::{ConfiguredMembership, FallbackMembership, StaticMembershipSpec};
 use crate::normalized_glob::NormalizedGlob;
 use crate::resolver::{IdeProjectCompilerOptions, ProjectMembership};
 use crate::workspace_snapshot::{
@@ -196,7 +196,10 @@ fn parse_both_paths(root: &str, tsconfig_body: &str) -> (StaticMembershipSpec, I
     let spec = membership_to_spec(&root_cp, &raw, &test_supported());
 
     let mut ide = IdeProjectConfig::new(root.to_string(), root.to_string(), Some(tsconfig));
-    ide.membership = spec_to_membership(&spec);
+    ide.membership = ConfiguredMembership {
+        spec: spec.clone(),
+        materialized_files: rustc_hash::FxHashSet::default(),
+    };
 
     (spec, ide)
 }
@@ -224,7 +227,10 @@ fn parse_both_paths_with_base(
     let spec = membership_to_spec(&root_cp, &raw, &test_supported());
 
     let mut ide = IdeProjectConfig::new(root.to_string(), root.to_string(), Some(tsconfig));
-    ide.membership = spec_to_membership(&spec);
+    ide.membership = ConfiguredMembership {
+        spec: spec.clone(),
+        materialized_files: rustc_hash::FxHashSet::default(),
+    };
 
     (spec, ide)
 }
@@ -428,7 +434,9 @@ fn simple_build_creates_resolver() {
     );
 
     // Resolver should find owner for files under project root
-    let owner = snap.resolver.owner_for_file("d:/project/src/main.ts");
+    let owner = snap
+        .resolver
+        .nearest_config_for_path("d:/project/src/main.ts");
     assert!(owner.is_some());
 }
 
@@ -599,31 +607,31 @@ fn fallback_no_tsconfig_no_aliases_no_configured_settings() {
     assert!(snap.tsconfig_path(owners[0]).is_none());
 }
 
-// ── spec_to_membership round-trip ──
+// ── membership_to_spec expansion + matching semantics ──
 
 #[test]
-fn spec_round_trips_through_membership() {
-    let original = StaticMembershipSpec {
-        files: vec![CanonicalPath::new("d:/project/src/main.ts")],
-        include: vec![NormalizedGlob::new("d:/project/src/**/*")],
-        exclude: vec![NormalizedGlob::new("d:/project/dist/**")],
+fn include_exclude_membership_expands_and_matches_supported_extensions() {
+    // A raw `files`/`include`/`exclude` membership expands to a spec whose
+    // `matches` honours `files` immunity, bare-star include expansion across the
+    // supported extension set, and `exclude` filtering.
+    let raw = ProjectMembership::IncludeExclude {
+        files: vec!["d:/project/src/main.ts".to_string()],
+        include: vec!["d:/project/src/**/*".to_string()],
+        exclude: vec!["d:/project/dist/**".to_string()],
     };
-
-    let membership = spec_to_membership(&original);
     let root = CanonicalPath::new("d:/project");
-    let back = membership_to_spec(&root, &membership, &test_supported());
+    let back = membership_to_spec(&root, &raw, &test_supported());
 
-    assert_eq!(back.files.len(), original.files.len());
+    assert_eq!(back.files.len(), 1);
     // The bare-star include expands per supported extension, so the glob COUNT
-    // differs; the membership SEMANTICS round-trip: the same supported paths
-    // match, the excluded dir does not.
+    // is one-per-extension; the membership SEMANTICS are what matter: the same
+    // supported paths match, the excluded dir does not.
     assert!(!back.include.is_empty());
     assert!(back.matches(&CanonicalPath::new("d:/project/src/main.ts")));
     assert!(back.matches(&CanonicalPath::new("d:/project/src/widget.tsx")));
     assert!(!back.matches(&CanonicalPath::new("d:/project/dist/out.ts")));
-    // Note: exclude may differ because empty exclude fills defaults
-    // In this case exclude is non-empty so it should round-trip
-    assert_eq!(back.exclude.len(), original.exclude.len());
+    // An explicit non-empty exclude is kept verbatim (no default fill).
+    assert_eq!(back.exclude.len(), 1);
 }
 
 // ── materialize_from_spec ──
@@ -901,7 +909,7 @@ fn build_from_workspace_roots_discovers_tsconfigs() {
     let owner = result
         .snapshot
         .resolver
-        .owner_for_file(&format!("{}/src/foo.ts", workspace_str));
+        .nearest_config_for_path(&format!("{}/src/foo.ts", workspace_str));
     assert!(owner.is_some(), "resolver should find owner");
 
     // No trust required
@@ -1062,7 +1070,7 @@ fn bridge_configured_project_from_vfs_config() {
         workspace_aliases: vec![],
         compiler_options: IdeProjectCompilerOptions::default(),
         references: vec!["d:/project/tsconfig.app.json".to_string()],
-        membership: ProjectMembership::MatchAll,
+        membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new("d:/project")),
     };
 
     let project = ownership_project_from_vfs_config(&config, ProjectId(0));
@@ -1096,7 +1104,7 @@ fn bridge_fallback_project_from_vfs_config() {
         workspace_aliases: vec![],
         compiler_options: IdeProjectCompilerOptions::default(),
         references: vec![],
-        membership: ProjectMembership::MatchAll,
+        membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new("d:/project")),
     };
 
     let project = ownership_project_from_vfs_config(&config, ProjectId(0));

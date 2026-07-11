@@ -45,7 +45,9 @@ fn build_host(files: &[(&str, &str)]) -> Arc<VerterHost> {
             workspace_aliases: vec![],
             compiler_options: verter_workspace::IdeProjectCompilerOptions::default(),
             references: vec![],
-            membership: verter_workspace::ProjectMembership::MatchAll,
+            membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+                &verter_workspace::CanonicalPath::new("/workspace"),
+            ),
         },
     ]);
     let workspace = Arc::new(MemoryWorkspace::new(MemoryOptions::default()));

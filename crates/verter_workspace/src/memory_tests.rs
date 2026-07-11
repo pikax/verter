@@ -1,11 +1,12 @@
 use super::*;
+use crate::canonical_path::CanonicalPath;
 use crate::changes::WorkspaceChange;
+use crate::membership::ConfiguredMembership;
 use crate::project_graph::{ProjectGraph, ProjectRank, VfsProjectConfig};
 use crate::resolver::{IdeProjectCompilerOptions, ProjectMembership};
 use crate::traits::{WorkspaceAccess, WorkspaceRead};
 use crate::types::{
-    ExactResolution, ParsedEdge, ProjectOwnership, ResolutionContext, ResolvePhase,
-    ResolveRequestKind,
+    ExactResolution, ParsedEdge, ResolutionContext, ResolvePhase, ResolveRequestKind,
 };
 
 // ── MemorySnapshot tests ──
@@ -346,7 +347,7 @@ fn resolve_import_via_project_resolver() {
         workspace_aliases: vec![],
         compiler_options: IdeProjectCompilerOptions::default(),
         references: vec![],
-        membership: ProjectMembership::MatchAll,
+        membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new("d:/project")),
     }]);
     ws.set_project_graph(graph);
 
@@ -391,7 +392,7 @@ fn resolve_import_via_tsconfig_paths() {
             ..Default::default()
         },
         references: vec![],
-        membership: ProjectMembership::MatchAll,
+        membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new("d:/project")),
     }]);
     ws.set_project_graph(graph);
 
@@ -600,7 +601,7 @@ fn record_parsed_edges_relative_updates_forward_reverse() {
         workspace_aliases: vec![],
         compiler_options: IdeProjectCompilerOptions::default(),
         references: vec![],
-        membership: ProjectMembership::MatchAll,
+        membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new("d:/project")),
     }]);
     ws.set_project_graph(graph);
 
@@ -670,10 +671,11 @@ fn record_parsed_edges_external_src_resolved() {
     );
 }
 
-// ── MemoryWorkspace::owner_for_file ──
+// ── WorkspaceSnapshot configured/fallback ownership (via the published snapshot) ──
 
 #[test]
-fn owner_for_file_with_project_graph() {
+fn configured_owner_resolution_finds_unique_project() {
+    use crate::workspace_snapshot::ConfiguredOwnerResolution;
     let ws = MemoryWorkspace::new(MemoryOptions::default());
 
     let graph = ProjectGraph::from_configs(vec![VfsProjectConfig {
@@ -686,29 +688,40 @@ fn owner_for_file_with_project_graph() {
         workspace_aliases: vec![],
         compiler_options: IdeProjectCompilerOptions::default(),
         references: vec![],
-        membership: ProjectMembership::MatchAll,
+        membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new("d:/project")),
     }]);
     ws.set_project_graph(graph);
 
-    let owner = ws.owner_for_file("d:/project/src/foo.vue");
-    assert_eq!(
-        owner,
-        Some(ProjectOwnership {
-            project_root: "d:/project".to_string(),
-            tsconfig_path: Some("d:/project/tsconfig.json".to_string()),
-        })
-    );
+    let root = ws.published_root().expect("published snapshot");
+    let snapshot = &root.snapshot;
+    match snapshot.configured_owner_resolution_for_file("d:/project/src/foo.vue") {
+        ConfiguredOwnerResolution::Unique(id) => {
+            let project = snapshot.project(id);
+            assert_eq!(project.root.as_str(), "d:/project");
+            assert_eq!(
+                snapshot.tsconfig_path(id).map(|p| p.as_str()),
+                Some("d:/project/tsconfig.json")
+            );
+        }
+        other => panic!("expected a unique configured owner, got {other:?}"),
+    }
 
-    // File outside the project should have no owner
-    let no_owner = ws.owner_for_file("d:/other/src/bar.vue");
+    // File outside the project should have no configured owner and no fallback owner.
+    assert!(matches!(
+        snapshot.configured_owner_resolution_for_file("d:/other/src/bar.vue"),
+        ConfiguredOwnerResolution::None
+    ));
     assert!(
-        no_owner.is_none(),
-        "file outside project should have no owner"
+        snapshot
+            .single_fallback_owner_for_file("d:/other/src/bar.vue")
+            .is_none(),
+        "file outside every project has no fallback owner"
     );
 }
 
 #[test]
-fn owner_for_file_returns_none_for_ambiguous_configured_projects() {
+fn configured_owner_resolution_is_ambiguous_for_overlapping_configured_projects() {
+    use crate::workspace_snapshot::ConfiguredOwnerResolution;
     let ws = MemoryWorkspace::new(MemoryOptions::default());
 
     let graph = ProjectGraph::from_configs(vec![
@@ -722,11 +735,15 @@ fn owner_for_file_returns_none_for_ambiguous_configured_projects() {
             workspace_aliases: vec![],
             compiler_options: IdeProjectCompilerOptions::default(),
             references: vec![],
-            membership: ProjectMembership::IncludeExclude {
-                files: vec!["d:/project/src/shared.ts".to_string()],
-                include: vec![],
-                exclude: vec![],
-            },
+            membership: crate::snapshot_builder::configured_membership_from_raw(
+                "d:/project",
+                &ProjectMembership::IncludeExclude {
+                    files: vec!["d:/project/src/shared.ts".to_string()],
+                    include: vec![],
+                    exclude: vec![],
+                },
+                &IdeProjectCompilerOptions::default(),
+            ),
         },
         VfsProjectConfig {
             root: "d:/project".to_string(),
@@ -738,18 +755,34 @@ fn owner_for_file_returns_none_for_ambiguous_configured_projects() {
             workspace_aliases: vec![],
             compiler_options: IdeProjectCompilerOptions::default(),
             references: vec![],
-            membership: ProjectMembership::IncludeExclude {
-                files: vec!["d:/project/src/shared.ts".to_string()],
-                include: vec![],
-                exclude: vec![],
-            },
+            membership: crate::snapshot_builder::configured_membership_from_raw(
+                "d:/project",
+                &ProjectMembership::IncludeExclude {
+                    files: vec!["d:/project/src/shared.ts".to_string()],
+                    include: vec![],
+                    exclude: vec![],
+                },
+                &IdeProjectCompilerOptions::default(),
+            ),
         },
     ]);
     ws.set_project_graph(graph);
 
+    let root = ws.published_root().expect("published snapshot");
+    let snapshot = &root.snapshot;
     assert!(
-        ws.owner_for_file("d:/project/src/shared.ts").is_none(),
-        "workspace single-owner API must not collapse overlapping configured owners"
+        matches!(
+            snapshot.configured_owner_resolution_for_file("d:/project/src/shared.ts"),
+            ConfiguredOwnerResolution::Ambiguous(_)
+        ),
+        "configured ownership must not collapse overlapping configured owners"
+    );
+    // A genuine configured overlap must never fall through to a fallback owner.
+    assert!(
+        snapshot
+            .single_fallback_owner_for_file("d:/project/src/shared.ts")
+            .is_none(),
+        "configured ambiguity must not resolve to a fallback owner"
     );
 }
 
@@ -1134,7 +1167,7 @@ fn set_project_graph_updates_resolver() {
         workspace_aliases: vec![],
         compiler_options: IdeProjectCompilerOptions::default(),
         references: vec![],
-        membership: ProjectMembership::MatchAll,
+        membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new("d:/project")),
     }]);
     ws.set_project_graph(graph);
 
@@ -1173,10 +1206,13 @@ fn add_explicit_project() {
         workspace_aliases: vec![],
         compiler_options: IdeProjectCompilerOptions::default(),
         references: vec![],
-        membership: ProjectMembership::MatchAll,
+        membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new("d:/project")),
     });
 
-    let owner = ws.owner_for_file("d:/project/src/utils.ts");
+    let root = ws.published_root().expect("published snapshot");
+    let owner = root
+        .snapshot
+        .single_fallback_owner_for_file("d:/project/src/utils.ts");
     assert!(
         owner.is_some(),
         "should own file after adding explicit project"
@@ -1575,7 +1611,7 @@ fn memory_resolved_relative_does_not_leak_stem() {
             workspace_aliases: vec![],
             compiler_options: crate::resolver::IdeProjectCompilerOptions::default(),
             references: vec![],
-            membership: crate::resolver::ProjectMembership::default(),
+            membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new("/src")),
         },
     ]));
     ws.record_parsed_edges(

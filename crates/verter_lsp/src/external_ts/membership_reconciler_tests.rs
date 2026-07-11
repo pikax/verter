@@ -4,18 +4,17 @@
 //! [`MembershipLedger`] state directly (the `getExternalFiles` end-to-end read path
 //! is a later step). Every test names the implementation defect that makes it RED.
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use verter_session::external_ts::{
-    EnvDims, ProjectBinding, ProjectResolution, ScriptKind, SnapshotRole,
+    AmbiguityCause, CarrierOwnershipResolution, EnvDims, ProjectBinding, ScriptKind, SnapshotRole,
 };
 use verter_session::file_artifact_store::ProjectIdentity;
 
 use super::{
-    AuthorityState, BootstrapKind, CarrierMembershipCommitter, CommitFuture, MembershipReconciler,
-    OwnershipAuthority, OwnershipDecision, ReconcileErr, ReconcileOutcome, ReconcileReason,
-    ResolverOwnershipAuthority,
+    CarrierMembershipCommitter, CommitFuture, MembershipReconciler, ReconcileErr, ReconcileOutcome,
+    ReconcileReason,
 };
 use crate::external_ts::membership_ledger::{
     AbsentReason, CanonicalSource, LedgerCompanion, MembershipLedger, MembershipRecord, ProjectUri,
@@ -73,6 +72,41 @@ impl CarrierMembershipCommitter for RecordingMembershipCommitter {
     }
 }
 
+/// A committer that BLOCKS inside `commit_owned` until the test releases a permit,
+/// signalling on entry — used to prove per-source serialization deterministically. A
+/// transition that reaches the committer sends one `entered` event and then parks on
+/// the release semaphore WHILE holding the reconciler's per-source gate, so the test
+/// can observe whether a concurrent same-source transition also reaches the committer.
+struct SerializingCommitter {
+    entered_tx: tokio::sync::mpsc::UnboundedSender<()>,
+    release: Arc<tokio::sync::Semaphore>,
+}
+
+impl CarrierMembershipCommitter for SerializingCommitter {
+    fn commit_owned<'a>(
+        &'a self,
+        _binding: &'a ProjectBinding,
+        _source_canonical: &'a str,
+        _companions: &'a [CarrierCompanion],
+    ) -> CommitFuture<'a> {
+        Box::pin(async move {
+            // Reached the committer — inside the per-source gate.
+            let _ = self.entered_tx.send(());
+            // Park (holding the gate) until the test hands out a permit.
+            self.release
+                .acquire()
+                .await
+                .expect("release semaphore is never closed")
+                .forget();
+            Ok(())
+        })
+    }
+
+    fn retract<'a>(&'a self, _source_canonical: &'a str) -> CommitFuture<'a> {
+        Box::pin(async move { Ok(()) })
+    }
+}
+
 /// A resolved `ProjectBinding` for `project` (test-only seam). The env dims are
 /// inert (the mock committer ignores them); only `tsconfig_uri == project`
 /// matters, since the reconciler derives the ledger's project from it.
@@ -83,15 +117,21 @@ fn test_binding(project: &str) -> ProjectBinding {
         lib_env_hash: [0u8; 16],
         project_identity: ProjectIdentity([0u8; 16]),
     };
-    ProjectBinding::new_for_test("/proj", project, "5.9.0", env_dims, Vec::new())
+    ProjectBinding::new_for_test(
+        "/proj",
+        project,
+        "5.9.0",
+        env_dims,
+        Vec::new(),
+        verter_workspace::ProjectId(0),
+        verter_workspace::SnapshotGeneration(1),
+    )
 }
 
-/// An `Owned` ownership decision advertising `companions` under `project`.
-fn owned(project: &str, companions: Vec<CarrierCompanion>) -> OwnershipDecision {
-    OwnershipDecision::Owned {
-        binding: test_binding(project),
-        companions,
-    }
+/// A `Bound` ownership resolution for `project` (the single state in which a carrier
+/// is advertised). Companions are passed separately to `reconcile_source_membership`.
+fn bound(project: &str) -> CarrierOwnershipResolution {
+    CarrierOwnershipResolution::Bound(test_binding(project))
 }
 
 // ── test fixtures ───────────────────────────────────────────────────────────
@@ -113,31 +153,11 @@ fn ide(provider_uri: &str) -> CarrierCompanion {
     companion(provider_uri, SnapshotRole::CarrierIde, ScriptKind::Tsx)
 }
 
-/// A deterministic ownership authority returning a fixed decision, counting how many
-/// times it was consulted (to prove ownership is resolved EXACTLY once).
-struct StubAuthority {
-    decision: OwnershipDecision,
-    calls: AtomicUsize,
-}
-
-impl StubAuthority {
-    fn new(decision: OwnershipDecision) -> Self {
-        Self {
-            decision,
-            calls: AtomicUsize::new(0),
-        }
-    }
-
-    fn call_count(&self) -> usize {
-        self.calls.load(Ordering::SeqCst)
-    }
-}
-
-impl OwnershipAuthority for StubAuthority {
-    fn resolve_membership(&self, _source: &CanonicalSource) -> OwnershipDecision {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        self.decision.clone()
-    }
+/// A fresh, empty per-source membership-gate map for a standalone test reconciler.
+/// Production shares ONE map via the coordinator; a test reconciler used once (or
+/// concurrently as a single shared instance) is correctly served by its own map.
+fn fresh_source_gates() -> Arc<dashmap::DashMap<String, Arc<tokio::sync::Mutex<()>>>> {
+    Arc::new(dashmap::DashMap::new())
 }
 
 /// Build a reconciler over a fresh ledger and the given provider, returning the
@@ -150,6 +170,7 @@ fn reconciler_with(
         Arc::clone(&ledger),
         provider,
         RecordingMembershipCommitter::arc(),
+        fresh_source_gates(),
     );
     (reconciler, ledger)
 }
@@ -169,6 +190,7 @@ fn reconciler_with_committer(
         Arc::clone(&ledger),
         provider,
         Arc::clone(&committer) as Arc<dyn CarrierMembershipCommitter>,
+        fresh_source_gates(),
     );
     (reconciler, ledger, committer)
 }
@@ -184,7 +206,8 @@ async fn advertise(
     let _ = reconciler
         .reconcile_source_membership(
             source,
-            &StubAuthority::new(owned(project, companions)),
+            bound(project),
+            companions,
             ReconcileReason::SourceSynced,
         )
         .await
@@ -197,33 +220,30 @@ async fn advertise(
 async fn owned_advertises_exactly_its_companions_under_project() {
     // DISCRIMINATION: an impl that skips the ledger commit, registers under the wrong
     // project, or drops a companion leaves the source un-advertised / mis-keyed —
-    // the asserts below go RED. Also asserts ownership resolved EXACTLY once.
+    // the asserts below go RED.
     let mock = Arc::new(MockTypeProvider::new());
     let (reconciler, ledger) = reconciler_with(mock.clone());
     let source = CanonicalSource::from("/proj/src/Comp.vue");
     let project = "/proj/tsconfig.json";
-    let authority = StubAuthority::new(owned(
-        project,
-        vec![
-            ide("/proj/src/Comp.vue.tsx"),
-            companion(
-                "/proj/src/Comp.vue.verter.ts",
-                SnapshotRole::CarrierApi,
-                ScriptKind::Ts,
-            ),
-        ],
-    ));
+    let companions = vec![
+        ide("/proj/src/Comp.vue.tsx"),
+        companion(
+            "/proj/src/Comp.vue.verter.ts",
+            SnapshotRole::CarrierApi,
+            ScriptKind::Ts,
+        ),
+    ];
 
     let outcome = reconciler
-        .reconcile_source_membership(&source, &authority, ReconcileReason::SourceSynced)
+        .reconcile_source_membership(
+            &source,
+            bound(project),
+            companions,
+            ReconcileReason::SourceSynced,
+        )
         .await
         .expect("owned reconcile should succeed");
 
-    assert_eq!(
-        authority.call_count(),
-        1,
-        "ownership must be resolved exactly once"
-    );
     match outcome {
         ReconcileOutcome::Advertised {
             project: p,
@@ -291,7 +311,8 @@ async fn owner_change_a_to_b_atomically_replaces_leaving_nothing_under_a() {
     let outcome = reconciler
         .reconcile_source_membership(
             &source,
-            &StubAuthority::new(owned(project_b, companions.clone())),
+            bound(project_b),
+            companions.clone(),
             ReconcileReason::SourceSynced,
         )
         .await
@@ -361,10 +382,20 @@ async fn assert_absent_retracts(reason: AbsentReason, via_remove: bool) {
             .await
             .expect("remove should succeed")
     } else {
+        // The ownership-resolved absent reasons map onto their `CarrierOwnershipResolution`.
+        let resolution = match reason {
+            AbsentReason::NoProject => CarrierOwnershipResolution::NoProject,
+            AbsentReason::Ambiguous => CarrierOwnershipResolution::Ambiguous {
+                candidates: Vec::new(),
+                cause: AmbiguityCause::MultipleOwners,
+            },
+            other => panic!("{other:?} is not an ownership-resolved absent reason"),
+        };
         reconciler
             .reconcile_source_membership(
                 &source,
-                &StubAuthority::new(OwnershipDecision::Absent { reason }),
+                resolution,
+                Vec::new(),
                 ReconcileReason::SourceSynced,
             )
             .await
@@ -406,7 +437,9 @@ async fn absent_ambiguous_retracts() {
 
 #[tokio::test]
 async fn absent_synthetic_scratch_retracts() {
-    assert_absent_retracts(AbsentReason::SyntheticScratch, false).await;
+    // SyntheticScratch is not an ownership-resolution outcome — it is an explicit
+    // scratch-lane removal, so it flows through `remove_source_membership`.
+    assert_absent_retracts(AbsentReason::SyntheticScratch, true).await;
 }
 
 #[tokio::test]
@@ -426,10 +459,11 @@ async fn absent_conflict_removed_removes() {
 
 #[tokio::test]
 async fn terminal_reason_short_circuits_without_resolving_ownership() {
-    // DISCRIMINATION: an impl that always resolves ownership (ignoring the terminal
-    // reason) consults the authority. A caller-authoritative terminal reason
-    // (Deleted) must tombstone WITHOUT resolving — `call_count() == 0` catches the
-    // bug.
+    // DISCRIMINATION: an impl that routes on the passed resolution BEFORE checking the
+    // caller-authoritative terminal reason would advertise under the (wrong) bound
+    // project instead of tombstoning. Passing a `Bound(/wrong)` resolution with a
+    // terminal `Deleted` reason and asserting a `Deleted` tombstone catches that
+    // ordering bug.
     let mock = Arc::new(MockTypeProvider::new());
     let (reconciler, ledger) = reconciler_with(mock.clone());
     let source = CanonicalSource::from("/proj/src/Comp.vue");
@@ -440,18 +474,17 @@ async fn terminal_reason_short_circuits_without_resolving_ownership() {
         vec![ide("/proj/src/Comp.vue.tsx")],
     )
     .await;
-    let authority = StubAuthority::new(owned("/wrong/tsconfig.json", vec![]));
 
     let outcome = reconciler
-        .reconcile_source_membership(&source, &authority, ReconcileReason::Deleted)
+        .reconcile_source_membership(
+            &source,
+            bound("/wrong/tsconfig.json"),
+            vec![ide("/wrong/Comp.vue.tsx")],
+            ReconcileReason::Deleted,
+        )
         .await
         .expect("terminal delete should succeed");
 
-    assert_eq!(
-        authority.call_count(),
-        0,
-        "a caller-authoritative terminal reason must NOT resolve ownership"
-    );
     assert!(matches!(
         outcome,
         ReconcileOutcome::Tombstoned {
@@ -472,12 +505,14 @@ async fn bootstrap_unknown_defers_without_advertising_or_clean_success() {
     let mock = Arc::new(MockTypeProvider::new());
     let (reconciler, ledger) = reconciler_with(mock.clone());
     let source = CanonicalSource::from("/proj/src/Comp.vue");
-    let authority = StubAuthority::new(OwnershipDecision::Bootstrap {
-        kind: BootstrapKind::OwnershipPending,
-    });
 
     let outcome = reconciler
-        .reconcile_source_membership(&source, &authority, ReconcileReason::SourceSynced)
+        .reconcile_source_membership(
+            &source,
+            CarrierOwnershipResolution::NotReady,
+            Vec::new(),
+            ReconcileReason::SourceSynced,
+        )
         .await
         .expect("bootstrap defers (it is not an error)");
 
@@ -517,9 +552,8 @@ async fn bootstrap_does_not_thrash_an_existing_advertisement() {
     let outcome = reconciler
         .reconcile_source_membership(
             &source,
-            &StubAuthority::new(OwnershipDecision::Bootstrap {
-                kind: BootstrapKind::ColdStart,
-            }),
+            CarrierOwnershipResolution::NotReady,
+            Vec::new(),
             ReconcileReason::SourceSynced,
         )
         .await
@@ -548,13 +582,14 @@ async fn ledger_commit_failure_returns_err_not_ok() {
     let (reconciler, ledger) = reconciler_with(mock.clone());
     let source = CanonicalSource::from("/proj/src/Comp.vue");
     ledger.arm_commit_failure();
-    let authority = StubAuthority::new(owned(
-        "/proj/tsconfig.json",
-        vec![ide("/proj/src/Comp.vue.tsx")],
-    ));
 
     let result = reconciler
-        .reconcile_source_membership(&source, &authority, ReconcileReason::SourceSynced)
+        .reconcile_source_membership(
+            &source,
+            bound("/proj/tsconfig.json"),
+            vec![ide("/proj/src/Comp.vue.tsx")],
+            ReconcileReason::SourceSynced,
+        )
         .await;
 
     assert!(
@@ -602,6 +637,7 @@ async fn provider_transition_failure_does_not_commit_the_tombstone() {
         Arc::clone(&ledger),
         provider,
         RecordingMembershipCommitter::arc(),
+        fresh_source_gates(),
     );
 
     let result = reconciler
@@ -630,13 +666,14 @@ async fn membership_commit_failure_returns_err_and_does_not_advertise() {
     let (reconciler, ledger, committer) = reconciler_with_committer(mock.clone());
     committer.arm_failure();
     let source = CanonicalSource::from("/proj/src/Comp.vue");
-    let authority = StubAuthority::new(owned(
-        "/proj/tsconfig.json",
-        vec![ide("/proj/src/Comp.vue.tsx")],
-    ));
 
     let result = reconciler
-        .reconcile_source_membership(&source, &authority, ReconcileReason::SourceSynced)
+        .reconcile_source_membership(
+            &source,
+            bound("/proj/tsconfig.json"),
+            vec![ide("/proj/src/Comp.vue.tsx")],
+            ReconcileReason::SourceSynced,
+        )
         .await;
 
     assert!(
@@ -661,13 +698,13 @@ async fn owned_commits_membership_before_advertising() {
     let mock = Arc::new(MockTypeProvider::new());
     let (reconciler, ledger, committer) = reconciler_with_committer(mock.clone());
     let source = CanonicalSource::from("/proj/src/Comp.vue");
-    let authority = StubAuthority::new(owned(
-        "/proj/tsconfig.json",
-        vec![ide("/proj/src/Comp.vue.tsx")],
-    ));
-
     let _ = reconciler
-        .reconcile_source_membership(&source, &authority, ReconcileReason::SourceSynced)
+        .reconcile_source_membership(
+            &source,
+            bound("/proj/tsconfig.json"),
+            vec![ide("/proj/src/Comp.vue.tsx")],
+            ReconcileReason::SourceSynced,
+        )
         .await
         .expect("owned reconcile should succeed");
 
@@ -752,15 +789,16 @@ async fn membership_commit_future_is_awaited_before_ledger_commit() {
         Arc::clone(&ledger),
         mock,
         Arc::clone(&committer) as Arc<dyn CarrierMembershipCommitter>,
+        fresh_source_gates(),
     );
     let source = CanonicalSource::from("/proj/src/Comp.vue");
-    let authority = StubAuthority::new(owned(
-        "/proj/tsconfig.json",
-        vec![ide("/proj/src/Comp.vue.tsx")],
-    ));
-
     let outcome = reconciler
-        .reconcile_source_membership(&source, &authority, ReconcileReason::SourceSynced)
+        .reconcile_source_membership(
+            &source,
+            bound("/proj/tsconfig.json"),
+            vec![ide("/proj/src/Comp.vue.tsx")],
+            ReconcileReason::SourceSynced,
+        )
         .await
         .expect("owned reconcile should succeed");
     assert!(matches!(outcome, ReconcileOutcome::Advertised { .. }));
@@ -819,58 +857,6 @@ async fn stale_session_lease_is_not_advertised() {
     );
 }
 
-// ── Production resolver-authority mapping ────────────────────────────────────
-
-#[test]
-fn resolver_authority_maps_no_project_to_absent_no_project() {
-    // DISCRIMINATION: the production adapter must map the existing resolver's
-    // NoProject onto Absent(NoProject); a wrong mapping is caught.
-    let authority = ResolverOwnershipAuthority::new(
-        AuthorityState::Ready,
-        |_s: &str| ProjectResolution::NoProject,
-        vec![],
-    );
-    match authority.resolve_membership(&CanonicalSource::from("/proj/src/Comp.vue")) {
-        OwnershipDecision::Absent {
-            reason: AbsentReason::NoProject,
-        } => {}
-        other => panic!("expected Absent(NoProject), got {other:?}"),
-    }
-}
-
-#[test]
-fn resolver_authority_maps_synthetic_scratch_to_absent_scratch() {
-    // DISCRIMINATION: SyntheticScratch must map to Absent(SyntheticScratch), not to a
-    // silent owned/binding.
-    let authority = ResolverOwnershipAuthority::new(
-        AuthorityState::Ready,
-        |_s: &str| ProjectResolution::synthetic_scratch("scratch"),
-        vec![],
-    );
-    match authority.resolve_membership(&CanonicalSource::from("/scratch.vue")) {
-        OwnershipDecision::Absent {
-            reason: AbsentReason::SyntheticScratch,
-        } => {}
-        other => panic!("expected Absent(SyntheticScratch), got {other:?}"),
-    }
-}
-
-#[test]
-fn resolver_authority_cold_state_defers_without_resolving() {
-    // DISCRIMINATION: a Bootstrap authority state must yield Bootstrap and must NOT
-    // consult the resolver. The panicking closure proves the resolver is not called
-    // when cold (an impl that resolved anyway would panic the test).
-    let authority = ResolverOwnershipAuthority::new(
-        AuthorityState::Bootstrap,
-        |_s: &str| panic!("a cold authority must not resolve ownership"),
-        vec![],
-    );
-    match authority.resolve_membership(&CanonicalSource::from("/proj/src/Comp.vue")) {
-        OwnershipDecision::Bootstrap { .. } => {}
-        other => panic!("expected Bootstrap, got {other:?}"),
-    }
-}
-
 // ── Transition matrix (randomized sequences + failure injection) ──────────────
 //
 // Drives the REAL reconciler over deterministic pseudo-random transition
@@ -906,9 +892,10 @@ enum Model {
 }
 
 /// Apply transition `op` to `source` through a production reconciler entry point.
-/// `op` encodes: 0 = owned under `proj`; 1/2/3 = an ownership-resolved absent
-/// (NoProject / Ambiguous / SyntheticScratch); 4/5/6 = a caller-authoritative
-/// terminal (Deleted / CompileFailed / ConflictRemoved); 7 = bootstrap-cold.
+/// `op` encodes: 0 = owned under `proj`; 1/2 = an ownership-resolved absent
+/// (NoProject / Ambiguous); 3 = SyntheticScratch (an explicit scratch-lane remove);
+/// 4/5/6 = a caller-authoritative terminal (Deleted / CompileFailed /
+/// ConflictRemoved); 7 = bootstrap (NotReady).
 async fn apply_matrix_op(
     reconciler: &MembershipReconciler,
     source: &CanonicalSource,
@@ -919,20 +906,28 @@ async fn apply_matrix_op(
     let synced = ReconcileReason::SourceSynced;
     match op {
         0 => {
-            let authority = StubAuthority::new(owned(proj, vec![ide(companion)]));
             reconciler
-                .reconcile_source_membership(source, &authority, synced)
+                .reconcile_source_membership(source, bound(proj), vec![ide(companion)], synced)
                 .await
         }
-        1..=3 => {
-            let reason = match op {
-                1 => AbsentReason::NoProject,
-                2 => AbsentReason::Ambiguous,
-                _ => AbsentReason::SyntheticScratch,
+        1..=2 => {
+            let resolution = if op == 1 {
+                CarrierOwnershipResolution::NoProject
+            } else {
+                CarrierOwnershipResolution::Ambiguous {
+                    candidates: Vec::new(),
+                    cause: AmbiguityCause::MultipleOwners,
+                }
             };
-            let authority = StubAuthority::new(OwnershipDecision::Absent { reason });
             reconciler
-                .reconcile_source_membership(source, &authority, synced)
+                .reconcile_source_membership(source, resolution, Vec::new(), synced)
+                .await
+        }
+        3 => {
+            // SyntheticScratch is not an ownership-resolution outcome — it is an
+            // explicit scratch-lane removal.
+            reconciler
+                .remove_source_membership(source, AbsentReason::SyntheticScratch)
                 .await
         }
         4..=6 => {
@@ -941,19 +936,25 @@ async fn apply_matrix_op(
                 5 => ReconcileReason::CompileFailed,
                 _ => ReconcileReason::ConflictRemoved,
             };
-            // The authority is intentionally a wrong owned decision: a terminal
-            // reason MUST short-circuit to a tombstone without consulting it.
-            let authority = StubAuthority::new(owned("/never/tsconfig.json", vec![]));
+            // The resolution is intentionally a wrong bound decision: a terminal
+            // reason MUST short-circuit to a tombstone without routing on it.
             reconciler
-                .reconcile_source_membership(source, &authority, reason)
+                .reconcile_source_membership(
+                    source,
+                    bound("/never/tsconfig.json"),
+                    Vec::new(),
+                    reason,
+                )
                 .await
         }
         7 => {
-            let authority = StubAuthority::new(OwnershipDecision::Bootstrap {
-                kind: BootstrapKind::ColdStart,
-            });
             reconciler
-                .reconcile_source_membership(source, &authority, synced)
+                .reconcile_source_membership(
+                    source,
+                    CarrierOwnershipResolution::NotReady,
+                    Vec::new(),
+                    synced,
+                )
                 .await
         }
         _ => unreachable!("op is bounded by % 8"),
@@ -1139,7 +1140,8 @@ async fn transition_matrix_membership_commit_and_provider_failures_are_fail_clos
         let result = reconciler
             .reconcile_source_membership(
                 &source,
-                &StubAuthority::new(owned(project_b, vec![ide(&companion)])),
+                bound(project_b),
+                vec![ide(&companion)],
                 ReconcileReason::SourceSynced,
             )
             .await;
@@ -1189,6 +1191,7 @@ async fn transition_matrix_membership_commit_and_provider_failures_are_fail_clos
             Arc::clone(&ledger),
             provider,
             RecordingMembershipCommitter::arc(),
+            fresh_source_gates(),
         );
         let reason = match lcg_next(&mut state) % 3 {
             0 => AbsentReason::Deleted,
@@ -1206,4 +1209,136 @@ async fn transition_matrix_membership_commit_and_provider_failures_are_fail_clos
             "seed {seed}: a failed provider close must NOT commit the tombstone"
         );
     }
+}
+
+// ── Per-source serialization ──────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn same_source_membership_transitions_serialize_per_source() {
+    // Two concurrent reconciles for the SAME source must NOT both be in-flight in the
+    // committer at once: the reconciler's per-source gate serializes them (the transition
+    // reads the prior ledger record and swaps it across `.await`s without holding the
+    // ledger lock, so an unserialized peer could interleave into a torn advertisement).
+    //
+    // DISCRIMINATION: a committer that blocks on entry lets us observe whether a second
+    // same-source transition reaches the committer WHILE the first is in-flight. Post-fix
+    // the gate provably blocks it (the second `entered` never arrives → timeout). Pre-fix
+    // (no gate) the second entered concurrently → the timeout resolves → RED.
+    use std::time::Duration;
+
+    let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let committer = Arc::new(SerializingCommitter {
+        entered_tx,
+        release: Arc::clone(&release),
+    });
+    let ledger = Arc::new(MembershipLedger::with_initial_session());
+    let provider = Arc::new(MockTypeProvider::new());
+    let reconciler = Arc::new(MembershipReconciler::new(
+        ledger,
+        provider,
+        Arc::clone(&committer) as Arc<dyn CarrierMembershipCommitter>,
+        fresh_source_gates(),
+    ));
+    let source = "/proj/src/Same.vue";
+    let spawn_reconcile = |reconciler: Arc<MembershipReconciler>| {
+        tokio::spawn(async move {
+            reconciler
+                .reconcile_source_membership(
+                    &CanonicalSource::from(source),
+                    bound("/proj/tsconfig.json"),
+                    vec![ide("/proj/src/Same.vue.tsx")],
+                    ReconcileReason::SourceSynced,
+                )
+                .await
+        })
+    };
+
+    // Task 1 enters the committer and parks there, holding the per-source gate.
+    let t1 = spawn_reconcile(Arc::clone(&reconciler));
+    entered_rx
+        .recv()
+        .await
+        .expect("the first transition must reach the committer");
+
+    // Task 2 (SAME source) must block on the gate — it must NOT reach the committer
+    // while task 1 holds it.
+    let t2 = spawn_reconcile(Arc::clone(&reconciler));
+    let second_entered = tokio::time::timeout(Duration::from_millis(300), entered_rx.recv()).await;
+    assert!(
+        second_entered.is_err(),
+        "a second concurrent transition for the SAME source reached the committer while the \
+         first was still in-flight — the per-source membership gate is not serializing"
+    );
+
+    // Release both: task 1 completes and drops the gate, then task 2 proceeds.
+    release.add_permits(2);
+    let _ = tokio::time::timeout(Duration::from_millis(300), entered_rx.recv()).await;
+    let _ = t1
+        .await
+        .expect("join task 1")
+        .expect("task 1 reconcile succeeds");
+    let _ = t2
+        .await
+        .expect("join task 2")
+        .expect("task 2 reconcile succeeds");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn distinct_source_membership_transitions_run_concurrently() {
+    // The gate is PER SOURCE, not global: two transitions for DIFFERENT sources must be
+    // able to be in-flight in the committer at the same time. This guards against a
+    // regression that over-serializes (e.g. a single global lock) and is the negative
+    // companion to `same_source_membership_transitions_serialize_per_source`.
+    use std::time::Duration;
+
+    let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let committer = Arc::new(SerializingCommitter {
+        entered_tx,
+        release: Arc::clone(&release),
+    });
+    let ledger = Arc::new(MembershipLedger::with_initial_session());
+    let provider = Arc::new(MockTypeProvider::new());
+    let reconciler = Arc::new(MembershipReconciler::new(
+        ledger,
+        provider,
+        Arc::clone(&committer) as Arc<dyn CarrierMembershipCommitter>,
+        fresh_source_gates(),
+    ));
+    let spawn_reconcile = |reconciler: Arc<MembershipReconciler>, source: &'static str| {
+        tokio::spawn(async move {
+            reconciler
+                .reconcile_source_membership(
+                    &CanonicalSource::from(source),
+                    bound("/proj/tsconfig.json"),
+                    vec![ide(&format!("{source}.tsx"))],
+                    ReconcileReason::SourceSynced,
+                )
+                .await
+        })
+    };
+
+    let t1 = spawn_reconcile(Arc::clone(&reconciler), "/proj/src/A.vue");
+    let t2 = spawn_reconcile(Arc::clone(&reconciler), "/proj/src/B.vue");
+
+    // BOTH distinct-source transitions must reach the committer concurrently: two
+    // `entered` events arrive before either is released.
+    let first = tokio::time::timeout(Duration::from_millis(500), entered_rx.recv()).await;
+    let second = tokio::time::timeout(Duration::from_millis(500), entered_rx.recv()).await;
+    assert!(
+        first.is_ok() && second.is_ok(),
+        "two transitions for DIFFERENT sources must run concurrently in the committer, but \
+         the second did not enter while the first was in-flight (the gate over-serializes)"
+    );
+
+    release.add_permits(2);
+    let _ = t1
+        .await
+        .expect("join task 1")
+        .expect("task 1 reconcile succeeds");
+    let _ = t2
+        .await
+        .expect("join task 2")
+        .expect("task 2 reconcile succeeds");
 }

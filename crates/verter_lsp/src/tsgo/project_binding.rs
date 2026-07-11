@@ -19,8 +19,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use verter_session::external_ts::{
-    AmbiguityCause, BoundProject, EngineBackend, EnvDims, ExternalTsProjectResolver,
-    ProjectBinding, ProjectResolution, WorkspaceProjectResolver,
+    AmbiguityCause, BoundProject, CarrierOwnershipResolution, EngineBackend, EnvDims,
+    ExternalTsProjectResolver, ProjectBinding, WorkspaceProjectResolver,
 };
 use verter_session::VerterHost;
 use verter_workspace::published_state::PublishedRoot;
@@ -120,7 +120,7 @@ impl CarrierBinding {
 
 /// Resolve the carrier `source`'s owning project over the host's LIVE published
 /// snapshot through the shared [`WorkspaceProjectResolver`], returning the FULL
-/// [`ProjectResolution`] and the snapshot/config generation it was resolved at
+/// [`CarrierOwnershipResolution`] and the snapshot/config generation it was resolved at
 /// (`None` when the published snapshot is not yet ready). The single host-backed
 /// resolution entry the OWNED gate, the SHARED binding path, and the shadow-safety
 /// gate all share — the env-dims closure reads the host's per-project R21 env-hash
@@ -130,31 +130,74 @@ impl CarrierBinding {
 /// `ts_version` is carried onto a resolved binding's metadata; it is NOT load-bearing
 /// for the witness identity or the `--api` op, so a bootstrap value (the OWNED gate)
 /// or an empty value (the shadow-safety probe) is safe.
+///
+/// `readiness_mode` selects how a PRESENT-but-cold published snapshot is treated —
+/// see [`OwnershipReadinessMode`].
 #[must_use]
 pub fn resolve_carrier(
-    host: &Arc<VerterHost>,
+    host: &VerterHost,
     source: &str,
     ts_version: Arc<str>,
-) -> Option<(ProjectResolution, u64)> {
+    readiness_mode: OwnershipReadinessMode,
+) -> Option<(CarrierOwnershipResolution, u64)> {
     let ws_read = host.workspace_read();
     let published = ws_read.published_root()?;
     let generation = published.snapshot.generation.0;
-    let env_dims_source = |tsconfig_uri: &str| {
-        let env = host.host_view_env_hashes_for(tsconfig_uri);
+    // The env-dims reader is keyed on a MEMBER canonical of the resolved project
+    // (the resolved carrier source), NOT the tsconfig path: a tsconfig file is
+    // normally outside the project's membership set, so keying the per-canonical
+    // host readers on it resolves to no owner and falls back to workspace-default
+    // dims. An owned member yields the project's real per-project env identity.
+    let env_dims_source = |member_canonical: &str| {
+        let env = host.host_view_env_hashes_for(member_canonical);
         EnvDims {
             parse_env_hash: env.parse_env_hash,
             resolve_env_hash: env.resolve_env_hash,
             lib_env_hash: env.lib_env_hash,
-            project_identity: host.host_view_project_identity_for(tsconfig_uri),
+            project_identity: host.host_view_project_identity_for(member_canonical),
         }
+    };
+    // Under `PresentSnapshotAuthoritative` a PRESENT published snapshot is the
+    // authority: the bootstrap-absent case is the earlier `published_root()?` (⇒
+    // `PreSnapshot`), and a present-but-empty snapshot must still resolve (⇒
+    // `NoProject`), never defer — the OWNED admission gate + the shadow-safety probe
+    // rely on this (a present snapshot published with `ownership_ready == false` must
+    // still bind). Under `ObservePublishedReadiness` the resolver instead threads the
+    // real `PublishedRoot::ownership_ready`, so a cold-bootstrap snapshot resolves
+    // `NotReady` (the `verter(project)` diagnostics consumer defers rather than
+    // emitting a premature terminal decision, exactly as the carrier-sync gateway).
+    let ownership_ready = match readiness_mode {
+        OwnershipReadinessMode::PresentSnapshotAuthoritative => true,
+        OwnershipReadinessMode::ObservePublishedReadiness => published.ownership_ready,
     };
     let resolver = WorkspaceProjectResolver::new(
         published.snapshot.as_ref(),
         ws_read.as_ref(),
         ts_version,
         &env_dims_source,
+        ownership_ready,
     );
-    Some((resolver.resolve(source), generation))
+    Some((resolver.resolve(source, None), generation))
+}
+
+/// How [`resolve_carrier`] treats a PRESENT-but-cold published snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnershipReadinessMode {
+    /// A PRESENT published snapshot is the authority: resolve `Bound` / `NoProject`
+    /// / `Ambiguous`, NEVER `NotReady`. The always-present OWNED carrier-diagnostics
+    /// gate and the SHARED overlay shadow-safety probe use this — the
+    /// bootstrap-absent case is the earlier `published_root()?` (⇒ `PreSnapshot`),
+    /// and a present-but-empty snapshot must still resolve authoritatively. Sourcing
+    /// readiness from the bootstrap bool here would regress the OWNED gate: a present
+    /// snapshot published with `ownership_ready == false` (the base-VFS publish) must
+    /// still bind its owner rather than spuriously defer.
+    PresentSnapshotAuthoritative,
+    /// OBSERVE the published root's `ownership_ready`: a non-authoritative
+    /// (cold-bootstrap) snapshot resolves `NotReady` instead of a premature terminal
+    /// `NoProject` / `Ambiguous`. The user-visible `verter(project)` diagnostics use
+    /// this so a bootstrap snapshot defers (no false diagnostic) exactly as the
+    /// carrier-sync gateway does, rather than surfacing a spurious no-owner warning.
+    ObservePublishedReadiness,
 }
 
 /// Resolve the carrier `source` to its owning configured project's [`BoundProject`]
@@ -162,21 +205,25 @@ pub fn resolve_carrier(
 /// gate obtains a `BoundProject` from before delegating to `TsgoOwnedProvider`.
 ///
 /// Published-snapshot → [`WorkspaceProjectResolver`] → `resolve(source)` → on
-/// [`ProjectResolution::ProjectBinding`] mint the witness through
+/// [`CarrierOwnershipResolution::Bound`] mint the witness through
 /// `TsgoEngineBackend::ensure_project(binding.ensure_project_request())`. Every other
-/// state ([`ProjectResolution::NoProject`] / [`ProjectResolution::Ambiguous`] /
-/// [`ProjectResolution::SyntheticScratch`], a pre-published snapshot, or an
+/// state ([`CarrierOwnershipResolution::NoProject`] / [`CarrierOwnershipResolution::Ambiguous`] /
+/// [`CarrierOwnershipResolution::NotReady`], a pre-published snapshot, or an
 /// `ensure_project` failure) is a DISTINCT fail-closed [`CarrierBinding`] variant
 /// that yields NO witness — NEVER a path-only inferred fallback.
 #[must_use]
 pub fn resolve_carrier_bound(host: &Arc<VerterHost>, source: &str) -> CarrierBinding {
     let ts_version: Arc<str> = Arc::from(OWNED_GATE_BOOTSTRAP_VERSION);
-    let Some((resolution, generation)) = resolve_carrier(host, source, Arc::clone(&ts_version))
-    else {
+    let Some((resolution, generation)) = resolve_carrier(
+        host.as_ref(),
+        source,
+        Arc::clone(&ts_version),
+        OwnershipReadinessMode::PresentSnapshotAuthoritative,
+    ) else {
         return CarrierBinding::PreSnapshot;
     };
     match resolution {
-        ProjectResolution::ProjectBinding(binding) => {
+        CarrierOwnershipResolution::Bound(binding) => {
             // Mint the BoundProject witness through the tsgo engine backend — the
             // project-bound contract's per-query witness discipline (no path-only
             // bypass). `ensure_project` is an infallible pure witness mint for a
@@ -191,9 +238,12 @@ pub fn resolve_carrier_bound(host: &Arc<VerterHost>, source: &str) -> CarrierBin
                 Err(_) => CarrierBinding::EnsureFailed,
             }
         }
-        ProjectResolution::NoProject => CarrierBinding::NoProject,
-        ProjectResolution::Ambiguous(cause) => CarrierBinding::Ambiguous(cause),
-        ProjectResolution::SyntheticScratch(_) => CarrierBinding::SyntheticScratch,
+        CarrierOwnershipResolution::NoProject => CarrierBinding::NoProject,
+        CarrierOwnershipResolution::Ambiguous { cause, .. } => CarrierBinding::Ambiguous(cause),
+        // Ownership not yet authoritative (bootstrap) ⇒ fail closed to the same
+        // no-result state as a missing published snapshot; the OWNED gate re-resolves
+        // once ownership is authoritative.
+        CarrierOwnershipResolution::NotReady => CarrierBinding::PreSnapshot,
     }
 }
 

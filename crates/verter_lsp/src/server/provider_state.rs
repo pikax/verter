@@ -15,8 +15,7 @@ use tower_lsp_server::ls_types::Uri;
 
 use crate::documents::line_index::LineIndex;
 use crate::provider_sync::{
-    commit_sync_transition, prepare_sync_transition, remove_sync_state, ProviderPathKind,
-    ProviderSyncState,
+    commit_sync_transition, prepare_sync_transition, ProviderPathKind, ProviderSyncState,
 };
 use crate::type_provider::merge;
 
@@ -221,8 +220,11 @@ impl VerterLanguageServer {
         ide: Option<&verter_session::IdeResponse>,
     ) -> crate::external_ts::CarrierSyncDecision {
         let Some(snapshot) = self.published_resolver() else {
-            // No published snapshot yet (bootstrap): nothing to advertise/commit.
-            return crate::external_ts::CarrierSyncDecision::Pending;
+            // No published snapshot yet (bootstrap): nothing to advertise/commit — a
+            // settleable non-owned outcome the caller routes through the coordinator.
+            return crate::external_ts::CarrierSyncDecision::NotOwned(
+                crate::external_ts::CarrierNotOwned::pending(),
+            );
         };
         // Clone the VFS handle out of the guard so no lock is held across the await.
         let vfs = self.vfs_workspace.read().clone();
@@ -232,19 +234,16 @@ impl VerterLanguageServer {
         let membership = match (
             matches!(self.type_provider_kind, crate::TypeProviderKind::Tsserver),
             self.carrier_publish_coordinator.as_ref(),
-            vfs.as_ref(),
         ) {
-            (true, Some(coordinator), Some(vfs)) => {
-                Some(crate::external_ts::CarrierMembershipCtx {
-                    coordinator,
-                    vfs,
-                    ownership_ready: snapshot.ownership_ready,
-                })
+            (true, Some(coordinator)) => {
+                Some(crate::external_ts::CarrierMembershipCtx { coordinator })
             }
             _ => None,
         };
         crate::external_ts::reconcile_carrier_source(crate::external_ts::CarrierSyncRequest {
             host: self.documents.host(),
+            vfs: vfs.as_deref(),
+            ownership_ready: snapshot.ownership_ready,
             resolver: &snapshot.resolver,
             provider_sync_states: &self.provider_sync_states,
             provider_surfaces: self.documents.provider_surfaces(),
@@ -253,6 +252,7 @@ impl VerterLanguageServer {
             is_jsx,
             ide,
             membership,
+            admission: &self.carrier_transaction_coordinator,
             reason: crate::external_ts::ReconcileReason::SourceSynced,
         })
         .await
@@ -295,29 +295,43 @@ impl VerterLanguageServer {
         commit_sync_transition(&self.provider_sync_states, canonical_id, state);
     }
 
-    /// Commit a CARRIER provider state — GATED on the sealed receipt minted by the
-    /// carrier-sync gateway (so a carrier state can never be committed without the
-    /// membership decision). Non-carrier (shadow) commits keep
+    /// Commit a CARRIER provider state through the coordinator's admission gate
+    /// ([`crate::external_ts::CarrierTransactionCoordinator::admit_owned`]) — GATED on the
+    /// sealed receipt minted by the carrier-sync gateway (so a carrier state can never be
+    /// committed without the membership decision). On a `Superseded` refusal (stale /
+    /// cross-owner / equal-key-different-artifact / owner-loss-since-capture) the source is
+    /// requeued for a fresh transaction — the interactive callers' retry disposition, never
+    /// silently dropped. Non-carrier (shadow) commits keep
     /// [`Self::commit_provider_sync_state`].
     pub(super) fn commit_carrier_provider_state(
         &self,
         canonical_id: &str,
         state: ProviderSyncState,
-        receipt: &crate::external_ts::CarrierProviderCommit,
+        receipt: &crate::external_ts::ProviderReadyReceipt,
     ) {
-        crate::external_ts::commit_carrier_provider_state(
+        if self.carrier_transaction_coordinator.admit_owned(
             &self.provider_sync_states,
             canonical_id,
             state,
             receipt,
-        );
+        ) == crate::external_ts::AdmitOutcome::Superseded
+        {
+            self.queue_snapshot_provider_sync(canonical_id.to_string());
+        }
     }
 
     pub(super) fn remove_provider_sync_state(
         &self,
         canonical_id: &str,
     ) -> Option<ProviderSyncState> {
-        remove_sync_state(&self.provider_sync_states, canonical_id)
+        // Advance-before-mutate: removing a previously-committed carrier state is an
+        // owner-loss for the admission barrier, so the coordinator advances the barrier
+        // BEFORE it vacates the slot (a late owned token captured before the removal can
+        // never resurrect the obsolete owner into the vacated slot — the barrier lives
+        // outside the removed state). A non-carrier / uncommitted state removes without a
+        // spurious advance.
+        self.carrier_transaction_coordinator
+            .advance_barrier_and_remove(&self.provider_sync_states, canonical_id)
     }
 
     pub(super) async fn clear_provider_sync_state(&self, canonical_id: &str) {
@@ -342,6 +356,17 @@ impl VerterLanguageServer {
         ide_code: Option<&str>,
     ) {
         let previous = self.provider_sync_state_for_source(canonical_id);
+        // Converting a previously-committed OWNED carrier (it carried a commit stamp) to
+        // Unresolved is an owner-loss for the admission barrier: advance it so a late owned
+        // token — captured before this conversion — can never resurrect the obsolete owner
+        // into the now-unstamped slot (the vacant-resurrection fence).
+        if previous
+            .as_ref()
+            .is_some_and(|state| state.commit_stamp.is_some())
+        {
+            self.carrier_transaction_coordinator
+                .advance_barrier(canonical_id);
+        }
         // The DESIRED Unresolved target: owner-independent desired-extension IDE
         // path + the open-vs-update syncability hint. Binding forced
         // `Unresolved`, owner-derived API dropped.
@@ -425,6 +450,10 @@ impl VerterLanguageServer {
     /// the genuinely-stale paths are closed (kind synced AND not active). On a
     /// total failure (`synced_kinds` empty) nothing is committed or closed —
     /// the previous state + provider paths are retained intact.
+    ///
+    /// The tsgo receipt is minted from `pending` HERE — after the empty-`synced_kinds`
+    /// early return — so it is minted only once at least one companion buffer opened;
+    /// on total failure the pending drops unconfirmed and no receipt exists.
     pub(super) async fn commit_and_close_after_sync(
         &self,
         canonical_id: &str,
@@ -432,7 +461,7 @@ impl VerterLanguageServer {
         mut committed_state: ProviderSyncState,
         stale_paths: &[(ProviderPathKind, String)],
         synced_kinds: &[ProviderPathKind],
-        receipt: &crate::external_ts::CarrierProviderCommit,
+        pending: crate::external_ts::PendingProviderReady,
     ) {
         if synced_kinds.is_empty() {
             return;
@@ -447,7 +476,23 @@ impl VerterLanguageServer {
             &committed_state,
             synced_kinds,
         );
-        self.commit_carrier_provider_state(canonical_id, committed_state, receipt);
+        // At least one kind opened: NOW mint the receipt (post-open), attesting EXACTLY
+        // the kinds that actually opened this pass, and commit through the admission gate.
+        let receipt = pending.confirm_opened(synced_kinds);
+        // Gate the stale-path close on ADMISSION: a `Superseded` commit (a newer
+        // transaction reclaimed the source, or an owner-loss advanced the barrier) requeues
+        // and closes NOTHING — the computed stale paths may be the newer transaction's LIVE
+        // buffers. Only an admitted commit closes them.
+        if self.carrier_transaction_coordinator.admit_owned(
+            &self.provider_sync_states,
+            canonical_id,
+            committed_state,
+            &receipt,
+        ) == crate::external_ts::AdmitOutcome::Superseded
+        {
+            self.queue_snapshot_provider_sync(canonical_id.to_string());
+            return;
+        }
         self.close_provider_paths(&genuinely_stale).await;
     }
 

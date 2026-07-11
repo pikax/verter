@@ -87,9 +87,7 @@ impl LspViews {
         snapshot: &verter_workspace::WorkspaceSnapshot,
         canonical_id: &str,
     ) -> Option<&LspProjectView> {
-        snapshot
-            .single_owner_for_file(canonical_id)
-            .map(|id| self.view(id))
+        view_owner_for_file(snapshot, canonical_id).map(|id| self.view(id))
     }
 
     /// Find the project root for a file (for tsserver `projectRootPath`).
@@ -101,9 +99,7 @@ impl LspViews {
         snapshot: &'a verter_workspace::WorkspaceSnapshot,
         canonical_id: &str,
     ) -> Option<&'a str> {
-        snapshot
-            .single_owner_for_file(canonical_id)
-            .map(|id| snapshot.project(id).root.as_str())
+        view_owner_for_file(snapshot, canonical_id).map(|id| snapshot.project(id).root.as_str())
     }
 
     /// Check if a file is in an SSR context.
@@ -125,10 +121,28 @@ impl LspViews {
         }
 
         // Tier 3: inherit from project
-        snapshot
-            .single_owner_for_file(canonical_id)
+        view_owner_for_file(snapshot, canonical_id)
             .map(|id| self.view(id).ssr_enabled)
             .unwrap_or(false)
+    }
+}
+
+/// The single view-owner project for a file: the unique configured owner, else — only
+/// on an authoritative configured-`None` — the single fallback owner. A genuine
+/// configured overlap (`Ambiguous`) fails closed to `None` and NEVER falls through to
+/// a fallback (and a fallback never becomes a configured owner). This is the
+/// per-project VIEW lookup (linter / `projectRootPath` / SSR), kept DISTINCT from the
+/// carrier-ownership authority (`external_ts::CarrierOwnershipResolution`) — it is not
+/// a generic path→singleton selector and never invents a winner for an overlap.
+fn view_owner_for_file(
+    snapshot: &verter_workspace::WorkspaceSnapshot,
+    canonical_id: &str,
+) -> Option<ProjectId> {
+    use verter_workspace::workspace_snapshot::ConfiguredOwnerResolution;
+    match snapshot.configured_owner_resolution_for_file(canonical_id) {
+        ConfiguredOwnerResolution::Unique(id) => Some(id),
+        ConfiguredOwnerResolution::Ambiguous(_) => None,
+        ConfiguredOwnerResolution::None => snapshot.single_fallback_owner_for_file(canonical_id),
     }
 }
 

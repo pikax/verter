@@ -22,8 +22,8 @@ use crate::documents::line_index::LineIndex;
 use crate::documents::DocumentRegistry;
 use crate::provider_sync::{
     commit_sync_transition, genuinely_stale_after_sync, non_decl_close_targets,
-    open_unresolved_carrier_commit, open_unresolved_carrier_state, remove_sync_state,
-    revert_unsynced_kinds, NonDeclProviderPathKind, ProviderPathKind, ProviderSyncState,
+    open_unresolved_carrier_commit, open_unresolved_carrier_state, revert_unsynced_kinds,
+    NonDeclProviderPathKind, ProviderPathKind, ProviderSyncState,
 };
 use crate::server::compute_verter_diagnostics_for_with_views;
 use crate::type_provider::merge;
@@ -86,6 +86,10 @@ pub struct SyncCoordinatorDeps {
     /// debounced sync publishes a freshly-edited carrier's companions through it
     /// so the plugin serves up-to-date content on the next pull.
     pub carrier_publish_coordinator: Option<crate::external_ts::CarrierPublishCoordinator>,
+    /// The per-source carrier transaction coordinator (admission gate, owner-loss barrier,
+    /// non-owned retry disposition), shared with the server so the debounced sync's carrier
+    /// commits and non-owned settlements serialize on the ONE barrier map.
+    pub carrier_transaction_coordinator: Arc<crate::external_ts::CarrierTransactionCoordinator>,
 }
 
 /// Debounce interval: sync fires after 300ms of silence for a given file.
@@ -209,6 +213,7 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
                 deps.documents.provider_surfaces(),
                 &deps.provider_sync_states,
                 canonical_id,
+                &deps.carrier_transaction_coordinator,
             )
             .await;
         }
@@ -236,13 +241,8 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
     let membership = match (
         matches!(deps.type_provider_kind, crate::TypeProviderKind::Tsserver),
         deps.carrier_publish_coordinator.as_ref(),
-        vfs.as_ref(),
     ) {
-        (true, Some(coordinator), Some(vfs)) => Some(crate::external_ts::CarrierMembershipCtx {
-            coordinator,
-            vfs,
-            ownership_ready: snapshot.ownership_ready,
-        }),
+        (true, Some(coordinator)) => Some(crate::external_ts::CarrierMembershipCtx { coordinator }),
         _ => None,
     };
 
@@ -250,9 +250,12 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
     // tsserver PUBLISHES the companions into the store the plugin reads (refreshing
     // the store content for the next pull), tsgo opens the companions directly, and an
     // owner loss RETRACTS the membership + preserves an open document / clears a
-    // closed one. The receipt gates every commit.
+    // closed one. The receipt gates every commit. Ownership resolves from the SAME
+    // published `vfs` for both engines.
     match crate::external_ts::reconcile_carrier_source(crate::external_ts::CarrierSyncRequest {
         host: deps.documents.host(),
+        vfs: vfs.as_deref(),
+        ownership_ready: snapshot.ownership_ready,
         resolver: &snapshot.resolver,
         provider_sync_states: &deps.provider_sync_states,
         provider_surfaces: deps.documents.provider_surfaces(),
@@ -261,6 +264,7 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
         is_jsx,
         ide: ide.as_ref(),
         membership,
+        admission: &deps.carrier_transaction_coordinator,
         reason: crate::external_ts::ReconcileReason::SourceSynced,
     })
     .await
@@ -270,22 +274,28 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
             receipt,
         } => {
             // The plugin serves both store-resident companions: no buffer I/O.
-            crate::external_ts::commit_carrier_provider_state(
+            if deps.carrier_transaction_coordinator.admit_owned(
                 &deps.provider_sync_states,
                 canonical_id,
                 committed_state,
                 &receipt,
-            );
+            ) == crate::external_ts::AdmitOutcome::Superseded
+            {
+                deps.pending_snapshot_provider_sync
+                    .insert(canonical_id.to_string());
+            }
         }
         crate::external_ts::CarrierSyncDecision::DirectOpen {
             transition,
-            receipt,
+            pending,
         } => {
             // Close-AFTER-successful-sync (per-kind, skip-active): capture stale +
             // prior state, sync each kind, then commit and close only genuinely-
             // stale paths. The coordinator can touch an OPEN file, so a failed
             // replacement sync must never close the live path nor commit an unsynced
-            // path.
+            // path. The readiness receipt is minted from `pending` only AFTER a kind
+            // opened (below); if no kind syncs, the pending drops unconfirmed and
+            // nothing commits.
             let previous_state = deps
                 .provider_sync_states
                 .get(canonical_id)
@@ -362,56 +372,63 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
                 revert_unsynced_kinds(&mut committed_state, previous_state.as_ref(), &synced_kinds);
                 let genuinely_stale =
                     genuinely_stale_after_sync(&stale_paths, &committed_state, &synced_kinds);
-                crate::external_ts::commit_carrier_provider_state(
+                // A kind opened: NOW mint the receipt (post-open), attesting EXACTLY the
+                // kinds that actually opened this pass, and commit through the coordinator.
+                let receipt = pending.confirm_opened(&synced_kinds);
+                // Gate the stale-path close on ADMISSION: a `Superseded` commit (a newer
+                // transaction reclaimed the source, or an owner-loss advanced the barrier)
+                // requeues and closes NOTHING — the computed stale paths may be the newer
+                // transaction's LIVE buffers. Only an admitted commit closes them (and
+                // `close_stale_paths` retires any closed `Api` surface's active generation in
+                // the provider-surface store so a closed `{carrier}.ts` is never later
+                // vouched as current by a rename).
+                if deps.carrier_transaction_coordinator.admit_owned(
                     &deps.provider_sync_states,
                     canonical_id,
                     committed_state,
                     &receipt,
-                );
-                // `close_stale_paths` retires any closed `Api` surface's active
-                // generation in the provider-surface store (forget), so a closed
-                // `{carrier}.ts` is never later vouched as current by a rename.
-                close_stale_paths(
-                    &deps.project_sync,
-                    deps.documents.provider_surfaces(),
-                    &non_decl_close_targets(&genuinely_stale),
-                )
-                .await;
+                ) == crate::external_ts::AdmitOutcome::Superseded
+                {
+                    deps.pending_snapshot_provider_sync
+                        .insert(canonical_id.to_string());
+                } else {
+                    close_stale_paths(
+                        &deps.project_sync,
+                        deps.documents.provider_surfaces(),
+                        &non_decl_close_targets(&genuinely_stale),
+                    )
+                    .await;
+                }
             }
         }
-        crate::external_ts::CarrierSyncDecision::Unowned => {
-            // No owner. Editor-liveness invariant: an OPEN `.vue` keeps its TSX live
-            // as Unresolved open-document state — NEVER clear+close. Only a genuinely
-            // non-open file is removed (and only once ready). The gateway already
+        crate::external_ts::CarrierSyncDecision::NotOwned(not_owned) => {
+            // Settle the non-owned disposition through the coordinator (requeue the
+            // transient `NotReady`/`Pending`, advance the owner-loss barrier for the
+            // terminal `Unresolved`), then run the editor-liveness buffer conversion for a
+            // settled no-owner class. Editor-liveness invariant: an OPEN `.vue` keeps its
+            // TSX live as Unresolved open-document state — NEVER clear+close; only a
+            // genuinely non-open file is removed (and only once ready). The gateway already
             // RETRACTED the STORE/ledger membership.
-            if deps.documents.canonical_id_to_uri(canonical_id).is_some() {
-                preserve_open_unresolved_carrier(deps, canonical_id, is_jsx, ide.as_ref()).await;
-            } else if snapshot.ownership_ready {
-                clear_provider_sync_state(
-                    &deps.project_sync,
-                    deps.documents.provider_surfaces(),
-                    &deps.provider_sync_states,
-                    canonical_id,
-                )
-                .await;
+            let class = deps.carrier_transaction_coordinator.settle(
+                not_owned,
+                canonical_id,
+                Some(&deps.pending_snapshot_provider_sync),
+            );
+            if class.runs_buffer_cleanup() {
+                if deps.documents.canonical_id_to_uri(canonical_id).is_some() {
+                    preserve_open_unresolved_carrier(deps, canonical_id, is_jsx, ide.as_ref())
+                        .await;
+                } else if snapshot.ownership_ready {
+                    clear_provider_sync_state(
+                        &deps.project_sync,
+                        deps.documents.provider_surfaces(),
+                        &deps.provider_sync_states,
+                        canonical_id,
+                        &deps.carrier_transaction_coordinator,
+                    )
+                    .await;
+                }
             }
-            deps.pending_snapshot_provider_sync
-                .insert(canonical_id.to_string());
-            if snapshot.ownership_ready {
-                tracing::warn!(
-                    "sync_coordinator: {canonical_id} has no project owner after real snapshot"
-                );
-            } else {
-                tracing::info!(
-                    "sync_coordinator: {canonical_id} unowned during bootstrap, queued for drain"
-                );
-            }
-        }
-        crate::external_ts::CarrierSyncDecision::Pending => {
-            // Nothing advertised this pass (cold defer / transient compile miss):
-            // keep the file queued so a later snapshot/drain reconciles it.
-            deps.pending_snapshot_provider_sync
-                .insert(canonical_id.to_string());
         }
     }
     tracing::info!("sync_coordinator: SYNC_DONE {canonical_id}");
@@ -435,6 +452,16 @@ async fn preserve_open_unresolved_carrier(
         .provider_sync_states
         .get(canonical_id)
         .map(|entry| entry.clone());
+    // Converting a previously-committed OWNED carrier to Unresolved is an owner-loss for the
+    // admission barrier: advance it so a late owned token can never resurrect the obsolete
+    // owner into the now-unstamped slot.
+    if previous
+        .as_ref()
+        .is_some_and(|state| state.commit_stamp.is_some())
+    {
+        deps.carrier_transaction_coordinator
+            .advance_barrier(canonical_id);
+    }
     // The DESIRED Unresolved target: owner-independent desired-extension IDE
     // path + the open-vs-update syncability hint. Binding forced `Unresolved`,
     // owner-derived API dropped.
@@ -500,8 +527,12 @@ async fn clear_provider_sync_state(
     provider_surfaces: &crate::provider_surface_store::ProviderSurfaceStore,
     states: &DashMap<String, ProviderSyncState>,
     canonical_id: &str,
+    carrier_coordinator: &crate::external_ts::CarrierTransactionCoordinator,
 ) {
-    if let Some(state) = remove_sync_state(states, canonical_id) {
+    // Advance-before-mutate: the coordinator advances the owner-loss barrier BEFORE it
+    // vacates the slot when the removed state was a previously-committed carrier, so a late
+    // owned token captured before this removal can never resurrect the obsolete owner.
+    if let Some(state) = carrier_coordinator.advance_barrier_and_remove(states, canonical_id) {
         // The declaration overlay (`Decl`), if any, is released by `DeclOverlayOwner`
         // via the `did_close` lifecycle, never closed here — the generic close
         // touches only non-decl artifacts.
@@ -684,7 +715,7 @@ async fn publish_merged_diagnostics(deps: &SyncCoordinatorDeps, canonical_id: &s
                 .and_then(|p| {
                     p.snapshot
                         .resolver
-                        .owner_for_file(canonical_id)
+                        .nearest_config_for_path(canonical_id)
                         .map(|o| o.root.clone())
                 })
         };

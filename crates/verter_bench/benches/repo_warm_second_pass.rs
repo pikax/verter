@@ -31,8 +31,8 @@ use verter_session::VerterHost;
 
 use verter_semantic::analysis::project_resolver::IdeProjectConfig;
 use verter_workspace::{
-    IdeProjectCompilerOptions, MemoryOptions, MemoryWorkspace, ProjectGraph, ProjectMembership,
-    ProjectRank, VfsProjectConfig, WorkspaceAccess,
+    IdeProjectCompilerOptions, MemoryOptions, MemoryWorkspace, ProjectGraph, ProjectRank,
+    VfsProjectConfig, WorkspaceAccess,
 };
 
 const NUM_COMPONENTS: usize = 16;
@@ -84,7 +84,9 @@ fn build_host() -> (Arc<VerterHost>, Vec<String>) {
             workspace_aliases: vec![],
             compiler_options: IdeProjectCompilerOptions::default(),
             references: vec![],
-            membership: ProjectMembership::MatchAll,
+            membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+                &verter_workspace::CanonicalPath::new("/workspace"),
+            ),
         },
     ]);
     let workspace = Arc::new(MemoryWorkspace::new(MemoryOptions::default()));

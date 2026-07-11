@@ -59,6 +59,8 @@ pub(super) struct BackgroundInitArgs {
     /// path). `Some` only for the tsserver engine; `None` for tsgo and when no
     /// type provider is connected.
     pub(super) carrier_publish_coordinator: Option<crate::external_ts::CarrierPublishCoordinator>,
+    pub(super) carrier_transaction_coordinator:
+        Arc<crate::external_ts::CarrierTransactionCoordinator>,
     /// The proactive declaration-overlay lifecycle owner (shared with the server's
     /// `did_close` lifecycle).
     pub(super) decl_overlay_owner: Arc<super::DeclOverlayOwner>,
@@ -148,6 +150,7 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         mru_canonical_ids,
         vfs_workspace,
         carrier_publish_coordinator,
+        carrier_transaction_coordinator,
         decl_overlay_owner,
     } = args;
 
@@ -292,6 +295,7 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         is_tsgo,
         Some(&mru_canonical_ids),
         carrier_publish_coordinator.as_ref(),
+        &carrier_transaction_coordinator,
     )
     .await;
 
@@ -308,6 +312,7 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         // init pass that reaches the overlay reconcile must not close an overlay a
         // newer live init pass re-established reachability for.
         my_gen,
+        &carrier_transaction_coordinator,
     )
     .await;
 
@@ -365,6 +370,8 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
             provider_surfaces: documents.provider_surfaces().clone(),
             is_tsgo,
             carrier_publish_coordinator: carrier_publish_coordinator.clone(),
+            carrier_transaction_coordinator: Arc::clone(&carrier_transaction_coordinator),
+            pending_snapshot_provider_sync: Arc::clone(&pending_snapshot_provider_sync),
             tsx_profile: tsx_profile.read().clone(),
             tsconfig_patterns: Vec::new(),
             workspace_snapshot: scanner_snapshot,
@@ -691,7 +698,7 @@ mod tests {
                 .root
                 .snapshot
                 .resolver
-                .owner_for_file(&app_path)
+                .nearest_config_for_path(&app_path)
                 .is_some(),
             "resolver published with the snapshot should own the configured file"
         );

@@ -38,8 +38,8 @@ use verter_audit::{RequestKind, RequestKindPayload, WorkspaceOp};
 use verter_session::tests::audit_tls_harness::assert_observer_reaches;
 use verter_session::{HostConfig, VerterHost};
 use verter_workspace::{
-    IdeProjectCompilerOptions, MemoryOptions, MemoryWorkspace, ProjectGraph, ProjectMembership,
-    ProjectRank, VfsProjectConfig, WorkspaceAccess,
+    IdeProjectCompilerOptions, MemoryOptions, MemoryWorkspace, ProjectGraph, ProjectRank,
+    VfsProjectConfig, WorkspaceAccess,
 };
 
 fn build_host_with_workspace(audit_enabled: bool) -> Arc<VerterHost> {
@@ -63,7 +63,9 @@ fn build_host_with_workspace(audit_enabled: bool) -> Arc<VerterHost> {
         workspace_aliases: vec![],
         compiler_options: IdeProjectCompilerOptions::default(),
         references: vec![],
-        membership: ProjectMembership::MatchAll,
+        membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+            &verter_workspace::CanonicalPath::new("d:/project"),
+        ),
     }]);
     ws.set_project_graph(graph);
 

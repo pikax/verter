@@ -55,8 +55,8 @@ use std::time::{Duration, Instant};
 
 use verter_session::{HostConfig, VerterHost};
 use verter_workspace::{
-    FilesystemOptions, FilesystemWorkspace, IdeProjectCompilerOptions, ProjectMembership,
-    ProjectRank, VfsProjectConfig, WorkspaceAccess,
+    FilesystemOptions, FilesystemWorkspace, IdeProjectCompilerOptions, ProjectRank,
+    VfsProjectConfig, WorkspaceAccess,
 };
 
 /// Components that MUST resolve without timeout (#1). The set includes
@@ -274,7 +274,9 @@ fn build_corpus_host_with_config(corpus_root: &Path, config: HostConfig) -> Arc<
         workspace_aliases: vec![],
         compiler_options: IdeProjectCompilerOptions::default(),
         references: vec![],
-        membership: ProjectMembership::MatchAll,
+        membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+            &verter_workspace::CanonicalPath::new(&ws_root_str),
+        ),
     }]);
     let workspace = Arc::new(FilesystemWorkspace::new(FilesystemOptions {
         roots: vec![ws_root_str.clone()],

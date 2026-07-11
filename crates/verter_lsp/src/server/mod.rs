@@ -369,6 +369,14 @@ pub struct VerterLanguageServer {
     /// open (`open_project` + `root_files`). The backend it holds resolves the SAME
     /// store dir the tsserver spawn delivers to the plugin.
     carrier_publish_coordinator: Option<crate::external_ts::CarrierPublishCoordinator>,
+    /// The per-source carrier transaction coordinator — the SINGLE authority for carrier
+    /// provider-state admission (the receipt-gated commit + IDE-surface stamp), the
+    /// owner-loss barrier (the tombstone that survives a state removal), and the non-owned
+    /// retry disposition (requeue / owner-loss barrier advance). Shared (`Arc`) across the
+    /// server, the SyncCoordinator, the background drain, and the workspace scanner so all
+    /// carrier admissions serialize on one barrier map. Engine-agnostic (both tsserver and
+    /// tsgo route their commits through it).
+    carrier_transaction_coordinator: Arc<crate::external_ts::CarrierTransactionCoordinator>,
 }
 
 impl VerterLanguageServer {
@@ -418,6 +426,12 @@ impl VerterLanguageServer {
             _ => None,
         };
 
+        // The per-source carrier transaction coordinator (admission gate + owner-loss
+        // barrier + non-owned retry disposition), shared across the server, SyncCoordinator,
+        // drain, and scanner so every carrier admission serializes on ONE barrier map.
+        let carrier_transaction_coordinator =
+            Arc::new(crate::external_ts::CarrierTransactionCoordinator::new());
+
         // Create SyncCoordinator if a type provider is connected.
         // The coordinator's debounced loop replaces the old spawn-per-keystroke pattern.
         let sync_coordinator = project_sync.as_ref().map(|ps| {
@@ -435,6 +449,7 @@ impl VerterLanguageServer {
                     vfs_workspace: Arc::clone(&vfs_workspace),
                     type_provider_kind: config.type_provider_kind,
                     carrier_publish_coordinator: carrier_publish_coordinator.clone(),
+                    carrier_transaction_coordinator: Arc::clone(&carrier_transaction_coordinator),
                 },
             )
         });
@@ -478,6 +493,7 @@ impl VerterLanguageServer {
                 crate::features::hover_provenance::HoverProvenanceCache::new(),
             ),
             carrier_publish_coordinator,
+            carrier_transaction_coordinator,
         }
     }
 

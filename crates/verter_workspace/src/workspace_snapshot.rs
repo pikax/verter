@@ -141,29 +141,73 @@ impl WorkspaceSnapshot {
             })
             .collect();
 
-        // Nearest-root effective ownership: a configured candidate whose root
-        // is a STRICT ANCESTOR of another matching candidate's root loses —
-        // `extends`/breadth at an ancestor root must not make a descendant
-        // package file ambiguous when a descendant configured project also
-        // claims it. After pruning ancestors, what remains is either exactly
-        // one config (UNIQUE), or multiple configs at the same root / at
-        // incomparable roots (genuine overlap → AMBIGUOUS).
+        // Deterministic graph pruning: a configured candidate is dropped when
+        // another co-claiming candidate DOMINATES it. Domination is either:
+        //
+        //   (a) nearest-root — the other candidate has a STRICTLY-DEEPER root
+        //       that contains this candidate's root. `extends`/breadth at an
+        //       ancestor root must not make a descendant package file ambiguous
+        //       when a descendant configured project also claims it.
+        //   (b) solution-graph — this candidate transitively `references` the
+        //       other candidate, i.e. it is a solution aggregator / referenced
+        //       non-leaf pulling in the real leaf owner. TypeScript solution
+        //       style: the referenced leaf owns the file, the aggregator only
+        //       pulls it in through project references.
+        //
+        // After pruning, what remains is either exactly one config (UNIQUE), or
+        // multiple configs at the same / incomparable roots with no reference
+        // relationship (a genuine overlap → AMBIGUOUS). Selection is never
+        // lexical / scan-order / load-order — only the deterministic graph
+        // rules above decide.
         let effective: SmallVec<[ProjectId; 2]> = configured
             .iter()
             .copied()
             .filter(|candidate| {
                 let candidate_root = &self.projects[candidate.0 as usize].root;
-                // Keep the candidate only if no OTHER matching candidate has a
-                // strictly-deeper root that contains this candidate's root.
                 !configured.iter().any(|other| {
                     if other == candidate {
                         return false;
                     }
                     let other_root = &self.projects[other.0 as usize].root;
-                    // `other` strictly under `candidate` ⇒ candidate is an
+                    // (a) `other` strictly under `candidate` ⇒ candidate is an
                     // ancestor ⇒ drop the ancestor candidate.
-                    other_root.starts_with_dir(candidate_root)
+                    if other_root.starts_with_dir(candidate_root)
                         && other_root.as_str().len() > candidate_root.as_str().len()
+                    {
+                        return true;
+                    }
+                    // (b) SOLUTION-GRAPH domination: candidate transitively
+                    // `references` the co-claiming `other`, i.e. candidate is a
+                    // solution aggregator / referenced non-leaf pulling in the real
+                    // leaf owner ⇒ drop the aggregator in favour of the leaf. This
+                    // fires ONLY for a STRICT reference relationship (a DAG edge),
+                    // never a cyclic tie: a malformed `A references B` / `B
+                    // references A` pair puts both configs in ONE reference SCC where
+                    // each transitively reaches the other, so neither strictly
+                    // dominates. Condensing the SCC — requiring `other` NOT to
+                    // reference `candidate` back — keeps a genuine cycle `Ambiguous`
+                    // over both candidates rather than collapsing it (each dropping
+                    // the other) to `None`.
+                    match (
+                        &self.projects[candidate.0 as usize].payload,
+                        &self.projects[other.0 as usize].payload,
+                    ) {
+                        (
+                            ProjectPayload::Configured {
+                                tsconfig_path: candidate_tsconfig,
+                                ..
+                            },
+                            ProjectPayload::Configured {
+                                tsconfig_path: other_tsconfig,
+                                ..
+                            },
+                        ) => {
+                            self.configured_references_transitively(*candidate, other_tsconfig)
+                                && !self
+                                    .configured_references_transitively(*other, candidate_tsconfig)
+                        }
+                        _ => false,
+                    }
                 })
             })
             .collect();
@@ -175,20 +219,72 @@ impl WorkspaceSnapshot {
         }
     }
 
-    /// Resolve a file to a single owner only when that owner is unambiguous.
+    /// Whether the configured project `from` reaches `target_tsconfig` through
+    /// the project-`references` graph (directly or transitively).
     ///
-    /// - Unique configured owner -> `Some(ProjectId)`
-    /// - Ambiguous configured owners -> `None`
-    /// - No configured owners -> a single fallback owner if exactly one exists
-    pub fn single_owner_for_file(&self, canonical_id: &str) -> Option<ProjectId> {
-        match self.configured_owner_resolution_for_file(canonical_id) {
-            ConfiguredOwnerResolution::Unique(id) => Some(id),
-            ConfiguredOwnerResolution::Ambiguous(_) => None,
-            ConfiguredOwnerResolution::None => {
-                let owners = self.owners_for_file(canonical_id);
-                (owners.len() == 1).then(|| owners[0])
+    /// Used by [`Self::configured_owner_resolution_for_file`] to drop a
+    /// solution aggregator / referenced non-leaf in favour of the co-claiming
+    /// leaf it pulls in. The reference graph is a DAG for valid TypeScript
+    /// configs; the `visited` set makes traversal terminate even on a malformed
+    /// cyclic reference set.
+    fn configured_references_transitively(
+        &self,
+        from: ProjectId,
+        target_tsconfig: &CanonicalPath,
+    ) -> bool {
+        let mut visited: SmallVec<[ProjectId; 8]> = SmallVec::new();
+        let mut stack: SmallVec<[ProjectId; 8]> = SmallVec::new();
+        stack.push(from);
+        while let Some(id) = stack.pop() {
+            if visited.contains(&id) {
+                continue;
+            }
+            visited.push(id);
+            let ProjectPayload::Configured { references, .. } =
+                &self.projects[id.0 as usize].payload
+            else {
+                continue;
+            };
+            for reference in references {
+                if reference == target_tsconfig {
+                    return true;
+                }
+                if let Some(next) = self.configured_project_by_tsconfig(reference) {
+                    if !visited.contains(&next) {
+                        stack.push(next);
+                    }
+                }
             }
         }
+        false
+    }
+
+    /// Find the configured project whose tsconfig path equals `tsconfig`.
+    fn configured_project_by_tsconfig(&self, tsconfig: &CanonicalPath) -> Option<ProjectId> {
+        self.projects
+            .iter()
+            .find_map(|project| match &project.payload {
+                ProjectPayload::Configured { tsconfig_path, .. } if tsconfig_path == tsconfig => {
+                    Some(project.id)
+                }
+                _ => None,
+            })
+    }
+
+    /// The single FALLBACK (tsconfig-less) owner for a file, or `None` when there is
+    /// no fallback owner or the fallback ownership is itself ambiguous (>1).
+    ///
+    /// This is the SEPARATE candidate-preserving fallback resolution the non-carrier
+    /// LSP context (per-project linter view / `projectRootPath` / SSR detection) and
+    /// the intrinsic-projection cache anchor consult ONLY after an authoritative
+    /// configured-`None`. It NEVER returns a configured project (carrier ownership is
+    /// `verter_session`'s `CarrierOwnershipResolution`), and it never invents a winner
+    /// for overlapping fallbacks. `owners_for_file` already suppresses fallbacks when
+    /// any configured project claims the file, so on a configured-`None` the owners it
+    /// reports are exactly the fallback owners.
+    pub fn single_fallback_owner_for_file(&self, canonical_id: &str) -> Option<ProjectId> {
+        let owners = self.owners_for_file(canonical_id);
+        (owners.len() == 1).then(|| owners[0])
     }
 
     /// Get a project by ID.

@@ -12935,28 +12935,26 @@ mod typed_ir_resolver_guards {
     //   * W4.5 — host_manage.rs (2) + meta_resolve/graph_predicates.rs
     //
     // Permanent exception entries (per the rule-scope clauses above):
-    //   * `verter_workspace/src/resolver.rs:84` — exception class (1):
-    //     the workspace classification API's own primitive.
     //   * `verter_lsp/src/server_utils.rs:22` — exception class (2):
     //     filesystem-event handler running below the workspace
     //     registry. The LSP `did_change_watched_files` gate.
     //
-    // These two stay in the allowlist permanently. Neither is a
-    // resolver-pipeline site. The matching call sites carry pointer
-    // comments back to this rule-scope block.
+    // Exception class (1) — the workspace classification API's own
+    // primitive — no longer needs a substring site: project membership
+    // resolves through the exact `ConfiguredMembership` (materialized
+    // file set / static spec), so `Project::matches_file` performs no
+    // `/node_modules/` substring classification. The single remaining
+    // allowlist site is exception class (2).
+    //
+    // This entry stays in the allowlist permanently. It is not a
+    // resolver-pipeline site. The matching call site carries a pointer
+    // comment back to this rule-scope block.
     // -----------------------------------------------------------------------
-    const NODE_MODULES_ALLOWLIST: &[(&str, u32, &str)] = &[
-        (
-            "crates/verter_lsp/src/server_utils.rs",
-            22,
-            r#".contains("/node_modules/")"#,
-        ),
-        (
-            "crates/verter_workspace/src/resolver.rs",
-            100,
-            r#".contains("/node_modules/")"#,
-        ),
-    ];
+    const NODE_MODULES_ALLOWLIST: &[(&str, u32, &str)] = &[(
+        "crates/verter_lsp/src/server_utils.rs",
+        22,
+        r#".contains("/node_modules/")"#,
+    )];
 
     fn scan_node_modules_substring() -> Vec<(String, u32, String)> {
         let files = collect_production_rs_files();
@@ -13017,18 +13015,6 @@ mod typed_ir_resolver_guards {
             "verter_lsp::server_utils::is_config_file must carry a rule-scope \
              pointer comment naming the architecture guard and the \
              filesystem-event-handler exception class. Restore the \
-             docstring or remove the allowlist entry.",
-        );
-
-        // Site 2 — workspace API primitive.
-        let ws_src = super::read_workspace_file("crates/verter_workspace/src/resolver.rs");
-        assert!(
-            ws_src.contains("Architecture-guard exception")
-                && ws_src.contains("WorkspaceAccess::is_workspace_owned")
-                && ws_src.contains("no_node_modules_substring_outside_workspace_api"),
-            "verter_workspace::Project::matches_file must carry a rule-scope \
-             pointer comment naming the architecture guard and the \
-             workspace-API-primitive exception class. Restore the \
              docstring or remove the allowlist entry.",
         );
 

@@ -42,7 +42,7 @@ use verter_lsp::type_provider::protocol::{
 use verter_lsp::type_provider::traits::{ProviderFuture, TypeProvider};
 
 use verter_session::external_ts::{
-    EnvDims, ExternalTsProjectResolver, ProjectResolution, WorkspaceProjectResolver,
+    CarrierOwnershipResolution, EnvDims, ExternalTsProjectResolver, WorkspaceProjectResolver,
 };
 use verter_session::file_artifact_store::ProjectIdentity;
 use verter_session::{
@@ -426,7 +426,7 @@ fn init_params(root_uri: &str) -> serde_json::Value {
 /// `include: ["src/**/*"]` configured project the composite test publishes) — the
 /// production resolution path, NOT the `new_for_test` seam. The three live tests thus
 /// exercise the real resolver, exactly as the production composite does.
-fn resolved_binding(workspace_root: &str, tsconfig: &str) -> ProjectResolution {
+fn resolved_binding(workspace_root: &str, tsconfig: &str) -> CarrierOwnershipResolution {
     let snapshot = fixture_snapshot(workspace_root, tsconfig);
     let vfs = MemoryWorkspace::new(MemoryOptions {
         roots: vec![workspace_root.to_string()],
@@ -443,8 +443,9 @@ fn resolved_binding(workspace_root: &str, tsconfig: &str) -> ProjectResolution {
         &vfs as &dyn WorkspaceRead,
         "7.0.2",
         &env_dims_source,
+        true,
     );
-    resolver.resolve(&format!("{workspace_root}/src/Widget.vue"))
+    resolver.resolve(&format!("{workspace_root}/src/Widget.vue"), None)
 }
 
 /// A wired SHARED session: the shim + fake editor + the established provider.
@@ -1023,9 +1024,10 @@ fn two_project_reference_fixture_resolves_as_one_closure() {
         &vfs as &dyn WorkspaceRead,
         "7.0.2",
         &env_dims_source,
+        true,
     );
-    let resolution = resolver.resolve(&format!("{ws_root}/app/src/Widget.vue"));
-    let ProjectResolution::ProjectBinding(binding) = resolution else {
+    let resolution = resolver.resolve(&format!("{ws_root}/app/src/Widget.vue"), None);
+    let CarrierOwnershipResolution::Bound(binding) = resolution else {
         panic!("the app carrier must resolve to a ProjectBinding; got {resolution:?}");
     };
 

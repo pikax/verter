@@ -15,6 +15,10 @@
 
 use super::*;
 
+#[path = "background_drain_owner_loss.rs"]
+mod owner_loss;
+use owner_loss::{reconcile_unowned_carrier_buffer, reconcile_unowned_carrier_provider_file};
+
 /// Outcome of a single pending-file provider-sync pass, used by the drain loop
 /// to decide whether to DEQUEUE the file or KEEP it for a later retry.
 ///
@@ -22,18 +26,40 @@ use super::*;
 /// per-kind partial-failure is real (one kind syncs, another fails and reverts).
 /// Removing the file from the pending set whenever *any* kind synced would
 /// permanently suppress the failed kind — it would never be retried. The drain
-/// therefore dequeues ONLY on [`SyncOutcome::FullyReconciled`].
+/// therefore dequeues only on [`SyncOutcome::FullyReconciled`] (every kind
+/// synced) or [`SyncOutcome::Terminal`] (a settled terminal no-owner state) — see
+/// [`sync_outcome_dequeues`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SyncOutcome {
     /// Every intended kind synced this pass (or there was nothing to sync and
     /// the committed state is already consistent). Safe to dequeue.
     FullyReconciled,
+    /// The carrier settled into a TERMINAL no-owner state (`NoProject` /
+    /// `Ambiguous`). Safe to dequeue: retrying a terminal ownership decision
+    /// would only re-run the same fail-closed result. A later config change that
+    /// resolves an owner is re-driven by that change's own reconcile, not by a
+    /// stale drain retry.
+    Terminal,
     /// At least one kind synced but at least one OTHER intended kind FAILED.
     /// Keep the file queued so the failed kind is retried on a later drain.
     Partial,
-    /// Nothing synced this pass — a total sync failure, or an intentionally
-    /// queued unresolved/owner-None state awaiting a future owner. Keep queued.
+    /// Nothing synced this pass — a total sync failure, a transient advertise
+    /// miss (`Pending`), or a still-transient `NotReady` bootstrap awaiting an
+    /// authoritative owner. The sole RETRYABLE outcomes; keep queued.
     Nothing,
+}
+
+/// Whether a drain [`SyncOutcome`] should DEQUEUE the carrier from the pending set.
+///
+/// Dequeue on [`SyncOutcome::FullyReconciled`] (every kind synced) and
+/// [`SyncOutcome::Terminal`] (a settled terminal no-owner state — never retried).
+/// [`SyncOutcome::Partial`] and [`SyncOutcome::Nothing`] stay queued so a failed
+/// kind or a still-transient (`NotReady` / `Pending`) carrier is retried.
+pub(super) fn sync_outcome_dequeues(outcome: SyncOutcome) -> bool {
+    matches!(
+        outcome,
+        SyncOutcome::FullyReconciled | SyncOutcome::Terminal
+    )
 }
 
 /// The live carrier-publish context threaded into the drain for the tsserver
@@ -44,9 +70,11 @@ pub(super) enum SyncOutcome {
 /// engine through the project-bound `--api` direct open — `open_project` +
 /// `root_files`) and for unit tests that assert the mock provider's open/sync calls.
 pub(super) struct CarrierPublishCtx<'a> {
-    /// The coordinator that resolves ownership + publishes the companions.
-    pub(super) coordinator: &'a crate::external_ts::CarrierPublishCoordinator,
-    /// The published filesystem workspace (ownership-resolution source).
+    /// The tsserver publish coordinator (drives the store-publish membership), or
+    /// `None` for tsgo direct-open. Ownership is resolved from `vfs` for BOTH engines.
+    pub(super) coordinator: Option<&'a crate::external_ts::CarrierPublishCoordinator>,
+    /// The published filesystem workspace — the SINGLE ownership-resolution source for
+    /// both engines.
     pub(super) vfs: Arc<verter_workspace::FilesystemWorkspace>,
     /// Whether the captured ownership snapshot is authoritative (vs cold-bootstrap):
     /// the reconciler's cold-vs-ready signal so a cold drain defers without thrash.
@@ -63,6 +91,7 @@ pub(super) async fn drain_pending_snapshot_provider_sync(
     is_tsgo: bool,
     mru_canonical_ids: Option<&parking_lot::Mutex<Vec<String>>>,
     carrier_publish_coordinator: Option<&crate::external_ts::CarrierPublishCoordinator>,
+    carrier_coordinator: &crate::external_ts::CarrierTransactionCoordinator,
 ) {
     let Some(sync) = project_sync else {
         pending_snapshot_provider_sync.clear();
@@ -87,14 +116,15 @@ pub(super) async fn drain_pending_snapshot_provider_sync(
             Arc::clone(ws),
         )
     };
-    // The tsserver carrier-publish context (the store-publish membership path).
-    // `None` for tsgo (project-bound `--api` direct carrier-companion open) and when
-    // no coordinator is wired.
-    let carrier_publish = carrier_publish_coordinator.map(|coordinator| CarrierPublishCtx {
-        coordinator,
+    // The carrier-publish context — ALWAYS present here (a published `vfs_handle` was
+    // captured above), carrying the single ownership-resolution vfs for BOTH engines.
+    // Its `coordinator` is `None` for tsgo (project-bound `--api` direct
+    // carrier-companion open) and when no coordinator is wired.
+    let carrier_publish = CarrierPublishCtx {
+        coordinator: carrier_publish_coordinator,
         vfs: Arc::clone(&vfs_handle),
         ownership_ready: snapshot.ownership_ready,
-    });
+    };
 
     // Collect pending IDs and sort by MRU order
     let pending_ids: Vec<String> = {
@@ -132,17 +162,18 @@ pub(super) async fn drain_pending_snapshot_provider_sync(
             provider_sync_states,
             &canonical_id,
             is_tsgo,
-            carrier_publish.as_ref(),
+            Some(&carrier_publish),
+            carrier_coordinator,
         )
         .await;
 
-        // Dequeue ONLY when the file is fully reconciled (every intended kind
-        // synced) or its source has vanished. A `Partial` outcome (a kind failed
-        // and was reverted to its prior live path) MUST stay queued so the
-        // failed kind is retried on a later drain — otherwise it is permanently
-        // suppressed. `Nothing` (total failure / queued-unresolved) also stays.
-        let fully_reconciled = matches!(outcome, SyncOutcome::FullyReconciled);
-        if fully_reconciled || documents.host.get_source(&canonical_id).is_none() {
+        // Dequeue when the file is fully reconciled (every intended kind synced),
+        // when it settled into a TERMINAL no-owner state (never retried), or when
+        // its source has vanished. A `Partial` outcome (a kind failed and was
+        // reverted to its prior live path) MUST stay queued so the failed kind is
+        // retried on a later drain — otherwise it is permanently suppressed.
+        // `Nothing` (total failure / transient `NotReady` / `Pending`) also stays.
+        if sync_outcome_dequeues(outcome) || documents.host.get_source(&canonical_id).is_none() {
             pending_snapshot_provider_sync.remove(&canonical_id);
         }
     }
@@ -166,6 +197,7 @@ pub(super) async fn resync_aliased_imports_for_open_files(
     carrier_publish_coordinator: Option<&crate::external_ts::CarrierPublishCoordinator>,
     decl_overlay_owner: &DeclOverlayOwner,
     pass_generation: u64,
+    carrier_coordinator: &crate::external_ts::CarrierTransactionCoordinator,
 ) -> bool {
     let Some(sync) = project_sync else {
         return false;
@@ -186,18 +218,17 @@ pub(super) async fn resync_aliased_imports_for_open_files(
             None => (None, None),
         }
     };
-    // The tsserver carrier-publish context for the aliased-import carrier sync.
-    let carrier_publish = match (carrier_publish_coordinator, vfs_handle) {
-        (Some(coordinator), Some(vfs)) => Some(CarrierPublishCtx {
-            coordinator,
-            vfs,
-            ownership_ready: snapshot
-                .as_ref()
-                .map(|s| s.ownership_ready)
-                .unwrap_or(false),
-        }),
-        _ => None,
-    };
+    // The carrier-publish context for the aliased-import carrier sync — present
+    // whenever a published `vfs` was captured (the single ownership-resolution source);
+    // its `coordinator` is `None` for tsgo.
+    let carrier_publish = vfs_handle.map(|vfs| CarrierPublishCtx {
+        coordinator: carrier_publish_coordinator,
+        vfs,
+        ownership_ready: snapshot
+            .as_ref()
+            .map(|s| s.ownership_ready)
+            .unwrap_or(false),
+    });
     let snapshot = match snapshot {
         Some(s) => s,
         None => return false,
@@ -302,6 +333,7 @@ pub(super) async fn resync_aliased_imports_for_open_files(
                 None,
                 "aliased_resync",
                 carrier_publish.as_ref(),
+                carrier_coordinator,
             )
             .await;
             continue;
@@ -332,7 +364,7 @@ pub(super) async fn resync_aliased_imports_for_open_files(
         // Route the owner-resolved carrier (or an owner lost mid-flight) through the
         // SINGLE carrier-sync gateway: tsserver publishes the membership, tsgo opens
         // the companions directly, and a mid-flight owner loss is reconciled inside
-        // (`Unowned`). Any synced kind counts as progress.
+        // (a `NotReady` / `Unresolved` no-owner outcome). Any synced kind is progress.
         if let CarrierApplyOutcome::Applied { synced, .. } = apply_owner_resolved_carrier_sync(
             sync,
             documents,
@@ -342,6 +374,7 @@ pub(super) async fn resync_aliased_imports_for_open_files(
             ide.as_ref(),
             "aliased_resync",
             carrier_publish.as_ref(),
+            carrier_coordinator,
         )
         .await
         {
@@ -470,6 +503,7 @@ pub(super) async fn resync_aliased_imports_for_open_files(
                     None,
                     "barrel_carrier_dep",
                     carrier_publish.as_ref(),
+                    carrier_coordinator,
                 )
                 .await;
                 continue;
@@ -500,6 +534,7 @@ pub(super) async fn resync_aliased_imports_for_open_files(
                 ide.as_ref(),
                 "barrel_carrier_dep",
                 carrier_publish.as_ref(),
+                carrier_coordinator,
             )
             .await
             {
@@ -559,7 +594,7 @@ pub(super) fn owner_path_config_for_source(
     snapshot: &super::PublishedResolverSnapshot,
     canonical_id: &str,
 ) -> Option<(String, serde_json::Value)> {
-    let owner = snapshot.resolver.owner_for_file(canonical_id)?;
+    let owner = snapshot.resolver.nearest_config_for_path(canonical_id)?;
     let tsconfig_path = owner.tsconfig_path.as_deref()?;
     let ws =
         verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default());
@@ -583,7 +618,7 @@ pub(crate) async fn configure_provider_paths_for_source(
     // resolution. The owner project root is the per-project resolution anchor.
     let owner_root = snapshot
         .resolver
-        .owner_for_file(canonical_id)
+        .nearest_config_for_path(canonical_id)
         .map(|o| o.root.clone())
         .unwrap_or_default();
     let paths = crate::svelte_assets::inject_svelte_paths(paths, &owner_root);
@@ -601,6 +636,7 @@ pub(crate) async fn configure_provider_paths_for_source(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn sync_pending_snapshot_provider_file(
     sync: &ProjectSync,
     documents: &DocumentRegistry,
@@ -609,6 +645,7 @@ pub(super) async fn sync_pending_snapshot_provider_file(
     canonical_id: &str,
     is_tsgo: bool,
     carrier_publish: Option<&CarrierPublishCtx<'_>>,
+    carrier_coordinator: &crate::external_ts::CarrierTransactionCoordinator,
 ) -> SyncOutcome {
     if carrier_language_for(canonical_id).is_some() {
         sync_pending_carrier_provider_file(
@@ -619,6 +656,7 @@ pub(super) async fn sync_pending_snapshot_provider_file(
             canonical_id,
             is_tsgo,
             carrier_publish,
+            carrier_coordinator,
         )
         .await
     } else {
@@ -640,6 +678,7 @@ pub(super) async fn sync_pending_snapshot_provider_file(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn sync_pending_carrier_provider_file(
     sync: &ProjectSync,
     documents: &DocumentRegistry,
@@ -648,6 +687,7 @@ pub(super) async fn sync_pending_carrier_provider_file(
     canonical_id: &str,
     is_tsgo: bool,
     carrier_publish: Option<&CarrierPublishCtx<'_>>,
+    carrier_coordinator: &crate::external_ts::CarrierTransactionCoordinator,
 ) -> SyncOutcome {
     // Ensure the file and its deps are loaded. The scheduler's extract_deps
     // + auto-ingress handles recursive dependency walking.
@@ -673,7 +713,7 @@ pub(super) async fn sync_pending_carrier_provider_file(
     // membership), tsgo opens the companions directly, and an owner loss RETRACTS the
     // membership + preserves an open document / removes a closed one. The receipt
     // gates every commit (the gap-E bug class).
-    match apply_owner_resolved_carrier_sync(
+    let outcome = apply_owner_resolved_carrier_sync(
         sync,
         documents,
         provider_sync_states,
@@ -682,14 +722,28 @@ pub(super) async fn sync_pending_carrier_provider_file(
         ide.as_ref(),
         "pending_snapshot",
         carrier_publish,
+        carrier_coordinator,
     )
-    .await
-    {
-        // Classify the outcome for the drain's dequeue decision (R2-6):
-        //   * every intended kind synced → FullyReconciled (dequeue);
-        //   * some synced but an intended kind FAILED → Partial (retry on a later
-        //     drain — never permanently suppress the failed kind);
-        //   * nothing synced → Nothing (total failure; prior state retained intact).
+    .await;
+    classify_carrier_apply_outcome(outcome)
+}
+
+/// Classify a carrier apply result into the drain's dequeue decision (R2-6):
+///   * every intended kind synced → `FullyReconciled` (dequeue);
+///   * some synced but an intended kind FAILED → `Partial` (retry on a later
+///     drain — never permanently suppress the failed kind);
+///   * a TERMINAL no-owner decision (`NoProject` / `Ambiguous`) → `Terminal`
+///     (dequeue — a terminal ownership state is never retried; the buffer-side
+///     preserve-open / remove-closed already ran and any `verter(project)`
+///     diagnostic is published separately);
+///   * a still-transient `NotReady` bootstrap, a `Pending` advertise miss, or a
+///     total sync failure → `Nothing` (keep queued for a later retry).
+///
+/// This is the SINGLE point that distinguishes the sole retryable ownership state
+/// (`NotReady`) from the terminal ones — a terminal carrier must never be retried
+/// into a provider on every drain.
+fn classify_carrier_apply_outcome(outcome: CarrierApplyOutcome) -> SyncOutcome {
+    match outcome {
         CarrierApplyOutcome::Applied { attempted, synced } => {
             if synced.is_empty() {
                 SyncOutcome::Nothing
@@ -699,10 +753,12 @@ pub(super) async fn sync_pending_carrier_provider_file(
                 SyncOutcome::Partial
             }
         }
-        // Owner-loss (the gateway retracted the membership; the buffer-side
-        // preserve-open / remove-closed already ran) or cold/transient: keep the
-        // file queued for a future snapshot that may resolve an owner.
-        CarrierApplyOutcome::Unowned | CarrierApplyOutcome::Pending => SyncOutcome::Nothing,
+        // Terminal no-owner (the gateway retracted the membership; the buffer-side
+        // preserve-open / remove-closed already ran): settle + dequeue, never retry.
+        CarrierApplyOutcome::Unresolved => SyncOutcome::Terminal,
+        // Transient bootstrap (`NotReady`) or a `Pending` advertise/compile miss:
+        // keep the file queued for a future snapshot/drain that may resolve it.
+        CarrierApplyOutcome::NotReady | CarrierApplyOutcome::Pending => SyncOutcome::Nothing,
     }
 }
 
@@ -729,6 +785,7 @@ pub(super) async fn sync_open_unresolved_carrier_provider_file(
     canonical_id: &str,
     is_jsx: bool,
     ide: Option<&verter_session::IdeResponse>,
+    carrier_coordinator: &crate::external_ts::CarrierTransactionCoordinator,
 ) -> bool {
     let provider_surfaces = documents.provider_surfaces();
     // Build the DESIRED Unresolved target through the shared primitive: the
@@ -738,6 +795,15 @@ pub(super) async fn sync_open_unresolved_carrier_provider_file(
     // prior `Owned` binding (rather than reusing it) is what lets a later
     // snapshot re-bind the file via `needs_owner_reconcile`.
     let previous = provider_sync_states.get(canonical_id).map(|e| e.clone());
+    // Converting a previously-committed OWNED carrier to Unresolved is an owner-loss for
+    // the admission barrier: advance it so a late owned token — captured before this
+    // conversion — can never resurrect the obsolete owner into the now-unstamped slot.
+    if previous
+        .as_ref()
+        .is_some_and(|state| state.commit_stamp.is_some())
+    {
+        carrier_coordinator.advance_barrier(canonical_id);
+    }
     let target = open_unresolved_carrier_state(previous.as_ref(), canonical_id, is_jsx);
 
     let Some(ide) = ide else {
@@ -852,99 +918,6 @@ async fn close_dropped_owner_api_path(
     }
 }
 
-/// Buffer-side owner-loss handling (NO membership): preserve an OPEN document's
-/// unresolved TSX, or drop a CLOSED document's stale state + provider paths (only
-/// once `ownership_ready`). The STORE/ledger membership retract is the SINGLE
-/// carrier-sync gateway's job (it resolves owner-absent → retract/defer); this is
-/// the provider-buffer half its `Unowned` decision hands back to the caller.
-async fn reconcile_unowned_carrier_buffer(
-    sync: &ProjectSync,
-    documents: &DocumentRegistry,
-    provider_sync_states: &DashMap<String, ProviderSyncState>,
-    canonical_id: &str,
-    ide: Option<&verter_session::IdeResponse>,
-    ownership_ready: bool,
-    context: &str,
-) {
-    if documents.canonical_id_to_uri(canonical_id).is_some() {
-        // Open document: keep its TSX live as unresolved open-document state.
-        // `is_jsx` is derived from the compiled IDE output (false when absent —
-        // a transient compile miss preserves the prior path regardless).
-        let is_jsx = ide.map(|output| output.is_jsx).unwrap_or(false);
-        sync_open_unresolved_carrier_provider_file(
-            sync,
-            documents,
-            provider_sync_states,
-            canonical_id,
-            is_jsx,
-            ide,
-        )
-        .await;
-        return;
-    }
-    if ownership_ready {
-        remove_provider_sync_state_and_close_paths(
-            sync,
-            documents.provider_surfaces(),
-            provider_sync_states,
-            canonical_id,
-            context,
-        )
-        .await;
-    }
-}
-
-/// Pre-compile owner-loss reconciliation for a `.vue` file reached during a
-/// background sync pass (the cheap owner projection already shows unresolved, so
-/// the compile is skipped). Routes the membership RETRACT (authoritative no-owner)
-/// / DEFER (bootstrap) through the SINGLE carrier-sync gateway, then runs the
-/// buffer-side handling.
-#[allow(clippy::too_many_arguments)]
-async fn reconcile_unowned_carrier_provider_file(
-    sync: &ProjectSync,
-    documents: &DocumentRegistry,
-    provider_sync_states: &DashMap<String, ProviderSyncState>,
-    snapshot: &super::PublishedResolverSnapshot,
-    canonical_id: &str,
-    ide: Option<&verter_session::IdeResponse>,
-    context: &str,
-    carrier_publish: Option<&CarrierPublishCtx<'_>>,
-) {
-    // Owner-absent ⇒ route the membership RETRACT/DEFER through the gateway; it
-    // resolves the empty companion set to Absent (retract) / Bootstrap (defer) and
-    // returns `Unowned`. The provider-buffer half (preserve-open / remove-closed)
-    // follows.
-    let is_jsx = ide.map(|output| output.is_jsx).unwrap_or(false);
-    let membership = carrier_publish.map(|publish| crate::external_ts::CarrierMembershipCtx {
-        coordinator: publish.coordinator,
-        vfs: &publish.vfs,
-        ownership_ready: publish.ownership_ready,
-    });
-    let _ = crate::external_ts::reconcile_carrier_source(crate::external_ts::CarrierSyncRequest {
-        host: documents.host(),
-        resolver: &snapshot.resolver,
-        provider_sync_states,
-        provider_surfaces: documents.provider_surfaces(),
-        documents: Some(documents),
-        canonical_id,
-        is_jsx,
-        ide,
-        membership,
-        reason: crate::external_ts::ReconcileReason::SourceSynced,
-    })
-    .await;
-    reconcile_unowned_carrier_buffer(
-        sync,
-        documents,
-        provider_sync_states,
-        canonical_id,
-        ide,
-        snapshot.ownership_ready,
-        context,
-    )
-    .await;
-}
-
 /// The applied result of an owner-resolved both-kinds carrier gateway sync.
 enum CarrierApplyOutcome {
     /// Committed (tsserver `Published` membership, or tsgo `DirectOpen` buffer sync).
@@ -955,9 +928,14 @@ enum CarrierApplyOutcome {
         attempted: Vec<ProviderPathKind>,
         synced: Vec<ProviderPathKind>,
     },
-    /// No owner: the gateway retracted/deferred the membership and the buffer-side
-    /// owner-loss handling already ran. Nothing committed.
-    Unowned,
+    /// TERMINAL no-owner (`NoProject` / `Ambiguous`): the gateway retracted the
+    /// membership and the buffer-side owner-loss handling already ran. Nothing
+    /// committed. Never retried — a settled terminal ownership decision.
+    Unresolved,
+    /// Transient bootstrap (`NotReady`): ownership is not yet authoritative. The
+    /// gateway deferred without thrash and the buffer-side preserve-open ran.
+    /// The sole RETRYABLE ownership state — keep queued for a later snapshot.
+    NotReady,
     /// Nothing advertised this pass (cold defer / transient miss / fail-closed).
     Pending,
 }
@@ -970,9 +948,11 @@ enum CarrierApplyOutcome {
 ///   * tsgo ⇒ `DirectOpen`: per-kind open/sync (open if not background-loaded, else
 ///     update), revert any failed kind to its prior live path, commit with the
 ///     receipt, and close only the genuinely-stale paths.
-///   * owner-loss ⇒ `Unowned`: the gateway retracted the membership; the buffer-side
-///     preserve-open / remove-closed handling runs here.
-///   * cold/transient ⇒ `Pending`.
+///   * owner-loss ⇒ `Unresolved` (terminal `NoProject` / `Ambiguous`) or
+///     `NotReady` (transient bootstrap): the gateway retracted/deferred the
+///     membership; the buffer-side preserve-open / remove-closed handling runs
+///     here. They differ only in the caller's dequeue decision.
+///   * cold/transient advertise miss ⇒ `Pending`.
 #[allow(
     clippy::too_many_arguments,
     reason = "carrier sync needs the provider-surface store + documents alongside the sync state"
@@ -986,15 +966,16 @@ async fn apply_owner_resolved_carrier_sync(
     ide: Option<&verter_session::IdeResponse>,
     context: &str,
     carrier_publish: Option<&CarrierPublishCtx<'_>>,
+    carrier_coordinator: &crate::external_ts::CarrierTransactionCoordinator,
 ) -> CarrierApplyOutcome {
     let is_jsx = ide.map(|output| output.is_jsx).unwrap_or(false);
-    let membership = carrier_publish.map(|publish| crate::external_ts::CarrierMembershipCtx {
-        coordinator: publish.coordinator,
-        vfs: &publish.vfs,
-        ownership_ready: publish.ownership_ready,
-    });
+    let membership = carrier_publish
+        .and_then(|publish| publish.coordinator)
+        .map(|coordinator| crate::external_ts::CarrierMembershipCtx { coordinator });
     match crate::external_ts::reconcile_carrier_source(crate::external_ts::CarrierSyncRequest {
         host: documents.host(),
+        vfs: carrier_publish.map(|publish| publish.vfs.as_ref()),
+        ownership_ready: carrier_publish.is_some_and(|publish| publish.ownership_ready),
         resolver: &snapshot.resolver,
         provider_sync_states,
         provider_surfaces: documents.provider_surfaces(),
@@ -1003,6 +984,7 @@ async fn apply_owner_resolved_carrier_sync(
         is_jsx,
         ide,
         membership,
+        admission: carrier_coordinator,
         reason: crate::external_ts::ReconcileReason::SourceSynced,
     })
     .await
@@ -1019,12 +1001,17 @@ async fn apply_owner_resolved_carrier_sync(
             if committed_state.ide_path.is_some() {
                 kinds.push(ProviderPathKind::Ide);
             }
-            crate::external_ts::commit_carrier_provider_state(
+            if carrier_coordinator.admit_owned(
                 provider_sync_states,
                 canonical_id,
                 committed_state,
                 &receipt,
-            );
+            ) == crate::external_ts::AdmitOutcome::Superseded
+            {
+                // A newer transaction already committed (or an owner-loss advanced the
+                // barrier): nothing synced this pass — keep queued for a fresh transaction.
+                return CarrierApplyOutcome::Pending;
+            }
             CarrierApplyOutcome::Applied {
                 attempted: kinds.clone(),
                 synced: kinds,
@@ -1032,7 +1019,7 @@ async fn apply_owner_resolved_carrier_sync(
         }
         crate::external_ts::CarrierSyncDecision::DirectOpen {
             transition,
-            receipt,
+            pending,
         } => {
             let previous_state = provider_sync_states.get(canonical_id).map(|e| e.clone());
             let stale_paths = transition.stale_paths;
@@ -1104,12 +1091,19 @@ async fn apply_owner_resolved_carrier_sync(
                 revert_unsynced_kinds(&mut committed_state, previous_state.as_ref(), &synced);
                 let genuinely_stale =
                     genuinely_stale_after_sync(&stale_paths, &committed_state, &synced);
-                crate::external_ts::commit_carrier_provider_state(
+                // A kind opened: NOW mint the receipt (post-open), attesting EXACTLY the
+                // kinds that actually opened this pass, and commit through the coordinator.
+                let receipt = pending.confirm_opened(&synced);
+                if carrier_coordinator.admit_owned(
                     provider_sync_states,
                     canonical_id,
                     committed_state,
                     &receipt,
-                );
+                ) == crate::external_ts::AdmitOutcome::Superseded
+                {
+                    // Superseded mid-flight: treat as no progress (keep queued).
+                    return CarrierApplyOutcome::Pending;
+                }
                 close_stale_provider_paths(
                     sync,
                     documents.provider_surfaces(),
@@ -1120,20 +1114,45 @@ async fn apply_owner_resolved_carrier_sync(
             }
             CarrierApplyOutcome::Applied { attempted, synced }
         }
-        crate::external_ts::CarrierSyncDecision::Unowned => {
-            reconcile_unowned_carrier_buffer(
-                sync,
-                documents,
-                provider_sync_states,
-                canonical_id,
-                ide,
-                snapshot.ownership_ready,
-                context,
-            )
-            .await;
-            CarrierApplyOutcome::Unowned
+        crate::external_ts::CarrierSyncDecision::NotOwned(not_owned) => {
+            // Settle the non-owned disposition through the coordinator (requeue the
+            // transient, advance the owner-loss barrier for the terminal), then run the
+            // SAME buffer-side owner-loss handling (preserve an open document's live TSX /
+            // remove a closed one) for a settled no-owner class. The dequeue decision is the
+            // returned class: `NotReady` transient (keep queued), `Unresolved` terminal
+            // (settle + dequeue, never retry). `Pending` commits nothing and keeps queued.
+            match carrier_coordinator.settle(not_owned, canonical_id, None) {
+                crate::external_ts::SettleClass::NotReady => {
+                    reconcile_unowned_carrier_buffer(
+                        sync,
+                        documents,
+                        provider_sync_states,
+                        canonical_id,
+                        ide,
+                        snapshot.ownership_ready,
+                        context,
+                        carrier_coordinator,
+                    )
+                    .await;
+                    CarrierApplyOutcome::NotReady
+                }
+                crate::external_ts::SettleClass::Unresolved => {
+                    reconcile_unowned_carrier_buffer(
+                        sync,
+                        documents,
+                        provider_sync_states,
+                        canonical_id,
+                        ide,
+                        snapshot.ownership_ready,
+                        context,
+                        carrier_coordinator,
+                    )
+                    .await;
+                    CarrierApplyOutcome::Unresolved
+                }
+                crate::external_ts::SettleClass::Pending => CarrierApplyOutcome::Pending,
+            }
         }
-        crate::external_ts::CarrierSyncDecision::Pending => CarrierApplyOutcome::Pending,
     }
 }
 
@@ -1162,22 +1181,29 @@ pub(super) async fn sync_api_to_provider_background_task(
     sync: ProjectSync,
     snapshot: super::PublishedResolverSnapshot,
     host: Arc<verter_session::VerterHost>,
+    vfs: Option<Arc<verter_workspace::FilesystemWorkspace>>,
     provider_sync_states: Arc<DashMap<String, ProviderSyncState>>,
     provider_surfaces: crate::provider_surface_store::ProviderSurfaceStore,
     canonical_id: String,
     is_jsx: bool,
     is_tsgo: bool,
+    carrier_coordinator: Arc<crate::external_ts::CarrierTransactionCoordinator>,
+    pending_snapshot_provider_sync: Arc<dashmap::DashSet<String>>,
 ) {
     if is_tsgo {
         configure_provider_paths_for_source(&sync, &snapshot, &canonical_id, true).await;
     }
     // Route through the SINGLE carrier-sync gateway. This API-only background task
     // is the tsgo path (the tsserver coordinator route returns before spawning it),
-    // so the gateway returns `DirectOpen` carrying the transition + the receipt that
-    // gates the commit below. No membership context ⇒ no store publish.
-    let (transition, receipt) =
+    // so the gateway returns `DirectOpen` carrying the transition + a POST-open
+    // authorization; the receipt is minted from `pending` only after the API buffer
+    // opens (below). No membership context ⇒ no store publish. Ownership resolves from
+    // the SAME published `vfs` the scanner reads.
+    let (transition, pending) =
         match crate::external_ts::reconcile_carrier_source(crate::external_ts::CarrierSyncRequest {
             host: &host,
+            vfs: vfs.as_deref(),
+            ownership_ready: snapshot.ownership_ready,
             resolver: &snapshot.resolver,
             provider_sync_states: &provider_sync_states,
             provider_surfaces: &provider_surfaces,
@@ -1186,17 +1212,26 @@ pub(super) async fn sync_api_to_provider_background_task(
             is_jsx,
             ide: None,
             membership: None,
+            admission: &carrier_coordinator,
             reason: crate::external_ts::ReconcileReason::SourceSynced,
         })
         .await
         {
             crate::external_ts::CarrierSyncDecision::DirectOpen {
                 transition,
-                receipt,
-            } => (transition, receipt),
-            // No owner (Unowned) or nothing to advertise (Pending): the dedicated
-            // owner-loss / IDE-sync paths own the provider state; nothing to do here.
-            _ => return,
+                pending,
+            } => (transition, pending),
+            // No owner (a settled non-owned outcome) or nothing to advertise: the dedicated
+            // owner-loss / IDE-sync paths own the provider state. Settle the non-owned
+            // disposition so the requeue / owner-loss barrier advance is not dropped; this
+            // API-only background task does no buffer conversion.
+            crate::external_ts::CarrierSyncDecision::NotOwned(not_owned) => {
+                let _ = carrier_coordinator.settle(not_owned, &canonical_id, None);
+                return;
+            }
+            // A tsserver `Published` outcome cannot occur here (`membership: None` ⇒ tsgo
+            // direct-open only); the store publish is the tsserver path's job.
+            crate::external_ts::CarrierSyncDecision::Published { .. } => return,
         };
     // Capture the prior committed state for the per-kind revert. `transition`
     // was prepared by a read-only `prepare_sync_transition`, so the DashMap
@@ -1248,12 +1283,23 @@ pub(super) async fn sync_api_to_provider_background_task(
         revert_unsynced_kinds(&mut committed_state, previous_state.as_ref(), &synced_kinds);
         let genuinely_stale =
             genuinely_stale_after_sync(&stale_paths, &committed_state, &synced_kinds);
-        crate::external_ts::commit_carrier_provider_state(
+        // The API buffer opened: NOW mint the receipt (post-open), attesting EXACTLY the
+        // kinds that actually opened this pass, and commit through the coordinator.
+        let receipt = pending.confirm_opened(&synced_kinds);
+        // Gate the stale-path close on ADMISSION and never drop the outcome: a `Superseded`
+        // commit (a newer transaction reclaimed the source / an owner-loss advanced the
+        // barrier) requeues the source and closes NOTHING — the computed stale paths may be
+        // the newer transaction's LIVE buffers. Only an admitted commit closes them.
+        if carrier_coordinator.admit_owned(
             &provider_sync_states,
             &canonical_id,
             committed_state,
             &receipt,
-        );
+        ) == crate::external_ts::AdmitOutcome::Superseded
+        {
+            pending_snapshot_provider_sync.insert(canonical_id.clone());
+            return;
+        }
         close_stale_provider_paths(
             &sync,
             &provider_surfaces,
@@ -1263,7 +1309,8 @@ pub(super) async fn sync_api_to_provider_background_task(
         .await;
     }
     // On API-sync failure nothing is committed and nothing is closed: the prior
-    // state + prior API path are retained intact.
+    // state + prior API path are retained intact, and the pending drops unconfirmed
+    // so no receipt is minted.
 }
 
 pub(super) async fn sync_pending_non_carrier_provider_file(
@@ -1400,8 +1447,14 @@ async fn remove_provider_sync_state_and_close_paths(
     provider_sync_states: &DashMap<String, ProviderSyncState>,
     canonical_id: &str,
     context: &str,
+    carrier_coordinator: &crate::external_ts::CarrierTransactionCoordinator,
 ) {
-    if let Some(state) = crate::provider_sync::remove_sync_state(provider_sync_states, canonical_id)
+    // Advance-before-mutate: the coordinator advances the owner-loss barrier BEFORE it
+    // vacates the slot when the removed state was a previously-committed carrier, so a late
+    // owned token captured before this removal can never resurrect the obsolete owner into
+    // the vacated slot.
+    if let Some(state) =
+        carrier_coordinator.advance_barrier_and_remove(provider_sync_states, canonical_id)
     {
         // The declaration overlay (`Decl`), if any, is NOT closed here: its
         // lifecycle is owned by `DeclOverlayOwner` and released only when no open
@@ -1416,3 +1469,7 @@ async fn remove_provider_sync_state_and_close_paths(
         .await;
     }
 }
+
+#[cfg(test)]
+#[path = "background_drain_tests.rs"]
+mod tests;

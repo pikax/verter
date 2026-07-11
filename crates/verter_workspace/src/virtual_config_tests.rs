@@ -54,11 +54,15 @@ fn virtual_identity_does_not_alias_non_virtual_project_identity() {
         workspace_aliases: Vec::new(),
         compiler_options: Default::default(),
         references: Vec::new(),
-        membership: ProjectMembership::IncludeExclude {
-            files: Vec::new(),
-            include: vec!["d:/ws/src/**/*.vue".to_string()],
-            exclude: Vec::new(),
-        },
+        membership: crate::snapshot_builder::configured_membership_from_raw(
+            WORKSPACE_ROOT,
+            &ProjectMembership::IncludeExclude {
+                files: Vec::new(),
+                include: vec!["d:/ws/src/**/*.vue".to_string()],
+                exclude: Vec::new(),
+            },
+            &crate::resolver::IdeProjectCompilerOptions::default(),
+        ),
     }
     .project_identity();
 

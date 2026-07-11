@@ -354,17 +354,32 @@ pub fn capture_committed_carrier_ide_surface(
     documents: &DocumentRegistry,
     canonical_id: &str,
 ) -> Option<Arc<ProviderSurfaceSnapshot>> {
-    let ide_path = provider_sync_states.get(canonical_id).and_then(|state| {
-        state
-            .ide_background_loaded
-            .then(|| state.ide_path.clone())
-            .flatten()
-    })?;
+    // Clone the committed state out of the guard: the ide_path key lookup AND the
+    // committed-surface authorization both read it, and the guard must drop before the
+    // store read.
+    let committed = provider_sync_states
+        .get(canonical_id)
+        .map(|state| state.clone())?;
+    let ide_path = committed
+        .ide_background_loaded
+        .then(|| committed.ide_path.clone())
+        .flatten()?;
     let snapshot = store.current_snapshot(&ide_path)?;
     if snapshot.kind != ProviderSurfaceKind::CarrierIde {
         return None;
     }
     if snapshot.source_canonical.as_ref() != canonical_id {
+        return None;
+    }
+    // Committed-surface gate: for an OWNED carrier the current IDE surface MUST be the
+    // receipt-attested committed one — a surface recorded for a publish that failed /
+    // never committed carries a different content/map identity and is refused (fail
+    // closed). An UNRESOLVED editor-liveness carrier records after a successful sync and
+    // needs no stamp.
+    if !committed.authorizes_carrier_ide_capture(
+        snapshot.stamp.content_hash.to_hash16(),
+        snapshot.stamp.map_hash,
+    ) {
         return None;
     }
     surface_matches_open_document_source(documents, canonical_id, &snapshot).then_some(snapshot)

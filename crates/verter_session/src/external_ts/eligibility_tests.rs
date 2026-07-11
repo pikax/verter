@@ -191,25 +191,26 @@ fn owned_output_is_always_an_eligibility_input_reason_never_derived() {
     }
 }
 
-/// `BindingFact::from_resolution` is `Bound` ONLY for a real `ProjectBinding` —
-/// `NoProject`, `Ambiguous`, and `SyntheticScratch` are all `NotBound`. The
-/// no-binding states must not masquerade as "bound" and let a project go SHARED.
+/// `BindingFact::from_resolution` is `Bound` ONLY for a real `Bound` binding —
+/// `NoProject`, `Ambiguous`, and `NotReady` are all `NotBound`. The no-binding
+/// states must not masquerade as "bound" and let a project go SHARED.
 #[test]
 fn binding_fact_is_bound_only_for_a_real_project_binding() {
-    use crate::external_ts::resolver::{AmbiguityCause, ProjectResolution};
+    use crate::external_ts::resolver::{AmbiguityCause, CarrierOwnershipResolution};
 
     assert_eq!(
-        BindingFact::from_resolution(&ProjectResolution::NoProject),
+        BindingFact::from_resolution(&CarrierOwnershipResolution::NoProject),
         BindingFact::NotBound
     );
     assert_eq!(
-        BindingFact::from_resolution(&ProjectResolution::Ambiguous(
-            AmbiguityCause::MultipleOwners
-        )),
+        BindingFact::from_resolution(&CarrierOwnershipResolution::Ambiguous {
+            candidates: Vec::new(),
+            cause: AmbiguityCause::MultipleOwners,
+        }),
         BindingFact::NotBound
     );
     assert_eq!(
-        BindingFact::from_resolution(&ProjectResolution::synthetic_scratch("untitled:1")),
+        BindingFact::from_resolution(&CarrierOwnershipResolution::NotReady),
         BindingFact::NotBound
     );
 }

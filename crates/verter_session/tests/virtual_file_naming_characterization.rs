@@ -12,7 +12,7 @@
 use verter_session::framework::descriptor::{
     svelte_descriptor, vue_descriptor, VirtualFileNaming, VirtualPathPolicy,
 };
-use verter_workspace::{IdeProjectConfig, NativeProjectResolver, ProjectMembership};
+use verter_workspace::{IdeProjectConfig, NativeProjectResolver};
 
 /// Apply a `VirtualPathPolicy` to a carrier canonical (append-to-full
 /// semantics, `is_jsx = false` — a TypeScript carrier — for the conditional
@@ -41,7 +41,9 @@ fn single_project_resolver() -> NativeProjectResolver {
         "/workspace".to_string(),
         Some("/workspace/tsconfig.json".to_string()),
     );
-    project.membership = ProjectMembership::MatchAll;
+    project.membership = verter_workspace::ConfiguredMembership::match_all_under_root(
+        &verter_workspace::CanonicalPath::new("/workspace"),
+    );
     NativeProjectResolver::new(vec![project])
 }
 

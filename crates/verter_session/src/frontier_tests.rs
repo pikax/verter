@@ -154,10 +154,6 @@ impl verter_workspace::WorkspaceRead for CountingWorkspace {
         self.inner.resolve_import(importer_id, specifier, ctx)
     }
 
-    fn owner_for_file(&self, canonical_id: &str) -> Option<verter_workspace::ProjectOwnership> {
-        self.inner.owner_for_file(canonical_id)
-    }
-
     fn content_generation(&self) -> u64 {
         self.inner.content_generation()
     }

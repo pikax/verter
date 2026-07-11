@@ -8,7 +8,7 @@
 use super::*;
 
 #[test]
-fn vue_sync_state_uses_owner_key_from_tsconfig() {
+fn carrier_close_target_derives_nested_package_companion_paths() {
     let resolver = NativeProjectResolver::new(vec![
         crate::project_resolver::IdeProjectConfig::new(
             "/workspace/pkg-a".to_string(),
@@ -22,21 +22,23 @@ fn vue_sync_state_uses_owner_key_from_tsconfig() {
         ),
     ]);
 
-    // `carrier_sync_state_for_source` is now private to the carrier-sync gateway;
-    // exercise the same owner-resolution + path derivation through its public
-    // close-target accessor (the gateway wraps the private resolver).
+    // `carrier_close_target` is the close-only path — owner-INDEPENDENT (it resolves NO
+    // ownership; the owner key is derived by the ownership resolution's
+    // `binding.tsconfig_uri()`, exercised by the reconcile tests). It derives the
+    // carrier's companion PATHS for a nested-package source and carries an `Unresolved`
+    // binding.
     let state = crate::external_ts::carrier_close_target(
         &resolver,
         "/workspace/pkg-a/src/App.vue",
         false,
         None,
     )
-    .expect("matched Vue source should materialize provider state");
+    .expect("a carrier source materializes companion paths to close");
 
     assert_eq!(
         state.owner_binding,
-        ProviderOwnerBinding::Owned("/workspace/pkg-a/tsconfig.json".to_string()),
-        "owner_binding should be Owned with tsconfig path when available"
+        ProviderOwnerBinding::Unresolved,
+        "the close target resolves no ownership (owner-independent)"
     );
     assert_eq!(
         state.ide_path.as_deref(),

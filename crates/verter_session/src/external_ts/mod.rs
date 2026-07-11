@@ -7,8 +7,8 @@
 //! project/host mechanics.
 //!
 //! ```text
-//! ExternalTsProjectResolver:  source_uri -> ProjectResolution
-//!     { ProjectBinding | NoProject | Ambiguous | SyntheticScratch }
+//! ExternalTsProjectResolver:  source_uri -> CarrierOwnershipResolution
+//!     { Bound | NoProject | Ambiguous | NotReady }   (scratch is a SEPARATE lane)
 //! CarrierRegistry:            source_uri -> Option<CarrierArtifact>
 //! EngineBackend (one per engine kind):
 //!     ensure_project -> BoundProject   (the witness)
@@ -25,11 +25,12 @@
 //! The production-result ops live on [`EngineBackend`] and take a
 //! [`BoundProject`]. A `BoundProject` is obtainable ONLY via
 //! [`EngineBackend::ensure_project`], whose [`EnsureProject`] argument is mintable
-//! ONLY from a resolved [`ProjectBinding`]. `NoProject` / `Ambiguous` carry no
-//! binding, so they can reach no production op; `SyntheticScratch` carries a
-//! distinct [`ScratchProject`] witness for non-cross-file features only. The
-//! impossibility is enforced by the compiler; the `provider_op_requires_resolved_project`
-//! architecture guard is the static backstop.
+//! ONLY from a resolved [`ProjectBinding`]. `NoProject` / `Ambiguous` / `NotReady`
+//! carry no binding, so they can reach no production op; the SEPARATE
+//! [`ScratchResolution`] lane carries a distinct [`ScratchProject`] witness for
+//! non-cross-file features only. The impossibility is enforced by the compiler;
+//! the `provider_op_requires_resolved_project` architecture guard is the static
+//! backstop.
 //!
 //! The tsserver engine is wired live on this contract: the LSP's carrier-publish
 //! coordinator resolves a `.vue`/`.svelte` source to its configured project,
@@ -77,8 +78,9 @@ pub use mode::{
     RedirectRef, RedirectReferenceGraph, ReferenceComponent, ServeMode, SharedSessionFacts,
 };
 pub use resolver::{
-    AmbiguityCause, ExternalTsProjectResolver, ProjectBinding, ProjectEnvDimsSource,
-    ProjectResolution, ScratchBinding, WorkspaceProjectResolver,
+    AmbiguityCause, CarrierOwnershipResolution, ExternalTsProjectResolver,
+    GenerationStampedEditorWitness, ProjectBinding, ProjectEnvDimsSource, ScratchBinding,
+    ScratchResolution, WorkspaceProjectResolver,
 };
 pub use warm_cache::{
     EngineWarmCache, EvictionScope, EvictionTrigger, ReconnectGeneration, WarmAdmissionError,

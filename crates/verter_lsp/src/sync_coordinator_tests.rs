@@ -255,6 +255,9 @@ async fn sync_file_queues_pending_snapshot_sync_when_resolver_snapshot_is_missin
         vfs_workspace: Arc::new(parking_lot::RwLock::new(None)),
         type_provider_kind: crate::TypeProviderKind::Tsgo,
         carrier_publish_coordinator: None,
+        carrier_transaction_coordinator: std::sync::Arc::new(
+            crate::external_ts::CarrierTransactionCoordinator::new(),
+        ),
     };
 
     sync_file(
@@ -296,6 +299,9 @@ async fn preserve_open_unresolved_carrier_no_ide_no_prior_commits_empty_unresolv
         vfs_workspace: Arc::new(parking_lot::RwLock::new(None)),
         type_provider_kind: crate::TypeProviderKind::Tsgo,
         carrier_publish_coordinator: None,
+        carrier_transaction_coordinator: std::sync::Arc::new(
+            crate::external_ts::CarrierTransactionCoordinator::new(),
+        ),
     };
 
     // No prior state in the (empty) states map; no IDE output this pass.
@@ -353,6 +359,9 @@ async fn publish_merged_diagnostics_skips_type_provider_without_committed_state(
         vfs_workspace: Arc::new(parking_lot::RwLock::new(None)),
         type_provider_kind: crate::TypeProviderKind::Tsgo,
         carrier_publish_coordinator: None,
+        carrier_transaction_coordinator: std::sync::Arc::new(
+            crate::external_ts::CarrierTransactionCoordinator::new(),
+        ),
     };
 
     publish_merged_diagnostics(&deps, "/workspace/src/App.vue", uri.as_str()).await;
@@ -408,6 +417,8 @@ async fn sync_file_preserves_open_vue_state_on_owner_none_ready_snapshot() {
             decl_background_loaded: false,
             shadow_path: None,
             shadow_background_loaded: false,
+            committed_ide_surface: None,
+            commit_stamp: None,
         },
     );
 
@@ -424,6 +435,9 @@ async fn sync_file_preserves_open_vue_state_on_owner_none_ready_snapshot() {
         vfs_workspace,
         type_provider_kind: crate::TypeProviderKind::Tsgo,
         carrier_publish_coordinator: None,
+        carrier_transaction_coordinator: std::sync::Arc::new(
+            crate::external_ts::CarrierTransactionCoordinator::new(),
+        ),
     };
 
     sync_file(&deps, canonical_id, uri.as_str()).await;
@@ -501,6 +515,9 @@ async fn rune_module_debounced_diagnostics_map_through_self_file_projection() {
         vfs_workspace: Arc::new(parking_lot::RwLock::new(None)),
         type_provider_kind: crate::TypeProviderKind::Tsgo,
         carrier_publish_coordinator: None,
+        carrier_transaction_coordinator: std::sync::Arc::new(
+            crate::external_ts::CarrierTransactionCoordinator::new(),
+        ),
     };
 
     // A REAL shadow sync (the production primitive): commits the Shadow state
@@ -646,6 +663,9 @@ async fn sync_file_routes_open_rune_module_through_self_file_shadow_not_carrier(
         vfs_workspace,
         type_provider_kind: crate::TypeProviderKind::Tsgo,
         carrier_publish_coordinator: None,
+        carrier_transaction_coordinator: std::sync::Arc::new(
+            crate::external_ts::CarrierTransactionCoordinator::new(),
+        ),
     };
 
     sync_file(&deps, canonical_id, uri.as_str()).await;
@@ -746,6 +766,8 @@ defineProps<{ msg: string }>()
         decl_background_loaded: false,
         shadow_path: None,
         shadow_background_loaded: false,
+        committed_ide_surface: None,
+        commit_stamp: None,
     };
     provider_sync_states.insert(canonical_id.to_string(), prior_state.clone());
 
@@ -762,6 +784,9 @@ defineProps<{ msg: string }>()
         vfs_workspace,
         type_provider_kind: crate::TypeProviderKind::Tsgo,
         carrier_publish_coordinator: None,
+        carrier_transaction_coordinator: std::sync::Arc::new(
+            crate::external_ts::CarrierTransactionCoordinator::new(),
+        ),
     };
 
     sync_file(&deps, canonical_id, "file:///workspace/src/App.vue").await;
@@ -832,6 +857,9 @@ async fn coordinator_direct_ide_sync_records_carrier_ide_surface() {
         vfs_workspace,
         type_provider_kind: crate::TypeProviderKind::Tsgo,
         carrier_publish_coordinator: None,
+        carrier_transaction_coordinator: std::sync::Arc::new(
+            crate::external_ts::CarrierTransactionCoordinator::new(),
+        ),
     };
 
     sync_file(&deps, canonical_id, uri.as_str()).await;
@@ -930,6 +958,9 @@ async fn coordinator_open_unresolved_preserve_records_carrier_ide_surface() {
         vfs_workspace,
         type_provider_kind: crate::TypeProviderKind::Tsgo,
         carrier_publish_coordinator: None,
+        carrier_transaction_coordinator: std::sync::Arc::new(
+            crate::external_ts::CarrierTransactionCoordinator::new(),
+        ),
     };
 
     sync_file(&deps, canonical_id, uri.as_str()).await;
@@ -1003,6 +1034,9 @@ async fn make_carrier_diagnostics_fixture() -> (
         vfs_workspace,
         type_provider_kind: crate::TypeProviderKind::Tsgo,
         carrier_publish_coordinator: None,
+        carrier_transaction_coordinator: std::sync::Arc::new(
+            crate::external_ts::CarrierTransactionCoordinator::new(),
+        ),
     };
     sync_file(&deps, &canonical_id, uri.as_str()).await;
 
@@ -1191,6 +1225,9 @@ async fn rune_diagnostics_drop_provider_results_when_shadow_surface_regenerates_
         vfs_workspace: Arc::new(parking_lot::RwLock::new(None)),
         type_provider_kind: crate::TypeProviderKind::Tsgo,
         carrier_publish_coordinator: None,
+        carrier_transaction_coordinator: std::sync::Arc::new(
+            crate::external_ts::CarrierTransactionCoordinator::new(),
+        ),
     };
     assert!(
         crate::server::sync_self_file_shadow_state(

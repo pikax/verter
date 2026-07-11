@@ -343,10 +343,6 @@ impl crate::traits::WorkspaceRead for MemoryWorkspace {
             .resolve_import_for_project(self, owner, specifier, ctx)
     }
 
-    fn owner_for_file(&self, canonical_id: &str) -> Option<crate::types::ProjectOwnership> {
-        self.engine.owner_for_file(canonical_id)
-    }
-
     fn is_workspace_owned(&self, canonical_id: &str) -> bool {
         let resolved = self.realpath(canonical_id);
         let target = resolved.as_deref().unwrap_or(canonical_id);

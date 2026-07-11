@@ -266,6 +266,25 @@ pub fn membership_to_spec(
     }
 }
 
+/// Build the exact [`ConfiguredMembership`] from the raw parsed
+/// `files`/`include`/`exclude` membership, applying the supported-extension
+/// expansion. The materialized set is left empty (bridge mode — `contains`
+/// falls to the static spec), for callers with no filesystem walk (the legacy
+/// `ProjectGraph` path and resolver-config tests). One membership
+/// representation, no second glob evaluator.
+pub fn configured_membership_from_raw(
+    root: &str,
+    membership: &ProjectMembership,
+    compiler_options: &crate::resolver::IdeProjectCompilerOptions,
+) -> ConfiguredMembership {
+    let supported = supported_extensions_for(compiler_options);
+    let spec = membership_to_spec(&CanonicalPath::new(root), membership, &supported);
+    ConfiguredMembership {
+        spec,
+        materialized_files: FxHashSet::default(),
+    }
+}
+
 /// Materialize the configured file set from a static membership spec.
 ///
 /// When `ws` is `Some` and the workspace supports `walk()`, walks the
@@ -338,7 +357,11 @@ fn build_resolver_from_projects(projects: &[OwnershipProject]) -> ProjectResolve
                 config.compiler_options = compiler_options.clone();
                 config.references = references.iter().map(|r| r.as_str().to_string()).collect();
                 config.workspace_aliases = workspace_aliases.clone();
-                config.membership = spec_to_membership(&membership.spec);
+                // Carry the EXACT configured membership onto the resolver
+                // config — the same materialized set the snapshot's
+                // `configured_owner_resolution_for_file` consults. No lossy
+                // exact→glob round-trip, no second membership engine.
+                config.membership = membership.clone();
                 config
             }
             ProjectPayload::Fallback { .. } => IdeProjectConfig::new(
@@ -350,26 +373,6 @@ fn build_resolver_from_projects(projects: &[OwnershipProject]) -> ProjectResolve
         .collect();
 
     ProjectResolver::new(ide_configs)
-}
-
-/// Convert StaticMembershipSpec back to ProjectMembership for the resolver.
-pub(crate) fn spec_to_membership(spec: &StaticMembershipSpec) -> ProjectMembership {
-    if spec.files.is_empty() && spec.include.is_empty() && spec.exclude.is_empty() {
-        return ProjectMembership::MatchAll;
-    }
-    ProjectMembership::IncludeExclude {
-        files: spec.files.iter().map(|f| f.as_str().to_string()).collect(),
-        include: spec
-            .include
-            .iter()
-            .map(|g| g.as_str().to_string())
-            .collect(),
-        exclude: spec
-            .exclude
-            .iter()
-            .map(|g| g.as_str().to_string())
-            .collect(),
-    }
 }
 
 /// Bridge: Convert a legacy `VfsProjectConfig` to an `OwnershipProject`.
@@ -384,21 +387,15 @@ pub fn ownership_project_from_vfs_config(
     let workspace_root = CanonicalPath::new(&config.workspace_root);
 
     if let Some(ref tsconfig) = config.tsconfig_path {
-        // Configured project
-        let supported = supported_extensions_for(&config.compiler_options);
-        let spec = membership_to_spec(&root, &config.membership, &supported);
-        let materialized_files = materialize_from_spec(&spec, &root, None);
-
+        // Configured project — the legacy `VfsProjectConfig` already carries the
+        // exact `ConfiguredMembership`, so no re-conversion / re-materialization.
         OwnershipProject {
             id,
             root,
             workspace_root,
             payload: ProjectPayload::Configured {
                 tsconfig_path: CanonicalPath::new(tsconfig),
-                membership: ConfiguredMembership {
-                    spec,
-                    materialized_files,
-                },
+                membership: config.membership.clone(),
                 compiler_options: config.compiler_options.clone(),
                 references: config
                     .references

@@ -21,8 +21,8 @@ use std::sync::Arc;
 
 use verter_audit::{RequestKind, RequestKindPayload, WorkspaceOp};
 use verter_workspace::{
-    IdeProjectCompilerOptions, MemoryOptions, MemoryWorkspace, ParsedEdge, ProjectGraph,
-    ProjectMembership, ProjectRank, ResolutionContext, ResolvePhase, ResolveRequestKind,
+    CanonicalPath, ConfiguredMembership, IdeProjectCompilerOptions, MemoryOptions, MemoryWorkspace,
+    ParsedEdge, ProjectGraph, ProjectRank, ResolutionContext, ResolvePhase, ResolveRequestKind,
     VfsProjectConfig, WorkspaceAccess, WorkspaceRead,
 };
 
@@ -57,7 +57,7 @@ fn audit_op_resolve_records_exactly_the_resolved_target_in_files() {
         workspace_aliases: vec![],
         compiler_options: IdeProjectCompilerOptions::default(),
         references: vec![],
-        membership: ProjectMembership::MatchAll,
+        membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new("d:/project")),
     }]);
     ws.set_project_graph(graph);
 
@@ -163,7 +163,7 @@ fn audit_op_resolve_unresolved_specifier_yields_zero_touched_files() {
         workspace_aliases: vec![],
         compiler_options: IdeProjectCompilerOptions::default(),
         references: vec![],
-        membership: ProjectMembership::MatchAll,
+        membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new("d:/project")),
     }]);
     ws.set_project_graph(graph);
 

@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use verter_session::external_ts::{AmbiguityCause, ProjectResolution};
+use verter_session::external_ts::{AmbiguityCause, CarrierOwnershipResolution};
 use verter_session::{HostConfig, VerterHost};
 use verter_type_runtime::protocol::{
     DiagnosticRelatedInfo, TypeDiagnostic, TypeDiagnosticSeverity, TypeDiagnosticTag,
@@ -298,16 +298,18 @@ fn injection_shadow_safe_rejects_only_real_file_shadow_causes() {
     // circuited before the conflict pass, so a real file there resolved to
     // `NoProject`/`MultipleOwners` (admitted below) and WAS overlay-shadowed.
     assert!(
-        !injection_shadow_safe(&ProjectResolution::Ambiguous(
-            AmbiguityCause::CarrierPathOccupiedByRealFile
-        )),
+        !injection_shadow_safe(&CarrierOwnershipResolution::Ambiguous {
+            candidates: Vec::new(),
+            cause: AmbiguityCause::CarrierPathOccupiedByRealFile,
+        }),
         "a real user file at the companion path must never be overlay-shadowed, in ANY \
          owner state (the resolver's unconditional pass makes it this cause)"
     );
     assert!(
-        !injection_shadow_safe(&ProjectResolution::Ambiguous(
-            AmbiguityCause::SameStemRuneModule
-        )),
+        !injection_shadow_safe(&CarrierOwnershipResolution::Ambiguous {
+            candidates: Vec::new(),
+            cause: AmbiguityCause::SameStemRuneModule,
+        }),
         "a same-stem rune module beside the source must never be overlay-shadowed"
     );
     // A GENUINE generated companion — NO real file at its path — is injectable. A
@@ -316,15 +318,16 @@ fn injection_shadow_safe_rejects_only_real_file_shadow_causes() {
     // `CarrierPathOccupiedByRealFile` (rejected above), NEVER these states — so admitting
     // them can no longer overlay-shadow a real user file.
     assert!(
-        injection_shadow_safe(&ProjectResolution::Ambiguous(
-            AmbiguityCause::MultipleOwners
-        )),
+        injection_shadow_safe(&CarrierOwnershipResolution::Ambiguous {
+            candidates: Vec::new(),
+            cause: AmbiguityCause::MultipleOwners,
+        }),
         "a MultipleOwners overlap with NO real file at the companion path is a genuine \
          virtual companion — injectable (a real file there is CarrierPathOccupiedByRealFile, \
          rejected above)"
     );
     assert!(
-        injection_shadow_safe(&ProjectResolution::NoProject),
+        injection_shadow_safe(&CarrierOwnershipResolution::NoProject),
         "a NoProject genuine companion with NO real file at its path is injectable as a \
          supporting import member (a real file there is CarrierPathOccupiedByRealFile, \
          rejected above)"
@@ -668,5 +671,68 @@ fn real_file_occupies_injected_path_is_normalized_cross_platform() {
     assert!(
         !real_file_occupies_injected_path(&ws, "d:/ws/src/Other.d.vue.ts"),
         "a different path is not occupied"
+    );
+}
+
+/// INV-5: the `verter(project)` diagnostics path OBSERVES the published root's
+/// `ownership_ready`, so a COLD-bootstrap snapshot resolves `NotReady` (it defers —
+/// no false no-owner warning), while the always-present OWNED admission gate keeps
+/// treating a PRESENT snapshot as authoritative (`NoProject`). Same host + same
+/// bootstrap root, two readiness modes — proving the gate stays authoritative (the
+/// 15-OWNED-gate-test contract) while diagnostics no longer emit a spurious warning
+/// during bootstrap.
+#[test]
+fn diagnostics_observe_readiness_while_owned_gate_stays_authoritative() {
+    use crate::tsgo::project_binding::{resolve_carrier, OwnershipReadinessMode};
+
+    let ws = Arc::new(FilesystemWorkspace::new(FilesystemOptions::default()));
+    ws.inject_file(
+        "d:/ws/src/Foo.vue".to_string(),
+        Arc::<str>::from("<template></template>"),
+    );
+    // A COLD-bootstrap published root (`new_vfs_only` ⇒ ownership_ready == false)
+    // whose snapshot has NO configured project: an authoritative resolution is
+    // `NoProject`; a readiness-observing resolution is `NotReady`.
+    let snapshot = build_workspace_snapshot_simple(Vec::new(), SnapshotGeneration(1));
+    ws.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(snapshot)));
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    host.set_workspace(Arc::clone(&ws) as Arc<dyn WorkspaceAccess>);
+
+    let source = "d:/ws/src/Foo.vue";
+
+    // The OWNED gate treats the present snapshot as authoritative: NoProject (no
+    // owner), NEVER NotReady — sourcing readiness from the bootstrap bool here would
+    // regress the 15 OWNED-gate tests.
+    let (authoritative, _) = resolve_carrier(
+        host.as_ref(),
+        source,
+        Arc::from(""),
+        OwnershipReadinessMode::PresentSnapshotAuthoritative,
+    )
+    .expect("a present snapshot resolves");
+    assert_eq!(
+        authoritative,
+        CarrierOwnershipResolution::NoProject,
+        "the OWNED gate treats a present snapshot as authoritative (NoProject, never NotReady)"
+    );
+
+    // The diagnostics path observes the cold `ownership_ready == false` ⇒ NotReady:
+    // it DEFERS instead of resolving a premature terminal NoProject.
+    let (observed, _) = resolve_carrier(
+        host.as_ref(),
+        source,
+        Arc::from(""),
+        OwnershipReadinessMode::ObservePublishedReadiness,
+    )
+    .expect("a present snapshot resolves");
+    assert_eq!(
+        observed,
+        CarrierOwnershipResolution::NotReady,
+        "a cold-bootstrap snapshot defers (NotReady) for the readiness-observing consumer"
+    );
+    // NotReady ⇒ NO `verter(project)` diagnostic (no spurious bootstrap warning).
+    assert!(
+        crate::external_ts::project_ownership_diagnostic(&observed).is_none(),
+        "a NotReady carrier must emit NO verter(project) diagnostic during bootstrap"
     );
 }

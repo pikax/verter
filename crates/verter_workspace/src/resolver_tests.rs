@@ -1,4 +1,6 @@
 use super::*;
+use crate::canonical_path::CanonicalPath;
+use crate::membership::ConfiguredMembership;
 use crate::types::ResolvePhase;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,7 +17,11 @@ fn project(
         workspace_root.to_string(),
         tsconfig_path.map(str::to_string),
     );
-    project.membership = membership;
+    project.membership = crate::snapshot_builder::configured_membership_from_raw(
+        root,
+        &membership,
+        &project.compiler_options,
+    );
     project
 }
 
@@ -308,7 +314,7 @@ fn owner_selection_ignores_solution_style_root_membership() {
     ]);
 
     let owner = resolver
-        .owner_for_file("/workspace/src/App.vue")
+        .nearest_config_for_path("/workspace/src/App.vue")
         .expect("src/App.vue should have an owner project");
 
     assert_eq!(
@@ -331,7 +337,7 @@ fn live_resolver_files_are_immune_to_exclude() {
     //
     // DISCRIMINATING: before FIX 4 the exclude check ran BEFORE the files check,
     // so `Keep.vue` (under the excluded `src/excluded`) was wrongly rejected ⇒
-    // `owner_for_file` returned `None` (the red). After the fix the file is
+    // `nearest_config_for_path` returned `None` (the red). After the fix the file is
     // owned.
     let resolver = ProjectResolver::new(vec![project(
         "/workspace",
@@ -344,7 +350,7 @@ fn live_resolver_files_are_immune_to_exclude() {
         },
     )]);
 
-    let owner = resolver.owner_for_file("/workspace/src/excluded/Keep.vue");
+    let owner = resolver.nearest_config_for_path("/workspace/src/excluded/Keep.vue");
     assert!(
         owner.is_some(),
         "an explicit `files` entry under an excluded dir must be OWNED \
@@ -358,7 +364,7 @@ fn live_resolver_files_are_immune_to_exclude() {
     // Negative control: a NON-files file under the excluded dir is still excluded.
     assert!(
         resolver
-            .owner_for_file("/workspace/src/excluded/Other.vue")
+            .nearest_config_for_path("/workspace/src/excluded/Other.vue")
             .is_none(),
         "a non-`files` file under the excluded dir stays excluded"
     );
@@ -389,12 +395,14 @@ fn live_resolver_exclude_only_owns_default_include_minus_exclude() {
     for ext in ["vue", "svelte"] {
         let owned = format!("/workspace/src/Foo.{ext}");
         assert!(
-            resolver.owner_for_file(&owned).is_some(),
+            resolver.nearest_config_for_path(&owned).is_some(),
             "exclude-only (default include) must OWN `src/Foo.{ext}`"
         );
     }
     assert!(
-        resolver.owner_for_file("/workspace/dist/Foo.vue").is_none(),
+        resolver
+            .nearest_config_for_path("/workspace/dist/Foo.vue")
+            .is_none(),
         "exclude-only must REJECT `dist/Foo.vue` (under the exclude)"
     );
 }
@@ -423,14 +431,26 @@ fn live_resolver_explicit_empty_files_owns_nothing() {
     )]);
 
     assert!(
-        resolver.owner_for_file("/workspace/src/App.vue").is_none(),
+        resolver
+            .nearest_config_for_path("/workspace/src/App.vue")
+            .is_none(),
         "an explicit `files: []` solution-style config must own NOTHING but references \
          (no everything-not-excluded fallback)"
     );
 }
 
 #[test]
-fn ambiguous_configured_owner_returns_none() {
+fn ambiguous_configured_owners_are_preserved_non_collapsing() {
+    // Two configured projects at the SAME root both claim `shared.ts` via `files`.
+    // The resolver is NON-COLLAPSING: `effective_configs_for_path` must PRESERVE both
+    // candidates rather than invent a single winner (or collapse to None). The
+    // fail-closed ownership authority (`WorkspaceSnapshot::configured_owner_resolution_for_file`)
+    // consumes this overlap and reports `Ambiguous`; the resolver's job is only to not
+    // lose it. Import resolution (`nearest_config_for_path`) is NOT the ownership
+    // authority, so it is not asserted here.
+    //
+    // DISCRIMINATING: a collapsing single-owner API returns 1 (invents a winner) or 0
+    // (loses the file); the non-collapsing contract returns BOTH.
     let resolver = ProjectResolver::new(vec![
         project(
             "/workspace",
@@ -454,11 +474,21 @@ fn ambiguous_configured_owner_returns_none() {
         ),
     ]);
 
+    let candidates = resolver.effective_configs_for_path("/workspace/src/shared.ts");
+    assert_eq!(
+        candidates.len(),
+        2,
+        "the non-collapsing resolver must PRESERVE both overlapping configured owners, \
+         not invent a single winner"
+    );
+    let tsconfigs: Vec<&str> = candidates
+        .iter()
+        .filter_map(|c| c.tsconfig_path.as_deref())
+        .collect();
     assert!(
-        resolver
-            .owner_for_file("/workspace/src/shared.ts")
-            .is_none(),
-        "single-owner resolver API must not invent a winner for overlapping configured owners"
+        tsconfigs.contains(&"/workspace/tsconfig.app.json")
+            && tsconfigs.contains(&"/workspace/tsconfig.vitest.json"),
+        "both overlapping configs must survive: {tsconfigs:?}"
     );
 }
 
@@ -485,7 +515,7 @@ fn descendant_configured_owner_wins_over_ancestor_configured_owner() {
     ]);
 
     let owner = resolver
-        .owner_for_file("/workspace/packages/app/src/Note.vue")
+        .nearest_config_for_path("/workspace/packages/app/src/Note.vue")
         .expect("descendant package config must own the package file");
     // Positive: the package config wins.
     assert_eq!(
@@ -502,7 +532,7 @@ fn descendant_configured_owner_wins_over_ancestor_configured_owner() {
 
     // A file owned only by the ancestor root still resolves to the root.
     let root_owner = resolver
-        .owner_for_file("/workspace/scripts/build.ts")
+        .nearest_config_for_path("/workspace/scripts/build.ts")
         .expect("ancestor root config still owns files outside descendant packages");
     assert_eq!(
         root_owner.tsconfig_path.as_deref(),
@@ -516,7 +546,7 @@ fn incomparable_configured_roots_each_own_only_their_own_files() {
     // Sibling-root isolation in the RESOLVER path: `IdeProjectConfig::matches_file`
     // applies `normalized_starts_with(file, root)` FIRST, so two configs with
     // incomparable roots can NEVER both claim the same file — genuine
-    // incomparable ambiguity is unreachable through `owner_for_file` (it IS
+    // incomparable ambiguity is unreachable through `nearest_config_for_path` (it IS
     // reachable in the SNAPSHOT path, exercised by
     // `workspace_snapshot_tests::incomparable_configured_roots_overlap_is_ambiguous`).
     // The real reachable property here: each config owns ONLY files under its own
@@ -539,7 +569,7 @@ fn incomparable_configured_roots_each_own_only_their_own_files() {
     // A file under packages/a is owned by the `a` config alone.
     assert_eq!(
         resolver
-            .owner_for_file("/workspace/packages/a/src/Note.vue")
+            .nearest_config_for_path("/workspace/packages/a/src/Note.vue")
             .and_then(|o| o.tsconfig_path.as_deref()),
         Some("/workspace/packages/a/tsconfig.json"),
         "a file under packages/a is owned by the a config alone"
@@ -547,7 +577,7 @@ fn incomparable_configured_roots_each_own_only_their_own_files() {
     // Negative: the `b` config must NOT cross-claim packages/a's file.
     assert_ne!(
         resolver
-            .owner_for_file("/workspace/packages/a/src/Note.vue")
+            .nearest_config_for_path("/workspace/packages/a/src/Note.vue")
             .and_then(|o| o.tsconfig_path.as_deref()),
         Some("/workspace/packages/b/tsconfig.json"),
         "the b config must not cross-claim a file under packages/a"
@@ -555,7 +585,7 @@ fn incomparable_configured_roots_each_own_only_their_own_files() {
     // Symmetric: a file under packages/b is owned by the `b` config alone.
     assert_eq!(
         resolver
-            .owner_for_file("/workspace/packages/b/src/Panel.vue")
+            .nearest_config_for_path("/workspace/packages/b/src/Panel.vue")
             .and_then(|o| o.tsconfig_path.as_deref()),
         Some("/workspace/packages/b/tsconfig.json"),
         "a file under packages/b is owned by the b config alone"
@@ -563,7 +593,7 @@ fn incomparable_configured_roots_each_own_only_their_own_files() {
     // A file under NEITHER root resolves to None (no config claims it).
     assert!(
         resolver
-            .owner_for_file("/workspace/packages/c/src/Other.vue")
+            .nearest_config_for_path("/workspace/packages/c/src/Other.vue")
             .is_none(),
         "a file under neither sibling root must resolve to None"
     );
@@ -1519,7 +1549,9 @@ fn native_project_resolver_alias_works() {
         ProjectMembership::MatchAll,
     )]);
     assert!(
-        resolver.owner_for_file("/workspace/src/App.vue").is_some(),
+        resolver
+            .nearest_config_for_path("/workspace/src/App.vue")
+            .is_some(),
         "NativeProjectResolver alias should be interchangeable with ProjectResolver"
     );
 }
@@ -2549,7 +2581,7 @@ fn bare_package_json_reread_per_importer() {
             workspace_aliases: vec![],
             compiler_options: IdeProjectCompilerOptions::default(),
             references: vec![],
-            membership: ProjectMembership::MatchAll,
+            membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new("/repo")),
         }]);
         *engine.project_graph.write() = graph;
         engine.rebuild_and_publish();
@@ -2603,7 +2635,7 @@ fn resolve_import_reuses_lazy_resolution_cache_for_same_importer_and_specifier()
             workspace_aliases: vec![],
             compiler_options: IdeProjectCompilerOptions::default(),
             references: vec![],
-            membership: ProjectMembership::MatchAll,
+            membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new("/repo")),
         }]);
         *engine.project_graph.write() = graph;
         engine.rebuild_and_publish();
@@ -2688,7 +2720,7 @@ fn package_imports_reread_per_importer() {
             workspace_aliases: vec![],
             compiler_options: IdeProjectCompilerOptions::default(),
             references: vec![],
-            membership: ProjectMembership::MatchAll,
+            membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new("/repo")),
         }]);
         *engine.project_graph.write() = graph;
         engine.rebuild_and_publish();
@@ -2747,7 +2779,7 @@ fn node_modules_missing_ancestor_manifests_do_not_trigger_reads() {
             workspace_aliases: vec![],
             compiler_options: IdeProjectCompilerOptions::default(),
             references: vec![],
-            membership: ProjectMembership::MatchAll,
+            membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new("/repo")),
         }]);
         *engine.project_graph.write() = graph;
         engine.rebuild_and_publish();

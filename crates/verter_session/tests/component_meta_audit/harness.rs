@@ -38,7 +38,7 @@ use verter_session::component_meta_audit::{RequestAuditRecord, RequestFootprintA
 use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{
     AmbientLibSpec, IdeProjectCompilerOptions, MemoryOptions, MemoryWorkspace, ProjectGraph,
-    ProjectMembership, ProjectRank, VfsProjectConfig, WorkspaceAccess,
+    ProjectRank, VfsProjectConfig, WorkspaceAccess,
 };
 
 // Shared test-fixture source files injected into hermetic
@@ -171,7 +171,9 @@ pub fn build_hermetic_host_with_lib(
         workspace_aliases: vec![],
         compiler_options: IdeProjectCompilerOptions::default(),
         references: vec![],
-        membership: ProjectMembership::default(),
+        membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+            &verter_workspace::CanonicalPath::new("/ws"),
+        ),
     }]));
     for (canonical, content) in files {
         workspace.inject_file((*canonical).into(), Arc::from(*content));

@@ -19,7 +19,7 @@
 //! `Ambiguous`. (The per-engine overlay-placement half of this guard lands with
 //! the backends in a later block.)
 
-use verter_session::external_ts::{AmbiguityCause, ProjectResolution};
+use verter_session::external_ts::{AmbiguityCause, CarrierOwnershipResolution};
 use verter_session::framework::descriptor::built_in_descriptors;
 use verter_session::framework::VirtualFileNaming;
 
@@ -66,7 +66,7 @@ fn carrier_never_shadows_real_user_file() {
             &source,
         );
         assert!(
-            matches!(clean, ProjectResolution::ProjectBinding(_)),
+            matches!(clean, CarrierOwnershipResolution::Bound(_)),
             "control: `Foo.{ext}` with no occupying file must bind cleanly (got {clean:?})"
         );
 
@@ -92,7 +92,10 @@ fn carrier_never_shadows_real_user_file() {
             );
             assert_eq!(
                 conflicted,
-                ProjectResolution::Ambiguous(AmbiguityCause::CarrierPathOccupiedByRealFile),
+                CarrierOwnershipResolution::Ambiguous {
+                    candidates: Vec::new(),
+                    cause: AmbiguityCause::CarrierPathOccupiedByRealFile,
+                },
                 "a real file at the descriptor-valid carrier path `Foo.{ext}{suffix}` must \
                  downgrade `Foo.{ext}` to Ambiguous (Verter never overlay-shadows a real \
                  user file)"
@@ -159,7 +162,10 @@ fn real_file_at_any_companion_path_downgrades_source_to_ambiguous() {
             );
             assert_eq!(
                 conflicted,
-                ProjectResolution::Ambiguous(AmbiguityCause::CarrierPathOccupiedByRealFile),
+                CarrierOwnershipResolution::Ambiguous {
+                    candidates: Vec::new(),
+                    cause: AmbiguityCause::CarrierPathOccupiedByRealFile,
+                },
                 "a real file at the descriptor-owned {:?} companion `{}` must downgrade \
                  `{source}` to Ambiguous (Verter never overlay-shadows a real user file at any \
                  occupiable companion path)",

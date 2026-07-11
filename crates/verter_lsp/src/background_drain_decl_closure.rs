@@ -976,27 +976,40 @@ impl DeclOverlayOwner {
             return None;
         }
 
-        // Record the live decl path + background-loaded flag on the carrier's
-        // committed provider state (so close/lifecycle reaches it), preserving the
-        // other kinds. A carrier already has a committed state from the carrier
-        // passes; update only the Decl kind in place.
-        if let Some(mut state) = provider_sync_states.get_mut(dep_canonical_id) {
-            state.decl_path = Some(decl_path.clone());
-            state.set_background_loaded(ProviderPathKind::Decl, true);
-        } else {
-            // No prior carrier state (the carrier reached only via the closure):
-            // commit a minimal owner-resolved state carrying the Decl kind.
-            let mut state = ProviderSyncState::default();
-            if let Some(owner) = snapshot.resolver.owner_for_file(dep_canonical_id) {
-                let owner_key = owner
-                    .tsconfig_path
-                    .clone()
-                    .unwrap_or_else(|| owner.root.clone());
-                state.owner_binding = crate::provider_sync::ProviderOwnerBinding::Owned(owner_key);
+        // Record the live decl path + background-loaded flag on the carrier's committed
+        // provider state (so close/lifecycle reaches it) through ONE atomic entry, so this
+        // declaration-overlay mutation stays OUTSIDE the receipt-attested IDE/API ownership:
+        // it touches ONLY the `Decl` kind and NEVER the admission token (`committed_ide_surface`
+        // / `commit_stamp`), and it can never clobber a carrier commit that landed
+        // concurrently in the window between a prior read and this write (the tracked
+        // decl-overlay-separation exemption to the coordinator's admission gate).
+        use dashmap::mapref::entry::Entry;
+        match provider_sync_states.entry(dep_canonical_id.to_string()) {
+            Entry::Occupied(mut occupied) => {
+                // A carrier commit (from the carrier passes, possibly concurrent) already
+                // owns this state: update ONLY the `Decl` kind in place, preserving every
+                // other kind AND the receipt-attested admission token untouched.
+                let state = occupied.get_mut();
+                state.decl_path = Some(decl_path.clone());
+                state.set_background_loaded(ProviderPathKind::Decl, true);
             }
-            state.decl_path = Some(decl_path.clone());
-            state.set_background_loaded(ProviderPathKind::Decl, true);
-            commit_sync_transition(provider_sync_states, dep_canonical_id, state);
+            Entry::Vacant(vacant) => {
+                // No prior carrier state (the carrier reached ONLY via the closure): insert a
+                // minimal owner-resolved state carrying just the `Decl` kind (no IDE/API
+                // companions, so no admission token — the carrier passes stamp that later).
+                let mut state = ProviderSyncState::default();
+                if let Some(owner) = snapshot.resolver.nearest_config_for_path(dep_canonical_id) {
+                    let owner_key = owner
+                        .tsconfig_path
+                        .clone()
+                        .unwrap_or_else(|| owner.root.clone());
+                    state.owner_binding =
+                        crate::provider_sync::ProviderOwnerBinding::Owned(owner_key);
+                }
+                state.decl_path = Some(decl_path.clone());
+                state.set_background_loaded(ProviderPathKind::Decl, true);
+                vacant.insert(state);
+            }
         }
 
         Some(decl_path)

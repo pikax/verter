@@ -1254,7 +1254,9 @@ fn candidate_list_resolves_to_first_loaded() {
             compiler_options:
                 verter_semantic::analysis::project_resolver::IdeProjectCompilerOptions::default(),
             references: vec![],
-            membership: verter_semantic::analysis::project_resolver::ProjectMembership::MatchAll,
+            membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+                &verter_workspace::CanonicalPath::new("/src"),
+            ),
         },
     ]);
     let source = "<script setup lang=\"ts\">\nimport type { Props } from '@/types'\nconst props = defineProps<Props>()\n</script>\n<template><div>{{ props.msg }}</div></template>";
@@ -3682,7 +3684,9 @@ fn upsert_syncs_relative_import_edges_to_workspace() {
         workspace_aliases: vec![],
         compiler_options: verter_workspace::IdeProjectCompilerOptions::default(),
         references: vec![],
-        membership: verter_workspace::ProjectMembership::default(),
+        membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+            &verter_workspace::CanonicalPath::new("/src"),
+        ),
     });
 
     // Inject the dependency file so the resolver can find it
@@ -3780,7 +3784,9 @@ fn workspace_resolution_used_for_aliased_imports() {
             ..Default::default()
         },
         references: vec![],
-        membership: verter_workspace::ProjectMembership::default(),
+        membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+            &verter_workspace::CanonicalPath::new("/project"),
+        ),
     });
 
     // Inject the dependency file into the workspace so it can be resolved

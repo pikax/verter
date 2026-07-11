@@ -13,22 +13,22 @@
 //! own an unknown extension under bare-star; against the explicit-extension
 //! model the assertions below hold.
 
-use verter_session::external_ts::ProjectResolution;
+use verter_session::external_ts::CarrierOwnershipResolution;
 
 use crate::shared::{carrier_exts, resolve_with};
 
 const TS: &str = "d:/ws/tsconfig.json";
 
-fn is_owned(res: &ProjectResolution) -> bool {
-    matches!(res, ProjectResolution::ProjectBinding(_))
+fn is_owned(res: &CarrierOwnershipResolution) -> bool {
+    matches!(res, CarrierOwnershipResolution::Bound(_))
 }
 
-fn is_no_project(res: &ProjectResolution) -> bool {
-    matches!(res, ProjectResolution::NoProject)
+fn is_no_project(res: &CarrierOwnershipResolution) -> bool {
+    matches!(res, CarrierOwnershipResolution::NoProject)
 }
 
 /// Resolve a carrier source `src/Foo.<ext>` under the given tsconfig JSON body.
-fn resolve_carrier(tsconfig_body: &str, ext: &str) -> ProjectResolution {
+fn resolve_carrier(tsconfig_body: &str, ext: &str) -> CarrierOwnershipResolution {
     let source = format!("d:/ws/src/Foo.{ext}");
     resolve_with(
         &[(TS, tsconfig_body), (source.as_str(), "// carrier source")],

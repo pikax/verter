@@ -13,7 +13,7 @@
 //!
 //! 1. **[`ProjectSyncBatch`] / [`plan_publish_for_resolution`]** — the §2.5 sync
 //!    planner: ownership resolution → per-project **atomic delta batch** keyed by
-//!    the owning tsconfig URI. A `NoProject`/`Ambiguous`/`SyntheticScratch`
+//!    the owning tsconfig URI. A `NoProject`/`Ambiguous`/`NotReady`
 //!    resolution yields no batch (no-owner ⇒ no external-TS publish; fail closed).
 //! 2. **[`SpanClass`] / [`classify_provider_span`]** — span classification:
 //!    every returned span is `SourceMappable` (mapped back to the carrier source),
@@ -44,8 +44,8 @@ use verter_span::TsPosition;
 
 use verter_scheduler::cancellation::CancellationToken;
 use verter_session::external_ts::{
-    ProjectBinding, ProjectResolution, PublishSnapshot, QueryFeature, ScriptKind, SnapshotFile,
-    SnapshotRole,
+    CarrierOwnershipResolution, ProjectBinding, PublishSnapshot, QueryFeature, ScriptKind,
+    SnapshotFile, SnapshotRole,
 };
 
 use verter_semantic::analysis::types::Hash16;
@@ -469,7 +469,7 @@ impl PlannedFile {
 /// CONSTRUCTION IS BINDING-GATED: the ONLY constructor ([`Self::for_binding`])
 /// takes a resolved [`ProjectBinding`], reading the owning project URI FROM it.
 /// There is no raw-string constructor, so a batch cannot be fabricated for a
-/// `NoProject` / `Ambiguous` / `SyntheticScratch` source — this extends the
+/// `NoProject` / `Ambiguous` / `NotReady` source — this extends the
 /// contract's `provider_op_requires_resolved_project` witness discipline to the
 /// sync seam (the no-owner-⇒-no-publish gate is structural, not advisory). The
 /// `project` field therefore always equals a resolved binding's `tsconfig_uri`.
@@ -485,7 +485,7 @@ impl ProjectSyncBatch {
     /// Build the atomic batch for the project the resolved `binding` owns. The
     /// owning tsconfig URI is taken from the binding (not a caller-supplied string),
     /// so a batch is constructible ONLY from a resolved [`ProjectBinding`] — a
-    /// `NoProject` / `Ambiguous` / `SyntheticScratch` source carries no binding and
+    /// `NoProject` / `Ambiguous` / `NotReady` source carries no binding and
     /// thus cannot produce a publish (fail closed).
     ///
     /// Callers obtain the `binding` from [`plan_publish_for_resolution`] (the
@@ -552,23 +552,26 @@ impl ProjectSyncBatch {
     }
 }
 
-/// Plan a project-bound publish for a resolved [`ProjectResolution`] (§2.5
+/// Plan a project-bound publish for a resolved [`CarrierOwnershipResolution`] (§2.5
 /// step 2). Returns the resolved [`ProjectBinding`] to publish under ONLY for the
-/// `ProjectBinding` state; `NoProject` / `Ambiguous` / `SyntheticScratch` yield
+/// `Bound` state; `NoProject` / `Ambiguous` / `NotReady` yield
 /// `None` (no external-TS publish — fail closed, the no-owner-⇒-no-result rule).
 ///
 /// This is the gate that keeps a config-less / scratch source from EVER warming a
 /// project cache: a caller cannot build a [`ProjectSyncBatch`] without a binding
 /// to read the owner URI / env dims from.
 #[must_use]
-pub fn plan_publish_for_resolution(resolution: &ProjectResolution) -> Option<&ProjectBinding> {
+pub fn plan_publish_for_resolution(
+    resolution: &CarrierOwnershipResolution,
+) -> Option<&ProjectBinding> {
     match resolution {
-        ProjectResolution::ProjectBinding(binding) => Some(binding),
-        // No owner / ambiguous / scratch ⇒ no project-bound publish. Verter-native
-        // (non-external-TS) features may still answer, but external-TS is fail-closed.
-        ProjectResolution::NoProject
-        | ProjectResolution::Ambiguous(_)
-        | ProjectResolution::SyntheticScratch(_) => None,
+        CarrierOwnershipResolution::Bound(binding) => Some(binding),
+        // No owner / ambiguous / not-yet-ready ⇒ no project-bound publish.
+        // Verter-native (non-external-TS) features may still answer, but external-TS
+        // is fail-closed.
+        CarrierOwnershipResolution::NoProject
+        | CarrierOwnershipResolution::Ambiguous { .. }
+        | CarrierOwnershipResolution::NotReady => None,
     }
 }
 

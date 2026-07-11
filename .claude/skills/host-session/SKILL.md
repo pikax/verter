@@ -206,6 +206,7 @@ The VFS publishes workspace snapshots atomically via `PublishedRoot`. Each snaps
 
 - `Provisional` -- file synced before ownership is known (bootstrap).
 - `Owned(String)` -- file bound to a real project (tsconfig path or root).
+- `Unresolved` -- a ready snapshot resolved NO usable owner (`NoProject`/`Ambiguous`); an open carrier keeps its owner-independent IDE TSX live but is never served as a configured-project member.
 
 **Readiness-gated sync rules**:
 
@@ -219,7 +220,29 @@ The VFS publishes workspace snapshots atomically via `PublishedRoot`. Each snaps
 | --- | --- |
 | `crates/verter_workspace/src/published_state.rs` | `PublishedRoot`, `ownership_ready` |
 | `crates/verter_lsp/src/provider_sync.rs` | `ProviderOwnerBinding`, `ProviderSyncState` |
-| `crates/verter_lsp/src/server/sync_orchestration.rs` | `PublishedResolverSnapshot`, `ensure_current_file_synced` |
+| `crates/verter_lsp/src/server/sync_orchestration.rs` | `PublishedResolverSnapshot`, `ensure_current_file_synced`, `project_ownership_diagnostics` |
+
+### Project-Bound Carrier Ownership (external-TS)
+
+Which configured project owns a carrier (`.vue`/`.svelte`) for external-TS results is decided by ONE resolution type, `CarrierOwnershipResolution` (`verter_session::external_ts::resolver`), the sole carrier-serving authority:
+
+- `NotReady` — the published ownership view is still bootstrap (`ownership_ready == false`) or no snapshot is published yet. The ONLY retryable state: keep the carrier queued, defer tsserver membership WITHOUT thrash (no retract), re-resolve later. Not a diagnostic (not the user's fault).
+- `NoProject` — no configured tsconfig owns the carrier. Terminal, fail closed. Never served.
+- `Bound(ProjectBinding)` — a resolved configured project. The ONLY state that produces external-TS results. A `ProjectBinding` is the head of the `provider_op_requires_resolved_project` witness chain (mints `EnsureProject` → `BoundProject`).
+- `Ambiguous { candidates, cause }` — multiple configured owners (`AmbiguityCause::MultipleOwners`, `candidates` = the overlapping tsconfig URIs), or a disk-layout conflict (`CarrierPathOccupiedByRealFile` / `SameStemRuneModule`, empty `candidates`). Terminal, fail closed. The disk-conflict pass runs FIRST, unconditionally, so a real user file is never overlay-shadowed in any owner state.
+
+`WorkspaceProjectResolver::resolve` maps `WorkspaceSnapshot::configured_owner_resolution_for_file` (`None`/`Unique`/`Ambiguous`, backed by the NON-collapsing `effective_configs_for_path` — the retired collapsing `owner_for_file`/`single_owner_for_file` is gone) onto these states, plus the disk-conflict downgrade. Ownership is NON-collapsing: two overlapping configs stay `Ambiguous` with both candidates, never a silently-picked single `Bound`.
+
+**One resolution, two consumers.** The async scanner's tier classifier (`workspace_scanner::classify_from_snapshot`) and the carrier-sync path (`external_ts::carrier_sync::reconcile_carrier_source` via `resolve_carrier_ownership_over_vfs`) both derive from the SAME `configured_owner_resolution_for_file`, so they are byte-equivalent on the ownership axis (scanner `ProjectSource` ⇔ resolver `Bound`/`Ambiguous(MultipleOwners)`; scanner `Other` ⇔ `NoProject`). They can never disagree on an ambiguous carrier.
+
+**Sync decision + readiness receipt.** `reconcile_carrier_source` returns a `CarrierSyncDecision`: `Published` (tsserver store-membership) / `DirectOpen` (tsgo direct buffer open) both carry a `ProviderReadyReceipt`; `NotReady` (keep-queued/retry) and `Unresolved` (`NoProject`/`Ambiguous`, terminal — never served, no provider registration) carry none; `Pending` = advertised nothing this pass. A `ProviderReadyReceipt` (`membership_reconciler`) is minted ONLY at the END of the ordered `apply_owned` transaction (after the store publish + ledger commit + verify) and is the capability token that gates the provider-state commit (`commit_carrier_provider_state`) — so a carrier `ProviderSyncState` can never be committed without a real resolution, and readiness never precedes publication. Every unresolved OPEN carrier also gets a user-visible `verter(project)` diagnostic (`project_ownership_diagnostic`), driven from the same typed resolution.
+
+| File | Purpose |
+| --- | --- |
+| `crates/verter_session/src/external_ts/resolver.rs` | `CarrierOwnershipResolution`, `AmbiguityCause`, `WorkspaceProjectResolver`, `ProjectBinding`, `ExternalTsProjectResolver` |
+| `crates/verter_lsp/src/external_ts/carrier_sync.rs` | `reconcile_carrier_source`, `CarrierSyncDecision`, `project_ownership_diagnostic`, `commit_carrier_provider_state` |
+| `crates/verter_lsp/src/external_ts/membership_reconciler.rs` | `ProviderReadyReceipt`, `MembershipReconciler`, `ReconcileOutcome` |
+| `crates/verter_lsp/src/external_ts/publish_coordinator.rs` | `CarrierPublishCoordinator`, `resolve_carrier_ownership_over_vfs` |
 
 ### Editor-Liveness Provider-Sync Invariant (CRITICAL)
 

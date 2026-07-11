@@ -21,6 +21,7 @@ use std::sync::Arc;
 use verter_lsp::tsgo::composite::TsgoCompositeProvider;
 use verter_lsp::tsgo::project_binding::{
     resolve_carrier, resolve_carrier_bound, AdmissionDenial, CarrierAdmissionCache, CarrierBinding,
+    OwnershipReadinessMode,
 };
 use verter_lsp::type_provider::protocol::{
     Completion, CompletionResolveData, CompletionResolveResult, CompletionResult, HoverInfo,
@@ -28,7 +29,7 @@ use verter_lsp::type_provider::protocol::{
     TypeCodeAction, TypeDiagnostic, TypeDiagnosticSeverity, TypeDocumentHighlight, TypeLocation,
 };
 use verter_lsp::type_provider::traits::{ProviderFuture, TypeProvider};
-use verter_session::external_ts::{AmbiguityCause, ProjectResolution};
+use verter_session::external_ts::{AmbiguityCause, CarrierOwnershipResolution};
 
 use verter_session::{HostConfig, VerterHost};
 
@@ -576,8 +577,13 @@ fn resolve_carrier_project_identity_is_version_independent() {
     let host = host_with_snapshot();
     let source = format!("{WS_ROOT}/src/Widget.vue");
 
-    let resolve_binding = |v: &str| match resolve_carrier(&host, &source, Arc::from(v)) {
-        Some((ProjectResolution::ProjectBinding(binding), _generation)) => binding,
+    let resolve_binding = |v: &str| match resolve_carrier(
+        &host,
+        &source,
+        Arc::from(v),
+        OwnershipReadinessMode::PresentSnapshotAuthoritative,
+    ) {
+        Some((CarrierOwnershipResolution::Bound(binding), _generation)) => binding,
         other => panic!(
             "expected a ProjectBinding for the bound source with ts_version {v:?}; got {other:?}"
         ),

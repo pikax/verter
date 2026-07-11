@@ -18,7 +18,7 @@
 //! editor opens still flow through the normal document-sync path.
 //!
 //! Project resolution is the contract's fail-closed gate: a `NoProject` /
-//! `Ambiguous` / `SyntheticScratch` source produces NO publish (no carrier
+//! `Ambiguous` / `NotReady` source produces NO publish (no carrier
 //! membership), so a carrier that would shadow a real user file — or whose owner
 //! is undecidable — is never advertised. Only a resolved
 //! [`ProjectBinding`](verter_session::external_ts::ProjectBinding) can mint the
@@ -28,19 +28,21 @@
 
 use std::sync::Arc;
 
+use dashmap::DashMap;
+use tokio::sync::Mutex as AsyncMutex;
+
 use verter_semantic::analysis::types::Hash16;
 use verter_session::external_ts::{
-    EngineBackend, EnvDims, ExternalTsProjectResolver, OpenState, ProjectBinding, ScriptKind,
-    SnapshotFile, SnapshotRole, WorkspaceProjectResolver,
+    CarrierOwnershipResolution, EngineBackend, EnvDims, ExternalTsProjectResolver, OpenState,
+    ProjectBinding, ScriptKind, SnapshotFile, SnapshotRole, WorkspaceProjectResolver,
 };
 use verter_session::VerterHost;
 use verter_workspace::FilesystemWorkspace;
 
 use crate::external_ts::membership_ledger::AbsentReason;
 use crate::external_ts::membership_reconciler::{
-    AuthorityState, BootstrapKind, CarrierMembershipCommitter, CommitFuture, MembershipReconciler,
-    OwnershipDecision, PrecomputedOwnershipAuthority, ReconcileErr, ReconcileOutcome,
-    ReconcileReason, ResolverOwnershipAuthority,
+    CarrierMembershipCommitter, CommitFuture, MembershipReconciler, ReconcileErr, ReconcileOutcome,
+    ReconcileReason,
 };
 use crate::external_ts::tsserver_backend::TsserverEngineBackend;
 use crate::external_ts::CanonicalSource;
@@ -78,6 +80,12 @@ pub struct CarrierPublishCoordinator {
     provider: Arc<dyn TypeProvider>,
     /// The negotiated TypeScript version string carried on every minted binding.
     ts_version: Arc<str>,
+    /// The ONE shared per-source membership-serialization gate map. The coordinator
+    /// rebuilds a [`MembershipReconciler`] per transition ([`Self::reconciler`]), so it
+    /// owns this map and hands the same `Arc` to every rebuilt reconciler — otherwise
+    /// each per-call reconciler would get a fresh (useless) map and concurrent
+    /// same-source transitions would not serialize. Shared across coordinator clones.
+    source_gates: Arc<DashMap<String, Arc<AsyncMutex<()>>>>,
 }
 
 impl CarrierPublishCoordinator {
@@ -92,6 +100,7 @@ impl CarrierPublishCoordinator {
             backend,
             provider,
             ts_version: ts_version.into(),
+            source_gates: Arc::new(DashMap::new()),
         }
     }
 
@@ -139,6 +148,7 @@ impl CarrierPublishCoordinator {
             Arc::clone(self.backend.membership_ledger()),
             Arc::clone(&self.provider),
             Arc::new(self.clone()) as Arc<dyn CarrierMembershipCommitter>,
+            Arc::clone(&self.source_gates),
         )
     }
 
@@ -149,6 +159,13 @@ impl CarrierPublishCoordinator {
     /// signal (a cold snapshot defers without thrash). On an owned resolution the
     /// carrier is published (durable store + provider buffer + ledger); on
     /// absent/owner-loss it is retracted; on cold it defers — all fail-closed.
+    /// Resolve ownership from the published snapshot AND run the membership transition
+    /// in one call. Production captures the [`CarrierOwnershipResolution`] ONCE (so the
+    /// two engines and the tier scanner share one resolution) and calls
+    /// [`Self::resolve_carrier_ownership`] + [`Self::reconcile_membership_with_resolution`]
+    /// separately; this combined entry is the coordinator's integration-test seam that
+    /// exercises both halves end-to-end from a host/VFS snapshot.
+    #[cfg(test)]
     pub(crate) async fn reconcile_membership(
         &self,
         host: &VerterHost,
@@ -158,18 +175,30 @@ impl CarrierPublishCoordinator {
         ownership_ready: bool,
         reason: ReconcileReason,
     ) -> Result<ReconcileOutcome, ReconcileErr> {
-        let authority_state = if ownership_ready {
-            AuthorityState::Ready
-        } else {
-            AuthorityState::Bootstrap
-        };
-        let decision =
-            self.resolve_ownership(host, vfs, source_canonical, authority_state, companions);
-        let authority = PrecomputedOwnershipAuthority::new(decision);
+        let resolution =
+            self.resolve_carrier_ownership(host, vfs, source_canonical, ownership_ready);
+        self.reconcile_membership_with_resolution(source_canonical, resolution, companions, reason)
+            .await
+    }
+
+    /// Run the authoritative membership transition for a source over the ONE captured
+    /// [`CarrierOwnershipResolution`] — the caller already resolved ownership (through
+    /// the shared resolver) and hands it here, so the reconciler never re-resolves. An owned
+    /// reconcile mints a readiness receipt with a placeholder intent epoch; the carrier-sync
+    /// gateway stamps the transaction's captured epoch onto it before returning the owned
+    /// decision (see [`ProviderReadyReceipt::stamped_with_intent_epoch`]).
+    pub(crate) async fn reconcile_membership_with_resolution(
+        &self,
+        source_canonical: &str,
+        resolution: CarrierOwnershipResolution,
+        companions: Vec<CarrierCompanion>,
+        reason: ReconcileReason,
+    ) -> Result<ReconcileOutcome, ReconcileErr> {
         self.reconciler()
             .reconcile_source_membership(
                 &CanonicalSource::from(source_canonical),
-                &authority,
+                resolution,
+                companions,
                 reason,
             )
             .await
@@ -189,47 +218,34 @@ impl CarrierPublishCoordinator {
             .await
     }
 
-    /// Resolve a carrier source's ownership decision ONCE, synchronously.
+    /// Resolve a carrier source's ownership ONCE, synchronously.
     ///
-    /// Builds the shared `WorkspaceProjectResolver` over the published snapshot
-    /// (ownership read from the host's published state, the carrier-path conflict
-    /// pass, per-canonical R21 env dims — never fabricated), maps its four
-    /// [`ProjectResolution`] states through [`ResolverOwnershipAuthority`], and
-    /// returns the resolved [`OwnershipDecision`]. The borrowing resolver is built
+    /// Delegates to [`resolve_carrier_ownership_over_vfs`] over the coordinator's
+    /// negotiated `ts_version`: it builds the shared [`WorkspaceProjectResolver`] over
+    /// the published snapshot (ownership read from the host's published state, the
+    /// carrier-path conflict pass, per-canonical R21 env dims — never fabricated) and
+    /// returns the one [`CarrierOwnershipResolution`]. The borrowing resolver is built
     /// and dropped entirely inside this synchronous call, so it never crosses an
-    /// `.await`; the caller hands the owned decision to
-    /// [`MembershipReconciler::reconcile_source_membership`] via a
-    /// `PrecomputedOwnershipAuthority`. `authority_state` is the caller's
-    /// cold-vs-authoritative snapshot signal (a cold snapshot defers without thrash).
-    /// A missing published snapshot is a cold bootstrap (defer), never an owner-loss
-    /// retract.
+    /// `.await`; the caller hands the owned resolution to
+    /// [`MembershipReconciler::reconcile_source_membership`]. `ownership_ready` is the
+    /// caller's cold-vs-authoritative snapshot signal (a cold snapshot defers without
+    /// thrash). A missing published snapshot is a cold bootstrap
+    /// ([`CarrierOwnershipResolution::NotReady`]), never an owner-loss retract.
     #[must_use]
-    pub(crate) fn resolve_ownership(
+    pub(crate) fn resolve_carrier_ownership(
         &self,
         host: &VerterHost,
         vfs: &FilesystemWorkspace,
         source_canonical: &str,
-        authority_state: AuthorityState,
-        companions: Vec<CarrierCompanion>,
-    ) -> OwnershipDecision {
-        let Some(published) = vfs.load_published() else {
-            // No published snapshot ⇒ ownership is not yet authoritative: a cold
-            // bootstrap deferral, NOT an owner loss (deferring avoids thrashing a
-            // carrier that re-resolves once the snapshot loads).
-            return OwnershipDecision::Bootstrap {
-                kind: BootstrapKind::ColdStart,
-            };
-        };
-        let env_dims_source =
-            |tsconfig_uri: &str| env_dims_for_project(host, &published.snapshot, tsconfig_uri);
-        let resolver = WorkspaceProjectResolver::new(
-            &published.snapshot,
+        ownership_ready: bool,
+    ) -> CarrierOwnershipResolution {
+        resolve_carrier_ownership_over_vfs(
+            host,
             vfs,
+            source_canonical,
+            ownership_ready,
             Arc::clone(&self.ts_version),
-            &env_dims_source,
-        );
-        ResolverOwnershipAuthority::new(authority_state, |s| resolver.resolve(s), companions)
-            .resolve_membership(&CanonicalSource::from(source_canonical))
+        )
     }
 
     /// Publish an ALREADY-resolved owned carrier's companions into the on-disk
@@ -353,20 +369,53 @@ impl std::error::Error for CarrierPublishError {}
 /// project's env hashes. The host NEVER fabricates env identity — these are the
 /// authoritative per-project values (the `no_default_env_hashes_in_production`
 /// rule), so the binding carries real dims.
+/// Resolve a carrier source's ownership decision ONCE from a published VFS snapshot —
+/// the shared ownership-resolution primitive BOTH engines' carrier-sync path uses
+/// (tsserver via [`CarrierPublishCoordinator::resolve_carrier_ownership`], tsgo
+/// direct-open). Builds the shared [`WorkspaceProjectResolver`] over
+/// `vfs.load_published()` (ownership + carrier-path conflict pass + per-canonical R21
+/// env dims from the host), so the scanner and the sync path share ONE resolution
+/// source. A missing published snapshot is the transient
+/// [`CarrierOwnershipResolution::NotReady`] (deferred without thrash, never owner-loss).
+/// `ts_version` is carried onto a resolved binding's metadata; it is NOT load-bearing
+/// for the witness identity or the `--api` op, so a bootstrap/empty value is safe.
+#[must_use]
+pub(crate) fn resolve_carrier_ownership_over_vfs(
+    host: &VerterHost,
+    vfs: &FilesystemWorkspace,
+    source_canonical: &str,
+    ownership_ready: bool,
+    ts_version: Arc<str>,
+) -> CarrierOwnershipResolution {
+    let Some(published) = vfs.load_published() else {
+        return CarrierOwnershipResolution::NotReady;
+    };
+    let env_dims_source =
+        |member_canonical: &str| env_dims_for_project(host, &published.snapshot, member_canonical);
+    let resolver = WorkspaceProjectResolver::new(
+        &published.snapshot,
+        vfs,
+        ts_version,
+        &env_dims_source,
+        ownership_ready,
+    );
+    resolver.resolve(source_canonical, None)
+}
+
 fn env_dims_for_project(
     host: &VerterHost,
     snapshot: &verter_workspace::workspace_snapshot::WorkspaceSnapshot,
-    tsconfig_uri: &str,
+    member_canonical: &str,
 ) -> EnvDims {
     // The host env-hash readers are per-CANONICAL; a configured project's env hashes
-    // are uniform across its members, so reading them for the tsconfig URI's owning
-    // project via any of its files yields the project's dims. We read for the
-    // tsconfig path itself (the published snapshot resolves it to its own project),
-    // falling back to the workspace-default dims the host applies for an
-    // unresolved canonical.
+    // are uniform across its members, so reading them for a MEMBER canonical of the
+    // resolved project (the resolved carrier source) yields the project's dims. The
+    // resolver passes an owned member, NOT the tsconfig path — the tsconfig file is
+    // normally outside the project's membership set, so keying the readers on it
+    // resolves to no owner and falls back to the workspace-default bundle.
     let _ = snapshot; // ownership resolution is internal to the host readers
-    let env = host.host_view_env_hashes_for(tsconfig_uri);
-    let project_identity = host.host_view_project_identity_for(tsconfig_uri);
+    let env = host.host_view_env_hashes_for(member_canonical);
+    let project_identity = host.host_view_project_identity_for(member_canonical);
     EnvDims {
         parse_env_hash: env.parse_env_hash,
         resolve_env_hash: env.resolve_env_hash,

@@ -137,12 +137,6 @@ pub trait WorkspaceRead: Send + Sync {
         None
     }
 
-    /// Find the owning project for a file.
-    /// Default: `None` (no project ownership).
-    fn owner_for_file(&self, _canonical_id: &str) -> Option<ProjectOwnership> {
-        None
-    }
-
     /// Whether `canonical_id` is a workspace-owned source file.
     ///
     /// Routes through the resolver's existing ownership classification:
@@ -886,8 +880,7 @@ pub trait SourceLoader: Send + Sync {
 /// mutation capabilities. The scheduler holds this via `ArcSwap` so it
 /// can be atomically replaced when project configuration changes.
 ///
-/// Implementors: [`ProjectResolver`](crate::resolver::ProjectResolver),
-/// `EmptyResolverSnapshot` (for standalone/test hosts).
+/// Implementor: `EmptyResolverSnapshot` (for standalone/test hosts).
 pub trait ResolverSnapshot: Send + Sync {
     /// Resolve an import specifier in context.
     fn resolve_import(

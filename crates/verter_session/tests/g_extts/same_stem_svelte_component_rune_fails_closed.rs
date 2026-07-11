@@ -13,7 +13,7 @@
 //! hardcoded — and matched to the carrier's own family, so a `.vue` source (no
 //! `vue.*` rune family) is never tripped.
 
-use verter_session::external_ts::{AmbiguityCause, ProjectResolution};
+use verter_session::external_ts::{AmbiguityCause, CarrierOwnershipResolution};
 
 use crate::shared::resolve_with;
 
@@ -42,7 +42,10 @@ fn same_stem_svelte_component_rune_fails_closed() {
     );
     assert_eq!(
         res,
-        ProjectResolution::Ambiguous(AmbiguityCause::SameStemRuneModule),
+        CarrierOwnershipResolution::Ambiguous {
+            candidates: Vec::new(),
+            cause: AmbiguityCause::SameStemRuneModule,
+        },
         "a same-stem `Foo.svelte.ts` rune beside `Foo.svelte` must fail closed (Ambiguous)"
     );
 
@@ -59,7 +62,7 @@ fn same_stem_svelte_component_rune_fails_closed() {
         "d:/ws/src/Clean.svelte",
     );
     assert!(
-        matches!(control, ProjectResolution::ProjectBinding(_)),
+        matches!(control, CarrierOwnershipResolution::Bound(_)),
         "control: a DIFFERENT-stem rune (`state.svelte.ts`) must not downgrade \
          `Clean.svelte` — it binds cleanly (got {control:?})"
     );

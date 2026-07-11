@@ -57,7 +57,9 @@ fn make_project_config(root: &str) -> verter_workspace::VfsProjectConfig {
         workspace_aliases: vec![],
         compiler_options: verter_workspace::IdeProjectCompilerOptions::default(),
         references: vec![],
-        membership: verter_workspace::ProjectMembership::MatchAll,
+        membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+            &verter_workspace::CanonicalPath::new(root),
+        ),
     }
 }
 

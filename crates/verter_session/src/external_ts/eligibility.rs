@@ -27,7 +27,7 @@ use crate::file_artifact_store::ProjectIdentity;
 use super::mode::{
     editor_binding_matches, EligibilityFailure, ProjectEligibility, SharedSessionFacts,
 };
-use super::resolver::ProjectResolution;
+use super::resolver::CarrierOwnershipResolution;
 
 /// The engine-version capability-gate fact. `Cleared` carries the observed
 /// engine version the gate `validate` produced (the positive evidence); the
@@ -60,10 +60,10 @@ pub enum AttachFact {
 
 /// The project-binding fact (the `ProjectNotBound` precondition). `Bound`
 /// carries the resolved configured project's identity; the absence is
-/// `NotBound`. Built from a [`ProjectResolution`] via
+/// `NotBound`. Built from a [`CarrierOwnershipResolution`] via
 /// [`BindingFact::from_resolution`] so "bound" means a real
-/// [`ProjectResolution::ProjectBinding`] — never `NoProject` / `Ambiguous` /
-/// `SyntheticScratch`.
+/// [`CarrierOwnershipResolution::Bound`] — never `NoProject` / `Ambiguous` /
+/// `NotReady`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BindingFact {
     /// The carrier source resolved to a configured project; the payload is that
@@ -99,20 +99,20 @@ pub enum EditorBindingFact {
 }
 
 impl BindingFact {
-    /// Derive the binding fact from a [`ProjectResolution`]: a real
-    /// [`ProjectResolution::ProjectBinding`] yields `Bound` with the binding's
+    /// Derive the binding fact from a [`CarrierOwnershipResolution`]: a real
+    /// [`CarrierOwnershipResolution::Bound`] yields `Bound` with the binding's
     /// configured-project identity; every other state (`NoProject`,
-    /// `Ambiguous`, `SyntheticScratch`) yields `NotBound`. "tsgo seems to know
-    /// this file" is NOT a binding — only a resolved `ProjectBinding` is.
+    /// `Ambiguous`, `NotReady`) yields `NotBound`. "tsgo seems to know
+    /// this file" is NOT a binding — only a resolved `Bound` is.
     #[must_use]
-    pub fn from_resolution(resolution: &ProjectResolution) -> Self {
+    pub fn from_resolution(resolution: &CarrierOwnershipResolution) -> Self {
         match resolution {
-            ProjectResolution::ProjectBinding(binding) => {
+            CarrierOwnershipResolution::Bound(binding) => {
                 BindingFact::Bound(binding.env_dims().project_identity)
             }
-            ProjectResolution::NoProject
-            | ProjectResolution::Ambiguous(_)
-            | ProjectResolution::SyntheticScratch(_) => BindingFact::NotBound,
+            CarrierOwnershipResolution::NoProject
+            | CarrierOwnershipResolution::Ambiguous { .. }
+            | CarrierOwnershipResolution::NotReady => BindingFact::NotBound,
         }
     }
 }

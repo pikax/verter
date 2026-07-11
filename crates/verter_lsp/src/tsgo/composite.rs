@@ -16,7 +16,7 @@
 //! → [`ProjectBinding`](verter_session::external_ts::ProjectBinding) →
 //! [`BoundProject`](verter_session::external_ts::BoundProject) witness. Only a bound
 //! carrier delegates to OWNED's `--lsp` diagnostics; every non-bound state (`NoProject`
-//! / `Ambiguous` / `SyntheticScratch`, a pre-published snapshot, an `ensure_project`
+//! / `Ambiguous` / `NotReady`, a pre-published snapshot, an `ensure_project`
 //! refusal) yields NO external-TS diagnostics for the carrier — fail closed, NEVER a
 //! `tsgo --lsp` inferred / own-discovery fall-through. A NON-carrier path (plain
 //! `.ts`/`.tsx`) is NOT gated — it delegates to OWNED unchanged. Carrier FEATURE methods
@@ -49,7 +49,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use verter_session::external_ts::{AmbiguityCause, ProjectBinding, ProjectResolution, ServeMode};
+use verter_session::external_ts::{
+    AmbiguityCause, CarrierOwnershipResolution, ProjectBinding, ServeMode,
+};
 use verter_session::framework::descriptor::classify_carrier_companion;
 use verter_session::VerterHost;
 use verter_workspace::resolver::normalize_canonical_id;
@@ -307,7 +309,7 @@ impl SharedTsgoOverlay {
     ///    downgrades the source to `Ambiguous(CarrierPathOccupiedByRealFile)`; a same-stem
     ///    rune module beside the source downgrades it to `Ambiguous(SameStemRuneModule)`.
     ///    Either downgrade means SKIPPED, OWNED serves. A genuine generated companion (a
-    ///    clean binding, `NoProject`, `SyntheticScratch`, or a MultipleOwners ambiguity,
+    ///    clean binding, `NoProject`, `NotReady`, or a MultipleOwners ambiguity,
     ///    none of which sit a REAL file at a companion path) is safe to inject as a
     ///    supporting Program member.
     ///
@@ -328,7 +330,12 @@ impl SharedTsgoOverlay {
         let Some(source) = carrier_source_of(companion_path) else {
             return false;
         };
-        match project_binding::resolve_carrier(&self.inner.host, &source, Arc::from("")) {
+        match project_binding::resolve_carrier(
+            self.inner.host.as_ref(),
+            &source,
+            Arc::from(""),
+            project_binding::OwnershipReadinessMode::PresentSnapshotAuthoritative,
+        ) {
             Some((resolution, _)) => injection_shadow_safe(&resolution),
             None => false,
         }
@@ -409,7 +416,7 @@ impl SharedTsgoOverlay {
             session_key: &self.inner.rendezvous.session_key,
             workspace_root: &self.inner.rendezvous.workspace_root,
             tsconfig_path: &tsconfig_path,
-            resolution: ProjectResolution::ProjectBinding(binding),
+            resolution: CarrierOwnershipResolution::Bound(binding),
             config_generation: generation,
             client_label: SHARED_CLIENT_LABEL,
         };
@@ -443,16 +450,18 @@ fn carrier_source_of(provider_path: &str) -> Option<String> {
 /// carrier-companion path (or a same-stem rune module beside the source) downgrades the
 /// source to an `Ambiguous` real-file-shadow cause — Verter must NEVER overlay-shadow it
 /// (`carrier_never_shadows_real_user_file`). Every other resolution (a clean binding,
-/// `NoProject`, `SyntheticScratch`, or a MultipleOwners ambiguity — none of which sit a
+/// `NoProject`, `NotReady`, or a MultipleOwners ambiguity — none of which sit a
 /// REAL file at the companion path) leaves a GENUINE virtual companion safe to inject as
-/// a supporting Program member. Typed over [`ProjectResolution`] — never a path-shape or
+/// a supporting Program member. Typed over [`CarrierOwnershipResolution`] — never a path-shape or
 /// substring check.
-fn injection_shadow_safe(resolution: &ProjectResolution) -> bool {
+fn injection_shadow_safe(resolution: &CarrierOwnershipResolution) -> bool {
     !matches!(
         resolution,
-        ProjectResolution::Ambiguous(
-            AmbiguityCause::CarrierPathOccupiedByRealFile | AmbiguityCause::SameStemRuneModule
-        )
+        CarrierOwnershipResolution::Ambiguous {
+            cause: AmbiguityCause::CarrierPathOccupiedByRealFile
+                | AmbiguityCause::SameStemRuneModule,
+            ..
+        }
     )
 }
 

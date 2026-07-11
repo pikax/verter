@@ -288,7 +288,8 @@ pub(super) fn source_id_from_provider_carrier_path(
         // through `source_id_from_provider_id` (which would re-derive the same
         // phantom carrier).
         let normalized = verter_workspace::resolver::normalize_canonical_id(provider_path);
-        if host.get_source(&normalized).is_some() && resolver.owner_for_file(&normalized).is_some()
+        if host.get_source(&normalized).is_some()
+            && resolver.nearest_config_for_path(&normalized).is_some()
         {
             return Some(normalized);
         }

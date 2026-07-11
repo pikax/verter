@@ -2,7 +2,7 @@
 //! and the dual-surface capability handshake.
 
 use verter_session::external_ts::{
-    BoundProject, EngineBackend, EnvDims, ProjectBinding, ProjectResolution,
+    BoundProject, CarrierOwnershipResolution, EngineBackend, EnvDims, ProjectBinding,
 };
 use verter_session::file_artifact_store::ProjectIdentity;
 
@@ -30,10 +30,12 @@ fn ensure(backend: &TsgoEngineBackend, workspace_root: &str, tsconfig_uri: &str)
         ENGINE_VERSION,
         env_dims(),
         Vec::new(),
+        verter_workspace::ProjectId(0),
+        verter_workspace::SnapshotGeneration(1),
     );
     assert!(matches!(
-        ProjectResolution::ProjectBinding(binding.clone()),
-        ProjectResolution::ProjectBinding(_)
+        CarrierOwnershipResolution::Bound(binding.clone()),
+        CarrierOwnershipResolution::Bound(_)
     ));
     backend
         .ensure_project(binding.ensure_project_request())

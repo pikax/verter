@@ -445,7 +445,13 @@ impl ProjectConfig {
         project.workspace_aliases = self.workspace_aliases.clone();
         project.compiler_options = self.compiler_options.clone();
         project.references = self.references.clone();
-        project.membership = self.membership.clone();
+        // The resolver config carries the exact `ConfiguredMembership`; build it
+        // from this project's raw parsed membership (bridge mode — no walk).
+        project.membership = verter_workspace::snapshot_builder::configured_membership_from_raw(
+            &self.root,
+            &self.membership,
+            &self.compiler_options,
+        );
         project
     }
 }

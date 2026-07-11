@@ -44,7 +44,12 @@ impl VerterLanguageServer {
     /// directly (the test harness drains the client socket, so a pushed set is not
     /// otherwise readable).
     pub(super) async fn compute_full_diagnostics(&self, uri: &Uri) -> Vec<Diagnostic> {
-        let verter_diags = self.compute_verter_diagnostics(uri);
+        let mut verter_diags = self.compute_verter_diagnostics(uri);
+        // Surface a user-visible `verter(project)` diagnostic for an UNRESOLVED open
+        // carrier (no configured project / ambiguous owner), from the ONE shared
+        // carrier-ownership resolution — so an orphaned carrier is never silently
+        // typeless.
+        verter_diags.extend(self.project_ownership_diagnostics(uri));
 
         if let Some(tp) = &self.type_provider {
             match self.provider_projection_context(uri) {
@@ -111,6 +116,37 @@ impl VerterLanguageServer {
         } else {
             verter_diags
         }
+    }
+
+    /// The `verter(project)` diagnostics for `uri` when it is an UNRESOLVED open
+    /// carrier (`NoProject` / `Ambiguous`). Empty for a `Bound` / `NotReady` carrier and
+    /// for a non-carrier document. Driven from the shared carrier-ownership
+    /// resolution — the same typed resolution the carrier-sync gateway consumes —
+    /// never a path-shape heuristic.
+    ///
+    /// Unlike the always-present OWNED admission gate, the diagnostics path OBSERVES
+    /// the published root's `ownership_ready`: a cold-bootstrap snapshot resolves
+    /// `NotReady` (⇒ empty), so a carrier queried before the real project graph
+    /// publishes never surfaces a FALSE `verter(project)` no-owner warning where the
+    /// carrier-sync gateway correctly defers. A genuine terminal `NoProject` /
+    /// `Ambiguous` under an authoritative snapshot still surfaces.
+    fn project_ownership_diagnostics(&self, uri: &Uri) -> Vec<Diagnostic> {
+        let host = self.documents.host();
+        let canonical = crate::audit_harness::canonical_id_for_uri(host, uri);
+        if !verter_workspace::resolver::path_is_carrier(&canonical) {
+            return Vec::new();
+        }
+        let Some((resolution, _generation)) = crate::tsgo::project_binding::resolve_carrier(
+            host,
+            &canonical,
+            std::sync::Arc::from(""),
+            crate::tsgo::project_binding::OwnershipReadinessMode::ObservePublishedReadiness,
+        ) else {
+            return Vec::new();
+        };
+        crate::external_ts::project_ownership_diagnostic(&resolution)
+            .into_iter()
+            .collect()
     }
 
     /// Audit-aware wrapper for [`Self::publish_full_diagnostics`].
@@ -241,10 +277,11 @@ impl VerterLanguageServer {
             }
             crate::external_ts::CarrierSyncDecision::DirectOpen {
                 transition,
-                receipt,
+                pending,
             } => {
                 // Close-AFTER-sync (skip-active, per-kind) — uniform with every
-                // owner-resolved Vue sync path.
+                // owner-resolved Vue sync path. The receipt is minted from `pending`
+                // inside `commit_and_close_after_sync`, after a kind opened.
                 let previous_state = self.provider_sync_state_for_source(&canonical_id);
                 let stale_paths = transition.stale_paths;
                 let mut committed_state = transition.next;
@@ -274,13 +311,20 @@ impl VerterLanguageServer {
                     committed_state,
                     &stale_paths,
                     &synced_kinds,
-                    &receipt,
+                    pending,
                 )
                 .await;
             }
-            crate::external_ts::CarrierSyncDecision::Unowned
-            | crate::external_ts::CarrierSyncDecision::Pending => {
-                self.pending_snapshot_provider_sync.insert(canonical_id);
+            crate::external_ts::CarrierSyncDecision::NotOwned(not_owned) => {
+                // Route the non-owned disposition through the coordinator (requeue the
+                // transient / advance the owner-loss barrier for the terminal) — never a
+                // dropped outcome. This interactive path does no buffer conversion, so the
+                // returned SettleClass is not consulted.
+                let _ = self.carrier_transaction_coordinator.settle(
+                    not_owned,
+                    &canonical_id,
+                    Some(&self.pending_snapshot_provider_sync),
+                );
             }
         }
     }
@@ -320,11 +364,13 @@ impl VerterLanguageServer {
             }
             crate::external_ts::CarrierSyncDecision::DirectOpen {
                 transition,
-                receipt,
+                pending,
             } => {
                 // Close-AFTER-sync: capture stale + prior state, sync, then commit +
                 // close only genuinely-stale paths (this path can touch an open Vue
-                // file, so a failed replacement must not close the live path).
+                // file, so a failed replacement must not close the live path). The
+                // receipt is minted from `pending` inside `commit_and_close_after_sync`,
+                // after a kind opened.
                 let previous_state = self.provider_sync_state_for_source(&canonical_id);
                 let stale_paths = transition.stale_paths;
                 let mut committed_state = transition.next;
@@ -358,13 +404,20 @@ impl VerterLanguageServer {
                     committed_state,
                     &stale_paths,
                     &synced_kinds,
-                    &receipt,
+                    pending,
                 )
                 .await;
             }
-            crate::external_ts::CarrierSyncDecision::Unowned
-            | crate::external_ts::CarrierSyncDecision::Pending => {
-                self.pending_snapshot_provider_sync.insert(canonical_id);
+            crate::external_ts::CarrierSyncDecision::NotOwned(not_owned) => {
+                // Route the non-owned disposition through the coordinator (requeue the
+                // transient / advance the owner-loss barrier for the terminal) — never a
+                // dropped outcome. This interactive path does no buffer conversion, so the
+                // returned SettleClass is not consulted.
+                let _ = self.carrier_transaction_coordinator.settle(
+                    not_owned,
+                    &canonical_id,
+                    Some(&self.pending_snapshot_provider_sync),
+                );
             }
         }
     }
@@ -408,12 +461,25 @@ impl VerterLanguageServer {
         // This is the MEMBERSHIP-refresh entry (eager carrier refresh / cross-file
         // prewarm): route through the SINGLE carrier-sync gateway for the store
         // membership decision (publish on owned / retract on owner-loss). The
-        // provider-state COMMIT is the caller's responsibility here, so the gateway's
-        // `Published` committed_state + receipt are intentionally discarded — only the
-        // store membership is refreshed. Fail-closed inside the gateway.
-        let _ = self
+        // provider-state COMMIT is the caller's responsibility here, so an OWNED decision's
+        // `committed_state` / `transition` is intentionally dropped — only the store
+        // membership is refreshed. But a NON-OWNED outcome is NOT discardable: it must be
+        // settled through the coordinator so a transient defer requeues (the F3/F4
+        // dropped-outcome class) and a terminal owner-loss advances the barrier.
+        match self
             .reconcile_carrier_via_gateway(canonical_id, is_jsx, ide.as_ref())
-            .await;
+            .await
+        {
+            crate::external_ts::CarrierSyncDecision::Published { .. }
+            | crate::external_ts::CarrierSyncDecision::DirectOpen { .. } => {}
+            crate::external_ts::CarrierSyncDecision::NotOwned(not_owned) => {
+                let _ = self.carrier_transaction_coordinator.settle(
+                    not_owned,
+                    canonical_id,
+                    Some(&self.pending_snapshot_provider_sync),
+                );
+            }
+        }
         true
     }
 
@@ -765,18 +831,24 @@ impl VerterLanguageServer {
         // reverts the IDE kind to its prior live path, and must never close or
         // rebind the live IDE `.tsx`.
         let host = self.documents.host_arc();
+        let vfs = self.vfs_workspace.read().clone();
         let provider_sync_states = Arc::clone(&self.provider_sync_states);
         let provider_surfaces = self.documents.provider_surfaces().clone();
+        let carrier_coordinator = Arc::clone(&self.carrier_transaction_coordinator);
+        let pending_snapshot_provider_sync = Arc::clone(&self.pending_snapshot_provider_sync);
         tokio::spawn(
             super::background_drain::sync_api_to_provider_background_task(
                 sync,
                 snapshot,
                 host,
+                vfs,
                 provider_sync_states,
                 provider_surfaces,
                 canonical_id,
                 is_jsx,
                 is_tsgo,
+                carrier_coordinator,
+                pending_snapshot_provider_sync,
             ),
         );
     }
@@ -870,18 +942,36 @@ impl VerterLanguageServer {
         let is_jsx = ide.as_ref().map(|r| r.is_jsx).unwrap_or(false);
 
         // Route the carrier MEMBERSHIP decision through the SINGLE carrier-sync
-        // gateway and capture the receipt that GATES the owner-resolved commit below.
-        // tsserver: PUBLISHES the carrier's companions into the store the plugin reads
-        // (the configured-project membership) and returns `Published`; the IDE
-        // companion is STILL opened below (tsserver `geterr` runs on open buffers) —
-        // membership (plugin) + open buffer (diagnostics) complement. tsgo: returns
-        // `DirectOpen` (no store), minting the receipt for the direct open+commit. An
-        // owner-loss (`Unowned`) RETRACTS the membership inside the gateway and yields
-        // no receipt (the open-document liveness commit below is membership-free).
-        let owned_commit_receipt = self
+        // gateway and capture the POST-open commit authorization that GATES the
+        // owner-resolved commit below. tsserver: PUBLISHES the carrier's companions
+        // into the store the plugin reads (the configured-project membership) and
+        // returns `Published` with an already-minted receipt; the IDE companion is
+        // STILL opened below (tsserver `geterr` runs on open buffers) — membership
+        // (plugin) + open buffer (diagnostics) complement. tsgo: returns `DirectOpen`
+        // (no store) with a PENDING authorization; the receipt is minted from it AFTER
+        // the IDE open below (`authorization.confirm()`). An owner-loss
+        // (`NotReady`/`Unresolved`) RETRACTS the membership inside the gateway and
+        // yields no authorization (the open-document liveness commit below is
+        // membership-free).
+        let owned_commit_authorization = match self
             .reconcile_carrier_via_gateway(&canonical_id, is_jsx, ide.as_ref())
             .await
-            .into_owned_receipt();
+            .into_owned_commit_authorization()
+        {
+            Ok(authorization) => Some(authorization),
+            Err(not_owned) => {
+                // Non-owned: settle through the coordinator so the requeue / owner-loss
+                // barrier advance is never dropped. The interactive owner-loss preserve of an
+                // open document's TSX is driven by the sync-plan (`unresolved`) branch below;
+                // this only guarantees the gateway disposition is finalized.
+                let _ = self.carrier_transaction_coordinator.settle(
+                    not_owned,
+                    &canonical_id,
+                    Some(&self.pending_snapshot_provider_sync),
+                );
+                None
+            }
+        };
 
         // Determine sync plan: owner-aware, unresolved, or skip.
         let snapshot = self.published_resolver();
@@ -1009,46 +1099,82 @@ impl VerterLanguageServer {
                     &ide.code,
                     ide.source_map.as_deref(),
                 );
-                // Commit state
-                let mut state = if unresolved {
-                    crate::provider_sync::ProviderSyncState {
+                // Commit state. An UNRESOLVED open-document liveness state is
+                // membership-free and commits through the plain non-carrier path. An
+                // owner-resolved carrier commit is GATED on the gateway authorization AND
+                // takes its owner binding from the RECEIPT's resolved binding — the SAME
+                // authority the gateway bound and the commit validates — so the
+                // committed owner can never diverge from the receipt (re-projecting the
+                // owner here could pick a different nearest-root config and be refused by
+                // the owner-binding validation). If the gateway did not advertise this pass (transient
+                // compile/membership defer), the owned state is left uncommitted and
+                // queued — NEVER committed ungated. The IDE companion opened above, so
+                // confirming the authorization mints the tsgo receipt strictly POST-open.
+                //
+                // Whether an OWNED commit was REFUSED by the admission gate (Superseded): a
+                // refused commit must close NOTHING below (the prior IDE path may be a newer
+                // transaction's live buffer that just reclaimed the source).
+                let mut owned_commit_superseded = false;
+                if unresolved {
+                    let mut state = crate::provider_sync::ProviderSyncState {
                         owner_binding: crate::provider_sync::ProviderOwnerBinding::Unresolved,
                         ide_path: Some(ide_path.clone()),
                         api_path: None,
                         ..Default::default()
-                    }
-                } else {
-                    // Owner-resolved carrier: the owner-aware provider paths (the
-                    // same computation the gateway used to mint the receipt). A miss
-                    // (snapshot lost mid-sync) falls back to an unresolved state.
-                    self.carrier_close_state(&canonical_id, is_jsx)
+                    };
+                    state.set_background_loaded(ProviderPathKind::Ide, true);
+                    self.commit_provider_sync_state(&canonical_id, state);
+                } else if let Some(authorization) = owned_commit_authorization {
+                    // Only the IDE companion opened on this interactive IDE-sync path (the
+                    // API companion is opened by the dedicated background API-sync task /
+                    // served by the tsserver store), so the receipt attests ONLY the IDE
+                    // kind — a partial open never stamps a companion this pass did not open.
+                    let receipt = authorization.confirm(&[ProviderPathKind::Ide]);
+                    // The owner is the receipt's bound tsconfig (the gateway's resolved
+                    // owner), NOT a re-projection — the `carrier_close_state` helper is
+                    // owner-INDEPENDENT and only computes the provider paths.
+                    let owner_binding = crate::provider_sync::ProviderOwnerBinding::Owned(
+                        receipt.binding().tsconfig_uri().to_string(),
+                    );
+                    let mut state = self
+                        .carrier_close_state(&canonical_id, is_jsx)
+                        .map(|mut state| {
+                            state.owner_binding = owner_binding.clone();
+                            state
+                        })
                         .unwrap_or_else(|| crate::provider_sync::ProviderSyncState {
-                            owner_binding: crate::provider_sync::ProviderOwnerBinding::Unresolved,
+                            owner_binding,
                             ide_path: Some(ide_path.clone()),
                             api_path: None,
                             ..Default::default()
-                        })
-                };
-                state.set_background_loaded(ProviderPathKind::Ide, true);
-                // An owner-resolved (carrier) commit is GATED on the gateway receipt;
-                // an UNRESOLVED open-document liveness state is membership-free and
-                // commits through the plain non-carrier path. If the gateway did not
-                // advertise this pass (transient compile/membership defer), the owned
-                // state is left uncommitted and queued — NEVER committed ungated.
-                if unresolved {
-                    self.commit_provider_sync_state(&canonical_id, state);
-                } else if let Some(receipt) = &owned_commit_receipt {
-                    self.commit_carrier_provider_state(&canonical_id, state, receipt);
+                        });
+                    state.set_background_loaded(ProviderPathKind::Ide, true);
+                    // Commit through the admission gate directly so the close below can be
+                    // gated on ADMISSION: a `Superseded` commit (a newer transaction reclaimed
+                    // the source, or an owner-loss advanced the barrier) requeues and closes
+                    // NOTHING — the prior IDE path may be that newer transaction's live buffer.
+                    if self.carrier_transaction_coordinator.admit_owned(
+                        &self.provider_sync_states,
+                        &canonical_id,
+                        state,
+                        &receipt,
+                    ) == crate::external_ts::AdmitOutcome::Superseded
+                    {
+                        self.queue_snapshot_provider_sync(canonical_id.clone());
+                        owned_commit_superseded = true;
+                    }
                 } else {
                     self.queue_snapshot_provider_sync(canonical_id.clone());
                 }
 
                 // FIX-7: only NOW — after the new path synced and the new state
                 // is committed — close the previous IDE path if it differs. On
-                // failure (the arms below) the old path is left untouched.
+                // failure (the arms below) the old path is left untouched. A REFUSED
+                // (Superseded) owned commit closes nothing — the prior path may be a
+                // newer transaction's live buffer.
                 if let Some(stale_ide_path) = previous_ide_path
                     .as_ref()
-                    .filter(|path| path.as_str() != ide_path.as_str())
+                    .filter(|path| !owned_commit_superseded && path.as_str() != ide_path.as_str())
                 {
                     // Retire the stale path's recorded surface under a close
                     // EPOCH (a `Current` surface for a closed buffer would stay
@@ -1514,8 +1640,23 @@ impl VerterLanguageServer {
                 // and the source/canonical gates below reject a stale key.
                 let provider_path = self.active_ide_path_for_uri(uri)?;
                 let snapshot = store.current_snapshot(&provider_path)?;
-                (snapshot.kind == crate::provider_surface_store::ProviderSurfaceKind::CarrierIde)
-                    .then_some(snapshot)?
+                let snapshot = (snapshot.kind
+                    == crate::provider_surface_store::ProviderSurfaceKind::CarrierIde)
+                    .then_some(snapshot)?;
+                // Committed-surface gate: for an OWNED carrier the current IDE
+                // surface MUST be the receipt-attested committed one — a surface
+                // recorded for a publish that FAILED / never committed (a newer
+                // content/map than the last successful commit) is refused, so
+                // provider offsets are never mapped through uncommitted content. An
+                // UNRESOLVED editor-liveness carrier needs no stamp.
+                let committed = self.provider_sync_state_for_source(&canonical_id)?;
+                if !committed.authorizes_carrier_ide_capture(
+                    snapshot.stamp.content_hash.to_hash16(),
+                    snapshot.stamp.map_hash,
+                ) {
+                    return None;
+                }
+                snapshot
             }
             crate::documents::provider_projection::DocumentProviderProjection::SelfFile {
                 ..
@@ -1767,11 +1908,15 @@ impl VerterLanguageServer {
                 owner_binding: crate::provider_sync::ProviderOwnerBinding::Unresolved,
                 ..Default::default()
             });
-        // This is a bootstrap "unresolved" sync — unresolved BY DEFINITION. A
-        // reused prior state may carry a stale `Owned` binding; force it back to
-        // `Unresolved` so we never commit an `Owned` binding from here (which
+        // This is a bootstrap "unresolved" sync — unresolved BY DEFINITION. A reused prior
+        // state may be a previously-committed OWNED carrier; route the owned→unresolved
+        // conversion through the coordinator so it advances the owner-loss barrier BEFORE
+        // clearing the receipt-attested admission token (a late owned token captured before
+        // this conversion can never resurrect the obsolete owner) and forces the binding to
+        // `Unresolved` (never committing an `Owned` binding / stale stamp from here, which
         // would strand the file on a dead owner via a false `needs_owner_reconcile`).
-        state.owner_binding = crate::provider_sync::ProviderOwnerBinding::Unresolved;
+        self.carrier_transaction_coordinator
+            .convert_to_unresolved(canonical_id, &mut state);
 
         let needs_open =
             state.ide_path.as_deref() != Some(ide_path.as_str()) || !state.ide_background_loaded;
@@ -1820,10 +1965,13 @@ impl VerterLanguageServer {
                 owner_binding: crate::provider_sync::ProviderOwnerBinding::Unresolved,
                 ..Default::default()
             });
-        // Bootstrap "unresolved" sync — unresolved BY DEFINITION. Force the
-        // (possibly-reused) binding back to `Unresolved` so a stale `Owned`
-        // binding from a prior committed state is never re-committed here.
-        state.owner_binding = crate::provider_sync::ProviderOwnerBinding::Unresolved;
+        // Bootstrap "unresolved" sync — unresolved BY DEFINITION. Route a possibly-reused
+        // OWNED carrier state's owned→unresolved conversion through the coordinator so it
+        // advances the owner-loss barrier BEFORE clearing the receipt-attested admission
+        // token and forces the binding to `Unresolved` (a stale `Owned` binding / stamp from
+        // a prior committed state is never re-committed here).
+        self.carrier_transaction_coordinator
+            .convert_to_unresolved(canonical_id, &mut state);
 
         let needs_open =
             state.api_path.as_deref() != Some(dts_path.as_str()) && !state.api_background_loaded;
@@ -1955,6 +2103,7 @@ impl VerterLanguageServer {
             },
             vfs_workspace: Arc::clone(&self.vfs_workspace),
             carrier_publish_coordinator: self.carrier_publish_coordinator.clone(),
+            carrier_transaction_coordinator: Arc::clone(&self.carrier_transaction_coordinator),
             decl_overlay_owner: Arc::clone(&self.decl_overlay_owner),
         };
 
@@ -2028,11 +2177,13 @@ impl VerterLanguageServer {
                     }
                     crate::external_ts::CarrierSyncDecision::DirectOpen {
                         transition,
-                        receipt,
+                        pending,
                     } => {
                         // Owner-resolved: sync NEW paths first, then close stale-after-
                         // success (per-kind, skip-active). This branch can touch an open
-                        // file, so a failed replacement must not close the live path.
+                        // file, so a failed replacement must not close the live path. The
+                        // receipt is minted from `pending` inside
+                        // `commit_and_close_after_sync`, after a kind opened.
                         let previous_state = self.provider_sync_state_for_source(canonical_id);
                         let stale_paths = transition.stale_paths;
                         let mut committed_state = transition.next;
@@ -2098,31 +2249,36 @@ impl VerterLanguageServer {
                             committed_state,
                             &stale_paths,
                             &synced_kinds,
-                            &receipt,
+                            pending,
                         )
                         .await;
                     }
-                    crate::external_ts::CarrierSyncDecision::Unowned => {
-                        // Ready snapshot but no owner. Editor-liveness invariant: an
-                        // OPEN imported `.vue` (imported-by-an-open-file) must keep its
-                        // TSX live as Unresolved open-document state — NEVER clear+close.
-                        // Only a genuinely non-open import is removed. The gateway has
-                        // already RETRACTED the STORE/ledger membership; the open-document
-                        // liveness commit below is membership-free (no receipt).
-                        if self.documents.canonical_id_to_uri(canonical_id).is_some() {
-                            self.preserve_open_unresolved_carrier(
-                                canonical_id,
-                                is_jsx,
-                                ide.as_ref().map(|output| &*output.code),
-                            )
-                            .await;
-                        } else {
-                            self.clear_provider_sync_state(canonical_id).await;
+                    crate::external_ts::CarrierSyncDecision::NotOwned(not_owned) => {
+                        // Settle the non-owned disposition through the coordinator (requeue
+                        // the transient / advance the owner-loss barrier for the terminal),
+                        // then run the editor-liveness buffer conversion for a settled
+                        // no-owner class. Editor-liveness invariant: an OPEN imported `.vue`
+                        // keeps its TSX live as Unresolved open-document state — NEVER
+                        // clear+close; only a genuinely non-open import is removed. The
+                        // gateway already RETRACTED the STORE/ledger membership; this
+                        // open-document liveness commit is membership-free (no receipt).
+                        let class = self.carrier_transaction_coordinator.settle(
+                            not_owned,
+                            canonical_id,
+                            Some(&self.pending_snapshot_provider_sync),
+                        );
+                        if class.runs_buffer_cleanup() {
+                            if self.documents.canonical_id_to_uri(canonical_id).is_some() {
+                                self.preserve_open_unresolved_carrier(
+                                    canonical_id,
+                                    is_jsx,
+                                    ide.as_ref().map(|output| &*output.code),
+                                )
+                                .await;
+                            } else {
+                                self.clear_provider_sync_state(canonical_id).await;
+                            }
                         }
-                        self.queue_snapshot_provider_sync(canonical_id.to_string());
-                    }
-                    crate::external_ts::CarrierSyncDecision::Pending => {
-                        self.queue_snapshot_provider_sync(canonical_id.to_string());
                     }
                 }
             }
@@ -2285,11 +2441,12 @@ impl VerterLanguageServer {
             }
             crate::external_ts::CarrierSyncDecision::DirectOpen {
                 transition,
-                receipt,
+                pending,
             } => {
                 // Close-AFTER-sync (per-kind, skip-active): capture stale + prior
                 // state, sync each kind, then commit (receipt-gated) + close
-                // genuinely-stale.
+                // genuinely-stale. The receipt is minted from `pending` inside
+                // `commit_and_close_after_sync`, after a kind opened.
                 let previous_state = self.provider_sync_state_for_source(canonical_id);
                 let stale_paths = transition.stale_paths;
                 let mut committed_state = transition.next;
@@ -2359,30 +2516,35 @@ impl VerterLanguageServer {
                     committed_state,
                     &stale_paths,
                     &synced_kinds,
-                    &receipt,
+                    pending,
                 )
                 .await;
             }
-            crate::external_ts::CarrierSyncDecision::Unowned => {
-                // Ready snapshot but no owner. Editor-liveness invariant: an OPEN Vue
-                // document keeps its TSX live as Unresolved open-document state — only
-                // a genuinely non-open (background) file is cleared. The gateway has
-                // already RETRACTED the STORE/ledger membership; the open-document
-                // liveness commit below is membership-free (no receipt).
-                if self.documents.canonical_id_to_uri(canonical_id).is_some() {
-                    self.preserve_open_unresolved_carrier(
-                        canonical_id,
-                        is_jsx,
-                        ide.map(|output| &*output.code),
-                    )
-                    .await;
-                } else {
-                    self.clear_provider_sync_state(canonical_id).await;
+            crate::external_ts::CarrierSyncDecision::NotOwned(not_owned) => {
+                // Settle the non-owned disposition through the coordinator (requeue the
+                // transient / advance the owner-loss barrier for the terminal), then run the
+                // editor-liveness buffer conversion for a settled no-owner class. Editor-
+                // liveness invariant: an OPEN Vue document keeps its TSX live as Unresolved
+                // open-document state — only a genuinely non-open (background) file is
+                // cleared. The gateway already RETRACTED the STORE/ledger membership; the
+                // open-document liveness commit is membership-free (no receipt).
+                let class = self.carrier_transaction_coordinator.settle(
+                    not_owned,
+                    canonical_id,
+                    Some(&self.pending_snapshot_provider_sync),
+                );
+                if class.runs_buffer_cleanup() {
+                    if self.documents.canonical_id_to_uri(canonical_id).is_some() {
+                        self.preserve_open_unresolved_carrier(
+                            canonical_id,
+                            is_jsx,
+                            ide.map(|output| &*output.code),
+                        )
+                        .await;
+                    } else {
+                        self.clear_provider_sync_state(canonical_id).await;
+                    }
                 }
-                self.queue_snapshot_provider_sync(canonical_id.to_string());
-            }
-            crate::external_ts::CarrierSyncDecision::Pending => {
-                self.queue_snapshot_provider_sync(canonical_id.to_string());
             }
         }
     }

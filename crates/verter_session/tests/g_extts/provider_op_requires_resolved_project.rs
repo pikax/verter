@@ -164,7 +164,7 @@ fn provider_op_scanner_discriminates() {
         "    fn query(&self, project: &BoundProject, query: Query) -> Result<QueryOutcome, EngineError>;"
     ));
     assert!(!line_declares_forbidden_path_only_op(
-        "    fn resolve(&self, source_uri: &str) -> ProjectResolution;"
+        "    fn resolve(&self, source_uri: &str) -> CarrierOwnershipResolution;"
     ));
     assert!(!line_declares_forbidden_path_only_op(
         "    fn ensure_project(&self, request: EnsureProject) -> Result<BoundProject, EngineError>;"

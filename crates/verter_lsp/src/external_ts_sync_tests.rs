@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use verter_session::external_ts::{
-    EnvDims, ProjectBinding, ProjectResolution, QueryFeature, SnapshotRole,
+    CarrierOwnershipResolution, EnvDims, ProjectBinding, QueryFeature, SnapshotRole,
 };
 use verter_session::file_artifact_store::ProjectIdentity;
 
@@ -30,7 +30,15 @@ fn env_dims() -> EnvDims {
 }
 
 fn binding() -> ProjectBinding {
-    ProjectBinding::new_for_test("/proj", TSCONFIG, "7.0.1", env_dims(), Vec::new())
+    ProjectBinding::new_for_test(
+        "/proj",
+        TSCONFIG,
+        "7.0.1",
+        env_dims(),
+        Vec::new(),
+        verter_workspace::ProjectId(0),
+        verter_workspace::SnapshotGeneration(1),
+    )
 }
 
 fn regen_key() -> RegenKey {
@@ -746,20 +754,21 @@ fn planned_file_from_ownerless_snapshot_fails_closed() {
 /// No-owner ⇒ no binding ⇒ no batch.
 #[test]
 fn planner_no_owner_yields_no_binding() {
-    assert!(plan_publish_for_resolution(&ProjectResolution::NoProject).is_none());
-    assert!(plan_publish_for_resolution(&ProjectResolution::Ambiguous(
-        verter_session::external_ts::AmbiguityCause::MultipleOwners
-    ))
-    .is_none());
+    assert!(plan_publish_for_resolution(&CarrierOwnershipResolution::NoProject).is_none());
     assert!(
-        plan_publish_for_resolution(&ProjectResolution::synthetic_scratch("untitled:1")).is_none()
+        plan_publish_for_resolution(&CarrierOwnershipResolution::Ambiguous {
+            candidates: Vec::new(),
+            cause: verter_session::external_ts::AmbiguityCause::MultipleOwners,
+        })
+        .is_none()
     );
+    assert!(plan_publish_for_resolution(&CarrierOwnershipResolution::NotReady).is_none());
 }
 
 /// A resolved binding yields itself.
 #[test]
 fn planner_project_binding_yields_binding() {
-    let resolution = ProjectResolution::ProjectBinding(binding());
+    let resolution = CarrierOwnershipResolution::Bound(binding());
     let got =
         plan_publish_for_resolution(&resolution).expect("a ProjectBinding yields its binding");
     assert_eq!(got.tsconfig_uri(), TSCONFIG);

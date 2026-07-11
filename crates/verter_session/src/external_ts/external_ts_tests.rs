@@ -131,11 +131,12 @@ fn bare_star_include_resolves_carrier_source_to_project_binding() {
             &ws,
             "7.0.1",
             &(test_env_dims as fn(&str) -> EnvDims),
+            true,
         );
 
-        let res = resolver.resolve(&format!("d:/ws/src/Foo.{ext}"));
+        let res = resolver.resolve(&format!("d:/ws/src/Foo.{ext}"), None);
         match res {
-            ProjectResolution::ProjectBinding(binding) => {
+            CarrierOwnershipResolution::Bound(binding) => {
                 assert_eq!(
                     binding.tsconfig_uri(),
                     "d:/ws/tsconfig.json",
@@ -164,11 +165,12 @@ fn extension_specific_include_does_not_own_carrier_source() {
             &ws,
             "7.0.1",
             &(test_env_dims as fn(&str) -> EnvDims),
+            true,
         );
 
         assert_eq!(
-            resolver.resolve(&format!("d:/ws/src/Foo.{ext}")),
-            ProjectResolution::NoProject,
+            resolver.resolve(&format!("d:/ws/src/Foo.{ext}"), None),
+            CarrierOwnershipResolution::NoProject,
             "an extension-specific `*.ts` include must NOT own `Foo.{ext}` ⇒ NoProject"
         );
     }
@@ -195,11 +197,16 @@ fn binding_carries_reference_graph_data() {
         &ws,
         &["d:/ws/tsconfig.json", "d:/ws/packages/shared/tsconfig.json"],
     );
-    let resolver =
-        WorkspaceProjectResolver::new(&snap, &ws, "7.0.1", &(test_env_dims as fn(&str) -> EnvDims));
+    let resolver = WorkspaceProjectResolver::new(
+        &snap,
+        &ws,
+        "7.0.1",
+        &(test_env_dims as fn(&str) -> EnvDims),
+        true,
+    );
 
-    match resolver.resolve("d:/ws/src/Foo.vue") {
-        ProjectResolution::ProjectBinding(binding) => {
+    match resolver.resolve("d:/ws/src/Foo.vue", None) {
+        CarrierOwnershipResolution::Bound(binding) => {
             assert!(
                 binding
                     .references()
@@ -210,6 +217,59 @@ fn binding_carries_reference_graph_data() {
             );
         }
         other => panic!("expected ProjectBinding, got {other:?}"),
+    }
+}
+
+#[test]
+fn bound_env_dims_sourced_from_resolved_project_member_not_tsconfig_path() {
+    // INV-7: a Bound binding's R21 env dims must be sourced from the resolved
+    // project via one of its MEMBER canonicals (the resolved carrier source), NOT
+    // the tsconfig PATH. A tsconfig path is normally outside the project's
+    // `ConfiguredMembership`, so a per-canonical host env-hash reader keyed on it
+    // resolves to no owner and returns the workspace-default fallback bundle —
+    // aliasing every project's cache dimensions to one bundle. The env-dims source
+    // here returns DISTINCT dims for the tsconfig path vs a real member; the binding
+    // must carry the MEMBER dims.
+    let ws = workspace_with(&[
+        ("d:/ws/tsconfig.json", r#"{ "include": ["src/**/*"] }"#),
+        ("d:/ws/src/Foo.vue", "<template></template>"),
+    ]);
+    let snap = snapshot_from_tsconfigs(&ws, &["d:/ws/tsconfig.json"]);
+
+    // Stand-in host reader: the tsconfig PATH (a non-member) reads a distinct
+    // sentinel (the workspace-default fallback), while a real project member reads
+    // the project's own dims.
+    let env_source = |canonical: &str| {
+        let fill = if canonical.ends_with("tsconfig.json") {
+            7u8 // the tsconfig path: reads the workspace-default fallback bundle
+        } else {
+            9u8 // an owned member: reads the project's real per-project dims
+        };
+        EnvDims {
+            parse_env_hash: [fill; 16],
+            resolve_env_hash: [fill; 16],
+            lib_env_hash: [fill; 16],
+            project_identity: crate::file_artifact_store::ProjectIdentity([fill; 16]),
+        }
+    };
+    let resolver = WorkspaceProjectResolver::new(&snap, &ws, "7.0.1", &env_source, true);
+
+    match resolver.resolve("d:/ws/src/Foo.vue", None) {
+        CarrierOwnershipResolution::Bound(binding) => {
+            assert_eq!(
+                binding.env_dims().parse_env_hash,
+                [9u8; 16],
+                "Bound env dims must be sourced from the resolved project's MEMBER \
+                 canonical, not the tsconfig path (which reads the workspace-default \
+                 fallback)"
+            );
+            assert_eq!(
+                binding.env_dims().project_identity,
+                crate::file_artifact_store::ProjectIdentity([9u8; 16]),
+                "project identity must likewise come from the member, not the tsconfig path"
+            );
+        }
+        other => panic!("expected Bound, got {other:?}"),
     }
 }
 
@@ -237,11 +297,15 @@ fn real_file_at_carrier_path_downgrades_to_ambiguous() {
             &ws,
             "7.0.1",
             &(test_env_dims as fn(&str) -> EnvDims),
+            true,
         );
 
         assert_eq!(
-            resolver.resolve(&format!("d:/ws/src/Foo.{ext}")),
-            ProjectResolution::Ambiguous(AmbiguityCause::CarrierPathOccupiedByRealFile),
+            resolver.resolve(&format!("d:/ws/src/Foo.{ext}"), None),
+            CarrierOwnershipResolution::Ambiguous {
+                candidates: Vec::new(),
+                cause: AmbiguityCause::CarrierPathOccupiedByRealFile,
+            },
             "a real file at `Foo.{ext}.tsx` must downgrade `Foo.{ext}` to Ambiguous \
              (Verter never overlay-shadows a real user file)"
         );
@@ -266,12 +330,20 @@ fn same_stem_svelte_rune_downgrades_to_ambiguous() {
         ("d:/ws/src/Foo.svelte.ts", "export const rune = 1;"),
     ]);
     let snap = snapshot_from_tsconfigs(&ws, &["d:/ws/tsconfig.json"]);
-    let resolver =
-        WorkspaceProjectResolver::new(&snap, &ws, "7.0.1", &(test_env_dims as fn(&str) -> EnvDims));
+    let resolver = WorkspaceProjectResolver::new(
+        &snap,
+        &ws,
+        "7.0.1",
+        &(test_env_dims as fn(&str) -> EnvDims),
+        true,
+    );
 
     assert_eq!(
-        resolver.resolve("d:/ws/src/Foo.svelte"),
-        ProjectResolution::Ambiguous(AmbiguityCause::SameStemRuneModule),
+        resolver.resolve("d:/ws/src/Foo.svelte", None),
+        CarrierOwnershipResolution::Ambiguous {
+            candidates: Vec::new(),
+            cause: AmbiguityCause::SameStemRuneModule,
+        },
         "a same-stem `Foo.svelte.ts` rune beside `Foo.svelte` must fail closed (Ambiguous)"
     );
 }
@@ -288,13 +360,18 @@ fn carrier_with_no_conflict_resolves_cleanly() {
         ("d:/ws/src/state.svelte.ts", "export const s = 1;"),
     ]);
     let snap = snapshot_from_tsconfigs(&ws, &["d:/ws/tsconfig.json"]);
-    let resolver =
-        WorkspaceProjectResolver::new(&snap, &ws, "7.0.1", &(test_env_dims as fn(&str) -> EnvDims));
+    let resolver = WorkspaceProjectResolver::new(
+        &snap,
+        &ws,
+        "7.0.1",
+        &(test_env_dims as fn(&str) -> EnvDims),
+        true,
+    );
 
     assert!(
         matches!(
-            resolver.resolve("d:/ws/src/Clean.svelte"),
-            ProjectResolution::ProjectBinding(_)
+            resolver.resolve("d:/ws/src/Clean.svelte", None),
+            CarrierOwnershipResolution::Bound(_)
         ),
         "a carrier with no path conflict and only a DIFFERENT-stem rune nearby \
          must resolve cleanly"
@@ -320,12 +397,20 @@ fn real_file_at_jsx_carrier_path_downgrades_to_ambiguous() {
         ("d:/ws/src/Foo.vue.jsx", "export const realUserFile = 1;"),
     ]);
     let snap = snapshot_from_tsconfigs(&ws, &["d:/ws/tsconfig.json"]);
-    let resolver =
-        WorkspaceProjectResolver::new(&snap, &ws, "7.0.1", &(test_env_dims as fn(&str) -> EnvDims));
+    let resolver = WorkspaceProjectResolver::new(
+        &snap,
+        &ws,
+        "7.0.1",
+        &(test_env_dims as fn(&str) -> EnvDims),
+        true,
+    );
 
     assert_eq!(
-        resolver.resolve("d:/ws/src/Foo.vue"),
-        ProjectResolution::Ambiguous(AmbiguityCause::CarrierPathOccupiedByRealFile),
+        resolver.resolve("d:/ws/src/Foo.vue", None),
+        CarrierOwnershipResolution::Ambiguous {
+            candidates: Vec::new(),
+            cause: AmbiguityCause::CarrierPathOccupiedByRealFile,
+        },
         "a real file at the descriptor-valid JSX carrier path `Foo.vue.jsx` must \
          downgrade `Foo.vue` to Ambiguous (the carrier path is descriptor-derived, \
          not hardcoded `.tsx`)"
@@ -350,10 +435,14 @@ fn tsx_carrier_path_still_detected_after_descriptor_derivation() {
             &ws,
             "7.0.1",
             &(test_env_dims as fn(&str) -> EnvDims),
+            true,
         );
         assert_eq!(
-            resolver.resolve(&source),
-            ProjectResolution::Ambiguous(AmbiguityCause::CarrierPathOccupiedByRealFile),
+            resolver.resolve(&source, None),
+            CarrierOwnershipResolution::Ambiguous {
+                candidates: Vec::new(),
+                cause: AmbiguityCause::CarrierPathOccupiedByRealFile,
+            },
             "the `.tsx` carrier path for `.{ext}` must still be detected after \
              descriptor derivation"
         );
@@ -385,10 +474,14 @@ fn non_canonical_source_uri_still_detects_carrier_conflict() {
             &ws,
             "7.0.1",
             &(test_env_dims as fn(&str) -> EnvDims),
+            true,
         );
         assert_eq!(
-            resolver.resolve(raw_source),
-            ProjectResolution::Ambiguous(AmbiguityCause::CarrierPathOccupiedByRealFile),
+            resolver.resolve(raw_source, None),
+            CarrierOwnershipResolution::Ambiguous {
+                candidates: Vec::new(),
+                cause: AmbiguityCause::CarrierPathOccupiedByRealFile,
+            },
             "a non-canonical source_uri `{raw_source}` must still detect the carrier \
              conflict (the fail-closed gate cannot be bypassed by a non-canonical URI)"
         );
@@ -425,12 +518,13 @@ fn real_file_at_carrier_path_downgrades_unowned_source_to_ambiguous() {
                 &ws,
                 "7.0.1",
                 &(test_env_dims as fn(&str) -> EnvDims),
+                true,
             );
-            resolver.resolve(&source)
+            resolver.resolve(&source, None)
         };
         assert_eq!(
             control,
-            ProjectResolution::NoProject,
+            CarrierOwnershipResolution::NoProject,
             "control: an unowned `Foo.{ext}` with NO real file at its companion path is \
              `NoProject` (the conflict pass fires ONLY on a real file, not blanket)"
         );
@@ -450,10 +544,14 @@ fn real_file_at_carrier_path_downgrades_unowned_source_to_ambiguous() {
             &ws,
             "7.0.1",
             &(test_env_dims as fn(&str) -> EnvDims),
+            true,
         );
         assert_eq!(
-            resolver.resolve(&source),
-            ProjectResolution::Ambiguous(AmbiguityCause::CarrierPathOccupiedByRealFile),
+            resolver.resolve(&source, None),
+            CarrierOwnershipResolution::Ambiguous {
+                candidates: Vec::new(),
+                cause: AmbiguityCause::CarrierPathOccupiedByRealFile,
+            },
             "a real file at `Foo.{ext}.tsx` must downgrade an UNOWNED `Foo.{ext}` \
              (`NoProject`) to `Ambiguous(CarrierPathOccupiedByRealFile)` — the shadow \
              check is unconditional, never only the clean-owner arm"
@@ -493,15 +591,32 @@ fn real_file_at_carrier_path_downgrades_multiply_owned_source_to_ambiguous() {
                 &ws,
                 "7.0.1",
                 &(test_env_dims as fn(&str) -> EnvDims),
+                true,
             );
-            resolver.resolve(&source)
+            resolver.resolve(&source, None)
         };
-        assert_eq!(
-            control,
-            ProjectResolution::Ambiguous(AmbiguityCause::MultipleOwners),
-            "control: `Foo.{ext}` claimed by two sibling tsconfigs with NO real file at its \
-             companion path is `Ambiguous(MultipleOwners)`"
-        );
+        match &control {
+            CarrierOwnershipResolution::Ambiguous { candidates, cause } => {
+                assert_eq!(
+                    *cause,
+                    AmbiguityCause::MultipleOwners,
+                    "control: `Foo.{ext}` claimed by two sibling tsconfigs is MultipleOwners"
+                );
+                // The MultipleOwners candidates thread the overlapping configs through
+                // for the later `verter(project)` diagnostic.
+                assert_eq!(
+                    candidates.len(),
+                    2,
+                    "MultipleOwners must list both overlapping configs, got {candidates:?}"
+                );
+                assert!(
+                    candidates.iter().any(|c| c.ends_with("tsconfig.json"))
+                        && candidates.iter().any(|c| c.ends_with("tsconfig.app.json")),
+                    "candidates must name both overlapping configs, got {candidates:?}"
+                );
+            }
+            other => panic!("control: expected Ambiguous(MultipleOwners), got {other:?}"),
+        }
 
         // The SAME multiply-owned source, but with a real user file at its `.tsx` companion.
         let ws = workspace_with(&[
@@ -519,10 +634,14 @@ fn real_file_at_carrier_path_downgrades_multiply_owned_source_to_ambiguous() {
             &ws,
             "7.0.1",
             &(test_env_dims as fn(&str) -> EnvDims),
+            true,
         );
         assert_eq!(
-            resolver.resolve(&source),
-            ProjectResolution::Ambiguous(AmbiguityCause::CarrierPathOccupiedByRealFile),
+            resolver.resolve(&source, None),
+            CarrierOwnershipResolution::Ambiguous {
+                candidates: Vec::new(),
+                cause: AmbiguityCause::CarrierPathOccupiedByRealFile,
+            },
             "a real file at `Foo.{ext}.tsx` must downgrade a MULTIPLY-OWNED `Foo.{ext}` to \
              `Ambiguous(CarrierPathOccupiedByRealFile)` — the shadow check runs BEFORE (and \
              takes precedence over) ownership, so MultipleOwners never masks a real-file shadow"
@@ -530,17 +649,110 @@ fn real_file_at_carrier_path_downgrades_multiply_owned_source_to_ambiguous() {
     }
 }
 
+// ── Non-collapsing multiply-owned ownership (§2.1) ──
+
+#[test]
+fn multiply_owned_carrier_resolves_ambiguous_with_all_candidates_non_collapsing() {
+    // Two sibling tsconfigs in the SAME dir both `include: ["src/**/*"]` claim
+    // `Foo.vue` with no deterministic leaf. The resolver must PRESERVE both configs
+    // as `Ambiguous(MultipleOwners)` candidates — NON-COLLAPSING — never silently
+    // pick one owner and return `Bound`. This is the runtime shadow of the
+    // non-collapsing `effective_configs_for_path` ownership primitive.
+    //
+    // DISCRIMINATING: a collapsing owner resolver (the retired
+    // `owner_for_file -> Option<&IdeProjectConfig>`, which picked a single winner)
+    // would resolve `Foo.vue` to ONE `Bound` owner, hiding the ambiguity and
+    // overlay-serving one project's view instead of failing closed.
+    let ws = workspace_with(&[
+        ("d:/ws/tsconfig.json", r#"{ "include": ["src/**/*"] }"#),
+        ("d:/ws/tsconfig.app.json", r#"{ "include": ["src/**/*"] }"#),
+        ("d:/ws/src/Foo.vue", "<template></template>"),
+    ]);
+    let snap = snapshot_from_tsconfigs(&ws, &["d:/ws/tsconfig.json", "d:/ws/tsconfig.app.json"]);
+    let resolver = WorkspaceProjectResolver::new(
+        &snap,
+        &ws,
+        "7.0.1",
+        &(test_env_dims as fn(&str) -> EnvDims),
+        true,
+    );
+
+    match resolver.resolve("d:/ws/src/Foo.vue", None) {
+        CarrierOwnershipResolution::Ambiguous { candidates, cause } => {
+            assert_eq!(
+                cause,
+                AmbiguityCause::MultipleOwners,
+                "two configs overlap with no deterministic leaf ⇒ MultipleOwners"
+            );
+            assert_eq!(
+                candidates.len(),
+                2,
+                "BOTH overlapping configs must be preserved (non-collapsing), got {candidates:?}"
+            );
+            assert!(
+                candidates.iter().any(|c| c.ends_with("tsconfig.json"))
+                    && candidates.iter().any(|c| c.ends_with("tsconfig.app.json")),
+                "the candidates must name BOTH overlapping configs, got {candidates:?}"
+            );
+        }
+        other => panic!(
+            "a multiply-owned carrier must resolve Ambiguous(MultipleOwners) — never a \
+             collapsed single Bound owner — got {other:?}"
+        ),
+    }
+}
+
 // ── SyntheticScratch ──
 
 #[test]
 fn synthetic_scratch_carries_labelled_binding() {
-    let res = ProjectResolution::synthetic_scratch("untitled:Buffer-1");
-    match res {
-        ProjectResolution::SyntheticScratch(scratch) => {
-            assert_eq!(scratch.label(), "untitled:Buffer-1");
-        }
-        other => panic!("expected SyntheticScratch, got {other:?}"),
-    }
+    // Scratch is a SEPARATE non-production lane, NOT a carrier-ownership state.
+    let res = ScratchResolution::synthetic_scratch("untitled:Buffer-1");
+    let ScratchResolution::SyntheticScratch(scratch) = res;
+    assert_eq!(scratch.label(), "untitled:Buffer-1");
+}
+
+// ── NotReady (bootstrap) ──
+
+#[test]
+fn bootstrap_ownership_view_resolves_not_ready() {
+    // A resolver over a NON-authoritative (bootstrap) published ownership view
+    // yields `NotReady` — the transient, retryable state — never a premature
+    // `NoProject`. Discriminating: the SAME source over an authoritative view is
+    // `Bound`, proving `NotReady` is the bootstrap gate, not a blanket refusal.
+    let ws = workspace_with(&[
+        ("d:/ws/tsconfig.json", r#"{ "include": ["src/**/*"] }"#),
+        ("d:/ws/src/Foo.vue", "<template></template>"),
+    ]);
+    let snap = snapshot_from_tsconfigs(&ws, &["d:/ws/tsconfig.json"]);
+
+    let bootstrap = WorkspaceProjectResolver::new(
+        &snap,
+        &ws,
+        "7.0.1",
+        &(test_env_dims as fn(&str) -> EnvDims),
+        false, // ownership_ready = false ⇒ bootstrap
+    );
+    assert_eq!(
+        bootstrap.resolve("d:/ws/src/Foo.vue", None),
+        CarrierOwnershipResolution::NotReady,
+        "a would-be-owned source over a bootstrap view is NotReady, never NoProject"
+    );
+
+    let authoritative = WorkspaceProjectResolver::new(
+        &snap,
+        &ws,
+        "7.0.1",
+        &(test_env_dims as fn(&str) -> EnvDims),
+        true,
+    );
+    assert!(
+        matches!(
+            authoritative.resolve("d:/ws/src/Foo.vue", None),
+            CarrierOwnershipResolution::Bound(_)
+        ),
+        "the same source over an authoritative view is Bound"
+    );
 }
 
 // ── provider_op_requires_resolved_project: the witness chain ──
@@ -554,11 +766,16 @@ fn project_binding_mints_ensure_project_request() {
         ("d:/ws/src/Foo.vue", "<template></template>"),
     ]);
     let snap = snapshot_from_tsconfigs(&ws, &["d:/ws/tsconfig.json"]);
-    let resolver =
-        WorkspaceProjectResolver::new(&snap, &ws, "7.0.1", &(test_env_dims as fn(&str) -> EnvDims));
+    let resolver = WorkspaceProjectResolver::new(
+        &snap,
+        &ws,
+        "7.0.1",
+        &(test_env_dims as fn(&str) -> EnvDims),
+        true,
+    );
 
-    let binding = match resolver.resolve("d:/ws/src/Foo.vue") {
-        ProjectResolution::ProjectBinding(b) => b,
+    let binding = match resolver.resolve("d:/ws/src/Foo.vue", None) {
+        CarrierOwnershipResolution::Bound(b) => b,
         other => panic!("expected ProjectBinding, got {other:?}"),
     };
 
@@ -577,11 +794,14 @@ fn no_project_and_ambiguous_carry_no_binding() {
     // an `EnsureProject` (hence no production op) from them. This is the runtime
     // shadow of the compile-time guarantee; the static guard
     // `provider_op_requires_resolved_project` is the source-level backstop.
-    let no_project = ProjectResolution::NoProject;
-    let ambiguous = ProjectResolution::Ambiguous(AmbiguityCause::MultipleOwners);
+    let no_project = CarrierOwnershipResolution::NoProject;
+    let ambiguous = CarrierOwnershipResolution::Ambiguous {
+        candidates: Vec::new(),
+        cause: AmbiguityCause::MultipleOwners,
+    };
     for state in [no_project, ambiguous] {
         assert!(
-            !matches!(state, ProjectResolution::ProjectBinding(_)),
+            !matches!(state, CarrierOwnershipResolution::Bound(_)),
             "fail-closed states must not carry a ProjectBinding"
         );
     }
@@ -622,10 +842,15 @@ fn bound_project_mints_from_ensure_project_request() {
         ("d:/ws/src/Foo.vue", "<template></template>"),
     ]);
     let snap = snapshot_from_tsconfigs(&ws, &["d:/ws/tsconfig.json"]);
-    let resolver =
-        WorkspaceProjectResolver::new(&snap, &ws, "7.0.1", &(test_env_dims as fn(&str) -> EnvDims));
-    let binding = match resolver.resolve("d:/ws/src/Foo.vue") {
-        ProjectResolution::ProjectBinding(b) => b,
+    let resolver = WorkspaceProjectResolver::new(
+        &snap,
+        &ws,
+        "7.0.1",
+        &(test_env_dims as fn(&str) -> EnvDims),
+        true,
+    );
+    let binding = match resolver.resolve("d:/ws/src/Foo.vue", None) {
+        CarrierOwnershipResolution::Bound(b) => b,
         other => panic!("expected ProjectBinding, got {other:?}"),
     };
     let request = binding.ensure_project_request();
