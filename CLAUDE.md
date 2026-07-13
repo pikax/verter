@@ -368,9 +368,23 @@ Coverage: new features need tests, bug fixes need regression tests, refactors mu
 
 **Always include negative assertions**: verify both what SHOULD and should NOT be present. Codegen tests must check removed syntax is absent. Type tests must include `@ts-expect-error` guards against `any`/`never`.
 
+**Public-boundary acceptance**: for every changed user-visible IDE, API, or compiler outcome, each affected acceptance ID has an automated public-boundary test asserting the required result AND the relevant forbidden or fail-closed result. Provider-selection, status, unit, and architecture tests supplement but do not substitute for that boundary test. A substrate block may inherit a parent boundary test only by recording the acceptance-ID mapping and executing that test in its gate. Enforcement is judgment — reviewers assess the actual invocation path and assertions, not the filename; §1a proves discrimination; confirm reruns the mapped test.
+
 **Architecture guards for critical rules**: every new `CRITICAL` architecture rule lands with a static architecture guard or a discriminating regression test in the same change; if a guard cannot be automated yet, the rule text names the planned guard/test and the gap is tracked in the owning skill/doc. The R6 meta-guard at `crates/verter_session/tests/g_misc0/critical_rules_have_guards.rs` (`every_critical_rule_in_docs_has_registered_guard`) walks `CLAUDE.md` plus every `.claude/skills/*/SKILL.md` and asserts every `(CRITICAL)` heading has a `CRITICAL_RULE_GUARDS` registry row with at least one named guard — a prose-only `(CRITICAL)` section fails the gate.
 
 **Rust test file organization**: When inline `#[cfg(test)]` exceeds ~400 lines, extract to a sibling `*_tests.rs` file.
+
+### Verification Must Prove Execution (MANDATORY)
+
+A required gate passes only on fresh, input-bound evidence that: every applicable required job was eligible and ran; the intended tree-derived surface was owned and independently discovered; selectors matched non-zero work; required source, build, and fixture prerequisites matched the tested tree; executed work was non-zero; unexpected prerequisite skips were zero; child deadlines were strictly below their parent killer; and a terminal summary completed. **Exit status 0 alone, a self-declared test universe, or a missing required-job result is FAIL.** Every tracked test or guard has exactly one declared primary gate; a hand-maintained filename list may not define the primary universe unless generated from independent discovery and parity-checked.
+
+Attestation alone is insufficient — a receipt faithfully attests whatever incomplete universe the runner defines for itself. The durable design needs all three: fresh execution attestation; independently tree-derived inventory/discovery parity; and per-surface negative-control mutation through the exact canonical entry point. A single global canary cannot detect an omitted unrelated spec.
+
+**The negative control must itself be proven to have applied.** A plant that fails to apply reports a pass: `perl`/`sed`/`grep` exit 0 on a non-match, so a mutation's exit code is never proof it landed, and a verification search hitting a PRE-EXISTING occurrence of the planted string is a false positive. Prove the mutation is present, unique, and new in the source before trusting the run; a green planted run means the plant failed until proven otherwise. A discrimination check that cannot distinguish "the plant did not apply" from "the code is correct" is not a discrimination check.
+
+Planned guard: `gate_contract_integrity` — one registered suite exercising the canonical entry point against independent inventory plus per-surface negative controls covering missing summary, disabled or missing job, invalid timeout nesting, zero selection, stale or missing build, missing fixture or unexpected skip, omitted or unowned test, and a mutation that silently fails to apply. Until that guard, its attesting driver, and the required-job aggregator land, this rule is held only by §1a and confirm judgment.
+
+**This rule currently fails its own test, and says so.** It ships `(MANDATORY)` — precisely the tier the R6 meta-guard (`every_critical_rule_in_docs_has_registered_guard`) does not check, because that guard scans `(CRITICAL)` headings only. A rule whose thesis is "a gate that cannot prove it ran is a failure" is therefore, today, a gate that cannot prove it ran. `(CRITICAL)` is not available as a shortcut: an unguarded `(CRITICAL)` heading FAILS the meta-guard. So the gap is named rather than hidden — the deferral, its owner (the gate-integrity block), its resolution gate (that block's landing), and the live in-tree instances are recorded in [`docs/arch/gate-integrity-ledger.md`](docs/arch/gate-integrity-ledger.md). Promotion to `(CRITICAL)` with its own `CRITICAL_RULE_GUARDS` row, in the same change that lands the guard, is an ACCEPTANCE CRITERION of that block (ledger row GI-4). It is never folded into `Stub Prevention` — a related but distinct invariant whose guards do not enforce these semantics.
 
 ### Testing-Hermeticity (MANDATORY)
 
@@ -406,15 +420,20 @@ Prefer architecturally correct, long-term solutions; evaluate by correctness and
 
 Plans must include these sections:
 1. **Context** — why this change is being made
-2. **Changes** — specific files to modify with concrete modifications
-3. **Legacy Deletions** — explicit list of files, functions, code paths, feature flags to remove
-4. **Verification** — full workspace test commands and expected outcomes
+2. **Intent Contract** — the ratified statement of intent, before any mechanism design
+3. **Changes** — specific files to modify with concrete modifications
+4. **Legacy Deletions** — explicit list of files, functions, code paths, feature flags to remove
+5. **Verification** — full workspace test commands and expected outcomes
 
 Without explicit legacy deletion lists, agents skip deletions and leave dual paths alive.
+
+**Intent before mechanism.** Before mechanism design for a block that changes observable behavior, authority, or fallback, record a ratified intent contract: the actor/problem and why the capability should exist; required and forbidden observable outcomes; authority/fallback order; a planned test or gate for each stable acceptance ID; and material cold, warm, allocation, fan-out, and latency bounds. An internal substrate block may reference its parent contract but must state the invariant and performance contribution it owns. Ratification comes from the approved plan or product authority; no implementation brief is dispatched without it. Enforcement is judgment — exercised at decomposition and again immediately before implementation dispatch.
 
 ### Execution
 
 Execute approved plans fully in one pass, end-to-end, without intermediate checkpoints or mid-plan confirmation on already-approved steps. Do not pause, defer scope, leave planned work unfinished, or rewrite the plan into a smaller/safer variant because the correct path is breaking, broad, or labor-intensive. Approved plans land as written unless the user explicitly re-scopes them.
+
+**One-pass execution applies only while the approved design remains valid.** The second-REOPEN circuit breaker lapses approval for the affected design: pause implementation, obtain and record the required architecture/product ruling, and resume only once the design is ratified again. This is not a checkpoint — one-pass governs *executing an approved design*, and the breaker fires when *approval itself has lapsed*, which is a different event and precisely why execution must stop rather than grind on. STOP, failed verification, rule conflict, and verified plan-invalidating discoveries pause at their prescribed evidence gate without creating a discretionary user checkpoint. Breadth, breakage, effort, or migration size never lapses approval; approved scope changes only through the recorded ruling or explicit user re-scope. See `/mom-cto-orchestration` → Decision Admission.
 
 ### Orchestrating Large Plans
 
@@ -435,9 +454,10 @@ When replacing a feature or refactoring a system, delete the superseded code in 
 
 When encountering issues during implementation:
 - If the correct fix aligns with the architecture → implement it properly
-- If the fix would be a workaround, patch, or shim → do NOT apply it. Instead: add a `TODO(follow-up)` comment explaining the proper fix, note it in the feedback file, continue with the plan
 - Never apply a dirty fix that contradicts architectural rules just to make tests pass
-- A clean TODO with a follow-up plan beats a quick patch that accumulates debt
+- If the proper fix is outside approved scope, do not apply a workaround and do not use a `TODO` as its disposition. Route the finding through the applicable scope authority and record `ADOPT-NOW`, `DEFER`, or `REJECT` before related work continues. A `TODO` may reference an approved debt row but never replaces it.
+
+**Explicit finding disposition.** Every scope-deviating correctness finding is dispositioned before related work continues as `ADOPT-NOW`, `DEFER`, or `REJECT`. `ADOPT-NOW` records the scope and acceptance-contract change. `DEFER` requires a codex-DEFER ruling and a debt row naming the durable owner block, the resolution gate no later than plan close, the acceptance ID/test, and the ruling reference. `REJECT` records evidence and rationale. A TODO, a feedback entry, or an ephemeral agent identity is not a disposition; plan close requires zero open deferrals. Enforcement is judgment — codex at the scope consult, and the plan-close zero-open-deferral check.
 
 ### Stub Prevention (CRITICAL)
 

@@ -61,6 +61,11 @@ Windows / PowerShell utilities:
 - `Get-ChildItem -Force` - list files including hidden.
 - `Get-ChildItem -Recurse -Filter <pattern>` - recursive file search by name.
 - `rg "pattern"` / `rg --files` - preferred fast search if available.
-- `Set-Location D:\dev\personal\verter` - change directory.
+- `Set-Location <repo-root>` - change directory (the repo root comes from the session, never a literal in this file).
 - `git status --short --branch`, `git log --oneline -5`, `git diff --stat` - basic git inspection.
-- `taskkill /F /PID <pid>` - kill a long-running test/dev server process on Windows.
+
+Terminating a test/dev server: this memory carries no kill command. Capture the PID at spawn and
+terminate only THAT recorded tree; a port is a diagnostic, not proof of ownership, and a
+name/pattern kill (`pkill`, `killall`, `taskkill /F /IM`, `Stop-Process -Name`) reaches the
+user's own processes and other agents' servers. Recipe and rationale:
+`.claude/skills/testing/SKILL.md` -> Server Cleanup.

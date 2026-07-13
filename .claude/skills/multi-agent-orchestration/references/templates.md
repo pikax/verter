@@ -113,15 +113,19 @@ Assemble with `cat head.md source.md tail.md > prompt.txt` so the embedded sourc
 
 ## 5. Second-opinion CLI invocations (codex)
 
-```bash
-# Architectural consult — prompt from a file, output to a file:
-codex exec --skip-git-repo-check < prompt.txt > consult-out.txt 2>&1
+Always pin model and effort explicitly — an unpinned invocation silently runs at the default and still returns a confident verdict. **Model and effort are POLICY, not discovery.** `CODEX_MODEL_POLICY[role] = { model, reasoning_effort }` comes from ONE ratified authority (`mom-cto-orchestration/reference/codex-model-policy.toml`); preflight only checks whether that policy-selected model is AVAILABLE and what actually BOUND. Preflight never chooses — it can tell you what is available, not what is intended, and a preflight that infers policy from availability is the capability-vs-evidence conflation. **Never hardcode a slug in a durable file**: preflight resolves the entry into two scalars, `CODEX_MODEL` and `CODEX_EFFORT`, and the invocation interpolates those. `${CODEX_MODEL_POLICY[$ROLE].model}` is NOT a shell expression — it is a `bad substitution` that exits 1 — so never write a policy lookup inline in a command. Unavailable, substituted, unknown, or banner-mismatched ⇒ **BLOCK the leg** — never substitute, upgrade, or downgrade.
 
-# Code review of a block — no prompt arg; run from inside the worktree:
-cd <worktree> && codex review --base <base-branch> < /dev/null > review-out.txt 2>&1
-```
+**The invocation is NOT reproduced here.** It has exactly ONE form in the tree — `mom-cto-orchestration/reference/PROTOCOL.md` → codex Invocation — and this file deliberately does not copy it. A second copy is not a convenience, it is a drift surface: the moment two copies exist they diverge (one grows a `cd`, one grows an exit check, one keeps a stale flag), and an agent obeys whichever it happened to read. Consult and review use the SAME single form; only the prompt file, the output paths, and the working directory differ.
 
-Output files are large. Grep them for findings (`grep -nE '\[P[0-3]\]' out.txt`) and read the tail for the verdict. Ignore trailing process-teardown noise. Never run these concurrently with a heavy test suite — memory contention.
+Everything below is the CONTRACT around that call, not a second version of it:
+
+**Lifecycle — one policy, identical to `mom-cto-orchestration/reference/{PROTOCOL,WAIT-PROTOCOL}.md`.** Foreground, explicit bounded timeout (`timeout_seconds` in the policy authority). No trailing `&`, never detached, never background-and-polled. On timeout the leg FAILED: redispatch up to `max_attempts`, then block and escalate. Parallelism comes from separate managed review calls with distinct output paths, never from global shell process manipulation.
+
+**Ownership recording follows the dispatch shape.** A foreground leg has no `&` and therefore no `$!` — `timeout` is its bound and the blocking call is its join, so there is no PID to record. A DETACHED dispatch records its `$!` at spawn, before the wait. **Cleanup is scoped to what you recorded:** terminate only that recorded tree, through the ONE shared helper — `terminate_recorded_tree` (`mom-cto-orchestration/reference/PROTOCOL.md` → Ownership and Termination), which confirms the descendant closure is gone rather than trusting a kill command's exit status. Do not reprint the kill here: the obvious form is wrong in ways that only appear when you run it, and a second copy is a drift surface. NEVER `taskkill /F /IM`, `pkill -f codex`, `killall`, or `Stop-Process -Name` — those kill every codex process on the machine, including the user's own sessions and the sibling review leg, and a leg killed by another's cleanup is indistinguishable from a stalled one.
+
+Verify the model AND effort the CLI actually bound — it echoes both in its startup banner — against the expected `CODEX_MODEL_POLICY` entry; a mismatch BLOCKS the leg. Do not trust the policy; read what actually bound.
+
+**A leg whose verdict artifact you cannot produce did not run.** The leg counts only on a clean exit under its timeout, a matching banner, and a non-empty verdict file (`-o`) whose contents you READ. The full transcript is contaminated by construction — it contains the prompt echoed back — so `LAND`, `CHANGES`, and `__DONE__` all appear in it whether or not the leg ever rendered a verdict; grep the transcript to orient or diagnose, never to conclude. Never run these concurrently with a heavy test suite — memory contention.
 
 ## 6. Environmental gotchas (carry into every brief)
 

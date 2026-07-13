@@ -11,14 +11,22 @@ For VS Code extension E2E fixtures, helpers API, and warm-session rules, see `/e
 
 Always kill dev/preview servers or other long-running test processes when done — stale servers interfere with subsequent runs (e.g., Playwright's `reuseExistingServer: true` uses old builds).
 
-```bash
-# After finishing with a server, kill it
-# If started in background, use the process ID or port:
-kill $(lsof -t -i:4173)   # Unix
-taskkill //F //PID <pid>   # Windows
+Capture the PID when you start the server and terminate THAT PID. A port is a diagnostic, not a proof of ownership — `lsof -t -i:<port>` returns whoever holds the port, which may be the user's own server or another agent's, and killing by image name or pattern (`pkill -f node`, `taskkill /F /IM node.exe`, `Stop-Process -Name`) is never acceptable.
 
-# Or if using pnpm/npm scripts, Ctrl+C the process
+```bash
+# Record the PID at spawn, terminate only that recorded tree:
+pnpm --filter @verter/playground preview & SERVER_PID=$!   # capture at spawn
+
+kill "$SERVER_PID"                                          # Unix — terminate only what you started
+taskkill //F //T //PID "$(cat /proc/$SERVER_PID/winpid)"    # Windows — see both caveats below
+
+# Or if using pnpm/npm scripts in a foreground shell, Ctrl+C the process
 ```
+
+Two Windows caveats, both verified by running them rather than inferred from the flag names:
+
+- **`$!` is the MSYS pid, not the Windows pid `taskkill` wants.** Passing `$SERVER_PID` straight to `taskkill` prints `ERROR: The process "…" not found`, exits 128, and kills nothing — hence the `/proc/<pid>/winpid` lookup.
+- **`//T` does not reap descendants.** It terminates the named process (exit 0, `SUCCESS: … has been terminated`) while its children keep running. So `pnpm`'s child `vite`/`node` can outlive it. CONFIRM the server is actually gone rather than trusting the success line — `kill -0 "$SERVER_PID"`, or re-probe the port — and terminate any surviving child by its own recorded PID.
 
 ## Test Output Best Practices
 
@@ -153,6 +161,23 @@ assert!(parsed.errors.is_empty(), "JS parse error: {:?}\n{}", parsed.errors, tpl
 Every new `CRITICAL` architecture rule must ship with an executable guard in the same change: static architecture guard, AST/source scanner with narrow allowlists, or a discriminating regression test that fails against old behavior. A rule without a guard is not durable enough for this repo's migration style.
 
 When the guard cannot be automated immediately, the owning skill/doc must name it, explain the gap, and link the follow-up. Do not add prose-only critical rules that future changes can violate silently.
+
+### Gate Integrity (MANDATORY)
+
+A gate that does not run its intended surface must FAIL, not silently pass. Exit status 0 alone, a self-declared test universe, or a missing required-job result is FAIL — see `CLAUDE.md` → Verification Must Prove Execution for the normative rule.
+
+Observed defect shapes, all of which reported success while testing nothing: a missing run-summary scored as a pass; a required CI job disabled with `if: false`; a helper timeout budget set ABOVE the timeout that kills it; a selector (`pnpm --filter`, a glob) matching no package and exiting 0; an unbuilt artifact under test; skips made vacuous by an absent fixture dependency; and a test script naming its spec files explicitly so a tracked spec sat in no gate at all.
+
+**A plant that fails to apply reports a pass.** The same class has a fourth face, and it is the worst, because it sits inside the verification of the verification: a discrimination check plants a defect and expects RED, but the mutation silently no-ops (a `perl`/`sed` regex that does not match still exits 0), and the verification `grep` false-positives on a PRE-EXISTING occurrence of the planted string. The planted tree comes back green — and the check reports the test as discriminating. Prove the mutation is present, unique, and new in the source (`git diff` it) before trusting any planted run; never take a mutation command's exit code as proof it applied. If a planted run is green, the first hypothesis is that the plant failed — not that the test is weak, and never that the code is correct. See `/mom-cto-orchestration` → Plant Verification.
+
+**Enforcement gap (tracked).** The rule is currently held by §1a and confirm JUDGMENT only. The planned guard is `gate_contract_integrity`: one registered suite exercising the exact canonical entry point against an independently tree-derived inventory, with per-surface negative controls for each shape above. Attestation alone is NOT sufficient — a receipt faithfully attests whatever incomplete universe the runner defines for itself, and a single global canary cannot detect an omitted unrelated spec; the design needs fresh execution attestation PLUS independent discovery parity PLUS per-surface mutation proof. Owed with it: a tree-derived verification-surface declaration (ownership, discovery roots, prerequisites, timeout relations, required jobs — not duplicated filenames), an attesting canonical driver emitting input-bound receipts, and an `if: always()` CI aggregator that fails on any missing/skipped/disabled/stale required-job receipt.
+
+**The gap, its owner, and its resolution gate are a debt row, not a note.** Owner: the gate-integrity block. Resolution gate: that block's landing. The rows — including the promotion of `Verification Must Prove Execution` to `(CRITICAL)` as an acceptance criterion of that block — live in [`../../../docs/arch/gate-integrity-ledger.md`](../../../docs/arch/gate-integrity-ledger.md). Do not close the rule without them.
+
+Live instances, verified in-tree:
+
+- `.github/workflows/ci.yml:432` (`build-vscode-e2e`) and `:473` (`vscode-e2e`) both carry `if: false` — two required E2E jobs that produce no result, and a missing required-job result currently reads as a pass.
+- `packages/vue-vscode/package.json` → `scripts.test` names 8 spec files explicitly, while the package has **21** tracked `*.spec.ts` files. The other **13** — including `activationGate.spec.ts` — are in no declared gate: root `pnpm test` is `pnpm -r --parallel run test`, which runs that same 8-file script, and CI runs only 4 named specs by path.
 
 ### Test Hermeticity (MANDATORY)
 

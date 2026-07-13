@@ -16,5 +16,7 @@ Start with these docs by task area:
 
 Load only the specific reference material needed for the task. Do not bulk-read every skill.
 
-Special current-context note:
-- For component-meta performance work, also check memory `in_flight_component_meta_performance_plan.md` and then inspect `D:\tmp\verter-component-meta-performance-plan.md` for the current orchestration state before changing code.
+Note on in-flight work: this file routes to DURABLE, in-tree authorities only. An in-flight plan
+is session state — it comes from the brief and from git, never from a memory and never from a
+machine-local path. For component-meta performance work the durable authorities are
+`/component-meta`, `/type-resolution`, `/type-cache-architecture`, plus `docs/arch/`.

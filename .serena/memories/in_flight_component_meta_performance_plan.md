@@ -1,26 +1,25 @@
-# In-Flight Component-Meta Performance Plan
+# Component-meta performance work — where the authority actually lives
 
-As of onboarding on 2026-05-02, the user noted that `D:\tmp\verter-component-meta-performance-plan.md` is actively being implemented and said it is currently in the middle of Wave 2 implementation. Treat this as ephemeral working context, not durable architecture. Before making component-meta/performance/architecture-guard changes, re-check the plan file, current branch, and git history.
+This memory used to route every agent to a machine-local plan file
+(`D:\tmp\verter-component-meta-performance-plan.md`) and called it "the source for current
+orchestration state", to be inspected before changing component-meta / performance /
+architecture-guard code.
 
-Observed local state during onboarding:
-- Repository branch: `integration/component-meta-perf-landing` tracking `origin/integration/component-meta-perf-landing`.
-- `git status --short --branch` showed only `.serena/` untracked from onboarding at that moment.
-- Recent local commits included component-meta performance work such as indexed-access early-out, lazy projection-rescue, Pick callback-param preservation, and related tests.
+**That file no longer exists** — not on another machine, and not even on the one that wrote the
+note. An agent following this memory today would read nothing, or improvise.
 
-Plan summary:
-- File: `D:\tmp\verter-component-meta-performance-plan.md`.
-- Title: `Verter Component-Meta Performance Plan`.
-- Scope: component-meta correctness/performance fixes plus architecture cleanup, implemented by an orchestrator with isolated worktrees/sub-agents and cherry-picked/rebased commits.
-- Core tiers: Tier A correctness, Tier B performance, Tier C architecture cleanup.
-- The plan defines non-negotiable invariants, acceptance gates, cache identity contracts, test harness patterns, rollback/commit slicing, and an orchestration model.
+That is the entire lesson, and it is why memory is not an authority: a remembered path (or
+command, or model slug, or branch name) outlives the thing it points at, is copied forward into
+briefs, and is followed by agents that never saw it reviewed. Memory may LINK to an authority;
+it may not BE one. See `/mom-cto-orchestration` → Memory Is Not Authority.
 
-Important Wave/dispatch notes from the plan:
-- `B-C0-foundations` is the Wave 2 bundle: Phase 12.A5 hermetic tests, Phase 12.A10 architecture guards, Phase 12.A11 no-phase-archaeology/d-cutover cleanup rule work, plus `WorkspaceAccess::is_workspace_owned` / `is_package_backed` API extensions consumed by Tier B.
-- A plan revision on 2026-05-02 defers architecture guard #7 (`no_phase_archaeology_in_production_code`) from `B-C0`/Wave 2 to `B-C6`/Wave 4 because the current integration tree still contains phase-archaeology strings that Wave 4 sweeps.
-- Wave-order shipping invariant: A1 ships first, C1/Wave 2 foundations ships second, A2 ships third; Tier B slices stage on `integration/component-meta-perf-landing` and only merge to main after required gates.
-- Phase 11b is diagnosis-only and returns `Status: AWAITING_FIX_DECISION`; the orchestrator chooses the Phase 11d fix.
+## What to read instead
 
-How to use this memory:
-- Do not assume the plan file is complete or final. It is the source for current orchestration details; re-read the relevant sections before acting.
-- Do not copy the whole plan into durable docs unless the user explicitly asks. Durable architecture belongs in `CLAUDE.md`, `.claude/skills/*`, or `docs/arch/` after the implementation state is settled.
-- For component-meta work, load `/component-meta`, `/type-resolution`, `/testing`, and, when architecture/build boundaries are involved, `/architecture` or `/build-and-profiling` as needed.
+- An IN-FLIGHT plan is session state. It comes from the brief and from git — never from memory.
+- Durable component-meta / performance architecture is in-tree:
+  - `CLAUDE.md` → Component-Meta Shallow-By-Default Rule, Cache Architecture, Build Philosophy.
+  - Skills: `/component-meta`, `/type-resolution`, `/type-cache-architecture`, `/rust-performance`.
+  - `docs/arch/` for binding designs, plans, and the debt ledgers.
+
+Before component-meta / performance / architecture-guard changes, load those, and take the
+current branch and plan state from git and the brief.

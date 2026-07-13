@@ -1,0 +1,63 @@
+# CODEX MODEL POLICY — the sole ratified authority for codex model + reasoning effort.
+#
+# This file is the ONE SOURCE OF THE CURRENT OPERATIONAL PIN. It is the one rule-bearing
+# file that MAY carry a model slug, because it IS the pin; no OTHER rule file, template,
+# brief, or memory may originate one — they reference this authority instead.
+# Preflight READS this file; it never selects. Preflight discovers whether the
+# policy-selected model is AVAILABLE and what ACTUALLY BOUND — it cannot supply intent.
+#
+# PIN RETIREMENT IS A STOP, AND THE RECOVERY AUTHORITY IS THE USER. If the pinned model is
+# retired or unavailable, no codex leg can run — yet editing this file is a rule-bearing
+# change that normally needs codex approval. That deadlock resolves in ONE direction:
+# escalate to the user, who ratifies the replacement pin. Never resolve it by substituting
+# a model; that is the silent-downgrade defect wearing a governance hat.
+#
+# EXEMPT: historical records. A `docs/arch` or `docs/better-implementation` row naming
+# the model that issued a past ruling (e.g. "codex gpt-5.5 xhigh, ratified") is
+# PROVENANCE — an immutable fact about what already happened, not an operational pin.
+# Those rows are not rewritten when this file changes; rewriting them would falsify
+# the record of who decided what.
+#
+# Policy shape (durable, stated in PROTOCOL.md -> codex Invocation):
+#   - ONE entry applied to EVERY role. There is no role split.
+#   - Unavailable | substituted | unknown | banner-mismatched => BLOCK THE LEG.
+#     No replacement, no upgrade, no downgrade, no reuse of another role's entry.
+#     Blocking is loud; substituting is silent.
+#
+# When a future model supersedes the current one, exactly ONE value changes here and no
+# other OPERATIONAL surface in the repository moves (provenance records stay as written).
+# That is the entire point: the pin is config, not documentation.
+#
+# Preflight resolves the entry into two SCALARS, CODEX_MODEL and CODEX_EFFORT, and the
+# invocation interpolates those. A nested lookup like ${CODEX_MODEL_POLICY[$ROLE].model}
+# is NOT a shell expression — it is a `bad substitution` that exits 1.
+#
+# Governance: changing this file is a rule-bearing change (PROTOCOL.md -> GOVERNANCE).
+
+schema_version = 1
+
+# Roles served by this policy. The mapping is total: every role below resolves to
+# [default]. A dispatcher cannot choose a model by choosing a role.
+roles = [
+  "review",
+  "1a",
+  "anti-rogue",
+  "architecture",
+  "best-implementation",
+]
+
+# The single ratified entry, applied to every role above.
+[default]
+model = "gpt-5.6-sol"
+reasoning_effort = "xhigh"
+
+# Leg lifecycle. These are POLICY too: a timeout and a retry ceiling that each caller
+# invents are values that disagree across legs, and "bounded to a finite retry count"
+# is not a bound if nobody says what the count is. Preflight resolves these into
+# $CODEX_TIMEOUT and $CODEX_MAX_ATTEMPTS alongside the model and effort scalars.
+#
+# timeout_seconds is deliberately below a typical 600s foreground tool-call ceiling, so a
+# leg fails as a LEG (exit 124, redispatchable) rather than as a severed tool call.
+# A leg that exhausts max_attempts BLOCKS and escalates — it never silently degrades.
+timeout_seconds = 550
+max_attempts = 3

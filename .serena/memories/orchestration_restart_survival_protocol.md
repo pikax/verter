@@ -1,40 +1,45 @@
-# Restart-Survival Protocol for Orchestrated Sub-Agents (MANDATORY)
+# Restart survival — why the long pole must not live inside a killable agent
 
-## Problem (root cause)
-This Claude Code environment restarts the session ~hourly. A restart KILLS all in-session
-Agent-tool sub-agents and background Bash tasks. Implementer agents kept dying mid-work and
-losing UNCOMMITTED WIP because the LONG pole — `cargo` verification (full `--tests` suite +
-multi-build revert-and-observe discrimination proofs = 10-20 min) — ran INSIDE the agent and the
-agent committed only AFTER verification. The restart almost always lands in that verification
-window → the agent dies before committing → WIP lost (must be recovered by hand).
+> **This memory records INSIGHT, never a command.** Operational prescriptions — dispatch,
+> waiting, commit cadence, verification ownership, cleanup, termination — have exactly ONE
+> current authority: `.claude/skills/mom-cto-orchestration/reference/`
+> (`PROTOCOL.md`, `WAIT-PROTOCOL.md`, `CHECKPOINT-PROTOCOL.md`). This file is not a protocol
+> and does not override one; it explains a failure mode so the protocol's rules read as
+> reasoned rather than arbitrary. Read the protocol; do not run this file.
 
-## Fix — the long pole must NEVER live inside a killable, un-banked agent
-1. **Orchestrator applies SMALL codex-specified fixes DIRECTLY (no agent).** The orchestrator
-   survives restarts (resumes via its handoff doc + a start-of-turn background-state audit). A
-   1-line / few-line fix that codex has precisely specified → `Edit` on the ABSOLUTE worktree path
-   → verify → commit, yourself. (Proven: recovered a dead agent's raise.rs `with_mode(Navigate)`
-   one-liner this way in minutes.)
-2. **Agents (for larger work) are COMMIT-FIRST, VERIFY-SECOND.** Every implementer brief MUST
-   mandate: edit → `cargo check -p <crate>` (compiles only — fast) → `git commit` IMMEDIATELY →
-   THEN run tests; on failure, follow-up fix commit. FORBIDDEN: running the full `--tests` suite or
-   a multi-build revert-and-observe BEFORE the first commit. This caps agent wall-clock to a few
-   minutes (fits inside a restart window) and guarantees a restart leaves a COMMITTED state.
-3. **Orchestrator OWNS all heavy verification** (full `--workspace` gate, targeted test runs,
-   discrimination revert-and-observe) on COMMITTED code — re-runnable after any restart (nothing
-   lost). codex re-confirm judges test discrimination STATICALLY (reliable); the orchestrator does
-   empirical revert-and-observe only if codex doubts.
-4. **Keep the existing cheap-recovery rails:** WIP patch-backup (`git -C <wt> diff HEAD >
-   D:/tmp/x.patch`); AUDIT background state at the START of every turn (git log for new commits +
-   newest mtime + `tasklist | grep cargo/rustc` + agent transcript mtime/size + the session-id dir
-   to detect a restart); worktree-ABSOLUTE-path mandate (Serena + relative paths silently hit the
-   MAIN repo); commit-after-every-step.
+## The failure mode (root cause)
 
-## Detecting a dead agent vs a live one (start-of-turn audit)
-- New session-id directory under `…/Temp/claude/<project>/<session-id>/` = a restart happened →
-  agents from the prior session id are DEAD.
-- Agent transcript (`…/<session-id>/tasks/<agentId>.output`) stale mtime (minutes old) + 0/static
-  size + no active `cargo|rustc` + uncommitted WIP = dead; recover. If cargo/rustc ACTIVE, it may
-  be the agent's (or an orphaned) build still running — do NOT race it with competing cargo
-  (concurrent cargo in one worktree can corrupt the target dir → transient `lld-link` crash).
-- A `// BUG-REVERT-PROOF`-style marker in WIP = the agent died MID discrimination-proof (it
-  reverted the fix to show the test fails, died before restoring) → restore the real fix.
+This environment restarts the session periodically. A restart kills in-session Agent sub-agents
+and background tasks. Implementer agents kept dying mid-work and losing UNCOMMITTED WIP because
+the LONG POLE — full `cargo` verification, plus multi-build revert-and-observe discrimination
+proofs — ran INSIDE the agent, and the agent committed only AFTER verification. A restart almost
+always lands in that verification window, so the agent dies before committing and the work is
+lost.
+
+The generalisable insight: **any completion-critical work that is not yet banked to a durable
+artifact is at the mercy of whatever kills its process.** The longer the unbanked window, the
+more likely something lands in it.
+
+## What follows from it
+
+- **Bank early, verify after.** An implementer commits per logical piece once it compiles (a
+  cheap check, not the full gate); the full gate runs at the end. This caps the unbanked window
+  to minutes and guarantees a restart leaves a COMMITTED state. The rule and its cadence live in
+  `CHECKPOINT-PROTOCOL.md` → Durable Artifacts.
+- **Heavy verification belongs where it is re-runnable.** A full-workspace gate run against
+  COMMITTED code loses nothing to a restart — it just reruns. `PROTOCOL.md` → Verification Gate
+  owns where gates run and how they are serialized.
+- **Recovery reads durable truth, not memory.** On every relaunch, reconstruct state from the
+  progress ledger and git, and resume at the next incomplete step; an artifact is reusable only
+  if its recorded input identity still matches. `CHECKPOINT-PROTOCOL.md` → Relaunch First.
+- **Detecting a dead worker is not the same as owning it.** Staleness signals (no new commits, a
+  stale transcript, no active build process) tell you a worker is probably gone. They do NOT
+  tell you which processes are yours. Termination is scoped to a RECORDED process tree, never to
+  a name, pattern, or port match — that reaches sibling legs and the user's own sessions
+  (`PROTOCOL.md` → Cleanup; `WAIT-PROTOCOL.md`).
+- **Do not "solve" this by having the orchestrator write the code.** An earlier version of this
+  note advised the orchestrator to apply small fixes directly because it survives restarts. That
+  trades a recoverable problem for an unrecoverable one: the orchestrator's context fills with
+  implementation detail and the independent-review gate loses the author/reviewer separation it
+  exists to enforce. The orchestrator dispatches, decides, and verifies; it does not implement
+  (`/multi-agent-orchestration` → The orchestrator role).
