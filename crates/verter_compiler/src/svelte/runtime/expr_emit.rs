@@ -616,7 +616,7 @@ pub(super) struct PropsDefaultFacts {
     /// predicate on the initializer AFTER reference rewriting
     /// (`initial = context.visit(binding.initial)`), where a FUNCTION
     /// literal's outer node kind survives inner rewrites but a rewritten
-    /// identifier LEAF becomes a getter call / `$$props` member (no longer
+    /// identifier LEAF becomes a getter call / `$$props` member (not
     /// simple). `None` when the skeleton is structurally non-simple (always
     /// LAZY); `Some(leaves)` when the skeleton is simple — a literal /
     /// identifier / arrow / function root, or a conditional / binary / logical
@@ -705,7 +705,7 @@ fn props_default_facts(
 /// alone does not decide: `Some(leaves)` carries every identifier in a
 /// non-function leaf position, and the consumer re-checks each against the
 /// shared reference rewriter (a rewritten leaf becomes a getter call /
-/// `$$props` member — no longer simple). Function roots/parts contribute NO
+/// `$$props` member — not simple). Function roots/parts contribute NO
 /// leaves: a rewrite inside a body never changes the outer node kind. A
 /// private-`in` test (`#x in obj`) is a distinct OXC node
 /// (`PrivateInExpression`), so official's `PrivateIdentifier` left-operand
@@ -953,6 +953,10 @@ pub(super) fn lower_simple_instance_item(
             }
         }
         Item::BindThisLocal { name } => SimpleItemLowering::Statement(format!("let {name};")),
+        // The component-event dispatcher declaration — a caller-owned lowering
+        // (the caller emits the keyword-preserving verbatim declaration; the
+        // dispatcher call stays plain, never a runtime-helper rewrite).
+        Item::DispatcherDecl { .. } => SimpleItemLowering::NeedsRewriter,
         // A LEGACY `export let` prop statement lowers through the FALLIBLE
         // rewriter: each declarator emits its own `let <local> = $.prop($$props,
         // <key>, <flags>[, <default>]);` declaration (default expressions

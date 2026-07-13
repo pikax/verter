@@ -12,8 +12,9 @@
 //!
 //! Because the emitter ([`super::client`]) matches ONLY the narrow plan, no broad
 //! [`IrNode`] / [`AttrIr`] / [`RuntimeOp`] variant reaches emission — emit-by-default
-//! is structurally impossible (a future broad-IR variant cannot become
-//! emit-capable).
+//! is structurally impossible (a future broad-IR variant reaches emission only
+//! through a conscious narrow-plan projection arm; nothing flows to the
+//! emitter by default).
 
 use oxc_allocator::Allocator;
 
@@ -35,10 +36,10 @@ use verter_span::Span;
 // the emitter consumes) lives in the sibling `client_plan_types` module; this builder
 // projects the broad IR onto it. Re-exported so existing consumers (`super::client`, …)
 // keep importing the vocabulary as `super::client_plan::<Type>`.
+pub(super) use super::client_plan_block_types::ClientBlock;
 pub(super) use super::client_plan_types::{
-    AttrValue, ClientAttr, ClientBindTarget, ClientBlock, ClientNode, ClientNodeId,
-    ClientRuntimeOp, ClientScriptItem, ElementLifecycleOp, EventEmit, EventEmitTarget, EventMode,
-    RegionOps,
+    AttrValue, ClientAttr, ClientBindTarget, ClientNode, ClientNodeId, ClientRuntimeOp,
+    ClientScriptItem, ElementLifecycleOp, EventEmit, EventEmitTarget, EventMode, RegionOps,
 };
 
 /// The narrow client module plan — the SOLE emitter input.
@@ -526,7 +527,7 @@ impl<'a> SupportedClientIr<'a> {
 
         // Divergence guard: the op projection re-derives a plain dynamic attribute's
         // emission shape through the shared `classify_dynamic_attr_shape` (the SAME
-        // function the classifier used to ACCEPT it). Assert the recorded
+        // function through which the classifier ACCEPTED it). Assert the recorded
         // `SetAttribute` / `DomProperty` shapes still re-derive to the same FAMILY, so a
         // future table edit that desynced acceptance from emission fails closed here
         // rather than silently mis-emitting (a property write as a `set_attribute`, or
@@ -679,7 +680,11 @@ impl<'a> SupportedClientIr<'a> {
                 BindingRuntimeKind::Prop | BindingRuntimeKind::BindableProp
             )
         });
-        let props_param_bound = real_props_binder || opens_context_frame;
+        // A `<slot>` outlet reads `$$props` at runtime (`$.slot(node, $$props,
+        // …)`), so its presence binds the props parameter — official emits
+        // `($$anchor, $$props)` for a propless slot-bearing component.
+        let has_slot_node = ir.nodes.iter().any(|n| matches!(n, IrNode::Slot(_)));
+        let props_param_bound = real_props_binder || opens_context_frame || has_slot_node;
         if host_used && !props_param_bound {
             return Err(UnsupportedSvelteRuntimeSurface::HostOrCustomElement {
                 surface: "$host",
@@ -838,6 +843,9 @@ impl<'a> SupportedClientIr<'a> {
             }
             // A static `<Foo …/>` component invocation — projected to a `Component` node.
             IrNode::Component(c) => self.project_component(c),
+            // A `<slot>` outlet — projected to the typed `$.slot` call plan
+            // (`client_slot_plan`); its fallback region is carried by scope id.
+            IrNode::Slot(slot) => self.project_slot(slot),
             // The component-invocation specials (`<svelte:component>` / `<svelte:self>`) —
             // projected to a `Component` node. A standalone `<svelte:fragment>` (the
             // transparent-wrapper surface) + the host / renderable `<svelte:*>` specials (not
@@ -1127,23 +1135,17 @@ impl<'a> SupportedClientIr<'a> {
         let mut out = None;
         match self.ir.op(op_id) {
             RuntimeOp::ReactiveText { target, expr } => {
-                // Rewrite the interpolation expression at BUILD time (fallible — an
-                // `await` / destructuring write inside `{…}` fails closed here, before
-                // the plan exists). Compute `has_call` for the memoizer.
-                let analyzed = self.ir.analysis.expressions.get(*expr);
-                let rewritten = self.rewrite(*expr, analyzed.scope)?;
-                let has_call = super::reactive_analysis::expr_has_call(
-                    analyzed.source,
-                    analyzed.scope,
-                    &self.ir.analysis.bindings,
-                    &self.ir.analysis.scopes,
-                    &self.declared_roots,
-                );
+                // Prepare the interpolation at BUILD time through the sole
+                // authored-value entry (fallible — an `await` / destructuring
+                // write inside `{…}` fails closed here, before the plan
+                // exists); the emitter only serializes the carrier.
+                let value = self.prepare_template_value(
+                    super::client_legacy_value::AuthoredExpr(*expr),
+                    super::client_legacy_value::AuthoredValueSurface::ReactiveText,
+                )?;
                 out = Some(ClientRuntimeOp::ReactiveText {
                     target: ClientNodeId(target.0),
-                    expr: *expr,
-                    rewritten,
-                    has_call,
+                    value,
                 });
             }
             RuntimeOp::Binding { target, bind } => {
@@ -1212,7 +1214,13 @@ impl<'a> SupportedClientIr<'a> {
                 let analyzed = self.ir.analysis.expressions.get(action.expr);
                 let callee = self.rewrite(action.expr, analyzed.scope)?;
                 let arg = match action.arg {
-                    Some(arg) => Some(self.rewrite_arrow_body_value(arg)?),
+                    Some(arg) => Some(
+                        self.prepare_template_value(
+                            super::client_legacy_value::AuthoredExpr(arg),
+                            super::client_legacy_value::AuthoredValueSurface::UseActionArg,
+                        )?
+                        .arrow_body(),
+                    ),
                     None => None,
                 };
                 out = Some(ClientRuntimeOp::Lifecycle(ElementLifecycleOp::Action {
@@ -1234,7 +1242,13 @@ impl<'a> SupportedClientIr<'a> {
                 let flags = kind_flags | if transition.global { 4 } else { 0 };
                 let get_fn = self.rewrite_source(&transition.name, scope_lexical)?;
                 let params = match transition.expr {
-                    Some(expr) => Some(self.rewrite_arrow_body_value(expr)?),
+                    Some(expr) => Some(
+                        self.prepare_template_value(
+                            super::client_legacy_value::AuthoredExpr(expr),
+                            super::client_legacy_value::AuthoredValueSurface::TransitionParams,
+                        )?
+                        .arrow_body(),
+                    ),
                     None => None,
                 };
                 out = Some(ClientRuntimeOp::Lifecycle(ElementLifecycleOp::Transition {
@@ -1249,7 +1263,13 @@ impl<'a> SupportedClientIr<'a> {
             RuntimeOp::Animation { target, animation } => {
                 let get_fn = self.rewrite_source(&animation.name, scope_lexical)?;
                 let params = match animation.expr {
-                    Some(expr) => Some(self.rewrite_arrow_body_value(expr)?),
+                    Some(expr) => Some(
+                        self.prepare_template_value(
+                            super::client_legacy_value::AuthoredExpr(expr),
+                            super::client_legacy_value::AuthoredValueSurface::AnimationParams,
+                        )?
+                        .arrow_body(),
+                    ),
                     None => None,
                 };
                 out = Some(ClientRuntimeOp::Lifecycle(ElementLifecycleOp::Animation {
@@ -1258,11 +1278,14 @@ impl<'a> SupportedClientIr<'a> {
                     params,
                 }));
             }
-            // An element-position `{@attach expr}` — the payload is the
-            // concise-arrow-wrapped getter-thunk body (an inline arrow / object
-            // payload stays a valid expression body).
+            // An element-position `{@attach expr}` — the payload is PREPARED
+            // (official `build_expression`); the lifecycle emitter supplies the
+            // thunk (a legacy-wrapped payload keeps the thunk over the sequence).
             RuntimeOp::Attachment { target, expr } => {
-                let payload = self.rewrite_arrow_body_value(*expr)?;
+                let payload = self.prepare_template_value(
+                    super::client_legacy_value::AuthoredExpr(*expr),
+                    super::client_legacy_value::AuthoredValueSurface::AttachPayload,
+                )?;
                 out = Some(ClientRuntimeOp::Lifecycle(ElementLifecycleOp::Attachment {
                     target: ClientNodeId(target.0),
                     payload,
@@ -1278,7 +1301,10 @@ impl<'a> SupportedClientIr<'a> {
     /// one-shot init (`RegularElement.js`'s `has_state ? update : init`). A
     /// `<svelte:head>`'s `<title>` reads this to pick `$.effect` (static) vs
     /// `$.deferred_template_effect` (stateful).
-    pub(super) fn expr_has_state(&self, expr_id: ExprId) -> bool {
+    pub(super) fn expr_has_state(
+        &self,
+        expr_id: ExprId,
+    ) -> Result<bool, UnsupportedSvelteRuntimeSurface> {
         let analyzed = self.ir.analysis.expressions.get(expr_id);
         // Official `has_state` is set by a reactive signal/prop reference OR by a BINDING
         // IMPURITY: a MEMBER access rooted at any declared binding
@@ -1286,17 +1312,23 @@ impl<'a> SupportedClientIr<'a> {
         // / plain local is impure ⇒ has_state, so `{d.x}` joins the `$.template_effect`
         // even though `d` is not a live signal) OR an assignment/update MUTATION (a write
         // is not pure, so `{obj.x = 1}` / `{plain++}` also join the `$.template_effect`).
-        super::reactive_analysis::expr_references_signal(
-            analyzed.source,
+        // The reference half consumes the STORED analysis references (no reparse);
+        // the impurity half fails CLOSED on a recovery failure.
+        if super::reactive_analysis::expr_references_signal(
+            &analyzed.references,
             analyzed.scope,
             &self.ir.analysis.bindings,
             &self.ir.analysis.scopes,
-        ) || super::reactive_analysis::expr_has_binding_impurity(
+        ) {
+            return Ok(true);
+        }
+        super::reactive_analysis::expr_has_binding_impurity(
             analyzed.source,
             analyzed.scope,
             &self.ir.analysis.bindings,
             &self.ir.analysis.scopes,
         )
+        .map_err(|()| UnsupportedSvelteRuntimeSurface::expression_fact_recovery("binding-impurity"))
     }
 
     /// Whether a template expression `has_call` (the official
@@ -1304,7 +1336,10 @@ impl<'a> SupportedClientIr<'a> {
     /// uses. A dynamic attribute / property value that `has_call` is MEMOIZED into the
     /// `$.template_effect(($N) => …, [() => expr])` deps-array form (the official
     /// `build_template_chunk` memoize rule), so the call runs once per dep change.
-    pub(super) fn expr_has_call(&self, expr_id: ExprId) -> bool {
+    pub(super) fn expr_has_call(
+        &self,
+        expr_id: ExprId,
+    ) -> Result<bool, UnsupportedSvelteRuntimeSurface> {
         let analyzed = self.ir.analysis.expressions.get(expr_id);
         super::reactive_analysis::expr_has_call(
             analyzed.source,
@@ -1313,6 +1348,7 @@ impl<'a> SupportedClientIr<'a> {
             &self.ir.analysis.scopes,
             &self.declared_roots,
         )
+        .map_err(|()| UnsupportedSvelteRuntimeSurface::expression_fact_recovery("has-call"))
     }
 
     /// Build the `bind:group` DYNAMIC/mixed value ([`GroupDynamicValue`]) for each recorded
@@ -1334,15 +1370,19 @@ impl<'a> SupportedClientIr<'a> {
             let IrNode::Element(el) = self.ir.node(node) else {
                 continue;
             };
-            let (value, has_state) = self.attr_value_for(el, "value")?;
+            let (value, has_state) = self.attr_value_for(
+                el,
+                "value",
+                super::client_legacy_value::AuthoredValueSurface::AttributeValue,
+            )?;
             let reactive = has_state || value.has_call();
             // The outer `?? ''` group-value coercion is gated on DEFINEDNESS (official
             // `evaluated.is_defined`), NOT single-vs-mixed: a provably-defined SINGLE value
             // omits it. Reuse the SAME `mixed_chunk_nullish_wrap` definedness analysis the
             // mixed-attribute parts run (no new analysis path) — meaningful only for a single
             // value (a mixed value is already a string and never carries the outer coercion).
-            let single_value_defined =
-                matches!(value, AttrValue::Single { .. }) && self.group_value_single_is_defined(el);
+            let single_value_defined = matches!(value, AttrValue::Single { .. })
+                && self.group_value_single_is_defined(el)?;
             out.push((
                 node,
                 super::client_plan_types::GroupDynamicValue {

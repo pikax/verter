@@ -1,0 +1,58 @@
+{
+  "slug": "cls-dyn-eschex-cls-q-snip-ext-prune-u",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "cls_dyn_eschex_cls_q_snip_ext_prune_u",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "template_effect",
+    "set_class",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "from_html",
+    "set_class",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "template_effect": 1,
+    "set_class": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div>x</div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div>x</div>`); export default function cls_dyn_eschex_cls_q_snip_ext_prune_u($$anchor, $$props) {const subject = ($$anchor) => {var div = root(); $.template_effect(() => $.set_class(div, 1, $$props.value, 'svelte-<scoped>')); $.append($$anchor, div);}; subject($$anchor);}",
+  "css": {
+    "present": true,
+    "hash": "svelte-sw2v6m",
+    "code": "\n\t.a\\26 b.svelte-<scoped> {\n\t\tcolor: red;\n\t}\n\n\t.unused-prune.svelte-<scoped> {\n\t\tcolor: blue;\n\t}\n"
+  }
+}

@@ -10,11 +10,13 @@
 //! rewrite, BEFORE the plan exists. The child block-body regions are carried by their
 //! [`TemplateScopeId`]; the emitter recurses into them.
 
+use super::client_legacy_value::{AuthoredExpr, AuthoredValueSurface};
 use super::client_plan::SupportedClientIr;
-use super::client_plan_types::{
+use super::client_plan_block_types::{
     ClientAwait, ClientBlock, ClientDebugEntry, ClientDeclKeyword, ClientDeclaration, ClientEach,
-    ClientEachKey, ClientIfBranch, ClientNode,
+    ClientEachKey, ClientIfBranch, DerivedHelper, PreparedDerivedRead, PreparedIfCondition,
 };
+use super::client_plan_types::ClientNode;
 use super::expr::{is_signal_kind, BindingRuntimeKind, ExprRefKind};
 use super::ir::{
     BindingId, BlockIr, DebugArg, DeclKind, ExprId, IfBranch, PatternId, SvelteMode,
@@ -67,7 +69,10 @@ impl<'a> SupportedClientIr<'a> {
                 catch_binding,
                 catch_body,
             } => ClientBlock::Await(ClientAwait {
-                promise: self.rewrite(*promise, self.expr_scope(*promise))?,
+                promise: self.prepare_template_value(
+                    AuthoredExpr(*promise),
+                    AuthoredValueSurface::AwaitPromise,
+                )?,
                 pending: *pending,
                 then_param: self.pattern_single_name(*then_binding)?,
                 then_body: *then_body,
@@ -75,7 +80,10 @@ impl<'a> SupportedClientIr<'a> {
                 catch_body: *catch_body,
             }),
             BlockIr::Key { expr, body } => ClientBlock::Key {
-                expr: self.rewrite(*expr, self.expr_scope(*expr))?,
+                expr: self.prepare_template_value(
+                    AuthoredExpr(*expr),
+                    AuthoredValueSurface::KeyExpression,
+                )?,
                 body: *body,
             },
             // A `{#snippet}` is the component/snippet surface — refused at the classifier,
@@ -91,7 +99,10 @@ impl<'a> SupportedClientIr<'a> {
     }
 
     /// Project the `{#if}` chain branches (the trailing `condition: None` branch is the
-    /// `{:else}`). Each test is rewritten in its OWN recorded (parent) scope.
+    /// `{:else}`). Each test is PREPARED through the sole authored-value entry; a
+    /// call-bearing test additionally records its hoisted `$.derived` read — the
+    /// official `IfBlock.js` topology (`var d = $.derived(() => <test>); …
+    /// if ($.get(d))`), UNCONDITIONAL on mode (never `$.derived_safe_equal`).
     fn project_if_branches(
         &self,
         branches: &[IfBranch],
@@ -100,7 +111,19 @@ impl<'a> SupportedClientIr<'a> {
             .iter()
             .map(|branch| {
                 let test = match branch.condition {
-                    Some(cond) => Some(self.rewrite(cond, self.expr_scope(cond))?),
+                    Some(cond) => {
+                        let value = self.prepare_template_value(
+                            AuthoredExpr(cond),
+                            AuthoredValueSurface::IfCondition,
+                        )?;
+                        let call_derived = value.has_call().then(|| PreparedDerivedRead {
+                            thunk_body: value.arrow_body(),
+                        });
+                        Some(PreparedIfCondition {
+                            value,
+                            call_derived,
+                        })
+                    }
                     None => None,
                 };
                 Ok(ClientIfBranch {
@@ -162,10 +185,15 @@ impl<'a> SupportedClientIr<'a> {
             .or_else(|| item_mutated.then(|| "$$index".to_string()));
 
         // The keyed key callback emits in its OWN scope (the key expr was lowered with
-        // item / index as PLAIN locals), so the rewrite reads them plainly.
+        // item / index as PLAIN locals), so the rewrite reads them plainly. The key
+        // is a RAW semantic role (official keyed-each keys never wrap) — it routes
+        // through the policy entry point and yields a raw carrier.
         let key = match key {
             Some(key_expr) => {
-                let expr = self.rewrite(key_expr, self.expr_scope(key_expr))?;
+                let expr = self.prepare_template_value(
+                    AuthoredExpr(key_expr),
+                    AuthoredValueSurface::EachKeyExpression,
+                )?;
                 let key_uses_index = user_index_name.as_ref().is_some_and(|idx| {
                     self.ir
                         .analysis
@@ -191,7 +219,10 @@ impl<'a> SupportedClientIr<'a> {
 
         Ok(ClientEach {
             flags,
-            source: self.rewrite(source, self.expr_scope(source))?,
+            source: self.prepare_template_value(
+                AuthoredExpr(source),
+                AuthoredValueSurface::EachCollection,
+            )?,
             key,
             item_param,
             index_param,
@@ -214,9 +245,12 @@ impl<'a> SupportedClientIr<'a> {
         })
     }
 
-    /// Project a `{@const x = …}` tag into a block-local derived declaration
-    /// (`const x = $.derived(() => …)`). A destructuring `{@const {a, b} = …}` (the
-    /// `computed_const` form) is not yet supported — fail closed.
+    /// Project a `{@const x = …}` tag into a block-local derived declaration —
+    /// the PREPARED initializer (legacy wrap in definite legacy only) plus the
+    /// mode-aware helper (official `create_derived`: `$.derived` in runes mode,
+    /// `$.derived_safe_equal` in EVERY non-runes mode). A destructuring
+    /// `{@const {a, b} = …}` (the `computed_const` form) is not yet supported —
+    /// fail closed.
     pub(super) fn project_const_tag(
         &self,
         pattern: PatternId,
@@ -228,9 +262,15 @@ impl<'a> SupportedClientIr<'a> {
                 span: verter_span::Span::new(0, 0),
             });
         };
-        let init = self.rewrite(init, self.expr_scope(init))?;
+        let init = self
+            .prepare_template_value(AuthoredExpr(init), AuthoredValueSurface::ConstInitializer)?;
+        let helper = if matches!(self.ir.component.mode, SvelteMode::Runes) {
+            DerivedHelper::Derived
+        } else {
+            DerivedHelper::DerivedSafeEqual
+        };
         Ok(ClientNode::Declarations {
-            decls: vec![ClientDeclaration::Derived { name, init }],
+            decls: vec![ClientDeclaration::Derived { name, init, helper }],
         })
     }
 
@@ -296,8 +336,17 @@ impl<'a> SupportedClientIr<'a> {
                     });
                 }
                 None => {
+                    // A declaration-tag initializer is a RAW semantic role (official
+                    // visits it as a normal expression) — it routes through the
+                    // policy entry point and yields a raw carrier.
                     let init = match declarator.init {
-                        Some(init) => Some(self.rewrite(init, self.expr_scope(init))?),
+                        Some(init) => Some(
+                            self.prepare_template_value(
+                                AuthoredExpr(init),
+                                AuthoredValueSurface::DeclarationTagInitializer,
+                            )?
+                            .inline_expression(),
+                        ),
                         None => None,
                     };
                     decls.push(ClientDeclaration::Inert {
@@ -322,7 +371,11 @@ impl<'a> SupportedClientIr<'a> {
     ) -> Result<ClientNode, UnsupportedSvelteRuntimeSurface> {
         let mut entries = Vec::with_capacity(args.len());
         for arg in args {
-            let snapshot_arg = self.rewrite(arg.expr, self.expr_scope(arg.expr))?;
+            // A `{@debug}` argument is a RAW semantic role — it routes through the
+            // policy entry point and yields a raw carrier.
+            let snapshot_arg = self
+                .prepare_template_value(AuthoredExpr(arg.expr), AuthoredValueSurface::DebugArg)?
+                .inline_expression();
             entries.push(ClientDebugEntry {
                 key: arg.name.clone(),
                 snapshot_arg,

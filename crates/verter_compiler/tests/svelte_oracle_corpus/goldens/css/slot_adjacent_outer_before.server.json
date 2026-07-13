@@ -1,0 +1,38 @@
+{
+  "slug": "css/slot_adjacent_outer_before.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "slot_adjacent_outer_before",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "slot"
+  ],
+  "helperSet": [
+    "slot"
+  ],
+  "helperCounts": {
+    "slot": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": true,
+    "hash": "svelte-165n1b3",
+    "code": "\n\t.outer.svelte-<scoped> + .inner:where(.svelte-<scoped>) { color: red; }\n"
+  }
+}

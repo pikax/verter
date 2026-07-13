@@ -129,6 +129,21 @@ pub enum CoreOfficialValidationRule {
     /// A DUPLICATE attribute / directive on one element — official `attribute_duplicate`.
     /// (Verter already fails this closed; carried here for reject-matrix coverage.)
     AttributeDuplicate,
+    /// A `<slot>` whose `name` attribute is NOT a static text value (`name={x}` /
+    /// `name="a{x}"` / a valueless `name`) — official `slot_element_invalid_name`
+    /// ("slot attribute must be a static value"). The official analyze
+    /// `SlotElement` visitor checks `is_text_attribute` on the `name` attribute
+    /// in SOURCE order before reading the name.
+    SlotElementInvalidName,
+    /// A `<slot name="default">` — official `slot_element_invalid_name_default`
+    /// ("`default` is a reserved word — it cannot be used as a slot name").
+    SlotElementInvalidNameDefault,
+    /// A `<slot>` carrying a DIRECTIVE other than `let:` (a `class:` / `style:` /
+    /// `bind:` / `on:` / `use:` / `transition:` / `animate:` / `{@attach}`) —
+    /// official `slot_element_invalid_attribute` ("`<slot>` can only receive
+    /// attributes and (optionally) let directives"). Plain attributes and
+    /// `{...spread}`s are the accepted slot-prop surface.
+    SlotElementInvalidAttribute,
     /// An invalid `<svelte:options>` (a duplicate / nested options element, a
     /// non-boolean `runes` value, or an unsupported axis) — official `options_*`.
     /// (Verter already fails these closed; carried here for reject-matrix coverage.)
@@ -265,6 +280,9 @@ impl CoreOfficialValidationRule {
         CoreOfficialValidationRule::RuneInvalidArguments,
         CoreOfficialValidationRule::PropsInvalidPattern,
         CoreOfficialValidationRule::AttributeDuplicate,
+        CoreOfficialValidationRule::SlotElementInvalidName,
+        CoreOfficialValidationRule::SlotElementInvalidNameDefault,
+        CoreOfficialValidationRule::SlotElementInvalidAttribute,
         CoreOfficialValidationRule::OptionsInvalid,
         CoreOfficialValidationRule::ParserStrictness,
         CoreOfficialValidationRule::DirectiveInvalidValue,
@@ -301,6 +319,9 @@ impl CoreOfficialValidationRule {
             Self::RuneInvalidArguments => "RuneInvalidArguments",
             Self::PropsInvalidPattern => "PropsInvalidPattern",
             Self::AttributeDuplicate => "AttributeDuplicate",
+            Self::SlotElementInvalidName => "SlotElementInvalidName",
+            Self::SlotElementInvalidNameDefault => "SlotElementInvalidNameDefault",
+            Self::SlotElementInvalidAttribute => "SlotElementInvalidAttribute",
             Self::OptionsInvalid => "OptionsInvalid",
             Self::ParserStrictness => "ParserStrictness",
             Self::DirectiveInvalidValue => "DirectiveInvalidValue",
@@ -357,6 +378,9 @@ impl CoreOfficialValidationRule {
             Self::RuneInvalidArguments => "rune_invalid_arguments",
             Self::PropsInvalidPattern => "props_invalid_pattern",
             Self::AttributeDuplicate => "attribute_duplicate",
+            Self::SlotElementInvalidName => "slot_element_invalid_name",
+            Self::SlotElementInvalidNameDefault => "slot_element_invalid_name_default",
+            Self::SlotElementInvalidAttribute => "slot_element_invalid_attribute",
             Self::OptionsInvalid => "options_invalid",
             // ParserStrictness spans a FAMILY of official parse-phase codes; the exact
             // one is carried per-refusal on `OfficialRejection::official_code` and keyed
@@ -405,6 +429,13 @@ impl CoreOfficialValidationRule {
             Self::RuneInvalidArguments => "svelte-official-reject-rune-invalid-arguments",
             Self::PropsInvalidPattern => "svelte-official-reject-props-invalid-pattern",
             Self::AttributeDuplicate => "svelte-official-reject-attribute-duplicate",
+            Self::SlotElementInvalidName => "svelte-official-reject-slot-element-invalid-name",
+            Self::SlotElementInvalidNameDefault => {
+                "svelte-official-reject-slot-element-invalid-name-default"
+            }
+            Self::SlotElementInvalidAttribute => {
+                "svelte-official-reject-slot-element-invalid-attribute"
+            }
             Self::OptionsInvalid => "svelte-official-reject-options-invalid",
             Self::ParserStrictness => "svelte-official-reject-parser-strictness",
             Self::DirectiveInvalidValue => "svelte-official-reject-directive-invalid-value",
@@ -466,6 +497,16 @@ impl CoreOfficialValidationRule {
             Self::RuneInvalidArguments => "a rune called with an invalid arity / form",
             Self::PropsInvalidPattern => "a `$props()` destructure in an unsupported pattern",
             Self::AttributeDuplicate => "a duplicate attribute / directive",
+            Self::SlotElementInvalidName => {
+                "a `<slot>` whose `name` attribute is not a static text value"
+            }
+            Self::SlotElementInvalidNameDefault => {
+                "a `<slot name=\"default\">` (`default` is a reserved slot name)"
+            }
+            Self::SlotElementInvalidAttribute => {
+                "a `<slot>` carrying a directive other than `let:` (`<slot>` can only \
+                 receive attributes and optionally let directives)"
+            }
             Self::OptionsInvalid => "an invalid `<svelte:options>`",
             Self::ParserStrictness => {
                 "malformed markup the official strict parser rejects (a raw `<`, a close \

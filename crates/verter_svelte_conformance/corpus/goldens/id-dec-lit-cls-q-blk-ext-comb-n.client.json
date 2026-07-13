@@ -1,0 +1,61 @@
+{
+  "slug": "id-dec-lit-cls-q-blk-ext-comb-n",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "id_dec_lit_cls_q_blk_ext_comb_n",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "comment",
+    "first_child",
+    "append",
+    "if",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "comment",
+    "first_child",
+    "from_html",
+    "if"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "comment": 1,
+    "first_child": 1,
+    "append": 2,
+    "if": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div class=\"wrap\"><div class=\"a b\">x</div></div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div class=\"wrap\"><div class=\"a b\">x</div></div>`); export default function id_dec_lit_cls_q_blk_ext_comb_n($$anchor) {let open = true; var fragment = $.comment(); var node = $.first_child(fragment); {var consequent = ($$anchor) => {var div = root(); $.append($$anchor, div);}; $.if(node, ($$render) => {if (open) $$render(consequent);});} $.append($$anchor, fragment);}",
+  "css": {
+    "present": true,
+    "hash": null,
+    "code": "\n\t/* (unused) .wrap #zz {\n\t\tcolor: red;\n\t}*/\n"
+  }
+}

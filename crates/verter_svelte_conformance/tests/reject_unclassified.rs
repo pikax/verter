@@ -24,8 +24,8 @@
 //!
 //! Plus the committed RED self-tests at the bottom: each mutates a DECLARED
 //! cell level in memory and asserts the observation checkers report the
-//! contradiction against the real compiled trace, so a silently weakened
-//! checker fails in-tree.
+//! contradiction against the real compiled trace, so a checker silently
+//! weakened on one of the exercised violation classes fails in-tree.
 //!
 //! # Which cell axes the trace can OBSERVE (vs structurally implied)
 //!
@@ -51,9 +51,10 @@
 //! |                                | count, and `ScopedCssArtifact::has_global` ⇔ `Global` on external rows. The     |
 //! |                                | selector text itself is NOT re-read.                                            |
 //! | `ElementRegion` (5)            | PARTIALLY OBSERVED: `SvelteElement` via the scoped `svelte:element` tag fact    |
-//! |                                | (positive AND negative direction on scoped rows); `LegacySlot` via the typed    |
-//! |                                | [`StyleSelectorUnsupported`] refusal. `StaticElement`/`Component`/`Block`/      |
-//! |                                | `Snippet` all host the same plain scoped `div` — structurally implied.          |
+//! |                                | (positive AND negative direction on scoped rows); `LegacySlot` hosts the same   |
+//! |                                | plain scoped `div` inside the slot fallback region (matcher facts + scoped-     |
+//! |                                | element observations). `StaticElement`/`Component`/`Block`/`Snippet` all host   |
+//! |                                | the same plain scoped `div` — structurally implied.                             |
 //! | `SelectorKind` (0)             | NOT trace-observable (selector spans point into the source; re-reading them     |
 //! |                                | would be a source scan). Structurally implied.                                  |
 //! | `SelectorValueRepresentation` (2) | NOT trace-observable (same reason). Structurally implied.                    |
@@ -65,9 +66,8 @@
 //! coverage note, not a gap this test papers over.
 //!
 //! Disposition partitions are fully observed as typed outcomes: a Supported
-//! cell must COMPILE (and yield the trace facts above); a
-//! `Refused(LegacySlotScopeUnprovable)` cell must fail closed with the typed
-//! [`StyleSelectorUnsupported`] code; an
+//! cell must COMPILE (and yield the trace facts above); the refusal partition
+//! is UNINHABITED (the empty `RefusalKind` match keeps the rail closed); an
 //! `OracleRejected(CssNestingSelectorInvalidPlacement)` cell must fail closed
 //! in Verter's css analysis with the SAME official diagnostic code
 //! (`css_nesting_selector_invalid_placement`) — observed BEFORE lowering, so
@@ -96,7 +96,7 @@ use verter_compiler::svelte::runtime::{
 use verter_svelte_conformance::manifest::{manifest, ManifestCase};
 use verter_svelte_conformance::model::{
     CompileTarget, CssSource, DiagnosticKind, Disposition, ElementRegion, MatchOutcome, Quoting,
-    RefusalKind, StructuralKind, Target, TemplateValueRepresentation,
+    StructuralKind, Target, TemplateValueRepresentation,
 };
 
 /// The committed corpus size this gate runs over (one fixture per manifest
@@ -255,24 +255,34 @@ fn corpus_inventory_is_bijective_with_manifest() {
 /// semantics of every pair are re-proven against the TYPED manifest levels
 /// in [`no_unexpected_byte_identical_fixtures`], so a stale or mis-scoped
 /// allowlist row fails the gate rather than silently widening it.
-const KNOWN_SPREAD_TARGET_SHARED_FIXTURES: [[&str; 2]; 5] = [
-    [
+const KNOWN_SPREAD_TARGET_SHARED_FIXTURES: &[&[&str]] = &[
+    &[
         "type-spread-lit-attr-q-blk-ext-plain-n",
-        "type-spread-lit-id-q-blk-ext-plain-n",
+        "type-spread-lit-cls-q-blk-ext-plain-n",
     ],
-    [
-        "type-spread-lit-attr-q-comp-ext-plain-m",
-        "type-spread-lit-id-q-comp-ext-plain-m",
-    ],
-    [
+    &[
         "type-spread-lit-attr-q-comp-ext-plain-n",
         "type-spread-lit-cls-q-comp-ext-plain-n",
+        "type-spread-lit-id-q-comp-ext-plain-n",
     ],
-    [
+    &[
+        "type-spread-lit-attr-q-el-ext-plain-m",
+        "type-spread-lit-cls-q-el-ext-plain-m",
+    ],
+    &[
+        "type-spread-lit-attr-q-slot-ext-plain-n",
+        "type-spread-lit-cls-q-slot-ext-plain-n",
+        "type-spread-lit-id-q-slot-ext-plain-n",
+    ],
+    &[
+        "type-spread-lit-cls-q-snip-ext-plain-m",
+        "type-spread-lit-id-q-snip-ext-plain-m",
+    ],
+    &[
         "type-spread-lit-attr-q-snip-ext-plain-n",
         "type-spread-lit-id-q-snip-ext-plain-n",
     ],
-    [
+    &[
         "type-spread-lit-cls-q-el-ext-plain-n",
         "type-spread-lit-id-q-el-ext-plain-n",
     ],
@@ -298,67 +308,83 @@ fn no_unexpected_byte_identical_fixtures() {
     //   ONLY in the Target segment (`attr` / `cls` / `id`);
     // - typed semantics: both slugs resolve to manifest cases declaring
     //   `template=Spread`, whose levels differ ONLY in the `target` axis.
-    for [slug_a, slug_b] in KNOWN_SPREAD_TARGET_SHARED_FIXTURES {
-        for slug in [slug_a, slug_b] {
+    for group in KNOWN_SPREAD_TARGET_SHARED_FIXTURES {
+        assert!(
+            group.len() >= 2,
+            "an allowlisted group needs at least two slugs: {group:?}"
+        );
+        for slug in *group {
             if !slug.starts_with("type-spread-lit-") {
                 violations.push(format!(
                     "allowlist row outside the documented `type-spread-lit-*` family: {slug}"
                 ));
             }
         }
-        let segments_a: Vec<&str> = slug_a.split('-').collect();
-        let segments_b: Vec<&str> = slug_b.split('-').collect();
-        if segments_a.len() != SLUG_SEGMENT_COUNT || segments_b.len() != SLUG_SEGMENT_COUNT {
-            violations.push(format!(
-                "allowlisted slugs are not nine-segment case slugs: {slug_a} / {slug_b}"
-            ));
-        } else {
-            for (index, (segment_a, segment_b)) in segments_a.iter().zip(&segments_b).enumerate() {
-                if index == TARGET_SLUG_SEGMENT {
-                    let target_ids = ["attr", "cls", "id"];
-                    if segment_a == segment_b
-                        || !target_ids.contains(segment_a)
-                        || !target_ids.contains(segment_b)
+        // Every PAIR within the group must be the pure Spread×Target
+        // degeneracy — both spellings (the slug shape and the typed levels).
+        for (i, slug_a) in group.iter().enumerate() {
+            for slug_b in &group[i + 1..] {
+                let segments_a: Vec<&str> = slug_a.split('-').collect();
+                let segments_b: Vec<&str> = slug_b.split('-').collect();
+                if segments_a.len() != SLUG_SEGMENT_COUNT || segments_b.len() != SLUG_SEGMENT_COUNT
+                {
+                    violations.push(format!(
+                        "allowlisted slugs are not nine-segment case slugs: {slug_a} / {slug_b}"
+                    ));
+                } else {
+                    for (index, (segment_a, segment_b)) in
+                        segments_a.iter().zip(&segments_b).enumerate()
                     {
-                        violations.push(format!(
-                            "allowlisted pair must differ in the Target segment \
-                             (`attr`/`cls`/`id`): {slug_a} / {slug_b}"
-                        ));
-                    }
-                } else if segment_a != segment_b {
-                    violations.push(format!(
-                        "allowlisted pair differs outside the Target segment \
-                         (segment {index}): {slug_a} / {slug_b}"
-                    ));
-                }
-            }
-        }
-        match (
-            manifest.case_for_slug(slug_a),
-            manifest.case_for_slug(slug_b),
-        ) {
-            (Some(case_a), Some(case_b)) => {
-                for case in [case_a, case_b] {
-                    if case.levels.template_value != TemplateValueRepresentation::Spread {
-                        violations.push(format!(
-                            "allowlisted case is not a Spread cell (template={:?}): {}",
-                            case.levels.template_value, case.slug
-                        ));
+                        if index == TARGET_SLUG_SEGMENT {
+                            let target_ids = ["attr", "cls", "id"];
+                            if segment_a == segment_b
+                                || !target_ids.contains(segment_a)
+                                || !target_ids.contains(segment_b)
+                            {
+                                violations.push(format!(
+                                    "allowlisted pair must differ in the Target segment \
+                                     (`attr`/`cls`/`id`): {slug_a} / {slug_b}"
+                                ));
+                            }
+                        } else if segment_a != segment_b {
+                            violations.push(format!(
+                                "allowlisted pair differs outside the Target segment \
+                                 (segment {index}): {slug_a} / {slug_b}"
+                            ));
+                        }
                     }
                 }
-                let mut target_neutral = case_a.levels;
-                target_neutral.target = case_b.levels.target;
-                if case_a.levels.target == case_b.levels.target || target_neutral != case_b.levels {
-                    violations.push(format!(
-                        "allowlisted pair is not a pure Spread×Target cell-pair (declared \
-                         levels must differ ONLY in `target`): {slug_a} / {slug_b}"
-                    ));
+                match (
+                    manifest.case_for_slug(slug_a),
+                    manifest.case_for_slug(slug_b),
+                ) {
+                    (Some(case_a), Some(case_b)) => {
+                        for case in [case_a, case_b] {
+                            if case.levels.template_value != TemplateValueRepresentation::Spread {
+                                violations.push(format!(
+                                    "allowlisted case is not a Spread cell (template={:?}): {}",
+                                    case.levels.template_value, case.slug
+                                ));
+                            }
+                        }
+                        let mut target_neutral = case_a.levels;
+                        target_neutral.target = case_b.levels.target;
+                        if case_a.levels.target == case_b.levels.target
+                            || target_neutral != case_b.levels
+                        {
+                            violations.push(format!(
+                                "allowlisted pair is not a pure Spread×Target cell-pair \
+                                 (declared levels must differ ONLY in `target`): \
+                                 {slug_a} / {slug_b}"
+                            ));
+                        }
+                    }
+                    _ => violations.push(format!(
+                        "stale allowlist: pair references a slug with NO manifest case: \
+                         {slug_a} / {slug_b}"
+                    )),
                 }
             }
-            _ => violations.push(format!(
-                "stale allowlist: pair references a slug with NO manifest case: \
-                 {slug_a} / {slug_b}"
-            )),
         }
     }
 
@@ -681,7 +707,7 @@ fn fixture_observations_are_consistent_with_declared_cells() {
     let manifest = manifest();
     let root = corpus_root();
     let mut violations: Vec<String> = Vec::new();
-    let (mut supported_seen, mut refused_seen, mut oracle_rejected_seen) = (0usize, 0usize, 0usize);
+    let (mut supported_seen, mut oracle_rejected_seen) = (0usize, 0usize);
 
     for case in manifest.cases() {
         let path = root.join("fixtures").join(format!("{}.svelte", case.slug));
@@ -709,32 +735,11 @@ fn fixture_observations_are_consistent_with_declared_cells() {
                 }
                 check_attr_provenance(case, &trace, &mut violations);
             }
-            Disposition::Refused(kind) => {
-                refused_seen += 1;
-                // Exhaustive: a new refusal kind must land with its own typed
-                // observation arm.
-                let RefusalKind::LegacySlotScopeUnprovable = kind;
-                match &result {
-                    Err(ClientCompileError::Unsupported(
-                        UnsupportedSvelteRuntimeSurface::StyleSelectorUnsupported { code, .. },
-                    )) if *code == "svelte-runtime-unsupported-style-selector" => {}
-                    other => violations.push(format!(
-                        "{}: declared Refused({kind:?}) expects the typed \
-                         `svelte-runtime-unsupported-style-selector` refusal, observed {other:?}",
-                        case.slug
-                    )),
-                }
-                // The refusal fires in the matcher — lowering already ran, so
-                // the attribute provenance axes stay observable...
-                check_attr_provenance(case, &trace, &mut violations);
-                // ...while the refused matcher run writes NO facts.
-                if !trace.style_matches.is_empty() {
-                    violations.push(format!(
-                        "{}: a refused matcher run must record no matcher facts",
-                        case.slug
-                    ));
-                }
-            }
+            // The refusal vocabulary is UNINHABITED — a declared Refused row is
+            // impossible by construction (the empty match proves the rail stays
+            // closed; a future refusal kind must land with its own typed
+            // observation arm here).
+            Disposition::Refused(kind) => match kind {},
             Disposition::OracleRejected(kind) => {
                 oracle_rejected_seen += 1;
                 // Exhaustive: a new diagnostic kind must land with its own
@@ -768,15 +773,15 @@ fn fixture_observations_are_consistent_with_declared_cells() {
         }
     }
 
-    // Non-vacuity: the gate must have exercised every disposition partition
-    // over the full committed corpus.
+    // Non-vacuity: the gate must have exercised every INHABITED disposition
+    // partition over the full committed corpus (the refusal partition is
+    // uninhabited by construction — the empty `RefusalKind` match above).
     assert_eq!(
-        supported_seen + refused_seen + oracle_rejected_seen,
+        supported_seen + oracle_rejected_seen,
         CASE_COUNT,
         "every committed case must be observed"
     );
     assert!(supported_seen > 0, "no Supported case was observed");
-    assert!(refused_seen > 0, "no Refused case was observed");
     assert!(
         oracle_rejected_seen > 0,
         "no OracleRejected case was observed"
@@ -787,9 +792,11 @@ fn fixture_observations_are_consistent_with_declared_cells() {
 // ---------------------------------------------------------------------------
 // Committed RED self-tests: each mutates the DECLARED cell in memory and
 // asserts the observation checkers report the contradiction against the REAL
-// compiled trace — a silently weakened checker fails IN-TREE, without any
-// out-of-tree plant recipe. (Slugs still only locate the fixture; the
-// mutated axis is always a typed level, never a path.)
+// compiled trace — a checker silently weakened on one of the violation
+// classes exercised below fails IN-TREE, without any out-of-tree plant
+// recipe (unexercised classes rely on the out-of-tree plant recipes). (Slugs
+// still only locate the fixture; the mutated axis is always a typed level,
+// never a path.)
 // ---------------------------------------------------------------------------
 
 /// Compile one committed fixture through Verter's client pipeline.

@@ -1,0 +1,31 @@
+{
+  "slug": "id-lit-escmix-attr-bool-snip-ext-nest-n",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "id_lit_escmix_attr_bool_snip_ext_nest_n",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [],
+  "helperSet": [],
+  "helperCounts": {},
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": true,
+    "hash": null,
+    "code": "\n\t/* (unused) #\\7a \\z {\n\t\tcolor: red;\n\n\t\t&:hover {\n\t\t\tcolor: blue;\n\t\t}\n\t}*/\n"
+  }
+}

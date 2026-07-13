@@ -48,12 +48,20 @@ use crate::svelte::parser::{
 ///   / fragment): an `on*` falls through to the element-event path (no corpus
 ///   fixture relies on a different rule, and the official analyzer never delegates
 ///   it because the parent is not a `RegularElement`).
+/// - [`AttrHost::Slot`] — a `<slot>` element. EVERY `on*` attribute is a plain slot
+///   PROPERTY under its original name (the official analyze/transform `SlotElement`
+///   visitors never event-classify an attribute — `<slot onclick={f}>` is the slot
+///   prop `onclick`, and `<slot onclick="text">` the text prop, NEVER the
+///   `attribute_invalid_event_handler` error), so the whole event-attribute rule is
+///   bypassed and the value lowers through the generic static/dynamic/mixed match.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum AttrHost {
     /// A regular intrinsic element.
     Element,
     /// A component reference (incl. `<svelte:component>` / `<svelte:self>`).
     Component,
+    /// A `<slot>` element (slot-property semantics — no event classification).
+    Slot,
     /// A `<svelte:element this={…}>` dynamic element.
     DynamicElement,
     /// A `<svelte:window>` / `<svelte:body>` / `<svelte:document>` global host.
@@ -123,7 +131,11 @@ fn lower_plain_attr(
     // value that is EXACTLY one expression chunk with no literal text
     // (`onclick="{() => x()}"`). The event NAME is `name.slice(2)` (the official
     // `visit_event_attribute`), then capture-normalized.
-    if let Some(raw_event) = name.strip_prefix("on") {
+    // A `<slot>` never event-classifies an attribute: official `SlotElement`
+    // treats every `on*` as a PLAIN Attribute (a slot prop), including the
+    // text-valued form — so the event rule (and its invalid-handler error) is
+    // bypassed entirely and the value lowers through the generic match below.
+    if let Some(raw_event) = name.strip_prefix("on").filter(|_| host != AttrHost::Slot) {
         if let Some(handler_span) = single_expression_value_span(ctx, value) {
             // The official `metadata.delegated` rule (`Attribute.js`):
             // `parent.type === 'RegularElement' && can_delegate_event(name.slice(2))`.
@@ -133,6 +145,13 @@ fn lower_plain_attr(
             // `$.attribute_effect`, and a window/body/document binds a DIRECT global
             // listener — and NONE of those is ever delegated.
             match host {
+                // A `<slot>` host never enters the event rule (the
+                // `strip_prefix` filter above bypasses it), so this arm is
+                // structurally unreachable — kept loud rather than silently
+                // mis-classifying a slot prop as an event.
+                AttrHost::Slot => {
+                    unreachable!("slot hosts bypass the event-attribute rule")
+                }
                 AttrHost::Component => {
                     // A component-hosted `on*` is a FORWARDED PROP under its ORIGINAL
                     // attribute name (`onclick`), passed in the component call's props
@@ -542,6 +561,7 @@ fn lower_directive(
         SvelteDirectiveKind::Let => Some(AttrIr::Let {
             name: directive.local.clone(),
             expr: value_expr(ctx),
+            span: attr_span,
         }),
         SvelteDirectiveKind::Unknown => {
             ctx.errors.push(

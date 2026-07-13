@@ -9,8 +9,11 @@
 use verter_span::Span;
 
 use super::client_allowlist::SupportedHtmlElement;
+use super::client_legacy_value::PreparedTemplateValue;
+use super::client_plan_block_types::{ClientBlock, ClientDebugEntry, ClientDeclaration};
 use super::client_shapes::{ClientBindShape, ClientEventHandlerShape};
 use super::ir::{EventOrigin, ExprId, LetBinding, TemplateScopeId};
+use super::synthesized_value::SynthesizedTemplateValue;
 
 /// A node in the NARROW client node arena — the closed template-node vocabulary
 /// the emitter walks. Every supported [`IrNode`] projects to exactly one of these;
@@ -121,6 +124,12 @@ pub(super) enum ClientNode {
     /// carried by scope id). Emitted directly against the region anchor (a sole-root
     /// STANDALONE component) or against a walked `<!>` node var (a sibling).
     Component(ClientComponent),
+    /// A `<slot>` outlet — the projected `$.slot(node, $$props, name, props,
+    /// fallback)` call against its walked `<!>` anchor var. Carries ONLY
+    /// fully-classified/rewritten data (the semantic name, the planned property
+    /// members / spread thunks, the memoizer hoists, the optional fallback
+    /// region) — the emitter never recovers these from broad IR or source text.
+    Slot(ClientSlot),
     /// A `{@render}` tag — a static snippet call (`pair(node, () => 1)`) or a dynamic
     /// `$.snippet(node, () => fn, …)`, its callee + argument thunks rewritten.
     Render(ClientRender),
@@ -215,8 +224,10 @@ pub(super) struct ClientBoundary {
 pub(super) struct BoundaryAttrProp {
     /// The prop KEY — the source attribute name (`onerror` / `failed` / `pending`).
     pub(super) name: String,
-    /// The rewritten value expression — the getter body (`return <expr>;`) or the init value.
-    pub(super) expr: String,
+    /// The PREPARED value expression (via the sole authored-value entry, surface
+    /// `BoundaryProp` — policy `Raw`, so the carrier is always the raw rewritten
+    /// form): the getter body (`return <expr>;`) or the init value.
+    pub(super) value: PreparedTemplateValue,
     /// Whether the value is STATE-BEARING (⇒ getter accessor) vs a constant (⇒ plain init) —
     /// official's `metadata.expression.has_state` (the sync-only, snippet-name-aware predicate).
     pub(super) has_state: bool,
@@ -252,7 +263,7 @@ pub(super) struct ClientSvelteElement {
     /// The element's attribute-fold items, in SOURCE ORDER — the entries of the single
     /// `$.attribute_effect($$element, () => ({ … }))` the callback emits. Empty when the
     /// element has no foldable attributes (no `$.attribute_effect` is emitted).
-    pub(super) fold: Vec<ElementFoldItem>,
+    pub(super) fold: Vec<AttributeEffectItem>,
     /// The scope-hash literal (`'svelte-<hash>'`) the FOLD threads as the official 6th
     /// positional `$.attribute_effect` argument (`build_attribute_effect` —
     /// `element.metadata.scoped && css.hash`), with the intermediate sync/async/blockers
@@ -273,21 +284,50 @@ pub(super) struct ClientSvelteElement {
     pub(super) body_region: TemplateScopeId,
 }
 
-/// One source-ordered entry of a `<svelte:element>`'s `$.attribute_effect` fold.
+/// One source-ordered item of an `$.attribute_effect` fold — the SHARED typed
+/// item vocabulary serving BOTH the regular-element spread fold and the
+/// `<svelte:element>` fold, so the wrap/memoize rules cannot drift between the
+/// two hosts. The emitter renders the items through ONE ordered memoizer (the
+/// official per-effect `Memoizer`) producing the arrow params + the single
+/// dependency array.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum ElementFoldItem {
-    /// A pre-built fold entry (`class: cls`, `...spread`, `[$.CLASS]: { … }`) — emitted
-    /// verbatim into the object literal.
+pub(super) enum AttributeEffectItem {
+    /// A pre-rendered SYNTHESIZED/static entry (`name: 'lit'`, the
+    /// analyze-phase `class: ''` / `style: ''` synthetics) — emitted verbatim,
+    /// never memoized. Carries NO authored expression by construction.
     Entry(String),
-    /// An EVENT handler — hoisted to a stable `var <name> = <handler>;` local in the callback
-    /// (the official attribute-effect handler-stability hoist), then referenced by name in the
-    /// fold (`onclick: <name>`). The hoist name is minted at emit time (collision-safe).
+    /// A co-located ordinary attribute value (`prop: <value>`) — each authored
+    /// expression was PREPARED (`BuildExpression` policy) and memoizes on
+    /// `has_call` (the official `build_attribute_value` + `Memoizer.add`).
+    Attr {
+        /// The fold object KEY (already `object_key`-quoted as needed).
+        prop: String,
+        /// The structured value (authored parts prepared at planning).
+        value: AttrValue,
+    },
+    /// A spread operand (`...expr`) — RAW with respect to `build_expression`,
+    /// but memoized on `has_call` (official `SpreadAttribute` + `Memoizer.add`).
+    Spread {
+        /// The prepared (raw-policy) operand.
+        value: PreparedTemplateValue,
+    },
+    /// An EVENT-attribute handler with a function-expression value — hoisted to
+    /// a stable `var <name> = <handler>;` local (the official attribute-effect
+    /// handler-stability hoist), then referenced by name in the fold.
     Event {
         /// The fold object KEY (`onclick`).
         prop: String,
-        /// The rewritten handler body (`() => $.update(n)`) — the `var <name> = …;` RHS.
-        handler: String,
+        /// The prepared handler (raw-policy; a function expression never
+        /// triggers the wrap).
+        handler: PreparedTemplateValue,
     },
+    /// The merged `[$.CLASS]: { … }` directive object — SYNTHESIZED (inner
+    /// conditions stay raw), memoized as a whole on the merged `has_call`.
+    ClassDirectives(SynthesizedTemplateValue),
+    /// The merged `[$.STYLE]: { … }` / `[normal, important]` directive
+    /// object — SYNTHESIZED (inner values were prepared and wrap), memoized as
+    /// a whole on the merged `has_call`.
+    StyleDirectives(SynthesizedTemplateValue),
 }
 
 /// The SEMANTIC pieces of one coalesced `$.set_class` write, HOST-INDEPENDENT — the
@@ -332,6 +372,57 @@ pub(super) struct ClientElementBind {
     pub(super) getter: String,
     /// The rewritten setter body (carries the `$.set(local, $$value, true)` proxy flag).
     pub(super) setter: String,
+}
+
+/// A projected `<slot>` outlet — the closed structural mirror of an
+/// [`IrNode::Slot`](super::ir::IrNode) node, built (with every prop value
+/// rewritten) in `client_slot_plan`. The emitter assembles the official
+/// `$.slot(node, $$props, '<name>', <props>, <fallback>)` call from this typed
+/// structure; the fallback region is emitted through the shared region emitter
+/// at its [`TemplateScopeId`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ClientSlot {
+    /// The full open-tag source span.
+    pub(super) span: Span,
+    /// The DECODED semantic slot name (`'default'` when unnamed) — emitted as a
+    /// single-quoted string literal.
+    pub(super) name: String,
+    /// The ordinary (non-spread) slot props, in source order — the members of
+    /// the ONE leading props object (official: `b.object(props)` first, every
+    /// spread thunk after; spreads never interleave with the object).
+    pub(super) props: Vec<SlotProp>,
+    /// The spread thunk texts in source order (`rest` for an unthunked zero-arg
+    /// accessor call, `() => o().x` otherwise) — appended AFTER the props object
+    /// inside `$.spread_props({ … }, thunk, …)`. Empty ⇒ the plain object form.
+    pub(super) spreads: Vec<String>,
+    /// The memoized-value hoists (`let $N = $.derived(() => …);`), emitted inside
+    /// a wrapping `{ … }` block BEFORE the `$.slot` statement (the official
+    /// per-`SlotElement` `Memoizer.deriveds()`). Empty when no value memoizes.
+    pub(super) memo_hoists: Vec<String>,
+    /// The fallback region, or `None` for the official literal `null` (a slot
+    /// with NO raw children — a whitespace-only fallback stays `Some`, emitting
+    /// the official empty callback `($$anchor) => {}`).
+    pub(super) fallback: Option<TemplateScopeId>,
+}
+
+/// One ordinary member of a `$.slot` props object, in source order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum SlotProp {
+    /// `key: value` — a static literal / boolean / non-reactive value.
+    Init {
+        /// The prop key.
+        key: String,
+        /// The already-rewritten value expression.
+        value: String,
+    },
+    /// `get key() { return body; }` — a state-bearing value (the child re-reads
+    /// on change).
+    Getter {
+        /// The prop key.
+        key: String,
+        /// The already-rewritten getter body.
+        body: String,
+    },
 }
 
 /// A projected component invocation — the closed structural mirror of a `<Foo …/>` /
@@ -566,137 +657,6 @@ pub(super) struct RegionOps {
     pub(super) scope_id: TemplateScopeId,
     /// The region's reactive ops, in source order.
     pub(super) ops: Vec<ClientRuntimeOp>,
-}
-
-/// A control-flow block with its head expressions rewritten + child-region scope ids.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum ClientBlock {
-    /// `{#if}` chain — branches in source order; the trailing `test: None` branch is
-    /// the `{:else}`.
-    If {
-        /// The if/else-if/else branches, in source order.
-        branches: Vec<ClientIfBranch>,
-    },
-    /// `{#each}` — keyed/unkeyed, optional index, optional `{:else}`.
-    Each(ClientEach),
-    /// `{#await}` — pending/then/catch.
-    Await(ClientAwait),
-    /// `{#key expr}` — `$.key(node, () => expr, ($$anchor) => { … })`.
-    Key {
-        /// The rewritten key expression (the `() => expr` thunk body).
-        expr: String,
-        /// The body region.
-        body: TemplateScopeId,
-    },
-}
-
-/// One branch of an `{#if}` chain.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ClientIfBranch {
-    /// The rewritten branch test, or `None` for the `{:else}` branch.
-    pub(super) test: Option<String>,
-    /// The branch body region.
-    pub(super) body: TemplateScopeId,
-}
-
-/// A projected `{#each}` block.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ClientEach {
-    /// The official EACH flags bitmask (`EACH_ITEM_REACTIVE` | `EACH_INDEX_REACTIVE` |
-    /// `EACH_IS_CONTROLLED` | `EACH_ITEM_IMMUTABLE`).
-    pub(super) flags: u8,
-    /// The rewritten source expression (the `() => SOURCE` thunk body).
-    pub(super) source: String,
-    /// The KEY callback for a keyed each (`(item) => key`), or `None` for an unkeyed
-    /// each (emitted as the `$.index` literal).
-    pub(super) key: Option<ClientEachKey>,
-    /// The item binding param name (`None` for the no-item `{#each {length}}` form).
-    pub(super) item_param: Option<String>,
-    /// The index binding param name, emitted ONLY when [`ClientEach::emit_index`] is set.
-    pub(super) index_param: Option<String>,
-    /// Whether the index render param is emitted (the official `uses_index` rule: the
-    /// index is read, OR the item is reassigned / mutated).
-    pub(super) emit_index: bool,
-    /// The body region.
-    pub(super) body: TemplateScopeId,
-    /// The `{:else}` fallback region.
-    pub(super) else_body: Option<TemplateScopeId>,
-}
-
-/// The key callback of a keyed `{#each}` — emitted in its OWN callback scope (the key
-/// expression is PLAIN, never body-signal-rewritten).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ClientEachKey {
-    /// The key-callback params (`(item)` or `(item, index)` when the key reads the index).
-    pub(super) params: Vec<String>,
-    /// The key expression rewritten in the KEY scope (plain, NOT body-signal-rewritten).
-    pub(super) expr: String,
-}
-
-/// A projected `{#await}` block.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ClientAwait {
-    /// The rewritten promise expression (the `() => PROMISE` thunk body).
-    pub(super) promise: String,
-    /// The pending body region (`None` → the `null` argument slot).
-    pub(super) pending: Option<TemplateScopeId>,
-    /// The `{:then v}` value param name.
-    pub(super) then_param: Option<String>,
-    /// The `{:then}` body region.
-    pub(super) then_body: Option<TemplateScopeId>,
-    /// The `{:catch e}` error param name.
-    pub(super) catch_param: Option<String>,
-    /// The `{:catch}` body region.
-    pub(super) catch_body: Option<TemplateScopeId>,
-}
-
-/// One block-local declaration (a `{@const}` derived memo, a `{const}/{let}` inert
-/// declarator, or a rune-carrying `{let x = $state(…)}` declarator).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum ClientDeclaration {
-    /// `{@const x = INIT}` (runes mode) → `const x = $.derived(() => INIT);`.
-    Derived {
-        /// The declared name.
-        name: String,
-        /// The rewritten initializer (the `() => INIT` derived body).
-        init: String,
-    },
-    /// `{const x = INIT}` / `{let x = INIT}` / `{let x}` inert declarator → a plain
-    /// block-local `const`/`let` (NO `$.derived`, NO `$.get`); the initializer is
-    /// signal-rewritten but the binding itself is inert.
-    Inert {
-        /// The declaration keyword.
-        keyword: ClientDeclKeyword,
-        /// The declared name.
-        name: String,
-        /// The rewritten initializer, or `None` for a bare `let x;`.
-        init: Option<String>,
-    },
-    /// A rune-carrying `{let x = $state(…)}` / `{let x = $derived(…)}` declarator,
-    /// classified through the instance-script rune/state pipeline → the already-lowered
-    /// declaration statement (`let x = $.state(…)` / `let x = $.derived(…)`).
-    Rune {
-        /// The fully-lowered declaration statement (without trailing `;`).
-        code: String,
-    },
-}
-
-/// The declaration keyword of an inert `{const}/{let}` declarator.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ClientDeclKeyword {
-    /// `const`.
-    Const,
-    /// `let`.
-    Let,
-}
-
-/// One `{ key: $.snapshot(arg) }` entry of a `{@debug}` effect.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ClientDebugEntry {
-    /// The object key (the debug identifier name).
-    pub(super) key: String,
-    /// The rewritten `$.snapshot(<expr>)` argument expression.
-    pub(super) snapshot_arg: String,
 }
 
 /// A node id into the plan's narrow node arena.
@@ -951,14 +911,10 @@ pub(super) enum ClientRuntimeOp {
     ReactiveText {
         /// The target node id (into the plan node arena).
         target: ClientNodeId,
-        /// The interpolated expression id (the emit-time text-run partition reads it
-        /// back through the build analysis for the mixed-run template assembly).
-        expr: ExprId,
-        /// The already-rewritten expression text (the value the memoizer routes
-        /// inline or hoists into a `$N` placeholder).
-        rewritten: String,
-        /// Whether the expression `has_call` (drives the memoizer deps-array form).
-        has_call: bool,
+        /// The PREPARED interpolation value (the sole authored-value carrier:
+        /// rewrite + facts + the surface-policied legacy wrap, computed at the
+        /// fallible planning stage). The emitter only serializes it.
+        value: PreparedTemplateValue,
     },
     /// A `bind:*` op (a DOM value/property bind or element `bind:this`).
     Bind {
@@ -1070,36 +1026,35 @@ pub(super) enum ClientRuntimeOp {
         /// The accumulator STEM (`styles`) when the reactive-directive path needs one.
         accumulator_stem: Option<&'static str>,
     },
-    /// A coalesced `$.attribute_effect(el, () => ({ <fold> }))` write — the SINGLE
-    /// reactive effect a spread element gets in place of the per-attribute path. The
-    /// presence of ANY spread on an element switches its WHOLE attribute strategy: every
-    /// co-located attribute folds into the single object literal the effect returns — plain
-    /// attributes (static / dynamic / mixed / a plain `class` / `style` attribute) and the
-    /// spreads themselves IN SOURCE ORDER, with every `class:` directive merged into ONE
-    /// trailing `[$.CLASS]: { … }` and every `style:` directive into ONE trailing
-    /// `[$.STYLE]: { … }` appended LAST (the official `Element.js` spread path) — and the
-    /// element emits NO separate `$.set_attribute` / `$.set_class` / `$.set_style` /
-    /// property write and NO `$.template_effect`. The op carries the already-assembled object-literal BODY (the
-    /// fold text between the `{` and `}`, expressions rewritten through the shared
-    /// rewriter); the emitter wraps it in the `el, () => ({ <body> })` call with the real
-    /// DOM var.
+    /// A coalesced `$.attribute_effect(el, (params) => ({ <fold> }), [deps…])` write —
+    /// the SINGLE reactive effect a spread element gets in place of the per-attribute
+    /// path. The presence of ANY spread on an element switches its WHOLE attribute
+    /// strategy: every co-located attribute folds into the single object literal the
+    /// effect returns — plain attributes (static / dynamic / mixed / a plain `class` /
+    /// `style` attribute) and the spreads themselves IN SOURCE ORDER, with every
+    /// `class:` directive merged into ONE trailing `[$.CLASS]` and every `style:`
+    /// directive into ONE trailing `[$.STYLE]` appended LAST (the official
+    /// `Element.js` spread path) — and the element emits NO separate
+    /// `$.set_attribute` / `$.set_class` / `$.set_style` / property write and NO
+    /// `$.template_effect`. The op carries the TYPED source-ordered fold items; the
+    /// emitter renders them through the shared per-effect memoizer (each `has_call`
+    /// value hoists into a `$N` arrow param + a `() => <expr>` dependency — the
+    /// official per-attribute/spread `Memoizer` topology) and assembles the
+    /// `el, ($0, …) => ({ <body> }), [deps…]` call with the real DOM var.
     AttributeEffect {
         /// The target node id.
         target: ClientNodeId,
-        /// The assembled object-literal fold body (`...p, id: x, [$.CLASS]: { on: c }`),
-        /// source-ordered. Empty for an attribute-less spread is impossible (a spread is
-        /// always present), so the body always carries at least one `...spread`.
-        fold_body: String,
-        /// Whether the element takes the trailing `void 0, void 0, void 0, void 0, true`
-        /// argument tail — the official form for a void / self-closing element (an
-        /// `<input>`, whose value/defaultValue handling the trailing `true` flags). A
-        /// 2-argument call otherwise.
+        /// The typed source-ordered fold items (plain attrs, spreads, hoisted
+        /// event handlers, the merged directive objects).
+        items: Vec<AttributeEffectItem>,
+        /// Whether the element takes the trailing `true` `remove_defaults`
+        /// argument — the official form for an `<input>` (suppressed by an
+        /// authored `defaultValue` / `defaultChecked`).
         input_trailing: bool,
         /// The scope-hash literal argument for a SCOPED spread element — the
         /// official `build_attribute_effect` passes `css_hash` at position 6
         /// ("the spread method appends the hash to the end of the class
-        /// attribute on its own"). `None` for an unscoped element (the slot is
-        /// omitted, or `void 0` when the input tail follows).
+        /// attribute on its own"). `None` for an unscoped element.
         css_hash: Option<String>,
     },
     /// An element LIFECYCLE op (`$.action` / `$.transition` / `$.animation` /
@@ -1112,27 +1067,48 @@ pub(super) enum ClientRuntimeOp {
     /// the post-walk op stage (after the binds + events) — the official
     /// `RegularElement` phase order.
     Lifecycle(ElementLifecycleOp),
-    /// A `{@html node, () => h [, true])` raw-markup insertion. The payload is the
-    /// already-assembled SECOND argument — a `() => <rewritten-expr>` thunk, or the bare
-    /// callee identifier when the payload is a direct zero-argument identifier call
-    /// (`{@html render()}` → `render`, the official thunk elision). `only_child` selects
-    /// the topology: a `{@html}` that is the SOLE controlled child of its parent element
-    /// operates on the PARENT element var with the trailing `true` argument and is
-    /// followed by `$.reset(parent)`; a `{@html}` with siblings operates on its OWN `<!>`
+    /// A `$.html(node, <getter> [, true])` raw-markup insertion. The payload was
+    /// PREPARED first (the official `build_expression` order); thunk ELISION to the
+    /// bare callee applies ONLY when the prepared value is RAW and retains the
+    /// eligible direct zero-arg-identifier-call shape whose callee rewrites
+    /// unchanged — a legacy-wrapped call is never elided (its getter returns the
+    /// prepared sequence). `only_child` selects the topology: a `{@html}` that is
+    /// the SOLE controlled child of its parent element operates on the PARENT
+    /// element var with the trailing `true` argument and is followed by
+    /// `$.reset(parent)`; a `{@html}` with siblings operates on its OWN `<!>`
     /// anchor var (reached by the DOM walk) with NO trailing argument.
     Html {
         /// The target node id (the `{@html}` tag node). For the only-child case the
         /// emitter resolves the PARENT element's var; for the sibling case the node's own
         /// walk var.
         target: ClientNodeId,
-        /// The already-assembled second argument (`() => h` thunk, or the bare elided
-        /// callee `render`).
-        payload: String,
+        /// The PREPARED payload value.
+        payload: PreparedTemplateValue,
+        /// The getter topology over the prepared payload (elision decisions are
+        /// RAW-carrier-only; a legacy-wrapped payload always keeps the thunk).
+        getter_form: HtmlGetterForm,
         /// Whether this `{@html}` is the SOLE controlled child of its parent element (the
         /// official `is_controlled` case): operate on the parent var + trailing `true` +
         /// `$.reset(parent)`.
         only_child: bool,
     },
+}
+
+/// The `$.html` GETTER topology over a PREPARED payload — decided at planning,
+/// on the RAW carrier only (a legacy-wrapped payload is never elided).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum HtmlGetterForm {
+    /// The general `() => <prepared>` getter (wrapped payloads always take it).
+    PreparedThunk,
+    /// The bare elided callee (`render`) — a RAW direct non-optional zero-arg
+    /// identifier call whose callee rewrote UNCHANGED (the official `b.thunk`
+    /// unthunk).
+    ElidedCallee(String),
+    /// The `() => <callee>()` thunk REBUILT from the peeled rewritten callee —
+    /// a RAW direct zero-arg call whose callee rewrote to a member/getter
+    /// (author parens around the callee drop, matching the official printed
+    /// AST: `() => $$props.render()`).
+    RebuiltCallThunk(String),
 }
 
 /// A narrow supported element LIFECYCLE op — the closed `{Action, Transition,
@@ -1196,9 +1172,9 @@ pub(super) enum ElementLifecycleOp {
     Attachment {
         /// The target node id.
         target: ClientNodeId,
-        /// The rewritten attachment THUNK BODY (concise-arrow-wrapped — an inline
-        /// arrow payload stays a valid expression body: `() => (() => {})`).
-        payload: String,
+        /// The PREPARED attachment payload (the emitter supplies the thunk; a
+        /// legacy-wrapped payload keeps the thunk over the sequence).
+        payload: PreparedTemplateValue,
     },
 }
 
@@ -1223,27 +1199,91 @@ impl ElementLifecycleOp {
 }
 
 /// One part of a dynamic attribute value carried to the emitter — a literal text
-/// chunk or a rewritten expression with its `has_call` memoize fact. The emitter
-/// resolves each [`AttrValuePart::Expr`] through the shared [`super::client::Memoizer`]
-/// at emit time, so a `has_call` value lands in the official deps-array form.
+/// chunk or a PREPARED authored expression with its `?? ''` coercion. The emitter
+/// resolves each [`AttrValuePart::Expr`] through the shared memoizer at emit time,
+/// so a `has_call` value lands in the official deps-array form.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum AttrValuePart {
     /// A literal text chunk of a mixed attribute value (already entity-decoded +
     /// escaped for the backtick template at emit time).
     Literal(String),
-    /// A rewritten expression part + whether it `has_call` (drives memoization) + how it
-    /// is `?? ''`-coerced (official `build_template_chunk`).
+    /// A PREPARED authored expression part + how it is `?? ''`-coerced (official
+    /// `build_template_chunk`).
     Expr {
-        /// The already-rewritten client expression.
-        rewritten: String,
-        /// Whether the expression `has_call` (memoized into a `$N` deps-array slot).
-        has_call: bool,
+        /// The prepared authored value (rewrite + facts + surface-policied wrap).
+        value: PreparedTemplateValue,
         /// How the live part is coerced to a string in the backtick template — the
         /// official `is_defined`/precedence `?? ''` rule (a provably-defined part is
         /// emitted raw, an undecided part gets `?? ''`, parenthesized for a `&&`/`||`
-        /// operand).
+        /// operand). A legacy-wrapped part is always the BARE `?? ''` (a sequence is
+        /// never provably defined, and it self-parenthesizes).
         coalesce: super::reactive_fold::NullishCoalesce,
     },
+}
+
+/// A SINGLE-expression template value that is either the AUTHORED prepared
+/// expression or a SYNTHESIZED composite (the `$.clsx(...)` class-base wrap).
+/// The split is BY TYPE: a synthesized value cannot occupy the authored arm
+/// (rustc), so the legacy wrap is never applied to (or omitted from) the
+/// wrong ARM. The reverse lane — authored raw text entering the synthesized
+/// carrier — is sealed against out-of-module struct-literal construction by
+/// rustc module privacy (the fields are private to the dedicated owner module);
+/// within that module the routing guard re-checks the construction-site +
+/// associated-item inventory as a fail-closed structural tripwire over the
+/// inventoried construction topology, not a proof that no in-module route can
+/// build the carrier. An in-owner permitted method body that derives arbitrary
+/// `text` at runtime is outside this structural check; foreclosing it requires a
+/// backend-wide typed authored-emission capability boundary rather than a
+/// raw-string carrier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum PlannedTemplateValue {
+    /// An authored expression, prepared through the sole
+    /// [`prepare_template_value`](super::client_plan::SupportedClientIr::prepare_template_value)
+    /// entry point.
+    Authored(PreparedTemplateValue),
+    /// A synthesized composite (never wrap-eligible). The authored inner
+    /// expression was prepared BEFORE synthesis (official applies
+    /// `build_expression` before `$.clsx`).
+    Synthesized(SynthesizedTemplateValue),
+}
+
+impl PlannedTemplateValue {
+    /// The official `has_call` memoize trigger of the value.
+    pub(super) fn has_call(&self) -> bool {
+        match self {
+            PlannedTemplateValue::Authored(p) => p.has_call(),
+            PlannedTemplateValue::Synthesized(s) => s.has_call(),
+        }
+    }
+}
+
+/// One `style:` directive entry of the merged `[$.STYLE]` synthesized object —
+/// the raw directive property name (quoted into an object key by the
+/// constructor), the TYPED value contributor, and the `|important` flag.
+#[derive(Debug)]
+pub(super) struct StyleDirectiveObjectEntry {
+    /// The raw `style:<property>` name (quoted by the constructor).
+    pub(super) property: String,
+    /// The typed value contributor.
+    pub(super) value: StyleDirectiveObjectValue,
+    /// Whether the directive carries `|important` (the array-form switch).
+    pub(super) important: bool,
+}
+
+/// The TYPED value contributor of one style-directive object entry — an
+/// authored PREPARED expression, a static text (quoted by the constructor), or
+/// a mixed template whose authored chunks were prepared upstream (folded by
+/// the constructor through the shared template fold). No free-text arm exists:
+/// every authored contribution enters as a prepared/typed carrier.
+#[derive(Debug)]
+pub(super) enum StyleDirectiveObjectValue {
+    /// An authored prepared expression value (`style:width={w}`).
+    Prepared(PreparedTemplateValue),
+    /// A static text value (`style:color="red"`) — single-quoted HERE.
+    StaticText(String),
+    /// A mixed text+interpolation value (`style:color="a{x}b"`) whose authored
+    /// chunks were prepared upstream — folded HERE.
+    Mixed(AttrValue),
 }
 
 /// A dynamic attribute / property VALUE carried to the emitter in STRUCTURED form,
@@ -1254,14 +1294,10 @@ pub(super) enum AttrValue {
     /// A constant value with no expression (`true` for a valueless boolean, a quoted
     /// literal string) — emitted verbatim, never memoized.
     Const(String),
-    /// A SINGLE dynamic expression (`id={expr}`) — emitted as the bare (possibly
-    /// memoized `$N`) value with NO `?? ''` wrap.
-    Single {
-        /// The already-rewritten client expression.
-        rewritten: String,
-        /// Whether the expression `has_call` (memoized into a `$N` deps-array slot).
-        has_call: bool,
-    },
+    /// A SINGLE value (`id={expr}`, the class/style base) — authored-prepared or a
+    /// synthesized composite, emitted as the bare (possibly memoized `$N`) value
+    /// with NO `?? ''` wrap.
+    Single(PlannedTemplateValue),
     /// A MIXED literal+expression value (`id="a{x}b"`) — emitted as the
     /// `` `lit${expr ?? ''}lit` `` template, each expr routed through the memoizer.
     Mixed(Vec<AttrValuePart>),
@@ -1276,10 +1312,56 @@ impl AttrValue {
     pub(super) fn has_call(&self) -> bool {
         match self {
             AttrValue::Const(_) => false,
-            AttrValue::Single { has_call, .. } => *has_call,
+            AttrValue::Single(v) => v.has_call(),
             AttrValue::Mixed(parts) => parts
                 .iter()
-                .any(|p| matches!(p, AttrValuePart::Expr { has_call: true, .. })),
+                .any(|p| matches!(p, AttrValuePart::Expr { value, .. } if value.has_call())),
+        }
+    }
+
+    /// Shorthand: a single AUTHORED prepared value.
+    pub(super) fn single_authored(prepared: PreparedTemplateValue) -> Self {
+        AttrValue::Single(PlannedTemplateValue::Authored(prepared))
+    }
+
+    /// Fold the structured value to its FULL inline text — the memoizer-free
+    /// rendering used where the whole value embeds as one expression (a
+    /// `style:` directive-object member, the non-reactive `bind:group` value
+    /// write). A mixed value folds to the `` `lit${expr ?? ''}lit` `` template
+    /// with each prepared chunk inlined (wrap-parenthesized where wrapped) and
+    /// its `?? ''` coercion applied per the recorded [`AttrValuePart`] fact.
+    pub(super) fn folded_text(&self) -> String {
+        match self {
+            AttrValue::Const(text) => text.clone(),
+            AttrValue::Single(PlannedTemplateValue::Authored(p)) => p.inline_expression(),
+            AttrValue::Single(PlannedTemplateValue::Synthesized(s)) => s.raw_text().to_string(),
+            AttrValue::Mixed(parts) => {
+                let mut tmpl = String::from("`");
+                for part in parts {
+                    match part {
+                        AttrValuePart::Literal(text) => {
+                            tmpl.push_str(&super::client_codegen_helpers::escape_template_text(
+                                text,
+                            ));
+                        }
+                        AttrValuePart::Expr { value, coalesce } => {
+                            use super::reactive_fold::NullishCoalesce;
+                            let v = value.inline_expression();
+                            match coalesce {
+                                NullishCoalesce::None => tmpl.push_str(&format!("${{{v}}}")),
+                                NullishCoalesce::Bare => {
+                                    tmpl.push_str(&format!("${{{v} ?? ''}}"));
+                                }
+                                NullishCoalesce::Parenthesized => {
+                                    tmpl.push_str(&format!("${{({v}) ?? ''}}"));
+                                }
+                            }
+                        }
+                    }
+                }
+                tmpl.push('`');
+                tmpl
+            }
         }
     }
 }

@@ -1,0 +1,55 @@
+{
+  "slug": "type-spread-lit-cls-q-snip-ext-plain-m",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "type_spread_lit_cls_q_snip_ext_plain_m",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "attribute_effect",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "attribute_effect",
+    "from_html"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "attribute_effect": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div>x</div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div>x</div>`); export default function type_spread_lit_cls_q_snip_ext_plain_m($$anchor, $$props) {const subject = ($$anchor) => {var div = root(); $.attribute_effect(div, () => ({...$$props.rest}), void 0, void 0, void 0, 'svelte-<scoped>'); $.append($$anchor, div);}; subject($$anchor);}",
+  "css": {
+    "present": true,
+    "hash": "svelte-p7nlzv",
+    "code": "\n\tdiv.svelte-<scoped> {\n\t\tcolor: red;\n\t}\n"
+  }
+}

@@ -30,7 +30,29 @@ fn scope_with_v() -> (
 
 fn has_call(src: &str) -> bool {
     let (bindings, scopes, root, declared_roots) = scope_with_v();
-    expr_has_call(src, root, &bindings, &scopes, &declared_roots)
+    expr_has_call(src, root, &bindings, &scopes, &declared_roots).expect("expression parses")
+}
+
+#[test]
+fn fact_recovery_failure_is_fail_closed_not_false() {
+    // The FAIL-CLOSED recovery contract: an analysis that cannot re-derive its
+    // facts returns `Err(())` (the caller surfaces the precise
+    // `svelte-runtime-unsupported-expression-fact-recovery` diagnostic) —
+    // NEVER a silent `false` that would degrade a `BuildExpression` surface to
+    // raw / a getter to a plain init.
+    let (bindings, scopes, root, declared_roots) = scope_with_v();
+    assert!(
+        expr_has_call("v ..(", root, &bindings, &scopes, &declared_roots).is_err(),
+        "an unrecoverable has_call scan must fail closed, not report false"
+    );
+    assert!(
+        super::expr_has_binding_impurity("v ..(", root, &bindings, &scopes).is_err(),
+        "an unrecoverable binding-impurity scan must fail closed, not report false"
+    );
+    assert!(
+        super::prop_value_has_state(&[], "v ..(", root, &bindings, &scopes).is_err(),
+        "an unrecoverable prop-value has_state scan must fail closed, not report false"
+    );
 }
 
 #[test]
@@ -425,7 +447,7 @@ fn other_class_value_shapes_need_clsx() {
 
 fn has_binding_impurity(src: &str) -> bool {
     let (bindings, scopes, root, _declared) = scope_with_v();
-    super::expr_has_binding_impurity(src, root, &bindings, &scopes)
+    super::expr_has_binding_impurity(src, root, &bindings, &scopes).expect("expression parses")
 }
 
 #[test]
@@ -631,7 +653,13 @@ fn prop_scope() -> (BindingTable, ScopeGraph, super::super::expr::ScopeId) {
 
 fn prop_has_state(src: &str) -> bool {
     let (bindings, scopes, root) = prop_scope();
-    super::prop_value_has_state(src, root, &bindings, &scopes)
+    // The reference half consumes the STORED analysis references — mirror the
+    // production callers by collecting them once from the canonical parse.
+    let references = crate::svelte::runtime::expr::collect_expr_references(src)
+        .expect("expression parses")
+        .references;
+    super::prop_value_has_state(&references, src, root, &bindings, &scopes)
+        .expect("expression parses")
 }
 
 #[test]

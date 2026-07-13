@@ -1,0 +1,44 @@
+{
+  "slug": "legacy/slot_spread.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "slot_spread",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "slot",
+    "spread_props",
+    "bind_props"
+  ],
+  "helperSet": [
+    "bind_props",
+    "slot",
+    "spread_props"
+  ],
+  "helperCounts": {
+    "slot": 1,
+    "spread_props": 1,
+    "bind_props": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

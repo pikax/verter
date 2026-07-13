@@ -1,0 +1,68 @@
+{
+  "slug": "id-spread-eschar-cls-q-slot-inj-nest-u",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "id_spread_eschar_cls_q_slot_inj_nest_u",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "append_styles",
+    "comment",
+    "first_child",
+    "slot",
+    "attribute_effect",
+    "append",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "append_styles",
+    "attribute_effect",
+    "comment",
+    "first_child",
+    "from_html",
+    "slot"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "append_styles": 1,
+    "comment": 1,
+    "first_child": 1,
+    "slot": 1,
+    "attribute_effect": 1,
+    "append": 2
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div>x</div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div>x</div>`); const $$css = {hash: 'svelte-<scoped>', code: '#a\\\\&b.svelte-<scoped> {color:red;&:hover {color:blue;}}'}; export default function id_spread_eschar_cls_q_slot_inj_nest_u($$anchor, $$props) {$.append_styles($$anchor, $$css); var fragment = $.comment(); var node = $.first_child(fragment); $.slot(node, $$props, 'default', {}, ($$anchor) => {var div = root(); $.attribute_effect(div, () => ({...$$props.rest}), void 0, void 0, void 0, 'svelte-<scoped>'); $.append($$anchor, div);}); $.append($$anchor, fragment);}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

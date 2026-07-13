@@ -70,6 +70,17 @@ pub struct ComponentIr {
     pub filename: Option<String>,
     /// The reactivity mode.
     pub mode: SvelteMode,
+    /// The official in-between MAYBE-RUNES fact (svelte@5.56.3 `analysis.maybe_runes`):
+    /// a non-runes component that might still be "wannabe runes" — no explicit
+    /// `runes: false` override, no top-level labeled statement, and no `export let`
+    /// in the instance script. Only meaningful under [`SvelteMode::Legacy`]: the
+    /// legacy value wrap (`build_expression`'s deep-read/untrack sequence) applies
+    /// ONLY when the component is DEFINITELY legacy (`mode == Legacy` and
+    /// `!maybe_runes`); the non-runes memo helper (`$.derived_safe_equal`) applies
+    /// in BOTH legacy sub-modes. (Official's `$$props`/`$$restProps`-reference
+    /// exclusion is not modelled: a magic-identifier reference is refused upstream,
+    /// so it can never reach a consumer of this fact.) Always `false` in runes mode.
+    pub maybe_runes: bool,
     /// The RESOLVED custom-element descriptor — `Some` iff the component compiles
     /// as a custom element (a `<svelte:options customElement>` value, or the
     /// `customElement: true` compile option; the options value WINS, and a
@@ -166,6 +177,11 @@ pub enum IrNode {
     },
     /// A regular intrinsic element.
     Element(ElementIr),
+    /// A `<slot>` element — the legacy slot-outlet surface. BLOCK-semantic (the
+    /// official `SlotElement`): it renders through a `<!>` hydration anchor +
+    /// `$.slot(node, $$props, name, props, fallback)`, never as an intrinsic DOM
+    /// element, and its fallback content is its OWN template region.
+    Slot(SlotElementIr),
     /// A component reference (`<Foo>` / `<Foo.Bar>`).
     Component(ComponentIrNode),
     /// A `<svelte:*>` special element.
@@ -190,6 +206,37 @@ pub struct ElementIr {
     /// The element's children in source order.
     pub children: Vec<NodeId>,
     /// The lexical scope the element's children bind in.
+    pub scope: ScopeId,
+}
+
+/// A `<slot>` element node — the block-semantic slot outlet (the official
+/// `SlotElement`). Its attributes lower through SLOT/COMPONENT property
+/// semantics (an authored `onclick={fn}` is the slot prop `onclick`, never a
+/// DOM event), its `name` attribute is CONSUMED into the semantic slot name,
+/// and its children form the fallback template region.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlotElementIr {
+    /// The full open-tag source span.
+    pub span: Span,
+    /// The DECODED semantic slot name (`"default"` when no `name` attribute is
+    /// present). A NON-static `name` is the official `slot_element_invalid_name`
+    /// compile error and never reaches this field (the classifier rejects it
+    /// from the retained attribute inventory).
+    pub name: String,
+    /// The typed, source-ordered attribute inventory (props / spreads / the
+    /// consumed `name` / any directive the classifier validates). Lowered with
+    /// slot PROPERTY semantics — an `on*` attribute stays a plain prop.
+    pub props: Vec<AttrIr>,
+    /// The `let:` slot-prop directives authored on the slot itself (the
+    /// PRODUCER-side provider bindings). Decomposed like component lets; the
+    /// classifier fails a non-empty list closed until the provider-side
+    /// lowering lands (a bare emission would read an unbound `$$slotProps`).
+    pub lets: Vec<LetBinding>,
+    /// The fallback content region — ALWAYS minted (empty roots for a
+    /// child-less `<slot />`; the emitter maps an empty-root region to the
+    /// official `null` fallback argument).
+    pub fallback: TemplateScopeId,
+    /// The lexical scope the slot binds in.
     pub scope: ScopeId,
 }
 
@@ -551,6 +598,9 @@ pub enum AttrIr {
         name: String,
         /// The aliasing expression, or `None` for the shorthand `let:item`.
         expr: Option<ExprId>,
+        /// The authored directive span (name + value) — the refusal-precision
+        /// span a `<slot let:x>` diagnostic reports.
+        span: Span,
     },
 }
 

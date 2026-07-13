@@ -1,0 +1,31 @@
+{
+  "slug": "nest-lit-lit-attr-bool-el-ext-glob-m",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "nest_lit_lit_attr_bool_el_ext_glob_m",
+    "params": [
+      "$$renderer"
+    ]
+  },
+  "helperSequence": [],
+  "helperSet": [],
+  "helperCounts": {},
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": true,
+    "hash": null,
+    "code": "\n\t& {\n\t\tcolor: red;\n\t}\n"
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "slug": "univ-dyn-lit-cls-q-slot-ext-glob-m",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "univ_dyn_lit_cls_q_slot_ext_glob_m",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "slot",
+    "attr_class"
+  ],
+  "helperSet": [
+    "attr_class",
+    "slot"
+  ],
+  "helperCounts": {
+    "slot": 1,
+    "attr_class": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": true,
+    "hash": null,
+    "code": "\n\t* {\n\t\tcolor: red;\n\t}\n"
+  }
+}

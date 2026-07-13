@@ -1,0 +1,38 @@
+{
+  "slug": "nest-dyn-lit-cls-q-blk-ext-nest-n",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "nest_dyn_lit_cls_q_blk_ext_nest_n",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "attr_class"
+  ],
+  "helperSet": [
+    "attr_class"
+  ],
+  "helperCounts": {
+    "attr_class": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": true,
+    "hash": null,
+    "code": "\n\t/* (empty) .zz {\n\t\t& {\n\t\t\tcolor: red;\n\t\t}\n\t}*/\n"
+  }
+}

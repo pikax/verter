@@ -266,6 +266,17 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
         &[
             "svelte_structural_conformance_discriminates_cosmetic_from_behavioral_diffs",
             "no_compiled_output_cosmetic_reprinter_path",
+            // The unified authored-value preparation boundary: every authored
+            // Svelte client template value AT AN INVENTORIED SURFACE routes
+            // through the sole prepare_template_value entry + the exhaustive
+            // wildcard-free surface policy; the explicitly-pinned narrow-plan
+            // value fields stay typed prepared carriers; the sealed synthesized
+            // carrier holds no wrap-typed state; a closed AuthoredExpr
+            // planner-module inventory + bypass scan — transitional structural
+            // enforcement over the inventoried surfaces, NOT a backend-wide
+            // completeness proof (the terminal capability boundary is D-61)
+            // (crates/verter_compiler/tests/svelte_client_authored_value_routing_guard.rs).
+            "svelte_client_authored_value_routing_guard",
         ],
     ),
     (

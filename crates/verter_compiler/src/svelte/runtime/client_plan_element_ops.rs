@@ -11,15 +11,18 @@ use super::client::UnsupportedSvelteRuntimeSurface;
 use super::client_codegen_helpers::{
     escape_template_text, js_single_quoted, object_key, object_property, style_object,
 };
+use super::client_legacy_value::{AuthoredExpr, AuthoredValueSurface};
 use super::client_plan::SupportedClientIr;
 use super::client_plan_types::{
     AttrValue, AttrValuePart, ClientDynAttrEmit, ClientNodeId, ClientRuntimeOp,
+    PlannedTemplateValue,
 };
 use super::client_shapes::ClientDynamicAttrShape;
 use super::entity_decode::escape_decoded_attr;
 use super::ir::{
     AttrIr, IrNode, NodeId, NonStaticPropertyKind, NonStaticPropertyValue, StyleDirectiveValue,
 };
+use super::synthesized_value::SynthesizedTemplateValue;
 use verter_span::Span;
 
 impl<'a> SupportedClientIr<'a> {
@@ -54,7 +57,8 @@ impl<'a> SupportedClientIr<'a> {
         // The element's `Dynamic` / `Mixed` attribute under this name → its STRUCTURED
         // value (each expression carrying its `has_call` fact for the emit-time
         // memoizer) + `has_state`.
-        let (value, has_state) = self.attr_value_for(el, name)?;
+        let (value, has_state) =
+            self.attr_value_for(el, name, AuthoredValueSurface::AttributeValue)?;
         // The write is REACTIVE when it references state OR `has_call` (a `has_call`
         // value is memoized into a `$N` placeholder that only the effect can bind — the
         // official `Memoizer.add` rule, which forces even a pure `String(plain_let)`
@@ -144,36 +148,43 @@ impl<'a> SupportedClientIr<'a> {
                 Ok((AttrValue::Const(js_single_quoted(text)), false))
             }
             NonStaticPropertyValue::Expr(expr) => {
-                // A VALUE position (`defaultValue={…}`; the `$.autofocus(node, value)` init
-                // likewise) — source-preserving (author parens kept; sequence wrapped once).
-                let rewritten = self.rewrite_value_preserving_source(*expr)?;
-                Ok((
-                    AttrValue::Single {
-                        rewritten,
-                        has_call: self.expr_has_call(*expr),
-                    },
-                    self.expr_has_state(*expr),
-                ))
+                // A VALUE position (`defaultValue={…}`; the `$.autofocus(node, value)`
+                // init likewise) — prepared through the sole authored-value entry:
+                // official applies `build_expression` to the property value whether
+                // it lands in the effect (`video.muted = $0`) or the one-shot init
+                // (`$.autofocus(node, (…))`).
+                let prepared = self.prepare_template_value(
+                    AuthoredExpr(*expr),
+                    AuthoredValueSurface::AttributeValue,
+                )?;
+                let has_state = prepared.facts().has_state;
+                Ok((AttrValue::single_authored(prepared), has_state))
             }
-            NonStaticPropertyValue::Mixed(parts) => self.mixed_attr_value(parts),
+            NonStaticPropertyValue::Mixed(parts) => {
+                self.mixed_attr_value(parts, AuthoredValueSurface::AttributeValue)
+            }
         }
     }
 
     /// Flatten a structured [`AttrValue`] for an INIT-only (`$.autofocus`) emit, where
-    /// no effect-side memoizer runs. A `Single` value emits its bare expression; a
-    /// `Const` emits verbatim; a `Mixed` value builds the `` `lit${expr ?? ''}lit` ``
-    /// template inline (no memoization, since an init-only value is read once).
+    /// no effect-side memoizer runs. A `Single` value emits its (legacy-wrap-prepared)
+    /// inline expression; a `Const` emits verbatim; a `Mixed` value builds the
+    /// `` `lit${expr ?? ''}lit` `` template inline (no memoization, since an init-only
+    /// value is read once — a prepared legacy wrap still embeds parenthesized, the
+    /// official `$.autofocus(node, (…, $.untrack(…)))` shape).
     fn flatten_init_attr_value(&self, value: &AttrValue) -> String {
         match value {
             AttrValue::Const(text) => text.clone(),
-            AttrValue::Single { rewritten, .. } => rewritten.clone(),
+            AttrValue::Single(PlannedTemplateValue::Authored(p)) => p.inline_expression(),
+            AttrValue::Single(PlannedTemplateValue::Synthesized(s)) => s.raw_text().to_string(),
             AttrValue::Mixed(parts) => {
                 let mut tmpl = String::from("`");
                 for part in parts {
                     match part {
                         AttrValuePart::Literal(text) => tmpl.push_str(&escape_template_text(text)),
-                        AttrValuePart::Expr { rewritten, .. } => {
-                            tmpl.push_str(&format!("${{{rewritten} ?? ''}}"));
+                        AttrValuePart::Expr { value, .. } => {
+                            let v = value.inline_expression();
+                            tmpl.push_str(&format!("${{{v} ?? ''}}"));
                         }
                     }
                 }
@@ -287,33 +298,33 @@ impl<'a> SupportedClientIr<'a> {
                     });
                 }
                 AttrIr::Dynamic { name, expr } if name.eq_ignore_ascii_case("class") => {
-                    // The `$.set_class` BASE value is a VALUE position — source-preserving
-                    // (author parens kept; sequence wrapped once). The `needs_clsx` decision
-                    // below reads the UNWRAPPED-ROOT KIND fact (computed on the
-                    // transparent-paren-unwrapped root), so a parenthesized literal / binary /
-                    // template is correctly classified as no-clsx.
-                    let v = self.rewrite_value_preserving_source(*expr)?;
+                    // The `$.set_class` BASE: (1) PREPARE the authored expression
+                    // (official applies `build_expression` BEFORE `$.clsx`), (2) render
+                    // its inline expression, (3) synthesize `$.clsx(<prepared>)` when
+                    // `needs_clsx` fires, (4) the memoizer memoizes the synthesized
+                    // whole. Preparation is NEVER called on the resulting `$.clsx(...)`.
+                    //
                     // Official `Attribute.js` sets `needs_clsx` for a single-expression
                     // `class={…}` UNLESS the value is a `Literal` / `TemplateLiteral` /
                     // `BinaryExpression`: a `class={a + b}` string-concatenation, a
-                    // `class={'x'}` literal, and a `` class={`a${b}`} `` template emit the
-                    // value RAW (no `$.clsx` wrap); every other shape IS wrapped. When
-                    // wrapped, the whole `$.clsx(expr)` wrap is the base value — a
-                    // `has_call` base memoizes the WHOLE wrap (`[() => $.clsx(call)]`, the
-                    // official `build_set_class`).
-                    let analyzed = self.ir.analysis.expressions.get(*expr);
-                    let rewritten = if super::reactive_analysis::class_value_needs_clsx(
-                        analyzed.unwrapped_root_kind,
-                    ) {
-                        format!("$.clsx({v})")
-                    } else {
-                        v
-                    };
-                    base_value = Some(AttrValue::Single {
-                        rewritten,
-                        has_call: self.expr_has_call(*expr),
-                    });
-                    base_has_state |= self.expr_has_state(*expr);
+                    // `class={'x'}` literal, and a `` class={`a${b}`} `` template emit
+                    // the value RAW (no `$.clsx` wrap); every other shape IS wrapped.
+                    let prepared = self.prepare_template_value(
+                        AuthoredExpr(*expr),
+                        AuthoredValueSurface::ClassBase,
+                    )?;
+                    base_has_state |= prepared.facts().has_state;
+                    base_value = Some(AttrValue::Single(
+                        if super::reactive_analysis::class_value_needs_clsx(
+                            prepared.facts().root_kind,
+                        ) {
+                            PlannedTemplateValue::Synthesized(SynthesizedTemplateValue::clsx(
+                                &prepared,
+                            ))
+                        } else {
+                            PlannedTemplateValue::Authored(prepared)
+                        },
+                    ));
                 }
                 AttrIr::Mixed { name, parts } if name.eq_ignore_ascii_case("class") => {
                     // A MIXED-string class (`class="a {x} b"`) is already a string
@@ -321,18 +332,24 @@ impl<'a> SupportedClientIr<'a> {
                     // wrapped in `$.clsx` (verified against svelte@5.56.3). The
                     // structured value memoizes each EXPRESSION PART at emit time, not
                     // the whole rendered template.
-                    let (mixed, st) = self.mixed_attr_value(parts)?;
+                    let (mixed, st) =
+                        self.mixed_attr_value(parts, AuthoredValueSurface::ClassBase)?;
                     base_value = Some(mixed);
                     base_has_state |= st;
                 }
                 AttrIr::Class { name, condition } => {
                     let cond = match condition {
                         Some(e) => {
-                            dir_has_state |= self.expr_has_state(*e);
-                            directives_has_call |= self.expr_has_call(*e);
-                            // The directive condition is a VALUE position — source-preserving
-                            // (author parens kept; sequence wrapped once).
-                            self.rewrite_value_preserving_source(*e)?
+                            // A `class:` condition is a RAW semantic role — it routes
+                            // through the policy entry point and yields a raw carrier
+                            // (official `build_class_directives_object` visits raw).
+                            let prepared = self.prepare_template_value(
+                                AuthoredExpr(*e),
+                                AuthoredValueSurface::ClassDirectiveCondition,
+                            )?;
+                            dir_has_state |= prepared.facts().has_state;
+                            directives_has_call |= prepared.has_call();
+                            prepared.inline_expression()
                         }
                         // A value-less shorthand `class:foo` with no synthesized
                         // condition is a defensive empty (lowering always synthesizes
@@ -427,21 +444,21 @@ impl<'a> SupportedClientIr<'a> {
                     });
                 }
                 AttrIr::Dynamic { name, expr } if name.eq_ignore_ascii_case("style") => {
-                    // The `$.set_style` BASE value is a VALUE position — source-preserving
-                    // (author parens kept; sequence wrapped once).
-                    let v = self.rewrite_value_preserving_source(*expr)?;
-                    // The whole dynamic expression is the base value; a `has_call` base
-                    // memoizes the whole expression.
-                    base_value = Some(AttrValue::Single {
-                        rewritten: v,
-                        has_call: self.expr_has_call(*expr),
-                    });
-                    base_has_state |= self.expr_has_state(*expr);
+                    // The `$.set_style` BASE value is a VALUE position, PREPARED
+                    // through the sole authored-value entry (official routes it
+                    // through `build_expression` then memoizes on `has_call`).
+                    let prepared = self.prepare_template_value(
+                        AuthoredExpr(*expr),
+                        AuthoredValueSurface::StyleBase,
+                    )?;
+                    base_has_state |= prepared.facts().has_state;
+                    base_value = Some(AttrValue::single_authored(prepared));
                 }
                 AttrIr::Mixed { name, parts } if name.eq_ignore_ascii_case("style") => {
                     // The structured mixed value memoizes each EXPRESSION PART at emit
                     // time, not the whole rendered template.
-                    let (mixed, st) = self.mixed_attr_value(parts)?;
+                    let (mixed, st) =
+                        self.mixed_attr_value(parts, AuthoredValueSurface::StyleBase)?;
                     base_value = Some(mixed);
                     base_has_state |= st;
                 }
@@ -452,26 +469,37 @@ impl<'a> SupportedClientIr<'a> {
                 } => {
                     let v = match value {
                         StyleDirectiveValue::Expr(e) => {
-                            dir_has_state |= self.expr_has_state(*e);
-                            directives_has_call |= self.expr_has_call(*e);
-                            // A VALUE position — source-preserving (author parens kept;
-                            // sequence wrapped once).
-                            self.rewrite_value_preserving_source(*e)?
+                            // A `style:` inner value WRAPS (official
+                            // `build_style_directives_object` routes each value
+                            // through `build_attribute_value` → `build_expression`);
+                            // the synthesized directive OBJECT then memoizes as a
+                            // whole on the merged `has_call`.
+                            let prepared = self.prepare_template_value(
+                                AuthoredExpr(*e),
+                                AuthoredValueSurface::StyleDirectiveValue,
+                            )?;
+                            dir_has_state |= prepared.facts().has_state;
+                            directives_has_call |= prepared.has_call();
+                            prepared.inline_expression()
                         }
                         // A static-text style value folds as a quoted string literal
                         // (`{ color: 'red' }`) — no state / call flags.
                         StyleDirectiveValue::Text(text) => js_single_quoted(text),
                         // A MIXED text+interpolation value (`style:color="a{x}b"`) folds as
-                        // the template-literal `` `a${x ?? ''}b` ``, built through the shared
-                        // mixed-value + fold-text path with NO memoizer (the effect re-runs).
+                        // the template-literal `` `a${x ?? ''}b` `` with each authored
+                        // chunk PREPARED (wrapping inline) and NO per-chunk memoizer —
+                        // official memoizes the whole directive object, not the chunks.
                         StyleDirectiveValue::Mixed(parts) => {
-                            let (mixed, st) = self.mixed_attr_value(parts)?;
+                            let (mixed, st) = self.mixed_attr_value(
+                                parts,
+                                AuthoredValueSurface::StyleDirectiveValue,
+                            )?;
                             dir_has_state |= st;
                             // A `has_call` interpolation inside the template forces the
                             // effect (the official memoizer rule), exactly as a base mixed
                             // value does.
                             directives_has_call |= mixed.has_call();
-                            self.fold_attr_value_text(&mixed)
+                            mixed.folded_text()
                         }
                     };
                     let entry = (object_key(property), v);

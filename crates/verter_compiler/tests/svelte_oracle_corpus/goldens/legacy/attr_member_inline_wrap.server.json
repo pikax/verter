@@ -1,0 +1,41 @@
+{
+  "slug": "legacy/attr_member_inline_wrap.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "attr_member_inline_wrap",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "attr",
+    "bind_props"
+  ],
+  "helperSet": [
+    "attr",
+    "bind_props"
+  ],
+  "helperCounts": {
+    "attr": 1,
+    "bind_props": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

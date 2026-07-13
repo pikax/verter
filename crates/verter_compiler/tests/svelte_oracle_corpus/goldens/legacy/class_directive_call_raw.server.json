@@ -1,0 +1,41 @@
+{
+  "slug": "legacy/class_directive_call_raw.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "class_directive_call_raw",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "attr_class",
+    "bind_props"
+  ],
+  "helperSet": [
+    "attr_class",
+    "bind_props"
+  ],
+  "helperCounts": {
+    "attr_class": 1,
+    "bind_props": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

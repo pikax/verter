@@ -475,7 +475,11 @@ fn attr_ir_inventory(attr: &AttrIr) {
         }
         | AttrIr::Animate { name: _, expr: _ }
         | AttrIr::Attach { expr: _ }
-        | AttrIr::Let { name: _, expr: _ } => {}
+        | AttrIr::Let {
+            name: _,
+            expr: _,
+            span: _,
+        } => {}
     }
 }
 

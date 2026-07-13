@@ -1,0 +1,74 @@
+{
+  "slug": "id-dyn-escmix-id-uq-comp-inj-comb-m",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "./Child.svelte",
+      "kind": "default",
+      "names": [
+        "default:Child"
+      ]
+    },
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "id_dyn_escmix_id_uq_comp_inj_comb_m",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "append_styles",
+    "child",
+    "reset",
+    "template_effect",
+    "set_attribute",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "append_styles",
+    "child",
+    "from_html",
+    "reset",
+    "set_attribute",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "append_styles": 1,
+    "child": 1,
+    "reset": 1,
+    "template_effect": 1,
+    "set_attribute": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div class=\"wrap svelte-<scoped>\"><div class=\"svelte-<scoped>\">x</div></div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; import Child from './Child.svelte'; var root = $.from_html(`<div class=\"wrap svelte-<scoped>\"><div class=\"svelte-<scoped>\">x</div></div>`); const $$css = {hash: 'svelte-<scoped>', code: '.wrap.svelte-<scoped> #a\\\\26 b\\\\&c:where(.svelte-<scoped>) {color:red;}'}; export default function id_dyn_escmix_id_uq_comp_inj_comb_m($$anchor, $$props) {$.append_styles($$anchor, $$css); Child($$anchor, {children: ($$anchor, $$slotProps) => {var div = root(); var div_1 = $.child(div); $.reset(div); $.template_effect(() => $.set_attribute(div_1, 'id', $$props.flag ? 'a&b&c' : 'a\\u0026b\\u0026c')); $.append($$anchor, div);}, $$slots: {default: true}});}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

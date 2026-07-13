@@ -1,0 +1,41 @@
+{
+  "slug": "type-spread-lit-id-q-slot-ext-plain-m",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "type_spread_lit_id_q_slot_ext_plain_m",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "slot",
+    "attributes"
+  ],
+  "helperSet": [
+    "attributes",
+    "slot"
+  ],
+  "helperCounts": {
+    "slot": 1,
+    "attributes": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": true,
+    "hash": "svelte-1oo89fu",
+    "code": "\n\tdiv.svelte-<scoped> {\n\t\tcolor: red;\n\t}\n"
+  }
+}

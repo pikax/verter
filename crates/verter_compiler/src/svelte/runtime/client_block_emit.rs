@@ -14,10 +14,10 @@ use super::client::{ClientEmitter, RegionFrame};
 use super::client_block_plan::EACH_IS_CONTROLLED;
 use super::client_codegen_helpers::js_single_quoted;
 use super::client_module_frame::emit_root_hoist;
-use super::client_plan_types::{
+use super::client_plan_block_types::{
     ClientAwait, ClientBlock, ClientDeclKeyword, ClientDeclaration, ClientEach, ClientIfBranch,
-    ClientNode,
 };
+use super::client_plan_types::ClientNode;
 use super::html::{synthesize_region, TemplateFactory};
 use super::ir::{BlockIr, IrNode, NodeId, SvelteRuntimeIr, TemplateScope, TemplateScopeId};
 use super::whitespace::{clean_nodes, clean_nodes_indexed, CleanContext, CleanItem};
@@ -129,6 +129,14 @@ impl<'a> ClientEmitter<'a> {
             // the parent region). Each is collected in its own post-order.
             IrNode::Component(component) => {
                 self.collect_component_slot_regions(&component.slots, out, each_scopes);
+            }
+            // A `<slot>`'s fallback content is its OWN region, planned in post-order
+            // (the fallback template hoists BEFORE its parent's — the official
+            // depth-first order). It is NOT a `$.next()`-prelude scope: a slot
+            // fallback is not an `{#each}` render callback (oracle-verified — a
+            // text-first fallback emits `var text = $.text()` with no `$.next()`).
+            IrNode::Slot(slot) => {
+                self.collect_post_order(slot.fallback, out, each_scopes);
             }
             IrNode::Special(special) => {
                 self.collect_component_slot_regions(&special.slots, out, each_scopes);
@@ -472,8 +480,15 @@ impl<'a> ClientEmitter<'a> {
             };
             for decl in decls {
                 match decl {
-                    ClientDeclaration::Derived { name, init } => {
-                        out.push_str(&format!("\tconst {name} = $.derived(() => {init});\n"));
+                    ClientDeclaration::Derived { name, init, helper } => {
+                        // The mode-aware helper over the PREPARED initializer: a
+                        // legacy-wrapped initializer embeds as the parenthesized
+                        // sequence body (`$.derived_safe_equal(() => (deps, $.untrack(…)))`).
+                        out.push_str(&format!(
+                            "\tconst {name} = {}(() => {});\n",
+                            helper.name(),
+                            init.arrow_body()
+                        ));
                     }
                     ClientDeclaration::Inert {
                         keyword,
@@ -601,15 +616,34 @@ impl<'a> ClientEmitter<'a> {
             out.push_str("};");
             names.push(name);
         }
-        // (2) The `$.if` render selector. The first branch carries no ordinal; each later
+        // (2) The call-bearing tests hoist their `var d = $.derived(() => <test>);`
+        // preludes (source order, AFTER the closures, BEFORE `$.if` — the official
+        // `IfBlock.js` statement order); the test then reads `$.get(d)`. This
+        // emitter only SERIALIZES the prepared condition — it never inspects
+        // legacy mode or reconstructs a wrap.
+        let mut test_texts: Vec<Option<String>> = Vec::with_capacity(branches.len());
+        for branch in branches {
+            test_texts.push(branch.test.as_ref().map(|cond| match &cond.call_derived {
+                Some(derived) => {
+                    let d = self.alloc_name("d");
+                    out.push_str(&format!(
+                        "var {d} = $.derived(() => {});",
+                        derived.thunk_body
+                    ));
+                    format!("$.get({d})")
+                }
+                None => cond.value.inline_expression(),
+            }));
+        }
+        // (3) The `$.if` render selector. The first branch carries no ordinal; each later
         // else-if carries its branch index; the `{:else}` carries -1.
         out.push_str(&format!("$.if({anchor_var}, ($$render) => {{"));
-        for (index, branch) in branches.iter().enumerate() {
+        for (index, test) in test_texts.iter().enumerate() {
             let name = &names[index];
             if index == 0 {
-                let test = branch.test.as_deref().unwrap_or("true");
+                let test = test.as_deref().unwrap_or("true");
                 out.push_str(&format!("if ({test}) $$render({name});"));
-            } else if let Some(test) = &branch.test {
+            } else if let Some(test) = test {
                 out.push_str(&format!(" else if ({test}) $$render({name}, {index});"));
             } else {
                 out.push_str(&format!(" else $$render({name}, -1);"));
@@ -632,14 +666,14 @@ impl<'a> ClientEmitter<'a> {
         // item/index/immutability flag.
         let flags = each.flags | if controlled { EACH_IS_CONTROLLED } else { 0 };
         out.push_str(&format!(
-            "\t$.each({anchor_var}, {flags}, () => {}, ",
-            each.source
+            "\t$.each({anchor_var}, {flags}, {}, ",
+            each.source.thunk()
         ));
         // The key callback: `(item[, index]) => key` (keyed) or the `$.index` literal.
         match &each.key {
             Some(key) => {
                 let params = key.params.join(", ");
-                out.push_str(&format!("({params}) => {}, ", key.expr));
+                out.push_str(&format!("({params}) => {}, ", key.expr.inline_expression()));
             }
             None => out.push_str("$.index, "),
         }
@@ -684,8 +718,8 @@ impl<'a> ClientEmitter<'a> {
         let pending_closure = awaited.pending.map(|body| self.branch_closure(None, body));
 
         out.push_str(&format!(
-            "\t$.await({anchor_var}, () => {}, ",
-            awaited.promise
+            "\t$.await({anchor_var}, {}, ",
+            awaited.promise.thunk()
         ));
         // Call-arg order: pending (0), then (1), catch (2). Trailing absent slots are
         // omitted; a MIDDLE-absent slot carries the official per-position sentinel — an
@@ -725,11 +759,12 @@ impl<'a> ClientEmitter<'a> {
         &mut self,
         out: &mut String,
         anchor_var: &str,
-        expr: &'a str,
+        expr: &'a super::client_legacy_value::PreparedTemplateValue,
         body: TemplateScopeId,
     ) {
         out.push_str(&format!(
-            "\t$.key({anchor_var}, () => {expr}, ($$anchor) => {{"
+            "\t$.key({anchor_var}, {}, ($$anchor) => {{",
+            expr.thunk()
         ));
         self.emit_region(out, body, "$$anchor");
         out.push_str("});\n");

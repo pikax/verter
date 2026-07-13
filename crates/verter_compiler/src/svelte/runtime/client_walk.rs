@@ -113,6 +113,9 @@ pub(super) fn node_or_descendant_dynamic(ir: &SvelteRuntimeIr, node_id: NodeId) 
         // `<svelte:fragment>`) is a dynamic node — its `<!>` anchor var hosts the
         // `Child(node, …)` call.
         IrNode::Component(_) => true,
+        // A `<slot>` outlet is a dynamic node — its `<!>` anchor var hosts the
+        // `$.slot(node, …)` call.
+        IrNode::Slot(_) => true,
         // A component-family special hosts a `Child(node, …)` call at its `<!>` anchor; a
         // RENDERABLE special (`<svelte:element>` / `<svelte:boundary>`) hosts a
         // `$.element(node, …)` / `$.boundary(node, …)` call at its `<!>` anchor — both are

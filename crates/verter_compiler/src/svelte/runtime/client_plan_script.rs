@@ -148,6 +148,20 @@ impl<'a> SupportedClientIr<'a> {
                             let rewritten = self.rewrite_source(init, root_scope)?;
                             format!("const {name} = {rewritten};")
                         }
+                        // The component-event dispatcher declaration — VERBATIM
+                        // (keyword preserved): `const dispatch =
+                        // createEventDispatcher();`. The dispatcher and its
+                        // `dispatch(...)` calls stay PLAIN (never a runtime-helper
+                        // rewrite); the imported call independently drives the
+                        // shared `needs_context` frame fact.
+                        Item::DispatcherDecl {
+                            const_decl,
+                            name,
+                            callee,
+                        } => {
+                            let keyword = if *const_decl { "const" } else { "let" };
+                            format!("{keyword} {name} = {callee}();")
+                        }
                         // A `$effect(fn);` / `$effect.pre(fn);` / bare `$effect.root(fn);`
                         // / `$effect.tracking();` statement: the whole call expression
                         // lowers through the shared rewriter in the STATEMENT role (the

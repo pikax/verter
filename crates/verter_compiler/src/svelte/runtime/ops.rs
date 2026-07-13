@@ -122,6 +122,12 @@ fn collect_node_ops(
             );
             local.push(op);
         }
+        // A `<slot>` carries NO region ops: its props / spreads are PROJECTED
+        // into the `$.slot(node, $$props, name, props, fallback)` call
+        // (`client_slot_plan`), and its fallback content is its OWN template
+        // region (its ops are collected when the op pass reaches that scope) —
+        // exactly like a component invocation.
+        IrNode::Slot(_) => {}
         // A block introduces a separate template scope (its own ops); other tags /
         // text / comments carry no reactive op here.
         IrNode::Block(_) | IrNode::Tag(_) | IrNode::Text { .. } | IrNode::Comment { .. } => {}

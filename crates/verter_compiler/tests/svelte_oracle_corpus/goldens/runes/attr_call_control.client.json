@@ -1,0 +1,64 @@
+{
+  "slug": "runes/attr_call_control.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "attr_call_control",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "push",
+    "template_effect",
+    "set_attribute",
+    "append",
+    "pop"
+  ],
+  "helperSet": [
+    "append",
+    "from_html",
+    "pop",
+    "push",
+    "set_attribute",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "push": 1,
+    "template_effect": 1,
+    "set_attribute": 1,
+    "append": 1,
+    "pop": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div></div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div></div>`); export default function attr_call_control($$anchor, $$props) {$.push($$props, true); var div = root(); $.template_effect(($0) => $.set_attribute(div, 'title', $0), [() => $$props.obj.m()]); $.append($$anchor, div); $.pop();}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

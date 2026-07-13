@@ -35,6 +35,10 @@ use verter_compiler::svelte::runtime::{
 const SUPPORTED_FIXTURES: &[&str] = &[
     // The §1.2 headline conformance target.
     "runes/hello_input",
+    // A RUNES-mode `createEventDispatcher` component: the preserved `svelte`
+    // import + verbatim dispatcher declaration, the runes frame
+    // (`$.push($$props, true)` … `$.pop()`), and NO legacy `$.init()`.
+    "runes/dispatcher",
     // A template-literal RHS in a `$state`-assign onclick body
     // (`onclick={() => { msg = `v${n}`; }}`).
     "runes/template_literal_handler",
@@ -101,6 +105,10 @@ const SUPPORTED_FIXTURES: &[&str] = &[
     // `() => arr[$.get(i)]` / `($$value) => arr[$.get(i)] = $$value` (F9 — the
     // computed-index signal read `$.get(i)` is rewritten, the proxy root reads plain).
     "runes/bind_value_computed_member",
+    // RUNES control for the legacy value wrap: a call-bearing attr dep stays
+    // the RAW rewritten expression (`[() => $$props.obj.m()]`) — NO
+    // `deep_read_state`, NO `untrack` (the wrap is legacy-mode-only).
+    "runes/attr_call_control",
     // ── 5g-c effect family ($effect / $effect.pre / $effect.root / $effect.tracking) ──
     // A top-level `$effect.pre(fn);` statement → `$.user_pre_effect` + the runes
     // frame (`$.push($$props, true)` / `$.pop()` + the `$$props` param).
@@ -1250,6 +1258,10 @@ const SUPPORTED_STORES: &[&str] = &[
     // The MINIMAL legacy imported store (interpolation-only): push=false +
     // flags/legacy + `$.init()`.
     "stores/store_legacy_only",
+    // MAYBE-RUNES control for the legacy value wrap (store-only component —
+    // the official in-between mode): the call-bearing attr dep stays RAW
+    // (`[() => $s().m()]`) — no `deep_read_state`, no `untrack`.
+    "stores/maybe_runes_attr_call",
     // Store WRITES: `$c = 5` in a named handler and `$c = 0` in an inline
     // arrow handler — both lower to `$.store_set(c, …)`.
     "stores/store_write",
@@ -1396,6 +1408,113 @@ const SUPPORTED_LEGACY: &[&str] = &[
     // writes through `$.set(y, …)` (the redundant paren carrier is waived by
     // the structural comparator).
     "legacy/reactive_paren_assign",
+    // ── the `<slot>` outlet (`$.slot`) ──
+    // A default `<slot />` inside an element: the `<div><!></div>` anchor
+    // skeleton, `$.slot(node, $$props, 'default', {}, null)`, the `$$props`
+    // param with NO frame and NO `$.init()`.
+    "legacy/slot_default",
+    // A NAMED slot with a reactive + a static prop: `$.slot(node, $$props, 'x',
+    // { get foo() { return a(); }, bar: 'b' }, null)` — the legacy prop
+    // accessor read inside the getter, the static init, the consumed `name`.
+    "legacy/slot_named_props",
+    // A spread slot: `$.spread_props({ a: '1' }, rest)` — the ONE leading
+    // ordinary object, the unthunked zero-arg accessor spread.
+    "legacy/slot_spread",
+    // A CALL-BEARING legacy slot prop: the official legacy memo topology —
+    // `let $0 = $.derived_safe_equal(() => ($.deep_read_state(obj()),
+    // $.untrack(() => obj().m())));` + the `$.get($0)` getter — plus the
+    // unsafe-call component frame (`$.push($$props, false)` … `$.init()` …
+    // `$.pop()`).
+    "legacy/slot_prop_call",
+    // A CALL-BEARING legacy slot SPREAD: official `SlotElement.js` never
+    // memoizes and never wraps a spread — the plain thunk
+    // `$.spread_props({}, () => obj().m())` (+ the unsafe-call frame).
+    "legacy/slot_spread_call",
+    // A CALL-BEARING legacy COMPONENT prop — the shared-owner memo topology
+    // twin of `slot_prop_call` (the same `DerivedMemoizer` + legacy wrap route):
+    // `$.derived_safe_equal` over the deep-read/untrack sequence, `$.get($0)`
+    // getter, unsafe-call frame.
+    "legacy/component_prop_call",
+    // A MEMBER-bearing (non-call) legacy component prop: NOT memoized, but the
+    // getter legacy-wraps — `get foo() { return ($.deep_read_state(obj()),
+    // $.untrack(() => obj().x)); }` (+ the unsafe-member frame).
+    "legacy/component_member_prop",
+    // A non-empty fallback: the fallback template hoists BEFORE the parent
+    // (post-order `root` / `root_1`) and renders as the `($$anchor) => { … }`
+    // callback region.
+    "legacy/slot_fallback",
+    // A sole-root slot with fallback: the `$.comment()` anchor frame (no
+    // `from_html` for the root; the fallback hoists its own template).
+    "legacy/slot_root_fallback",
+    // ── `createEventDispatcher` (the legacy component-event surface) ──
+    // A used dispatcher: the preserved instance-slot `svelte` import, the
+    // verbatim `const dispatch = createEventDispatcher();`, the plain
+    // `dispatch('go', 1)` call, and the legacy frame (`$.push($$props, false)`
+    // … `$.init()` … `$.pop()`) driven by the imported-call `needs_context`.
+    "legacy/dispatcher",
+    // An UNUSED dispatcher import: the import is preserved, NO frame, NO
+    // `$.init()`, NO `$$props` param.
+    "legacy/dispatcher_unused",
+    // ── the legacy value wrap on the `$.template_effect` attr/text surface ──
+    // The combined DOM-attribute + text probe: the call-bearing attr memoizes
+    // its wrapped sequence (`[() => ($.deep_read_state(obj()), $.untrack(() =>
+    // obj().m()))]`) while the imported-member text wraps INLINE in the same
+    // effect — `deep_read_state` × 2 / `untrack` × 2 pinned.
+    "legacy/attr_text_call_wrap",
+    // A NON-call member attr value wraps INLINE (wrap precedes the memoize
+    // decision): `$.set_attribute(div, 'title', ($.deep_read_state(obj()),
+    // $.untrack(() => obj().x)))` — no deps array.
+    "legacy/attr_member_inline_wrap",
+    // TWO positions of the identical call: one independent wrapper sequence
+    // per dep — no cross-position dedup, no cross-dep deep-read merge.
+    "legacy/attr_two_positions_call",
+    // An IMPORTED zero-arg callee: the import joins the dep as
+    // `$.deep_read_state(helper)` and the call untracks BY REFERENCE.
+    "legacy/attr_imported_call",
+    // A PLAIN-LOCAL callee negative: untracked (`[() => ($.untrack(m))]`) with
+    // NO fabricated `deep_read_state`.
+    "legacy/attr_plain_local_call",
+    // A MIXED attribute: the call chunk memoizes its own wrapped sequence into
+    // `$0` while the member chunk stays inline-wrapped with `?? ''` — per-chunk
+    // granularity.
+    "legacy/attr_mixed_call_member",
+    // GUARDRAIL control: the `class:` directive OBJECT is a SYNTHESIZED
+    // memoizer value — official emits it RAW (`[() => ({ foo: obj().m() })]`),
+    // no wrap; a blanket memoizer-level wrap would break this golden.
+    "legacy/class_directive_call_raw",
+    // ── the unified authored-value preparation (the remaining wrap surfaces) ──
+    // The class single base wraps INSIDE the synthesized `$.clsx` (memoized
+    // call + inline member twin).
+    "legacy/wrap_class_clsx_call",
+    // The style single base memoizes wrapped; the `style:` directive inner
+    // values wrap inside the memoized `[normal, important]` object pair.
+    "legacy/wrap_style_directive_call",
+    // The `{#if}` member test wraps inline; the `{:else if}` call test hoists
+    // the mode-independent `var d = $.derived(() => (wrap))` + `$.get(d)`.
+    "legacy/wrap_if_elseif_call",
+    // The keyed `{#each}` collection wraps inside its thunk; the key callback
+    // stays raw.
+    "legacy/wrap_each_collection_call",
+    // The `{#await}` promise + `{#key}` expression wrap inside their thunks.
+    "legacy/wrap_await_key_call",
+    // The `{@html}` payload wraps inside its getter (no thunk elision across
+    // a required wrap).
+    "legacy/wrap_html_call",
+    // The `{@const}` initializer wraps inside `$.derived_safe_equal` (the
+    // non-runes helper).
+    "legacy/wrap_const_call",
+    // The element `{@attach}` payload wraps inside its thunk.
+    "legacy/wrap_attach_call",
+    // The `<title>` mixed chunk memoizes its wrapped sequence into the
+    // deferred-effect deps array.
+    "legacy/wrap_title_mixed_call",
+    // The spread fold: co-located attr wraps + memoizes, the `style:` inner
+    // value wraps inside its memoized object, the `class:` condition stays
+    // raw inside its memoized object — one ordered memoizer + deps row.
+    "legacy/wrap_spread_colocated_call",
+    // The `<svelte:element>` fold rides the SAME item substrate: co-located
+    // attr wraps + memoizes; the `style:` inner value wraps.
+    "legacy/wrap_svelte_element_style_dir",
 ];
 
 /// The css scoping corpus (5l) — a top-level `<style>` compiles to the scoped
@@ -1530,6 +1649,30 @@ const SUPPORTED_CSS: &[&str] = &[
     // step lands `codepoint_at` on a continuation byte → char-boundary panic).
     // svelte@5.56.3 accepts + scopes; the div retains + bakes the hash.
     "css/nonascii_attr_selector_value",
+    // ── the `<slot>` outlet projection (official `SlotElement` block semantics) ──
+    // A selector matching an element INSIDE the slot fallback: kept + the
+    // fallback `<p>` scoped; the unused `.absent` prunes; the slot itself never
+    // receives the scope hash (`<!>` anchor, no element).
+    "css/slot_fallback_scoped",
+    // `.outer + .inner` where `.inner` is the FIRST fallback element — the
+    // sibling walk climbs OUT of the fallback fragment to the definite outer
+    // sibling (kept, both scoped).
+    "css/slot_adjacent_outer_before",
+    // `.last + .after` where `.last` is the LAST fallback element and `.after`
+    // follows the slot — the slot projects its fallback boundary candidates
+    // NON-exhaustively (kept fail-open, both scoped).
+    "css/slot_adjacent_fallback_last",
+    // `.a + .b` with an EMPTY-fallback slot between — the walk records the slot
+    // PROBABLY and keeps stepping to the definite `.a` (kept); the `.zz + .b`
+    // twin still prunes.
+    "css/slot_adjacent_empty_between",
+    // `:global(.x) + p` over a slot sibling — the official SlotElement
+    // uncertainty arm keeps the all-global remainder (the slot may render a
+    // `.x`); the non-global `.x + p` twin prunes.
+    "css/slot_global_sibling",
+    // The INJECTED-mode variant of the fallback-scoped fixture: the same
+    // matcher verdicts route through the `$$css` inline artifact.
+    "css/injected_slot_fallback_scoped",
 ];
 
 /// The repository root (two levels up from this crate's `tests/` dir).
@@ -6714,11 +6857,12 @@ fn supported_stores_cover_the_full_store_corpus() {
     // writes, the mode-sensitive frame); a dropped row is a coverage regression.
     assert_eq!(
         SUPPORTED_STORES.len(),
-        15,
-        "the store corpus must enumerate all 15 `stores/*` fixtures (auto_subscribe, \
-         runes_mode, legacy_only, write, compound, multiple, derived_shadowed, \
-         local_factory, bind_value, rune_named_state, rune_named_state_runes, \
-         rune_named_derived, each_nonshadow, class_local, custom_element)"
+        16,
+        "the store corpus must enumerate all 16 `stores/*` fixtures (auto_subscribe, \
+         runes_mode, legacy_only, maybe_runes_attr_call, write, compound, multiple, \
+         derived_shadowed, local_factory, bind_value, rune_named_state, \
+         rune_named_state_runes, rune_named_derived, each_nonshadow, class_local, \
+         custom_element)"
     );
     let mut seen = std::collections::BTreeSet::new();
     for &slug in SUPPORTED_STORES {
@@ -6785,12 +6929,20 @@ fn supported_legacy_cover_the_full_legacy_corpus() {
     // `$.mutable_source` promotion); a dropped row is a coverage regression.
     assert_eq!(
         SUPPORTED_LEGACY.len(),
-        22,
-        "the legacy corpus must enumerate all 22 `legacy/*` fixtures (export_let \
+        51,
+        "the legacy corpus must enumerate all 51 `legacy/*` fixtures (export_let \
          bare/default/mutated/reassigned/multiple/sibling_default, let function_write/\
          handler_write/bind_value/bind_uninit/bind_member/member_mutate/bind_window, \
          reactive assign/block/if/topo_order/prop_store/prop_only/prop_write/for_shadow/\
-         paren_assign)"
+         paren_assign, slot default/named_props/spread/fallback/root_fallback/prop_call/\
+         spread_call, component prop_call/member_prop, dispatcher used/unused, the \
+         template-effect value-wrap rows attr_text_call_wrap/attr_member_inline_wrap/\
+         attr_two_positions_call/attr_imported_call/attr_plain_local_call/\
+         attr_mixed_call_member/class_directive_call_raw, and the unified-preparation \
+         wrap rows wrap_class_clsx_call/wrap_style_directive_call/wrap_if_elseif_call/\
+         wrap_each_collection_call/wrap_await_key_call/wrap_html_call/wrap_const_call/\
+         wrap_attach_call/wrap_title_mixed_call/wrap_spread_colocated_call/\
+         wrap_svelte_element_style_dir)"
     );
     let mut seen = std::collections::BTreeSet::new();
     for &slug in SUPPORTED_LEGACY {
@@ -6903,14 +7055,12 @@ fn lifecycle_animate_emits_animation_not_transition_and_widens_each_flags() {
 #[test]
 fn lifecycle_attach_is_attribute_position_and_action_callee_shapes_hold() {
     // Element-position `{@attach expr}` emits the 2-arg `$.attach(el, () => expr)` getter
-    // thunk; the action closures use the EXACT official param names `$$node` /
+    // thunk over the PREPARED payload (the official `b.thunk` shape — `() => fn`);
+    // the action closures use the EXACT official param names `$$node` /
     // `$$action_arg` with the optional-chained callee.
-    // The payload rides the shared unconditional concise-arrow-body wrap (`() => (fn)`
-    // vs official `() => fn` — a behavior-preserving redundant paren the structural
-    // comparator waives, same as the `$.html` payload convention).
     let attach = emit("lifecycle/attach_element");
     assert!(
-        attach.contains("$.attach(div, () => (fn));"),
+        attach.contains("$.attach(div, () => fn);"),
         "attach_element must emit the 2-arg getter-thunk `$.attach`:\n{attach}"
     );
     let noarg = emit("lifecycle/use_noarg");
@@ -8801,8 +8951,8 @@ fn supported_css_covers_the_full_css_corpus() {
     // fixture that silently skips the gate.
     assert_eq!(
         SUPPORTED_CSS.len(),
-        30,
-        "the css corpus must enumerate all 30 `css/*` fixtures"
+        36,
+        "the css corpus must enumerate all 36 `css/*` fixtures"
     );
     let mut seen = std::collections::BTreeSet::new();
     for &slug in SUPPORTED_CSS {

@@ -19,14 +19,16 @@
 //! element inventory the official `analysis.elements` iterable carries.
 //!
 //! Outcomes are FAIL-CLOSED: any template or selector construct whose
-//! official neighborhood semantics cannot be PROVEN from the IR (a legacy
-//! `<slot>` element, a named-slot filler whose lowered child order diverges
-//! from the source fragment order, `<svelte:fragment slot>` hoisting that
-//! erases the official climb-out boundary, a `<svelte:head>` `<title>` that
-//! the IR decomposes away, a `{@render}` spread argument, a value literal
-//! whose JS stringification cannot be reproduced exactly) aborts the match
-//! with the typed [`MatcherRefusal`] — never a guessed scope, never an
-//! over-approximated `used` verdict.
+//! official neighborhood semantics cannot be PROVEN from the IR (a
+//! named-slot filler whose lowered child order diverges from the source
+//! fragment order, `<svelte:fragment slot>` hoisting that erases the
+//! official climb-out boundary, a `<svelte:head>` `<title>` that the IR
+//! decomposes away, a `{@render}` spread argument, a value literal whose JS
+//! stringification cannot be reproduced exactly) aborts the match with the
+//! typed [`MatcherRefusal`] — never a guessed scope, never an
+//! over-approximated `used` verdict. (A legacy `<slot>` element is PROVABLE:
+//! the IR projects its lossless block topology, so slot CSS scoping matches
+//! without refusal.)
 //!
 //! The JS algorithm mutates `metadata.used` / `metadata.scoped` in place
 //! through shared object references (spread-copied selectors alias the same
@@ -600,10 +602,13 @@ impl<'ast> Matcher<'_, '_, '_> {
                 for (possible_sibling, existence) in siblings.entries() {
                     let branch = if self.index.is_render_tag(possible_sibling)
                         || self.index.is_component_node(possible_sibling)
+                        || self.index.is_slot_node(possible_sibling)
                     {
                         // `{@render foo()}<p>foo</p>` with `:global(.x) + p`
-                        // is a match — the rendered content is unknowable, so
-                        // the official acceptance is a fail-open `Maybe`.
+                        // is a match — the rendered content is unknowable
+                        // (official includes `SlotElement` here: a slot may
+                        // render supplied content), so the official acceptance
+                        // is a fail-open `Maybe`.
                         if to - from == 1 && relative_selectors[from].as_ref().metadata.is_global {
                             MatchCertainty::Maybe
                         } else {

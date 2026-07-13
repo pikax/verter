@@ -27,7 +27,14 @@ use crate::model::{
 
 /// Version of the manifest schema (bumped on any breaking change to the
 /// spec shape, the classification vocabulary, or the case contract).
-pub const SCHEMA_VERSION: u32 = 1;
+/// v2: the `refused:*` disposition vocabulary emptied — the former
+/// `refused:legacy-slot-scope-unprovable` cells reclassified `supported`
+/// (the `<slot>` fallback region lowers + scopes through the shared matcher).
+/// v3: the legacy VALUE-WRAP × SURFACE coverage axis added
+/// ([`crate::value_wrap`]) — the typed `ValueWrapSurface` vocabulary, the
+/// exhaustive `classify_value_wrap` cells, and the executable per-cell
+/// observation gate (`tests/value_wrap_cells.rs`).
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// One selected covering row, expanded into its executable conformance case.
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -1,0 +1,41 @@
+{
+  "slug": "cls-spread-eschar-id-q-dynel-ext-comb-u",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "cls_spread_eschar_id_q_dynel_ext_comb_u",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "element",
+    "attributes"
+  ],
+  "helperSet": [
+    "attributes",
+    "element"
+  ],
+  "helperCounts": {
+    "element": 1,
+    "attributes": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": true,
+    "hash": "svelte-85k5iw",
+    "code": "\n\t.wrap.svelte-<scoped> .a\\&b:where(.svelte-<scoped>) {\n\t\tcolor: red;\n\t}\n"
+  }
+}

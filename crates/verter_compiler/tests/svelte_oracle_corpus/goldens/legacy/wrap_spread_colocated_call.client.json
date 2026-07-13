@@ -1,0 +1,87 @@
+{
+  "slug": "legacy/wrap_spread_colocated_call.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "wrap_spread_colocated_call",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "push",
+    "prop",
+    "prop",
+    "init",
+    "attribute_effect",
+    "CLASS",
+    "STYLE",
+    "deep_read_state",
+    "untrack",
+    "deep_read_state",
+    "untrack",
+    "append",
+    "pop"
+  ],
+  "helperSet": [
+    "CLASS",
+    "STYLE",
+    "append",
+    "attribute_effect",
+    "deep_read_state",
+    "from_html",
+    "init",
+    "pop",
+    "prop",
+    "push",
+    "untrack"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "push": 1,
+    "prop": 2,
+    "init": 1,
+    "attribute_effect": 1,
+    "CLASS": 1,
+    "STYLE": 1,
+    "deep_read_state": 2,
+    "untrack": 2,
+    "append": 1,
+    "pop": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div></div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div></div>`); export default function wrap_spread_colocated_call($$anchor, $$props) {$.push($$props, false); let p = $.prop($$props, 'p', 8); let obj = $.prop($$props, 'obj', 8); $.init(); var div = root(); $.attribute_effect(div, ($0, $1, $2) => ({...p(), title: $0, [$.CLASS]: $1, [$.STYLE]: $2}), [() => ($.deep_read_state(obj()), $.untrack(() => obj().m())), () => ({on: obj().c()}), () => ({color: ($.deep_read_state(obj()), $.untrack(() => obj().f()))})]); $.append($$anchor, div); $.pop();}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

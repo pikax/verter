@@ -9,4 +9,4 @@
 //! a self-referential read would turn that comparison into a tautology.
 
 /// One fixture per manifest case; two backend goldens each.
-pub const CASE_COUNT: usize = 518;
+pub const CASE_COUNT: usize = 609;

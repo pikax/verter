@@ -1,0 +1,51 @@
+{
+  "slug": "stores/maybe_runes_attr_call.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/store",
+      "kind": "named",
+      "names": [
+        "writable"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "maybe_runes_attr_call",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "attr",
+    "store_get",
+    "unsubscribe_stores"
+  ],
+  "helperSet": [
+    "attr",
+    "store_get",
+    "unsubscribe_stores"
+  ],
+  "helperCounts": {
+    "attr": 1,
+    "store_get": 1,
+    "unsubscribe_stores": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

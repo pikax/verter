@@ -119,6 +119,8 @@ pub enum SvelteHelper {
     Await,
     /// `$.snippet` — a dynamic `{@render expr?.()}` snippet call.
     Snippet,
+    /// `$.slot` — a legacy `<slot>` outlet render.
+    Slot,
     /// `$.derived` — a `$derived` / `{@const}` memo.
     Derived,
     /// `$.head` — a `<svelte:head>` region.
@@ -220,6 +222,7 @@ impl SvelteHelper {
             Self::Key => "key",
             Self::Await => "await",
             Self::Snippet => "snippet",
+            Self::Slot => "slot",
             Self::Derived => "derived",
             Self::Head => "head",
             Self::RemoveInputDefaults => "remove_input_defaults",

@@ -1,0 +1,71 @@
+{
+  "slug": "attr-dyn-eschex-attr-uq-blk-inj-prune-u",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "attr_dyn_eschex_attr_uq_blk_inj_prune_u",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "append_styles",
+    "comment",
+    "first_child",
+    "template_effect",
+    "set_attribute",
+    "append",
+    "if",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "append_styles",
+    "comment",
+    "first_child",
+    "from_html",
+    "if",
+    "set_attribute",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "append_styles": 1,
+    "comment": 1,
+    "first_child": 1,
+    "template_effect": 1,
+    "set_attribute": 1,
+    "append": 2,
+    "if": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div class=\"svelte-<scoped>\">x</div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div class=\"svelte-<scoped>\">x</div>`); const $$css = {hash: 'svelte-<scoped>', code: '[data-x=\"a\\\\26 b\"].svelte-<scoped> {color:red;}'}; export default function attr_dyn_eschex_attr_uq_blk_inj_prune_u($$anchor, $$props) {$.append_styles($$anchor, $$css); let open = true; var fragment = $.comment(); var node = $.first_child(fragment); {var consequent = ($$anchor) => {var div = root(); $.template_effect(() => $.set_attribute(div, 'data-x', $$props.value)); $.append($$anchor, div);}; $.if(node, ($$render) => {if (open) $$render(consequent);});} $.append($$anchor, fragment);}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

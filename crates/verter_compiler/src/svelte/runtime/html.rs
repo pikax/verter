@@ -237,7 +237,7 @@ pub enum DynamicSlotKind {
 pub enum PathBase {
     /// The cloned template fragment root.
     Fragment,
-    /// A previously-named node (e.g. a parent reached via an earlier path).
+    /// An already-named node (e.g. a parent reached via an earlier path).
     Node(NodeId),
 }
 
@@ -370,6 +370,11 @@ fn is_static_html_root(node: &IrNode) -> bool {
             false
         }
         IrNode::Special(_) => !is_non_body_special(node),
+        // A `<slot>` is a `<!>`-anchored renderable (`$.slot(...)` against a
+        // hydration anchor), NOT a static-HTML clone root — exactly like a
+        // control-flow block. A sole-root slot is a comment anchor; among
+        // siblings it serializes to a `<!>` marker.
+        IrNode::Slot(_) => false,
         IrNode::Element(_) | IrNode::Component(_) | IrNode::Comment { .. } => true,
         // HTML-significance uses the ASCII `is_html_ws` set, NOT `str::trim`
         // (which also folds a literal NBSP `\u{00a0}` and other Unicode
@@ -949,6 +954,18 @@ fn collect_node_slots(
                 kind: DynamicSlotKind::Block,
             });
         }
+        // A `<slot>` element occupies a `<!>` anchor position exactly like a
+        // block (its `$.slot(...)` renders there); its OWN dynamic props are
+        // projected into the call (not region ops), and its fallback content
+        // lives in its OWN region (collected when the slot pass reaches that
+        // scope) — no child recursion here.
+        IrNode::Slot(_) => {
+            slots.push(DynamicSlot {
+                scope,
+                node: node_id,
+                kind: DynamicSlotKind::Block,
+            });
+        }
         // A component-family node (a `<Foo>` component, `<svelte:component>` /
         // `<svelte:self>` / `<svelte:fragment>`): its OWN dynamic props / binds / spreads
         // are part of the shared SSR dynamic surface (`Attribute` / `Bind` / `Spread`
@@ -1257,6 +1274,9 @@ fn element_hosts_dynamic_descendant(ir: &SvelteRuntimeIr, node_id: NodeId) -> bo
 fn node_needs_path(ir: &SvelteRuntimeIr, node_id: NodeId) -> bool {
     match ir.node(node_id) {
         IrNode::Interpolation { .. } | IrNode::Block(_) => true,
+        // A `<slot>` outlet is a dynamic node the DOM walk must reach (its
+        // `$.slot(node, …)` call operates on the walked `<!>` anchor var).
+        IrNode::Slot(_) => true,
         IrNode::Element(el) => el.attrs.iter().any(attr_is_dynamic_surface),
         // A raw `{@html}` tag is a dynamic node the DOM walk must reach.
         IrNode::Tag(crate::svelte::runtime::ir::TagIr::Html { .. }) => true,
@@ -1315,6 +1335,8 @@ fn collect_node_template_scopes(
         // named) + its `{#snippet}`-def body regions — NOT its raw `children` (the slot
         // content lives in those regions). Mirrors the emit-side `collect_child_regions`.
         IrNode::Component(c) => collect_component_slot_template_scopes(ir, &c.slots, out),
+        // A `<slot>`'s fallback content is its OWN template region.
+        IrNode::Slot(slot) => collect_template_scopes(ir, slot.fallback, out),
         IrNode::Special(s) => {
             collect_component_slot_template_scopes(ir, &s.slots, out);
             // A RENDERABLE-REGION special (`<svelte:element>`) hosts its children in its own

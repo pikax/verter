@@ -345,16 +345,20 @@ mod tests {
         // can NEVER produce an `Ok` plan — the plan type carries no
         // unprovable state; the refusal is the typed `Err` with the
         // construct's EXACT span and description.
-        let source = "<slot></slot>\n<style>.card { color: red; }</style>";
-        let err = plan_for(source, None).expect_err("a `<slot>` template cannot prove");
+        let source =
+            "<svelte:head><title>t</title></svelte:head>\n<style>.card { color: red; }</style>";
+        let err = plan_for(source, None).expect_err("a head-`<title>` template cannot prove");
         assert_eq!(err.class, StylePlanFailureClass::SelectorUnprovable);
         assert_eq!(err.code, "svelte-runtime-unsupported-style-selector");
-        let slot = source.find("<slot>").unwrap() as u32;
-        assert_eq!(err.span, Span::new(slot, slot + "<slot>".len() as u32));
+        let head = source.find("<svelte:head>").unwrap() as u32;
+        assert_eq!(
+            err.span,
+            Span::new(head, head + "<svelte:head>".len() as u32)
+        );
         assert!(
             err.construct
                 .expect("a matcher refusal names its construct")
-                .contains("<slot>"),
+                .contains("<title>"),
             "the construct description names the unprovable construct"
         );
     }

@@ -1,0 +1,45 @@
+{
+  "slug": "id-spread-eschex-cls-q-comp-ext-prune-u",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "./Child.svelte",
+      "kind": "default",
+      "names": [
+        "default:Child"
+      ]
+    },
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "id_spread_eschex_cls_q_comp_ext_prune_u",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "attributes"
+  ],
+  "helperSet": [
+    "attributes"
+  ],
+  "helperCounts": {
+    "attributes": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": true,
+    "hash": "svelte-ap7czg",
+    "code": "\n\t#a\\26 b.svelte-<scoped> {\n\t\tcolor: red;\n\t}\n\n\t.unused-prune.svelte-<scoped> {\n\t\tcolor: blue;\n\t}\n"
+  }
+}

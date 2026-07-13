@@ -1,0 +1,73 @@
+{
+  "slug": "legacy/slot_fallback.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "slot_fallback",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "from_html",
+    "child",
+    "slot",
+    "append",
+    "reset",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "from_html",
+    "reset",
+    "slot"
+  ],
+  "helperCounts": {
+    "from_html": 2,
+    "child": 1,
+    "slot": 1,
+    "append": 2,
+    "reset": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<p>fb</p>",
+      "flag": null
+    },
+    {
+      "factory": "from_html",
+      "html": "<div><!></div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<p>fb</p>`); var root_1 = $.from_html(`<div><!></div>`); export default function slot_fallback($$anchor, $$props) {var div = root_1(); var node = $.child(div); $.slot(node, $$props, 'default', {}, ($$anchor) => {var p = root(); $.append($$anchor, p);}); $.reset(div); $.append($$anchor, div);}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

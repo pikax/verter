@@ -278,6 +278,10 @@ fn component_with_element(tag: &str) -> String {
 /// compile fails closed" (there may be no element under test at all).
 const SVELTE_SPECIAL_PARSE_TAGS: &[&str] = &[
     "script", "style", "template", "title", "head", "body", "html", "noscript",
+    // `<slot>` lowers to the BLOCK-semantic slot outlet (`$.slot` against a `<!>`
+    // anchor) — it never clones as an intrinsic element, so it takes the same
+    // "must not clone" negative-half disposition as the special-parse tags.
+    "slot",
 ];
 
 /// Whether the emitted module (if any) clones `<tag>` as an intrinsic element — i.e.
@@ -457,19 +461,19 @@ fn element_matrix_hyphenated_custom_tags_fail_closed() {
 }
 
 #[test]
-fn element_matrix_raw_slot_fails_closed() {
-    // A raw `<slot>` must NEVER reach intrinsic emission (Verter's parser does not
-    // model the official `SlotElement`).
-    let src = "<script>let c = $state(0); c = 1;</script>\n<slot></slot>\n";
-    assert!(!emits_main(src), "a raw <slot> must fail closed (no Main)");
+fn element_matrix_raw_slot_emits_the_slot_outlet_not_an_element() {
+    // A `<slot>` NEVER reaches intrinsic emission — it is the BLOCK-semantic
+    // slot outlet: a `<!>` hydration anchor + `$.slot(node, $$props, 'default',
+    // {}, null)`, never a cloned `<slot>` DOM element.
+    let src = "<slot></slot>\n";
+    let js = compile(src).expect("a <slot> outlet compiles");
     assert!(
-        matches!(
-            compile(src),
-            Err(ClientCompileError::Unsupported(
-                verter_compiler::svelte::runtime::UnsupportedSvelteRuntimeSurface::Element { tag, .. }
-            )) if tag == "slot"
-        ),
-        "a raw <slot> must fail closed with the regular-element refusal"
+        js.contains("$.slot(node, $$props, 'default', {}, null);"),
+        "the slot outlet call topology:\n{js}"
+    );
+    assert!(
+        !js.contains("<slot"),
+        "the skeleton never contains a <slot> element:\n{js}"
     );
 }
 

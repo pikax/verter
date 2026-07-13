@@ -1,0 +1,80 @@
+{
+  "slug": "special/svelte_boundary_legacy_call_prop.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "svelte_boundary_legacy_call_prop",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "push",
+    "prop",
+    "prop",
+    "init",
+    "comment",
+    "first_child",
+    "boundary",
+    "append",
+    "append",
+    "pop"
+  ],
+  "helperSet": [
+    "append",
+    "boundary",
+    "comment",
+    "first_child",
+    "from_html",
+    "init",
+    "pop",
+    "prop",
+    "push"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "push": 1,
+    "prop": 2,
+    "init": 1,
+    "comment": 1,
+    "first_child": 1,
+    "boundary": 1,
+    "append": 2,
+    "pop": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<p>content</p>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<p>content</p>`); export default function svelte_boundary_legacy_call_prop($$anchor, $$props) {$.push($$props, false); let obj = $.prop($$props, 'obj', 8); let fail = $.prop($$props, 'fail', 8); $.init(); var fragment = $.comment(); var node = $.first_child(fragment); $.boundary(node, {get failed() {return obj().m();}, get pending() {return fail();}}, ($$anchor) => {var p = root(); $.append($$anchor, p);}); $.append($$anchor, fragment); $.pop();}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

@@ -16,18 +16,18 @@
 
 use super::client::ClientEmitter;
 use super::client::UnsupportedSvelteRuntimeSurface;
-use super::client_codegen_helpers::{js_single_quoted, object_key};
+use super::client_codegen_helpers::js_single_quoted;
 use super::client_component_emit::CallbackPlacement;
 use super::client_effect::{emit_text_effect, EffectBody, Memoizer};
 use super::client_event::render_event_registration;
 use super::client_plan::SupportedClientIr;
 use super::client_plan_bind::event_wrappers;
 use super::client_plan_types::{
-    ClientElementBind, ClientNode, ClientRuntimeOp, ClientSvelteElement, ElementFoldItem,
+    AttributeEffectItem, ClientElementBind, ClientNode, ClientRuntimeOp, ClientSvelteElement,
     EventEmit, EventEmitTarget, EventMode,
 };
 use super::client_shapes::ClientBindShape;
-use super::ir::{AttrIr, BindOp, NodeId, SpecialElementIr, StyleDirectiveValue};
+use super::ir::{AttrIr, BindOp, NodeId, SpecialElementIr};
 
 impl<'a> SupportedClientIr<'a> {
     /// Project a `<svelte:element this={…}>` into its narrow [`ClientNode::SvelteElement`]:
@@ -44,11 +44,17 @@ impl<'a> SupportedClientIr<'a> {
         s: &SpecialElementIr,
         node_id: NodeId,
     ) -> Result<ClientNode, UnsupportedSvelteRuntimeSurface> {
-        // The get-tag thunk BODY: a DYNAMIC `this={…}` rewrites its expression
-        // (source-preserving), a STATIC `this="div"` is the single-quoted literal. A
-        // `<svelte:element>` with neither is a parse error upstream — fail closed defensively.
+        // The get-tag thunk BODY: a DYNAMIC `this={…}` prepares its expression
+        // through the sole authored-value entry (a RAW semantic role — official
+        // visits the tag expression without `build_expression`); a STATIC
+        // `this="div"` is the single-quoted literal. A `<svelte:element>` with
+        // neither is a parse error upstream — fail closed defensively.
         let get_tag = if let Some(expr) = s.this_expr {
-            self.rewrite_value_preserving_source(expr)?
+            self.prepare_template_value(
+                super::client_legacy_value::AuthoredExpr(expr),
+                super::client_legacy_value::AuthoredValueSurface::SvelteElementThis,
+            )?
+            .inline_expression()
         } else if let Some(tag) = &s.static_tag {
             js_single_quoted(tag)
         } else {
@@ -65,14 +71,8 @@ impl<'a> SupportedClientIr<'a> {
                     span: s.span,
                 })?;
 
-        let mut fold: Vec<ElementFoldItem> = Vec::new();
         let mut binds: Vec<ClientElementBind> = Vec::new();
         let mut events: Vec<String> = Vec::new();
-        // The merged `class:` / `style:` directive entries, appended LAST (after the plain
-        // attributes / events, in directive source order) — the official `Element.js`
-        // attribute-effect fold ordering.
-        let mut class_dirs: Vec<String> = Vec::new();
-        let mut style_dirs: Vec<String> = Vec::new();
         // The scope hash for THIS dynamic element — `Some` iff the selector-to-template
         // matcher marked the host node scoped (the SAME shared [`CssScopeFacts`] read
         // every other injection site consumes). The SCOPED fact feeds the route (the
@@ -97,6 +97,11 @@ impl<'a> SupportedClientIr<'a> {
         } else {
             None
         };
+        // The NON-fold attribute families: `bind:` (each with its rewritten
+        // proxied getter/setter), the LEGACY `on:` directives (direct `$.event`
+        // registrations — NOT fold entries), and the fail-closed lifecycle /
+        // `let:` directives. The FOLD-eligible families route through the ONE
+        // shared attribute-effect item builder below.
         for attr in &s.attrs {
             match attr {
                 AttrIr::Bind {
@@ -148,8 +153,12 @@ impl<'a> SupportedClientIr<'a> {
                     // capture / passive that the fold form silently dropped. Rendered through the
                     // SHARED event substrate (`render_event_registration`) against the `$$element`
                     // host (a callback-local, so the node-var map is empty).
-                    let scope = self.ir.analysis.expressions.get(*handler).scope;
-                    let handler_body = self.rewrite(*handler, scope)?;
+                    let handler_body = self
+                        .prepare_template_value(
+                            super::client_legacy_value::AuthoredExpr(*handler),
+                            super::client_legacy_value::AuthoredValueSurface::EventHandler,
+                        )?
+                        .inline_expression();
                     let emit = EventEmit {
                         mode: EventMode::Direct,
                         origin: *origin,
@@ -163,96 +172,6 @@ impl<'a> SupportedClientIr<'a> {
                     let rendered =
                         render_event_registration(&emit, &rustc_hash::FxHashMap::default());
                     events.push(rendered.trim().to_string());
-                }
-                AttrIr::Static { name, value } => {
-                    // On the `set_class` fast path the static-text `class` is the pieces'
-                    // BASE value, so it is NOT folded here — skip it (the NAME matches
-                    // case-insensitively, the official `toLowerCase()` rule). Every other
-                    // static attribute (and a non-lone / non-text `class`) folds normally.
-                    if set_class.is_some() && name.eq_ignore_ascii_case("class") {
-                        continue;
-                    }
-                    // A valueless boolean attribute folds as `name: true`; a present value as
-                    // the single-quoted literal over the producer-DECODED value (read via
-                    // `as_str`, never a second decode).
-                    let v = match value {
-                        None => "true".to_string(),
-                        Some(v) => js_single_quoted(v.value.as_str()),
-                    };
-                    fold.push(ElementFoldItem::Entry(format!("{}: {v}", object_key(name))));
-                }
-                AttrIr::Dynamic { name, expr } => {
-                    let v = self.rewrite_value_preserving_source(*expr)?;
-                    // The official `is_event_attribute` rule (`name.startsWith('on')` on an
-                    // expression attribute): a `<svelte:element>`-hosted `on*` handler folds
-                    // into `$.attribute_effect` as a HOISTED stable local (`var event_handler =
-                    // <handler>; … on<event>: event_handler`) — the handler-stability hoist the
-                    // re-running effect arrow requires. A non-`on*` attribute is a plain fold
-                    // entry. (The `on*`-name check mirrors svelte's compiler rule — it is the
-                    // attribute-effect fold's own handler classification, NOT a type-resolver
-                    // heuristic.)
-                    if name.starts_with("on") {
-                        fold.push(ElementFoldItem::Event {
-                            prop: name.clone(),
-                            handler: v,
-                        });
-                    } else {
-                        fold.push(ElementFoldItem::Entry(format!("{}: {v}", object_key(name))));
-                    }
-                }
-                AttrIr::Mixed { name, parts } => {
-                    let (value, _) = self.mixed_attr_value(parts)?;
-                    let v = self.fold_attr_value_text(&value);
-                    fold.push(ElementFoldItem::Entry(format!("{}: {v}", object_key(name))));
-                }
-                AttrIr::Spread { expr } => {
-                    fold.push(ElementFoldItem::Entry(format!(
-                        "...{}",
-                        self.rewrite_value_preserving_source(*expr)?
-                    )));
-                }
-                AttrIr::Class { name, condition } => {
-                    // On the `set_class` fast path every `class:` directive is merged
-                    // into the pieces' directive-object argument — skip the fold entry.
-                    if set_class.is_some() {
-                        continue;
-                    }
-                    let key = object_key(name);
-                    let entry = match condition {
-                        Some(e) => super::client_codegen_helpers::object_property(
-                            &key,
-                            &self.rewrite_value_preserving_source(*e)?,
-                        ),
-                        None => key,
-                    };
-                    class_dirs.push(entry);
-                }
-                AttrIr::Style {
-                    property, value, ..
-                } => {
-                    let key = object_key(property);
-                    let entry = match value {
-                        StyleDirectiveValue::Expr(e) => {
-                            super::client_codegen_helpers::object_property(
-                                &key,
-                                &self.rewrite_value_preserving_source(*e)?,
-                            )
-                        }
-                        StyleDirectiveValue::Text(text) => {
-                            super::client_codegen_helpers::object_property(
-                                &key,
-                                &js_single_quoted(text),
-                            )
-                        }
-                        StyleDirectiveValue::Mixed(parts) => {
-                            let (mixed, _) = self.mixed_attr_value(parts)?;
-                            super::client_codegen_helpers::object_property(
-                                &key,
-                                &self.fold_attr_value_text(&mixed),
-                            )
-                        }
-                    };
-                    style_dirs.push(entry);
                 }
                 // A lifecycle directive (`use:` / `transition:` / `animate:` /
                 // `{@attach}`) or `let:` on a dynamic element is the DEFERRED
@@ -268,38 +187,39 @@ impl<'a> SupportedClientIr<'a> {
                         span: s.span,
                     });
                 }
+                // The FOLD-eligible families (static/dynamic/mixed attributes,
+                // spreads, `class:`/`style:` directives) route through the shared
+                // item builder below.
+                _ => {}
             }
         }
-        // The analyze-phase SYNTHESIZED empty `class` / `style` attributes (official
-        // `phases/2-analyze/index.js`): a `class:`/`style:` directive OR a SCOPED node
-        // with no matching plain attribute (and no spread) contributes a `class: ''` /
-        // `style: ''` fold entry, appended AFTER the real attributes (official pushes the
-        // synthetics onto the attribute list) and BEFORE the `[$.CLASS]` / `[$.STYLE]`
-        // directive entries.
-        if let SvelteElementAttrRoute::Fold {
-            synth_class,
-            synth_style,
-        } = route
+        // The FOLD items — the SAME shared typed item builder the regular-element
+        // spread fold uses (one wrap/memoize substrate, no per-host drift), with
+        // the `<svelte:element>` host knobs: the analyze-phase synthesized
+        // `class: ''` / `style: ''` entries and the SetClass-consumed class skip.
+        let (synth_class, synth_style) = match route {
+            SvelteElementAttrRoute::Fold {
+                synth_class,
+                synth_style,
+            } => (synth_class, synth_style),
+            _ => (false, false),
+        };
+        let fold: Vec<AttributeEffectItem> = if matches!(route, SvelteElementAttrRoute::Fold { .. })
         {
-            if synth_class {
-                fold.push(ElementFoldItem::Entry("class: ''".to_string()));
-            }
-            if synth_style {
-                fold.push(ElementFoldItem::Entry("style: ''".to_string()));
-            }
-        }
-        if !class_dirs.is_empty() {
-            fold.push(ElementFoldItem::Entry(format!(
-                "[$.CLASS]: {{ {} }}",
-                class_dirs.join(", ")
-            )));
-        }
-        if !style_dirs.is_empty() {
-            fold.push(ElementFoldItem::Entry(format!(
-                "[$.STYLE]: {{ {} }}",
-                style_dirs.join(", ")
-            )));
-        }
+            self.attribute_effect_items(
+                &s.attrs,
+                super::client_plan_spread_html::AttributeEffectFoldOptions {
+                    synth_class,
+                    synth_style,
+                    skip_class: false,
+                },
+            )?
+        } else if set_class.is_some() {
+            // The lone-class fast path consumed the class family; nothing folds.
+            Vec::new()
+        } else {
+            Vec::new()
+        };
 
         Ok(ClientNode::SvelteElement(ClientSvelteElement {
             get_tag,
@@ -512,28 +432,26 @@ impl<'a> ClientEmitter<'a> {
             }
         }
         if !el.fold.is_empty() {
-            let mut entries: Vec<String> = Vec::with_capacity(el.fold.len());
-            for item in &el.fold {
-                match item {
-                    ElementFoldItem::Entry(entry) => entries.push(entry.clone()),
-                    ElementFoldItem::Event { prop, handler } => {
-                        // The official attribute-effect handler-stability hoist: a stable `var
-                        // event_handler = <handler>;` referenced by name in the fold.
-                        let name = self.alloc_name("event_handler");
-                        setup.push_str(&format!("var {name} = {handler};"));
-                        entries.push(format!("{prop}: {name}"));
-                    }
-                }
-            }
-            // The SHARED `$.attribute_effect` argument row (the same tail builder the
-            // regular-element spread fold uses): a SCOPED dynamic element threads its
-            // scope-hash literal as the official 6th argument
+            // The fold renders through the SHARED per-effect item renderer (the same
+            // memoizer + hoist substrate the regular-element spread fold uses): each
+            // `has_call` value hoists into a `$N` arrow param + dependency, and the
+            // event-handler stability hoists precede the effect. A SCOPED dynamic
+            // element threads its scope-hash literal as the official 6th argument
             // (`build_attribute_effect`); `<svelte:element>` never takes the `<input>`
             // remove-defaults tail (the official `SvelteElement` visitor passes no
             // `should_remove_defaults`).
+            let mut hoists = String::new();
+            let (body, deps) = self.render_attribute_effect_items(&el.fold, &mut hoists);
+            // The setup prelude is single-line (per-statement indentation stripped);
+            // normalize the hoist lines the shared renderer indents for the
+            // walk-position form.
+            for line in hoists.lines() {
+                setup.push_str(line.trim_start());
+            }
             let call = super::client_spread_html_emit::attribute_effect_call(
                 "$$element",
-                &entries.join(", "),
+                &body,
+                &deps,
                 false,
                 el.css_hash.as_deref(),
             );

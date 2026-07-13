@@ -7734,6 +7734,39 @@ fn svelte_boundary_onerror_emits_the_props_member() {
 }
 
 #[test]
+fn legacy_boundary_call_bearing_prop_stays_raw_through_the_prepared_carrier() {
+    // BoundaryProp is policy=Raw: official `SvelteBoundary.js` visits the
+    // attribute expression RAW (no `build_expression`), so a call-bearing
+    // `failed={obj.m()}` in a DEFINITELY-legacy component must NOT legacy-wrap
+    // even though the wrap trigger (`has_call`) fires. The prop still routes
+    // through the sole preparation entry as a raw prepared carrier.
+    let js = emit(
+        "<script>export let obj;\nexport let fail;</script>\n<svelte:boundary failed={obj.m()} pending={fail}><p>c</p></svelte:boundary>\n",
+        "App.svelte",
+    );
+    let n = normalize_js_cosmetics(&js);
+    assert!(
+        !js.contains("$.untrack("),
+        "a boundary prop never legacy-wraps (official visits it raw):\n{js}"
+    );
+    assert!(
+        !js.contains("$.deep_read_state("),
+        "no wrap dep-reads on the raw boundary surface:\n{js}"
+    );
+    // The call-bearing value still emits as the STATE-BEARING getter over the
+    // RAW rewritten expression (the legacy prop accessor, untouched).
+    assert!(
+        n.contains(&nc("get failed() { return obj().m(); }")),
+        "raw getter body over the legacy prop accessor:\n{js}"
+    );
+    assert!(
+        n.contains(&nc("get pending() { return fail(); }")),
+        "the state-bearing shorthand prop keeps the raw getter:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
 fn svelte_boundary_failed_snippet_hoists_into_the_wrapping_block() {
     // `{#snippet failed(error, reset)}…{/snippet}` → the snippet hoists to a `const failed =
     // ($$anchor, error = $.noop, reset = $.noop) => {…}` in a wrapping `{ … }` block above the
@@ -9750,10 +9783,11 @@ fn non_global_css_artifact_reports_has_global_false_and_no_undemanded_map() {
 #[test]
 fn matcher_unprovable_template_fails_closed_on_the_selector_surface() {
     // A template construct the selector-to-template matcher cannot PROVE (a
-    // legacy `<slot>` re-parents unpredictably) keeps the style fail-closed on
-    // the selector surface — never a guessed scope, never unscoped output.
+    // `<svelte:head>` `<title>` is decomposed out of the runtime IR fragment)
+    // keeps the style fail-closed on the selector surface — never a guessed
+    // scope, never unscoped output.
     assert_fail_closed(
-        "<div><slot></slot></div>\n<style>div { color: red; }</style>\n",
+        "<svelte:head><title>t</title></svelte:head>\n<div>x</div>\n<style>div { color: red; }</style>\n",
         |s| {
             matches!(
                 s,
@@ -10286,10 +10320,12 @@ fn style_css_analysis_refusal_carries_the_precise_css_code_and_span() {
 #[test]
 fn style_selector_refusal_carries_the_construct_span_and_selector_code() {
     // Code/span propagation (matcher refusal): the selector-unprovable
-    // refusal reports the UNPROVABLE CONSTRUCT's exact span (the `<slot>`
-    // open tag) with the fixed selector-surface code. NEGATIVE: never the
+    // refusal reports the UNPROVABLE CONSTRUCT's exact span (the
+    // `<svelte:head>` open tag whose `<title>` is decomposed out of the
+    // runtime IR) with the fixed selector-surface code. NEGATIVE: never the
     // whole `<style>` content span (the pre-F4 secondary-check span).
-    let source = "<div><slot></slot></div>\n<style>div { color: red; }</style>\n";
+    let source =
+        "<svelte:head><title>t</title></svelte:head>\n<div>x</div>\n<style>div { color: red; }</style>\n";
     let err = emit_result(source).expect_err("an unprovable template must not compile");
     let ClientCompileError::Unsupported(surface) = err else {
         panic!("expected the selector refusal, got {err:?}");
@@ -10305,10 +10341,10 @@ fn style_selector_refusal_carries_the_construct_span_and_selector_code() {
         surface.diagnostic_code(),
         "svelte-runtime-unsupported-style-selector"
     );
-    let slot = source.find("<slot>").unwrap() as u32;
+    let head = source.find("<svelte:head>").unwrap() as u32;
     assert_eq!(
         surface.span(),
-        verter_span::Span::new(slot, slot + "<slot>".len() as u32),
+        verter_span::Span::new(head, head + "<svelte:head>".len() as u32),
         "the refusal span is the unprovable construct's own span"
     );
 }
@@ -23588,24 +23624,6 @@ fn store_bind_this_target_fails_closed() {
 }
 
 #[test]
-fn legacy_surfaces_fail_closed_with_narrow_per_surface_diagnostics() {
-    // (`$:` reactive statements are SUPPORTED — they lower through
-    // `$.legacy_pre_effect`; see `reactive_store_dep_registers_the_bare_accessor_call`.)
-    // `<slot>` (legacy) → the narrow slot surface.
-    assert_fail_closed("<div><slot></slot></div>\n", |s| {
-        matches!(s, UnsupportedSvelteRuntimeSurface::LegacySlotElement { .. })
-    });
-    // `createEventDispatcher` (legacy) → the narrow dispatcher surface.
-    assert_fail_closed(
-        "<script>import { createEventDispatcher } from 'svelte'; const dispatch = createEventDispatcher(); function go() { dispatch('x'); }</script>\n<button onclick={go}>go</button>\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::LegacyEventDispatcher { .. }),
-    );
-    // A legacy bind-target `let` is SUPPORTED — legacy `let` reactivity
-    // promotes it to a real `$.mutable_source` binding (see
-    // `legacy_bind_target_let_promotes_to_mutable_source`).
-}
-
-#[test]
 fn runes_named_function_handler_is_passed_by_reference() {
     // INVERTED (was the `event_local_function_ident` fail row): a bare-identifier
     // handler naming a top-level function declaration passes the reference
@@ -24913,6 +24931,2444 @@ fn reactive_store_dep_registers_the_bare_accessor_call() {
     assert!(
         js.contains("const doubled = $.mutable_source();"),
         "the assignment target synthesizes:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+// ── The `<slot>` element surface (`$.slot(...)`) ────────────────────────────
+
+#[test]
+fn slot_default_empty_in_element_emits_dollar_slot_anchor_topology() {
+    // `<div><slot /></div>` (legacy — no runes): the slot keeps its `<!>` anchor
+    // even as the sole child (NEVER controlled), and emits
+    // `$.slot(node, $$props, 'default', {}, null)` at its document position.
+    let js = emit("<div><slot /></div>\n", "App.svelte");
+    assert!(
+        js.contains("$.from_html(`<div><!></div>`)"),
+        "the slot serializes as a `<!>` hydration anchor:\n{js}"
+    );
+    assert!(
+        js.contains("var node = $.child(div);"),
+        "the walk descends to the slot anchor:\n{js}"
+    );
+    assert!(
+        js.contains("$.slot(node, $$props, 'default', {}, null);"),
+        "the default slot call topology:\n{js}"
+    );
+    assert!(
+        js.contains("export default function App($$anchor, $$props) {"),
+        "a slot-bearing component binds the `$$props` param:\n{js}"
+    );
+    assert!(
+        js.contains("import 'svelte/internal/flags/legacy';"),
+        "a non-runes slot component is legacy mode:\n{js}"
+    );
+    // NEGATIVE: no `<slot>` DOM element in the skeleton, no frame, no `$.init`.
+    assert!(
+        !js.contains("<slot") && !js.contains("$.push") && !js.contains("$.init()"),
+        "the slot is not a DOM element and forces no frame/init:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn slot_as_sole_root_uses_the_comment_anchor_frame() {
+    // `<slot />` as the whole template: the official comment-anchor root
+    // (`var fragment = $.comment(); var node = $.first_child(fragment); …`).
+    let js = emit("<slot />\n", "App.svelte");
+    assert!(
+        js.contains("var fragment = $.comment();"),
+        "a sole-root slot mounts a comment anchor:\n{js}"
+    );
+    assert!(
+        js.contains("var node = $.first_child(fragment);"),
+        "the walk reaches the anchor:\n{js}"
+    );
+    assert!(
+        js.contains("$.slot(node, $$props, 'default', {}, null);"),
+        "the slot call:\n{js}"
+    );
+    assert!(
+        js.contains("$.append($$anchor, fragment);"),
+        "the fragment mounts:\n{js}"
+    );
+    // NEGATIVE: no `$.from_html` hoist for a slot-only root.
+    assert!(
+        !js.contains("$.from_html"),
+        "a slot-only root hoists no template:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn slot_named_emits_the_semantic_name() {
+    let js = emit("<div><slot name=\"x\" /></div>\n", "App.svelte");
+    assert!(
+        js.contains("$.slot(node, $$props, 'x', {}, null);"),
+        "the named slot passes its semantic name:\n{js}"
+    );
+    // NEGATIVE: the `name` attribute is CONSUMED (never a slot prop / DOM attr).
+    assert!(
+        !js.contains("name:") && !js.contains("set_attribute"),
+        "the name attribute is consumed, not projected:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn slot_static_and_boolean_props_emit_plain_inits() {
+    let js = emit("<div><slot foo=\"bar\" on /></div>\n", "App.svelte");
+    assert!(
+        js.contains("$.slot(node, $$props, 'default', { foo: 'bar', on: true }, null);"),
+        "static + boolean slot props are plain inits:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn slot_reactive_prop_emits_a_getter_over_the_legacy_prop_accessor() {
+    // `foo={a}` where `a` is a legacy `export let` prop: state-bearing ⇒ a getter
+    // reading the prop accessor (`a()`), never a plain init and never a DOM write.
+    let js = emit(
+        "<script>export let a;</script>\n<div><slot foo={a} /></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("get foo() {") && js.contains("return a();"),
+        "a state-bearing slot prop is a getter over the accessor:\n{js}"
+    );
+    // NEGATIVE: not a DOM attribute write.
+    assert!(
+        !js.contains("$.set_attribute"),
+        "a slot prop is never a DOM attribute write:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn slot_onclick_prop_is_a_slot_property_not_a_dom_event() {
+    // An `onclick={f}` ATTRIBUTE on a `<slot>` is the slot prop `onclick`
+    // (official `SlotElement` treats it as a plain Attribute), NEVER a DOM event.
+    let js = emit(
+        "<script>export let f;</script>\n<div><slot onclick={f} /></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("get onclick() {") && js.contains("return f();"),
+        "the onclick slot prop is a getter member:\n{js}"
+    );
+    // NEGATIVE: no event registration, no delegation epilogue.
+    assert!(
+        !js.contains("$.delegated(") && !js.contains("$.event(") && !js.contains("$.delegate(["),
+        "a slot onclick prop must not register a DOM event:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn slot_spread_props_emit_ordinary_object_first_then_thunks() {
+    // Official slot spread topology: `$.spread_props({ ordinary }, thunk, …)` —
+    // ONE leading ordinary-prop object, then every spread thunk in source order.
+    // A legacy-prop spread (`{...rest}` where `rest` is a prop accessor) unthunks
+    // to the bare accessor (`rest`) — the official `b.thunk` call-unwrap.
+    let js = emit(
+        "<script>export let rest;</script>\n<div><slot a=\"1\" {...rest} /></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.slot(node, $$props, 'default', $.spread_props({ a: '1' }, rest), null);"),
+        "the spread props topology (object first, unthunked accessor):\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn slot_member_spread_emits_a_thunk() {
+    // `{...o.x}` (a member spread over a legacy prop) keeps the arrow thunk
+    // (`() => o().x`) — only a bare zero-arg call unthunks.
+    let js = emit(
+        "<script>export let o;</script>\n<div><slot {...o.x} /></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.spread_props({}, () => o().x)"),
+        "a member spread keeps its thunk (empty leading object):\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn slot_fallback_region_emits_an_anchor_callback_with_postorder_hoist() {
+    // `<slot><p>fb</p></slot>`: the non-empty fallback visits as its OWN
+    // `($$anchor) => { … }` region — the fallback template hoists BEFORE the
+    // parent's (post-order: `root` = `<p>fb</p>`, `root_1` = the parent div).
+    let js = emit("<div><slot><p>fb</p></slot></div>\n", "App.svelte");
+    assert!(
+        js.contains("var root = $.from_html(`<p>fb</p>`);")
+            && js.contains("var root_1 = $.from_html(`<div><!></div>`);"),
+        "the fallback template hoists before the parent (post-order):\n{js}"
+    );
+    assert!(
+        js.contains("$.slot(node, $$props, 'default', {}, ($$anchor) => {"),
+        "the fallback is an anchor callback:\n{js}"
+    );
+    assert!(
+        js.contains("var p = root();") && js.contains("$.append($$anchor, p);"),
+        "the fallback region clones + mounts its own template:\n{js}"
+    );
+    // NEGATIVE: the fallback is NOT `null` and NOT inlined into the skeleton.
+    assert!(
+        !js.contains(", null);") && !js.contains("<p>fb</p></div>"),
+        "a non-empty fallback is never null / never skeleton-inlined:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn slot_whitespace_only_fallback_emits_an_empty_callback_not_null() {
+    // `<slot>   </slot>`: the RAW fragment is non-empty (a whitespace text node)
+    // ⇒ a callback, but the cleaned region emits nothing ⇒ `($$anchor) => {}`.
+    let js = emit("<div><slot>   </slot></div>\n", "App.svelte");
+    assert!(
+        js.contains("$.slot(node, $$props, 'default', {}, ($$anchor) => {});"),
+        "a whitespace-only fallback is an EMPTY callback (not null):\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn slot_empty_element_form_fallback_is_null() {
+    // `<slot></slot>` (no children at all): the official `null` fallback slot.
+    let js = emit("<div><slot></slot></div>\n", "App.svelte");
+    assert!(
+        js.contains("$.slot(node, $$props, 'default', {}, null);"),
+        "an empty fallback is the literal null:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn slot_text_first_fallback_uses_the_in_closure_text_frame_without_next() {
+    // `<slot>{a}</slot>`: the fallback region is text-first — the in-closure
+    // `$.text()` frame with NO leading `$.next()` (a slot fallback is not an
+    // `{#each}` render callback).
+    let js = emit(
+        "<script>export let a;</script>\n<div><slot>{a}</slot></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("($$anchor) => {") && js.contains("var text = $.text();"),
+        "the text-first fallback frame:\n{js}"
+    );
+    assert!(
+        js.contains("$.template_effect(() => $.set_text(text, a()));"),
+        "the fallback text effect reads the prop accessor:\n{js}"
+    );
+    assert!(
+        !js.contains("$.next();\n\tvar text"),
+        "a slot fallback emits NO `$.next()` prelude:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn two_named_slots_walk_sibling_anchors() {
+    let js = emit(
+        "<div><slot name=\"a\" /><slot name=\"b\" /></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.from_html(`<div><!><!></div>`)"),
+        "two slots serialize two anchors:\n{js}"
+    );
+    assert!(
+        js.contains("$.slot(node, $$props, 'a', {}, null);")
+            && js.contains("var node_1 = $.sibling(node);")
+            && js.contains("$.slot(node_1, $$props, 'b', {}, null);"),
+        "each slot targets its own walked anchor:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn slot_before_trailing_static_sibling_advances_the_hydration_cursor() {
+    // `<div><slot name="n"><p>fb</p></slot><span>after</span></div>`: the slot is
+    // the last NAMED position; the trailing static `<span>` advances the cursor
+    // (`$.next();`) before `$.reset(div)` — oracle-pinned svelte@5.56.3.
+    let js = emit(
+        "<div><slot name=\"n\"><p>fb</p></slot><span>after</span></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.next();"),
+        "the trailing static sibling advances the hydration cursor:\n{js}"
+    );
+    assert!(
+        js.contains("$.reset(div);"),
+        "the parent resets after its child walk:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn slot_inside_if_block_body_emits_in_the_branch_region() {
+    let js = emit(
+        "<script>export let open;</script>\n{#if open}<div><slot /></div>{/if}\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("var consequent = ($$anchor) => {"),
+        "the branch closure:\n{js}"
+    );
+    assert!(
+        js.contains("$.slot(node_1, $$props, 'default', {}, null);"),
+        "the slot emits inside the branch region against its own anchor:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn runes_mode_slot_emits_without_legacy_flags() {
+    // `<slot>` in a RUNES component (official: deprecated but compilable): the
+    // same `$.slot` topology, NO legacy flags import, and a never-reassigned
+    // `$state` demotes to a plain init prop.
+    let js = emit(
+        "<script>let n = $state(1);</script>\n<div><slot foo={n} /></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.slot(node, $$props, 'default', { foo: n }, null);"),
+        "the runes-mode slot prop (demoted plain init):\n{js}"
+    );
+    assert!(
+        !js.contains("svelte/internal/flags/legacy"),
+        "a runes component imports no legacy flags:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn slot_mixed_prop_emits_the_template_literal_getter() {
+    // `foo="p{a}s"` — a mixed value with state ⇒ a getter over the template
+    // literal with the `?? ''` coercion (official `build_template_chunk`).
+    let js = emit(
+        "<script>export let a;</script>\n<div><slot foo=\"p{a}s\" /></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("get foo() {") && js.contains("return `p${a() ?? ''}s`;"),
+        "the mixed slot prop getter:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+// ── `<slot>` official-invalid forms → EXACT official rejects ────────────────
+
+#[test]
+fn slot_dynamic_name_rejects_as_slot_element_invalid_name() {
+    for source in [
+        "<slot name={x} />\n",
+        "<slot name=\"a{x}\" />\n",
+        "<slot name />\n",
+    ] {
+        let err = emit_result(source).expect_err("a non-static slot name must reject");
+        let ClientCompileError::OfficialReject(rejection) = err else {
+            panic!("expected an OfficialReject refusal for {source:?}, got {err:?}");
+        };
+        assert_eq!(
+            rejection.rule,
+            CoreOfficialValidationRule::SlotElementInvalidName,
+            "a non-static slot name rejects via SlotElementInvalidName"
+        );
+        assert_eq!(rejection.official_code, "slot_element_invalid_name");
+    }
+}
+
+#[test]
+fn slot_name_default_rejects_as_slot_element_invalid_name_default() {
+    let err =
+        emit_result("<slot name=\"default\" />\n").expect_err("`name=\"default\"` must reject");
+    let ClientCompileError::OfficialReject(rejection) = err else {
+        panic!("expected an OfficialReject refusal, got {err:?}");
+    };
+    assert_eq!(
+        rejection.rule,
+        CoreOfficialValidationRule::SlotElementInvalidNameDefault,
+    );
+    assert_eq!(rejection.official_code, "slot_element_invalid_name_default");
+}
+
+#[test]
+fn slot_directives_reject_as_slot_element_invalid_attribute() {
+    // Official: `<slot>` can only receive attributes / spreads / `let:` — every
+    // other directive family is `slot_element_invalid_attribute`.
+    for source in [
+        "<slot class:on={x} />\n",
+        "<slot on:click={f} />\n",
+        "<slot bind:this={el} />\n",
+        "<slot style:color=\"red\" />\n",
+    ] {
+        let err = emit_result(source).expect_err("a slot directive must reject");
+        let ClientCompileError::OfficialReject(rejection) = err else {
+            panic!("expected an OfficialReject refusal for {source:?}, got {err:?}");
+        };
+        assert_eq!(
+            rejection.rule,
+            CoreOfficialValidationRule::SlotElementInvalidAttribute,
+            "a slot directive rejects via SlotElementInvalidAttribute for {source:?}"
+        );
+        assert_eq!(rejection.official_code, "slot_element_invalid_attribute");
+    }
+}
+
+#[test]
+fn slot_duplicate_attribute_rejects_as_attribute_duplicate() {
+    let err = emit_result("<slot foo=\"1\" foo=\"2\" />\n")
+        .expect_err("a duplicate slot attribute must reject");
+    let ClientCompileError::OfficialReject(rejection) = err else {
+        panic!("expected an OfficialReject refusal, got {err:?}");
+    };
+    assert_eq!(
+        rejection.rule,
+        CoreOfficialValidationRule::AttributeDuplicate
+    );
+    assert_eq!(rejection.official_code, "attribute_duplicate");
+}
+
+// ── `<slot>` fail-closed sub-shapes (unsupported, never fail-open) ──────────
+
+#[test]
+fn slot_let_unbound_fails_closed_with_dedicated_diagnostic() {
+    // `<slot let:x>` (the producer-side provider `let:` binding) is
+    // official-ACCEPTED, but the pinned svelte@5.56.3 compiler ITSELF emits
+    // BROKEN output for it — a component-instance-scope
+    // `const x = $.derived_safe_equal(() => $$slotProps.x);` reading an
+    // UNDECLARED `$$slotProps` (`$$slotProps` is bound only inside a component
+    // slot-content callback), a guaranteed runtime `ReferenceError`. Verter
+    // REFUSES rather than shipping invalid runtime code — an accepted
+    // fail-closed upstream-bug divergence (the same class as the bare
+    // `$host()` disposition), carried by the DEDICATED `SlotLetUnbound`
+    // surface with the authored DIRECTIVE span (not the whole slot span).
+    let src = "<div><slot let:x /></div>\n";
+    let result = emit_result(src);
+    let Err(ClientCompileError::Unsupported(surface)) = result else {
+        panic!("a `<slot let:x>` provider binding must fail closed, got {result:?}");
+    };
+    // The dedicated variant + machine-stable code (NOT the component/snippet
+    // family — this is neither a component nor a snippet failure).
+    assert!(
+        matches!(
+            &surface,
+            UnsupportedSvelteRuntimeSurface::SlotLetUnbound { .. }
+        ),
+        "the refusal is the dedicated SlotLetUnbound surface: {surface:?}"
+    );
+    assert_eq!(
+        surface.diagnostic_code(),
+        "svelte-runtime-unsupported-slot-let-unbound",
+        "the machine-stable dedicated diagnostic code"
+    );
+    // The message states the upstream defect: the pinned official compiler
+    // emits an unbound `$$slotProps` reference, and Verter refuses rather
+    // than shipping invalid runtime code.
+    let message = surface.message();
+    assert!(
+        message.contains("$$slotProps") && message.contains("refus"),
+        "the message names the unbound `$$slotProps` emission and the refusal: {message}"
+    );
+    // The span is the authored `let:x` DIRECTIVE span, not the enclosing slot.
+    let start = src.find("let:x").expect("fixture contains the directive") as u32;
+    assert_eq!(
+        surface.span(),
+        verter_span::Span::new(start, start + "let:x".len() as u32),
+        "the refusal reports the authored directive span"
+    );
+    // PINNED oracle evidence (svelte@5.56.3 over this exact fixture): the
+    // official client module reads `$$slotProps` exactly once and never
+    // declares it — the upstream bug this refusal diverges from. If a future
+    // re-pin changes this output, this pin fails and the divergence must be
+    // re-ruled (see the decision-log row beside the `$host()` disposition).
+    const PINNED_OFFICIAL_CLIENT: &str = "import 'svelte/internal/disclose-version';\nimport 'svelte/internal/flags/legacy';\nimport * as $ from 'svelte/internal/client';\n\nvar root = $.from_html(`<div><!></div>`);\n\nexport default function App($$anchor, $$props) {\n\tvar div = root();\n\tvar node = $.child(div);\n\tconst x = $.derived_safe_equal(() => $$slotProps.x);\n\n\t$.slot(node, $$props, 'default', {}, null);\n\t$.reset(div);\n\t$.append($$anchor, div);\n}";
+    assert_eq!(
+        PINNED_OFFICIAL_CLIENT.matches("$$slotProps").count(),
+        1,
+        "official reads the magic object exactly once"
+    );
+    assert!(
+        PINNED_OFFICIAL_CLIENT.contains("$.derived_safe_equal(() => $$slotProps.x)"),
+        "the lone occurrence is the undeclared instance-scope READ"
+    );
+    assert!(
+        !PINNED_OFFICIAL_CLIENT.contains("const $$slotProps")
+            && !PINNED_OFFICIAL_CLIENT.contains("let $$slotProps")
+            && !PINNED_OFFICIAL_CLIENT.contains("var $$slotProps")
+            && !PINNED_OFFICIAL_CLIENT.contains("$$slotProps)"),
+        "official never declares `$$slotProps` (no decl, no parameter binding)"
+    );
+}
+
+// ── The LEGACY value memo topology (`$.derived_safe_equal` + the official ────
+// `build_expression` deep-read/untrack wrap — svelte@5.56.3
+// `shared/utils.js` `build_expression` + `Memoizer.deriveds(runes)`).
+//
+// The shared `DerivedMemoizer` picks the helper BY MODE (runes → `$.derived`,
+// non-runes → `$.derived_safe_equal`); the SEPARATE shared legacy value wrap
+// (`(dep reads…, $.untrack(() => value))`) applies only in a DEFINITELY-legacy
+// component (official `!runes && !maybe_runes`) when the value has a call, a
+// member expression, or an assignment. Every assertion below is pinned against
+// a direct pinned-oracle compile of the same fixture.
+
+#[test]
+fn legacy_component_call_bearing_prop_memoizes_safe_equal_with_deep_read_untrack() {
+    // THE shared-owner regression: a legacy component prop `<Child foo={obj.m()}/>`
+    // routes through the SAME `DerivedMemoizer` as slot props. Oracle:
+    //   let $0 = $.derived_safe_equal(() => ($.deep_read_state(obj()), $.untrack(() => obj().m())));
+    //   Child($$anchor, { get foo() { return $.get($0); } });
+    let js = emit(
+        "<script>import Child from './Child.svelte';\nexport let obj;</script>\n<Child foo={obj.m()} />\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains(
+            "let $0 = $.derived_safe_equal(() => ($.deep_read_state(obj()), $.untrack(() => obj().m())));"
+        ),
+        "the legacy memo is `$.derived_safe_equal` over the deep-read/untrack wrap:\n{js}"
+    );
+    assert!(
+        js.contains("get foo() {return $.get($0);}"),
+        "the prop getter reads the memo:\n{js}"
+    );
+    // NEGATIVE: the runes helper never appears in a legacy module, and the
+    // authored call executes ONLY inside the `$.untrack` thunk (one tracked
+    // occurrence would re-run the memo on every dependency of the call body).
+    assert!(
+        !js.contains("$.derived("),
+        "no plain `$.derived(` in a legacy module:\n{js}"
+    );
+    assert_eq!(
+        js.matches("obj().m()").count(),
+        1,
+        "the authored call appears exactly once (inside $.untrack):\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_component_member_prop_wraps_untracked_getter_without_memo() {
+    // A member-bearing NON-call legacy prop (`foo={obj.x}`) is NOT memoized
+    // (no `has_call`) but still legacy-wraps at the getter. Oracle:
+    //   get foo() { return ($.deep_read_state(obj()), $.untrack(() => obj().x)); }
+    let js = emit(
+        "<script>import Child from './Child.svelte';\nexport let obj;</script>\n<Child foo={obj.x} />\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("get foo() {return ($.deep_read_state(obj()), $.untrack(() => obj().x));}"),
+        "the non-memoized legacy getter wraps deep-read + untrack:\n{js}"
+    );
+    assert!(
+        !js.contains("$.derived"),
+        "a member-only value never memoizes:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_wrap_deps_include_nested_function_captures() {
+    // Oracle parity (svelte@5.56.3): nested fn/arrow bodies do NOT set the sync
+    // wrap trigger, but their free bindings REMAIN `metadata.references`
+    // dependencies when another part of the expression triggers the wrap.
+    // `<Comp foo={(a.x, () => b.y)} />` — the sync member `a.x` triggers; the
+    // arrow-captured `b` still joins the visible dep reads. Oracle:
+    //   ($.deep_read_state(a()), $.deep_read_state(b()), $.untrack(() => (a().x, () => b().y)))
+    let js = emit(
+        "<script>import Child from './Child.svelte';\nexport let a;\nexport let b;</script>\n<Child foo={(a.x, () => b.y)} />\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.deep_read_state(a()), $.deep_read_state(b()), $.untrack("),
+        "the wrap deps include the arrow-captured `b` after the sync `a.x` trigger, \
+         in first-reference source order:\n{js}"
+    );
+    assert!(
+        js.contains("a().x, () => b().y"),
+        "the untracked payload keeps the authored sequence:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_iife_call_deps_include_arrow_captured_prop() {
+    // Oracle parity (svelte@5.56.3): an IIFE `(() => obj.x)()` fires the
+    // `has_call` trigger; its ONLY reference (`obj`) sits inside the arrow body
+    // yet still joins the deps. Oracle:
+    //   ($.deep_read_state(obj()), $.untrack(() => (() => obj().x)()))
+    let js = emit(
+        "<script>import Child from './Child.svelte';\nexport let obj;</script>\n<Child foo={(() => obj.x)()} />\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.deep_read_state(obj()), $.untrack("),
+        "the IIFE wrap deep-reads the arrow-captured `obj`:\n{js}"
+    );
+    assert!(
+        js.contains("(() => obj().x)()"),
+        "the untracked payload keeps the authored IIFE:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_nested_arrow_only_read_without_trigger_stays_raw() {
+    // NEGATIVE control: an expression whose ONLY reactive read lives inside a
+    // nested arrow, with NO sync call/member/assignment, never fires the wrap
+    // trigger — the deferred read is not a sync trigger even though it would be
+    // a dep if some other part triggered. Oracle: `foo: () => b().y` (a plain
+    // init — no `$.untrack`, no `$.deep_read_state`).
+    let js = emit(
+        "<script>import Child from './Child.svelte';\nexport let b;</script>\n<Child foo={() => b.y} />\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("foo: () => b().y"),
+        "the deferred-only value stays a plain prop init:\n{js}"
+    );
+    assert!(
+        !js.contains("$.untrack("),
+        "no wrap without a sync trigger:\n{js}"
+    );
+    assert!(
+        !js.contains("$.deep_read_state("),
+        "no dep reads without a wrap:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_call_bearing_slot_prop_memoizes_official_legacy_topology() {
+    // The slot twin of the component regression above (the former fail-closed
+    // refusal, now SUPPORTED). Oracle:
+    //   let $0 = $.derived_safe_equal(() => ($.deep_read_state(obj()), $.untrack(() => obj().m())));
+    //   $.slot(node, $$props, 'default', { get foo() { return $.get($0); } }, null);
+    let js = emit(
+        "<script>export let obj;</script>\n<div><slot foo={obj.m()} /></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains(
+            "let $0 = $.derived_safe_equal(() => ($.deep_read_state(obj()), $.untrack(() => obj().m())));"
+        ),
+        "the legacy slot memo is `$.derived_safe_equal` over the wrap:\n{js}"
+    );
+    assert!(
+        js.contains("get foo() { return $.get($0); }"),
+        "the slot prop getter reads the memo:\n{js}"
+    );
+    assert!(
+        !js.contains("$.derived("),
+        "no plain `$.derived(` in a legacy module:\n{js}"
+    );
+    assert_eq!(
+        js.matches("obj().m()").count(),
+        1,
+        "the authored call appears exactly once (inside $.untrack):\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_call_bearing_slot_spread_stays_plain_thunk() {
+    // Official `SlotElement.js` NEVER memoizes a slot spread (unlike component
+    // spreads) and never legacy-wraps it. Oracle:
+    //   $.slot(node, $$props, 'default', $.spread_props({}, () => obj().m()), null);
+    let js = emit(
+        "<script>export let obj;</script>\n<div><slot {...obj.m()} /></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.spread_props({}, () => obj().m())"),
+        "the slot spread stays the plain thunk:\n{js}"
+    );
+    assert!(
+        !js.contains("$.derived") && !js.contains("$.untrack") && !js.contains("$.deep_read_state"),
+        "a slot spread neither memoizes nor wraps:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_mixed_slot_prop_call_chunk_memoizes_wrapped() {
+    // A mixed slot value's call-bearing chunk memoizes the WRAPPED expression;
+    // the template literal reads `$.get($0) ?? ''`. Oracle (I-shape):
+    //   let $0 = $.derived_safe_equal(() => ($.deep_read_state(obj()), $.untrack(() => obj().m())));
+    //   get foo() { return `a${$.get($0) ?? ''}b`; }
+    let js = emit(
+        "<script>export let obj;</script>\n<div><slot foo=\"a{obj.m()}b\" /></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains(
+            "let $0 = $.derived_safe_equal(() => ($.deep_read_state(obj()), $.untrack(() => obj().m())));"
+        ),
+        "the mixed chunk memoizes the wrapped value:\n{js}"
+    );
+    assert!(
+        js.contains("`a${$.get($0) ?? ''}b`"),
+        "the template literal reads the memo:\n{js}"
+    );
+    assert!(!js.contains("$.derived("), "no runes helper:\n{js}");
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_quoted_single_slot_prop_call_memoizes_wrapped() {
+    // The QUOTED single-chunk form (`foo="{obj.m()}"`) is the same memoize
+    // surface as the bare `foo={obj.m()}` (official `build_attribute_value`
+    // single-chunk branch).
+    let js = emit(
+        "<script>export let obj;</script>\n<div><slot foo=\"{obj.m()}\" /></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains(
+            "let $0 = $.derived_safe_equal(() => ($.deep_read_state(obj()), $.untrack(() => obj().m())));"
+        ),
+        "the quoted single-chunk call memoizes wrapped:\n{js}"
+    );
+    assert!(
+        js.contains("get foo() { return $.get($0); }"),
+        "the getter reads the memo:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_component_mixed_call_chunk_memoizes_wrapped() {
+    // The component mixed-value twin (K-shape): the call chunk memoizes the
+    // wrapped value; the getter renders the template literal over `$.get($0)`.
+    let js = emit(
+        "<script>import Child from './Child.svelte';\nexport let obj;</script>\n<Child foo=\"a{obj.m()}b\" />\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains(
+            "let $0 = $.derived_safe_equal(() => ($.deep_read_state(obj()), $.untrack(() => obj().m())));"
+        ),
+        "the component mixed call chunk memoizes wrapped:\n{js}"
+    );
+    assert!(
+        js.contains("`a${$.get($0) ?? ''}b`"),
+        "the template literal reads the memo:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_component_spread_call_memoizes_without_wrap() {
+    // A component spread MEMOIZES on `has_call` but NEVER legacy-wraps
+    // (official visits a `SpreadAttribute` without `build_expression`).
+    // Oracle (J-shape):
+    //   let $0 = $.derived_safe_equal(() => obj().m());
+    //   Child($$anchor, $.spread_props(() => $.get($0)));
+    let js = emit(
+        "<script>import Child from './Child.svelte';\nexport let obj;</script>\n<Child {...obj.m()} />\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.derived_safe_equal(() => (obj().m()))")
+            || js.contains("$.derived_safe_equal(() => obj().m())"),
+        "the spread memo holds the UNWRAPPED value:\n{js}"
+    );
+    assert!(
+        js.contains("$.spread_props(() => $.get($0))"),
+        "the spread thunk reads the memo:\n{js}"
+    );
+    assert!(
+        !js.contains("$.untrack") && !js.contains("$.deep_read_state"),
+        "a component spread never legacy-wraps:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_component_spread_prop_read_unthunks_bare_accessor() {
+    // A NON-call component spread of a legacy prop unthunks the zero-arg
+    // accessor read (official `b.thunk(rest())` → `rest`). Oracle (CA-shape):
+    //   Child($$anchor, $.spread_props(rest));
+    let js = emit(
+        "<script>import Child from './Child.svelte';\nexport let rest;</script>\n<Child {...rest} />\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.spread_props(rest)"),
+        "the zero-arg accessor spread unthunks to the bare callee:\n{js}"
+    );
+    assert!(
+        !js.contains("() => rest()"),
+        "no redundant thunk around the bare accessor:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_render_arg_call_memoizes_wrapped() {
+    // A `{@render}` argument in a definitely-legacy component memoizes the
+    // WRAPPED value through the same shared memoizer (X-shape oracle):
+    //   let $0 = $.derived_safe_equal(() => ($.deep_read_state(obj()), $.untrack(() => obj().m())));
+    //   s($$anchor, () => $.get($0));
+    let js = emit(
+        "<script>export let obj;</script>\n{#snippet s(v)}<p>{v}</p>{/snippet}\n{@render s(obj.m())}\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains(
+            "let $0 = $.derived_safe_equal(() => ($.deep_read_state(obj()), $.untrack(() => obj().m())));"
+        ),
+        "the legacy render arg memoizes wrapped:\n{js}"
+    );
+    assert!(
+        js.contains("s($$anchor, () => $.get($0))"),
+        "the arg thunk reads the memo:\n{js}"
+    );
+    assert!(!js.contains("$.derived("), "no runes helper:\n{js}");
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_import_zero_arg_call_untracks_by_reference() {
+    // The official `b.thunk` unthunk inside the wrap: a zero-arg identifier
+    // call (`fn()`) untracks BY REFERENCE (`$.untrack(fn)`), and the imported
+    // callee joins the deps as a `$.deep_read_state` live read (oracle):
+    //   let $0 = $.derived_safe_equal(() => ($.deep_read_state(fn), $.untrack(fn)));
+    let js = emit(
+        "<script>export let obj;\nimport { fn } from './x.js';</script>\n<div><slot foo={fn()} bar={obj.x} /></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("let $0 = $.derived_safe_equal(() => ($.deep_read_state(fn), $.untrack(fn)));"),
+        "the zero-arg call untracks by reference (import dep deep-read):\n{js}"
+    );
+    assert!(
+        !js.contains("$.untrack(() => fn())"),
+        "no redundant thunk around the bare callee:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_slot_assignment_value_wraps_with_target_dep() {
+    // An assignment-bearing value wraps (official `has_assignment`), the
+    // mutable-source TARGET joins the deps as a plain `$.get` read, and the
+    // legacy prop deep-reads — first-reference source order (S-shape oracle):
+    //   get foo() { return ($.get(c), $.deep_read_state(obj()), $.untrack(() => $.set(c, obj().x))); }
+    let js = emit(
+        "<script>export let obj;\nlet c = 0;</script>\n<div><slot foo={c = obj.x} /></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains(
+            "get foo() { return ($.get(c), $.deep_read_state(obj()), $.untrack(() => $.set(c, obj().x))); }"
+        ),
+        "the assignment value wraps with ordered deps:\n{js}"
+    );
+    assert!(
+        !js.contains("$.derived"),
+        "no memo for a non-call value:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_global_member_value_wraps_untracked_with_empty_deps() {
+    // A GLOBAL-rooted member (`Math.PI`) still sets the official
+    // `has_member_expression` trigger: the init value wraps in `$.untrack`
+    // with NO dependency reads (BA-shape oracle): `foo: ($.untrack(() => Math.PI))`.
+    let js = emit(
+        "<script>export let obj;</script>\n<div><slot foo={Math.PI} bar={obj.x} /></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("foo: ($.untrack(() => Math.PI))"),
+        "the global member init wraps untracked with empty deps:\n{js}"
+    );
+    assert!(
+        js.contains("get bar() { return ($.deep_read_state(obj()), $.untrack(() => obj().x)); }"),
+        "the sibling prop-rooted member wraps with its dep:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_each_item_dep_reads_plain_get_in_wrap() {
+    // An `{#each}` item is the official `each` binding kind — a PLAIN `$.get`
+    // dependency read, NOT deep-read (L-shape oracle):
+    //   let $0 = $.derived_safe_equal(() => ($.get(item), $.untrack(() => $.get(item).m())));
+    let js = emit(
+        "<script>export let items;</script>\n{#each items as item}<div><slot foo={item.m()} /></div>{/each}\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains(
+            "let $0 = $.derived_safe_equal(() => ($.get(item), $.untrack(() => $.get(item).m())));"
+        ),
+        "the each-item dep is a plain signal read:\n{js}"
+    );
+    assert!(
+        !js.contains("$.deep_read_state($.get(item))"),
+        "an each item is never deep-read:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn maybe_runes_slot_call_memoizes_safe_equal_without_legacy_wrap() {
+    // A store-only component (no `export let`, no `$:`) is the official
+    // MAYBE-RUNES in-between mode: the memo helper stays `$.derived_safe_equal`
+    // (non-runes) but the legacy wrap does NOT apply (BO-shape oracle):
+    //   let $0 = $.derived_safe_equal(() => $s().m());
+    let js = emit(
+        "<script>import { writable } from 'svelte/store';\nconst s = writable({});</script>\n<div><slot foo={$s.m()} /></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.derived_safe_equal(() => ($s().m()))")
+            || js.contains("$.derived_safe_equal(() => $s().m())"),
+        "a maybe-runes memo keeps the safe-equal helper, unwrapped:\n{js}"
+    );
+    assert!(
+        !js.contains("$.untrack") && !js.contains("$.deep_read_state"),
+        "the legacy wrap never applies in maybe-runes mode:\n{js}"
+    );
+    assert!(
+        !js.contains("$.derived("),
+        "non-runes never uses `$.derived`:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn explicit_runes_false_option_applies_legacy_wrap() {
+    // `<svelte:options runes={false} />` FORCES definite-legacy (official
+    // `runes_option !== false` gate on maybe-runes), so the wrap applies even
+    // with no `export let` / `$:` (oracle):
+    //   let $0 = $.derived_safe_equal(() => ($.deep_read_state(fn), $.untrack(() => fn(1))));
+    let js = emit(
+        "<svelte:options runes={false} />\n<script>import { fn } from './x.js';</script>\n<div><slot foo={fn(1)} /></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains(
+            "let $0 = $.derived_safe_equal(() => ($.deep_read_state(fn), $.untrack(() => fn(1))));"
+        ),
+        "the forced-legacy component wraps (the import deep-reads):\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn runes_call_bearing_component_prop_still_memoizes_plain_derived() {
+    // RUNES control: the memoizer stays `$.derived` and no legacy machinery
+    // appears (G-shape oracle): let $0 = $.derived(() => $$props.obj.m());
+    let js = emit(
+        "<script>import Child from './Child.svelte';\nlet { obj } = $props();</script>\n<Child foo={obj.m()} />\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.derived(() => ($$props.obj.m()))")
+            || js.contains("$.derived(() => $$props.obj.m())"),
+        "a runes call-bearing prop memoizes with `$.derived`:\n{js}"
+    );
+    assert!(
+        !js.contains("derived_safe_equal")
+            && !js.contains("$.untrack")
+            && !js.contains("$.deep_read_state"),
+        "no legacy memo machinery in a runes module:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn runes_call_bearing_slot_prop_still_memoizes_plain_derived() {
+    // RUNES slot control (P-shape oracle): let $0 = $.derived(() => $$props.obj.m());
+    let js = emit(
+        "<script>let { obj } = $props();</script>\n<div><slot foo={obj.m()} /></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.derived(() => ($$props.obj.m()))")
+            || js.contains("$.derived(() => $$props.obj.m())"),
+        "a runes slot call-bearing prop memoizes with `$.derived`:\n{js}"
+    );
+    assert!(
+        !js.contains("derived_safe_equal")
+            && !js.contains("$.untrack")
+            && !js.contains("$.deep_read_state"),
+        "no legacy memo machinery in a runes module:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn runes_component_spread_call_memoizes_plain_derived() {
+    // RUNES spread control (BF-shape oracle): the spread memoizes on
+    // `has_call` in BOTH modes; runes keeps `$.derived`.
+    let js = emit(
+        "<script>import Child from './Child.svelte';\nlet { obj } = $props();</script>\n<Child {...obj.m()} />\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.derived(() => ($$props.obj.m()))")
+            || js.contains("$.derived(() => $$props.obj.m())"),
+        "a runes call-bearing spread memoizes with `$.derived`:\n{js}"
+    );
+    assert!(
+        js.contains("$.spread_props(() => $.get($0))"),
+        "the spread thunk reads the memo:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+// ── The legacy value wrap on the `$.template_effect` DOM-attr / text surface ─
+
+#[test]
+fn legacy_two_attr_positions_same_call_wrap_independently_no_dedup() {
+    // TWO positions of the IDENTICAL call expression: one INDEPENDENT wrapper
+    // sequence per memoized dep — no cross-position dedup of the expression,
+    // no cross-dep `deep_read_state` merge (oracle):
+    //   $.template_effect(($0, $1) => { … }, [
+    //     () => ($.deep_read_state(obj()), $.untrack(() => obj().m())),
+    //     () => ($.deep_read_state(obj()), $.untrack(() => obj().m()))
+    //   ]);
+    let js = emit(
+        "<script>export let obj;</script>\n<div title={obj.m()} data-x={obj.m()}></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains(
+            "[() => ($.deep_read_state(obj()), $.untrack(() => obj().m())), () => ($.deep_read_state(obj()), $.untrack(() => obj().m()))]"
+        ),
+        "both deps wrap independently in collection order:\n{js}"
+    );
+    assert_eq!(
+        js.matches("$.deep_read_state(obj())").count(),
+        2,
+        "one deep-read per dep — never merged across `$0`/`$1`:\n{js}"
+    );
+    assert_eq!(
+        js.matches("$.untrack(() => obj().m())").count(),
+        2,
+        "one untracked authored value per dep:\n{js}"
+    );
+    // The raw TRACKED dependency thunk must not survive in a definite-legacy
+    // deps array (a bare `[() => obj().m()` / `, () => obj().m()` entry).
+    assert!(
+        !js.contains("[() => obj().m()") && !js.contains(", () => obj().m()"),
+        "no raw tracked dependency survives:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_combined_attr_call_and_text_member_wrap_in_one_effect() {
+    // The combined DOM-attribute + TEXT probe on the accepted text surface:
+    // the call-bearing attribute memoizes its wrapped sequence while the
+    // imported-member text interpolation wraps INLINE — both inside ONE
+    // combined `$.template_effect`, each with its own wrapper sequence
+    // (oracle):
+    //   $.template_effect(($0) => {
+    //     $.set_attribute(div, 'title', $0);
+    //     $.set_text(text, ($.deep_read_state(NS), $.untrack(() => NS.z)));
+    //   }, [() => ($.deep_read_state(obj()), $.untrack(() => obj().m()))]);
+    // (A call/member-bearing text interpolation like `{obj.m()}` stays the
+    // fail-closed complex-interpolation breadth — the classifier refuses it,
+    // so the deps-array fail-open cannot arise there.)
+    let js = emit(
+        "<script>import * as NS from './x.js';\nexport let obj;</script>\n<div title={obj.m()}></div>{NS.z}\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.set_text(text, ($.deep_read_state(NS), $.untrack(() => NS.z)))"),
+        "the text member wraps inline in the shared effect:\n{js}"
+    );
+    assert!(
+        js.contains("[() => ($.deep_read_state(obj()), $.untrack(() => obj().m()))]"),
+        "the attr call memoizes its own wrapped sequence:\n{js}"
+    );
+    assert!(
+        js.contains("$.set_attribute(div, 'title', $0)"),
+        "the attr write reads the memoized slot:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_dom_attr_non_call_member_wraps_inline() {
+    // A NON-call member attribute value wraps INLINE (wrap precedes the
+    // memoize decision — official applies `build_expression` BEFORE
+    // `Memoizer.add`, and a no-call value is never memoized). Oracle:
+    //   $.template_effect(() => $.set_attribute(div, 'title',
+    //     ($.deep_read_state(obj()), $.untrack(() => obj().x))));
+    let js = emit(
+        "<script>export let obj;</script>\n<div title={obj.x}></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains(
+            "$.set_attribute(div, 'title', ($.deep_read_state(obj()), $.untrack(() => obj().x)))"
+        ),
+        "the member value wraps inline in the write:\n{js}"
+    );
+    assert!(
+        !js.contains("$0"),
+        "a non-call value never memoizes into a deps slot:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_text_imported_member_wraps_inline() {
+    // The accepted imported-member TEXT shape (`{NS.z}`) wraps inline — the
+    // import deep-reads, the authored member untracks (oracle):
+    //   $.template_effect(() => $.set_text(text,
+    //     ($.deep_read_state(NS), $.untrack(() => NS.z))));
+    let js = emit(
+        "<script>import * as NS from './x.js';\nexport let p;</script>\n<p>{NS.z}</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.set_text(text, ($.deep_read_state(NS), $.untrack(() => NS.z)))"),
+        "the imported-member text value wraps inline:\n{js}"
+    );
+    assert!(
+        !js.contains("$0"),
+        "a non-call value never memoizes into a deps slot:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_attr_imported_call_dep_deep_reads_import() {
+    // An IMPORTED zero-arg callee joins the dep as a `$.deep_read_state` live
+    // read, and the authored call untracks BY REFERENCE (oracle):
+    //   [() => ($.deep_read_state(helper), $.untrack(helper))]
+    let js = emit(
+        "<script>import { helper } from './h.js';\nexport let p;</script>\n<div title={helper()}></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("[() => ($.deep_read_state(helper), $.untrack(helper))]"),
+        "the imported callee deep-reads and untracks by reference:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_attr_plain_local_call_untracks_without_deep_read() {
+    // A PLAIN-LOCAL callee (official `normal` non-import) never joins the
+    // deps: the authored call is untracked but NO `$.deep_read_state` is
+    // fabricated (oracle): [() => ($.untrack(m))]. (The `on:click={m}` sibling
+    // admits the top-level function through the handler-referent gate.)
+    let js = emit(
+        "<script>export let p;\nfunction m() { return 1; }</script>\n<button on:click={m}>x</button>\n<div title={m()}></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("[() => ($.untrack(m))]"),
+        "the plain-local call memoizes untracked:\n{js}"
+    );
+    assert!(
+        !js.contains("$.deep_read_state"),
+        "no fabricated dependency read for a plain local:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_mixed_attr_call_and_member_chunks_wrap_independently() {
+    // A MIXED attribute wraps each expression chunk on its own: the call
+    // chunk memoizes the wrapped sequence into `$0`; the member chunk stays
+    // INLINE-wrapped inside the template with the `?? ''` coercion (oracle):
+    //   `p${$0 ?? ''}q${($.deep_read_state(b()), $.untrack(() => b().x)) ?? ''}r`
+    //   [() => ($.deep_read_state(a()), $.untrack(() => a().f()))]
+    let js = emit(
+        "<script>export let a;\nexport let b;</script>\n<div title=\"p{a.f()}q{b.x}r\"></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("`p${$0 ?? ''}q${($.deep_read_state(b()), $.untrack(() => b().x)) ?? ''}r`"),
+        "the member chunk wraps inline with `?? ''`; the call chunk reads `$0`:\n{js}"
+    );
+    assert!(
+        js.contains("[() => ($.deep_read_state(a()), $.untrack(() => a().f()))]"),
+        "the call chunk memoizes its own wrapped sequence:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_mixed_text_member_wraps_inline_with_coalesce() {
+    // A mixed TEXT run wraps the accepted imported-member interpolation inline
+    // inside the template literal (oracle):
+    //   $.set_text(text, `x ${($.deep_read_state(NS), $.untrack(() => NS.z)) ?? ''} y`)
+    let js = emit(
+        "<script>import * as NS from './x.js';\nexport let p;</script>\n<p>x {NS.z} y</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("`x ${($.deep_read_state(NS), $.untrack(() => NS.z)) ?? ''} y`"),
+        "the mixed-text member chunk wraps inline with `?? ''`:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_non_reactive_attr_member_write_wraps_inline_untracked() {
+    // A NON-reactive (stateless) member value still wraps at the init write —
+    // official applies `build_expression` regardless of reactivity; an
+    // unresolved global root contributes no dep read (oracle):
+    //   $.set_attribute(div, 'title', ($.untrack(() => globalObj.x)));
+    let js = emit(
+        "<script>export let p;</script>\n<div title={globalObj.x}></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.set_attribute(div, 'title', ($.untrack(() => globalObj.x)))"),
+        "the init member write wraps untracked with empty deps:\n{js}"
+    );
+    assert!(
+        !js.contains("$.deep_read_state"),
+        "an unresolved global never joins the deps:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_group_dynamic_value_call_wraps_effect_dep_and_getter_read() {
+    // The `bind:group` dynamic value wraps in BOTH consumers: the guarded
+    // change-detection effect memoizes the wrapped sequence; the `$.bind_group`
+    // getter's dependency read is the FULL inline wrapped sequence (oracle):
+    //   [() => ($.deep_read_state(obj()), $.untrack(() => obj().m()))]
+    //   () => { ($.deep_read_state(obj()), $.untrack(() => obj().m())); return $.get(sel); }
+    let js = emit(
+        "<script>export let obj;\nlet sel = [];</script>\n<input type=\"checkbox\" bind:group={sel} value={obj.m()} />\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("[() => ($.deep_read_state(obj()), $.untrack(() => obj().m()))]"),
+        "the group-value effect dep memoizes wrapped:\n{js}"
+    );
+    assert!(
+        js.contains("($.deep_read_state(obj()), $.untrack(() => obj().m()));"),
+        "the bind_group getter dep read is the inline wrapped sequence:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_autofocus_call_value_wraps_untracked_in_init() {
+    // The init-only `$.autofocus` value ALSO wraps (official applies
+    // `build_expression` at expression-build time, not per effect) — oracle:
+    //   $.autofocus(input, ($.deep_read_state(obj()), $.untrack(() => obj().m())));
+    let js = emit(
+        "<script>export let obj;</script>\n<input autofocus={obj.m()} />\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.autofocus(input, ($.deep_read_state(obj()), $.untrack(() => obj().m())))"),
+        "the autofocus init value wraps inline:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_muted_property_call_value_memoizes_wrapped() {
+    // A DOM-property write (`video.muted = $0`) memoizes the wrapped sequence
+    // exactly like `$.set_attribute` (oracle):
+    //   $.template_effect(($0) => video.muted = $0,
+    //     [() => ($.deep_read_state(obj()), $.untrack(() => obj().m()))]);
+    let js = emit(
+        "<script>export let obj;</script>\n<video muted={obj.m()}></video>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("video.muted = $0"),
+        "the property write reads the memoized slot:\n{js}"
+    );
+    assert!(
+        js.contains("[() => ($.deep_read_state(obj()), $.untrack(() => obj().m()))]"),
+        "the property value memoizes wrapped:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn runes_attr_call_dep_stays_raw() {
+    // RUNES control: the template-effect dep stays the RAW rewritten
+    // expression — no `$.deep_read_state`, no `$.untrack`.
+    let js = emit(
+        "<script>let { obj } = $props();</script>\n<div title={obj.m()}></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("[() => $$props.obj.m()]") || js.contains("[() => ($$props.obj.m())]"),
+        "the runes dep stays the raw expression:\n{js}"
+    );
+    assert!(
+        !js.contains("$.untrack") && !js.contains("$.deep_read_state"),
+        "no legacy wrap machinery in a runes module:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn maybe_runes_attr_call_dep_stays_raw() {
+    // MAYBE-RUNES control (a store-only component — no `export let` / `$:` —
+    // the official in-between mode): the wrap does NOT apply; the call still
+    // memoizes raw (oracle): [() => $s().m()]
+    let js = emit(
+        "<script>import { writable } from 'svelte/store';\nconst s = writable({});</script>\n<div title={$s.m()}></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("[() => $s().m()]") || js.contains("[() => ($s().m())]"),
+        "the maybe-runes dep stays the raw expression:\n{js}"
+    );
+    assert!(
+        !js.contains("$.untrack") && !js.contains("$.deep_read_state"),
+        "the legacy wrap never applies in maybe-runes mode:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+// GUARDRAIL control for the SYNTHESIZED class/style directive OBJECTS: the
+// class:/style: asymmetry (class inner RAW, style inner WRAPPED, never a wrap
+// around the synthesized object as a whole) is pinned by
+// `legacy_class_directive_inner_stays_raw_style_directive_inner_wraps`.
+
+// ── The `createEventDispatcher` legacy component-event surface ──────────────
+
+#[test]
+fn legacy_dispatcher_component_emits_push_init_pop_topology() {
+    // The oracle topology (svelte@5.56.3): the authored `svelte` import stays in
+    // the INSTANCE import slot (after the runtime namespace), the dispatcher
+    // declaration + the handler function emit as PLAIN statements, and the
+    // imported call sets `needs_context` — `$.push($$props, false)` … `$.init()`
+    // … `$.pop()` around the template.
+    let js = emit(
+        "<script>import { createEventDispatcher } from 'svelte';\nconst dispatch = createEventDispatcher();\nfunction fire() { dispatch('go', 1); }</script>\n<button onclick={fire}>go</button>\n",
+        "App.svelte",
+    );
+    let ns = js
+        .find("import * as $ from 'svelte/internal/client';")
+        .expect("runtime namespace import");
+    let user = js
+        .find("import { createEventDispatcher } from 'svelte';")
+        .expect("the authored svelte import is preserved");
+    assert!(
+        user > ns,
+        "the instance-slot import follows the runtime namespace import:\n{js}"
+    );
+    assert!(
+        js.contains("$.push($$props, false);"),
+        "the legacy frame opens:\n{js}"
+    );
+    assert!(
+        js.contains("const dispatch = createEventDispatcher();"),
+        "the dispatcher declaration stays a plain call:\n{js}"
+    );
+    assert!(
+        js.contains("dispatch('go', 1);"),
+        "the dispatch call stays plain:\n{js}"
+    );
+    assert!(js.contains("$.init();"), "the legacy init hook:\n{js}");
+    assert!(js.contains("$.pop();"), "the frame closes:\n{js}");
+    assert!(
+        js.contains("$.delegated('click', button, fire);"),
+        "the handler passes by reference:\n{js}"
+    );
+    // ORDER: dispatcher declaration BEFORE `$.init()` (instance statements first).
+    let decl_at = js
+        .find("const dispatch = createEventDispatcher();")
+        .unwrap();
+    let init_at = js.find("$.init();").unwrap();
+    assert!(
+        decl_at < init_at,
+        "instance statements precede $.init():\n{js}"
+    );
+    // NEGATIVE: the dispatcher is never rewritten to a runtime helper.
+    assert!(
+        !js.contains("$.createEventDispatcher") && !js.contains("$.dispatch"),
+        "dispatcher calls stay plain (no runtime-helper rewrite):\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn unused_dispatcher_import_emits_no_frame_and_no_init() {
+    // An UNUSED `createEventDispatcher` import: official preserves the import and
+    // emits NO frame, NO `$.init()`, and NO `$$props` param.
+    let js = emit(
+        "<script>import { createEventDispatcher } from 'svelte';</script>\n<p>hi</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("import { createEventDispatcher } from 'svelte';"),
+        "the unused import is preserved:\n{js}"
+    );
+    assert!(
+        js.contains("export default function App($$anchor) {"),
+        "no $$props param without a trigger:\n{js}"
+    );
+    assert!(
+        !js.contains("$.push") && !js.contains("$.init()") && !js.contains("$.pop()"),
+        "an unused import forces no frame/init:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn runes_dispatcher_frames_without_legacy_init() {
+    // A RUNES-mode dispatcher component: the same preserved import + plain
+    // declaration, the runes frame (`$.push($$props, true)`), and NO legacy
+    // `$.init()` (oracle-verified against svelte@5.56.3 with the fn-ref handler).
+    let js = emit(
+        "<script>import { createEventDispatcher } from 'svelte';\nlet n = $state(0);\nconst dispatch = createEventDispatcher();\nfunction fire() { dispatch('go', n); }</script>\n<button onclick={fire}>go</button>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.push($$props, true);"),
+        "the runes frame opens:\n{js}"
+    );
+    assert!(
+        js.contains("const dispatch = createEventDispatcher();"),
+        "the dispatcher declaration stays plain:\n{js}"
+    );
+    assert!(
+        js.contains("dispatch('go', n)"),
+        "the handler dispatch call stays plain:\n{js}"
+    );
+    assert!(
+        !js.contains("$.init()"),
+        "a runes component emits NO legacy $.init():\n{js}"
+    );
+    assert!(
+        !js.contains("svelte/internal/flags/legacy"),
+        "a runes component imports no legacy flags:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+// ── The UNIFIED authored-value preparation (`prepare_template_value`) — the ──
+// remaining `build_expression` consumers: class/style bases, `style:` inner
+// values, attribute-effect folds (+ `<svelte:element>`), block heads, `{@html}`,
+// `{@const}`, `{@attach}`, `<title>` chunks. Every oracle line below is a
+// direct pinned `svelte@5.56.3` compile of the same fixture.
+
+const LEGACY_OBJ: &str = "<script>export let obj;</script>\n";
+
+/// The legacy deep-read/untrack wrap over a member-of-`obj` payload.
+fn obj_wrap(payload: &str) -> String {
+    format!("$.deep_read_state(obj()), $.untrack(() => {payload})")
+}
+
+#[test]
+fn legacy_class_single_base_call_wraps_inside_clsx_and_memoizes() {
+    // Oracle: $.template_effect(($0) => $.set_class(div, 1, $0), [
+    //   () => $.clsx(($.deep_read_state(obj()), $.untrack(() => obj().m())))
+    // ]);
+    let js = emit(
+        &format!("{LEGACY_OBJ}<div class={{obj.m()}}></div>\n"),
+        "App.svelte",
+    );
+    assert!(
+        js.contains(&format!("$.clsx(({}))", obj_wrap("obj().m()"))),
+        "the authored class base wraps INSIDE the synthesized $.clsx:\n{js}"
+    );
+    assert!(
+        js.contains("$.set_class(div, 1, $0)"),
+        "the memoized clsx whole lands in the $0 slot:\n{js}"
+    );
+    // NEGATIVE: no raw (unwrapped) clsx dep, and the wrap is never applied
+    // AROUND the synthesized $.clsx composite.
+    assert!(
+        !js.contains("=> $.clsx(obj().m())"),
+        "a definite-legacy class call dep must not stay raw:\n{js}"
+    );
+    assert!(
+        !js.contains("$.untrack(() => $.clsx("),
+        "the wrap applies to the authored expression, never the synthesized $.clsx:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_class_single_base_member_wraps_inline_inside_clsx() {
+    // Oracle: $.template_effect(() => $.set_class(div, 1, $.clsx(($.deep_read_state(obj()), $.untrack(() => obj().x)))));
+    let js = emit(
+        &format!("{LEGACY_OBJ}<div class={{obj.x}}></div>\n"),
+        "App.svelte",
+    );
+    assert!(
+        js.contains(&format!(
+            "$.set_class(div, 1, $.clsx(({})))",
+            obj_wrap("obj().x")
+        )),
+        "the non-call class base wraps inline inside $.clsx:\n{js}"
+    );
+    assert!(
+        !js.contains("$.clsx(obj.x)") && !js.contains("$.clsx(obj().x)"),
+        "no raw base survives:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_class_base_binary_no_clsx_wraps_plain() {
+    // A binary class base skips $.clsx (official `needs_clsx` false) but still
+    // wraps. Oracle: $.set_class(div, 1, ($.deep_read_state(obj()), $.untrack(() => obj().a + 'x')))
+    let js = emit(
+        &format!("{LEGACY_OBJ}<div class={{obj.a + 'x'}}></div>\n"),
+        "App.svelte",
+    );
+    assert!(
+        js.contains(&format!(
+            "$.set_class(div, 1, ({}))",
+            obj_wrap("obj().a + 'x'")
+        )),
+        "the no-clsx binary base wraps plain:\n{js}"
+    );
+    assert!(
+        !js.contains("$.clsx"),
+        "a binary base never wraps in $.clsx:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn runes_class_single_base_call_stays_raw_in_clsx() {
+    // RUNES control. Oracle: [() => $.clsx($$props.obj.m())]
+    let js = emit(
+        "<script>let { obj } = $props();</script>\n<div class={obj.m()}></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.clsx($$props.obj.m())"),
+        "the runes class dep stays the raw clsx (cosmetic dep parens waived):\n{js}"
+    );
+    assert!(
+        !js.contains("$.untrack") && !js.contains("$.deep_read_state"),
+        "no legacy wrap machinery in a runes module:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_style_single_base_call_memoizes_wrapped() {
+    // Oracle: $.template_effect(($0) => $.set_style(div, $0), [() => ($.deep_read_state(obj()), $.untrack(() => obj().m()))]);
+    let js = emit(
+        &format!("{LEGACY_OBJ}<div style={{obj.m()}}></div>\n"),
+        "App.svelte",
+    );
+    assert!(
+        js.contains(&format!("[() => ({})]", obj_wrap("obj().m()"))),
+        "the style base memoizes the wrapped sequence:\n{js}"
+    );
+    assert!(
+        js.contains("$.set_style(div, $0)"),
+        "the base reads the $0 slot:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_style_single_base_member_wraps_inline() {
+    // Oracle: $.template_effect(() => $.set_style(div, ($.deep_read_state(obj()), $.untrack(() => obj().x))));
+    let js = emit(
+        &format!("{LEGACY_OBJ}<div style={{obj.x}}></div>\n"),
+        "App.svelte",
+    );
+    assert!(
+        js.contains(&format!("$.set_style(div, ({}))", obj_wrap("obj().x"))),
+        "the non-call style base wraps inline:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_style_directive_call_wraps_inside_memoized_object() {
+    // Oracle: $.template_effect(($0) => styles = $.set_style(div, '', styles, $0), [
+    //   () => ({ color: ($.deep_read_state(obj()), $.untrack(() => obj().m())) })
+    // ]);
+    let js = emit(
+        &format!("{LEGACY_OBJ}<div style:color={{obj.m()}}></div>\n"),
+        "App.svelte",
+    );
+    assert!(
+        js.contains(&format!("{{ color: ({}) }}", obj_wrap("obj().m()"))),
+        "the style-directive inner value wraps inside the object:\n{js}"
+    );
+    assert!(
+        js.contains("styles = $.set_style(div, '', styles, $0)"),
+        "the whole directives object memoizes into the $0 slot:\n{js}"
+    );
+    assert!(
+        !js.contains("{ color: obj().m() }"),
+        "no raw style-directive value survives in definite legacy:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_style_directive_member_wraps_inline_object() {
+    // Oracle: $.template_effect(() => styles = $.set_style(div, '', styles, { color: ($.deep_read_state(obj()), $.untrack(() => obj().x)) }));
+    let js = emit(
+        &format!("{LEGACY_OBJ}<div style:color={{obj.x}}></div>\n"),
+        "App.svelte",
+    );
+    assert!(
+        js.contains(&format!("{{ color: ({}) }}", obj_wrap("obj().x"))),
+        "the non-call style-directive value wraps inline in the object:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_style_directive_important_wraps_inside_array_form() {
+    // Oracle dep: () => [{}, { color: ($.deep_read_state(obj()), $.untrack(() => obj().m())) }]
+    let js = emit(
+        &format!("{LEGACY_OBJ}<div style:color|important={{obj.m()}}></div>\n"),
+        "App.svelte",
+    );
+    assert!(
+        js.contains(&format!("[{{}}, {{ color: ({}) }}]", obj_wrap("obj().m()"))),
+        "the |important array form wraps the inner value:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_style_directive_mixed_chunk_wraps_in_template() {
+    // Oracle dep: () => ({ width: `a${($.deep_read_state(obj()), $.untrack(() => obj().m())) ?? ''}b` })
+    let js = emit(
+        &format!("{LEGACY_OBJ}<div style:width=\"a{{obj.m()}}b\"></div>\n"),
+        "App.svelte",
+    );
+    assert!(
+        js.contains(&format!("`a${{({}) ?? ''}}b`", obj_wrap("obj().m()"))),
+        "the mixed style-directive chunk wraps inside the template:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_class_directive_inner_stays_raw_style_directive_inner_wraps() {
+    // The class:/style: asymmetry (official `build_class_directives_object`
+    // visits raw; `build_style_directives_object` routes build_attribute_value):
+    //   [() => ({ foo: obj().m() }), () => ({ color: ($.deep_read_state(obj()), $.untrack(() => obj().f())) })]
+    let js = emit(
+        &format!("{LEGACY_OBJ}<div class:foo={{obj.m()}} style:color={{obj.f()}}></div>\n"),
+        "App.svelte",
+    );
+    assert!(
+        js.contains("{ foo: obj().m() }"),
+        "the class-directive inner condition stays RAW:\n{js}"
+    );
+    assert!(
+        js.contains(&format!("{{ color: ({}) }}", obj_wrap("obj().f()"))),
+        "the style-directive inner value WRAPS:\n{js}"
+    );
+    // GUARDRAIL: the synthesized directive OBJECTS are never wrapped as a whole.
+    assert!(
+        !js.contains("$.untrack(() => ({"),
+        "no wrap is fabricated around a synthesized directives object:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_spread_operand_call_memoizes_raw() {
+    // The spread operand is RAW w.r.t. build_expression but MEMOIZABLE.
+    // Oracle: $.attribute_effect(div, ($0) => ({ ...$0 }), [() => obj().m()]);
+    let js = emit(
+        &format!("{LEGACY_OBJ}<div {{...obj.m()}}></div>\n"),
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.attribute_effect(div, ($0) => ({ ...$0 }), [() => (obj().m())])")
+            || js.contains("$.attribute_effect(div, ($0) => ({ ...$0 }), [() => obj().m()])"),
+        "the call-bearing spread operand memoizes RAW into $0 (cosmetic dep parens waived):\n{js}"
+    );
+    assert!(
+        !js.contains("$.untrack") && !js.contains("$.deep_read_state"),
+        "a spread operand is never legacy-wrapped:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_spread_colocated_attr_call_memoizes_wrapped() {
+    // Oracle: $.attribute_effect(div, ($0) => ({ ...p(), title: $0 }), [() => ($.deep_read_state(obj()), $.untrack(() => obj().m()))]);
+    let js = emit(
+        &format!("<script>export let p; export let obj;</script>\n<div {{...p}} title={{obj.m()}}></div>\n"),
+        "App.svelte",
+    );
+    assert!(
+        js.contains(&format!(
+            "$.attribute_effect(div, ($0) => ({{ ...p(), title: $0 }}), [() => ({})])",
+            obj_wrap("obj().m()")
+        )),
+        "the co-located attr value wraps AND memoizes in the fold:\n{js}"
+    );
+    assert!(
+        !js.contains("title: obj().m()"),
+        "no raw fold value survives:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_spread_colocated_attr_member_wraps_inline() {
+    // Oracle: $.attribute_effect(div, () => ({ ...p(), title: ($.deep_read_state(obj()), $.untrack(() => obj().x)) }));
+    let js = emit(
+        &format!("<script>export let p; export let obj;</script>\n<div {{...p}} title={{obj.x}}></div>\n"),
+        "App.svelte",
+    );
+    assert!(
+        js.contains(&format!("title: ({})", obj_wrap("obj().x"))),
+        "the non-call co-located value wraps inline in the fold:\n{js}"
+    );
+    assert!(
+        !js.contains("($0)"),
+        "a member-only fold takes no memo params:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_spread_style_directive_wraps_inner_memoizes_object() {
+    // Oracle: $.attribute_effect(div, ($0) => ({ ...p(), [$.STYLE]: $0 }), [
+    //   () => ({ color: ($.deep_read_state(obj()), $.untrack(() => obj().m())) })
+    // ]);
+    let js = emit(
+        &format!("<script>export let p; export let obj;</script>\n<div {{...p}} style:color={{obj.m()}}></div>\n"),
+        "App.svelte",
+    );
+    assert!(
+        js.contains("[$.STYLE]: $0"),
+        "the whole [$.STYLE] object memoizes into $0:\n{js}"
+    );
+    assert!(
+        js.contains(&format!("{{ color: ({}) }}", obj_wrap("obj().m()"))),
+        "the style-directive inner value wraps inside the memoized object:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_spread_class_directive_raw_inner_memoizes_object() {
+    // Oracle: $.attribute_effect(div, ($0) => ({ ...p(), [$.CLASS]: $0 }), [() => ({ on: obj().m() })]);
+    let js = emit(
+        &format!("<script>export let p; export let obj;</script>\n<div {{...p}} class:on={{obj.m()}}></div>\n"),
+        "App.svelte",
+    );
+    assert!(
+        js.contains("[$.CLASS]: $0"),
+        "the whole [$.CLASS] object memoizes into $0:\n{js}"
+    );
+    assert!(
+        js.contains("[() => ({ on: obj().m() })]"),
+        "the class-directive inner condition stays RAW in the memoized object:\n{js}"
+    );
+    assert!(
+        !js.contains("$.untrack") && !js.contains("$.deep_read_state"),
+        "a class-directive condition is never legacy-wrapped:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_spread_mixed_attr_chunk_memoizes_wrapped() {
+    // Oracle: $.attribute_effect(div, ($0) => ({ ...p(), title: `a${$0 ?? ''}b` }), [() => (wrap)]);
+    let js = emit(
+        &format!("<script>export let p; export let obj;</script>\n<div {{...p}} title=\"a{{obj.m()}}b\"></div>\n"),
+        "App.svelte",
+    );
+    assert!(
+        js.contains("title: `a${$0 ?? ''}b`"),
+        "the mixed fold chunk memoizes into the $0 template slot:\n{js}"
+    );
+    assert!(
+        js.contains(&format!("[() => ({})]", obj_wrap("obj().m()"))),
+        "the memoized chunk dep is the wrapped sequence:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_spread_input_keeps_remove_defaults_tail_after_deps() {
+    // Oracle: $.attribute_effect(input, ($0) => ({ ...p(), title: $0 }), [() => (wrap)], void 0, void 0, void 0, true);
+    let js = emit(
+        &format!("<script>export let p; export let obj;</script>\n<input {{...p}} title={{obj.m()}} />\n"),
+        "App.svelte",
+    );
+    assert!(
+        js.contains(&format!(
+            "[() => ({})], void 0, void 0, void 0, true)",
+            obj_wrap("obj().m()")
+        )),
+        "the deps array rides the sync slot before the input tail:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn attribute_effect_event_handler_arrow_hoists_stable_id_identifier_stays_inline() {
+    // The attribute-effect handler-stability rule on its reachable
+    // `<svelte:element>` host (the regular-spread modern-event surface is a
+    // pre-existing classifier fail-closed refusal, not a wrap fail-open).
+    // Oracle: var event_handler = () => obj().m();
+    //   $.attribute_effect($$element, ($0) => ({ onclick: event_handler, title: $0 }), [() => (wrap)]);
+    // An IDENTIFIER handler stays inline (`onclick: fn`) — no hoist, no memo.
+    let js = emit(
+        &format!("{LEGACY_OBJ}<svelte:element this={{'div'}} onclick={{() => obj.m()}} title={{obj.m()}}></svelte:element>\n"),
+        "App.svelte",
+    );
+    assert!(
+        js.contains("var event_handler = () => obj().m();"),
+        "an arrow event-attribute handler hoists to a stable id:\n{js}"
+    );
+    assert!(
+        js.contains("onclick: event_handler"),
+        "the fold references the hoisted handler by name:\n{js}"
+    );
+    let js2 = emit(
+        "<script>import { fn } from './x.js';</script>\n<svelte:element this={'div'} onclick={fn} title=\"t\"></svelte:element>\n",
+        "App.svelte",
+    );
+    assert!(
+        js2.contains("onclick: fn") && !js2.contains("event_handler"),
+        "an identifier handler stays inline without a hoist:\n{js2}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_svelte_element_colocated_attr_memoizes_wrapped() {
+    // Oracle: $.attribute_effect($$element, ($0) => ({ title: $0 }), [() => (wrap)]);
+    let js = emit(
+        &format!(
+            "{LEGACY_OBJ}<svelte:element this={{'div'}} title={{obj.m()}}></svelte:element>\n"
+        ),
+        "App.svelte",
+    );
+    assert!(
+        js.contains(&format!(
+            "$.attribute_effect($$element, ($0) => ({{ title: $0 }}), [() => ({})])",
+            obj_wrap("obj().m()")
+        )),
+        "the dynamic-element co-located attr wraps AND memoizes:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_svelte_element_style_directive_wraps_inner() {
+    // Oracle: $.attribute_effect($$element, ($0) => ({ style: '', [$.STYLE]: $0 }), [
+    //   () => ({ color: (wrap) })
+    // ]);
+    let js = emit(
+        &format!("{LEGACY_OBJ}<svelte:element this={{'div'}} style:color={{obj.m()}}></svelte:element>\n"),
+        "App.svelte",
+    );
+    assert!(
+        js.contains("style: '', [$.STYLE]: $0"),
+        "the synthesized style entry stays raw and the object memoizes:\n{js}"
+    );
+    assert!(
+        js.contains(&format!("{{ color: ({}) }}", obj_wrap("obj().m()"))),
+        "the dynamic-element style-directive inner value wraps:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn svelte_element_this_call_stays_raw() {
+    // Control: the `<svelte:element this={…}>` tag expression is RAW.
+    // Oracle: $.element(node, () => obj().m(), false, …)
+    let js = emit(
+        &format!("{LEGACY_OBJ}<svelte:element this={{obj.m()}} title=\"t\"></svelte:element>\n"),
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.element(node, () => obj().m(), false"),
+        "the dynamic tag expression stays raw:\n{js}"
+    );
+    assert!(
+        !js.contains("$.untrack") && !js.contains("$.deep_read_state"),
+        "the tag expression is never legacy-wrapped:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_if_call_condition_gains_outer_derived() {
+    // Oracle: var d = $.derived(() => ($.deep_read_state(obj()), $.untrack(() => obj().m())));
+    //         $.if(node, ($$render) => { if ($.get(d)) $$render(consequent); });
+    let js = emit(
+        &format!("{LEGACY_OBJ}{{#if obj.m()}}<p>a</p>{{/if}}\n"),
+        "App.svelte",
+    );
+    assert!(
+        js.contains(&format!(
+            "var d = $.derived(() => ({}));",
+            obj_wrap("obj().m()")
+        )),
+        "the call-bearing test hoists the wrapped $.derived:\n{js}"
+    );
+    assert!(
+        js.contains("if ($.get(d)) $$render(consequent);"),
+        "the test reads $.get(d):\n{js}"
+    );
+    // NEGATIVE: the raw tracked call must not survive as the test, and the
+    // condition derived is `$.derived` (mode-independent), never safe_equal.
+    assert!(
+        !js.contains("if (obj().m())"),
+        "no raw tracked test in definite legacy:\n{js}"
+    );
+    assert!(
+        !js.contains("$.derived_safe_equal(() => ($.deep_read_state"),
+        "the condition derived is plain $.derived, not safe_equal:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_if_member_condition_wraps_inline() {
+    // Oracle: if (($.deep_read_state(obj()), $.untrack(() => obj().x))) $$render(consequent);
+    let js = emit(
+        &format!("{LEGACY_OBJ}{{#if obj.x}}<p>a</p>{{/if}}\n"),
+        "App.svelte",
+    );
+    assert!(
+        js.contains(&format!(
+            "if (({})) $$render(consequent);",
+            obj_wrap("obj().x")
+        )),
+        "the member-only test wraps inline (no derived):\n{js}"
+    );
+    assert!(
+        !js.contains("$.derived"),
+        "a member-only test never hoists a derived:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_else_if_call_gets_own_derived() {
+    // Oracle: the first (member) test wraps inline; the {:else if} call test
+    // hoists its own derived and reads `$.get(d)`.
+    let js = emit(
+        &format!("{LEGACY_OBJ}{{#if obj.x}}<p>a</p>{{:else if obj.m()}}<p>b</p>{{/if}}\n"),
+        "App.svelte",
+    );
+    assert!(
+        js.contains(&format!(
+            "if (({})) $$render(consequent);",
+            obj_wrap("obj().x")
+        )),
+        "the first member test wraps inline:\n{js}"
+    );
+    assert!(
+        js.contains(&format!(
+            "var d = $.derived(() => ({}));",
+            obj_wrap("obj().m()")
+        )),
+        "the else-if call test hoists its own wrapped derived:\n{js}"
+    );
+    assert!(
+        js.contains("else if ($.get(d)) $$render(consequent_1, 1);"),
+        "the else-if reads $.get(d):\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn maybe_runes_if_call_condition_gains_underived_raw() {
+    // The condition $.derived is UNCONDITIONAL on mode; the wrap is not.
+    // Oracle (maybe-runes): var d = $.derived(() => $s().m());
+    let js = emit(
+        "<script>import { writable } from 'svelte/store';\nconst s = writable({});</script>\n{#if $s.m()}<p>a</p>{/if}\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("var d = $.derived(() => ($s().m()));")
+            || js.contains("var d = $.derived(() => $s().m());"),
+        "the maybe-runes call test hoists the RAW $.derived (cosmetic parens waived):\n{js}"
+    );
+    assert!(
+        !js.contains("$.untrack") && !js.contains("$.deep_read_state"),
+        "the legacy wrap never applies in maybe-runes mode:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn runes_if_call_condition_gains_underived_raw() {
+    // Oracle (runes): var d = $.derived(() => $$props.obj.m());
+    let js = emit(
+        "<script>let { obj } = $props();</script>\n{#if obj.m()}<p>a</p>{/if}\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("var d = $.derived(() => ($$props.obj.m()));")
+            || js.contains("var d = $.derived(() => $$props.obj.m());"),
+        "the runes call test hoists the RAW $.derived (cosmetic parens waived):\n{js}"
+    );
+    assert!(
+        !js.contains("$.untrack") && !js.contains("$.deep_read_state"),
+        "no legacy wrap machinery in a runes module:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_if_assignment_condition_wraps_inline() {
+    // Oracle: if (($.deep_read_state(obj()), $.untrack(() => obj(obj().x = 1, true)))) …
+    let js = emit(
+        &format!("{LEGACY_OBJ}{{#if (obj.x = 1)}}<p>a</p>{{/if}}\n"),
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.deep_read_state(obj()), $.untrack(() => "),
+        "the assignment-bearing test wraps:\n{js}"
+    );
+    assert!(
+        !js.contains("$.derived"),
+        "an assignment-only test never memoizes:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_each_collection_call_wraps_thunk() {
+    // Oracle: $.each(node, 1, () => ($.deep_read_state(obj()), $.untrack(() => obj().m())), $.index, …
+    let js = emit(
+        &format!("{LEGACY_OBJ}{{#each obj.m() as item}}<p>{{item}}</p>{{/each}}\n"),
+        "App.svelte",
+    );
+    assert!(
+        js.contains(&format!(
+            "$.each(node, 1, () => ({}), $.index",
+            obj_wrap("obj().m()")
+        )),
+        "the each collection wraps inside its thunk:\n{js}"
+    );
+    assert!(
+        !js.contains("() => obj().m(), $.index"),
+        "no raw tracked collection thunk in definite legacy:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_each_keyed_key_stays_raw_collection_wraps() {
+    // Oracle: $.each(node, 1, () => (wrap), (item) => item.id, …
+    let js = emit(
+        &format!("{LEGACY_OBJ}{{#each obj.m() as item (item.id)}}<p>{{item}}</p>{{/each}}\n"),
+        "App.svelte",
+    );
+    assert!(
+        js.contains("(item) => item.id"),
+        "the keyed-each key callback stays raw:\n{js}"
+    );
+    assert!(
+        js.contains(&format!("() => ({})", obj_wrap("obj().m()"))),
+        "the keyed collection still wraps:\n{js}"
+    );
+    assert!(
+        !js.contains("(item) => ($.deep_read_state"),
+        "the key expression is never legacy-wrapped:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn runes_each_collection_call_stays_raw() {
+    // Oracle (runes): $.each(node, 17, () => $$props.obj.m(), $.index, …
+    let js = emit(
+        "<script>let { obj } = $props();</script>\n{#each obj.m() as item}<p>{item}</p>{/each}\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("() => $$props.obj.m(), $.index"),
+        "the runes collection thunk stays raw:\n{js}"
+    );
+    assert!(
+        !js.contains("$.untrack") && !js.contains("$.deep_read_state"),
+        "no legacy wrap machinery in a runes module:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_await_promise_call_wraps_thunk() {
+    // Oracle: $.await(node, () => ($.deep_read_state(obj()), $.untrack(() => obj().m())), null, ($$anchor, v) => …
+    let js = emit(
+        &format!("{LEGACY_OBJ}{{#await obj.m() then v}}<p>{{v}}</p>{{/await}}\n"),
+        "App.svelte",
+    );
+    assert!(
+        js.contains(&format!(
+            "$.await(node, () => ({}), null",
+            obj_wrap("obj().m()")
+        )),
+        "the await promise wraps inside its thunk:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_key_expression_call_wraps_thunk() {
+    // Oracle: $.key(node, () => ($.deep_read_state(obj()), $.untrack(() => obj().m())), ($$anchor) => …
+    let js = emit(
+        &format!("{LEGACY_OBJ}{{#key obj.m()}}<p>a</p>{{/key}}\n"),
+        "App.svelte",
+    );
+    assert!(
+        js.contains(&format!("$.key(node, () => ({})", obj_wrap("obj().m()"))),
+        "the key expression wraps inside its thunk:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_html_call_wraps_thunk_no_elision() {
+    // Oracle: $.html(node, () => ($.deep_read_state(obj()), $.untrack(() => obj().m())));
+    let js = emit(&format!("{LEGACY_OBJ}{{@html obj.m()}}\n"), "App.svelte");
+    assert!(
+        js.contains(&format!("$.html(node, () => ({}))", obj_wrap("obj().m()"))),
+        "the html payload wraps inside its getter:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_html_local_zero_arg_call_unthunks_inside_untrack() {
+    // The legacy wrap PRECEDES thunk elision: an imported zero-arg call
+    // becomes the deep-read + untracked-by-reference getter, NOT the bare
+    // elided callee.
+    // Oracle: $.html(node, () => ($.deep_read_state(render), $.untrack(render)));
+    let js = emit(
+        "<script>import { render } from './x.js';\nexport let obj;</script>\n{@html render()}\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.html(node, () => ($.deep_read_state(render), $.untrack(render)))"),
+        "the legacy-wrapped call unthunks INSIDE $.untrack with the import dep:\n{js}"
+    );
+    assert!(
+        !js.contains("$.html(node, render)"),
+        "a legacy-wrapped call is never elided to the bare callee:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn runes_html_local_zero_arg_call_elides() {
+    // RUNES control: the raw direct zero-arg call elides to the bare callee.
+    // Oracle: $.html(node, local);
+    let js = emit(
+        "<script>import { local } from './x.js';\nlet { q } = $props();</script>\n{@html local()}\n<p>{q}</p>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.html(node, local)"),
+        "the runes raw call elides the thunk:\n{js}"
+    );
+    assert!(
+        !js.contains("$.untrack"),
+        "no wrap machinery in a runes module:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_const_initializer_wraps_in_safe_equal_derived() {
+    // Oracle: const y = $.derived_safe_equal(() => ($.deep_read_state(obj()), $.untrack(() => obj().m())));
+    let js = emit(
+        &format!("{LEGACY_OBJ}{{#each [1] as item}}{{@const y = obj.m()}}<p>{{y}}</p>{{/each}}\n"),
+        "App.svelte",
+    );
+    assert!(
+        js.contains(&format!(
+            "const y = $.derived_safe_equal(() => ({}));",
+            obj_wrap("obj().m()")
+        )),
+        "the legacy {{@const}} wraps inside $.derived_safe_equal:\n{js}"
+    );
+    assert!(
+        !js.contains("$.derived("),
+        "a non-runes {{@const}} never uses plain $.derived:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn maybe_runes_const_uses_safe_equal_without_wrap() {
+    // Oracle (maybe-runes): const y = $.derived_safe_equal(() => $s().m());
+    let js = emit(
+        "<script>import { writable } from 'svelte/store';\nconst s = writable({});</script>\n{#each [1] as item}{@const y = $s.m()}<p>{y}</p>{/each}\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("const y = $.derived_safe_equal(() => ($s().m()));")
+            || js.contains("const y = $.derived_safe_equal(() => $s().m());"),
+        "the maybe-runes {{@const}} keeps safe_equal, unwrapped (cosmetic parens waived):\n{js}"
+    );
+    assert!(
+        !js.contains("$.untrack") && !js.contains("$.deep_read_state"),
+        "the legacy wrap never applies in maybe-runes mode:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn runes_const_uses_plain_derived() {
+    // Oracle (runes): const y = $.derived(() => $$props.obj.m());
+    let js = emit(
+        "<script>let { obj } = $props();</script>\n{#each [1] as item}{@const y = obj.m()}<p>{y}</p>{/each}\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("const y = $.derived(() => ($$props.obj.m()));")
+            || js.contains("const y = $.derived(() => $$props.obj.m());"),
+        "the runes {{@const}} uses plain $.derived (cosmetic parens waived):\n{js}"
+    );
+    assert!(
+        !js.contains("$.derived_safe_equal"),
+        "runes never uses safe_equal:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_const_plain_item_expression_stays_unwrapped_safe_equal() {
+    // No call/member/assignment trigger: safe_equal helper, NO wrap.
+    // Oracle: const y = $.derived_safe_equal(() => 1 + 2);
+    let js = emit(
+        &format!("{LEGACY_OBJ}{{#each [1] as item}}{{@const y = 1 + 2}}<p>{{y}}</p>{{/each}}\n"),
+        "App.svelte",
+    );
+    assert!(
+        js.contains("const y = $.derived_safe_equal(() => (1 + 2));")
+            || js.contains("const y = $.derived_safe_equal(() => 1 + 2);"),
+        "an untriggered legacy {{@const}} stays unwrapped under safe_equal (cosmetic parens waived):\n{js}"
+    );
+    assert!(
+        !js.contains("$.untrack") && !js.contains("$.deep_read_state"),
+        "no wrap without a call/member/assignment trigger:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_declaration_tag_initializer_stays_raw() {
+    // Control: a `{const}` declaration-tag initializer is RAW and inert.
+    // Oracle: const y = obj().m();
+    let js = emit(
+        &format!("{LEGACY_OBJ}{{#each [1] as item}}{{const y = obj.m()}}x{{/each}}\n"),
+        "App.svelte",
+    );
+    assert!(
+        js.contains("const y = obj().m();"),
+        "the declaration-tag initializer stays raw and inert:\n{js}"
+    );
+    assert!(
+        !js.contains("$.untrack") && !js.contains("$.deep_read_state"),
+        "a declaration-tag initializer is never legacy-wrapped:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_attach_call_wraps_thunk() {
+    // Oracle: $.attach(div, () => ($.deep_read_state(obj()), $.untrack(() => obj().m())));
+    let js = emit(
+        &format!("{LEGACY_OBJ}<div {{@attach obj.m()}}></div>\n"),
+        "App.svelte",
+    );
+    assert!(
+        js.contains(&format!("$.attach(div, () => ({}))", obj_wrap("obj().m()"))),
+        "the attachment payload wraps inside its thunk:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_attach_member_wraps_thunk() {
+    // Oracle: $.attach(div, () => ($.deep_read_state(obj()), $.untrack(() => obj().x)));
+    let js = emit(
+        &format!("{LEGACY_OBJ}<div {{@attach obj.x}}></div>\n"),
+        "App.svelte",
+    );
+    assert!(
+        js.contains(&format!("$.attach(div, () => ({}))", obj_wrap("obj().x"))),
+        "the member attachment payload wraps inside its thunk:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_use_action_arg_stays_raw() {
+    // Control: `use:` arguments are RAW (official visits them without
+    // build_expression). Oracle: $.action(div, ($$node, $$action_arg) => act?.($$node, $$action_arg), () => obj().m())
+    let js = emit(
+        "<script>import { act } from './x.js';\nexport let obj;</script>\n<div use:act={obj.m()}></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("() => obj().m())") || js.contains("() => (obj().m()))"),
+        "the action argument thunk stays raw (cosmetic parens waived):\n{js}"
+    );
+    assert!(
+        !js.contains("$.untrack") && !js.contains("$.deep_read_state"),
+        "a use: argument is never legacy-wrapped:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_title_call_memoizes_wrapped_deferred() {
+    // Oracle: $.deferred_template_effect(($0) => { $.document.title = $0 ?? ''; },
+    //   [() => ($.deep_read_state(obj()), $.untrack(() => obj().m()))]);
+    let js = emit(
+        &format!("{LEGACY_OBJ}<svelte:head><title>{{obj.m()}}</title></svelte:head>\n"),
+        "App.svelte",
+    );
+    assert!(
+        js.contains(&format!("[() => ({})]", obj_wrap("obj().m()"))),
+        "the call-bearing title chunk memoizes wrapped:\n{js}"
+    );
+    assert!(
+        js.contains("$.document.title = $0 ?? ''"),
+        "the title RHS reads the opaque memo slot:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_title_member_wraps_inline_coalesced() {
+    // Oracle: $.deferred_template_effect(() => { $.document.title = ($.deep_read_state(obj()), $.untrack(() => obj().x)) ?? ''; });
+    let js = emit(
+        &format!("{LEGACY_OBJ}<svelte:head><title>{{obj.x}}</title></svelte:head>\n"),
+        "App.svelte",
+    );
+    assert!(
+        js.contains(&format!(
+            "$.document.title = ({}) ?? ''",
+            obj_wrap("obj().x")
+        )),
+        "the member title chunk wraps inline with the bare coalesce:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn legacy_title_mixed_chunk_memoizes_wrapped() {
+    // Oracle: $.document.title = `page ${$0 ?? ''}`; deps [() => (wrap)]
+    let js = emit(
+        &format!("{LEGACY_OBJ}<svelte:head><title>page {{obj.m()}}</title></svelte:head>\n"),
+        "App.svelte",
+    );
+    assert!(
+        js.contains("$.document.title = `page ${$0 ?? ''}`"),
+        "the mixed title chunk memoizes into the template slot:\n{js}"
+    );
+    assert!(
+        js.contains(&format!("[() => ({})]", obj_wrap("obj().m()"))),
+        "the memoized title dep is the wrapped sequence:\n{js}"
+    );
+    assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+#[test]
+fn every_reactive_text_node_carries_exactly_one_prepared_op() {
+    // The reactive-text accept path is TOTAL: every projected
+    // `ClientNode::ReactiveText` node carries exactly ONE prepared
+    // `ClientRuntimeOp::ReactiveText` op — the sole source `reactive_text_for`
+    // serves the emitter from. No interpolation reaches emission without a
+    // prepared carrier, so the emitter has no raw-source path (an absent op is
+    // an internal routing defect that fails CLOSED, never a silent raw
+    // emission).
+    use crate::svelte::runtime::client_plan::SupportedClientIr;
+    use crate::svelte::runtime::client_plan_types::{ClientNode, ClientRuntimeOp};
+    use crate::svelte::runtime::client_surface::ClientSyntaxSurface;
+    use crate::svelte::runtime::lower_parsed_svelte_to_ir;
+    for source in [
+        // A pure single interpolation.
+        "<script>let { x } = $props();</script>\n<p>{x}</p>\n",
+        // A MIXED literal/interpolation run (two interps in one text node).
+        "<script>let { x, y } = $props();</script>\n<p>a {x} b {y} c</p>\n",
+        // The definitely-legacy imported-member shape (the wrap path).
+        "<script>import * as NS from './x.js';\nexport let p;</script>\n<p>{NS.z}</p>\n",
+        // An interpolation inside a nested block region.
+        "<script>let { x, c } = $props();</script>\n{#if c}<p>{x}</p>{/if}\n",
+        // A top-level interpolation (root fragment).
+        "<script>let { x } = $props();</script>\n<p>t</p>\n{x}\n",
+    ] {
+        let alloc = Allocator::default();
+        let parsed = parse_svelte(source);
+        let opts = SvelteRuntimeOptions {
+            filename: Some("App.svelte".to_string()),
+            ..Default::default()
+        };
+        let ir =
+            lower_parsed_svelte_to_ir(source, &parsed, &opts, &alloc).expect("lowering succeeds");
+        let classified = ClientSyntaxSurface::classify(&ir).expect("the surface classifies");
+        let plan = SupportedClientIr::build(&classified, &ir, None).expect("the plan builds");
+        let mut reactive_nodes = 0usize;
+        for (idx, node) in plan.nodes.iter().enumerate() {
+            if matches!(node, ClientNode::ReactiveText { .. }) {
+                reactive_nodes += 1;
+                let ops = plan
+                    .all_ops()
+                    .filter(|op| {
+                        matches!(op, ClientRuntimeOp::ReactiveText { target, .. }
+                            if target.0 == idx as u32)
+                    })
+                    .count();
+                assert_eq!(
+                    ops, 1,
+                    "reactive interpolation node {idx} must carry exactly one prepared \
+                     ReactiveText op in:\n{source}"
+                );
+            }
+        }
+        assert!(
+            reactive_nodes > 0,
+            "the fixture must exercise reactive text: {source}"
+        );
+    }
+}
+
+#[test]
+fn legacy_mixed_wrapped_defined_chunk_keeps_bare_coalesce() {
+    // A mixed-attr chunk whose AUTHOR expression is PROVABLY DEFINED (a
+    // template literal always evaluates to a string) but legacy-WRAPPED (the
+    // `p.a` member trigger): official never proves the WRAPPED sequence
+    // defined, so the bare `?? ''` coalesce still applies — the definedness of
+    // the authored expression must NOT leak through the wrap and elide it.
+    let js = emit(
+        "<script>export let p;</script>\n<div title=\"a {`x${p.a}`} b\"></div>\n",
+        "App.svelte",
+    );
+    assert!(
+        js.contains("?? ''"),
+        "the wrapped defined chunk keeps the bare `?? ''` coalesce:\n{js}"
+    );
+    assert!(
+        js.contains("$.untrack("),
+        "the member-trigger chunk wraps in definite legacy:\n{js}"
     );
     assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
 }

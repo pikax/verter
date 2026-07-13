@@ -249,21 +249,27 @@ impl<'a> ClientEmitter<'a> {
     /// expression part through `memoizer` (when `Some`) so a `has_call` value lands in
     /// the official deps-array form. A `Single` value emits its bare (possibly `$N`)
     /// expression; a `Mixed` value builds the `` `lit${expr ?? ''}lit` `` template with
-    /// each expr resolved; a `Const` emits verbatim. Shared by the dynamic-attribute /
-    /// class / style emitters and the `bind:group` dynamic-value helpers above.
+    /// each expr resolved; a `Const` emits verbatim. Each AUTHORED value was PREPARED
+    /// at planning (wrap first, then the memoize decision; a non-memoized wrapped value
+    /// embeds as the parenthesized sequence, including on the `None`-memoizer
+    /// init/dep-read paths); a SYNTHESIZED value passes through untouched. Shared by
+    /// the dynamic-attribute / class / style emitters and the `bind:group`
+    /// dynamic-value helpers above.
     pub(super) fn build_attr_value(
         &self,
         value: &AttrValue,
         memoizer: &mut Option<&mut Memoizer>,
     ) -> String {
+        use super::client_plan_types::PlannedTemplateValue;
         match value {
             AttrValue::Const(text) => text.clone(),
-            AttrValue::Single {
-                rewritten,
-                has_call,
-            } => match memoizer {
-                Some(m) => m.add(rewritten.clone(), *has_call),
-                None => rewritten.clone(),
+            AttrValue::Single(PlannedTemplateValue::Authored(p)) => match memoizer {
+                Some(m) => m.add(p.effect_value(), p.has_call()),
+                None => p.inline_expression(),
+            },
+            AttrValue::Single(PlannedTemplateValue::Synthesized(s)) => match memoizer {
+                Some(m) => m.add(s.raw_text().to_string(), s.has_call()),
+                None => s.raw_text().to_string(),
             },
             AttrValue::Mixed(parts) => {
                 let mut tmpl = String::from("`");
@@ -274,14 +280,10 @@ impl<'a> ClientEmitter<'a> {
                                 text,
                             ));
                         }
-                        AttrValuePart::Expr {
-                            rewritten,
-                            has_call,
-                            coalesce,
-                        } => {
+                        AttrValuePart::Expr { value, coalesce } => {
                             let v = match memoizer {
-                                Some(m) => m.add(rewritten.clone(), *has_call),
-                                None => rewritten.clone(),
+                                Some(m) => m.add(value.effect_value(), value.has_call()),
+                                None => value.inline_expression(),
                             };
                             // The `?? ''` coercion the plan computed (official
                             // `build_template_chunk`): a provably-defined part is RAW, an

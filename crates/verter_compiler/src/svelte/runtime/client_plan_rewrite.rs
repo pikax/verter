@@ -193,46 +193,4 @@ impl<'a> SupportedClientIr<'a> {
             rewritten
         })
     }
-
-    /// Rewrite a value for embedding as a CONCISE ARROW BODY (`() => <here>`), then wrap it in
-    /// one paren pair UNCONDITIONALLY (`EXPR` → `(EXPR)`) so `() => (EXPR)` is ALWAYS an
-    /// expression body. There is NO shape-dependent wrap decision: the body is wrapped whether or
-    /// not it leads with a `{` (object literal / object-rooted member / TS skin), so `() => { … }`
-    /// can never parse `{ … }` as a block returning `undefined` (`{@html {a:1}}` -> `() => ({a:1})`,
-    /// `{@html {a:1} as any}` -> `() => ({a:1} as any)` after the TS strip), and a bare `a, b`
-    /// sequence can never split a positional arg (`{@html a, b}` -> `() => (a, b)`). Over-wrapping a
-    /// complete expression is behavior-preserving and cosmetically invisible to the
-    /// paren-insensitive structural corpus comparator. This is the official `b.arrow`
-    /// parenthesization applied unconditionally — complete-by-construction (no shape predicate can
-    /// under-wrap a future skin), so the wrap routes through the shared
-    /// [`concise_arrow_expr_body`] helper.
-    ///
-    /// The rewrite is the GENERIC post-strip expression rewriter (signal/prop reads lowered, TS
-    /// stripped, author parens + whitespace kept verbatim) — NOT
-    /// [`rewrite_value_preserving_source`] (whose sequence re-wrap is unnecessary here, since the
-    /// unconditional outer paren already keeps a top-level sequence as one value). The wrap belongs
-    /// at this arrow-body embedding site only, NOT inside the multi-site value/property printer
-    /// (used at object-property / conditional-arm sites where a leading `{` is not a
-    /// statement-start, so wrapping there would be incorrect).
-    ///
-    /// [`concise_arrow_expr_body`]: super::client_codegen_helpers::concise_arrow_expr_body
-    /// [`rewrite_value_preserving_source`]: Self::rewrite_value_preserving_source
-    pub(super) fn rewrite_arrow_body_value(
-        &self,
-        expr_id: ExprId,
-    ) -> Result<String, UnsupportedSvelteRuntimeSurface> {
-        let analyzed = self.ir.analysis.expressions.get(expr_id);
-        let rewritten = expr_rewrite::rewrite_expression_full(
-            analyzed.source,
-            analyzed.scope,
-            &self.ir.analysis.bindings,
-            &self.ir.analysis.scopes,
-            &self.prop_reads,
-            &self.proxy_inits,
-        )
-        .map(|r| r.text)?;
-        Ok(super::client_codegen_helpers::concise_arrow_expr_body(
-            &rewritten,
-        ))
-    }
 }

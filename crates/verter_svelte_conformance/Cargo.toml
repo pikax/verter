@@ -17,5 +17,6 @@ serde_json = { workspace = true, features = ["raw_value"] }
 
 [dev-dependencies]
 oxc_allocator = { workspace = true }
+syn = { workspace = true }
 tempfile = "3.27"
 verter_compiler = { path = "../verter_compiler", features = ["conformance-trace"] }

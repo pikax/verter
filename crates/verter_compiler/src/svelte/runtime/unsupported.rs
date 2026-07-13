@@ -51,6 +51,21 @@ pub enum UnsupportedSvelteRuntimeSurface {
         /// The source span.
         span: Span,
     },
+    /// A `<slot let:x>` producer-side provider `let:` binding. Official
+    /// svelte@5.56.3 ACCEPTS the syntax but ITSELF emits broken output — a
+    /// component-instance-scope `const x = $.derived_safe_equal(() =>
+    /// $$slotProps.x);` reading an UNDECLARED `$$slotProps` (it is bound only
+    /// inside a component slot-content callback), a guaranteed runtime
+    /// `ReferenceError`. Verter refuses rather than shipping invalid runtime
+    /// code — an accepted fail-closed upstream-bug divergence (the same class
+    /// as the bare-`$host()` disposition), NOT a completeness deferral: there
+    /// is no valid official topology to converge on while the pinned compiler
+    /// emits the unbound read.
+    SlotLetUnbound {
+        /// The authored `let:` directive span (directive-precise, not the
+        /// enclosing slot element).
+        span: Span,
+    },
     /// A rune beyond the supported `$state` / `$derived` / `$effect` / basic
     /// `$props()` subset (`$state.raw` / `$state.snapshot` / `$effect.pre` /
     /// `$effect.root` / `$effect.tracking` / `$props()` rest / `$props.id` /
@@ -141,20 +156,6 @@ pub enum UnsupportedSvelteRuntimeSurface {
         /// The source span of the export declaration.
         span: Span,
     },
-    /// A `<slot>` element in a LEGACY (non-runes) component — the legacy slot
-    /// surface (`$.slot(node, $$props, 'default', …)`). Not yet lowered — fails
-    /// closed.
-    LegacySlotElement {
-        /// The source span of the slot element.
-        span: Span,
-    },
-    /// A `createEventDispatcher` usage (the `svelte` import local referenced in
-    /// the instance script) in a LEGACY (non-runes) component — the legacy
-    /// component-event surface. Not yet lowered — fails closed.
-    LegacyEventDispatcher {
-        /// The source span of the dispatcher reference.
-        span: Span,
-    },
     /// A Svelte rune NAME referenced in a LEGACY (non-runes) component — under
     /// `runes={false}` a rune name is NOT a rune (official parses `$state` as a
     /// STORE subscription of `state` and lowers `let` state through
@@ -197,9 +198,10 @@ pub enum UnsupportedSvelteRuntimeSurface {
     },
     /// A CLEAN-analyzed `<style>` whose selector⇄template relation the
     /// selector-to-template matcher cannot PROVE (a template construct outside
-    /// the matcher's provable set — a legacy `<slot>`, hoisted slot content):
-    /// without proven scope facts no faithful scoped emission exists, so the
-    /// style refuses instead of emitting a guessed scope or unscoped output.
+    /// the matcher's provable set — hoisted `<svelte:fragment slot>` content, a
+    /// `<svelte:head>` `<title>`): without proven scope facts no faithful
+    /// scoped emission exists, so the style refuses instead of emitting a
+    /// guessed scope or unscoped output.
     StyleSelectorUnsupported {
         /// The selector-refusal diagnostic code threaded from the typed
         /// style-plan failure (`svelte-runtime-unsupported-style-selector`)
@@ -244,7 +246,7 @@ pub enum UnsupportedSvelteRuntimeSurface {
     /// Every STATIC import form — default / named / aliased / namespace /
     /// side-effect / mixed, instance or import-only module slot — is admitted and
     /// hoisted through the typed [`UserImport`](super::client_imports::UserImport)
-    /// prelude carrier, so this surface no longer covers them.
+    /// prelude carrier, so this surface does not cover them.
     ScriptImport {
         /// A short construct label (`type-only import`, `import phase`,
         /// `import assertion`).
@@ -377,6 +379,21 @@ pub enum UnsupportedSvelteRuntimeSurface {
         /// template-expression reference, whose arena entry carries no span).
         span: Span,
     },
+    /// A template-expression FACT-RECOVERY failure: a scope-aware analysis
+    /// (the `has_call` impure-call scan, the binding-impurity scan) could not
+    /// re-derive its facts from an expression that lowered cleanly, or a
+    /// canonical-analysis fact (the sync member/assignment wrap trigger) was
+    /// demanded from a TORN expression. FAIL-CLOSED by contract: emitting with
+    /// defaulted facts would silently change wrap / effect-membership /
+    /// getter-vs-init topology (the official metadata would disagree), so the
+    /// surface refuses with the failed analysis named instead of degrading.
+    ExpressionFactRecovery {
+        /// The analysis whose fact recovery failed (`has-call` /
+        /// `binding-impurity` / `sync-member-or-assignment`).
+        analysis: &'static str,
+        /// The source span (`0..0` when the failing analysis carries no span).
+        span: Span,
+    },
     /// A carrier for an OFFICIAL-reject detected MID-REWRITE. The fallible
     /// expression rewriter's error channel is `UnsupportedSvelteRuntimeSurface`,
     /// but some malformed inputs it detects (a `$$`-prefixed member of a
@@ -408,16 +425,13 @@ impl UnsupportedSvelteRuntimeSurface {
             Self::NonDelegatedEvent { .. } => "svelte-runtime-unsupported-non-delegated-event",
             Self::Block { .. } => "svelte-runtime-unsupported-block",
             Self::ComponentOrSnippet { .. } => "svelte-runtime-unsupported-component",
+            Self::SlotLetUnbound { .. } => "svelte-runtime-unsupported-slot-let-unbound",
             Self::AdvancedRune { .. } => "svelte-runtime-unsupported-advanced-rune",
             Self::HostOrCustomElement { .. } => "svelte-runtime-unsupported-host-custom-element",
             Self::Element { .. } => "svelte-runtime-unsupported-element",
             Self::ElementName { .. } => "svelte-runtime-unsupported-element-name",
             Self::ComponentExportBinding { .. } => {
                 "svelte-runtime-unsupported-component-export-binding"
-            }
-            Self::LegacySlotElement { .. } => "svelte-runtime-unsupported-legacy-slot",
-            Self::LegacyEventDispatcher { .. } => {
-                "svelte-runtime-unsupported-legacy-event-dispatcher"
             }
             Self::LegacyRuneReference { .. } => "svelte-runtime-unsupported-legacy-rune-reference",
             Self::ExperimentalAsync { .. } => "svelte-runtime-unsupported-experimental-async",
@@ -446,6 +460,9 @@ impl UnsupportedSvelteRuntimeSurface {
             Self::StoreScopedSubscription { .. } => {
                 "svelte-runtime-unsupported-store-scoped-subscription"
             }
+            Self::ExpressionFactRecovery { .. } => {
+                "svelte-runtime-unsupported-expression-fact-recovery"
+            }
             // A transient official-reject carrier — delegate to the carried rule's
             // official-reject diagnostic id (it is converted to
             // `ClientCompileError::OfficialReject` at the boundary and never surfaces
@@ -467,6 +484,11 @@ impl UnsupportedSvelteRuntimeSurface {
             }
             Self::Block { construct, .. } => format!("the `{construct}` block construct"),
             Self::ComponentOrSnippet { construct, .. } => format!("the `{construct}` construct"),
+            Self::SlotLetUnbound { .. } => "the `<slot let:…>` provider binding (the pinned \
+                 official compiler emits an UNBOUND `$$slotProps` reference for it — a \
+                 runtime `ReferenceError` — so Verter refuses rather than shipping \
+                 invalid runtime code)"
+                .to_string(),
             Self::AdvancedRune { rune, .. } => format!("the `{rune}` rune form"),
             Self::HostOrCustomElement { surface, .. } => {
                 format!("the `{surface}` custom-element surface")
@@ -483,12 +505,6 @@ impl UnsupportedSvelteRuntimeSurface {
                 "an instance-script `export {construct}` component-export binding (official \
                  lowers it through the `$$exports` accessor object + `$.bind_prop`)"
             ),
-            Self::LegacySlotElement { .. } => {
-                "a `<slot>` element in a legacy (non-runes) component".to_string()
-            }
-            Self::LegacyEventDispatcher { .. } => {
-                "a `createEventDispatcher` usage in a legacy (non-runes) component".to_string()
-            }
             Self::LegacyRuneReference { rune, .. } => format!(
                 "the `{rune}` rune name referenced in a legacy (non-runes) component (under \
                  `runes={{false}}` a rune name is a store subscription, not a rune)"
@@ -593,6 +609,13 @@ impl UnsupportedSvelteRuntimeSurface {
                      function-local binding; official `store_invalid_scoped_subscription`)"
                 );
             }
+            Self::ExpressionFactRecovery { analysis, .. } => {
+                return format!(
+                    "Svelte client emission could not recover the `{analysis}` \
+                     analysis facts of a template expression; the surface fails \
+                     closed rather than emitting with defaulted metadata."
+                );
+            }
             // A transient official-reject carrier — surface the carried rule's
             // official-reject message directly (NOT the "does not yet support …"
             // wrapper below), since it mirrors an official COMPILE-ERROR, not a
@@ -611,13 +634,12 @@ impl UnsupportedSvelteRuntimeSurface {
             | Self::NonDelegatedEvent { span, .. }
             | Self::Block { span, .. }
             | Self::ComponentOrSnippet { span, .. }
+            | Self::SlotLetUnbound { span }
             | Self::AdvancedRune { span, .. }
             | Self::HostOrCustomElement { span, .. }
             | Self::Element { span, .. }
             | Self::ElementName { span, .. }
             | Self::ComponentExportBinding { span, .. }
-            | Self::LegacySlotElement { span }
-            | Self::LegacyEventDispatcher { span }
             | Self::LegacyRuneReference { span, .. }
             | Self::ExperimentalAsync { span, .. }
             | Self::DevMode { span }
@@ -639,7 +661,19 @@ impl UnsupportedSvelteRuntimeSurface {
             | Self::ConstFoldThrow { span, .. }
             | Self::ServerGenerate { span }
             | Self::StoreScopedSubscription { span, .. }
+            | Self::ExpressionFactRecovery { span, .. }
             | Self::OfficialReject { span, .. } => *span,
+        }
+    }
+
+    /// The FAIL-CLOSED fact-recovery refusal for one named analysis — the
+    /// shared constructor every fact-recovery `Err(())` maps through (no span
+    /// is available at the analysis layer, so the diagnostic carries `0..0`).
+    #[must_use]
+    pub(super) fn expression_fact_recovery(analysis: &'static str) -> Self {
+        Self::ExpressionFactRecovery {
+            analysis,
+            span: Span::new(0, 0),
         }
     }
 }

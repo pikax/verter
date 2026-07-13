@@ -22,9 +22,13 @@ pub(super) struct Memoizer {
 }
 
 impl Memoizer {
-    /// Route a rewritten chunk through the memoizer: a `has_call` chunk is hoisted
-    /// (its rewritten expression becomes the next `() => <expr>` dep and a `$N`
+    /// Route a PREPARED chunk through the memoizer: a `has_call` chunk is hoisted
+    /// (its prepared expression becomes the next `() => <expr>` dep and a `$N`
     /// placeholder is returned); a non-call chunk is returned inline unchanged.
+    /// The value arrives ALREADY prepared — an authored expression's plan-time
+    /// legacy wrap rides its `PreparedTemplateValue` carrier (`effect_value()` at
+    /// the caller); the memoizer itself never inspects or wraps values
+    /// (synthesized class/style values pass through it untouched).
     pub(super) fn add(&mut self, rewritten: String, has_call: bool) -> String {
         if !has_call {
             return rewritten;

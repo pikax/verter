@@ -194,25 +194,43 @@ fn render_callee_needs_context(
     scan.found
 }
 
-/// Collect the UNSAFE `$props()` destructure root names of a program. A call /
-/// member rooted at one of these is unsafe (`is_safe_identifier` returns false
-/// for a `prop` binding). The IMPORT half of the unsafe-root set comes from the
-/// shared `ClassifiedScriptImports` carrier in [`needs_context`] — this walk owns
-/// ONLY the `$props()` destructure names.
+/// Collect the UNSAFE prop root names of a program: the `$props()` destructure
+/// names (runes props) AND the `export let` locals (legacy props — official
+/// `is_safe_identifier` returns false for a `prop` / `bindable_prop` binding in
+/// BOTH modes). A call / member rooted at one of these is unsafe. The IMPORT
+/// half of the unsafe-root set comes from the shared `ClassifiedScriptImports`
+/// carrier in [`needs_context`] — this walk owns only the prop names.
 fn collect_unsafe_root_names(program: &Program<'_>, out: &mut rustc_hash::FxHashSet<String>) {
     for stmt in &program.body {
-        let Statement::VariableDeclaration(decl) = stmt else {
-            continue;
-        };
-        for d in &decl.declarations {
-            let Some(Expression::CallExpression(call)) = &d.init else {
-                continue;
-            };
-            if is_props_callee(&call.callee) {
-                let mut names = Vec::new();
-                collect_pattern_names(&d.id, &mut names);
-                out.extend(names);
+        match stmt {
+            Statement::VariableDeclaration(decl) => {
+                for d in &decl.declarations {
+                    let Some(Expression::CallExpression(call)) = &d.init else {
+                        continue;
+                    };
+                    if is_props_callee(&call.callee) {
+                        let mut names = Vec::new();
+                        collect_pattern_names(&d.id, &mut names);
+                        out.extend(names);
+                    }
+                }
             }
+            // A legacy `export let` prop (official `prop`/`bindable_prop` kind):
+            // a template call / member rooted at it opens the component frame.
+            Statement::ExportNamedDeclaration(export) => {
+                if let Some(oxc_ast::ast::Declaration::VariableDeclaration(decl)) =
+                    &export.declaration
+                {
+                    if decl.kind == oxc_ast::ast::VariableDeclarationKind::Let {
+                        for d in &decl.declarations {
+                            let mut names = Vec::new();
+                            collect_pattern_names(&d.id, &mut names);
+                            out.extend(names);
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -228,9 +246,21 @@ struct NeedsContextScan<'a> {
 }
 
 impl NeedsContextScan<'_> {
-    /// Whether `name` is an unsafe root that is NOT shadowed by a local.
+    /// Whether `name` is an unsafe root that is NOT shadowed by a local. A
+    /// `$`-prefixed (non-`$$`) name is a store ACCESSOR read — the official
+    /// `is_safe_identifier` recurses on the store BASE (`$s` is unsafe iff `s`
+    /// is), so a subscription over an imported / prop-held store still opens
+    /// the frame.
     fn is_unsafe_root(&self, name: &str) -> bool {
-        self.unsafe_roots.contains(name) && !self.scopes.is_shadowed(name)
+        if self.unsafe_roots.contains(name) && !self.scopes.is_shadowed(name) {
+            return true;
+        }
+        let bytes = name.as_bytes();
+        if bytes.first() == Some(&b'$') && bytes.len() > 1 && bytes[1] != b'$' {
+            let base = &name[1..];
+            return self.unsafe_roots.contains(base) && !self.scopes.is_shadowed(base);
+        }
+        false
     }
 
     /// Whether a callee / member expression is UNSAFE (so the call / member triggers

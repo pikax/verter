@@ -1,0 +1,44 @@
+{
+  "slug": "legacy/wrap_await_key_call.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "wrap_await_key_call",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "await",
+    "escape",
+    "bind_props"
+  ],
+  "helperSet": [
+    "await",
+    "bind_props",
+    "escape"
+  ],
+  "helperCounts": {
+    "await": 1,
+    "escape": 1,
+    "bind_props": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "slug": "legacy/wrap_svelte_element_style_dir.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "wrap_svelte_element_style_dir",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "element",
+    "attr",
+    "attr_style",
+    "bind_props"
+  ],
+  "helperSet": [
+    "attr",
+    "attr_style",
+    "bind_props",
+    "element"
+  ],
+  "helperCounts": {
+    "element": 1,
+    "attr": 1,
+    "attr_style": 1,
+    "bind_props": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

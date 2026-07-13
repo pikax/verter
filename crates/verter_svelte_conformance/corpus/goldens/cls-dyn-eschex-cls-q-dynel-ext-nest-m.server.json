@@ -1,0 +1,41 @@
+{
+  "slug": "cls-dyn-eschex-cls-q-dynel-ext-nest-m",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "cls_dyn_eschex_cls_q_dynel_ext_nest_m",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "element",
+    "attr_class"
+  ],
+  "helperSet": [
+    "attr_class",
+    "element"
+  ],
+  "helperCounts": {
+    "element": 1,
+    "attr_class": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": true,
+    "hash": "svelte-10sp394",
+    "code": "\n\t.a\\26 b.svelte-<scoped> {\n\t\tcolor: red;\n\n\t\t&:hover {\n\t\t\tcolor: blue;\n\t\t}\n\t}\n"
+  }
+}

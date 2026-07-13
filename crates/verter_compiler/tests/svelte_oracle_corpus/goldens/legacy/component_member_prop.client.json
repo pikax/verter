@@ -1,0 +1,70 @@
+{
+  "slug": "legacy/component_member_prop.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "./Child.svelte",
+      "kind": "default",
+      "names": [
+        "default:Child"
+      ]
+    },
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "component_member_prop",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "push",
+    "prop",
+    "init",
+    "deep_read_state",
+    "untrack",
+    "pop"
+  ],
+  "helperSet": [
+    "deep_read_state",
+    "init",
+    "pop",
+    "prop",
+    "push",
+    "untrack"
+  ],
+  "helperCounts": {
+    "push": 1,
+    "prop": 1,
+    "init": 1,
+    "deep_read_state": 1,
+    "untrack": 1,
+    "pop": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; import Child from './Child.svelte'; export default function component_member_prop($$anchor, $$props) {$.push($$props, false); let obj = $.prop($$props, 'obj', 8); $.init(); Child($$anchor, {get foo() {return ($.deep_read_state(obj()), $.untrack(() => obj().x));}}); $.pop();}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

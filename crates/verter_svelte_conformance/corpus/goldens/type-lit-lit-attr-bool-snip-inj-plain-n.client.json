@@ -1,0 +1,59 @@
+{
+  "slug": "type-lit-lit-attr-bool-snip-inj-plain-n",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "type_lit_lit_attr_bool_snip_inj_plain_n",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "append",
+    "from_html",
+    "append_styles"
+  ],
+  "helperSet": [
+    "append",
+    "append_styles",
+    "from_html"
+  ],
+  "helperCounts": {
+    "append": 1,
+    "from_html": 1,
+    "append_styles": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div data-x=\"\">x</div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; const subject = ($$anchor) => {var div = root(); $.append($$anchor, div);}; var root = $.from_html(`<div data-x=\"\">x</div>`); const $$css = {hash: 'svelte-<scoped>', code: ''}; export default function type_lit_lit_attr_bool_snip_inj_plain_n($$anchor) {$.append_styles($$anchor, $$css); subject($$anchor);}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "slug": "attr-spread-eschex-cls-q-snip-ext-comb-u",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "attr_spread_eschex_cls_q_snip_ext_comb_u",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "attributes"
+  ],
+  "helperSet": [
+    "attributes"
+  ],
+  "helperCounts": {
+    "attributes": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": true,
+    "hash": "svelte-1ewzdu6",
+    "code": "\n\t.wrap.svelte-<scoped> [data-x=\"a\\26 b\"]:where(.svelte-<scoped>) {\n\t\tcolor: red;\n\t}\n"
+  }
+}

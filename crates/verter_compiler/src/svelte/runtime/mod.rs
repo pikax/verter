@@ -44,23 +44,27 @@ mod client_effect;
 mod client_emit;
 mod client_event;
 mod client_imports;
+mod client_legacy_value;
 mod client_lifecycle;
 mod client_module_frame;
 mod client_plan;
 mod client_plan_attr_value;
 mod client_plan_bind;
+mod client_plan_block_types;
 mod client_plan_element_ops;
 mod client_plan_rewrite;
 mod client_plan_script;
 mod client_plan_spread_html;
 mod client_plan_types;
 mod client_shapes;
+mod client_slot_plan;
 mod client_spread_html_emit;
 mod client_surface;
 mod client_surface_element_query;
 mod client_surface_imports;
 mod client_surface_refuse;
 mod client_surface_script;
+mod client_surface_slot;
 mod client_surface_special;
 mod client_svelte_boundary;
 mod client_svelte_element;
@@ -76,6 +80,7 @@ mod cross_slot_redeclaration;
 mod css;
 mod css_reject;
 mod custom_element;
+mod declaration_tag_lowering;
 mod entity_decode;
 mod entity_table;
 mod events;
@@ -85,6 +90,7 @@ pub mod expr_rewrite;
 pub mod helpers;
 mod host_attr_gate;
 pub mod html;
+mod instance_item_shapes;
 mod instance_items;
 pub mod ir;
 mod legacy_reactive;
@@ -105,6 +111,7 @@ mod script_body_parse;
 mod state_prep;
 mod state_scan;
 mod store_subscriptions;
+mod synthesized_value;
 pub mod topology;
 mod unsupported;
 mod whitespace;
@@ -127,18 +134,18 @@ use verter_span::Span;
 
 use attr_lowering::lower_attributes;
 use expr::{
-    collect_expr_references, parse_debug_identifier_spans, parse_declarators, parse_pattern_names,
-    reparse_module, AnalyzedExpr, BindingInfo, BindingRuntimeKind, BindingTable, DeclaratorKeyword,
-    ExprArena, ScopeGraph, ScopeId, ScriptAnalysis,
+    collect_expr_references, parse_debug_identifier_spans, parse_pattern_names, reparse_module,
+    AnalyzedExpr, BindingInfo, BindingRuntimeKind, BindingTable, ExprArena, ScopeGraph, ScopeId,
+    ScriptAnalysis,
 };
 use html::StaticTemplatePlan;
 use ir::{
     BlockIr, ComponentIr, ComponentIrNode, ComponentSlots, DebugArg, DeclKind, ElementIr,
     EscapeMode, ExprId, IfBranch, IrNode, NodeId, PatternBindings, PatternId, RenderCallee,
     RuntimeAnalysis, RuntimeOp, SpecialElementIr, SpecialKind, SvelteMode, SvelteRuntimeIr, TagIr,
-    TemplateDeclarator, TemplateRune, TemplateScope, TemplateScopeId,
+    TemplateScope, TemplateScopeId,
 };
-use state_scan::script_uses_runes;
+use state_scan::{instance_forces_definite_legacy, script_uses_runes};
 
 /// Re-export the public IR + analysis + planning surface so consumers reach it
 /// through one module path. (`emit_client_module` is module-private — the client
@@ -737,6 +744,18 @@ pub fn lower_parsed_svelte_to_ir<'a>(
     } else {
         SvelteMode::Legacy
     };
+    // The official in-between MAYBE-RUNES fact (`analysis.maybe_runes`): a
+    // non-runes component with no explicit `runes: false` override and no
+    // definitively-legacy instance construct (a top-level labeled statement or an
+    // `export let`). Drives EXACTLY the legacy value-wrap gate — see
+    // [`ComponentIr::maybe_runes`]. (`$$props`/`$$restProps` references — the
+    // remaining official exclusion — are refused upstream as magic identifiers,
+    // so they never reach a consumer of this fact.)
+    let maybe_runes = !runes
+        && explicit_runes != Some(false)
+        && !instance_source
+            .map(|t| instance_forces_definite_legacy(alloc, t))
+            .unwrap_or(false);
 
     // LEGACY-mode `let` promotion: with the FINAL mode decided and the template
     // scope graph complete, promote each WRITTEN tracked top-level `let`
@@ -765,6 +784,7 @@ pub fn lower_parsed_svelte_to_ir<'a>(
         name: derive_component_name(opts),
         filename: opts.filename.clone(),
         mode,
+        maybe_runes,
         custom_element,
     };
     let analysis = RuntimeAnalysis {
@@ -828,6 +848,13 @@ pub(super) fn lower_node(
 /// special element records a diagnostic and contributes no node (it is NOT
 /// coerced to a fragment).
 fn lower_element(ctx: &mut LoweringCtx, el: &SvelteElement, scope: ScopeId) -> Option<NodeId> {
+    // A `<slot>` element is the BLOCK-semantic slot outlet (the official
+    // `SlotElement`) — its own IR node kind, never an intrinsic `ElementIr`: it
+    // renders through a `<!>` anchor + `$.slot(...)`, its attributes take slot
+    // PROPERTY semantics, and its children form the fallback template region.
+    if matches!(el.kind, SvelteElementKind::Intrinsic) && el.name == "slot" {
+        return Some(lower_component::lower_slot_element(ctx, el, scope));
+    }
     // The attribute host kind decides how an `on*` event lowers (the official
     // `metadata.delegated` parent-kind rule): a regular element delegates, a
     // component forwards the handler as a prop, a `<svelte:element>` runs it through
@@ -1287,10 +1314,14 @@ fn lower_tag(ctx: &mut LoweringCtx, tag: &SvelteTag, scope: ScopeId) -> Option<N
             // `{@const x = expr}` — a block-local derived binding. The names + the
             // initializer span both come from the OXC-parsed declarator (so a
             // destructuring `{@const {a, b} = obj}` declares two bindings, not one).
-            lower_at_const(ctx, tag, scope)
+            declaration_tag_lowering::lower_at_const(ctx, tag, scope)
         }
-        SvelteTagKind::Const => lower_declaration_tag(ctx, tag, DeclKind::Const, scope),
-        SvelteTagKind::Let => lower_declaration_tag(ctx, tag, DeclKind::Let, scope),
+        SvelteTagKind::Const => {
+            declaration_tag_lowering::lower_declaration_tag(ctx, tag, DeclKind::Const, scope)
+        }
+        SvelteTagKind::Let => {
+            declaration_tag_lowering::lower_declaration_tag(ctx, tag, DeclKind::Let, scope)
+        }
         SvelteTagKind::Debug => {
             // `{@debug a, b}` lowers to ONE debug expression PER comma-separated
             // argument (the official `DebugTag` walks `node.identifiers`
@@ -1343,133 +1374,6 @@ fn lower_tag(ctx: &mut LoweringCtx, tag: &SvelteTag, scope: ScopeId) -> Option<N
             None
         }
     }
-}
-
-/// Lower a `{@const … = expr}` tag into a binding pattern + an initializer
-/// expression. The pattern's names + the initializer span both come from the
-/// OXC-parsed declarator (no top-level-`=` text splitter), so a destructuring
-/// `{@const {a, b} = obj}` declares one binding per name, NOT one collapsed
-/// binding.
-fn lower_at_const(ctx: &mut LoweringCtx, tag: &SvelteTag, scope: ScopeId) -> Option<NodeId> {
-    let text = span_text(ctx.source, tag.inner);
-    // `{@const}` always carries an initializer — wrap with `const`.
-    let decls = match parse_declarators(text, DeclaratorKeyword::Const) {
-        Ok(decls) => decls,
-        Err(()) => {
-            ctx.errors.push(
-                "svelte-runtime-const-parse",
-                format!("could not parse `{{@const}}` declaration `{text}`"),
-                tag.span,
-            );
-            return None;
-        }
-    };
-    // `{@const}` declares exactly one declarator with an initializer.
-    let Some(decl) = decls.into_iter().next() else {
-        ctx.errors.push(
-            "svelte-runtime-const-empty",
-            "`{@const}` requires a declarator".to_string(),
-            tag.span,
-        );
-        return None;
-    };
-    let pattern =
-        ctx.push_pattern_names(&decl.names, scope, BindingRuntimeKind::LegacyConstDerived);
-    let Some((s, e)) = decl.init else {
-        ctx.errors.push(
-            "svelte-runtime-const-no-init",
-            "`{@const}` requires an initializer".to_string(),
-            tag.span,
-        );
-        return None;
-    };
-    let init_span = Span::new(tag.inner.start + s, tag.inner.start + e);
-    let init = ctx.push_expr(init_span, scope);
-    Some(ctx.push_node(IrNode::Tag(TagIr::LegacyConst { pattern, init })))
-}
-
-/// Lower a `{const …}` / `{let …}` declaration tag — INERT block-local
-/// declarators (`TemplateDeclLocal`), DISTINCT from `{@const}`. Each declarator's
-/// names + initializer span come from the OXC-parsed declaration (no `=`
-/// splitter), and a destructuring declarator declares one binding per name.
-fn lower_declaration_tag(
-    ctx: &mut LoweringCtx,
-    tag: &SvelteTag,
-    kind: DeclKind,
-    scope: ScopeId,
-) -> Option<NodeId> {
-    let text = span_text(ctx.source, tag.inner);
-    // A `{let …}` tag may have NO initializer (`{let x}`), which is invalid under
-    // a `const` wrapper — wrap with the matching keyword so `{let x}` parses.
-    let keyword = match kind {
-        DeclKind::Const => DeclaratorKeyword::Const,
-        DeclKind::Let => DeclaratorKeyword::Let,
-    };
-    let parsed = match parse_declarators(text, keyword) {
-        Ok(decls) => decls,
-        Err(()) => {
-            ctx.errors.push(
-                "svelte-runtime-decl-parse",
-                format!("could not parse declaration tag `{text}`"),
-                tag.span,
-            );
-            return None;
-        }
-    };
-    let mut declarators = Vec::with_capacity(parsed.len());
-    for decl in parsed {
-        // Every declarator is first declared as an INERT block-local (`TemplateDeclLocal`);
-        // a single-name `{let x = $state(<primitive>)}` / `{let x = $derived(<arg>)}` rune
-        // declarator is then RECLASSIFIED through the shared rune/state pipeline (its binding
-        // row is reclassified in place — `$state` write-gated + tracked for the finalizer,
-        // `$derived` a `Derived` signal), so its template reads/writes route through the
-        // signal rewriter; a rune the pipeline cannot lower stays inert and fails closed.
-        let pattern =
-            ctx.push_pattern_names(&decl.names, scope, BindingRuntimeKind::TemplateDeclLocal);
-        let init_span = decl
-            .init
-            .map(|(s, e)| Span::new(tag.inner.start + s, tag.inner.start + e));
-        let mut rune = None;
-        let mut derived_arg = None;
-        if decl.names.len() == 1 {
-            if let Some(span) = init_span {
-                let init_text = span_text(ctx.source, span).to_string();
-                let binding = ctx.patterns[pattern.0 as usize].bindings[0];
-                match state_prep::classify_block_rune_declarator(
-                    binding,
-                    &init_text,
-                    &mut ctx.bindings,
-                ) {
-                    Some(state_prep::BlockRuneDeclarator::State { tracked, init }) => {
-                        ctx.block_rune_tracking.push(tracked);
-                        rune = Some(TemplateRune::State(init));
-                    }
-                    Some(state_prep::BlockRuneDeclarator::Derived { arg }) => {
-                        // The `$derived` ARGUMENT expr — rewritten into the `$.derived(() =>
-                        // …)` body at projection; carried on the declarator's `init` slot.
-                        let arg_span = Span::new(span.start + arg.0, span.start + arg.1);
-                        derived_arg = Some(ctx.push_expr(arg_span, scope));
-                        rune = Some(TemplateRune::Derived);
-                    }
-                    None => {}
-                }
-            }
-        }
-        // A `$state` rune declarator carries NO init expr (its primitive text rides the
-        // `TemplateRune::State`); a `$derived` declarator carries its rewritable argument;
-        // an inert declarator carries its plain initializer.
-        let init = match rune {
-            Some(TemplateRune::State(_)) => None,
-            Some(TemplateRune::Derived) => derived_arg,
-            None => init_span.map(|span| ctx.push_expr(span, scope)),
-        };
-        declarators.push(TemplateDeclarator {
-            pattern,
-            init,
-            rune,
-        });
-    }
-    Some(ctx.push_node(IrNode::Tag(TagIr::Declaration { kind, declarators })))
 }
 
 /// Plan the static templates, dynamic slots, and client-side node paths for a

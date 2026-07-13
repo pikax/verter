@@ -393,7 +393,7 @@ impl<'a> ClientEmitter<'a> {
         // matching the official depth-first hoist order). Each region's clone frame lands in
         // `self.region_frame`; a text-first region records NO hoist (its `$.text(...)` is
         // emitted in the body), and a comment-anchor / empty body region records no hoist (its
-        // `$.comment()` frame is created in the body). The `html_plan` is no longer consulted
+        // `$.comment()` frame is created in the body). The `html_plan` is not consulted
         // here — the emitter synthesizes each region's factory through the same
         // `synthesize_region` the plan uses.
         //
@@ -921,6 +921,11 @@ impl<'a> ClientEmitter<'a> {
                         // the walked `<!>` anchor var. (`emit_svelte_element` lives in
                         // `client_svelte_element`.)
                         self.emit_svelte_element(out, *node, &var);
+                    } else if matches!(self.client_node(*node), ClientNode::Slot(_)) {
+                        // A `<slot>` outlet — emit its `$.slot(node, $$props, …)` call
+                        // INLINE here against the walked `<!>` anchor var, recursing into
+                        // the fallback region. (`emit_slot` lives in `client_slot_plan`.)
+                        self.emit_slot(out, *node, &var);
                     } else if matches!(self.client_node(*node), ClientNode::Boundary(_)) {
                         // A `<svelte:boundary>` — emit its `$.boundary(node, props, callback)`
                         // call (with the hoisted `failed`/`pending` snippet block) INLINE here
@@ -1090,39 +1095,44 @@ impl<'a> ClientEmitter<'a> {
         target
     }
 
-    /// Route one interpolation through the MEMOIZER, consuming the PRE-REWRITTEN
-    /// op text: a `has_call` chunk is hoisted into a `$N` placeholder (its rewritten
+    /// Route one interpolation through the MEMOIZER, consuming the PREPARED op
+    /// carrier: a `has_call` chunk is hoisted into a `$N` placeholder (its prepared
     /// expression becomes a `() => <expr>` dep on the shared memoizer); a bare read
-    /// stays inline. The rewrite + has_call were computed at BUILD time (the
-    /// fallible rewrite already ran), so this is a pure lookup.
+    /// stays inline. The rewrite, the facts, AND the legacy value wrap were
+    /// computed at BUILD time (the fallible planning stage already ran), so this is
+    /// a pure serialization — a non-memoized wrapped value embeds as the
+    /// parenthesized sequence.
     fn memoized_interp(&self, interp: NodeId, memoizer: &mut Memoizer) -> String {
-        let (rewritten, has_call) = self.reactive_text_for(interp);
-        memoizer.add(rewritten, has_call)
+        let value = self.reactive_text_for(interp);
+        memoizer.add(value.effect_value(), value.has_call())
     }
 
-    /// The pre-rewritten reactive-text body + `has_call` for the interpolation node,
-    /// from the narrow plan ops (the op's `target` is the interp node id). A node
-    /// with no op (unreachable for a reactive interpolation) yields its raw text.
-    fn reactive_text_for(&self, interp: NodeId) -> (String, bool) {
-        for op in self.plan.all_ops() {
-            if let ClientRuntimeOp::ReactiveText {
-                target,
-                rewritten,
-                has_call,
-                ..
-            } = op
-            {
-                if NodeId(target.0) == interp {
-                    return (rewritten.clone(), *has_call);
+    /// The PREPARED reactive-text carrier for the interpolation node, from the
+    /// narrow plan ops (the op's `target` is the interp node id). TOTAL over
+    /// the accept path: planning prepares every interpolation through the sole
+    /// authored-value entry (one `ReactiveText` op per interpolation node), so
+    /// the returned value is always a plan-prepared carrier — the emitter has
+    /// no way to fabricate one. A missing op is an internal routing defect and
+    /// fails CLOSED with context; there is no raw-source or empty fallback.
+    fn reactive_text_for(
+        &self,
+        interp: NodeId,
+    ) -> &super::client_legacy_value::PreparedTemplateValue {
+        self.plan
+            .all_ops()
+            .find_map(|op| match op {
+                ClientRuntimeOp::ReactiveText { target, value } if NodeId(target.0) == interp => {
+                    Some(value)
                 }
-            }
-        }
-        // Fallback (unreachable on the accept path): the interpolation's raw source.
-        if let IrNode::Interpolation { expr, .. } = self.ir().node(interp) {
-            let analyzed = self.ir().analysis.expressions.get(*expr);
-            return (analyzed.source.to_string(), false);
-        }
-        (String::new(), false)
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                unreachable!(
+                    "routing defect: interpolation node {interp:?} reached emission without \
+                     a prepared ReactiveText op — planning prepares every reactive \
+                     interpolation (fail closed)"
+                )
+            })
     }
 
     /// Determine the text-node template shape for an interpolation's DOM text node.
@@ -1294,6 +1304,16 @@ impl<'a> ClientEmitter<'a> {
             /// this walk position; the stem is allocated to a collision-free name and
             /// recorded under the op's [`AccKind`] slot.
             Accumulator(&'static str, AccKind),
+            /// The `$.attribute_effect` spread fold — rendered in the emit loop
+            /// (the handler-stability hoists + memo deps need `&mut self`).
+            AttributeEffect {
+                /// The typed source-ordered fold items.
+                items: Vec<super::client_plan_types::AttributeEffectItem>,
+                /// The `<input>` remove-defaults trailing `true`.
+                input_trailing: bool,
+                /// The scope-hash literal argument.
+                css_hash: Option<String>,
+            },
         }
         let inits: Vec<InlineInit> = self
             .plan
@@ -1366,26 +1386,26 @@ impl<'a> ClientEmitter<'a> {
                 // order: after the input cleanup, before the children / reset).
                 ClientRuntimeOp::AttributeEffect {
                     target,
-                    fold_body,
+                    items,
                     input_trailing,
                     css_hash,
-                } if NodeId(target.0) == node => {
-                    Some(InlineInit::Stmt(self.emit_attribute_effect(
-                        node,
-                        fold_body,
-                        *input_trailing,
-                        css_hash.as_deref(),
-                    )))
-                }
+                } if NodeId(target.0) == node => Some(InlineInit::AttributeEffect {
+                    items: items.clone(),
+                    input_trailing: *input_trailing,
+                    css_hash: css_hash.clone(),
+                }),
                 // A `{@html}` that is the SOLE controlled child of THIS element — emitted
                 // at the element's init position, operating on the element var with the
                 // trailing `true` (the `$.reset(element)` follows via the child walk).
                 ClientRuntimeOp::Html {
                     target,
                     payload,
+                    getter_form,
                     only_child: true,
                 } if self.html_only_child_parent(NodeId(target.0)) == Some(node) => {
-                    Some(InlineInit::Stmt(self.emit_html_only_child(node, payload)))
+                    let getter =
+                        super::client_spread_html_emit::html_payload_getter(payload, getter_form);
+                    Some(InlineInit::Stmt(self.emit_html_only_child(node, &getter)))
                 }
                 _ => None,
             })
@@ -1397,6 +1417,26 @@ impl<'a> ClientEmitter<'a> {
                     let name = self.alloc_name(stem);
                     out.push_str(&format!("\tlet {name};\n"));
                     self.acc_name.insert((node, kind), name);
+                }
+                InlineInit::AttributeEffect {
+                    items,
+                    input_trailing,
+                    css_hash,
+                } => {
+                    // The handler-stability hoists (`var event_handler = …;`) precede
+                    // the effect (the official `context.state.init` order); the items
+                    // render through the ONE ordered per-effect memoizer.
+                    let mut hoists = String::new();
+                    let (body, deps) = self.render_attribute_effect_items(&items, &mut hoists);
+                    out.push_str(&hoists);
+                    let call = super::client_spread_html_emit::attribute_effect_call(
+                        &self.dom_var(node),
+                        &body,
+                        &deps,
+                        input_trailing,
+                        css_hash.as_deref(),
+                    );
+                    out.push_str(&format!("\t{call};\n"));
                 }
             }
         }

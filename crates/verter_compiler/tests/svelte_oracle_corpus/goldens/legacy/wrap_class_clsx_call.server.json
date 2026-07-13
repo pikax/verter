@@ -1,0 +1,46 @@
+{
+  "slug": "legacy/wrap_class_clsx_call.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "wrap_class_clsx_call",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "attr_class",
+    "clsx",
+    "attr_class",
+    "clsx",
+    "bind_props"
+  ],
+  "helperSet": [
+    "attr_class",
+    "bind_props",
+    "clsx"
+  ],
+  "helperCounts": {
+    "attr_class": 2,
+    "clsx": 2,
+    "bind_props": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

@@ -72,7 +72,9 @@ impl<'a> SupportedClientIr<'a> {
         }))
     }
 
-    /// Build one boundary [`BoundaryAttrProp`] — the rewritten value expression plus its
+    /// Build one boundary [`BoundaryAttrProp`] — the PREPARED value expression (the sole
+    /// authored-value entry under the RAW `BoundaryProp` policy — official's
+    /// `SvelteBoundary.js` visits the attribute expression without `build_expression`) plus its
     /// `has_state` (the getter-vs-init discriminator, official's `metadata.expression.has_state`).
     fn boundary_attr_prop(
         &self,
@@ -81,14 +83,21 @@ impl<'a> SupportedClientIr<'a> {
     ) -> Result<BoundaryAttrProp, UnsupportedSvelteRuntimeSurface> {
         let analyzed = self.ir.analysis.expressions.get(expr);
         let has_state = super::reactive_analysis::prop_value_has_state(
+            &analyzed.references,
             analyzed.source,
             analyzed.scope,
             &self.ir.analysis.bindings,
             &self.ir.analysis.scopes,
-        );
+        )
+        .map_err(|()| {
+            UnsupportedSvelteRuntimeSurface::expression_fact_recovery("binding-impurity")
+        })?;
         Ok(BoundaryAttrProp {
             name: name.to_string(),
-            expr: self.rewrite(expr, analyzed.scope)?,
+            value: self.prepare_template_value(
+                super::client_legacy_value::AuthoredExpr(expr),
+                super::client_legacy_value::AuthoredValueSurface::BoundaryProp,
+            )?,
             has_state,
         })
     }
@@ -130,10 +139,11 @@ impl<'a> ClientEmitter<'a> {
         // yield BOTH keys — a duplicate-key object, official parity, no dedupe).
         let mut props: Vec<String> = Vec::new();
         for p in &b.attr_props {
+            let value = p.value.inline_expression();
             if p.has_state {
-                props.push(format!("get {}() {{ return {}; }}", p.name, p.expr));
+                props.push(format!("get {}() {{ return {value}; }}", p.name));
             } else {
-                props.push(format!("{}: {}", p.name, p.expr));
+                props.push(format!("{}: {value}", p.name));
             }
         }
         for &snippet in &b.snippets {

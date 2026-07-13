@@ -11,7 +11,6 @@
 //! `$$slots`.
 
 use oxc_allocator::Allocator;
-use oxc_span::GetSpan;
 
 use super::client_codegen_helpers::js_single_quoted;
 use super::client_plan::SupportedClientIr;
@@ -29,36 +28,56 @@ use verter_span::Span;
 /// The official per-call `Memoizer` (svelte@5.56.3 client `shared/utils.js`): mints the
 /// ordered `let $N = $.derived(() => <expr>);` hoist statements and hands back the
 /// `$.get($N)` read for each memoized value. The `$N` numbering restarts per memoizer
-/// instance — one per component call (`CallBuild`) and one per `{@render}` tag, exactly
-/// the official per-`build_component` / per-`RenderTag` instances. This is the SINGLE
-/// memoize engine for every template value hoist, so the numbering, the derived
-/// statement shape, and the concise-arrow body wrap can never diverge between the
-/// component-prop and render-argument surfaces.
-#[derive(Default)]
+/// instance — one per component call (`CallBuild`), one per `<slot>` outlet, and one
+/// per `{@render}` tag, exactly the official per-`build_component` / per-`SlotElement`
+/// / per-`RenderTag` instances. This is the SINGLE memoize engine for every template
+/// value hoist, so the numbering, the derived statement shape, the concise-arrow body
+/// wrap, AND the MODE-AWARE helper choice can never diverge between the component-prop,
+/// slot-prop, and render-argument surfaces. The helper is the official
+/// `Memoizer.deriveds(runes)` rule: `$.derived` in runes mode, `$.derived_safe_equal`
+/// in EVERY non-runes mode (definitely-legacy AND maybe-runes alike — the separate
+/// legacy VALUE wrap is owned by the sole
+/// [`prepare_template_value`](SupportedClientIr::prepare_template_value) entry).
 pub(super) struct DerivedMemoizer {
+    runes: bool,
     counter: usize,
     statements: Vec<String>,
 }
 
 impl DerivedMemoizer {
-    /// Memoize one rewritten value expression: push its `let $N = $.derived(() => …);`
+    /// A memoizer for one call surface, mode-aware: `runes` picks the derived
+    /// helper (`$.derived` vs `$.derived_safe_equal`).
+    pub(super) fn new(runes: bool) -> Self {
+        Self {
+            runes,
+            counter: 0,
+            statements: Vec::new(),
+        }
+    }
+
+    /// Memoize one rewritten value expression: push its `let $N = <helper>(() => …);`
     /// hoist (the value embedded as a CONCISE ARROW BODY through the shared
-    /// [`concise_arrow_expr_body`] wrap, so an object-literal / sequence value stays a
-    /// valid expression body) and return the `$.get($N)` read.
+    /// [`concise_arrow_expr_body`] wrap, so an object-literal / sequence / legacy-wrap
+    /// sequence value stays a valid expression body) and return the `$.get($N)` read.
     ///
     /// [`concise_arrow_expr_body`]: super::client_codegen_helpers::concise_arrow_expr_body
-    fn memoize(&mut self, value: &str) -> String {
+    pub(super) fn memoize(&mut self, value: &str) -> String {
         let n = self.counter;
         self.counter += 1;
+        let helper = if self.runes {
+            "$.derived"
+        } else {
+            "$.derived_safe_equal"
+        };
         let body = super::client_codegen_helpers::concise_arrow_expr_body(value);
         self.statements
-            .push(format!("let ${n} = $.derived(() => {body});"));
+            .push(format!("let ${n} = {helper}(() => {body});"));
         format!("$.get(${n})")
     }
 
-    /// The ordered `let $N = $.derived(…);` hoist statements (the official
-    /// `memoizer.deriveds()`), consumed into the wrapping block.
-    fn into_statements(self) -> Vec<String> {
+    /// The ordered `let $N = <helper>(…);` hoist statements (the official
+    /// `memoizer.deriveds(runes)`), consumed into the wrapping block.
+    pub(super) fn into_statements(self) -> Vec<String> {
         self.statements
     }
 }
@@ -146,7 +165,13 @@ impl<'a> SupportedClientIr<'a> {
             // expression drives `$.component(node, () => <this>, …)`.
             SpecialKind::Component => {
                 let this_expr = match s.this_expr {
-                    Some(expr) => self.rewrite_value_preserving_source(expr)?,
+                    // A RAW semantic role — routed through the policy entry point.
+                    Some(expr) => self
+                        .prepare_template_value(
+                            super::client_legacy_value::AuthoredExpr(expr),
+                            super::client_legacy_value::AuthoredValueSurface::ComponentSelector,
+                        )?
+                        .inline_expression(),
                     // A `<svelte:component>` with no `this` is a parse error upstream;
                     // defensively project the `undefined` selector.
                     None => "undefined".to_string(),
@@ -208,7 +233,7 @@ impl<'a> SupportedClientIr<'a> {
 
         let mut build = CallBuild {
             fn_pair_binds: Vec::new(),
-            memoizer: DerivedMemoizer::default(),
+            memoizer: DerivedMemoizer::new(self.ir.component.mode == super::ir::SvelteMode::Runes),
         };
 
         // The props are built as the official `props_and_spreads`: object groups + spread
@@ -237,7 +262,7 @@ impl<'a> SupportedClientIr<'a> {
                             &mut current_group,
                         )));
                     }
-                    let arg = self.project_spread_arg(*expr)?;
+                    let arg = self.project_spread_arg(*expr, &mut build)?;
                     spread_parts.push(ComponentSpreadPart::Spread { arg });
                 }
                 AttrIr::Bind { target, expr } => {
@@ -267,7 +292,13 @@ impl<'a> SupportedClientIr<'a> {
                     handler,
                     ..
                 } => {
-                    let body = self.rewrite_value_preserving_source(*handler)?;
+                    // A RAW semantic role — routed through the policy entry point.
+                    let body = self
+                        .prepare_template_value(
+                            super::client_legacy_value::AuthoredExpr(*handler),
+                            super::client_legacy_value::AuthoredValueSurface::EventHandler,
+                        )?
+                        .inline_expression();
                     events.push((event_type.clone(), body));
                 }
                 // A `let:` slot-prop directive is CONSUMED by the slot decomposition at
@@ -361,12 +392,18 @@ impl<'a> SupportedClientIr<'a> {
             AttrIr::Dynamic { name, expr } => self.project_dynamic_prop(name, *expr, scope, build),
             AttrIr::Mixed { name, .. } => {
                 // A mixed component prop (`label="a {b}"`) is a string-concatenation value.
-                // Route through the shared mixed-value path.
-                let (value, has_state) = self.mixed_attr_value(match attr {
-                    AttrIr::Mixed { parts, .. } => parts,
-                    _ => unreachable!(),
-                })?;
-                let rendered = self.render_attr_value(&value);
+                // Route through the shared mixed-value path; each expression chunk
+                // legacy-wraps and memoizes through the SHARED per-call memoizer
+                // (the official `build_attribute_value` memoize callback — a
+                // `has_call` chunk reads `$.get($N)`).
+                let (value, has_state) = self.mixed_attr_value(
+                    match attr {
+                        AttrIr::Mixed { parts, .. } => parts,
+                        _ => unreachable!(),
+                    },
+                    super::client_legacy_value::AuthoredValueSurface::ComponentProp,
+                )?;
+                let rendered = self.render_memoized_attr_value(&value, &mut build.memoizer);
                 if has_state {
                     Ok(ComponentMember::Getter {
                         key: name.clone(),
@@ -392,22 +429,37 @@ impl<'a> SupportedClientIr<'a> {
         build: &mut CallBuild,
     ) -> Result<ComponentMember, UnsupportedSvelteRuntimeSurface> {
         let analyzed = self.ir.analysis.expressions.get(expr);
-        let value = self.rewrite_value_preserving_source(expr)?;
         let has_state = super::reactive_analysis::prop_value_has_state(
+            &analyzed.references,
             analyzed.source,
             scope,
             &self.ir.analysis.bindings,
             &self.ir.analysis.scopes,
-        );
-        let has_call = self.expr_has_call(expr);
+        )
+        .map_err(|()| {
+            UnsupportedSvelteRuntimeSurface::expression_fact_recovery("binding-impurity")
+        })?;
+        // The sole authored-value preparation (the official `build_expression`
+        // runs BEFORE the memoize decision — a memoized value memoizes the
+        // WRAPPED sequence; a non-memoized wrapped value embeds parenthesized).
+        let prepared = self.prepare_template_value(
+            super::client_legacy_value::AuthoredExpr(expr),
+            super::client_legacy_value::AuthoredValueSurface::ComponentProp,
+        )?;
         // The official `should_wrap_in_derived`: the chunk expression is NOT a simple
-        // `Identifier` / `MemberExpression` (a compound expression that may over-fire).
-        let should_wrap = !expr_is_simple_ref(analyzed.source);
-        let memoize = has_call || (should_wrap && has_state);
+        // `Identifier` / `MemberExpression` (a compound expression that may over-fire)
+        // — read from the POPULATED unwrapped-root-kind fact of the canonical parse
+        // (no reparse).
+        let should_wrap = !matches!(
+            analyzed.unwrapped_root_kind,
+            super::expr::UnwrappedRootKind::Identifier
+                | super::expr::UnwrappedRootKind::MemberExpression
+        );
+        let memoize = prepared.has_call() || (should_wrap && has_state);
         let final_value = if memoize {
-            build.memoizer.memoize(&value)
+            build.memoizer.memoize(prepared.memo_input())
         } else {
-            value
+            prepared.inline_expression()
         };
         if has_state {
             Ok(ComponentMember::Getter {
@@ -422,21 +474,52 @@ impl<'a> SupportedClientIr<'a> {
         }
     }
 
-    /// Render an [`AttrValue`](super::client_plan_types::AttrValue) to its emitted form
-    /// for a non-memoized (init/getter) component prop — a const verbatim, a single
-    /// expression bare, or a mixed template literal.
-    fn render_attr_value(&self, value: &super::client_plan_types::AttrValue) -> String {
-        use super::client_plan_types::{AttrValue, AttrValuePart};
+    /// Render a structured [`AttrValue`](super::client_plan_types::AttrValue) for a
+    /// component / `<slot>` prop through the SHARED per-call memoizer — the official
+    /// `build_attribute_value` / `build_template_chunk` with the memoize callback:
+    /// a const verbatim; a single expression memoized when `has_call`; a mixed
+    /// template literal whose each expression chunk memoizes when `has_call` (the
+    /// chunk reads `$.get($N)`) and `?? ''`-coerces per its recorded
+    /// [`NullishCoalesce`] rule. The legacy value wrap was PREPARED on the carrier
+    /// at planning time (wrap first, then the memoize decision) — this renderer only
+    /// serializes it: a memoized value memoizes the wrapped sequence; a non-memoized
+    /// wrapped value embeds parenthesized.
+    ///
+    /// [`NullishCoalesce`]: super::reactive_fold::NullishCoalesce
+    pub(super) fn render_memoized_attr_value(
+        &self,
+        value: &super::client_plan_types::AttrValue,
+        memoizer: &mut DerivedMemoizer,
+    ) -> String {
+        use super::client_plan_types::{AttrValue, AttrValuePart, PlannedTemplateValue};
         match value {
             AttrValue::Const(c) => c.clone(),
-            AttrValue::Single { rewritten, .. } => rewritten.clone(),
+            AttrValue::Single(PlannedTemplateValue::Authored(p)) => {
+                if p.has_call() {
+                    memoizer.memoize(p.memo_input())
+                } else {
+                    p.inline_expression()
+                }
+            }
+            AttrValue::Single(PlannedTemplateValue::Synthesized(s)) => {
+                if s.has_call() {
+                    memoizer.memoize(s.raw_text())
+                } else {
+                    s.raw_text().to_string()
+                }
+            }
             AttrValue::Mixed(parts) => {
                 let mut s = String::from("`");
                 for part in parts {
                     match part {
                         AttrValuePart::Literal(t) => s.push_str(t),
-                        AttrValuePart::Expr { rewritten, .. } => {
-                            s.push_str(&format!("${{{rewritten} ?? ''}}"));
+                        AttrValuePart::Expr { value, .. } => {
+                            let read = if value.has_call() {
+                                memoizer.memoize(value.memo_input())
+                            } else {
+                                value.inline_expression()
+                            };
+                            s.push_str(&format!("${{{read} ?? ''}}"));
                         }
                     }
                 }
@@ -446,11 +529,28 @@ impl<'a> SupportedClientIr<'a> {
         }
     }
 
-    /// Project the spread argument of a `{...rest}` attribute — `() => <rewritten>` (the
-    /// official `b.thunk` of the spread expression; a stateful spread is always thunked).
-    fn project_spread_arg(&self, expr: ExprId) -> Result<String, UnsupportedSvelteRuntimeSurface> {
-        let rewritten = self.rewrite_value_preserving_source(expr)?;
-        Ok(format!("() => {rewritten}"))
+    /// Project the spread argument of a `{...rest}` attribute — the official
+    /// component-spread rule: a `has_call` spread MEMOIZES through the shared
+    /// per-call memoizer (`() => $.get($N)`; mode-aware helper, NEVER
+    /// legacy-wrapped — official visits a `SpreadAttribute` without
+    /// `build_expression`), and the thunk routes through the shared
+    /// [`js_thunk`](super::client_codegen_helpers::js_thunk) so a bare zero-arg
+    /// accessor read unthunks (`{...rest}` over a legacy prop → `rest`).
+    fn project_spread_arg(
+        &self,
+        expr: ExprId,
+        build: &mut CallBuild,
+    ) -> Result<String, UnsupportedSvelteRuntimeSurface> {
+        let prepared = self.prepare_template_value(
+            super::client_legacy_value::AuthoredExpr(expr),
+            super::client_legacy_value::AuthoredValueSurface::ComponentSpreadOperand,
+        )?;
+        if prepared.has_call() {
+            let read = build.memoizer.memoize(prepared.memo_input());
+            Ok(format!("() => {read}"))
+        } else {
+            Ok(prepared.thunk())
+        }
     }
 
     /// Whether a component bind's LVALUE root is a SUPPORTED writable target under the
@@ -656,7 +756,7 @@ impl<'a> SupportedClientIr<'a> {
         for expr in self.ir.analysis.expressions.all() {
             if self.scope_within(expr.scope, body_scope)
                 && super::reactive_analysis::expr_references_signal(
-                    expr.source,
+                    &expr.references,
                     expr.scope,
                     &self.ir.analysis.bindings,
                     &self.ir.analysis.scopes,
@@ -701,17 +801,25 @@ impl<'a> SupportedClientIr<'a> {
         callee: &RenderCallee,
         args: &[ExprId],
     ) -> Result<ClientNode, UnsupportedSvelteRuntimeSurface> {
-        let mut memoizer = DerivedMemoizer::default();
+        let mut memoizer =
+            DerivedMemoizer::new(self.ir.component.mode == super::ir::SvelteMode::Runes);
         let arg_thunks = args
             .iter()
             .map(|&a| {
-                let value = self.rewrite_value_preserving_source(a)?;
-                let value = if self.expr_has_call(a) {
-                    memoizer.memoize(&value)
+                // The official per-arg `build_expression` + memoize: the legacy
+                // wrap applies to the ARG's own metadata, the memoized read is
+                // `$.get($N)`, and the thunk routes through the shared
+                // `b.thunk` zero-arg unthunk.
+                let prepared = self.prepare_template_value(
+                    super::client_legacy_value::AuthoredExpr(a),
+                    super::client_legacy_value::AuthoredValueSurface::RenderArg,
+                )?;
+                Ok(if prepared.has_call() {
+                    let read = memoizer.memoize(prepared.memo_input());
+                    format!("() => {read}")
                 } else {
-                    value
-                };
-                Ok(format!("() => {value}"))
+                    prepared.thunk()
+                })
             })
             .collect::<Result<Vec<_>, UnsupportedSvelteRuntimeSurface>>()?;
         let memo_hoists = memoizer.into_statements();
@@ -734,9 +842,7 @@ impl<'a> SupportedClientIr<'a> {
             // `$.snippet(node, () => <fn>[ ?? $.noop], …args)`. The `?? $.noop` is added
             // only for the optional `?.()` (ChainExpression) form.
             RenderCallee::Dynamic(expr) => {
-                let analyzed = self.ir.analysis.expressions.get(*expr);
-                let (fn_body, _is_chain) =
-                    self.render_dynamic_callee(analyzed.source, analyzed.scope)?;
+                let fn_body = self.render_dynamic_callee(*expr)?;
                 Ok(ClientNode::Render(ClientRender {
                     dynamic: true,
                     callee: fn_body,
@@ -748,66 +854,61 @@ impl<'a> SupportedClientIr<'a> {
         }
     }
 
-    /// Rewrite a dynamic `{@render}` callee expression into the `$.snippet` snippet-fn
-    /// thunk body: peel the trailing call, rewrite the callee, and append `?? $.noop` for
-    /// the optional `?.()` (ChainExpression) form. Returns (fn-body, is_chain).
+    /// Lower a dynamic `{@render}` callee expression into the `$.snippet` snippet-fn
+    /// thunk body — consuming the CANONICAL-analysis dynamic-callee facts (the
+    /// populated span/shape/reference facts on `AnalyzedExpr.render_dynamic_callee`):
+    /// slice the callee by the populated span, rewrite it, and append `?? $.noop` for
+    /// the optional `?.()` (ChainExpression) form. No reparse, no re-collected
+    /// references, no fail-open reference fallback — a missing fact (a non-call
+    /// dynamic expression) fails closed with the render refusal.
     fn render_dynamic_callee(
         &self,
-        source: &str,
-        scope: super::expr::ScopeId,
-    ) -> Result<(String, bool), UnsupportedSvelteRuntimeSurface> {
-        // Parse `(<source>);` to peel the trailing call expression and detect the optional
-        // chain (`fn?.()`), mirroring the official `unwrap_optional` + ChainExpression rule.
-        let alloc = Allocator::default();
-        let wrapped = format!("({source});");
-        let parsed = oxc_parser::Parser::new(&alloc, &wrapped, oxc_span::SourceType::tsx()).parse();
-        if parsed.panicked || !parsed.errors.is_empty() {
+        expr: ExprId,
+    ) -> Result<String, UnsupportedSvelteRuntimeSurface> {
+        let analyzed = self.ir.analysis.expressions.get(expr);
+        let Some(facts) = analyzed.render_dynamic_callee.as_ref() else {
             return Err(UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
                 construct: "render",
                 span: Span::new(0, 0),
             });
-        }
-        use oxc_ast::ast::{Expression, Statement};
-        let mut is_chain = false;
-        // The callee SOURCE slice (the part before the trailing `()`).
-        let callee_src = parsed
-            .program
-            .body
-            .first()
-            .and_then(|stmt| match stmt {
-                Statement::ExpressionStatement(s) => Some(&s.expression),
-                _ => None,
-            })
-            .and_then(|expr| {
-                let mut e = expr;
-                while let Expression::ParenthesizedExpression(p) = e {
-                    e = &p.expression;
-                }
-                // A `ChainExpression` wraps an optional call (`fn?.()`).
-                if let Expression::ChainExpression(chain) = e {
-                    is_chain = true;
-                    if let oxc_ast::ast::ChainElement::CallExpression(call) = &chain.expression {
-                        let s = call.callee.span();
-                        return Some(slice_inner(source, s.start, s.end));
-                    }
-                }
-                if let Expression::CallExpression(call) = e {
-                    let s = call.callee.span();
-                    return Some(slice_inner(source, s.start, s.end));
-                }
-                None
-            });
-        let callee_src = callee_src.ok_or(UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
-            construct: "render",
-            span: Span::new(0, 0),
-        })?;
-        let rewritten = self.rewrite_source(callee_src, scope)?;
-        let body = if is_chain {
-            format!("{rewritten} ?? $.noop")
-        } else {
-            rewritten
         };
-        Ok((body, is_chain))
+        // The callee SOURCE slice (the part before the trailing `()`), sliced by
+        // the canonical parse's populated INNER-TEXT-relative span. A boundary
+        // failure (impossible for a span produced by the same parse) fails
+        // CLOSED with the render refusal — never a whole-source fallback.
+        let callee_src = analyzed
+            .source
+            .get(facts.span.0 as usize..facts.span.1 as usize)
+            .ok_or(UnsupportedSvelteRuntimeSurface::ComponentOrSnippet {
+                construct: "render",
+                span: Span::new(0, 0),
+            })?;
+        let rewritten = self.rewrite_source(callee_src, analyzed.scope)?;
+        // The official `build_expression(callee, …)` legacy wrap over the PEELED
+        // callee slice — routed through the SOLE preparation entry (the
+        // `RenderCalleeSlice` arm of the closed `AuthoredValueInput` vocabulary)
+        // under the `RenderCallee` surface policy: the trigger/reference facts
+        // ride the populated callee facts (its references are a subset of the
+        // whole render expression's, collected over the callee subtree so the
+        // outer snippet CALL never mis-triggers the wrap). The chain fallback
+        // (`?? $.noop`) applies OUTSIDE the wrapped sequence, exactly as official
+        // composes `b.logical('??', snippet_function, $.noop)` after the wrap.
+        let body = self
+            .prepare_template_value(
+                super::client_legacy_value::AuthoredValueInput::RenderCalleeSlice {
+                    source: callee_src,
+                    scope: analyzed.scope,
+                    facts,
+                    rewritten: &rewritten,
+                },
+                super::client_legacy_value::AuthoredValueSurface::RenderCallee,
+            )?
+            .inline_expression();
+        Ok(if facts.is_chain {
+            format!("{body} ?? $.noop")
+        } else {
+            body
+        })
     }
 
     /// Whether the component needs a component context (`$.push`/`$.pop`) — the official
@@ -852,48 +953,4 @@ impl<'a> SupportedClientIr<'a> {
             &self.ir.analysis.script_imports,
         )
     }
-}
-
-/// Whether an expression's transparent-paren-unwrapped root is a simple `Identifier` or
-/// `MemberExpression` (NOT a compound expression) — the official component-prop
-/// `should_wrap_in_derived` negation (`n.expression.type !== 'Identifier' &&
-/// !== 'MemberExpression'`).
-fn expr_is_simple_ref(source: &str) -> bool {
-    use oxc_ast::ast::{Expression, Statement};
-    let alloc = Allocator::default();
-    let wrapped = format!("({source});");
-    let parsed = oxc_parser::Parser::new(&alloc, &wrapped, oxc_span::SourceType::tsx()).parse();
-    if parsed.panicked || !parsed.errors.is_empty() {
-        return false;
-    }
-    parsed
-        .program
-        .body
-        .first()
-        .and_then(|stmt| match stmt {
-            Statement::ExpressionStatement(s) => Some(&s.expression),
-            _ => None,
-        })
-        .map(|expr| {
-            let mut e = expr;
-            while let Expression::ParenthesizedExpression(p) = e {
-                e = &p.expression;
-            }
-            matches!(
-                e,
-                Expression::Identifier(_)
-                    | Expression::StaticMemberExpression(_)
-                    | Expression::ComputedMemberExpression(_)
-            )
-        })
-        .unwrap_or(false)
-}
-
-/// Slice the inner source `source[start - off .. end - off]` where the spans were
-/// computed over the `(source)`-wrapped parse (offset by the leading `(`).
-fn slice_inner(source: &str, start: u32, end: u32) -> &str {
-    // The wrap is `(source);` — the leading `(` shifts every span by 1.
-    let s = (start as usize).saturating_sub(1);
-    let e = (end as usize).saturating_sub(1);
-    source.get(s..e).unwrap_or(source)
 }

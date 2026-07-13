@@ -1,0 +1,77 @@
+{
+  "slug": "cls-dyn-eschar-id-q-slot-inj-comb-n",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "cls_dyn_eschar_id_q_slot_inj_comb_n",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "append_styles",
+    "comment",
+    "first_child",
+    "slot",
+    "child",
+    "reset",
+    "template_effect",
+    "set_attribute",
+    "append",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "append_styles",
+    "child",
+    "comment",
+    "first_child",
+    "from_html",
+    "reset",
+    "set_attribute",
+    "slot",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "append_styles": 1,
+    "comment": 1,
+    "first_child": 1,
+    "slot": 1,
+    "child": 1,
+    "reset": 1,
+    "template_effect": 1,
+    "set_attribute": 1,
+    "append": 2
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div class=\"wrap\"><div>x</div></div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div class=\"wrap\"><div>x</div></div>`); const $$css = {hash: 'svelte-<scoped>', code: ''}; export default function cls_dyn_eschar_id_q_slot_inj_comb_n($$anchor, $$props) {$.append_styles($$anchor, $$css); var fragment = $.comment(); var node = $.first_child(fragment); $.slot(node, $$props, 'default', {}, ($$anchor) => {var div = root(); var div_1 = $.child(div); $.reset(div); $.template_effect(() => $.set_attribute(div_1, 'id', $$props.flag ? 'a&b' : 'a\\u0026b')); $.append($$anchor, div);}); $.append($$anchor, fragment);}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

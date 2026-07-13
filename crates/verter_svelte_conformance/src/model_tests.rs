@@ -150,13 +150,10 @@ fn level_inventories_are_dense_unique_and_complete() {
         CompileTarget::from_ordinal,
         CompileTarget::id,
     );
-    check(
-        RefusalKind::ALL,
-        1,
-        RefusalKind::ordinal,
-        RefusalKind::from_ordinal,
-        RefusalKind::id,
-    );
+    // `RefusalKind` is UNINHABITED (no refusal cells remain) — its contract
+    // degenerates to the empty ALL + the always-`None` inverse.
+    assert!(RefusalKind::ALL.is_empty());
+    assert_eq!(RefusalKind::from_ordinal(0), None);
     check(
         DiagnosticKind::ALL,
         1,
@@ -530,15 +527,13 @@ fn constraint_functions_classify_hand_picked_rows() {
     };
     assert_eq!(classify(&dyn_tag_maybe), Disposition::Supported);
 
-    // The legacy `<slot>` region is the declared Verter refusal.
+    // The `<slot>` fallback region is a SUPPORTED conformance cell — it
+    // classifies identically to its static-element twin.
     let slot_region = RowLevels {
         region: ElementRegion::LegacySlot,
         ..baseline()
     };
-    assert_eq!(
-        classify(&slot_region),
-        Disposition::Refused(RefusalKind::LegacySlotScopeUnprovable)
-    );
+    assert_eq!(classify(&slot_region), Disposition::Supported);
     // An officially-incoherent slot row stays Invalid (coherence precedes
     // the refusal).
     let slot_incoherent = RowLevels {
@@ -593,7 +588,7 @@ fn every_constraint_kind_fires_and_partitions_round_trip() {
     assert_eq!(
         seen_refusals.into_iter().collect::<Vec<_>>(),
         RefusalKind::ALL.to_vec(),
-        "every declared refusal kind occurs"
+        "the refusal partition stays uninhabited"
     );
     assert_eq!(
         seen_diagnostics.into_iter().collect::<Vec<_>>(),

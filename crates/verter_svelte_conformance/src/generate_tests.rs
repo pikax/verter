@@ -16,7 +16,9 @@ use crate::model::{
 
 /// The pinned selected-case count of the committed manifest. A change here is
 /// a manifest change and must be deliberate (regenerate the corpus + goldens).
-const PINNED_CASES: usize = 518;
+/// v2 grew the selection: the former slot-region refusal rows joined the
+/// SUPPORTED coverage universe, widening the t-way obligations.
+const PINNED_CASES: usize = 609;
 
 /// The pinned full candidate product (6·7·4·3·3·6·2·5·3).
 const PINNED_FULL_PRODUCT: u64 = 272_160;
@@ -251,7 +253,6 @@ fn plan_json_carries_manifest_identity_and_wire_shape() {
 
     let known_dispositions: BTreeSet<String> = [
         "supported",
-        "refused:legacy-slot-scope-unprovable",
         "oracle-rejected:css-nesting-selector-invalid-placement",
     ]
     .into_iter()
@@ -259,7 +260,7 @@ fn plan_json_carries_manifest_identity_and_wire_shape() {
     .collect();
     assert_eq!(
         dispositions, known_dispositions,
-        "all three partitions must surface in the plan, and nothing else"
+        "both inhabited partitions must surface in the plan, and nothing else"
     );
 
     let known_outcomes: BTreeSet<String> = ["match", "no-match", "maybe"]
@@ -407,7 +408,10 @@ fn coverage_summary_projects_axes_partitions_and_groups() {
     }
     // Per-partition tallies and the strengthened-group inventory.
     assert!(text.contains("supported"));
-    assert!(text.contains("legacy-slot-scope-unprovable"));
+    assert!(
+        !text.contains("legacy-slot-scope-unprovable"),
+        "the retired refusal id must not resurface in the summary"
+    );
     assert!(text.contains("css-nesting-selector-invalid-placement"));
     assert!(text.contains("strength 5"));
     assert!(text.contains("strength 4"));

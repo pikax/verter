@@ -4,3 +4,4 @@ pub mod covering_array;
 pub mod generate;
 pub mod manifest;
 pub mod model;
+pub mod value_wrap;

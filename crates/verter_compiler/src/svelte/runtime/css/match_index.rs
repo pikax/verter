@@ -211,16 +211,16 @@ impl<'ir, 'src> TemplateIndex<'ir, 'src> {
             self.paths[id.0 as usize] = path.clone();
             match self.ir.node(id) {
                 IrNode::Text { .. } | IrNode::Comment { .. } | IrNode::Interpolation { .. } => {}
+                // A `<slot>` element has BLOCK semantics (the official
+                // `SlotElement`): it never enters the `elements` inventory (it
+                // renders no DOM element of its own — only real fallback
+                // elements receive the scope hash); its fallback fragment is
+                // minted + walked like a block body.
+                IrNode::Slot(slot) => {
+                    let fallback = slot.fallback;
+                    self.walk_scope(id, fallback, path, snippet_of_binding, renderer_plans)?;
+                }
                 IrNode::Element(el) => {
-                    if el.tag == "slot" {
-                        // The official `SlotElement` has block semantics
-                        // (fragment, PROBABLY existence); the IR carries a
-                        // plain intrinsic element — not provable.
-                        return Err(MatcherRefusal::at(
-                            el.span,
-                            "a legacy `<slot>` element (official `SlotElement` block semantics are not represented in the runtime IR)",
-                        ));
-                    }
                     self.elements.push(id);
                     let frag = self.mint_children_frag(id, &el.children);
                     let children = el.children.clone();
@@ -413,7 +413,7 @@ impl<'ir, 'src> TemplateIndex<'ir, 'src> {
     ) -> MatchResult<()> {
         if !slots.named.is_empty() {
             // Named-slot regions are appended after the default region — the
-            // lowered child order no longer reproduces the official source
+            // lowered child order does not reproduce the official source
             // fragment order the sibling scans depend on.
             return Err(MatcherRefusal::at(
                 span,
@@ -641,6 +641,13 @@ impl<'ir, 'src> TemplateIndex<'ir, 'src> {
                 .copied()
                 .into_iter()
                 .collect(),
+            // A `<slot>`'s child fragment is its fallback region.
+            IrNode::Slot(slot) => self
+                .frag_of_scope
+                .get(&slot.fallback.0)
+                .copied()
+                .into_iter()
+                .collect(),
             IrNode::Block(block) => {
                 let scopes: Vec<TemplateScopeId> = match block {
                     BlockIr::If { branches } => branches.iter().map(|b| b.body).collect(),
@@ -702,8 +709,7 @@ impl<'ir, 'src> TemplateIndex<'ir, 'src> {
     }
 
     /// The official `is_block` — `IfBlock | EachBlock | AwaitBlock |
-    /// KeyBlock | SlotElement` (`SnippetBlock` is NOT a block; the slot
-    /// element never reaches the index).
+    /// KeyBlock | SlotElement` (`SnippetBlock` is NOT a block).
     fn is_block_node(&self, node: NodeId) -> bool {
         matches!(
             self.ir.node(node),
@@ -712,8 +718,13 @@ impl<'ir, 'src> TemplateIndex<'ir, 'src> {
                     | BlockIr::Each { .. }
                     | BlockIr::Await { .. }
                     | BlockIr::Key { .. }
-            )
+            ) | IrNode::Slot(_)
         )
+    }
+
+    /// `SlotElement` — the official type check (a `<slot>` outlet node).
+    pub(super) fn is_slot_node(&self, node: NodeId) -> bool {
+        matches!(self.ir.node(node), IrNode::Slot(_))
     }
 
     fn is_snippet_block(&self, node: NodeId) -> bool {
@@ -741,6 +752,7 @@ impl<'ir, 'src> TemplateIndex<'ir, 'src> {
             IrNode::Element(el) => &el.attrs,
             IrNode::Special(sp) => &sp.attrs,
             IrNode::Component(c) => &c.attrs,
+            IrNode::Slot(slot) => &slot.props,
             _ => &[],
         }
     }
@@ -1044,7 +1056,11 @@ pub(super) fn get_possible_element_siblings(
                     }
                 }
             } else if index.is_block_node(sibling) || index.is_component_node(sibling) {
-                if index.is_component_node(sibling) {
+                // The official `node.type === 'SlotElement' || node.type ===
+                // 'Component'` probable-insertion: the slot / component itself
+                // records PROBABLY (supplied content may render there), then its
+                // boundary candidates merge.
+                if index.is_component_node(sibling) || index.is_slot_node(sibling) {
                     result.set(sibling, Existence::Probably);
                 }
                 let mut nested_seen: FxHashSet<NodeId> = FxHashSet::default();
@@ -1180,6 +1196,14 @@ fn get_possible_nested_siblings(
         }
         IrNode::Block(BlockIr::Key { body, .. }) => {
             fragments.push(index.frag_of_scope.get(&body.0).copied());
+        }
+        // The official `case 'SlotElement'` — the fallback fragment, with the
+        // NON-exhaustive force below (`exhaustive = node.type !== 'SlotElement'
+        // && !== 'SnippetBlock'`): supplied slot content may render instead of
+        // the fallback, so a fallback element is never a DEFINITE candidate.
+        IrNode::Slot(slot) => {
+            exhaustive = false;
+            fragments.push(index.frag_of_scope.get(&slot.fallback.0).copied());
         }
         IrNode::Block(BlockIr::Snippet { body, .. }) => {
             if !seen.insert(node) {

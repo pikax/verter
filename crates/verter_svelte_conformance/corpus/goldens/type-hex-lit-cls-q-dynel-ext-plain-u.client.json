@@ -1,0 +1,58 @@
+{
+  "slug": "type-hex-lit-cls-q-dynel-ext-plain-u",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "type_hex_lit_cls_q_dynel_ext_plain_u",
+    "params": [
+      "$$anchor"
+    ]
+  },
+  "helperSequence": [
+    "comment",
+    "first_child",
+    "element",
+    "set_class",
+    "text",
+    "append",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "comment",
+    "element",
+    "first_child",
+    "set_class",
+    "text"
+  ],
+  "helperCounts": {
+    "comment": 1,
+    "first_child": 1,
+    "element": 1,
+    "set_class": 1,
+    "text": 1,
+    "append": 2
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; export default function type_hex_lit_cls_q_dynel_ext_plain_u($$anchor) {let tag = 'div'; var fragment = $.comment(); var node = $.first_child(fragment); $.element(node, () => tag, false, ($$element, $$anchor) => {$.set_class($$element, 0, 'a b svelte-<scoped>'); var text = $.text('x'); $.append($$anchor, text);}); $.append($$anchor, fragment);}",
+  "css": {
+    "present": true,
+    "hash": "svelte-9s872t",
+    "code": "\n\tdiv.svelte-<scoped> {\n\t\tcolor: red;\n\t}\n"
+  }
+}

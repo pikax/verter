@@ -1,0 +1,51 @@
+{
+  "slug": "legacy/attr_text_call_wrap.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "./x.js",
+      "kind": "namespace",
+      "names": [
+        "NS"
+      ]
+    },
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "attr_text_call_wrap",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "attr",
+    "escape",
+    "bind_props"
+  ],
+  "helperSet": [
+    "attr",
+    "bind_props",
+    "escape"
+  ],
+  "helperCounts": {
+    "attr": 1,
+    "escape": 1,
+    "bind_props": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

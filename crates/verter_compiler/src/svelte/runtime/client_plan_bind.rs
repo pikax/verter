@@ -127,8 +127,15 @@ impl<'a> SupportedClientIr<'a> {
                 (host, shape)
             }
         };
-        let analyzed = self.ir.analysis.expressions.get(event.handler);
-        let handler = self.rewrite(event.handler, analyzed.scope)?;
+        // The handler expression is a RAW semantic role — it routes through the
+        // policy entry point (uniform routing) and yields a raw carrier; the
+        // event substrate owns the wrapper/delegation topology.
+        let handler = self
+            .prepare_template_value(
+                super::client_legacy_value::AuthoredExpr(event.handler),
+                super::client_legacy_value::AuthoredValueSurface::EventHandler,
+            )?
+            .inline_expression();
         let emit = EventEmit {
             // A GLOBAL host event is ALWAYS a direct `$.event(...)` registration (never
             // delegated) — the lowering records `delegated: false` for the host targets, so
@@ -307,8 +314,12 @@ impl<'a> SupportedClientIr<'a> {
     /// suppresses the coercion, `Bare` / `Parenthesized` keeps it. `false` when the `value`
     /// attr is not a single expression (a bare `value={n}` Dynamic or a one-interpolation
     /// `value="{n}"` Mixed are the two shapes `attr_value_for` lowers to `AttrValue::Single`).
-    /// Read by [`SupportedClientIr::collect_group_dynamic_values`].
-    pub(super) fn group_value_single_is_defined(&self, el: &super::ir::ElementIr) -> bool {
+    /// Read by [`SupportedClientIr::collect_group_dynamic_values`]; a `has_call`
+    /// fact-recovery failure fails closed (propagated).
+    pub(super) fn group_value_single_is_defined(
+        &self,
+        el: &super::ir::ElementIr,
+    ) -> Result<bool, UnsupportedSvelteRuntimeSurface> {
         let expr = el.attrs.iter().find_map(|attr| match attr {
             AttrIr::Dynamic { name, expr } if name == "value" => Some(*expr),
             AttrIr::Mixed { name, parts } if name == "value" => match parts.as_slice() {
@@ -318,11 +329,11 @@ impl<'a> SupportedClientIr<'a> {
             _ => None,
         });
         let Some(expr) = expr else {
-            return false;
+            return Ok(false);
         };
         let analyzed = self.ir.analysis.expressions.get(expr);
-        let has_call = self.expr_has_call(expr);
-        matches!(
+        let has_call = self.expr_has_call(expr)?;
+        Ok(matches!(
             super::reactive_fold::mixed_chunk_nullish_wrap(
                 analyzed.source,
                 analyzed.scope,
@@ -332,7 +343,7 @@ impl<'a> SupportedClientIr<'a> {
                 has_call,
             ),
             super::reactive_fold::NullishCoalesce::None
-        )
+        ))
     }
 }
 

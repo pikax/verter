@@ -239,18 +239,12 @@ fn committed_coverage_index_matches_the_manifest() {
         "partitions.invalid"
     );
 
-    // The refusal partitions are PRESENT and NON-EMPTY at both levels: the
-    // full-space inventories carry rows, and the selected cases include at
-    // least one member of each.
+    // The refusal partition is UNINHABITED (`RefusalKind` has no variants):
+    // the committed index must carry NO refused rows at either level.
     assert!(
-        !index.proof.partitions.refused.is_empty()
-            && index
-                .proof
-                .partitions
-                .refused
-                .values()
-                .all(|&count| count > 0),
-        "the refused partition must be present and non-empty"
+        index.proof.partitions.refused.is_empty(),
+        "the refused partition must stay uninhabited: {:?}",
+        index.proof.partitions.refused
     );
     assert!(
         !index.proof.partitions.oracle_rejected.is_empty()
@@ -262,7 +256,10 @@ fn committed_coverage_index_matches_the_manifest() {
                 .all(|&count| count > 0),
         "the oracle-rejected partition must be present and non-empty"
     );
-    assert!(refused_cases > 0, "no refused case was selected");
+    assert_eq!(
+        refused_cases, 0,
+        "the uninhabited refusal partition selects no cases"
+    );
     assert!(
         oracle_rejected_cases > 0,
         "no oracle-rejected case was selected"

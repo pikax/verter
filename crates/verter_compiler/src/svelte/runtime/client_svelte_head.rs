@@ -87,36 +87,48 @@ impl<'a> SupportedClientIr<'a> {
         e: ExprId,
         span: Span,
     ) -> Result<ClientTitleEffect, UnsupportedSvelteRuntimeSurface> {
-        match self.title_chunk_fold(e) {
-            // A statically-known value folds to a literal (`has_state` false ⇒ `$.effect`).
-            ChunkFold::Fold(folded) => {
-                return Ok(ClientTitleEffect {
-                    deferred: false,
-                    rhs: js_single_quoted(&folded),
-                    deps: Vec::new(),
-                })
-            }
-            ChunkFold::Live { .. } => {}
-            ChunkFold::Refuse(reason) => {
-                return Err(UnsupportedSvelteRuntimeSurface::ConstFoldThrow {
-                    reason: reason.label(),
-                    span,
-                })
+        // PREPARE FIRST (the official `build_expression → Memoizer.add → evaluate`
+        // ordering): a legacy-wrapped chunk is a sequence by the time official
+        // evaluates it ⇒ UNKNOWN ⇒ it never constant-folds, and a memoized `$N` is
+        // opaque — only a RAW non-call chunk may fold.
+        let prepared = self.prepare_template_value(
+            super::client_legacy_value::AuthoredExpr(e),
+            super::client_legacy_value::AuthoredValueSurface::TitleChunk,
+        )?;
+        let has_call = prepared.has_call();
+        if !has_call && !prepared.is_wrapped() {
+            match self.title_chunk_fold(e) {
+                // A statically-known value folds to a literal (`has_state` false ⇒ `$.effect`).
+                ChunkFold::Fold(folded) => {
+                    return Ok(ClientTitleEffect {
+                        deferred: false,
+                        rhs: js_single_quoted(&folded),
+                        deps: Vec::new(),
+                    })
+                }
+                ChunkFold::Live { .. } => {}
+                ChunkFold::Refuse(reason) => {
+                    return Err(UnsupportedSvelteRuntimeSurface::ConstFoldThrow {
+                        reason: reason.label(),
+                        span,
+                    })
+                }
             }
         }
-        let value = self.rewrite_value_preserving_source(e)?;
         // The official `Memoizer.add` rule: a `has_call` chunk is hoisted into a `$N`
-        // deps-array slot (the memoized `$.deferred_template_effect($N => …, [() => call()])`
-        // form); a non-call live value stays inline. A memoized call also forces the
-        // deferred form (`has_state` is true for the memoized call).
-        let has_call = self.expr_has_call(e);
-        let deferred = self.expr_has_state(e) || has_call;
+        // deps-array slot (the memoized `$.deferred_template_effect($N => …, [() => (…)])`
+        // form) with the WRAPPED sequence as the dep; a non-call live value stays
+        // inline (a wrapped one as the parenthesized sequence). A memoized call also
+        // forces the deferred form.
+        let deferred = prepared.facts().has_state || has_call;
         let mut memoizer = Memoizer::default();
-        let placeholder = memoizer.add(value, has_call);
-        // The `TitleElement` outer coalesce: a MEMOIZED `$N` is opaque (`is_defined` false),
-        // so it always coalesces `$N ?? ''`; a non-memoized value emits RAW when provably
-        // defined, else `value ?? ''` (parenthesized for a top-level `&&`/`||`).
-        let rhs = if has_call {
+        let placeholder = memoizer.add(prepared.effect_value(), has_call);
+        // The `TitleElement` outer coalesce: a MEMOIZED `$N` is opaque (`is_defined`
+        // false) ⇒ always `$N ?? ''`; an INLINE legacy-wrapped chunk is a sequence
+        // official never proves defined ⇒ the BARE `?? ''`; a raw value emits RAW
+        // when provably defined, else `value ?? ''` (parenthesized for a top-level
+        // `&&`/`||`).
+        let rhs = if has_call || prepared.is_wrapped() {
             format!("{placeholder} ?? ''")
         } else {
             match self.title_chunk_nullish_wrap(e) {
@@ -153,27 +165,36 @@ impl<'a> SupportedClientIr<'a> {
             match chunk {
                 TitleChunkIr::Text(text) => cooked.push_str(text),
                 TitleChunkIr::Expr(e) => {
-                    match self.title_chunk_fold(*e) {
-                        // A known interpolation folds into the cooked literal text.
-                        ChunkFold::Fold(folded) => {
-                            cooked.push_str(&folded);
-                            continue;
-                        }
-                        ChunkFold::Live { .. } => {}
-                        ChunkFold::Refuse(reason) => {
-                            return Err(UnsupportedSvelteRuntimeSurface::ConstFoldThrow {
-                                reason: reason.label(),
-                                span,
-                            })
+                    // PREPARE FIRST (official `build_expression → Memoizer.add →
+                    // evaluate`): only a RAW non-call chunk may constant-fold — a
+                    // wrapped or memoized chunk stays live.
+                    let prepared = self.prepare_template_value(
+                        super::client_legacy_value::AuthoredExpr(*e),
+                        super::client_legacy_value::AuthoredValueSurface::TitleChunk,
+                    )?;
+                    let has_call = prepared.has_call();
+                    if !has_call && !prepared.is_wrapped() {
+                        match self.title_chunk_fold(*e) {
+                            // A known interpolation folds into the cooked literal text.
+                            ChunkFold::Fold(folded) => {
+                                cooked.push_str(&folded);
+                                continue;
+                            }
+                            ChunkFold::Live { .. } => {}
+                            ChunkFold::Refuse(reason) => {
+                                return Err(UnsupportedSvelteRuntimeSurface::ConstFoldThrow {
+                                    reason: reason.label(),
+                                    span,
+                                })
+                            }
                         }
                     }
-                    let value = self.rewrite_value_preserving_source(*e)?;
-                    let has_call = self.expr_has_call(*e);
-                    deferred |= self.expr_has_state(*e) || has_call;
-                    let placeholder = memoizer.add(value, has_call);
-                    // A MEMOIZED `$N` is opaque (`is_defined` false) ⇒ always `$N ?? ''`; a
-                    // non-memoized live part uses the computed `is_defined`/precedence wrap.
-                    let part = if has_call {
+                    deferred |= prepared.facts().has_state || has_call;
+                    let placeholder = memoizer.add(prepared.effect_value(), has_call);
+                    // A MEMOIZED `$N` is opaque (`is_defined` false) ⇒ always `$N ?? ''`;
+                    // an INLINE legacy-wrapped part is a sequence ⇒ the BARE `?? ''`; a
+                    // raw live part uses the computed `is_defined`/precedence wrap.
+                    let part = if has_call || prepared.is_wrapped() {
                         format!("{placeholder} ?? ''")
                     } else {
                         match self.title_chunk_nullish_wrap(*e) {

@@ -370,6 +370,62 @@ pub fn script_uses_runes(
     detector.used()
 }
 
+/// Whether the instance script contains a DEFINITIVELY-LEGACY top-level construct
+/// — the negated half of the official `analysis.maybe_runes` condition
+/// (svelte@5.56.3 `phases/2-analyze/index.js`): a top-level `LabeledStatement`
+/// (any label, exactly as official checks the raw AST — the admitted surface only
+/// ever carries `$:`) or an `export let` (a `let`-kind export declaration, or an
+/// export specifier whose local resolves to a top-level `let`). A component with
+/// one of these can never be "wannabe runes", so the legacy value wrap applies.
+///
+/// A malformed instance parse returns `false` — the malformed-script diagnostic
+/// path owns that failure; the mode facts stay inert.
+#[must_use]
+pub fn instance_forces_definite_legacy(alloc: &Allocator, text: &str) -> bool {
+    let Some(program) = reparse_module(alloc, text) else {
+        return false;
+    };
+    // Top-level `let` names — the export-specifier resolution set
+    // (`export { x }` over a top-level `let x`).
+    let mut let_names: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
+    for stmt in &program.body {
+        if let Statement::VariableDeclaration(decl) = stmt {
+            if decl.kind == oxc_ast::ast::VariableDeclarationKind::Let {
+                for d in &decl.declarations {
+                    let mut names = Vec::new();
+                    collect_pattern_names(&d.id, &mut names);
+                    let_names.extend(names);
+                }
+            }
+        }
+    }
+    for stmt in &program.body {
+        match stmt {
+            Statement::LabeledStatement(_) => return true,
+            Statement::ExportNamedDeclaration(export) => {
+                if let Some(oxc_ast::ast::Declaration::VariableDeclaration(decl)) =
+                    &export.declaration
+                {
+                    if decl.kind == oxc_ast::ast::VariableDeclarationKind::Let {
+                        return true;
+                    }
+                }
+                if export.specifiers.iter().any(|spec| {
+                    matches!(
+                        &spec.local,
+                        oxc_ast::ast::ModuleExportName::IdentifierReference(id)
+                            if let_names.contains(id.name.as_str())
+                    )
+                }) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 /// The runtime kind of each binding a `$props()` declarator pattern introduces, as
 /// `(name, is_bindable)` rows in source order. `is_bindable` is `true` only for a
 /// destructured member whose default initializer is a `$bindable(…)` call.

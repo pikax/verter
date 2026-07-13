@@ -1,0 +1,71 @@
+{
+  "slug": "attr-dyn-eschar-attr-uq-comp-ext-comb-u",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "./Child.svelte",
+      "kind": "default",
+      "names": [
+        "default:Child"
+      ]
+    },
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "attr_dyn_eschar_attr_uq_comp_ext_comb_u",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "child",
+    "reset",
+    "template_effect",
+    "set_attribute",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "from_html",
+    "reset",
+    "set_attribute",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "child": 1,
+    "reset": 1,
+    "template_effect": 1,
+    "set_attribute": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div class=\"wrap svelte-<scoped>\"><div class=\"svelte-<scoped>\">x</div></div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; import Child from './Child.svelte'; var root = $.from_html(`<div class=\"wrap svelte-<scoped>\"><div class=\"svelte-<scoped>\">x</div></div>`); export default function attr_dyn_eschar_attr_uq_comp_ext_comb_u($$anchor, $$props) {Child($$anchor, {children: ($$anchor, $$slotProps) => {var div = root(); var div_1 = $.child(div); $.reset(div); $.template_effect(() => $.set_attribute(div_1, 'data-x', $$props.value)); $.append($$anchor, div);}, $$slots: {default: true}});}",
+  "css": {
+    "present": true,
+    "hash": "svelte-1r7ttlp",
+    "code": "\n\t.wrap.svelte-<scoped> [data-x=\"a\\&b\"]:where(.svelte-<scoped>) {\n\t\tcolor: red;\n\t}\n"
+  }
+}

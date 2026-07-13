@@ -273,6 +273,7 @@ pub(super) fn after_update_ranks(
             Some(
                 ClientNode::Block(_)
                 | ClientNode::Component(_)
+                | ClientNode::Slot(_)
                 | ClientNode::Render(_)
                 | ClientNode::SvelteElement(_)
                 | ClientNode::Boundary(_)
@@ -297,9 +298,9 @@ pub(super) fn after_update_ranks(
 }
 
 /// The FAIL-LOUD after-update rank lookup: an after-update op whose target node is
-/// missing from the rank map is a planner/emitter DESYNC — the op would silently
-/// tail-sort (the retired `u32::MAX` fallback) and misorder the official
-/// after-update stream. Panic with the invariant name instead.
+/// missing from the rank map is a planner/emitter DESYNC — a silent fallback rank
+/// would tail-sort the op and misorder the official after-update stream. Panic
+/// with the invariant name instead.
 pub(super) fn require_after_update_rank(
     ranks: &rustc_hash::FxHashMap<NodeId, AfterUpdateRank>,
     node: NodeId,
@@ -359,9 +360,11 @@ pub(super) fn render_lifecycle_op(
             }
             None => format!("\t$.animation({el}, () => {get_fn}, null);\n"),
         },
-        // `$.attach(el, () => payload);` — 2 args, getter thunk.
+        // `$.attach(el, () => payload);` — 2 args, getter thunk over the PREPARED
+        // payload (a legacy-wrapped payload keeps the thunk over the sequence; the
+        // raw path applies the shared `b.thunk` zero-arg unthunk).
         ElementLifecycleOp::Attachment { payload, .. } => {
-            format!("\t$.attach({el}, () => {payload});\n")
+            format!("\t$.attach({el}, {});\n", payload.thunk())
         }
     }
 }
@@ -562,7 +565,10 @@ mod render_lifecycle_op_tests {
             render_lifecycle_op(
                 &ElementLifecycleOp::Attachment {
                     target: ClientNodeId(3),
-                    payload: "(fn)".to_string(),
+                    payload: super::super::client_legacy_value::PreparedTemplateValue::test_raw(
+                        super::super::client_legacy_value::AuthoredValueSurface::AttachPayload,
+                        "(fn)",
+                    ),
                 },
                 &vars(),
             )
@@ -583,7 +589,10 @@ mod render_lifecycle_op_tests {
         .is_init_domain());
         assert!(ElementLifecycleOp::Attachment {
             target: ClientNodeId(0),
-            payload: "p".to_string(),
+            payload: super::super::client_legacy_value::PreparedTemplateValue::test_raw(
+                super::super::client_legacy_value::AuthoredValueSurface::AttachPayload,
+                "p",
+            ),
         }
         .is_init_domain());
         assert!(!ElementLifecycleOp::Transition {

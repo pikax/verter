@@ -1,0 +1,55 @@
+{
+  "slug": "univ-spread-lit-attr-q-snip-ext-glob-m",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "univ_spread_lit_attr_q_snip_ext_glob_m",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "attribute_effect",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "attribute_effect",
+    "from_html"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "attribute_effect": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div>x</div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div>x</div>`); export default function univ_spread_lit_attr_q_snip_ext_glob_m($$anchor, $$props) {const subject = ($$anchor) => {var div = root(); $.attribute_effect(div, () => ({...$$props.rest})); $.append($$anchor, div);}; subject($$anchor);}",
+  "css": {
+    "present": true,
+    "hash": null,
+    "code": "\n\t* {\n\t\tcolor: red;\n\t}\n"
+  }
+}

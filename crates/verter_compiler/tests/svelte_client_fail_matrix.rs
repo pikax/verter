@@ -801,13 +801,6 @@ const FAIL_MATRIX: &[FailRow] = &[
         source: "<script>let c = $state(0);</script>\n<textarea>hi</textarea><button onclick={() => c++}>x</button>\n",
         code: "svelte-runtime-unsupported-element",
     },
-    FailRow {
-        // A raw `<slot>` is rejected at the element gate (Verter's parser does not model
-        // the official `SlotElement`, so it must never reach intrinsic emission).
-        name: "raw_slot_element",
-        source: "<script>let c = $state(0); c = 1;</script>\n<slot></slot>\n",
-        code: "svelte-runtime-unsupported-element",
-    },
     // ── `slot` attribute placement / validity (official slot_attribute_* errors) ──
     FailRow {
         // A `slot="a"` on an element that is NOT a direct component child (top level) —
@@ -3035,8 +3028,8 @@ fn fail_matrix_covers_every_documented_sub_shape() {
     // (the legacy `$.mutable_source` promotion is legacy-mode-only).
     assert_eq!(
         FAIL_MATRIX.len(),
-        219,
-        "the fail matrix pins 178 fail-closed rows — one documented \
+        218,
+        "the fail matrix pins 218 fail-closed rows — one documented \
          unsupported-feature sub-shape per row, EXCEPT the D-43 custom-element-host / \
          native-slotting rows, which are REPRESENTATIVE smoke probes for that \
          root-scoped over-refusal class (protected by the generic host-gate rows plus \

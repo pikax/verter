@@ -1,0 +1,84 @@
+{
+  "slug": "legacy/wrap_title_mixed_call.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "wrap_title_mixed_call",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "push",
+    "prop",
+    "init",
+    "head",
+    "deferred_template_effect",
+    "document",
+    "deep_read_state",
+    "untrack",
+    "append",
+    "pop"
+  ],
+  "helperSet": [
+    "append",
+    "deep_read_state",
+    "deferred_template_effect",
+    "document",
+    "from_html",
+    "head",
+    "init",
+    "pop",
+    "prop",
+    "push",
+    "untrack"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "push": 1,
+    "prop": 1,
+    "init": 1,
+    "head": 1,
+    "deferred_template_effect": 1,
+    "document": 1,
+    "deep_read_state": 1,
+    "untrack": 1,
+    "append": 1,
+    "pop": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<p>b</p>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<p>b</p>`); export default function wrap_title_mixed_call($$anchor, $$props) {$.push($$props, false); let obj = $.prop($$props, 'obj', 8); $.init(); var p = root(); $.head('1ru97li', ($$anchor) => {$.deferred_template_effect(($0) => {$.document.title = `page ${$0 ?? ''}`;}, [() => ($.deep_read_state(obj()), $.untrack(() => obj().m()))]);}); $.append($$anchor, p); $.pop();}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

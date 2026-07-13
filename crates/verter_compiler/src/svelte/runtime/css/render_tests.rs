@@ -303,10 +303,12 @@ fn plan_populates_css_code_for_proven_template_and_unprovable_never_plans() {
     assert!(!code.is_empty());
     assert!(code.contains(&hash));
 
-    // Unprovable (a legacy `<slot>` element): NO plan exists — the build
-    // fails with the typed selector-unprovable failure (fail-closed, never a
-    // guessed scope, never a sentinel plan).
-    let source = "<slot></slot>\n<style>.card { color: red; }</style>";
+    // Unprovable (a `<svelte:head>` `<title>`, decomposed out of the runtime
+    // IR fragment): NO plan exists — the build fails with the typed
+    // selector-unprovable failure (fail-closed, never a guessed scope, never a
+    // sentinel plan).
+    let source =
+        "<svelte:head><title>t</title></svelte:head>\n<style>.card { color: red; }</style>";
     let alloc = Allocator::default();
     let parsed = parse_svelte(source);
     let opts = SvelteRuntimeOptions::default();
@@ -319,7 +321,7 @@ fn plan_populates_css_code_for_proven_template_and_unprovable_never_plans() {
         &ir,
         false,
     )
-    .expect_err("a `<slot>` template never constructs a plan");
+    .expect_err("a head-`<title>` template never constructs a plan");
     assert_eq!(
         err.class,
         super::StylePlanFailureClass::SelectorUnprovable,

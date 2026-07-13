@@ -2,9 +2,9 @@
 
 Derived review artifact. The typed Rust manifest (`crates/verter_svelte_conformance`) is the sole authority; regenerate this file and the fixture corpus with `cargo run -p verter_svelte_conformance -- write`.
 
-- schema version: 1
-- manifest hash: `fnv1a64-527c96f87a2bfda7`
-- selected cases: 518 of 272160 candidate rows (0.19%)
+- schema version: 3
+- manifest hash: `fnv1a64-0a8b7b90c5b3bbf8`
+- selected cases: 609 of 272160 candidate rows (0.22%)
 - fixtures: `fixtures/<slug>.svelte`, one per case; each case compiles on both backends (`client`, `server`)
 
 ## Selected cases by partition
@@ -12,15 +12,13 @@ Derived review artifact. The typed Rust manifest (`crates/verter_svelte_conforma
 | partition | cases |
 | --- | ---: |
 | oracle-rejected:css-nesting-selector-invalid-placement | 1 |
-| refused:legacy-slot-scope-unprovable | 1 |
-| supported | 516 |
+| supported | 608 |
 
 ## Full candidate space by partition
 
 | partition | kind | rows |
 | --- | --- | ---: |
-| supported | — | 31890 |
-| refused | legacy-slot-scope-unprovable | 6458 |
+| supported | — | 38348 |
 | oracle-rejected | css-nesting-selector-invalid-placement | 4320 |
 | invalid | boolean-quoting-on-valued-target | 60480 |
 | invalid | boolean-quoting-carries-no-value | 25920 |
@@ -38,13 +36,13 @@ Derived review artifact. The typed Rust manifest (`crates/verter_svelte_conforma
 
 | template \ selector | `lit` | `eschex` | `eschar` | `escmix` |
 | --- | ---: | ---: | ---: | ---: |
-| `lit` | 81 | 9 | 9 | 9 |
-| `named` | 49 | 6 | 6 | 6 |
-| `dec` | 48 | 5 | 6 | 7 |
-| `hex` | 48 | 7 | 5 | 6 |
-| `mixent` | 48 | 6 | 6 | 6 |
-| `dyn` | 63 | 10 | 10 | 10 |
-| `spread` | 37 | 5 | 5 | 5 |
+| `lit` | 99 | 9 | 9 | 9 |
+| `named` | 57 | 7 | 7 | 7 |
+| `dec` | 57 | 6 | 7 | 8 |
+| `hex` | 57 | 7 | 8 | 6 |
+| `mixent` | 59 | 6 | 6 | 7 |
+| `dyn` | 77 | 11 | 10 | 10 |
+| `spread` | 44 | 7 | 6 | 6 |
 
 ## Strengthened interaction groups
 
@@ -56,10 +54,10 @@ Derived review artifact. The typed Rust manifest (`crates/verter_svelte_conforma
 ```
 covering-array proof
 candidates: 272160
-selected-rows: 518
-global: required=5194 covered=5194
-group[0]: required=473 covered=473
+selected-rows: 609
+global: required=5628 covered=5628
+group[0]: required=562 covered=562
 group[1]: required=163 covered=163
-focus-cells: 38
-refusal-partitions: 2
+focus-cells: 39
+refusal-partitions: 1
 ```

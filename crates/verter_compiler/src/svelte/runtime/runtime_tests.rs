@@ -2887,6 +2887,103 @@ fn render_callee_fact_spread_argument_flags_fail_closed() {
 }
 
 // ---------------------------------------------------------------------------
+// The stored wrap-trigger + dynamic-callee lowering facts — populated by the
+// SAME canonical parse (`collect_expr_references`), the single authority the
+// legacy wrap trigger and the dynamic `{@render}` lowering read (no consumer
+// re-parses / re-slices / re-collects). Torn expressions carry FAIL-CLOSED
+// facts, never silent defaults.
+// ---------------------------------------------------------------------------
+
+/// The per-parse analysis facts of one expression source.
+fn analysis_facts_of(src: &str) -> super::expr::ExprAnalysisFacts {
+    super::expr::collect_expr_references(src).expect("the expression parses")
+}
+
+#[test]
+fn sync_member_or_assignment_fact_covers_member_assignment_update() {
+    // Members (incl. global-rooted), assignments, and updates trigger.
+    assert!(analysis_facts_of("obj.x").has_sync_member_or_assignment);
+    assert!(analysis_facts_of("Math.PI").has_sync_member_or_assignment);
+    assert!(analysis_facts_of("x = 1").has_sync_member_or_assignment);
+    assert!(analysis_facts_of("x++").has_sync_member_or_assignment);
+    assert!(analysis_facts_of("(a.x, () => b.y)").has_sync_member_or_assignment);
+    // A plain read / call / binary carries no member/assignment trigger.
+    assert!(!analysis_facts_of("x").has_sync_member_or_assignment);
+    assert!(!analysis_facts_of("f(x)").has_sync_member_or_assignment);
+    assert!(!analysis_facts_of("a + b").has_sync_member_or_assignment);
+    // A nested fn/arrow body is DEFERRED (official nulls `state.expression`).
+    assert!(!analysis_facts_of("() => obj.x").has_sync_member_or_assignment);
+    assert!(!analysis_facts_of("function f() { return obj.x; }").has_sync_member_or_assignment);
+}
+
+#[test]
+fn render_dynamic_callee_fact_carries_span_chain_and_subtree_facts() {
+    // `children?.()` — the callee span slices to `children`, the chain flag is
+    // set, and the callee subtree's facts are its own (a bare identifier: one
+    // read reference, no sync trigger, no zero-arg-call fact, a root ident).
+    let src = "children?.()";
+    let facts = analysis_facts_of(src)
+        .render_dynamic_callee
+        .expect("a trailing call populates the fact");
+    assert_eq!(
+        &src[facts.span.0 as usize..facts.span.1 as usize],
+        "children",
+        "the populated span slices the callee text"
+    );
+    assert!(facts.is_chain, "`?.()` is the chain form");
+    assert_eq!(facts.references.len(), 1);
+    assert_eq!(facts.references[0].name, "children");
+    assert!(!facts.has_sync_member_or_assignment);
+    assert_eq!(facts.direct_zero_arg_call_callee, None);
+    assert_eq!(facts.root_ident.as_deref(), Some("children"));
+    // `obj.snip(x)` — a member callee: plain call, member trigger inside the
+    // callee subtree, the ARGUMENT's reference is NOT a callee reference.
+    let src = "obj.snip(x)";
+    let facts = analysis_facts_of(src)
+        .render_dynamic_callee
+        .expect("a trailing call populates the fact");
+    assert_eq!(
+        &src[facts.span.0 as usize..facts.span.1 as usize],
+        "obj.snip"
+    );
+    assert!(!facts.is_chain);
+    assert!(facts.has_sync_member_or_assignment);
+    assert_eq!(facts.references.len(), 1);
+    assert_eq!(facts.references[0].name, "obj");
+    assert_eq!(facts.root_ident, None);
+    // `f()()` — a call-of-call: the callee slice is itself a zero-arg
+    // identifier call (the unthunk fact of the SLICE).
+    let src = "f()()";
+    let facts = analysis_facts_of(src)
+        .render_dynamic_callee
+        .expect("a trailing call populates the fact");
+    assert_eq!(&src[facts.span.0 as usize..facts.span.1 as usize], "f()");
+    assert_eq!(facts.direct_zero_arg_call_callee.as_deref(), Some("f"));
+    // A NON-call expression populates no fact — the render lowering fails
+    // closed on it.
+    assert_eq!(
+        analysis_facts_of("cond ? a : b").render_dynamic_callee,
+        None
+    );
+}
+
+#[test]
+fn torn_expression_facts_are_fail_closed_not_defaults() {
+    // A torn expression's wrap-trigger fact is `Err(())` — the preparation
+    // entry maps it to the precise
+    // `svelte-runtime-unsupported-expression-fact-recovery` diagnostic instead
+    // of silently treating the surface as raw (`false` would).
+    let torn = super::expr::AnalyzedExpr::torn("a ..b", super::expr::ScopeId(0));
+    assert_eq!(torn.has_sync_member_or_assignment, Err(()));
+    assert_eq!(torn.render_dynamic_callee, None);
+    assert!(torn.render_callee.is_err());
+    // An interned expression carries the populated fact.
+    let facts = analysis_facts_of("obj.x");
+    let interned = super::expr::AnalyzedExpr::interned("obj.x", super::expr::ScopeId(0), facts);
+    assert_eq!(interned.has_sync_member_or_assignment, Ok(true));
+}
+
+// ---------------------------------------------------------------------------
 // F12 — a zero-root template (only a `<script>` + whitespace) still plans a
 // CommentAnchor for the root region. FAILS against the skip-empty-region path
 // that produced no factory.
@@ -3875,6 +3972,7 @@ mod topology_oracle {
         SvelteHelper::Key,
         SvelteHelper::Html,
         SvelteHelper::Snippet,
+        SvelteHelper::Slot,
         SvelteHelper::Delegated,
         SvelteHelper::Event,
         SvelteHelper::Delegate,

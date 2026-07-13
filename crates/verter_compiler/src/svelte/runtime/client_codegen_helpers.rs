@@ -111,6 +111,22 @@ pub(super) fn concise_arrow_expr_body(body: &str) -> String {
     format!("({body})")
 }
 
+/// The official `b.thunk` of a rewritten value: a bare zero-arg identifier
+/// call unthunks to its callee (`rest()` → `rest`); every other shape keeps
+/// the `() => <expr>` arrow. `unthunk_callee` is the ANALYZED unthunk fact —
+/// the canonical parse's direct-zero-arg-identifier-call callee, kept only
+/// while its rewrite stays a plain identifier (computed at preparation, see
+/// `PreparedTemplateValue::unthunk_callee`) — so the decision reads typed
+/// analysis facts, never a reparse of the generated text. Shared by the
+/// component/slot spread thunks, the `{@render}` argument thunks, and the
+/// legacy-wrap `$.untrack` payload.
+pub(super) fn js_thunk(unthunk_callee: Option<&str>, rewritten: &str) -> String {
+    match unthunk_callee {
+        Some(callee) => callee.to_string(),
+        None => format!("() => {rewritten}"),
+    }
+}
+
 /// An object-literal KEY for a `class:` / `style:` directive name: a bare identifier
 /// key for a plain JS-identifier name (`foo`, `fontWeight`), or a QUOTED key for a
 /// name that is not a valid bare identifier (`--x`, `font-size`, `aria-label`). The
@@ -151,12 +167,10 @@ pub(super) fn object_property(key: &str, value: &str) -> String {
     }
 }
 
-/// Render the merged `[$.STYLE]` fold entry for a spread element's `style:` directives,
-/// or `None` when there are none. A normal directive folds into the object shorthand
-/// (`{ color: 'red', width: w }`); when ANY `|important` directive is present, the entry
-/// switches to the official `[{ <normal> }, { <important> }]` array form. Each entry is
-/// the already-rendered `key` / `key: value` property text + its `important` flag.
-pub(super) fn fold_style_directives(entries: &[(String, bool)]) -> Option<String> {
+/// The VALUE half of [`fold_style_directives`] — the merged style-directive
+/// object (or the `[normal, important]` array) WITHOUT the `[$.STYLE]: ` key,
+/// for the typed attribute-effect item that carries the key separately.
+pub(super) fn fold_style_directives_value(entries: &[(String, bool)]) -> Option<String> {
     if entries.is_empty() {
         return None;
     }
@@ -177,18 +191,17 @@ pub(super) fn fold_style_directives(entries: &[(String, bool)]) -> Option<String
             format!("{{ {} }}", props.join(", "))
         }
     };
-    let body = if important.is_empty() {
+    Some(if important.is_empty() {
         obj(&normal)
     } else {
         format!("[{}, {}]", obj(&normal), obj(&important))
-    };
-    Some(format!("[$.STYLE]: {body}"))
+    })
 }
 
 /// Whether a string is a single plain JS identifier (`/^[A-Za-z_$][A-Za-z0-9_$]*$/`)
 /// — used to decide whether a `class:` / `style:` directive name needs a quoted
-/// object key.
-fn is_plain_js_identifier(s: &str) -> bool {
+/// object key, and whether a rewritten unthunk callee stayed a bare identifier.
+pub(super) fn is_plain_js_identifier(s: &str) -> bool {
     let mut chars = s.chars();
     match chars.next() {
         Some(c) if c.is_ascii_alphabetic() || c == '_' || c == '$' => {}

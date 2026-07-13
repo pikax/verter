@@ -1,0 +1,41 @@
+{
+  "slug": "univ-spread-lit-id-q-dynel-ext-prune-m",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "univ_spread_lit_id_q_dynel_ext_prune_m",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "element",
+    "attributes"
+  ],
+  "helperSet": [
+    "attributes",
+    "element"
+  ],
+  "helperCounts": {
+    "element": 1,
+    "attributes": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": true,
+    "hash": "svelte-1e8fr62",
+    "code": "\n\t.svelte-<scoped> {\n\t\tcolor: red;\n\t}\n\n\t.unused-prune.svelte-<scoped> {\n\t\tcolor: blue;\n\t}\n"
+  }
+}

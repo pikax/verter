@@ -1,0 +1,38 @@
+{
+  "slug": "css/slot_adjacent_empty_between.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "slot_adjacent_empty_between",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "slot"
+  ],
+  "helperSet": [
+    "slot"
+  ],
+  "helperCounts": {
+    "slot": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": true,
+    "hash": "svelte-1utcwa",
+    "code": "\n\t.a.svelte-<scoped> + .b:where(.svelte-<scoped>) { color: red; }\n\t/* (unused) .zz + .b { color: blue; }*/\n"
+  }
+}

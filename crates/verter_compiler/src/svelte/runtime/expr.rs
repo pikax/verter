@@ -472,6 +472,55 @@ pub struct AnalyzedExpr<'a> {
     /// not parse (a torn expression); consumers fail closed exactly as a per-consumer
     /// reparse failure did.
     pub render_callee: Result<RenderCalleeShape, ()>,
+    /// The SYNTAX half of the official legacy value-wrap trigger
+    /// (`build_expression`'s `metadata.has_member_expression ||
+    /// metadata.has_assignment` — svelte@5.56.3 `shared/utils.js`): whether the
+    /// SYNCHRONOUS part of the expression contains ANY member expression
+    /// (including a GLOBAL-rooted one — `Math.PI` triggers, exactly as the
+    /// official `MemberExpression` analyze visitor sets the flag
+    /// unconditionally), any assignment, or any update expression. Nested
+    /// function/arrow bodies are DEFERRED (official nulls `state.expression`
+    /// inside them), so `{() => obj.x}` does not trigger. Populated from the
+    /// SAME canonical parse; `Err(())` = a torn expression — a consumer needing
+    /// the trigger fact FAILS CLOSED with a precise diagnostic, never a
+    /// silent-raw `false`. The `has_call` half of the trigger stays the
+    /// scope-aware plan-time analysis (binding kinds finalize after lowering).
+    pub has_sync_member_or_assignment: Result<bool, ()>,
+    /// The `{@render}` DYNAMIC-callee LOWERING facts
+    /// ([`RenderDynamicCalleeFacts`]) — the peeled trailing-call callee's span
+    /// (inner-text-relative), chain-ness, and the callee subtree's own
+    /// reference / wrap-trigger / zero-arg-callee facts — harvested from the
+    /// SAME canonical parse, so the dynamic-render lowering never re-parses or
+    /// re-collects. `None` = the expression has no trailing call (or is torn);
+    /// the render lowering fails closed on it.
+    pub render_dynamic_callee: Option<RenderDynamicCalleeFacts>,
+}
+
+/// The `{@render}` DYNAMIC-callee lowering facts, harvested from the canonical
+/// expression parse: the trailing call's CALLEE span (relative to the inner
+/// text), whether the call is the optional `?.()` (ChainExpression) form, and
+/// the callee SUBTREE's own analysis facts — its free references (the wrap's
+/// visible dependency reads), its synchronous member/assignment wrap trigger,
+/// and its direct-zero-arg-identifier-call callee (the `b.thunk` unthunk
+/// fact). The callee subtree is analyzed exactly as a standalone expression
+/// (fresh local frames, function depth 0) on the canonical parse — no
+/// per-consumer reparse and no fail-open fallback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderDynamicCalleeFacts {
+    /// The callee byte-span, relative to the inner expression text.
+    pub span: (u32, u32),
+    /// Whether the trailing call is the optional `?.()` (ChainExpression) form.
+    pub is_chain: bool,
+    /// The callee subtree's free references, in source order.
+    pub references: Vec<ExprReference>,
+    /// The callee subtree's synchronous member/assignment wrap trigger.
+    pub has_sync_member_or_assignment: bool,
+    /// The callee subtree's direct-zero-arg-identifier-call callee fact.
+    pub direct_zero_arg_call_callee: Option<String>,
+    /// The callee subtree's transparent-paren-peeled BARE-identifier root
+    /// (`children` / `(children)`) — the unthunk candidate for a read that
+    /// LOWERS to a zero-arg accessor call (`children()`).
+    pub root_ident: Option<String>,
 }
 
 /// The KIND of a value expression's transparent-paren-unwrapped root, restricted to the
@@ -488,8 +537,22 @@ pub enum UnwrappedRootKind {
     TemplateLiteral,
     /// A `BinaryExpression` (`a + b`) — no `$.clsx` wrap.
     BinaryExpression,
-    /// Every other expression kind (identifier / member / call / conditional / logical /
-    /// object / array / sequence / unary / `new` / …) — wrapped in `$.clsx`.
+    /// An `ArrowFunctionExpression` / `FunctionExpression` — the attribute-effect
+    /// event-handler stability-hoist trigger (still `$.clsx`-wrapped as a class
+    /// value, like every non-literal/template/binary kind).
+    Function,
+    /// A bare `Identifier` — a SIMPLE reference for the component-prop
+    /// `should_wrap_in_derived` negation (official: `type !== 'Identifier' &&
+    /// !== 'MemberExpression'`); still `$.clsx`-wrapped as a class value.
+    Identifier,
+    /// A static/computed `MemberExpression` (`o.x` / `o[k]`) — the other
+    /// SIMPLE-reference kind of the `should_wrap_in_derived` negation; still
+    /// `$.clsx`-wrapped as a class value. (A private-field or optional-chain
+    /// member stays [`Other`](Self::Other) — the compound disposition.)
+    MemberExpression,
+    /// Every other expression kind (call / conditional / logical / object /
+    /// array / sequence / unary / `new` / chain / private-field member / …) —
+    /// wrapped in `$.clsx`, compound for `should_wrap_in_derived`.
     Other,
 }
 
@@ -595,13 +658,16 @@ impl<'a> AnalyzedExpr<'a> {
             bind_target: facts.bind_target,
             matcher_expr: facts.matcher_expr,
             render_callee: Ok(facts.render_callee),
+            has_sync_member_or_assignment: Ok(facts.has_sync_member_or_assignment),
+            render_dynamic_callee: facts.render_dynamic_callee,
         }
     }
 
     /// Build the analyzed expression for a TORN parse (the fragment did not parse cleanly):
     /// no references, treated as a non-sequence root with an unknown root kind, an empty
-    /// bind-target fact, a [`MatcherExpr::Other`] matcher projection, and an `Err(())`
-    /// render-callee fact (a torn expression fails closed downstream).
+    /// bind-target fact, a [`MatcherExpr::Other`] matcher projection, an `Err(())`
+    /// render-callee fact, an `Err(())` wrap-trigger fact, and no dynamic-callee facts
+    /// (a torn expression fails closed downstream — never a silent default).
     pub(crate) fn torn(source: &'a str, scope: ScopeId) -> Self {
         Self {
             source,
@@ -613,6 +679,8 @@ impl<'a> AnalyzedExpr<'a> {
             bind_target: BindTargetFact::default(),
             matcher_expr: MatcherExpr::Other,
             render_callee: Err(()),
+            has_sync_member_or_assignment: Err(()),
+            render_dynamic_callee: None,
         }
     }
 }
@@ -1792,8 +1860,7 @@ pub enum RenderCalleeShape {
 }
 
 /// Classify the ALREADY-PARSED body of a `{@render …}` tag's inner expression
-/// into its callee shape — the classification half of the retired
-/// parse-then-classify helper, operating on the SAME parsed `body_expr`
+/// into its callee shape, operating on the SAME parsed `body_expr`
 /// [`collect_expr_references`] harvests every other expression fact from (no
 /// second reparse, no synthesize-then-reparse).
 ///
@@ -2260,6 +2327,12 @@ pub(crate) struct ExprAnalysisFacts {
     /// The `{@render}` callee classification, computed from the SAME parsed
     /// expression (argument spans rebased to inner-text-relative offsets).
     pub render_callee: RenderCalleeShape,
+    /// The synchronous member/assignment/update wrap-trigger fact, computed
+    /// from the SAME parsed expression (nested fn/arrow bodies deferred).
+    pub has_sync_member_or_assignment: bool,
+    /// The `{@render}` dynamic-callee lowering facts, computed from the SAME
+    /// parsed expression (`None` when the expression has no trailing call).
+    pub render_dynamic_callee: Option<RenderDynamicCalleeFacts>,
 }
 
 /// Collect the FREE identifier references of a single template-expression text,
@@ -2296,30 +2369,7 @@ pub(crate) fn collect_expr_references(text: &str) -> Result<ExprAnalysisFacts, (
     // The direct-zero-arg-identifier-call fact: the WHOLE expression is a non-optional,
     // zero-argument `CallExpression` whose callee peels (through transparent parens) to a
     // plain identifier.
-    let direct_zero_arg_call_callee = body_expr.and_then(|expr| {
-        let mut e = expr;
-        while let Expression::ParenthesizedExpression(p) = e {
-            e = &p.expression;
-        }
-        match e {
-            Expression::CallExpression(call) if !call.optional && call.arguments.is_empty() => {
-                // The callee may itself be wrapped in transparent author parens
-                // (`(render)()` / `((render))()` — OXC represents each `(…)` as a
-                // `ParenthesizedExpression`). Peel them, the SAME transparent-paren peel
-                // the whole-expression walk above does, before the identifier check, so a
-                // paren-wrapped zero-arg call still harvests its callee name.
-                let mut callee = &call.callee;
-                while let Expression::ParenthesizedExpression(p) = callee {
-                    callee = &p.expression;
-                }
-                match callee {
-                    Expression::Identifier(id) => Some(id.name.to_string()),
-                    _ => None,
-                }
-            }
-            _ => None,
-        }
-    });
+    let direct_zero_arg_call_callee = body_expr.and_then(direct_zero_arg_call_callee_of);
     // The transparent-paren-unwrapped root facts: peel every transparent outer
     // `ParenthesizedExpression` to the root operand, then CLASSIFY it — whether it is a
     // `SequenceExpression` (the BEHAVIORAL sequence-wrap signal) and its KIND (the `class={…}`
@@ -2357,6 +2407,9 @@ pub(crate) fn collect_expr_references(text: &str) -> Result<ExprAnalysisFacts, (
         RenderCalleeShape::Dynamic { args: Vec::new() },
         classify_render_callee,
     );
+    // The wrap-trigger + dynamic-callee lowering facts — from the SAME parse.
+    let has_sync_member_or_assignment = body_expr.is_some_and(sync_member_or_assignment);
+    let render_dynamic_callee = body_expr.and_then(collect_render_dynamic_callee_facts);
     Ok(ExprAnalysisFacts {
         references: collector.refs,
         direct_zero_arg_call_callee,
@@ -2365,6 +2418,144 @@ pub(crate) fn collect_expr_references(text: &str) -> Result<ExprAnalysisFacts, (
         bind_target,
         matcher_expr,
         render_callee,
+        has_sync_member_or_assignment,
+        render_dynamic_callee,
+    })
+}
+
+/// The direct-zero-arg-identifier-call fact of ONE expression node: the node
+/// (peeling transparent parens) is a non-optional, ZERO-argument
+/// `CallExpression` whose callee peels (through transparent author parens —
+/// `(render)()` / `((render))()`; estree/acorn has no paren nodes, so official
+/// sees the bare identifier) to a plain identifier. The official
+/// `b.thunk`/`unthunk` structural fact, shared by the whole-expression fact
+/// and the `{@render}` dynamic-callee subtree fact.
+fn direct_zero_arg_call_callee_of(expr: &Expression<'_>) -> Option<String> {
+    let mut e = expr;
+    while let Expression::ParenthesizedExpression(p) = e {
+        e = &p.expression;
+    }
+    match e {
+        Expression::CallExpression(call) if !call.optional && call.arguments.is_empty() => {
+            let mut callee = &call.callee;
+            while let Expression::ParenthesizedExpression(p) = callee {
+                callee = &p.expression;
+            }
+            match callee {
+                Expression::Identifier(id) => Some(id.name.to_string()),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Whether the SYNCHRONOUS part of an expression contains ANY member
+/// expression, assignment, or update expression — the syntax half of the
+/// official legacy value-wrap trigger (`metadata.has_member_expression ||
+/// metadata.has_assignment`, svelte@5.56.3 `shared/utils.js`). Nested
+/// function/arrow bodies are DEFERRED (official nulls `state.expression`
+/// inside them), so `() => obj.x` does not trigger. Computed ONCE here, on
+/// the canonical parse — no consumer re-parses to re-derive it.
+fn sync_member_or_assignment(expr: &Expression<'_>) -> bool {
+    let mut scan = SyncMemberOrAssignmentScan { found: false };
+    scan.visit_expression(expr);
+    scan.found
+}
+
+/// The [`sync_member_or_assignment`] walker: member / assignment / update
+/// detection over the synchronous subtree only (function and arrow bodies are
+/// skipped whole, the official `expression: null` deferral).
+struct SyncMemberOrAssignmentScan {
+    found: bool,
+}
+
+impl<'a> Visit<'a> for SyncMemberOrAssignmentScan {
+    fn visit_function(&mut self, _it: &Function<'a>, _flags: oxc_syntax::scope::ScopeFlags) {
+        // Deferred: a nested function body never contributes wrap triggers.
+    }
+
+    fn visit_arrow_function_expression(&mut self, _it: &ArrowFunctionExpression<'a>) {
+        // Deferred: a nested arrow body never contributes wrap triggers.
+    }
+
+    fn visit_static_member_expression(&mut self, it: &oxc_ast::ast::StaticMemberExpression<'a>) {
+        self.found = true;
+        walk::walk_static_member_expression(self, it);
+    }
+
+    fn visit_computed_member_expression(
+        &mut self,
+        it: &oxc_ast::ast::ComputedMemberExpression<'a>,
+    ) {
+        self.found = true;
+        walk::walk_computed_member_expression(self, it);
+    }
+
+    fn visit_private_field_expression(&mut self, it: &oxc_ast::ast::PrivateFieldExpression<'a>) {
+        self.found = true;
+        walk::walk_private_field_expression(self, it);
+    }
+
+    fn visit_assignment_expression(&mut self, it: &AssignmentExpression<'a>) {
+        self.found = true;
+        walk::walk_assignment_expression(self, it);
+    }
+
+    fn visit_update_expression(&mut self, it: &UpdateExpression<'a>) {
+        self.found = true;
+        walk::walk_update_expression(self, it);
+    }
+}
+
+/// Harvest the [`RenderDynamicCalleeFacts`] of one parsed expression: peel
+/// every transparent outer paren, peel the trailing call (a plain
+/// `CallExpression` or the `CallExpression` inside a `ChainExpression` — the
+/// optional `fn?.()` form), and analyze the CALLEE subtree as a standalone
+/// expression (fresh reference frames, function depth 0). `None` for a
+/// non-call expression (the dynamic render lowering fails closed on it).
+fn collect_render_dynamic_callee_facts(expr: &Expression<'_>) -> Option<RenderDynamicCalleeFacts> {
+    let mut inner = expr;
+    while let Expression::ParenthesizedExpression(p) = inner {
+        inner = &p.expression;
+    }
+    let (call, is_chain): (&CallExpression, bool) = match inner {
+        Expression::CallExpression(call) => (call, false),
+        Expression::ChainExpression(chain) => match &chain.expression {
+            ChainElement::CallExpression(call) => (call, true),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    // The `({text});` wrapper prefix is a single `(` — rebase to inner text.
+    let prefix_len = 1u32;
+    let span = call.callee.span();
+    let mut collector = ExprReferenceCollector {
+        refs: Vec::new(),
+        local_frames: Vec::new(),
+        fn_depth: 0,
+    };
+    collector.visit_expression(&call.callee);
+    // The callee's transparent-paren-peeled bare-identifier root (the
+    // accessor-read unthunk candidate).
+    let mut callee = &call.callee;
+    while let Expression::ParenthesizedExpression(p) = callee {
+        callee = &p.expression;
+    }
+    let root_ident = match callee {
+        Expression::Identifier(id) => Some(id.name.to_string()),
+        _ => None,
+    };
+    Some(RenderDynamicCalleeFacts {
+        span: (
+            span.start.saturating_sub(prefix_len),
+            span.end.saturating_sub(prefix_len),
+        ),
+        is_chain,
+        references: collector.refs,
+        has_sync_member_or_assignment: sync_member_or_assignment(&call.callee),
+        direct_zero_arg_call_callee: direct_zero_arg_call_callee_of(&call.callee),
+        root_ident,
     })
 }
 
@@ -2521,6 +2712,13 @@ fn unwrapped_root_kind_of(expr: &Expression) -> UnwrappedRootKind {
         | Expression::StringLiteral(_) => UnwrappedRootKind::Literal,
         Expression::TemplateLiteral(_) => UnwrappedRootKind::TemplateLiteral,
         Expression::BinaryExpression(_) => UnwrappedRootKind::BinaryExpression,
+        Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_) => {
+            UnwrappedRootKind::Function
+        }
+        Expression::Identifier(_) => UnwrappedRootKind::Identifier,
+        Expression::StaticMemberExpression(_) | Expression::ComputedMemberExpression(_) => {
+            UnwrappedRootKind::MemberExpression
+        }
         _ => UnwrappedRootKind::Other,
     }
 }

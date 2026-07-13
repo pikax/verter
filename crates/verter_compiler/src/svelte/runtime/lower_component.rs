@@ -9,12 +9,12 @@
 //! OWN lexical scope (a child of the component's scope) so its `let:` slot-prop bindings
 //! (lowered as `Derived` so a read emits `$.get`) shadow correctly.
 
-use super::attr_lowering::AttrHost;
+use super::attr_lowering::{lower_attributes, AttrHost};
 use super::entity_decode::decode_attr_entities;
 use super::expr::{parse_let_alias_identifier, BindingInfo, BindingRuntimeKind, ScopeId};
 use super::ir::{
-    AttrIr, ComponentSlots, ExprId, HeadTitleIr, LetBinding, NamedSlot, NodeId, SpecialKind,
-    TemplateScopeId, TitleChunkIr,
+    AttrIr, ComponentSlots, ExprId, HeadTitleIr, IrNode, LetBinding, NamedSlot, NodeId,
+    SlotElementIr, SpecialKind, TemplateScopeId, TitleChunkIr,
 };
 use super::{lower_node, span_text, LoweringCtx};
 use crate::svelte::parser::{
@@ -261,6 +261,53 @@ fn lower_slot_region(
 /// Returns the decomposed bindings PLUS whether any directive used an unsupported form. The
 /// let decomposition is infallible here, so an unsupported form sets the flag (consumed by
 /// the fallible component projection, which fails CLOSED) rather than being silently dropped.
+/// Lower a `<slot>` element into its BLOCK-semantic [`IrNode::Slot`] node (the
+/// official `SlotElement`): attributes lower with slot PROPERTY semantics (an
+/// `on*` attribute stays a plain prop — never a DOM event), the STATIC `name`
+/// attribute is consumed into the DECODED semantic slot name (`"default"` when
+/// absent; a NON-static `name` keeps the placeholder — the classifier rejects
+/// it as the official `slot_element_invalid_name` before emission), the `let:`
+/// directives decompose like component lets, and the children lower into the
+/// ALWAYS-minted fallback template region (empty roots for a child-less slot —
+/// the emitter maps that to the official `null` fallback argument).
+pub(super) fn lower_slot_element(
+    ctx: &mut LoweringCtx,
+    el: &SvelteElement,
+    scope: ScopeId,
+) -> NodeId {
+    let props = lower_attributes(ctx, &el.attributes, scope, AttrHost::Slot);
+    // The producer-side `let:` decomposition (shorthand + identifier alias); a
+    // malformed alias keeps its `AttrIr::Let` entry in `props`, which the
+    // classifier fails closed together with every other slot-hosted `let:`.
+    let (lets, _has_unsupported_let) = let_directive_bindings(el, ctx.source);
+    let name = props
+        .iter()
+        .find_map(|attr| match attr {
+            AttrIr::Static {
+                name,
+                value: Some(value),
+            } if name == "name" => Some(value.value.as_str().to_string()),
+            _ => None,
+        })
+        .unwrap_or_else(|| "default".to_string());
+    let fallback = ctx.push_template_scope(scope);
+    let mut roots = Vec::new();
+    for child in &el.children {
+        if let Some(id) = lower_node(ctx, child, scope) {
+            roots.push(id);
+        }
+    }
+    ctx.template_scopes[fallback.0 as usize].roots = roots;
+    ctx.push_node(IrNode::Slot(SlotElementIr {
+        span: el.open_span,
+        name,
+        props,
+        lets,
+        fallback,
+        scope,
+    }))
+}
+
 fn let_directive_bindings(el: &SvelteElement, source: &str) -> (Vec<LetBinding>, bool) {
     let mut out = Vec::new();
     let mut unsupported = false;

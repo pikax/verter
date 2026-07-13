@@ -1,0 +1,58 @@
+{
+  "slug": "id-dyn-escmix-cls-q-el-ext-plain-n",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "id_dyn_escmix_cls_q_el_ext_plain_n",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "template_effect",
+    "set_class",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "from_html",
+    "set_class",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "template_effect": 1,
+    "set_class": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div>x</div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div>x</div>`); export default function id_dyn_escmix_cls_q_el_ext_plain_n($$anchor, $$props) {var div = root(); $.template_effect(() => $.set_class(div, 1, $$props.flag ? 'a a&b&c' : 'a\\u0026b\\u0026c')); $.append($$anchor, div);}",
+  "css": {
+    "present": true,
+    "hash": null,
+    "code": "\n\t/* (unused) #\\7a \\z {\n\t\tcolor: red;\n\t}*/\n"
+  }
+}

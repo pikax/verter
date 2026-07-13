@@ -1,0 +1,48 @@
+{
+  "slug": "legacy/attr_imported_call.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "./h.js",
+      "kind": "named",
+      "names": [
+        "helper"
+      ]
+    },
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "attr_imported_call",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "attr",
+    "bind_props"
+  ],
+  "helperSet": [
+    "attr",
+    "bind_props"
+  ],
+  "helperCounts": {
+    "attr": 1,
+    "bind_props": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

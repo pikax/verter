@@ -34,7 +34,7 @@ fn coverage_spec_matches_the_declared_design() {
     assert_eq!(four_wise.strength, 4);
 
     assert_eq!(full_product(), 272_160, "raw candidate space");
-    assert_eq!(SCHEMA_VERSION, 1);
+    assert_eq!(SCHEMA_VERSION, 3);
 }
 
 // ---------------------------------------------------------------------------
@@ -313,9 +313,9 @@ fn manifest_hash_pins_the_full_space_classification_stream() {
 // Refusal-partition structural exactness (classification tripwire)
 // ---------------------------------------------------------------------------
 
-/// The structural cause of the [`RefusalKind::LegacySlotScopeUnprovable`]
-/// partition, stated independently of `classify`'s rule order: the subject
-/// element lives in a legacy `<slot>` fallback region.
+/// The structural cause of the `<slot>`-region twin-equivalence tripwire,
+/// stated independently of `classify`'s rule order: the subject element lives
+/// in a `<slot>` fallback region.
 fn legacy_slot_cause(levels: &RowLevels) -> bool {
     levels.region == ElementRegion::LegacySlot
 }
@@ -333,8 +333,10 @@ fn parentless_nesting_cause(levels: &RowLevels) -> bool {
 }
 
 /// Scan the full candidate space under `classify_levels` and return the first
-/// structural-exactness violation (ascending ordinal order); `None` when each
-/// refusal / oracle partition is EXACTLY the row set of its structural cause.
+/// structural-exactness violation (ascending ordinal order); `None` when the
+/// oracle partition is EXACTLY the row set of its structural cause, NO row
+/// lands in the (uninhabited) refusal partition, and every `<slot>`-region row
+/// classifies IDENTICALLY to its static-element twin.
 fn refusal_exactness_violation(
     spec: &CoverageSpec<FACTOR_COUNT>,
     classify_levels: impl Fn(&RowLevels) -> Disposition,
@@ -345,21 +347,13 @@ fn refusal_exactness_violation(
             return;
         }
         let disposition = classify_levels(&levels);
-        let slot = legacy_slot_cause(&levels);
         let nesting = parentless_nesting_cause(&levels);
 
-        // Forward: a partition member carries EXACTLY its structural cause —
-        // no Supported / other-cause row can be absorbed into a partition.
+        // Forward: the refusal partition is UNINHABITED (no row may be spirited
+        // into it), and an oracle partition member carries EXACTLY its
+        // structural cause.
         match disposition {
-            Disposition::Refused(kind) => {
-                if kind != RefusalKind::LegacySlotScopeUnprovable || !slot {
-                    violation = Some(format!(
-                        "Refused({kind:?}) row without the legacy-slot structural cause: \
-                         {levels:?}"
-                    ));
-                    return;
-                }
-            }
+            Disposition::Refused(kind) => match kind {},
             Disposition::OracleRejected(kind) => {
                 if kind != DiagnosticKind::CssNestingSelectorInvalidPlacement || !nesting {
                     violation = Some(format!(
@@ -374,53 +368,34 @@ fn refusal_exactness_violation(
 
         // Backward: a structural-cause row not intercepted by an earlier
         // carrier/coherence constraint (Invalid) lands in EXACTLY its
-        // partition — never Supported, never another partition. The oracle
-        // reject precedes the refusal, so a parentless-nesting row in a
-        // legacy-slot region oracle-rejects.
-        if !matches!(disposition, Disposition::Invalid(_)) {
-            let expected = if nesting {
-                Some(Disposition::OracleRejected(
-                    DiagnosticKind::CssNestingSelectorInvalidPlacement,
-                ))
-            } else if slot {
-                Some(Disposition::Refused(RefusalKind::LegacySlotScopeUnprovable))
-            } else {
-                None
-            };
-            if let Some(expected) = expected {
-                if disposition != expected {
-                    violation = Some(format!(
-                        "structural-cause row classified {disposition:?}, expected {expected:?}: \
-                         {levels:?}"
-                    ));
-                    return;
-                }
-            }
+        // partition — never Supported, never another partition.
+        if !matches!(disposition, Disposition::Invalid(_))
+            && nesting
+            && disposition
+                != Disposition::OracleRejected(DiagnosticKind::CssNestingSelectorInvalidPlacement)
+        {
+            violation = Some(format!(
+                "structural-cause row classified {disposition:?}, expected the \
+                 parentless-nesting oracle partition: {levels:?}"
+            ));
+            return;
         }
 
-        // Twin equivalence: between a legacy-slot row and its static-element
-        // twin the ONLY classification difference is the refusal itself —
-        // this pins "reaches the refusal" (no region-conditioned constraint
-        // may spirit refusal rows into Invalid or vice versa) without
-        // duplicating the earlier constraint rules. `Refused(LegacySlot…)` ⇔
-        // twin `Supported`; every other disposition transfers kind-exactly.
-        if slot {
+        // Twin equivalence: a `<slot>`-region row classifies IDENTICALLY to its
+        // static-element twin — the fallback region carries NO classification
+        // weight of its own (no region-conditioned constraint may split the
+        // partitions), unless another typed factor independently causes an
+        // official reject / invalid constraint (which then binds BOTH twins).
+        if legacy_slot_cause(&levels) {
             let twin = RowLevels {
                 region: ElementRegion::StaticElement,
                 ..levels
             };
             let twin_disposition = classify_levels(&twin);
-            let equivalent = match (disposition, twin_disposition) {
-                (
-                    Disposition::Refused(RefusalKind::LegacySlotScopeUnprovable),
-                    Disposition::Supported,
-                ) => true,
-                (disposition, twin_disposition) => disposition == twin_disposition,
-            };
-            if !equivalent {
+            if disposition != twin_disposition {
                 violation = Some(format!(
-                    "legacy-slot row {disposition:?} diverges from its static-element twin \
-                     {twin_disposition:?} beyond the refusal itself: {levels:?}"
+                    "slot-region row {disposition:?} diverges from its static-element twin \
+                     {twin_disposition:?}: {levels:?}"
                 ));
             }
         }
@@ -428,40 +403,48 @@ fn refusal_exactness_violation(
     violation
 }
 
-/// CLASSIFICATION TRIPWIRE (structural exactness): each refusal / oracle
-/// partition equals EXACTLY the row set of its single structural cause —
-/// `Refused(LegacySlotScopeUnprovable)` ⇔ a legacy `<slot>` region row that
-/// reaches the refusal; `OracleRejected(CssNestingSelectorInvalidPlacement)`
-/// ⇔ a parentless nesting selector. A reclassification in EITHER direction
-/// (absorbing hard Supported cells into a refusal partition, or silently
-/// claiming support for a refused cell) breaks exactness and fails here — a
+/// CLASSIFICATION TRIPWIRE (structural exactness): the refusal partition is
+/// UNINHABITED (`RefusalKind` has no variants — no covering cell may be
+/// spirited into a refusal), the oracle partition equals EXACTLY the row set
+/// of its single structural cause
+/// (`OracleRejected(CssNestingSelectorInvalidPlacement)` ⇔ a parentless
+/// nesting selector), and every `<slot>`-region row classifies IDENTICALLY to
+/// its static-element twin. A reclassification in EITHER direction (absorbing
+/// hard Supported cells into the oracle partition, silently claiming support
+/// for an oracle-rejected cell, or splitting the slot twins) fails here — a
 /// full manifest regeneration cannot mask it, because the causes are pinned
 /// against the raw row levels, not against `classify`'s own output.
 #[test]
 fn refused_and_oracle_partitions_are_exactly_their_structural_cause() {
     let spec = coverage_spec();
 
-    // The exactness map is written against the CURRENT closed refusal
-    // vocabulary; a new kind must extend the causes and this map together.
-    assert_eq!(RefusalKind::ALL.len(), 1, "extend the exactness map");
+    // The exactness map is written against the CURRENT closed vocabularies; a
+    // new kind must extend the causes and this map together.
+    assert_eq!(RefusalKind::ALL.len(), 0, "extend the exactness map");
     assert_eq!(DiagnosticKind::ALL.len(), 1, "extend the exactness map");
 
     assert_eq!(refusal_exactness_violation(&spec, classify), None);
 
     // Discrimination controls: a SINGLE-row reclassification in any
     // direction must break exactness.
-    let mut refused_row: Option<RowLevels> = None;
     let mut oracle_row: Option<RowLevels> = None;
     let mut supported_row: Option<RowLevels> = None;
+    let mut supported_slot_row: Option<RowLevels> = None;
     for_each_row(&spec, |levels| match classify(&levels) {
-        Disposition::Refused(_) if refused_row.is_none() => refused_row = Some(levels),
         Disposition::OracleRejected(_) if oracle_row.is_none() => oracle_row = Some(levels),
-        Disposition::Supported if supported_row.is_none() => supported_row = Some(levels),
+        Disposition::Supported => {
+            if supported_row.is_none() {
+                supported_row = Some(levels);
+            }
+            if supported_slot_row.is_none() && levels.region == ElementRegion::LegacySlot {
+                supported_slot_row = Some(levels);
+            }
+        }
         _ => {}
     });
-    let refused_row = refused_row.expect("a Refused row exists");
     let oracle_row = oracle_row.expect("an OracleRejected row exists");
     let supported_row = supported_row.expect("a Supported row exists");
+    let supported_slot_row = supported_slot_row.expect("a Supported slot-region row exists");
 
     let reclassify = |from: RowLevels, to: Disposition| {
         move |levels: &RowLevels| {
@@ -477,17 +460,6 @@ fn refused_and_oracle_partitions_are_exactly_their_structural_cause() {
             &spec,
             reclassify(
                 supported_row,
-                Disposition::Refused(RefusalKind::LegacySlotScopeUnprovable),
-            ),
-        )
-        .is_some(),
-        "a Supported row absorbed into the refusal partition must break exactness"
-    );
-    assert!(
-        refusal_exactness_violation(
-            &spec,
-            reclassify(
-                supported_row,
                 Disposition::OracleRejected(DiagnosticKind::CssNestingSelectorInvalidPlacement),
             ),
         )
@@ -495,35 +467,38 @@ fn refused_and_oracle_partitions_are_exactly_their_structural_cause() {
         "a Supported row absorbed into the oracle partition must break exactness"
     );
     assert!(
-        refusal_exactness_violation(&spec, reclassify(refused_row, Disposition::Supported))
-            .is_some(),
-        "a refused cell reclassified Supported must break exactness"
-    );
-    assert!(
         refusal_exactness_violation(&spec, reclassify(oracle_row, Disposition::Supported))
             .is_some(),
         "an oracle-rejected cell reclassified Supported must break exactness"
     );
+    // The slot-twin control: re-splitting a Supported slot-region row away
+    // from its static-element twin must break the twin equivalence.
+    assert!(
+        refusal_exactness_violation(
+            &spec,
+            reclassify(
+                supported_slot_row,
+                Disposition::Invalid(ConstraintKind::MaybeNeedsUncertainSource),
+            ),
+        )
+        .is_some(),
+        "a slot-region row reclassified away from its twin must break exactness"
+    );
 }
 
-/// CLASSIFICATION TRIPWIRE (pinned literals) — belt-and-suspenders to the
-/// structural-exactness test above: the four full-space partition totals are
-/// pinned as LITERALS, so ANY reclassification (including a
-/// Refused ↔ Invalid shuffle the exactness causes alone cannot see) moves a
-/// pinned number and must arrive as a conscious, reviewed edit of this test —
-/// regenerating the manifest cannot silently absorb cells into a partition.
 #[test]
 fn full_space_partition_counts_are_pinned_literals() {
     let manifest = manifest();
     assert_eq!(
         manifest.supported_row_count(),
-        31_890,
-        "Supported full-space rows"
+        38_348,
+        "Supported full-space rows (the former 6,458 slot-region refusal rows \
+         reclassified Supported)"
     );
     assert_eq!(
         manifest.refused_inventory(),
-        &[(RefusalKind::LegacySlotScopeUnprovable, 6_458)][..],
-        "Refused full-space rows, per kind"
+        &[][..],
+        "the refusal partition is uninhabited"
     );
     assert_eq!(
         manifest.oracle_rejected_inventory(),
@@ -533,7 +508,7 @@ fn full_space_partition_counts_are_pinned_literals() {
     let invalid: u64 = manifest.invalid_inventory().iter().map(|&(_, n)| n).sum();
     assert_eq!(invalid, 229_492, "Invalid full-space rows");
     assert_eq!(
-        31_890 + 6_458 + 4_320 + 229_492,
+        38_348 + 4_320 + 229_492,
         full_product(),
         "the pinned literals tile the whole candidate space"
     );

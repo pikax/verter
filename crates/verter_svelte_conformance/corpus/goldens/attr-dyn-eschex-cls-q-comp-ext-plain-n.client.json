@@ -1,0 +1,65 @@
+{
+  "slug": "attr-dyn-eschex-cls-q-comp-ext-plain-n",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "./Child.svelte",
+      "kind": "default",
+      "names": [
+        "default:Child"
+      ]
+    },
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "attr_dyn_eschex_cls_q_comp_ext_plain_n",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "template_effect",
+    "set_class",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "from_html",
+    "set_class",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "template_effect": 1,
+    "set_class": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div>x</div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; import Child from './Child.svelte'; var root = $.from_html(`<div>x</div>`); export default function attr_dyn_eschex_cls_q_comp_ext_plain_n($$anchor, $$props) {Child($$anchor, {children: ($$anchor, $$slotProps) => {var div = root(); $.template_effect(() => $.set_class(div, 1, $$props.flag ? 'a a&b' : 'a\\u0026b')); $.append($$anchor, div);}, $$slots: {default: true}});}",
+  "css": {
+    "present": true,
+    "hash": null,
+    "code": "\n\t/* (unused) [data-x=\"\\7a z\"] {\n\t\tcolor: red;\n\t}*/\n"
+  }
+}

@@ -1087,22 +1087,133 @@ fn genuinely_unused_rules_carry_used_false() {
 // Fail-closed unprovable constructs.
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────────────────────
+// `<slot>` block-semantic projection (official `SlotElement` — css-prune.js).
+// ─────────────────────────────────────────────────────────────────────────────
+
 #[test]
-fn legacy_slot_element_fails_closed() {
-    let f = facts("<div><slot></slot></div>\n<style>div { color: red; }</style>");
-    assert!(
-        f.unprovable.is_some_and(|c| c.contains("<slot>")),
-        "a legacy <slot> is unprovable, got {:?}",
-        f.unprovable
+fn slot_fallback_element_matches_and_scopes() {
+    // A selector matching an element INSIDE the slot fallback: the fallback
+    // fragment projects (kept + the fallback element scoped); the slot itself
+    // NEVER enters the element inventory (no scope hash on a non-element).
+    let f = facts(
+        "<div><slot><p class=\"fb\">x</p></slot></div>\n<style>.fb { color: red; }\n.absent { color: red; }</style>",
     );
-    // Fail-closed constructs NO plan, so NO facts exist at all: no used
-    // verdicts (the matching `div` included) and no scoped elements.
+    assert_proven(&f);
+    assert!(f.used(".fb"), "the fallback element matches: {:?}", f.used);
+    assert!(!f.used(".absent"), "an absent class still prunes");
     assert!(
-        f.used.is_empty(),
-        "an unprovable relation publishes no used facts: {:?}",
+        f.scoped_tag("p"),
+        "the fallback <p> is scoped: {:?}",
+        f.scoped_tags
+    );
+    assert!(
+        !f.scoped_tag("slot"),
+        "the slot itself never receives the scope hash: {:?}",
+        f.scoped_tags
+    );
+}
+
+#[test]
+fn outer_before_slot_to_fallback_first_adjacency_matches() {
+    // `.outer + .inner` where `.inner` is the FIRST fallback element: the
+    // sibling walk climbs OUT of the fallback fragment (the slot is a block
+    // boundary, not a stop) and finds the definite outer sibling.
+    let f = facts(
+        "<div><i class=\"outer\">a</i><slot><p class=\"inner\">x</p></slot></div>\n<style>.outer + .inner { color: red; }</style>",
+    );
+    assert_proven(&f);
+    assert!(
+        f.used(".outer + .inner"),
+        "the fallback-first adjacency crosses the slot boundary: {:?}",
         f.used
     );
-    assert!(f.scoped_tags.is_empty());
+    assert!(f.scoped_tag("p") && f.scoped_tag("i"));
+}
+
+#[test]
+fn fallback_last_to_outer_after_slot_adjacency_is_fail_open() {
+    // `.last + .after` where `.last` is the LAST fallback element and `.after`
+    // follows the slot: the slot sibling projects its fallback boundary
+    // candidates NON-exhaustively (supplied content may render instead), so the
+    // relation is kept fail-open and both elements scope.
+    let f = facts(
+        "<div><slot><p class=\"last\">x</p></slot><em class=\"after\">y</em></div>\n<style>.last + .after { color: red; }</style>",
+    );
+    assert_proven(&f);
+    assert!(
+        f.used(".last + .after"),
+        "the fallback-last adjacency is kept (fail-open): {:?}",
+        f.used
+    );
+    assert!(f.scoped_tag("p") && f.scoped_tag("em"));
+}
+
+#[test]
+fn empty_fallback_slot_between_outer_siblings_keeps_adjacency() {
+    // `.a + .b` with an EMPTY-fallback slot between: the sibling walk records
+    // the slot as PROBABLY (it may render supplied content) and keeps stepping
+    // to the definite `.a` sibling — official keeps the adjacency.
+    let f = facts(
+        "<div><i class=\"a\">a</i><slot></slot><em class=\"b\">b</em></div>\n<style>.a + .b { color: red; }\n.zz + .b { color: red; }</style>",
+    );
+    assert_proven(&f);
+    assert!(
+        f.used(".a + .b"),
+        "the walk steps past the slot to the definite sibling: {:?}",
+        f.used
+    );
+    // NEGATIVE: a never-present left side still prunes — the slot's PROBABLY
+    // entry alone must not fail the walk open for a non-global selector.
+    assert!(
+        !f.used(".zz + .b"),
+        "a non-matching adjacency with only the slot between stays pruned: {:?}",
+        f.used
+    );
+}
+
+#[test]
+fn sibling_walk_continues_past_a_slot_with_definite_fallback_content() {
+    // `.pre + .after` across a slot whose FALLBACK carries a definite element:
+    // the slot's boundary candidates are NON-exhaustive (supplied content may
+    // render instead), so the adjacent walk must NOT early-return on them — it
+    // keeps stepping to the definite `.pre` sibling BEFORE the slot. An
+    // (incorrect) exhaustive fallback projection would stop at the fallback
+    // `<p>` and prune the relation.
+    let f = facts(
+        "<div><span class=\"pre\">a</span><slot><p class=\"last\">x</p></slot><em class=\"after\">y</em></div>\n<style>.pre + .after { color: red; }</style>",
+    );
+    assert_proven(&f);
+    assert!(
+        f.used(".pre + .after"),
+        "the walk continues past the slot's non-exhaustive fallback: {:?}",
+        f.used
+    );
+    assert!(f.scoped_tag("span") && f.scoped_tag("em"));
+}
+
+#[test]
+fn global_sibling_over_slot_is_kept_by_the_slot_uncertainty() {
+    // `:global(.x) + em`: the slot sibling takes the official
+    // `SlotElement`-uncertainty arm — a SINGLE all-global remainder matches
+    // (the slot may render a `.x`), so the rule is kept and `em` scopes. The
+    // NON-global twin (`.x + em` with no `.x` anywhere) stays pruned — the
+    // uncertainty arm is global-remainder-ONLY.
+    let f = facts(
+        "<div><slot></slot><em>y</em></div>\n<style>:global(.x) + em { color: red; }\n.x + em { color: red; }</style>",
+    );
+    assert_proven(&f);
+    assert!(
+        f.used(":global(.x) + em"),
+        "the global sibling over a slot is kept: {:?}",
+        f.used
+    );
+    assert!(
+        !f.used(".x + em"),
+        "the non-global twin stays pruned: {:?}",
+        f.used
+    );
+    assert!(f.scoped_tag("em"));
 }
 
 #[test]

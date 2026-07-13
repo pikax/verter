@@ -245,6 +245,13 @@ fn walk_node_topology(
                 walk_node_topology(ir, child, helpers, delegated, scope_facts);
             }
         }
+        // A `<slot>` outlet records its `$.slot` call; its fallback content is
+        // its OWN template region (walked here so its block / render helpers
+        // record — its factory rides `html.templates` like every region).
+        IrNode::Slot(slot) => {
+            helpers.call(SvelteHelper::Slot);
+            walk_topology(ir, slot.fallback, helpers, delegated, scope_facts);
+        }
         IrNode::Block(block) => match block {
             BlockIr::If { branches } => {
                 helpers.call(SvelteHelper::If);

@@ -1,0 +1,38 @@
+{
+  "slug": "id-spread-eschex-cls-q-blk-ext-plain-u",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "id_spread_eschex_cls_q_blk_ext_plain_u",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "attributes"
+  ],
+  "helperSet": [
+    "attributes"
+  ],
+  "helperCounts": {
+    "attributes": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": true,
+    "hash": "svelte-12yx7ic",
+    "code": "\n\t#a\\26 b.svelte-<scoped> {\n\t\tcolor: red;\n\t}\n"
+  }
+}

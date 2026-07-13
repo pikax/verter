@@ -1,0 +1,45 @@
+{
+  "slug": "legacy/attr_mixed_call_member.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "attr_mixed_call_member",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "attr",
+    "stringify",
+    "stringify",
+    "bind_props"
+  ],
+  "helperSet": [
+    "attr",
+    "bind_props",
+    "stringify"
+  ],
+  "helperCounts": {
+    "attr": 1,
+    "stringify": 2,
+    "bind_props": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

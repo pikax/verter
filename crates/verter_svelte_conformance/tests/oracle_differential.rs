@@ -52,17 +52,10 @@
 //!   5. Verter's matcher tri-state: the observed [`MatchCertainty`] pattern
 //!      must be consistent with the fixture's DECLARED `expected_outcome`
 //!      (the shared `common::expected_certainty_pattern` expectation).
-//! - **Refused** — the official goldens prove the fixture COMPILES and
-//!   ACTUALLY SCOPES the declared selector (disposition-aware evidence on
-//!   both backend goldens: `css.present` PLUS a non-null scope hash PLUS
-//!   non-empty scoped css carrying the masked scope class PLUS, on the
-//!   client golden, a non-empty scope-token delivery signature with
-//!   consistent scoped-template topology — `present` alone also admits a
-//!   fully-PRUNED `{hash: null, code: ""}` capture, which proves nothing),
-//!   while Verter must fail closed with the typed
-//!   `svelte-runtime-unsupported-style-selector` refusal and record NO
-//!   matcher facts (the selector never enters the used set) — the grounded,
-//!   DECLARED Verter↔official divergence.
+//! - **Refused** — UNINHABITED (`RefusalKind` has no variants): every
+//!   officially-compilable covering cell is Supported, and the empty match in
+//!   the disposition arm keeps the rail closed (a future refusal kind must
+//!   land with its own typed evidence rule + self-tests).
 //! - **Oracle-rejected** — the official goldens are the captured diagnostic
 //!   (`{rejected: true, diagnostic}`, backend-independent); Verter must ALSO
 //!   reject, with the diagnostic identity (`code` equality) of the CLIENT
@@ -96,9 +89,7 @@ use verter_compiler::svelte::runtime::{
     ClientCompileError, ClientModule, UnsupportedSvelteRuntimeSurface,
 };
 use verter_svelte_conformance::manifest::{manifest, ManifestCase};
-use verter_svelte_conformance::model::{
-    CompileTarget, CssSource, Disposition, MatchOutcome, RefusalKind,
-};
+use verter_svelte_conformance::model::{CompileTarget, CssSource, Disposition, MatchOutcome};
 
 /// The committed corpus size this differential runs over — the shared
 /// test-side pin (`common/case_count.rs`). A manifest change legitimately
@@ -805,101 +796,6 @@ fn check_supported_against_golden(
     facts
 }
 
-/// The official-scoping EVIDENCE a Refused golden must carry — the official
-/// side of the DECLARED Verter↔official divergence. `css.present` alone is
-/// NOT proof the official compiler scoped anything: `present: true` also
-/// admits a fully-PRUNED capture (`{hash: null, code: ""}` — a stylesheet
-/// existed but nothing was scoped). Every refused partition today is a
-/// MATCH cell, so the official compiler must have ACTUALLY scoped the
-/// declared selector; the check mirrors the supported-case scoping axes on
-/// the official artifacts:
-///
-/// 1. `css.present` (a stylesheet survived),
-/// 2. a NON-NULL, non-empty scope `hash` (a scope token was minted),
-/// 3. non-empty scoped `css.code` CARRYING the masked scope class (the
-///    declared selector was rewritten with the scoping class),
-/// 4. (client golden only — the server golden carries no module) a
-///    `clientModule` whose scope-token delivery signature is NON-EMPTY, and
-///    every scoped golden template appearing VERBATIM in it (the
-///    scoped-template topology, exactly the supported axis-2 shape).
-///
-/// A refused cell with a NON-Match declared outcome has no defined evidence
-/// rule yet — that fails loudly so the rule is extended deliberately, never
-/// silently assumed.
-fn check_refused_official_scoping(
-    slug: &str,
-    backend: CompileTarget,
-    kind: RefusalKind,
-    expected_outcome: MatchOutcome,
-    golden: &CompiledGolden,
-    violations: &mut Vec<String>,
-) {
-    let backend_id = backend.id();
-    if expected_outcome != MatchOutcome::Match {
-        violations.push(format!(
-            "{slug} [{backend_id}] Disposition: a Refused({kind:?}) cell with declared \
-             outcome {expected_outcome:?} has no official-scoping evidence rule — extend \
-             check_refused_official_scoping deliberately for the new refusal shape"
-        ));
-        return;
-    }
-    if !golden.css.present {
-        violations.push(format!(
-            "{slug} [{backend_id}] Disposition: a Refused({kind:?}) golden must show \
-             official scoping (css.present)"
-        ));
-    }
-    if golden
-        .css
-        .hash
-        .as_deref()
-        .is_none_or(|hash| hash.is_empty())
-    {
-        violations.push(format!(
-            "{slug} [{backend_id}] Disposition: a Refused({kind:?}) golden must carry a \
-             non-null scope hash — a pruned capture ({:?}) is not official scoping",
-            golden.css.hash
-        ));
-    }
-    match golden.css.code.as_deref() {
-        Some(code) if !code.is_empty() && code.contains(SCOPE_MASK) => {}
-        other => violations.push(format!(
-            "{slug} [{backend_id}] Disposition: a Refused({kind:?}) golden must carry \
-             non-empty scoped css code with the `{SCOPE_MASK}` scope class on the \
-             declared selector (found {other:?})"
-        )),
-    }
-    if backend == CompileTarget::Client {
-        match golden.client_module.as_deref() {
-            None => violations.push(format!(
-                "{slug} [{backend_id}] golden integrity: a refused CLIENT golden must \
-                 carry `clientModule` (the scope-token delivery evidence)"
-            )),
-            Some(client_module) => {
-                if scope_token_signature(client_module).is_empty() {
-                    violations.push(format!(
-                        "{slug} [{backend_id}] Disposition: a Refused({kind:?}) client \
-                         golden must DELIVER the scope token somewhere in its \
-                         clientModule (template html or a runtime carrier) — a \
-                         token-free module means nothing was scoped"
-                    ));
-                }
-                for template in &golden.templates {
-                    if template.html.contains(SCOPE_MASK) && !client_module.contains(&template.html)
-                    {
-                        violations.push(format!(
-                            "{slug} [{backend_id}] Disposition: the scoped golden \
-                             template {:?} (factory `{}`) is absent from the golden's \
-                             own clientModule — inconsistent official capture",
-                            template.html, template.factory
-                        ));
-                    }
-                }
-            }
-        }
-    }
-}
-
 /// The official backend-independence INVARIANT on a compiled golden pair:
 /// CSS scoping is backend-independent in the official compiler, so the
 /// server golden's normalized css payload must equal the client golden's.
@@ -984,7 +880,7 @@ fn verter_agrees_with_official_goldens_on_css_conformance_axes() {
     let root = corpus_root();
     let mut violations: Vec<String> = Vec::new();
     let mut observed: BTreeSet<DivergenceKey> = BTreeSet::new();
-    let (mut supported_seen, mut refused_seen, mut oracle_rejected_seen) = (0usize, 0usize, 0usize);
+    let (mut supported_seen, mut oracle_rejected_seen) = (0usize, 0usize);
     let mut compiled_count = 0usize;
     let (mut runtime_delivery_cases, mut token_free_module_delivery_cases, mut injected_cases) =
         (0usize, 0usize, 0usize);
@@ -1073,72 +969,10 @@ fn verter_agrees_with_official_goldens_on_css_conformance_axes() {
                 }
                 check_matcher_certainty(case, &trace, &mut observed, &mut violations);
             }
-            Disposition::Refused(kind) => {
-                refused_seen += 1;
-                // The official side of the declared divergence: the goldens
-                // prove the fixture compiles AND scopes on both backends, and
-                // the css payload is backend-independent.
-                let compiled_pair = match (&client_golden, &server_golden) {
-                    (Golden::Compiled(client), Golden::Compiled(server)) => Some((client, server)),
-                    _ => {
-                        for (backend, golden) in [
-                            (CompileTarget::Client, &client_golden),
-                            (CompileTarget::Server, &server_golden),
-                        ] {
-                            if matches!(golden, Golden::Rejected(_)) {
-                                violations.push(format!(
-                                    "{} [{}] Disposition: declared Refused({kind:?}) but the \
-                                     official golden is a rejection capture",
-                                    case.slug,
-                                    backend.id()
-                                ));
-                            }
-                        }
-                        None
-                    }
-                };
-                if let Some((client, server)) = compiled_pair {
-                    for (backend, golden) in [
-                        (CompileTarget::Client, client),
-                        (CompileTarget::Server, server),
-                    ] {
-                        check_golden_identity(&case.slug, backend, golden, &mut violations);
-                        check_refused_official_scoping(
-                            &case.slug,
-                            backend,
-                            kind,
-                            case.expected_outcome,
-                            golden,
-                            &mut violations,
-                        );
-                    }
-                    check_compiled_backend_independence(
-                        &case.slug,
-                        client,
-                        server,
-                        &mut violations,
-                    );
-                }
-                // The Verter side: the typed fail-closed refusal, with the
-                // selector never entering the used set (no matcher facts).
-                match &result {
-                    Err(ClientCompileError::Unsupported(
-                        UnsupportedSvelteRuntimeSurface::StyleSelectorUnsupported { code, .. },
-                    )) if *code == "svelte-runtime-unsupported-style-selector" => {}
-                    other => violations.push(format!(
-                        "{} Disposition: declared Refused({kind:?}) expects the typed \
-                         `svelte-runtime-unsupported-style-selector` refusal, observed {other:?}",
-                        case.slug
-                    )),
-                }
-                if !trace.style_matches.is_empty() {
-                    violations.push(format!(
-                        "{} Disposition: a refused fixture must record no matcher facts (the \
-                         selector never enters the used set)",
-                        case.slug
-                    ));
-                }
-            }
+            // The refusal vocabulary is UNINHABITED — a declared Refused row is
+            // impossible by construction (a future refusal kind must land with
+            // its own typed evidence rule + observation arm here).
+            Disposition::Refused(kind) => match kind {},
             Disposition::OracleRejected(kind) => {
                 oracle_rejected_seen += 1;
                 let rejected_pair = match (&client_golden, &server_golden) {
@@ -1206,12 +1040,11 @@ fn verter_agrees_with_official_goldens_on_css_conformance_axes() {
     // disposition partition exercised.
     assert_eq!(compiled_count, CASE_COUNT, "Verter compiled every fixture");
     assert_eq!(
-        supported_seen + refused_seen + oracle_rejected_seen,
+        supported_seen + oracle_rejected_seen,
         CASE_COUNT,
         "every committed case must be compared"
     );
     assert!(supported_seen > 0, "no Supported case was compared");
-    assert!(refused_seen > 0, "no Refused case was compared");
     assert!(
         oracle_rejected_seen > 0,
         "no OracleRejected case was compared"
@@ -1310,8 +1143,10 @@ fn check_rejected_identity(
 
 // ---------------------------------------------------------------------------
 // Committed RED self-tests: each mutates an in-memory golden/declaration and
-// asserts the checker reports the expected violation — a silently weakened
-// checker fails IN-TREE, without any out-of-tree plant recipe.
+// asserts the checker reports the expected violation — a checker silently
+// weakened on one of the violation classes exercised below fails IN-TREE,
+// without any out-of-tree plant recipe (unexercised classes rely on the
+// out-of-tree plant recipes).
 // ---------------------------------------------------------------------------
 
 /// Compile one committed fixture through Verter's client pipeline.
@@ -1568,109 +1403,6 @@ fn self_test_mutated_rejected_golden_is_detected() {
             .iter()
             .any(|v| v.contains("`rejected` must be true")),
         "a falsified rejection marker must fail identity integrity: {marker_violations:?}"
-    );
-}
-
-/// A PRESENT-BUT-PRUNED refused golden (`css.present: true`, null hash,
-/// empty code, no scope token anywhere) must FAIL the refused
-/// official-scoping evidence — the committed RED proof that `css.present`
-/// alone is NOT accepted as scoping proof for the refused Match cell.
-#[test]
-fn self_test_pruned_refused_golden_is_detected() {
-    let case = find_case(|case| matches!(case.disposition, Disposition::Refused(_)));
-    let Disposition::Refused(kind) = case.disposition else {
-        unreachable!("selected by the predicate above");
-    };
-    assert_eq!(
-        case.expected_outcome,
-        MatchOutcome::Match,
-        "the refused partition is a Match cell (must scope)"
-    );
-    let golden = read_compiled_client_golden(case);
-
-    // Control: the committed refused golden carries REAL scoping evidence.
-    let mut violations = Vec::new();
-    check_refused_official_scoping(
-        &case.slug,
-        CompileTarget::Client,
-        kind,
-        case.expected_outcome,
-        &golden,
-        &mut violations,
-    );
-    assert!(
-        violations.is_empty(),
-        "control: the committed refused golden must pass the scoping evidence: {violations:?}"
-    );
-
-    // The mutation: a stylesheet that survived (`present: true`) but was
-    // fully PRUNED — nothing scoped, no hash, no token delivery.
-    let mut pruned = golden;
-    pruned.css = GoldenCss {
-        present: true,
-        hash: None,
-        code: Some(String::new()),
-    };
-    let stripped_module = pruned
-        .client_module
-        .as_deref()
-        .expect("refused client golden carries clientModule")
-        .replace(SCOPE_MASK, "unscoped");
-    pruned.client_module = Some(stripped_module);
-    for template in &mut pruned.templates {
-        template.html = template.html.replace(SCOPE_MASK, "unscoped");
-    }
-
-    let mut violations = Vec::new();
-    check_refused_official_scoping(
-        &case.slug,
-        CompileTarget::Client,
-        kind,
-        case.expected_outcome,
-        &pruned,
-        &mut violations,
-    );
-    assert!(
-        violations.iter().any(|v| v.contains("non-null scope hash")),
-        "a null hash must fail the refused scoping evidence: {violations:?}"
-    );
-    assert!(
-        violations
-            .iter()
-            .any(|v| v.contains("non-empty scoped css code")),
-        "empty scoped css code must fail the refused scoping evidence: {violations:?}"
-    );
-    assert!(
-        violations
-            .iter()
-            .any(|v| v.contains("DELIVER the scope token")),
-        "a token-free clientModule must fail the refused scoping evidence: {violations:?}"
-    );
-}
-
-/// An UNDEFINED refused shape — a declared non-Match outcome — fails loudly
-/// instead of silently passing a weaker evidence rule.
-#[test]
-fn self_test_refused_non_match_outcome_fails_closed() {
-    let case = find_case(|case| matches!(case.disposition, Disposition::Refused(_)));
-    let Disposition::Refused(kind) = case.disposition else {
-        unreachable!("selected by the predicate above");
-    };
-    let golden = read_compiled_client_golden(case);
-    let mut violations = Vec::new();
-    check_refused_official_scoping(
-        &case.slug,
-        CompileTarget::Client,
-        kind,
-        MatchOutcome::NoMatch,
-        &golden,
-        &mut violations,
-    );
-    assert!(
-        violations
-            .iter()
-            .any(|v| v.contains("no official-scoping evidence rule")),
-        "a refused non-Match cell has no evidence rule and must fail closed: {violations:?}"
     );
 }
 

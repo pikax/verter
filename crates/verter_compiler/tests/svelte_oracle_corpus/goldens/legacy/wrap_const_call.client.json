@@ -1,0 +1,108 @@
+{
+  "slug": "legacy/wrap_const_call.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "wrap_const_call",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "push",
+    "prop",
+    "init",
+    "comment",
+    "first_child",
+    "each",
+    "deep_read_state",
+    "untrack",
+    "index",
+    "derived_safe_equal",
+    "deep_read_state",
+    "untrack",
+    "child",
+    "reset",
+    "template_effect",
+    "set_text",
+    "get",
+    "append",
+    "append",
+    "pop"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "comment",
+    "deep_read_state",
+    "derived_safe_equal",
+    "each",
+    "first_child",
+    "from_html",
+    "get",
+    "index",
+    "init",
+    "pop",
+    "prop",
+    "push",
+    "reset",
+    "set_text",
+    "template_effect",
+    "untrack"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "push": 1,
+    "prop": 1,
+    "init": 1,
+    "comment": 1,
+    "first_child": 1,
+    "each": 1,
+    "deep_read_state": 2,
+    "untrack": 2,
+    "index": 1,
+    "derived_safe_equal": 1,
+    "child": 1,
+    "reset": 1,
+    "template_effect": 1,
+    "set_text": 1,
+    "get": 1,
+    "append": 2,
+    "pop": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<p> </p>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<p> </p>`); export default function wrap_const_call($$anchor, $$props) {$.push($$props, false); let obj = $.prop($$props, 'obj', 8); $.init(); var fragment = $.comment(); var node = $.first_child(fragment); $.each(node, 1, () => ($.deep_read_state(obj()), $.untrack(() => obj().list())), $.index, ($$anchor, item) => {const y = $.derived_safe_equal(() => ($.deep_read_state(obj()), $.untrack(() => obj().m()))); var p = root(); var text = $.child(p, true); $.reset(p); $.template_effect(() => $.set_text(text, $.get(y))); $.append($$anchor, p);}); $.append($$anchor, fragment); $.pop();}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

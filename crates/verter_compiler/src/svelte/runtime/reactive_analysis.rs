@@ -55,22 +55,28 @@ use super::expr::{
 /// handler arrow inside an interpolation is not the evaluated reactive value, and
 /// official sets `expression: null` there so neither its identifiers nor its calls
 /// participate.
-#[must_use]
+/// FAIL-CLOSED recovery contract: this analysis re-derives its facts by
+/// re-walking the expression source (the scope-aware source-order rule cannot
+/// be finalized at canonical-parse time — binding kinds finalize after
+/// lowering); a recovery failure (the source fails to parse as an
+/// expression) returns `Err(())` so the caller surfaces a PRECISE unsupported
+/// diagnostic — never a silent `false` that would degrade a `BuildExpression`
+/// surface to raw.
 pub fn expr_has_call(
     source: &str,
     scope: ScopeId,
     bindings: &BindingTable,
     scopes: &ScopeGraph,
     declared_roots: &rustc_hash::FxHashSet<String>,
-) -> bool {
+) -> Result<bool, ()> {
     let alloc = Allocator::default();
     let wrapped = format!("({source})");
     let parsed = oxc_parser::Parser::new(&alloc, &wrapped, SourceType::tsx()).parse();
     if parsed.panicked || !parsed.errors.is_empty() {
-        return false;
+        return Err(());
     }
     let Some(Statement::ExpressionStatement(stmt)) = parsed.program.body.first() else {
-        return false;
+        return Err(());
     };
     let inner = match &stmt.expression {
         Expression::ParenthesizedExpression(p) => &p.expression,
@@ -85,7 +91,7 @@ pub fn expr_has_call(
         found: false,
     };
     scan.visit_expr(inner);
-    scan.found
+    Ok(scan.found)
 }
 
 // ---------------------------------------------------------------------------
@@ -219,17 +225,16 @@ fn collect_program_top_level_names(program: &Program<'_>, out: &mut rustc_hash::
 /// not counted; a prop / tracking const / import is NOT a signal (it emits
 /// `$$props.x` / a plain read, not `$.get`), so [`is_signal_kind`] stays free of
 /// them.
+/// Consumes the expression's STORED reference facts (populated once by the
+/// canonical analysis parse) — no reparse, no fail-open recovery.
 #[must_use]
 pub(super) fn expr_references_signal(
-    source: &str,
+    references: &[super::expr::ExprReference],
     scope: ScopeId,
     bindings: &BindingTable,
     scopes: &ScopeGraph,
 ) -> bool {
-    let Ok(facts) = super::expr::collect_expr_references(source) else {
-        return false;
-    };
-    facts.references.iter().any(|r| {
+    references.iter().any(|r| {
         bindings
             .resolve_kind(scopes, scope, &r.name)
             .is_some_and(|k| {
@@ -266,17 +271,20 @@ pub(super) fn expr_references_signal(
 ///    init. The scan does NOT descend into nested function bodies, so `{() => obj.x}`
 ///    stays a plain init (rule 1 is preserved). Verified against pinned svelte@5.56.3
 ///    (component + boundary emit identically).
-#[must_use]
+///
+/// Consumes the expression's STORED reference facts for the synchronous-read
+/// half (no reparse); the binding-impurity half still re-walks `source`
+/// (scope-aware member/mutation structure) and FAILS CLOSED — `Err(())` on a
+/// recovery failure, so the caller surfaces a precise diagnostic instead of a
+/// silent plain-init downgrade.
 pub(super) fn prop_value_has_state(
+    references: &[super::expr::ExprReference],
     source: &str,
     scope: ScopeId,
     bindings: &BindingTable,
     scopes: &ScopeGraph,
-) -> bool {
-    let Ok(facts) = super::expr::collect_expr_references(source) else {
-        return false;
-    };
-    facts.references.iter().any(|r| {
+) -> Result<bool, ()> {
+    let sync_state = references.iter().any(|r| {
         !r.in_function
             && bindings
                 .resolve_kind(scopes, scope, &r.name)
@@ -297,7 +305,11 @@ pub(super) fn prop_value_has_state(
                         // getter form (`get name() { return x; }`).
                         || super::expr::is_import_binding(k)
                 })
-    }) || expr_has_binding_impurity(source, scope, bindings, scopes)
+    });
+    if sync_state {
+        return Ok(true);
+    }
+    expr_has_binding_impurity(source, scope, bindings, scopes)
 }
 
 /// Whether a template expression carries a BINDING IMPURITY — a MEMBER access whose
@@ -332,21 +344,24 @@ pub(super) fn prop_value_has_state(
 /// an evaluated LHS computed key (`globalThis[obj.y] = 1`), or a destructuring default /
 /// computed key (`[foo = obj.y] = g` / `({ [obj.y]: foo } = g)`). Function bodies are not
 /// descended, so a mutation deferred inside `{() => plain = 1}` stays a plain init.
-#[must_use]
+/// FAIL-CLOSED recovery contract: the member/mutation structure is re-walked
+/// from `source` (scope-aware, not finalizable at canonical-parse time); a
+/// recovery failure returns `Err(())` so the caller surfaces a precise
+/// diagnostic — never a silent `false`.
 pub(super) fn expr_has_binding_impurity(
     source: &str,
     scope: ScopeId,
     bindings: &BindingTable,
     scopes: &ScopeGraph,
-) -> bool {
+) -> Result<bool, ()> {
     let alloc = Allocator::default();
     let wrapped = format!("({source})");
     let parsed = oxc_parser::Parser::new(&alloc, &wrapped, SourceType::tsx()).parse();
     if parsed.panicked || !parsed.errors.is_empty() {
-        return false;
+        return Err(());
     }
     let Some(Statement::ExpressionStatement(stmt)) = parsed.program.body.first() else {
-        return false;
+        return Err(());
     };
     let mut scan = BindingImpurityScan {
         bindings,
@@ -355,7 +370,7 @@ pub(super) fn expr_has_binding_impurity(
         found: false,
     };
     scan.visit_expr(&stmt.expression);
-    scan.found
+    Ok(scan.found)
 }
 
 /// Walks an expression tree for the IMPURE portion of `has_state`: a MEMBER access

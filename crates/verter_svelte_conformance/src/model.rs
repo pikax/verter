@@ -193,10 +193,12 @@ model_enum! {
         Block => "blk",
         /// A static element inside a `{#snippet}` rendered via `{@render}`.
         Snippet => "snip",
-        /// A static element inside a legacy `<slot>` fallback. Officially
-        /// compilable (deprecated); Verter's selector-to-template matcher
-        /// fails closed on legacy `SlotElement` semantics, so these cells are
-        /// declared [`RefusalKind::LegacySlotScopeUnprovable`].
+        /// A static element inside a `<slot>` fallback region. The slot outlet
+        /// lowers block-semantically (`$.slot(node, $$props, …)` against a `<!>`
+        /// anchor) and its fallback fragment projects through the
+        /// selector-to-template matcher (official `SlotElement` semantics), so
+        /// these cells are Supported: the fallback subject scopes/prunes exactly
+        /// like its static-element twin.
         LegacySlot => "slot",
     }
 }
@@ -261,14 +263,35 @@ model_enum! {
 // Classification enums
 // ---------------------------------------------------------------------------
 
-model_enum! {
-    /// Verter-declared refusal cells: officially-compilable fixtures whose
-    /// faithful scoped emission Verter fails closed on today.
-    pub enum RefusalKind {
-        /// A legacy `<slot>` region: official `SlotElement` block semantics
-        /// are not represented in Verter's runtime IR, so the matcher refuses
-        /// (`svelte-runtime-unsupported-style-selector`) instead of guessing.
-        LegacySlotScopeUnprovable => "legacy-slot-scope-unprovable",
+/// Verter-declared refusal cells: officially-compilable fixtures whose
+/// faithful scoped emission Verter fails closed on today. Currently
+/// UNINHABITED — every officially-compilable covering cell is Supported (the
+/// `<slot>` fallback region now lowers + scopes through the shared matcher) —
+/// the typed rail is retained so a future refusal lands as a variant plus its
+/// observation arm, never a parallel hand-authored list.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum RefusalKind {}
+
+impl RefusalKind {
+    /// Every variant, in declaration (= ordinal) order.
+    pub const ALL: &'static [Self] = &[];
+
+    /// The stable, slug-safe identifier fragment of this level.
+    #[must_use]
+    pub fn id(self) -> &'static str {
+        match self {}
+    }
+
+    /// Dense ordinal (declaration order, starting at 0).
+    #[must_use]
+    pub fn ordinal(self) -> u16 {
+        match self {}
+    }
+
+    /// Inverse of [`ordinal`](Self::ordinal); `None` out of range.
+    #[must_use]
+    pub fn from_ordinal(_ordinal: u16) -> Option<Self> {
+        None
     }
 }
 
@@ -554,12 +577,9 @@ pub fn classify(levels: &RowLevels) -> Disposition {
         return Disposition::Invalid(ConstraintKind::MaybeNeedsUncertainSource);
     }
 
-    // 4. Verter-declared refusals.
-    if region == ElementRegion::LegacySlot {
-        return Disposition::Refused(RefusalKind::LegacySlotScopeUnprovable);
-    }
-
-    // 5. Everything else is a Supported conformance cell.
+    // 4. Everything else is a Supported conformance cell (the `<slot>`
+    // fallback region included — it classifies identically to its
+    // static-element twin).
     Disposition::Supported
 }
 

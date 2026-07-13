@@ -9,6 +9,7 @@
 
 use super::client::UnsupportedSvelteRuntimeSurface;
 use super::client_codegen_helpers::js_single_quoted;
+use super::client_legacy_value::{AuthoredExpr, AuthoredValueSurface};
 use super::client_plan::SupportedClientIr;
 use super::client_plan_types::{AttrValue, AttrValuePart};
 use super::ir::{AttrIr, MixedAttrPart};
@@ -25,25 +26,21 @@ impl<'a> SupportedClientIr<'a> {
         &self,
         el: &super::ir::ElementIr,
         name: &str,
+        surface: AuthoredValueSurface,
     ) -> Result<(AttrValue, bool), UnsupportedSvelteRuntimeSurface> {
         for attr in &el.attrs {
             match attr {
                 AttrIr::Dynamic { name: n, expr } if n == name => {
-                    // A VALUE-position rewrite: source-preserving (author parens kept; a
-                    // top-level sequence is wrapped once so it stays one value).
-                    let rewritten = self.rewrite_value_preserving_source(*expr)?;
-                    let has_state = self.expr_has_state(*expr);
-                    let has_call = self.expr_has_call(*expr);
-                    return Ok((
-                        AttrValue::Single {
-                            rewritten,
-                            has_call,
-                        },
-                        has_state,
-                    ));
+                    // The SOLE authored-value preparation: value-position rewrite +
+                    // facts + the surface-policied legacy wrap (official
+                    // `build_expression` before the memoize decision); the emit-time
+                    // consumers only serialize the carrier.
+                    let prepared = self.prepare_template_value(AuthoredExpr(*expr), surface)?;
+                    let has_state = prepared.facts().has_state;
+                    return Ok((AttrValue::single_authored(prepared), has_state));
                 }
                 AttrIr::Mixed { name: n, parts } if n == name => {
-                    return self.mixed_attr_value(parts);
+                    return self.mixed_attr_value(parts, surface);
                 }
                 _ => {}
             }
@@ -73,6 +70,7 @@ impl<'a> SupportedClientIr<'a> {
     pub(super) fn mixed_attr_value(
         &self,
         parts: &[MixedAttrPart],
+        surface: AuthoredValueSurface,
     ) -> Result<(AttrValue, bool), UnsupportedSvelteRuntimeSurface> {
         // SINGLE-chunk quoted value — the official `value.length === 1` branch: the raw
         // single expression, NOT evaluate-folded and NOT `?? ''`-wrapped.
@@ -82,17 +80,11 @@ impl<'a> SupportedClientIr<'a> {
                     Ok((AttrValue::Const(js_single_quoted(text)), false))
                 }
                 MixedAttrPart::Expr(e) => {
-                    // The single-chunk quoted value is a VALUE position — source-preserving
-                    // (author parens kept; a top-level sequence is wrapped once).
-                    let rewritten = self.rewrite_value_preserving_source(*e)?;
-                    let has_state = self.expr_has_state(*e);
-                    Ok((
-                        AttrValue::Single {
-                            rewritten,
-                            has_call: self.expr_has_call(*e),
-                        },
-                        has_state,
-                    ))
+                    // The single-chunk quoted value is a VALUE position, prepared
+                    // through the sole authored-value entry.
+                    let prepared = self.prepare_template_value(AuthoredExpr(*e), surface)?;
+                    let has_state = prepared.facts().has_state;
+                    Ok((AttrValue::single_authored(prepared), has_state))
                 }
             };
         }
@@ -107,7 +99,12 @@ impl<'a> SupportedClientIr<'a> {
                 }
                 MixedAttrPart::Expr(e) => {
                     let analyzed = self.ir.analysis.expressions.get(*e);
-                    let has_call = self.expr_has_call(*e);
+                    // A template-literal `${…}` interpolation is a VALUE position,
+                    // prepared through the sole authored-value entry (the `?? ''`
+                    // coalesce decision below peels parens of its own for its
+                    // precedence check, so it is unaffected).
+                    let prepared = self.prepare_template_value(AuthoredExpr(*e), surface)?;
+                    let has_call = prepared.has_call();
                     // Official `build_template_chunk` constant-folds a KNOWN interpolation
                     // into the cooked literal text (`id="a {d + 1} b"` over a demoted
                     // `$state(5)` → `'a 6 b'`) via `scope.evaluate` — but it evaluates the
@@ -116,14 +113,17 @@ impl<'a> SupportedClientIr<'a> {
                     // `$N` slot BEFORE the evaluate, and `evaluate($N)` resolves to no binding
                     // ⇒ UNKNOWN ⇒ never folds (so `String(d)` over a demoted `$state` stays a
                     // live `String(d)` effect, NOT a folded literal). Only a NON-`has_call`
-                    // chunk can fold; an unknown chunk stays live either way.
+                    // chunk can fold; a LEGACY-WRAPPED chunk is a sequence expression by the
+                    // time official evaluates it ⇒ likewise UNKNOWN ⇒ never folds (and never
+                    // reaches the compile-refusal arm — official emits it live); an unknown
+                    // chunk stays live either way.
                     //
                     // The const-fold tri-state contract: `Fold` → the cooked literal;
                     // `Live` (a plain not-foldable chunk OR a ledgered live-fallback) → the
                     // live `?? ''` path; `Refuse` → a deterministic compile refusal (a
                     // compile-time JS throw official also compile-fails — never emit live
                     // code that would crash at runtime).
-                    if !has_call {
+                    if !has_call && !prepared.is_wrapped() {
                         match super::reactive_fold::mixed_chunk_fold(
                             analyzed.source,
                             analyzed.scope,
@@ -150,27 +150,27 @@ impl<'a> SupportedClientIr<'a> {
                             }
                         }
                     }
-                    // A template-literal `${…}` interpolation is a VALUE position —
-                    // source-preserving (author parens kept; a top-level sequence is wrapped
-                    // once). The `?? ''` coalesce decision below peels parens of its own
-                    // (`unwrap_parens`) for its precedence check, so it is unaffected.
-                    let rewritten = self.rewrite_value_preserving_source(*e)?;
-                    has_state |= self.expr_has_state(*e);
+                    has_state |= prepared.facts().has_state;
                     // The `?? ''` coercion for this LIVE part — official's
                     // `build_template_chunk` `is_defined`/precedence rule. A memoized part
                     // (`has_call`) is a `$N` identifier slot, so the paren decision
-                    // collapses; a provably-defined part is emitted RAW (no `?? ''`).
-                    let coalesce = super::reactive_fold::mixed_chunk_nullish_wrap(
-                        analyzed.source,
-                        analyzed.scope,
-                        &self.ir.analysis.bindings,
-                        &self.ir.analysis.scopes,
-                        self.ir.analysis.scripts.instance_source,
-                        has_call,
-                    );
+                    // collapses; a provably-defined part is emitted RAW (no `?? ''`). An
+                    // INLINE legacy-wrapped part is a self-parenthesized sequence official
+                    // never proves defined — the BARE `?? ''` always applies to it.
+                    let coalesce = if prepared.is_wrapped() && !has_call {
+                        super::reactive_fold::NullishCoalesce::Bare
+                    } else {
+                        super::reactive_fold::mixed_chunk_nullish_wrap(
+                            analyzed.source,
+                            analyzed.scope,
+                            &self.ir.analysis.bindings,
+                            &self.ir.analysis.scopes,
+                            self.ir.analysis.scripts.instance_source,
+                            has_call,
+                        )
+                    };
                     value_parts.push(AttrValuePart::Expr {
-                        rewritten,
-                        has_call,
+                        value: prepared,
                         coalesce,
                     });
                 }

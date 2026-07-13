@@ -1,0 +1,118 @@
+{
+  "slug": "legacy/wrap_await_key_call.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    },
+    {
+      "source": "svelte/internal/flags/legacy",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "wrap_await_key_call",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "from_html",
+    "from_html",
+    "push",
+    "prop",
+    "init",
+    "first_child",
+    "await",
+    "deep_read_state",
+    "untrack",
+    "child",
+    "reset",
+    "template_effect",
+    "set_text",
+    "get",
+    "append",
+    "sibling",
+    "key",
+    "deep_read_state",
+    "untrack",
+    "append",
+    "append",
+    "pop"
+  ],
+  "helperSet": [
+    "append",
+    "await",
+    "child",
+    "deep_read_state",
+    "first_child",
+    "from_html",
+    "get",
+    "init",
+    "key",
+    "pop",
+    "prop",
+    "push",
+    "reset",
+    "set_text",
+    "sibling",
+    "template_effect",
+    "untrack"
+  ],
+  "helperCounts": {
+    "from_html": 3,
+    "push": 1,
+    "prop": 1,
+    "init": 1,
+    "first_child": 1,
+    "await": 1,
+    "deep_read_state": 2,
+    "untrack": 2,
+    "child": 1,
+    "reset": 1,
+    "template_effect": 1,
+    "set_text": 1,
+    "get": 1,
+    "append": 3,
+    "sibling": 1,
+    "key": 1,
+    "pop": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<p> </p>",
+      "flag": null
+    },
+    {
+      "factory": "from_html",
+      "html": "<p>a</p>",
+      "flag": null
+    },
+    {
+      "factory": "from_html",
+      "html": "<!> <!>",
+      "flag": "1"
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import 'svelte/internal/flags/legacy'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<p> </p>`); var root_1 = $.from_html(`<p>a</p>`); var root_2 = $.from_html(`<!> <!>`, 1); export default function wrap_await_key_call($$anchor, $$props) {$.push($$props, false); let obj = $.prop($$props, 'obj', 8); $.init(); var fragment = root_2(); var node = $.first_child(fragment); $.await(node, () => ($.deep_read_state(obj()), $.untrack(() => obj().m())), null, ($$anchor, v) => {var p = root(); var text = $.child(p, true); $.reset(p); $.template_effect(() => $.set_text(text, $.get(v))); $.append($$anchor, p);}); var node_1 = $.sibling(node, 2); $.key(node_1, () => ($.deep_read_state(obj()), $.untrack(() => obj().k())), ($$anchor) => {var p_1 = root_1(); $.append($$anchor, p_1);}); $.append($$anchor, fragment); $.pop();}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

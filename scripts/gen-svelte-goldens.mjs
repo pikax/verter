@@ -224,7 +224,16 @@ const EMIT_PLAN_COMMAND = [
 
 // The emit-plan wire schema this consumer understands. A bump on the Rust side
 // is a reviewed delta of this façade, never a silent reinterpretation.
-const CONFORMANCE_PLAN_SCHEMA_VERSION = 1;
+// v2: the `refused:*` disposition vocabulary emptied — the former
+// `refused:legacy-slot-scope-unprovable` cells reclassified `supported`. The
+// consumer contract is unchanged (every non-`oracle-rejected:*` disposition
+// must COMPILE under the pinned official compiler; `oracle-rejected:*` must
+// reject with its recorded code), reviewed against the v2 plan.
+// v3: the legacy VALUE-WRAP × SURFACE coverage axis added — the typed
+// `ValueWrapSurface` vocabulary plus its exhaustive per-cell observation gate.
+// The consumer contract is unchanged (the same COMPILE / `oracle-rejected:*`
+// obligations), reviewed against the v3 plan.
+const CONFORMANCE_PLAN_SCHEMA_VERSION = 3;
 
 // ---------------------------------------------------------------------------
 // Destructive-path safety

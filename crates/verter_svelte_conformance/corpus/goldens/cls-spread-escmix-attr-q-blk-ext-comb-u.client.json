@@ -1,0 +1,71 @@
+{
+  "slug": "cls-spread-escmix-attr-q-blk-ext-comb-u",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "cls_spread_escmix_attr_q_blk_ext_comb_u",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "comment",
+    "first_child",
+    "child",
+    "attribute_effect",
+    "reset",
+    "append",
+    "if",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "attribute_effect",
+    "child",
+    "comment",
+    "first_child",
+    "from_html",
+    "if",
+    "reset"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "comment": 1,
+    "first_child": 1,
+    "child": 1,
+    "attribute_effect": 1,
+    "reset": 1,
+    "append": 2,
+    "if": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div class=\"wrap svelte-<scoped>\"><div>x</div></div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div class=\"wrap svelte-<scoped>\"><div>x</div></div>`); export default function cls_spread_escmix_attr_q_blk_ext_comb_u($$anchor, $$props) {let open = true; var fragment = $.comment(); var node = $.first_child(fragment); {var consequent = ($$anchor) => {var div = root(); var div_1 = $.child(div); $.attribute_effect(div_1, () => ({...$$props.rest}), void 0, void 0, void 0, 'svelte-<scoped>'); $.reset(div); $.append($$anchor, div);}; $.if(node, ($$render) => {if (open) $$render(consequent);});} $.append($$anchor, fragment);}",
+  "css": {
+    "present": true,
+    "hash": "svelte-1xik3c8",
+    "code": "\n\t.wrap.svelte-<scoped> .a\\26 b\\&c:where(.svelte-<scoped>) {\n\t\tcolor: red;\n\t}\n"
+  }
+}

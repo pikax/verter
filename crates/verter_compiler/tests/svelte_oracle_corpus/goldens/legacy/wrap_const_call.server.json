@@ -1,0 +1,44 @@
+{
+  "slug": "legacy/wrap_const_call.svelte",
+  "backend": "server",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/server",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    }
+  ],
+  "exportDefault": {
+    "name": "wrap_const_call",
+    "params": [
+      "$$renderer",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "ensure_array_like",
+    "escape",
+    "bind_props"
+  ],
+  "helperSet": [
+    "bind_props",
+    "ensure_array_like",
+    "escape"
+  ],
+  "helperCounts": {
+    "ensure_array_like": 1,
+    "escape": 1,
+    "bind_props": 1
+  },
+  "delegatedEvents": [],
+  "templates": [],
+  "clientModule": null,
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

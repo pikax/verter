@@ -1,0 +1,74 @@
+{
+  "slug": "attr-dyn-eschex-attr-q-slot-ext-comb-u",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "attr_dyn_eschex_attr_q_slot_ext_comb_u",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "comment",
+    "first_child",
+    "slot",
+    "child",
+    "reset",
+    "template_effect",
+    "set_attribute",
+    "append",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "comment",
+    "first_child",
+    "from_html",
+    "reset",
+    "set_attribute",
+    "slot",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "comment": 1,
+    "first_child": 1,
+    "slot": 1,
+    "child": 1,
+    "reset": 1,
+    "template_effect": 1,
+    "set_attribute": 1,
+    "append": 2
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div class=\"wrap svelte-<scoped>\"><div class=\"svelte-<scoped>\">x</div></div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div class=\"wrap svelte-<scoped>\"><div class=\"svelte-<scoped>\">x</div></div>`); export default function attr_dyn_eschex_attr_q_slot_ext_comb_u($$anchor, $$props) {var fragment = $.comment(); var node = $.first_child(fragment); $.slot(node, $$props, 'default', {}, ($$anchor) => {var div = root(); var div_1 = $.child(div); $.reset(div); $.template_effect(() => $.set_attribute(div_1, 'data-x', $$props.value)); $.append($$anchor, div);}); $.append($$anchor, fragment);}",
+  "css": {
+    "present": true,
+    "hash": "svelte-bhqktn",
+    "code": "\n\t.wrap.svelte-<scoped> [data-x=\"a\\26 b\"]:where(.svelte-<scoped>) {\n\t\tcolor: red;\n\t}\n"
+  }
+}

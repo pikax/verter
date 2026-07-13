@@ -891,6 +891,7 @@ fn walk_node(
                 walk_node(ir, c, Some(node), f);
             }
         }
+        IrNode::Slot(slot) => walk_nodes(ir, slot.fallback, f),
         IrNode::Block(block) => match block {
             BlockIr::If { branches } => {
                 for b in branches {
