@@ -144,3 +144,11 @@ HEADs, where nothing in git pointed at it at all); all of it was anchored **befo
 Recover with `git show <tag>:<path>`; inspect with `git show --stat <tag>`. **Do not delete these tags** — they are
 the only copy. Artifacts were deliberately NOT preserved (`.d1a-engines/` 396 MB, `_bench/` 62 MB,
 `.review-artifacts/` 7.6 MB); the review artifacts' findings were already salvaged into `docs/better-implementation/`.
+
+**Gotcha for a repo that creates worktrees constantly: `git worktree remove` does NOT delete gitignored content.**
+It removes the registration and the tracked files, then leaves a skeleton holding `node_modules/`, `target/`, and
+build output — and reports success. That is how **82 directories** accumulated against **51 registered worktrees**:
+every previous cleanup left residue that no `git worktree list` would ever show again. A separate orphan,
+`.cargo-target-b8impl`, held **15 GB** of build output for a worktree that had already been deleted. **After
+removing a worktree, delete its directory and any external `CARGO_TARGET_DIR` explicitly** — git's success message
+is not evidence the disk was reclaimed.
