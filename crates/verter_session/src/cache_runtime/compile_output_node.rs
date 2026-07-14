@@ -119,6 +119,12 @@ pub(crate) struct CompileOutputValue {
     pub style_override_hash: u64,
     /// Cached content-override hash captured at publish.
     pub content_override_hash: u64,
+    /// The resolved Svelte `cssHash` override captured at publish (byte-exact;
+    /// `None` for the default derivation). Threaded onto the session
+    /// [`CompileSlot`] and compared EXACTLY on every warm hit so a `profile_hash`
+    /// u64 collision can never serve a result carrying a different scope class
+    /// (the exact-override warm-hit discriminant).
+    pub css_hash_override: Option<Arc<str>>,
     /// Per-virtual-node-kind outputs (Script, Template, Style, Main,
     /// Custom).
     pub outputs: FxHashMap<VirtualNodeKind, CachedVirtualFile>,
@@ -147,6 +153,7 @@ impl CompileOutputValue {
         semantic_hash: Hash16,
         style_override_hash: u64,
         content_override_hash: u64,
+        css_hash_override: Option<Arc<str>>,
         outputs: FxHashMap<VirtualNodeKind, CachedVirtualFile>,
         diagnostics: DiagnosticsSnapshot,
         last_good_outputs: Option<FxHashMap<VirtualNodeKind, CachedVirtualFile>>,
@@ -158,6 +165,7 @@ impl CompileOutputValue {
             semantic_hash,
             style_override_hash,
             content_override_hash,
+            css_hash_override,
             outputs,
             diagnostics,
             last_good_outputs,
@@ -508,6 +516,7 @@ impl CompileOutputNodeFactValidatedSession {
         live_semantic_hash: &Hash16,
         live_style_override_hash: u64,
         live_content_override_hash: u64,
+        live_css_hash_override: Option<&str>,
         acquire_view: A,
         validate_facts: F,
     ) -> Option<SessionLookupHit>
@@ -528,6 +537,15 @@ impl CompileOutputNodeFactValidatedSession {
             || slot.style_override_hash != live_style_override_hash
             || slot.content_override_hash != live_content_override_hash
         {
+            return None;
+        }
+        // Never-wrong override discriminant: the resolved Svelte cssHash override is
+        // folded into `profile_hash` (the slot key), but the key is a bare u64 — so a u64
+        // collision could address a slot carrying a DIFFERENT override. Compare
+        // the override BYTE-EXACT (not a re-hash — an exact hash would merely
+        // reintroduce the same collision) so a warm hit can never emit a wrong
+        // scope class. `None == None` (the default path) is the common case.
+        if slot.css_hash_override.as_deref() != live_css_hash_override {
             return None;
         }
         // The cheap predicates passed → there is a candidate slot worth
@@ -573,6 +591,7 @@ impl CompileOutputNodeFactValidatedSession {
                     semantic_hash: value.semantic_hash,
                     style_override_hash: value.style_override_hash,
                     content_override_hash: value.content_override_hash,
+                    css_hash_override: value.css_hash_override,
                     outputs: value.outputs,
                     diagnostics: value.diagnostics,
                     last_good_outputs: value.last_good_outputs,

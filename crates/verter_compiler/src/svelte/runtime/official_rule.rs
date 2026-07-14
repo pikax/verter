@@ -563,27 +563,26 @@ impl CoreOfficialValidationRule {
     }
 
     /// Map an already-fail-closed [`UnsupportedSvelteRuntimeSurface`] to the
-    /// official-reject rule it corresponds to, for the reject-parity matrix. ONLY the
-    /// surfaces that genuinely correspond to an official COMPILE-ERROR map to a rule;
-    /// a pure "unsupported feature" surface (a `bind:checked`, an `{#if}`, a
-    /// `<span>`) returns `None` (it is a deferrable unsupported feature, not an
-    /// official reject).
+    /// official-reject rule it corresponds to, for the reject-parity matrix. NO
+    /// unsupported surface currently corresponds to an official COMPILE-ERROR, so this
+    /// always returns `None` — every official reject flows through the parser's
+    /// official-reject gate (carrying its exact code) via the
+    /// [`ClientCompileError::OfficialReject`](crate::svelte::runtime::ClientCompileError)
+    /// channel, never through an unsupported surface.
+    ///
+    /// - Every MALFORMED `<svelte:options>` form (a duplicate / nested / non-root
+    ///   placement, child content, a spread / directive, an invalid `namespace` / `css`,
+    ///   a non-boolean `runes`, an unknown attribute, the deprecated `tag`) is an
+    ///   EXACT-CODE parse error carried by the official-reject gate, not mapped here.
+    /// - A `CompileOptionUnsupported` surface is a fail-closed FEATURE refusal
+    ///   (`compatibility.componentApi: 4` / `hmr` / `accessors` / `immutable`), which the
+    ///   official compiler ACCEPTS — so it is NOT an official reject.
+    /// - A `MagicIdentifier` surface is ambiguous (`$$slots` is official-ACCEPTED, while
+    ///   `$$props` / `$$restProps` flow through the official-reject gate), so the surface
+    ///   alone cannot discriminate the reject class.
     #[must_use]
-    pub fn from_unsupported_surface(surface: &UnsupportedSvelteRuntimeSurface) -> Option<Self> {
-        match surface {
-            // NOTE: a template `attribute_duplicate` and a duplicate `<svelte:options>`
-            // (`svelte_meta_duplicate`) are EXACT-CODE parse errors now minted by the parser
-            // and carried by the official-reject gate, NOT mapped from an unsupported surface.
-            // `OptionsAxis` here covers only the NON-duplicate unsupported options axes (a
-            // nested / non-root placement, child content, a non-runes axis).
-            UnsupportedSvelteRuntimeSurface::OptionsAxis { .. } => Some(Self::OptionsInvalid),
-            // NOTE: a `MagicIdentifier` surface is NOT auto-mapped — `$$slots` is
-            // official-ACCEPTED (a deferrable unsupported feature), while `$$props` /
-            // `$$restProps` are official rejects that flow through the official-reject
-            // gate (`GlobalReferenceInvalid`) instead, so the surface alone cannot
-            // discriminate the reject class.
-            _ => None,
-        }
+    pub fn from_unsupported_surface(_surface: &UnsupportedSvelteRuntimeSurface) -> Option<Self> {
+        None
     }
 }
 

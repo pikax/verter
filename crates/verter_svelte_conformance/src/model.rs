@@ -596,6 +596,18 @@ pub struct ManifestCompileOptions {
     /// `filename: null` (the JS side maps it to `undefined`, exercising the
     /// css-hash filename fallback).
     pub filename_undefined: bool,
+    /// `fragments: 'tree'` — the CSP-safe `$.from_tree` objectified-clone
+    /// factory. The flip changes ONLY the root FACTORY (`$.from_tree` vs the
+    /// html-string `$.from_html`): the css scope token itself is baked by the
+    /// SHARED static-attribute authority (`template_serialize.rs`) read by both
+    /// the html-string serializer and the `$.from_tree` objectifier, so the
+    /// token is byte-identical across the two modes — and for this spread cell it
+    /// rides the SAME `$.attribute_effect(…, 'svelte-<hash>')`
+    /// (`HashStringArgument`) carrier in html AND tree. The oracle differential's
+    /// scope-token axes are therefore scope-token-identical across the flip and
+    /// do NOT themselves observe it; see [`compile_options`] for how the tree
+    /// axis is actually pinned.
+    pub fragments_tree: bool,
 }
 
 impl ManifestCompileOptions {
@@ -610,16 +622,50 @@ impl ManifestCompileOptions {
         if self.filename_undefined {
             fields.push("\"filename\":null".to_string());
         }
+        if self.fragments_tree {
+            fields.push("\"fragments\":\"tree\"".to_string());
+        }
         format!("{{{}}}", fields.join(","))
     }
 }
 
-/// The compile options of a row (default for every current matrix row; the
-/// carrier exists so option-driven cells stay typed manifest data).
+/// The compile options of a row. Default for every row EXCEPT the scoped-CSS
+/// tree cell: a supported scoped static-element cell (an external scoped
+/// `<style>`, a plain type selector that certainly matches on the class target)
+/// is compiled under `fragments: 'tree'`, so the corpus exercises the tree-mode
+/// `$.from_tree` root factory alongside the html-string `$.from_html` factory
+/// every other scoped cell covers. The flip is orthogonal to classification (it
+/// never changes a row's disposition / outcome), so it shifts only that cell's
+/// compiled carrier + golden. Selects exactly one row.
+///
+/// Why the oracle differential cannot discriminate this flip (the scope-token
+/// orthogonality contract, NOT a coverage hole): the css scope token is baked by
+/// the SHARED static-attribute authority (`template_serialize.rs`) read by both
+/// the html-string serializer and the `$.from_tree` objectifier, so the token is
+/// byte-identical in html and tree — and for this spread cell it rides the same
+/// `$.attribute_effect(…, css_hash)` (`HashStringArgument`) carrier in both. The
+/// oracle differential (`oracle_differential.rs`) compares ONLY scope-token
+/// occurrences, never the outer factory, so its `ScopeTokenDelivery` /
+/// `ScopedClassTopology` axes produce identical signatures for html and tree —
+/// forcing Verter to emit `$.from_html` would leave the differential green. The
+/// tree flip is instead pinned by TWO other rails: (1) this manifest-cell
+/// assertion (`compile_options_serialize_deterministically`), and (2) the
+/// committed `$.from_tree` golden regenerated + checked under `--conformance`.
+/// Verter's OWN `$.from_html`-vs-`$.from_tree` root-factory discrimination is
+/// covered by the separate `svelte_client_emit_topology.rs` corpus over the
+/// `options/fragments_tree_*` fixtures.
 #[must_use]
 pub fn compile_options(levels: &RowLevels) -> ManifestCompileOptions {
-    let _ = levels;
-    ManifestCompileOptions::default()
+    let is_scoped_static_tree_cell = levels.region == ElementRegion::StaticElement
+        && levels.css_source == CssSource::External
+        && levels.structural == StructuralKind::Plain
+        && levels.selector_kind == SelectorKind::Type
+        && levels.outcome == MatchOutcome::Match
+        && levels.target == Target::Class;
+    ManifestCompileOptions {
+        fragments_tree: is_scoped_static_tree_cell,
+        ..ManifestCompileOptions::default()
+    }
 }
 
 // ---------------------------------------------------------------------------

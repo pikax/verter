@@ -12186,11 +12186,20 @@ fn custom_element_with_style_block_injects_its_css() {
 }
 
 #[test]
-fn svelte_options_other_axis_fails_closed() {
-    // F4: a `<svelte:options>` axis beyond name/runes (here `namespace`) is an unsupported options axis.
+fn svelte_options_unsupported_feature_axis_fails_closed() {
+    // A `<svelte:options>` axis carrying an unsupported FEATURE option (here inline
+    // `immutable`) fails closed with the typed compile-option surface — NOT an
+    // official reject (the official compiler accepts `immutable`).
     assert_fail_closed(
-        "<svelte:options namespace=\"svg\" />\n<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n",
-        |s| matches!(s, UnsupportedSvelteRuntimeSurface::OptionsAxis { .. }),
+        "<svelte:options immutable />\n<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n",
+        |s| matches!(
+            s,
+            UnsupportedSvelteRuntimeSurface::CompileOptionUnsupported {
+                option: crate::svelte::runtime::UnsupportedSvelteCompileOption::Immutable,
+                origin: crate::svelte::runtime::CompileOptionOrigin::Inline,
+                ..
+            }
+        ),
     );
 }
 
@@ -26609,7 +26618,7 @@ fn legacy_spread_operand_call_memoizes_raw() {
 fn legacy_spread_colocated_attr_call_memoizes_wrapped() {
     // Oracle: $.attribute_effect(div, ($0) => ({ ...p(), title: $0 }), [() => ($.deep_read_state(obj()), $.untrack(() => obj().m()))]);
     let js = emit(
-        &format!("<script>export let p; export let obj;</script>\n<div {{...p}} title={{obj.m()}}></div>\n"),
+        "<script>export let p; export let obj;</script>\n<div {...p} title={obj.m()}></div>\n",
         "App.svelte",
     );
     assert!(
@@ -26630,7 +26639,7 @@ fn legacy_spread_colocated_attr_call_memoizes_wrapped() {
 fn legacy_spread_colocated_attr_member_wraps_inline() {
     // Oracle: $.attribute_effect(div, () => ({ ...p(), title: ($.deep_read_state(obj()), $.untrack(() => obj().x)) }));
     let js = emit(
-        &format!("<script>export let p; export let obj;</script>\n<div {{...p}} title={{obj.x}}></div>\n"),
+        "<script>export let p; export let obj;</script>\n<div {...p} title={obj.x}></div>\n",
         "App.svelte",
     );
     assert!(
@@ -26650,7 +26659,7 @@ fn legacy_spread_style_directive_wraps_inner_memoizes_object() {
     //   () => ({ color: ($.deep_read_state(obj()), $.untrack(() => obj().m())) })
     // ]);
     let js = emit(
-        &format!("<script>export let p; export let obj;</script>\n<div {{...p}} style:color={{obj.m()}}></div>\n"),
+        "<script>export let p; export let obj;</script>\n<div {...p} style:color={obj.m()}></div>\n",
         "App.svelte",
     );
     assert!(
@@ -26668,7 +26677,7 @@ fn legacy_spread_style_directive_wraps_inner_memoizes_object() {
 fn legacy_spread_class_directive_raw_inner_memoizes_object() {
     // Oracle: $.attribute_effect(div, ($0) => ({ ...p(), [$.CLASS]: $0 }), [() => ({ on: obj().m() })]);
     let js = emit(
-        &format!("<script>export let p; export let obj;</script>\n<div {{...p}} class:on={{obj.m()}}></div>\n"),
+        "<script>export let p; export let obj;</script>\n<div {...p} class:on={obj.m()}></div>\n",
         "App.svelte",
     );
     assert!(
@@ -26690,7 +26699,7 @@ fn legacy_spread_class_directive_raw_inner_memoizes_object() {
 fn legacy_spread_mixed_attr_chunk_memoizes_wrapped() {
     // Oracle: $.attribute_effect(div, ($0) => ({ ...p(), title: `a${$0 ?? ''}b` }), [() => (wrap)]);
     let js = emit(
-        &format!("<script>export let p; export let obj;</script>\n<div {{...p}} title=\"a{{obj.m()}}b\"></div>\n"),
+        "<script>export let p; export let obj;</script>\n<div {...p} title=\"a{obj.m()}b\"></div>\n",
         "App.svelte",
     );
     assert!(
@@ -26708,7 +26717,7 @@ fn legacy_spread_mixed_attr_chunk_memoizes_wrapped() {
 fn legacy_spread_input_keeps_remove_defaults_tail_after_deps() {
     // Oracle: $.attribute_effect(input, ($0) => ({ ...p(), title: $0 }), [() => (wrap)], void 0, void 0, void 0, true);
     let js = emit(
-        &format!("<script>export let p; export let obj;</script>\n<input {{...p}} title={{obj.m()}} />\n"),
+        "<script>export let p; export let obj;</script>\n<input {...p} title={obj.m()} />\n",
         "App.svelte",
     );
     assert!(
@@ -27371,4 +27380,117 @@ fn legacy_mixed_wrapped_defined_chunk_keeps_bare_coalesce() {
         "the member-trigger chunk wraps in definite legacy:\n{js}"
     );
     assert!(parses_as_js(&js), "module must be valid JS:\n{js}");
+}
+
+// ---------------------------------------------------------------------------
+// cssHash scope-class override (the resolved `cssHash` callback result threaded
+// into the SINGLE style-plan construction point). The override REPLACES the
+// default `svelte-<hash>` scope class byte-exact in BOTH the serialized HTML
+// skeleton (baked static `class`) and the external CSS artifact; absent, the
+// default djb2 derivation is unchanged.
+// ---------------------------------------------------------------------------
+
+/// Compile a styled component with an explicit resolved `css_hash_override`,
+/// returning the full client module (JS body + external css artifact).
+fn emit_module_with_css_override(
+    source: &str,
+    filename: &str,
+    css_hash_override: Option<&str>,
+) -> crate::svelte::runtime::client::ClientModule {
+    let alloc = Allocator::default();
+    let parsed = parse_svelte(source);
+    let opts = SvelteRuntimeOptions {
+        filename: Some(filename.to_string()),
+        css_hash_override: css_hash_override.map(str::to_string),
+        ..Default::default()
+    };
+    compile_client(source, &parsed, &opts, &alloc, false, false)
+        .unwrap_or_else(|e| panic!("client emission failed for {filename}: {e:?}"))
+}
+
+const CSS_OVERRIDE_INPUT: &str = "<div class=\"card\">x</div>\n<style>.card{color:blue}</style>\n";
+
+#[test]
+fn css_hash_override_replaces_the_default_scope_class_in_html_and_css() {
+    // The resolved override string is used VERBATIM as the scope class in BOTH
+    // the baked HTML skeleton (the `$.from_html` static class attribute) and the
+    // external css artifact (its `hash` + the scoped selector), and it PRESERVES
+    // the override bytes exactly (no `svelte-` prefix, no re-hash).
+    let module =
+        emit_module_with_css_override(CSS_OVERRIDE_INPUT, "App.svelte", Some("zzoverride1"));
+
+    // (external css) the artifact hash IS the resolved override, byte-exact.
+    let css = module
+        .css
+        .as_ref()
+        .expect("a styled component publishes external css");
+    assert_eq!(
+        css.hash, "zzoverride1",
+        "the external css hash must be the resolved override byte-exact"
+    );
+    assert!(
+        css.code.contains("zzoverride1"),
+        "the scoped css selector must carry the override class:\n{}",
+        css.code
+    );
+    // NEGATIVE: the default `svelte-` scope class must NOT appear once overridden.
+    assert!(
+        !css.code.contains("svelte-"),
+        "the default svelte- scope class must be fully replaced in css:\n{}",
+        css.code
+    );
+
+    // (baked HTML) the from_html static skeleton carries the override class.
+    assert!(
+        module.code.contains("zzoverride1"),
+        "the baked static class must carry the override:\n{}",
+        module.code
+    );
+    assert!(
+        !module.code.contains("class=\"card svelte-"),
+        "the baked static class must not carry the default svelte- scope:\n{}",
+        module.code
+    );
+}
+
+#[test]
+fn css_hash_override_absent_keeps_the_default_djb2_scope_class() {
+    // Absent an override, the default `svelte-<djb2>` derivation is UNCHANGED
+    // (the oracle-pinned filename hash for `App.svelte`).
+    let default_class =
+        crate::svelte::runtime::css::hash::css_scope_hash(Some("App.svelte"), ".card{color:blue}");
+    assert_eq!(
+        default_class, "svelte-n50uah",
+        "oracle-pinned default hash for App.svelte"
+    );
+    let module = emit_module_with_css_override(CSS_OVERRIDE_INPUT, "App.svelte", None);
+    let css = module
+        .css
+        .as_ref()
+        .expect("a styled component publishes external css");
+    assert_eq!(
+        css.hash, default_class,
+        "absent override → default hash unchanged"
+    );
+    assert!(
+        module.code.contains(&default_class),
+        "baked class uses the default:\n{}",
+        module.code
+    );
+}
+
+#[test]
+fn distinct_css_hash_overrides_produce_distinct_scope_classes_same_source() {
+    // Two DIFFERENT resolved overrides over the SAME source produce DIFFERENT
+    // scope classes in both HTML and css — the property the cache identity
+    // relies on (identical source, different override ⇒ different output).
+    let a = emit_module_with_css_override(CSS_OVERRIDE_INPUT, "App.svelte", Some("aaone"));
+    let b = emit_module_with_css_override(CSS_OVERRIDE_INPUT, "App.svelte", Some("bbtwo"));
+    assert_ne!(
+        a.css.as_ref().unwrap().hash,
+        b.css.as_ref().unwrap().hash,
+        "distinct overrides must yield distinct css hashes"
+    );
+    assert!(a.code.contains("aaone") && !a.code.contains("bbtwo"));
+    assert!(b.code.contains("bbtwo") && !b.code.contains("aaone"));
 }

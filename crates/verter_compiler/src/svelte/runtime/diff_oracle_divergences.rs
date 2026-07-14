@@ -5,8 +5,6 @@
 // list; what REMAINS are emission-LAYER deferrals — the IR carries enough facts,
 // and the owning runtime emission LAYER emits the concrete shape:
 //
-//   - `5m` namespace-root-helper layer — namespace-aware root-helper selection
-//     ($.from_svg / $.from_mathml for an SVG/MathML root).
 //   - `5a` class-style-merge / option-value layer — the class:/style: directive
 //     merge with the class/style attribute into one set_class/set_style attr-part
 //     (the IR-topology coalesce); <option>/<datalist> value property-vs-attribute.
@@ -49,30 +47,6 @@ const KNOWN_DIVERGENCES_DATA: [DivergenceRow; 97] = [
     // in 5f-b: the no-DOM host root is now an init-only region (a global host emits no
     // `$.comment` / `$.append`; a head-only root emits `$.head(...)` with no root comment/append),
     // matching official's folded region. (Their KNOWN_DIVERGENCES rows were removed as stale.)
-    DivergenceRow {
-        fixture: "generated/007_root_svg.svelte",
-        axis: DiffAxis::HelperSet,
-        root_cause: "Y9 -> 5m (namespace-root-helper layer): an SVG/MathML root must clone via $.from_svg / $.from_mathml, not $.from_html — the 5m namespace-aware root-helper layer owns the factory-family selection",
-        summary: "official owned-helper-set [\"append\"] != Verter [\"append\", \"from_html\"]",
-    },
-    DivergenceRow {
-        fixture: "generated/007_root_svg.svelte",
-        axis: DiffAxis::Factory,
-        root_cause: "Y9 -> 5m (namespace-root-helper layer): an SVG/MathML root must clone via $.from_svg / $.from_mathml, not $.from_html — the 5m namespace-aware root-helper layer owns the factory-family selection",
-        summary: "official factory-kinds [\"from_svg\"] != Verter [\"from_html\"]",
-    },
-    DivergenceRow {
-        fixture: "generated/008_root_mathml.svelte",
-        axis: DiffAxis::HelperSet,
-        root_cause: "Y9 -> 5m (namespace-root-helper layer): an SVG/MathML root must clone via $.from_svg / $.from_mathml, not $.from_html — the 5m namespace-aware root-helper layer owns the factory-family selection",
-        summary: "official owned-helper-set [\"append\"] != Verter [\"append\", \"from_html\"]",
-    },
-    DivergenceRow {
-        fixture: "generated/008_root_mathml.svelte",
-        axis: DiffAxis::Factory,
-        root_cause: "Y9 -> 5m (namespace-root-helper layer): an SVG/MathML root must clone via $.from_svg / $.from_mathml, not $.from_html — the 5m namespace-aware root-helper layer owns the factory-family selection",
-        summary: "official factory-kinds [\"from_mathml\"] != Verter [\"from_html\"]",
-    },
     DivergenceRow {
         fixture: "generated/032_attr_mixed.svelte",
         axis: DiffAxis::DynamicSlots,
@@ -219,72 +193,12 @@ const KNOWN_DIVERGENCES_DATA: [DivergenceRow; 97] = [
         summary: "official dynamic-slots {\"value\": 1} != Verter {\"attribute\": 1}",
     },
     DivergenceRow {
-        fixture: "generated/073_pair_root_svg__attr_static.svelte",
-        axis: DiffAxis::HelperSet,
-        root_cause: "Y9 -> 5m (namespace-root-helper layer): an SVG/MathML root must clone via $.from_svg / $.from_mathml, not $.from_html — the 5m namespace-aware root-helper layer owns the factory-family selection",
-        summary: "official owned-helper-set [\"append\"] != Verter [\"append\", \"from_html\"]",
-    },
-    DivergenceRow {
-        fixture: "generated/073_pair_root_svg__attr_static.svelte",
-        axis: DiffAxis::Factory,
-        root_cause: "Y9 -> 5m (namespace-root-helper layer): an SVG/MathML root must clone via $.from_svg / $.from_mathml, not $.from_html — the 5m namespace-aware root-helper layer owns the factory-family selection",
-        summary: "official factory-kinds [\"from_svg\"] != Verter [\"from_html\"]",
-    },
-    DivergenceRow {
-        fixture: "generated/074_pair_root_svg__attr_dynamic.svelte",
-        axis: DiffAxis::HelperSet,
-        root_cause: "Y9 -> 5m (namespace-root-helper layer): an SVG/MathML root must clone via $.from_svg / $.from_mathml, not $.from_html — the 5m namespace-aware root-helper layer owns the factory-family selection",
-        summary: "official owned-helper-set [\"append\"] != Verter [\"append\", \"from_html\"]",
-    },
-    DivergenceRow {
-        fixture: "generated/074_pair_root_svg__attr_dynamic.svelte",
-        axis: DiffAxis::Factory,
-        root_cause: "Y9 -> 5m (namespace-root-helper layer): an SVG/MathML root must clone via $.from_svg / $.from_mathml, not $.from_html — the 5m namespace-aware root-helper layer owns the factory-family selection",
-        summary: "official factory-kinds [\"from_svg\"] != Verter [\"from_html\"]",
-    },
-    DivergenceRow {
-        fixture: "generated/075_pair_root_svg__attr_mixed.svelte",
-        axis: DiffAxis::HelperSet,
-        root_cause: "Y9 -> 5m (namespace-root-helper layer): an SVG/MathML root must clone via $.from_svg / $.from_mathml, not $.from_html — the 5m namespace-aware root-helper layer owns the factory-family selection",
-        summary: "official owned-helper-set [\"append\"] != Verter [\"append\", \"from_html\"]",
-    },
-    DivergenceRow {
-        fixture: "generated/075_pair_root_svg__attr_mixed.svelte",
-        axis: DiffAxis::Factory,
-        root_cause: "Y9 -> 5m (namespace-root-helper layer): an SVG/MathML root must clone via $.from_svg / $.from_mathml, not $.from_html — the 5m namespace-aware root-helper layer owns the factory-family selection",
-        summary: "official factory-kinds [\"from_svg\"] != Verter [\"from_html\"]",
-    },
-    DivergenceRow {
         fixture: "generated/075_pair_root_svg__attr_mixed.svelte",
         axis: DiffAxis::DynamicSlots,
         root_cause: "Y13 -> 5a (typed-setter-slot layer): a class/style/value dynamic attribute is realized by a TYPED setter ($.set_class / $.set_style / $.set_value) routed as a typed slot — the 5a typed-setter layer owns it",
         summary: "official dynamic-slots {\"class\": 1} != Verter {\"attribute\": 1}",
     },
     DivergenceRow {
-        fixture: "generated/076_pair_root_svg__attr_boolean.svelte",
-        axis: DiffAxis::HelperSet,
-        root_cause: "Y9 -> 5m (namespace-root-helper layer): an SVG/MathML root must clone via $.from_svg / $.from_mathml, not $.from_html — the 5m namespace-aware root-helper layer owns the factory-family selection",
-        summary: "official owned-helper-set [\"append\"] != Verter [\"append\", \"from_html\"]",
-    },
-    DivergenceRow {
-        fixture: "generated/076_pair_root_svg__attr_boolean.svelte",
-        axis: DiffAxis::Factory,
-        root_cause: "Y9 -> 5m (namespace-root-helper layer): an SVG/MathML root must clone via $.from_svg / $.from_mathml, not $.from_html — the 5m namespace-aware root-helper layer owns the factory-family selection",
-        summary: "official factory-kinds [\"from_svg\"] != Verter [\"from_html\"]",
-    },
-    DivergenceRow {
-        fixture: "generated/077_pair_root_svg__attr_shorthand.svelte",
-        axis: DiffAxis::HelperSet,
-        root_cause: "Y9 -> 5m (namespace-root-helper layer): an SVG/MathML root must clone via $.from_svg / $.from_mathml, not $.from_html — the 5m namespace-aware root-helper layer owns the factory-family selection",
-        summary: "official owned-helper-set [\"append\"] != Verter [\"append\", \"from_html\"]",
-    },
-    DivergenceRow {
-        fixture: "generated/077_pair_root_svg__attr_shorthand.svelte",
-        axis: DiffAxis::Factory,
-        root_cause: "Y9 -> 5m (namespace-root-helper layer): an SVG/MathML root must clone via $.from_svg / $.from_mathml, not $.from_html — the 5m namespace-aware root-helper layer owns the factory-family selection",
-        summary: "official factory-kinds [\"from_svg\"] != Verter [\"from_html\"]",
-    },
-    DivergenceRow {
         fixture: "generated/077_pair_root_svg__attr_shorthand.svelte",
         axis: DiffAxis::DynamicSlots,
         root_cause: "Y13-value -> 5c (form-control setter layer): a `value`/`checked` dynamic attribute is realized by a TYPED form-control setter ($.set_value / $.set_checked / $.set_selected / $.set_default_*) — the 5c form-control/bindings layer owns it (the value sub-case was split out of the 5a typed-setter layer; class/style stay 5a)",
@@ -292,69 +206,9 @@ const KNOWN_DIVERGENCES_DATA: [DivergenceRow; 97] = [
     },
     DivergenceRow {
         fixture: "generated/078_pair_root_svg__attr_shorthand_spaced.svelte",
-        axis: DiffAxis::HelperSet,
-        root_cause: "Y9 -> 5m (namespace-root-helper layer): an SVG/MathML root must clone via $.from_svg / $.from_mathml, not $.from_html — the 5m namespace-aware root-helper layer owns the factory-family selection",
-        summary: "official owned-helper-set [\"append\"] != Verter [\"append\", \"from_html\"]",
-    },
-    DivergenceRow {
-        fixture: "generated/078_pair_root_svg__attr_shorthand_spaced.svelte",
-        axis: DiffAxis::Factory,
-        root_cause: "Y9 -> 5m (namespace-root-helper layer): an SVG/MathML root must clone via $.from_svg / $.from_mathml, not $.from_html — the 5m namespace-aware root-helper layer owns the factory-family selection",
-        summary: "official factory-kinds [\"from_svg\"] != Verter [\"from_html\"]",
-    },
-    DivergenceRow {
-        fixture: "generated/078_pair_root_svg__attr_shorthand_spaced.svelte",
         axis: DiffAxis::DynamicSlots,
         root_cause: "Y13-value -> 5c (form-control setter layer): a `value`/`checked` dynamic attribute is realized by a TYPED form-control setter ($.set_value / $.set_checked / $.set_selected / $.set_default_*) — the 5c form-control/bindings layer owns it (the value sub-case was split out of the 5a typed-setter layer; class/style stay 5a)",
         summary: "official dynamic-slots {\"value\": 1} != Verter {\"attribute\": 1}",
-    },
-    DivergenceRow {
-        fixture: "generated/079_pair_root_svg__attr_spread.svelte",
-        axis: DiffAxis::HelperSet,
-        root_cause: "Y9 -> 5m (namespace-root-helper layer): an SVG/MathML root must clone via $.from_svg / $.from_mathml, not $.from_html — the 5m namespace-aware root-helper layer owns the factory-family selection",
-        summary: "official owned-helper-set [\"append\", \"attribute_effect\"] != Verter [\"append\", \"attribute_effect\", \"from_html\"]",
-    },
-    DivergenceRow {
-        fixture: "generated/079_pair_root_svg__attr_spread.svelte",
-        axis: DiffAxis::Factory,
-        root_cause: "Y9 -> 5m (namespace-root-helper layer): an SVG/MathML root must clone via $.from_svg / $.from_mathml, not $.from_html — the 5m namespace-aware root-helper layer owns the factory-family selection",
-        summary: "official factory-kinds [\"from_svg\"] != Verter [\"from_html\"]",
-    },
-    DivergenceRow {
-        fixture: "generated/080_pair_root_mathml__attr_static.svelte",
-        axis: DiffAxis::HelperSet,
-        root_cause: "Y9 -> 5m (namespace-root-helper layer): an SVG/MathML root must clone via $.from_svg / $.from_mathml, not $.from_html — the 5m namespace-aware root-helper layer owns the factory-family selection",
-        summary: "official owned-helper-set [\"append\"] != Verter [\"append\", \"from_html\"]",
-    },
-    DivergenceRow {
-        fixture: "generated/080_pair_root_mathml__attr_static.svelte",
-        axis: DiffAxis::Factory,
-        root_cause: "Y9 -> 5m (namespace-root-helper layer): an SVG/MathML root must clone via $.from_svg / $.from_mathml, not $.from_html — the 5m namespace-aware root-helper layer owns the factory-family selection",
-        summary: "official factory-kinds [\"from_mathml\"] != Verter [\"from_html\"]",
-    },
-    DivergenceRow {
-        fixture: "generated/081_pair_root_mathml__attr_dynamic.svelte",
-        axis: DiffAxis::HelperSet,
-        root_cause: "Y9 -> 5m (namespace-root-helper layer): an SVG/MathML root must clone via $.from_svg / $.from_mathml, not $.from_html — the 5m namespace-aware root-helper layer owns the factory-family selection",
-        summary: "official owned-helper-set [\"append\"] != Verter [\"append\", \"from_html\"]",
-    },
-    DivergenceRow {
-        fixture: "generated/081_pair_root_mathml__attr_dynamic.svelte",
-        axis: DiffAxis::Factory,
-        root_cause: "Y9 -> 5m (namespace-root-helper layer): an SVG/MathML root must clone via $.from_svg / $.from_mathml, not $.from_html — the 5m namespace-aware root-helper layer owns the factory-family selection",
-        summary: "official factory-kinds [\"from_mathml\"] != Verter [\"from_html\"]",
-    },
-    DivergenceRow {
-        fixture: "generated/082_pair_root_mathml__attr_mixed.svelte",
-        axis: DiffAxis::HelperSet,
-        root_cause: "Y9 -> 5m (namespace-root-helper layer): an SVG/MathML root must clone via $.from_svg / $.from_mathml, not $.from_html — the 5m namespace-aware root-helper layer owns the factory-family selection",
-        summary: "official owned-helper-set [\"append\"] != Verter [\"append\", \"from_html\"]",
-    },
-    DivergenceRow {
-        fixture: "generated/082_pair_root_mathml__attr_mixed.svelte",
-        axis: DiffAxis::Factory,
-        root_cause: "Y9 -> 5m (namespace-root-helper layer): an SVG/MathML root must clone via $.from_svg / $.from_mathml, not $.from_html — the 5m namespace-aware root-helper layer owns the factory-family selection",
-        summary: "official factory-kinds [\"from_mathml\"] != Verter [\"from_html\"]",
     },
     DivergenceRow {
         fixture: "generated/082_pair_root_mathml__attr_mixed.svelte",
@@ -363,30 +217,6 @@ const KNOWN_DIVERGENCES_DATA: [DivergenceRow; 97] = [
         summary: "official dynamic-slots {\"class\": 1} != Verter {\"attribute\": 1}",
     },
     DivergenceRow {
-        fixture: "generated/083_pair_root_mathml__attr_boolean.svelte",
-        axis: DiffAxis::HelperSet,
-        root_cause: "Y9 -> 5m (namespace-root-helper layer): an SVG/MathML root must clone via $.from_svg / $.from_mathml, not $.from_html — the 5m namespace-aware root-helper layer owns the factory-family selection",
-        summary: "official owned-helper-set [\"append\"] != Verter [\"append\", \"from_html\"]",
-    },
-    DivergenceRow {
-        fixture: "generated/083_pair_root_mathml__attr_boolean.svelte",
-        axis: DiffAxis::Factory,
-        root_cause: "Y9 -> 5m (namespace-root-helper layer): an SVG/MathML root must clone via $.from_svg / $.from_mathml, not $.from_html — the 5m namespace-aware root-helper layer owns the factory-family selection",
-        summary: "official factory-kinds [\"from_mathml\"] != Verter [\"from_html\"]",
-    },
-    DivergenceRow {
-        fixture: "generated/084_pair_root_mathml__attr_shorthand.svelte",
-        axis: DiffAxis::HelperSet,
-        root_cause: "Y9 -> 5m (namespace-root-helper layer): an SVG/MathML root must clone via $.from_svg / $.from_mathml, not $.from_html — the 5m namespace-aware root-helper layer owns the factory-family selection",
-        summary: "official owned-helper-set [\"append\"] != Verter [\"append\", \"from_html\"]",
-    },
-    DivergenceRow {
-        fixture: "generated/084_pair_root_mathml__attr_shorthand.svelte",
-        axis: DiffAxis::Factory,
-        root_cause: "Y9 -> 5m (namespace-root-helper layer): an SVG/MathML root must clone via $.from_svg / $.from_mathml, not $.from_html — the 5m namespace-aware root-helper layer owns the factory-family selection",
-        summary: "official factory-kinds [\"from_mathml\"] != Verter [\"from_html\"]",
-    },
-    DivergenceRow {
         fixture: "generated/084_pair_root_mathml__attr_shorthand.svelte",
         axis: DiffAxis::DynamicSlots,
         root_cause: "Y13-value -> 5c (form-control setter layer): a `value`/`checked` dynamic attribute is realized by a TYPED form-control setter ($.set_value / $.set_checked / $.set_selected / $.set_default_*) — the 5c form-control/bindings layer owns it (the value sub-case was split out of the 5a typed-setter layer; class/style stay 5a)",
@@ -394,33 +224,9 @@ const KNOWN_DIVERGENCES_DATA: [DivergenceRow; 97] = [
     },
     DivergenceRow {
         fixture: "generated/085_pair_root_mathml__attr_shorthand_spaced.svelte",
-        axis: DiffAxis::HelperSet,
-        root_cause: "Y9 -> 5m (namespace-root-helper layer): an SVG/MathML root must clone via $.from_svg / $.from_mathml, not $.from_html — the 5m namespace-aware root-helper layer owns the factory-family selection",
-        summary: "official owned-helper-set [\"append\"] != Verter [\"append\", \"from_html\"]",
-    },
-    DivergenceRow {
-        fixture: "generated/085_pair_root_mathml__attr_shorthand_spaced.svelte",
-        axis: DiffAxis::Factory,
-        root_cause: "Y9 -> 5m (namespace-root-helper layer): an SVG/MathML root must clone via $.from_svg / $.from_mathml, not $.from_html — the 5m namespace-aware root-helper layer owns the factory-family selection",
-        summary: "official factory-kinds [\"from_mathml\"] != Verter [\"from_html\"]",
-    },
-    DivergenceRow {
-        fixture: "generated/085_pair_root_mathml__attr_shorthand_spaced.svelte",
         axis: DiffAxis::DynamicSlots,
         root_cause: "Y13-value -> 5c (form-control setter layer): a `value`/`checked` dynamic attribute is realized by a TYPED form-control setter ($.set_value / $.set_checked / $.set_selected / $.set_default_*) — the 5c form-control/bindings layer owns it (the value sub-case was split out of the 5a typed-setter layer; class/style stay 5a)",
         summary: "official dynamic-slots {\"value\": 1} != Verter {\"attribute\": 1}",
-    },
-    DivergenceRow {
-        fixture: "generated/086_pair_root_mathml__attr_spread.svelte",
-        axis: DiffAxis::HelperSet,
-        root_cause: "Y9 -> 5m (namespace-root-helper layer): an SVG/MathML root must clone via $.from_svg / $.from_mathml, not $.from_html — the 5m namespace-aware root-helper layer owns the factory-family selection",
-        summary: "official owned-helper-set [\"append\", \"attribute_effect\"] != Verter [\"append\", \"attribute_effect\", \"from_html\"]",
-    },
-    DivergenceRow {
-        fixture: "generated/086_pair_root_mathml__attr_spread.svelte",
-        axis: DiffAxis::Factory,
-        root_cause: "Y9 -> 5m (namespace-root-helper layer): an SVG/MathML root must clone via $.from_svg / $.from_mathml, not $.from_html — the 5m namespace-aware root-helper layer owns the factory-family selection",
-        summary: "official factory-kinds [\"from_mathml\"] != Verter [\"from_html\"]",
     },
     DivergenceRow {
         fixture: "generated/089_pair_root_if_block__attr_mixed.svelte",
@@ -606,40 +412,246 @@ const KNOWN_DIVERGENCES_DATA: [DivergenceRow; 97] = [
         root_cause: "Y17 -> 5a (option/datalist-value layer): an <option>/<datalist> value is a non-static DOM property (option.value), not a plain static attribute — the 5a option/datalist-value layer owns it",
         summary: "official node-paths [[CandNodePath { base: \"fragment\", steps: [\"child\"] }]] != Verter []",
     },
+    // ── svg / mathml root element emission (CATEGORY-4 POST-RELEASE deferral) ──
+    // This differential oracle is a PLAN-LEVEL IR projection: it reads
+    // `plan_static_templates` (the static-template plan), NOT the emitted client module.
+    // At the plan level an svg/mathml ROOT projects as an html-namespaced `$.from_html`
+    // clone where official emits the `$.from_svg` / `$.from_mathml` root helper, so each
+    // such root diverges on BOTH the clone-template factory family (`from_html` vs
+    // `from_svg`/`from_mathml`) and the owned-helper set (Verter's PLAN carries
+    // `from_html`; the official `from_svg`/`from_mathml` is outside the owned-helper
+    // universe). The REAL `compile_client` compile FAILS CLOSED on an svg/mathml root (a
+    // non-`html` namespace is refused at the resolver and svg/mathml elements fail closed
+    // — see the namespace fail-close tests): no `$.from_html` is EVER emitted for these
+    // roots. This row tracks ONLY the plan-projection divergence for the deferred
+    // svg/mathml element-emission surface — see the svelte-native-compiler-plan Decisions
+    // Log svg/mathml element-emission D-row.
+    DivergenceRow {
+        fixture: "generated/007_root_svg.svelte",
+        axis: DiffAxis::HelperSet,
+        root_cause: "svg/mathml element emission (CATEGORY-4 post-release deferral): Verter's PLAN-projected owned helper set carries `from_html` where official emits the out-of-universe $.from_svg / $.from_mathml root helper (the real compile_client compile fails closed on an svg/mathml root; the deferred svg/mathml element-emission surface)",
+        summary: "official owned-helper-set [\"append\"] != Verter [\"append\", \"from_html\"]",
+    },
+    DivergenceRow {
+        fixture: "generated/007_root_svg.svelte",
+        axis: DiffAxis::Factory,
+        root_cause: "svg/mathml element emission (CATEGORY-4 post-release deferral): at the PLAN level (this oracle reads plan_static_templates, not the emitted module) an svg/mathml root PROJECTS as an html-namespaced $.from_html clone where official emits the $.from_svg / $.from_mathml root helper — the REAL compile_client compile fails closed on an svg/mathml root (see the namespace fail-close tests), so no $.from_html is emitted; a separate deferred element-emission surface",
+        summary: "official factory-kinds [\"from_svg\"] != Verter [\"from_html\"]",
+    },
+    DivergenceRow {
+        fixture: "generated/008_root_mathml.svelte",
+        axis: DiffAxis::HelperSet,
+        root_cause: "svg/mathml element emission (CATEGORY-4 post-release deferral): Verter's PLAN-projected owned helper set carries `from_html` where official emits the out-of-universe $.from_svg / $.from_mathml root helper (the real compile_client compile fails closed on an svg/mathml root; the deferred svg/mathml element-emission surface)",
+        summary: "official owned-helper-set [\"append\"] != Verter [\"append\", \"from_html\"]",
+    },
+    DivergenceRow {
+        fixture: "generated/008_root_mathml.svelte",
+        axis: DiffAxis::Factory,
+        root_cause: "svg/mathml element emission (CATEGORY-4 post-release deferral): at the PLAN level (this oracle reads plan_static_templates, not the emitted module) an svg/mathml root PROJECTS as an html-namespaced $.from_html clone where official emits the $.from_svg / $.from_mathml root helper — the REAL compile_client compile fails closed on an svg/mathml root (see the namespace fail-close tests), so no $.from_html is emitted; a separate deferred element-emission surface",
+        summary: "official factory-kinds [\"from_mathml\"] != Verter [\"from_html\"]",
+    },
+    DivergenceRow {
+        fixture: "generated/073_pair_root_svg__attr_static.svelte",
+        axis: DiffAxis::HelperSet,
+        root_cause: "svg/mathml element emission (CATEGORY-4 post-release deferral): Verter's PLAN-projected owned helper set carries `from_html` where official emits the out-of-universe $.from_svg / $.from_mathml root helper (the real compile_client compile fails closed on an svg/mathml root; the deferred svg/mathml element-emission surface)",
+        summary: "official owned-helper-set [\"append\"] != Verter [\"append\", \"from_html\"]",
+    },
+    DivergenceRow {
+        fixture: "generated/073_pair_root_svg__attr_static.svelte",
+        axis: DiffAxis::Factory,
+        root_cause: "svg/mathml element emission (CATEGORY-4 post-release deferral): at the PLAN level (this oracle reads plan_static_templates, not the emitted module) an svg/mathml root PROJECTS as an html-namespaced $.from_html clone where official emits the $.from_svg / $.from_mathml root helper — the REAL compile_client compile fails closed on an svg/mathml root (see the namespace fail-close tests), so no $.from_html is emitted; a separate deferred element-emission surface",
+        summary: "official factory-kinds [\"from_svg\"] != Verter [\"from_html\"]",
+    },
+    DivergenceRow {
+        fixture: "generated/074_pair_root_svg__attr_dynamic.svelte",
+        axis: DiffAxis::HelperSet,
+        root_cause: "svg/mathml element emission (CATEGORY-4 post-release deferral): Verter's PLAN-projected owned helper set carries `from_html` where official emits the out-of-universe $.from_svg / $.from_mathml root helper (the real compile_client compile fails closed on an svg/mathml root; the deferred svg/mathml element-emission surface)",
+        summary: "official owned-helper-set [\"append\"] != Verter [\"append\", \"from_html\"]",
+    },
+    DivergenceRow {
+        fixture: "generated/074_pair_root_svg__attr_dynamic.svelte",
+        axis: DiffAxis::Factory,
+        root_cause: "svg/mathml element emission (CATEGORY-4 post-release deferral): at the PLAN level (this oracle reads plan_static_templates, not the emitted module) an svg/mathml root PROJECTS as an html-namespaced $.from_html clone where official emits the $.from_svg / $.from_mathml root helper — the REAL compile_client compile fails closed on an svg/mathml root (see the namespace fail-close tests), so no $.from_html is emitted; a separate deferred element-emission surface",
+        summary: "official factory-kinds [\"from_svg\"] != Verter [\"from_html\"]",
+    },
+    DivergenceRow {
+        fixture: "generated/075_pair_root_svg__attr_mixed.svelte",
+        axis: DiffAxis::HelperSet,
+        root_cause: "svg/mathml element emission (CATEGORY-4 post-release deferral): Verter's PLAN-projected owned helper set carries `from_html` where official emits the out-of-universe $.from_svg / $.from_mathml root helper (the real compile_client compile fails closed on an svg/mathml root; the deferred svg/mathml element-emission surface)",
+        summary: "official owned-helper-set [\"append\"] != Verter [\"append\", \"from_html\"]",
+    },
+    DivergenceRow {
+        fixture: "generated/075_pair_root_svg__attr_mixed.svelte",
+        axis: DiffAxis::Factory,
+        root_cause: "svg/mathml element emission (CATEGORY-4 post-release deferral): at the PLAN level (this oracle reads plan_static_templates, not the emitted module) an svg/mathml root PROJECTS as an html-namespaced $.from_html clone where official emits the $.from_svg / $.from_mathml root helper — the REAL compile_client compile fails closed on an svg/mathml root (see the namespace fail-close tests), so no $.from_html is emitted; a separate deferred element-emission surface",
+        summary: "official factory-kinds [\"from_svg\"] != Verter [\"from_html\"]",
+    },
+    DivergenceRow {
+        fixture: "generated/076_pair_root_svg__attr_boolean.svelte",
+        axis: DiffAxis::HelperSet,
+        root_cause: "svg/mathml element emission (CATEGORY-4 post-release deferral): Verter's PLAN-projected owned helper set carries `from_html` where official emits the out-of-universe $.from_svg / $.from_mathml root helper (the real compile_client compile fails closed on an svg/mathml root; the deferred svg/mathml element-emission surface)",
+        summary: "official owned-helper-set [\"append\"] != Verter [\"append\", \"from_html\"]",
+    },
+    DivergenceRow {
+        fixture: "generated/076_pair_root_svg__attr_boolean.svelte",
+        axis: DiffAxis::Factory,
+        root_cause: "svg/mathml element emission (CATEGORY-4 post-release deferral): at the PLAN level (this oracle reads plan_static_templates, not the emitted module) an svg/mathml root PROJECTS as an html-namespaced $.from_html clone where official emits the $.from_svg / $.from_mathml root helper — the REAL compile_client compile fails closed on an svg/mathml root (see the namespace fail-close tests), so no $.from_html is emitted; a separate deferred element-emission surface",
+        summary: "official factory-kinds [\"from_svg\"] != Verter [\"from_html\"]",
+    },
+    DivergenceRow {
+        fixture: "generated/077_pair_root_svg__attr_shorthand.svelte",
+        axis: DiffAxis::HelperSet,
+        root_cause: "svg/mathml element emission (CATEGORY-4 post-release deferral): Verter's PLAN-projected owned helper set carries `from_html` where official emits the out-of-universe $.from_svg / $.from_mathml root helper (the real compile_client compile fails closed on an svg/mathml root; the deferred svg/mathml element-emission surface)",
+        summary: "official owned-helper-set [\"append\"] != Verter [\"append\", \"from_html\"]",
+    },
+    DivergenceRow {
+        fixture: "generated/077_pair_root_svg__attr_shorthand.svelte",
+        axis: DiffAxis::Factory,
+        root_cause: "svg/mathml element emission (CATEGORY-4 post-release deferral): at the PLAN level (this oracle reads plan_static_templates, not the emitted module) an svg/mathml root PROJECTS as an html-namespaced $.from_html clone where official emits the $.from_svg / $.from_mathml root helper — the REAL compile_client compile fails closed on an svg/mathml root (see the namespace fail-close tests), so no $.from_html is emitted; a separate deferred element-emission surface",
+        summary: "official factory-kinds [\"from_svg\"] != Verter [\"from_html\"]",
+    },
+    DivergenceRow {
+        fixture: "generated/078_pair_root_svg__attr_shorthand_spaced.svelte",
+        axis: DiffAxis::HelperSet,
+        root_cause: "svg/mathml element emission (CATEGORY-4 post-release deferral): Verter's PLAN-projected owned helper set carries `from_html` where official emits the out-of-universe $.from_svg / $.from_mathml root helper (the real compile_client compile fails closed on an svg/mathml root; the deferred svg/mathml element-emission surface)",
+        summary: "official owned-helper-set [\"append\"] != Verter [\"append\", \"from_html\"]",
+    },
+    DivergenceRow {
+        fixture: "generated/078_pair_root_svg__attr_shorthand_spaced.svelte",
+        axis: DiffAxis::Factory,
+        root_cause: "svg/mathml element emission (CATEGORY-4 post-release deferral): at the PLAN level (this oracle reads plan_static_templates, not the emitted module) an svg/mathml root PROJECTS as an html-namespaced $.from_html clone where official emits the $.from_svg / $.from_mathml root helper — the REAL compile_client compile fails closed on an svg/mathml root (see the namespace fail-close tests), so no $.from_html is emitted; a separate deferred element-emission surface",
+        summary: "official factory-kinds [\"from_svg\"] != Verter [\"from_html\"]",
+    },
+    DivergenceRow {
+        fixture: "generated/079_pair_root_svg__attr_spread.svelte",
+        axis: DiffAxis::HelperSet,
+        root_cause: "svg/mathml element emission (CATEGORY-4 post-release deferral): Verter's PLAN-projected owned helper set carries `from_html` where official emits the out-of-universe $.from_svg / $.from_mathml root helper (the real compile_client compile fails closed on an svg/mathml root; the deferred svg/mathml element-emission surface)",
+        summary: "official owned-helper-set [\"append\", \"attribute_effect\"] != Verter [\"append\", \"attribute_effect\", \"from_html\"]",
+    },
+    DivergenceRow {
+        fixture: "generated/079_pair_root_svg__attr_spread.svelte",
+        axis: DiffAxis::Factory,
+        root_cause: "svg/mathml element emission (CATEGORY-4 post-release deferral): at the PLAN level (this oracle reads plan_static_templates, not the emitted module) an svg/mathml root PROJECTS as an html-namespaced $.from_html clone where official emits the $.from_svg / $.from_mathml root helper — the REAL compile_client compile fails closed on an svg/mathml root (see the namespace fail-close tests), so no $.from_html is emitted; a separate deferred element-emission surface",
+        summary: "official factory-kinds [\"from_svg\"] != Verter [\"from_html\"]",
+    },
+    DivergenceRow {
+        fixture: "generated/080_pair_root_mathml__attr_static.svelte",
+        axis: DiffAxis::HelperSet,
+        root_cause: "svg/mathml element emission (CATEGORY-4 post-release deferral): Verter's PLAN-projected owned helper set carries `from_html` where official emits the out-of-universe $.from_svg / $.from_mathml root helper (the real compile_client compile fails closed on an svg/mathml root; the deferred svg/mathml element-emission surface)",
+        summary: "official owned-helper-set [\"append\"] != Verter [\"append\", \"from_html\"]",
+    },
+    DivergenceRow {
+        fixture: "generated/080_pair_root_mathml__attr_static.svelte",
+        axis: DiffAxis::Factory,
+        root_cause: "svg/mathml element emission (CATEGORY-4 post-release deferral): at the PLAN level (this oracle reads plan_static_templates, not the emitted module) an svg/mathml root PROJECTS as an html-namespaced $.from_html clone where official emits the $.from_svg / $.from_mathml root helper — the REAL compile_client compile fails closed on an svg/mathml root (see the namespace fail-close tests), so no $.from_html is emitted; a separate deferred element-emission surface",
+        summary: "official factory-kinds [\"from_mathml\"] != Verter [\"from_html\"]",
+    },
+    DivergenceRow {
+        fixture: "generated/081_pair_root_mathml__attr_dynamic.svelte",
+        axis: DiffAxis::HelperSet,
+        root_cause: "svg/mathml element emission (CATEGORY-4 post-release deferral): Verter's PLAN-projected owned helper set carries `from_html` where official emits the out-of-universe $.from_svg / $.from_mathml root helper (the real compile_client compile fails closed on an svg/mathml root; the deferred svg/mathml element-emission surface)",
+        summary: "official owned-helper-set [\"append\"] != Verter [\"append\", \"from_html\"]",
+    },
+    DivergenceRow {
+        fixture: "generated/081_pair_root_mathml__attr_dynamic.svelte",
+        axis: DiffAxis::Factory,
+        root_cause: "svg/mathml element emission (CATEGORY-4 post-release deferral): at the PLAN level (this oracle reads plan_static_templates, not the emitted module) an svg/mathml root PROJECTS as an html-namespaced $.from_html clone where official emits the $.from_svg / $.from_mathml root helper — the REAL compile_client compile fails closed on an svg/mathml root (see the namespace fail-close tests), so no $.from_html is emitted; a separate deferred element-emission surface",
+        summary: "official factory-kinds [\"from_mathml\"] != Verter [\"from_html\"]",
+    },
+    DivergenceRow {
+        fixture: "generated/082_pair_root_mathml__attr_mixed.svelte",
+        axis: DiffAxis::HelperSet,
+        root_cause: "svg/mathml element emission (CATEGORY-4 post-release deferral): Verter's PLAN-projected owned helper set carries `from_html` where official emits the out-of-universe $.from_svg / $.from_mathml root helper (the real compile_client compile fails closed on an svg/mathml root; the deferred svg/mathml element-emission surface)",
+        summary: "official owned-helper-set [\"append\"] != Verter [\"append\", \"from_html\"]",
+    },
+    DivergenceRow {
+        fixture: "generated/082_pair_root_mathml__attr_mixed.svelte",
+        axis: DiffAxis::Factory,
+        root_cause: "svg/mathml element emission (CATEGORY-4 post-release deferral): at the PLAN level (this oracle reads plan_static_templates, not the emitted module) an svg/mathml root PROJECTS as an html-namespaced $.from_html clone where official emits the $.from_svg / $.from_mathml root helper — the REAL compile_client compile fails closed on an svg/mathml root (see the namespace fail-close tests), so no $.from_html is emitted; a separate deferred element-emission surface",
+        summary: "official factory-kinds [\"from_mathml\"] != Verter [\"from_html\"]",
+    },
+    DivergenceRow {
+        fixture: "generated/083_pair_root_mathml__attr_boolean.svelte",
+        axis: DiffAxis::HelperSet,
+        root_cause: "svg/mathml element emission (CATEGORY-4 post-release deferral): Verter's PLAN-projected owned helper set carries `from_html` where official emits the out-of-universe $.from_svg / $.from_mathml root helper (the real compile_client compile fails closed on an svg/mathml root; the deferred svg/mathml element-emission surface)",
+        summary: "official owned-helper-set [\"append\"] != Verter [\"append\", \"from_html\"]",
+    },
+    DivergenceRow {
+        fixture: "generated/083_pair_root_mathml__attr_boolean.svelte",
+        axis: DiffAxis::Factory,
+        root_cause: "svg/mathml element emission (CATEGORY-4 post-release deferral): at the PLAN level (this oracle reads plan_static_templates, not the emitted module) an svg/mathml root PROJECTS as an html-namespaced $.from_html clone where official emits the $.from_svg / $.from_mathml root helper — the REAL compile_client compile fails closed on an svg/mathml root (see the namespace fail-close tests), so no $.from_html is emitted; a separate deferred element-emission surface",
+        summary: "official factory-kinds [\"from_mathml\"] != Verter [\"from_html\"]",
+    },
+    DivergenceRow {
+        fixture: "generated/084_pair_root_mathml__attr_shorthand.svelte",
+        axis: DiffAxis::HelperSet,
+        root_cause: "svg/mathml element emission (CATEGORY-4 post-release deferral): Verter's PLAN-projected owned helper set carries `from_html` where official emits the out-of-universe $.from_svg / $.from_mathml root helper (the real compile_client compile fails closed on an svg/mathml root; the deferred svg/mathml element-emission surface)",
+        summary: "official owned-helper-set [\"append\"] != Verter [\"append\", \"from_html\"]",
+    },
+    DivergenceRow {
+        fixture: "generated/084_pair_root_mathml__attr_shorthand.svelte",
+        axis: DiffAxis::Factory,
+        root_cause: "svg/mathml element emission (CATEGORY-4 post-release deferral): at the PLAN level (this oracle reads plan_static_templates, not the emitted module) an svg/mathml root PROJECTS as an html-namespaced $.from_html clone where official emits the $.from_svg / $.from_mathml root helper — the REAL compile_client compile fails closed on an svg/mathml root (see the namespace fail-close tests), so no $.from_html is emitted; a separate deferred element-emission surface",
+        summary: "official factory-kinds [\"from_mathml\"] != Verter [\"from_html\"]",
+    },
+    DivergenceRow {
+        fixture: "generated/085_pair_root_mathml__attr_shorthand_spaced.svelte",
+        axis: DiffAxis::HelperSet,
+        root_cause: "svg/mathml element emission (CATEGORY-4 post-release deferral): Verter's PLAN-projected owned helper set carries `from_html` where official emits the out-of-universe $.from_svg / $.from_mathml root helper (the real compile_client compile fails closed on an svg/mathml root; the deferred svg/mathml element-emission surface)",
+        summary: "official owned-helper-set [\"append\"] != Verter [\"append\", \"from_html\"]",
+    },
+    DivergenceRow {
+        fixture: "generated/085_pair_root_mathml__attr_shorthand_spaced.svelte",
+        axis: DiffAxis::Factory,
+        root_cause: "svg/mathml element emission (CATEGORY-4 post-release deferral): at the PLAN level (this oracle reads plan_static_templates, not the emitted module) an svg/mathml root PROJECTS as an html-namespaced $.from_html clone where official emits the $.from_svg / $.from_mathml root helper — the REAL compile_client compile fails closed on an svg/mathml root (see the namespace fail-close tests), so no $.from_html is emitted; a separate deferred element-emission surface",
+        summary: "official factory-kinds [\"from_mathml\"] != Verter [\"from_html\"]",
+    },
+    DivergenceRow {
+        fixture: "generated/086_pair_root_mathml__attr_spread.svelte",
+        axis: DiffAxis::HelperSet,
+        root_cause: "svg/mathml element emission (CATEGORY-4 post-release deferral): Verter's PLAN-projected owned helper set carries `from_html` where official emits the out-of-universe $.from_svg / $.from_mathml root helper (the real compile_client compile fails closed on an svg/mathml root; the deferred svg/mathml element-emission surface)",
+        summary: "official owned-helper-set [\"append\", \"attribute_effect\"] != Verter [\"append\", \"attribute_effect\", \"from_html\"]",
+    },
+    DivergenceRow {
+        fixture: "generated/086_pair_root_mathml__attr_spread.svelte",
+        axis: DiffAxis::Factory,
+        root_cause: "svg/mathml element emission (CATEGORY-4 post-release deferral): at the PLAN level (this oracle reads plan_static_templates, not the emitted module) an svg/mathml root PROJECTS as an html-namespaced $.from_html clone where official emits the $.from_svg / $.from_mathml root helper — the REAL compile_client compile fails closed on an svg/mathml root (see the namespace fail-close tests), so no $.from_html is emitted; a separate deferred element-emission surface",
+        summary: "official factory-kinds [\"from_mathml\"] != Verter [\"from_html\"]",
+    },
     DivergenceRow {
         fixture: "generated/149_ws_svg_interior.svelte",
         axis: DiffAxis::HelperSet,
-        root_cause: "Y9 -> 5m (namespace-root-helper layer): an SVG/MathML root must clone via $.from_svg / $.from_mathml, not $.from_html — the 5m namespace-aware root-helper layer owns the factory-family selection",
+        root_cause: "svg/mathml element emission (CATEGORY-4 post-release deferral): Verter's PLAN-projected owned helper set carries `from_html` where official emits the out-of-universe $.from_svg / $.from_mathml root helper (the real compile_client compile fails closed on an svg/mathml root; the deferred svg/mathml element-emission surface)",
         summary: "official owned-helper-set [\"append\"] != Verter [\"append\", \"from_html\"]",
     },
     DivergenceRow {
         fixture: "generated/149_ws_svg_interior.svelte",
         axis: DiffAxis::Factory,
-        root_cause: "Y9 -> 5m (namespace-root-helper layer): an SVG/MathML root must clone via $.from_svg / $.from_mathml, not $.from_html — the 5m namespace-aware root-helper layer owns the factory-family selection",
+        root_cause: "svg/mathml element emission (CATEGORY-4 post-release deferral): at the PLAN level (this oracle reads plan_static_templates, not the emitted module) an svg/mathml root PROJECTS as an html-namespaced $.from_html clone where official emits the $.from_svg / $.from_mathml root helper — the REAL compile_client compile fails closed on an svg/mathml root (see the namespace fail-close tests), so no $.from_html is emitted; a separate deferred element-emission surface",
         summary: "official factory-kinds [\"from_svg\"] != Verter [\"from_html\"]",
     },
     DivergenceRow {
         fixture: "generated/150_ws_svg_title.svelte",
         axis: DiffAxis::HelperSet,
-        root_cause: "Y9 -> 5m (namespace-root-helper layer): an SVG/MathML root must clone via $.from_svg / $.from_mathml, not $.from_html — the 5m namespace-aware root-helper layer owns the factory-family selection",
+        root_cause: "svg/mathml element emission (CATEGORY-4 post-release deferral): Verter's PLAN-projected owned helper set carries `from_html` where official emits the out-of-universe $.from_svg / $.from_mathml root helper (the real compile_client compile fails closed on an svg/mathml root; the deferred svg/mathml element-emission surface)",
         summary: "official owned-helper-set [\"append\"] != Verter [\"append\", \"from_html\"]",
     },
     DivergenceRow {
         fixture: "generated/150_ws_svg_title.svelte",
         axis: DiffAxis::Factory,
-        root_cause: "Y9 -> 5m (namespace-root-helper layer): an SVG/MathML root must clone via $.from_svg / $.from_mathml, not $.from_html — the 5m namespace-aware root-helper layer owns the factory-family selection",
+        root_cause: "svg/mathml element emission (CATEGORY-4 post-release deferral): at the PLAN level (this oracle reads plan_static_templates, not the emitted module) an svg/mathml root PROJECTS as an html-namespaced $.from_html clone where official emits the $.from_svg / $.from_mathml root helper — the REAL compile_client compile fails closed on an svg/mathml root (see the namespace fail-close tests), so no $.from_html is emitted; a separate deferred element-emission surface",
         summary: "official factory-kinds [\"from_svg\"] != Verter [\"from_html\"]",
     },
     DivergenceRow {
         fixture: "generated/151_ws_svg_anchor.svelte",
         axis: DiffAxis::HelperSet,
-        root_cause: "Y9 -> 5m (namespace-root-helper layer): an SVG/MathML root must clone via $.from_svg / $.from_mathml, not $.from_html — the 5m namespace-aware root-helper layer owns the factory-family selection",
+        root_cause: "svg/mathml element emission (CATEGORY-4 post-release deferral): Verter's PLAN-projected owned helper set carries `from_html` where official emits the out-of-universe $.from_svg / $.from_mathml root helper (the real compile_client compile fails closed on an svg/mathml root; the deferred svg/mathml element-emission surface)",
         summary: "official owned-helper-set [\"append\"] != Verter [\"append\", \"from_html\"]",
     },
     DivergenceRow {
         fixture: "generated/151_ws_svg_anchor.svelte",
         axis: DiffAxis::Factory,
-        root_cause: "Y9 -> 5m (namespace-root-helper layer): an SVG/MathML root must clone via $.from_svg / $.from_mathml, not $.from_html — the 5m namespace-aware root-helper layer owns the factory-family selection",
+        root_cause: "svg/mathml element emission (CATEGORY-4 post-release deferral): at the PLAN level (this oracle reads plan_static_templates, not the emitted module) an svg/mathml root PROJECTS as an html-namespaced $.from_html clone where official emits the $.from_svg / $.from_mathml root helper — the REAL compile_client compile fails closed on an svg/mathml root (see the namespace fail-close tests), so no $.from_html is emitted; a separate deferred element-emission surface",
         summary: "official factory-kinds [\"from_svg\"] != Verter [\"from_html\"]",
     },
 ];

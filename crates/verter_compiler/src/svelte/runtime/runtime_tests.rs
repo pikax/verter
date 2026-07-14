@@ -35,6 +35,94 @@ fn lower_result<'a>(
     lower_parsed_svelte_to_ir(source, &parsed, &SvelteRuntimeOptions::default(), alloc)
 }
 
+/// Lower `source` under an explicit component `name` option and return the derived
+/// component-function name (the svelte `Scope.generate` deconfliction result).
+fn component_name_with_option(source: &str, name: &str, alloc: &Allocator) -> String {
+    let parsed = parse_svelte(source);
+    let opts = SvelteRuntimeOptions {
+        name: Some(name.to_string()),
+        ..SvelteRuntimeOptions::default()
+    };
+    lower_parsed_svelte_to_ir(source, &parsed, &opts, alloc)
+        .expect("lowering succeeds for a well-formed fixture")
+        .component
+        .name
+}
+
+#[test]
+fn authored_declarations_reserve_the_component_name() {
+    // Every script + template declaration form reserves the component-function name:
+    // svelte@5.56.3 renders a declared `Foo` under component name `Foo` as `Foo_1`.
+    // Each row's `Foo` appears ONLY as the declaration (never template-referenced),
+    // so it isolates the declaration path — not the free-reference fold.
+    let alloc = Allocator::default();
+    let cases: &[(&str, &str)] = &[
+        (
+            "export let prop",
+            "<script>export let Foo;</script>\n<div>hi</div>",
+        ),
+        (
+            "export function",
+            "<script>export function Foo() {}</script>\n<div>hi</div>",
+        ),
+        (
+            "export class",
+            "<script>export class Foo {}</script>\n<div>hi</div>",
+        ),
+        (
+            "export const",
+            "<script>export const Foo = 1;</script>\n<div>hi</div>",
+        ),
+        (
+            "instance import",
+            "<script>import Foo from './x.js';</script>\n<div>hi</div>",
+        ),
+        (
+            "module import",
+            "<script module>import Foo from './x.js';</script>\n<div>hi</div>",
+        ),
+        (
+            "props destructure",
+            "<script>let { Foo } = $props();</script>\n<div>hi</div>",
+        ),
+        (
+            "each item",
+            "<script>let items = [];</script>\n{#each items as Foo}<span></span>{/each}",
+        ),
+        (
+            "each index",
+            "<script>let items = [];</script>\n{#each items as it, Foo}<span></span>{/each}",
+        ),
+        (
+            "await then",
+            "<script>let p = Promise.resolve(1);</script>\n{#await p then Foo}<span></span>{/await}",
+        ),
+        (
+            "await catch",
+            "<script>let p = Promise.resolve(1);</script>\n{#await p}<span></span>{:catch Foo}<span></span>{/await}",
+        ),
+        (
+            "snippet name",
+            "<script>let x = 1;</script>\n{#snippet Foo()}<span></span>{/snippet}\n<span>{x}</span>",
+        ),
+        (
+            "slot let: binding",
+            "<script>import C from './C.svelte';</script>\n<C let:Foo><span></span></C>",
+        ),
+        (
+            "@const tag",
+            "<script>let x = 1;</script>\n{#if x}{@const Foo = x + 1}<span>{Foo}</span>{/if}",
+        ),
+    ];
+    for (label, src) in cases {
+        assert_eq!(
+            component_name_with_option(src, "Foo", &alloc),
+            "Foo_1",
+            "the {label} declaration `Foo` must reserve the component name (expected `Foo_1`)"
+        );
+    }
+}
+
 /// Resolve the runtime kind of a top-level (root-scope) binding by name.
 fn root_binding_kind(ir: &super::ir::SvelteRuntimeIr, name: &str) -> Option<BindingRuntimeKind> {
     let root_scope = ir.root_scope().scope;
@@ -1530,6 +1618,34 @@ fn malformed_instance_script_records_diagnostic() {
     assert!(
         ok.is_ok(),
         "a well-formed instance script lowers cleanly (got {ok:?})"
+    );
+}
+
+#[test]
+fn same_scope_redeclaration_refuses_via_scope_facts() {
+    let alloc = Allocator::default();
+    // A same-scope redeclaration (`const a = 1; const a = 2;`) is PARSE-valid but
+    // fails SemanticBuilder scope analysis, so the component-scope facts REFUSE
+    // (`svelte-runtime-scope-facts`) rather than fabricate an un-deconflicted
+    // component name from partial facts. svelte@5.56.3 likewise rejects it
+    // (`Identifier 'a' has already been declared`) — the refusal is oracle-aligned.
+    let src = "<script>const a = 1; const a = 2;</script>\n<p>x</p>\n";
+    let errors =
+        lower_result(src, &alloc).expect_err("a same-scope redeclaration must fail lowering");
+    assert!(
+        errors
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "svelte-runtime-scope-facts"),
+        "a same-scope redeclaration refuses via the scope-facts channel (got {:?})",
+        errors.diagnostics
+    );
+
+    // Control: a well-formed instance script lowers cleanly (no scope-facts refusal).
+    let ok = lower_result("<script>const a = 1;</script>\n<p>x</p>\n", &alloc);
+    assert!(
+        ok.is_ok(),
+        "a well-formed script must not trip the scope-facts refusal (got {ok:?})"
     );
 }
 
@@ -3282,6 +3398,7 @@ mod non_body_special_excluded_from_skeleton {
                 TemplateFactory::FromHtml {
                     html,
                     fragment_flag,
+                    ..
                 } => Some((html.clone(), fragment_flag.map(|f| f.literal()))),
                 TemplateFactory::TextNode { .. }
                 | TemplateFactory::CommentAnchor { .. }
@@ -3422,6 +3539,7 @@ mod non_rendering_construct_excluded_from_skeleton {
                 TemplateFactory::FromHtml {
                     html,
                     fragment_flag,
+                    ..
                 } => Some((html.clone(), fragment_flag.map(|f| f.literal()))),
                 TemplateFactory::TextNode { .. }
                 | TemplateFactory::CommentAnchor { .. }
@@ -3963,6 +4081,7 @@ mod topology_oracle {
     /// slack remains.
     const OWNED_STRUCTURAL_HELPERS: &[SvelteHelper] = &[
         SvelteHelper::FromHtml,
+        SvelteHelper::FromTree,
         SvelteHelper::Text,
         SvelteHelper::Comment,
         SvelteHelper::Append,
@@ -4033,10 +4152,19 @@ mod topology_oracle {
         plan.templates
             .iter()
             .filter_map(|t| match t {
+                // A `fragments: 'tree'` factory carries its objectified array
+                // literal in `tree`; the golden's template body is that same
+                // literal, so the skeleton comparison must use it (not the
+                // still-populated `html` skeleton string) when present.
                 TemplateFactory::FromHtml {
                     html,
+                    tree,
                     fragment_flag,
-                } => Some((html.clone(), fragment_flag.map(|f| f.literal()))),
+                    ..
+                } => Some((
+                    tree.clone().unwrap_or_else(|| html.clone()),
+                    fragment_flag.map(|f| f.literal()),
+                )),
                 TemplateFactory::TextNode { .. }
                 | TemplateFactory::CommentAnchor { .. }
                 | TemplateFactory::Standalone { .. } => None,
@@ -4232,48 +4360,30 @@ mod topology_oracle {
         // mounts the render through the each block's own anchor (no separate comment
         // factory). Reachable + semantically equal — the mount strategy is a backend
         // emission concern.
-        // `<svelte:options namespace="svg">` selects the `from_svg` root factory
-        // helper; the runtime-IR plan emits the `from_html` factory family uniformly
-        // (the namespace-driven root-helper selection is a downstream layer).
-        LedgerRow {
-            fixture: "options/svelte_options_namespace.svelte",
-            axis: TopologyAxis::OwnedHelperSet,
-            owning_layer:
-                "the namespace-aware root-helper selection layer (from_svg / from_mathml)",
-            reason: "official selects `from_svg` for an svg-namespace component; the runtime-IR \
-                     plan emits the `from_html` factory family uniformly (the namespace-driven \
-                     root-helper selection + options fold is a downstream layer)",
-        },
-        LedgerRow {
-            fixture: "options/svelte_options_namespace.svelte",
-            axis: TopologyAxis::OwnedHelperCounts,
-            owning_layer:
-                "the namespace-aware root-helper selection layer (from_svg / from_mathml)",
-            reason: "same as the OwnedHelperSet row: `from_html` count 1 vs official's `from_svg`",
-        },
-        // An inline `<svg>` subtree compiles to a `from_svg` root factory in
-        // official; the runtime-IR plan emits the `from_html` factory family
-        // uniformly (the same deferred namespace-aware root-helper selection layer
-        // as the `svelte:options namespace` fixture). The SVG whitespace REMOVAL
-        // (X6) — the interior whitespace between `<rect>`/`<circle>` dropped, the
-        // `<text>` content kept — IS asserted on the Skeleton axis (not ledgered);
-        // only the from_svg-vs-from_html ROOT-HELPER family is deferred here.
+        //
+        // svg / mathml root element emission (CATEGORY-4 POST-RELEASE deferral): a
+        // non-`html` namespace is refused at the resolver and svg/mathml elements fail
+        // closed, so Verter serializes an svg root as an html-namespaced `$.from_html`
+        // clone where official emits the `$.from_svg` root helper. The whitespace-cleaned
+        // SKELETON bytes still match (the svg-context whitespace rule is honored), so only
+        // the owned helper SET / COUNTS diverge (Verter carries `from_html`; official's
+        // `from_svg` is outside the owned-helper universe).
         LedgerRow {
             fixture: "whitespace/svg_whitespace.svelte",
             axis: TopologyAxis::OwnedHelperSet,
-            owning_layer:
-                "the namespace-aware root-helper selection layer (from_svg / from_mathml)",
-            reason: "official selects `from_svg` for an inline `<svg>` subtree; the runtime-IR \
-                     plan emits the `from_html` factory family uniformly (the namespace-driven \
-                     root-helper selection is a downstream layer) — the SVG whitespace removal \
-                     itself is asserted on the Skeleton axis",
+            owning_layer: "the deferred svg/mathml element-emission surface (the $.from_svg/$.from_mathml root-helper layer)",
+            reason: "Verter serializes an svg root as an html-namespaced `$.from_html` clone \
+                     (svg element emission is refused / deferred), so its owned helper set \
+                     carries `from_html` where official emits the out-of-universe `from_svg` \
+                     root helper",
         },
         LedgerRow {
             fixture: "whitespace/svg_whitespace.svelte",
             axis: TopologyAxis::OwnedHelperCounts,
-            owning_layer:
-                "the namespace-aware root-helper selection layer (from_svg / from_mathml)",
-            reason: "same as the OwnedHelperSet row: `from_html` count 1 vs official's `from_svg`",
+            owning_layer: "the deferred svg/mathml element-emission surface (the $.from_svg/$.from_mathml root-helper layer)",
+            reason: "same as the OwnedHelperSet row: the plan emits one `from_html` factory \
+                     where official emits one `from_svg` (outside the owned-helper universe), \
+                     so the owned `from_html` count diverges",
         },
     ];
 
@@ -4299,9 +4409,22 @@ mod topology_oracle {
         let source = load_fixture(slug);
         let alloc = Allocator::default();
         let parsed = parse_svelte(&source);
-        let ir =
-            lower_parsed_svelte_to_ir(&source, &parsed, &SvelteRuntimeOptions::default(), &alloc)
-                .expect("fixture lowers");
+        // Compile under the fixture's golden compile-options (the hand-vendored analogue
+        // of `gen-svelte-goldens.mjs`'s `FIXTURE_COMPILE_OPTIONS`), threading the resolved
+        // `root_options` exactly as `compile_client` does — so a `fragments: 'tree'`
+        // fixture plans the `$.from_tree` factory the golden was generated with.
+        let opts = fixture_runtime_options(slug);
+        let resolved =
+            crate::svelte::runtime::resolve_svelte_compile_options(&source, &parsed, &opts)
+                .expect("fixture options resolve");
+        let mut ir =
+            lower_parsed_svelte_to_ir(&source, &parsed, &opts, &alloc).expect("fixture lowers");
+        ir.root_options = crate::svelte::runtime::ir::RootCompileOptions {
+            fragments: resolved.fragments,
+            preserve_whitespace: resolved.preserve_whitespace,
+            preserve_comments: resolved.preserve_comments,
+            disclose_version: resolved.disclose_version,
+        };
         // The fixture's proven scope-injection facts (a style-less fixture has
         // none) — the skeleton bake consumes them exactly as production does.
         let css_facts = fixture_scope_facts(&source, &ir);
@@ -4394,12 +4517,12 @@ mod topology_oracle {
         }
 
         // (4) ImportPlan: the client namespace + disclose-version + the mode-derived
-        // legacy flag (a legacy golden carries `svelte/internal/flags/legacy`).
+        // legacy flag (a legacy golden carries `svelte/internal/flags/legacy`). The
+        // disclose-version import is present by DEFAULT (and for every default-options
+        // fixture), but the `discloseVersion: false` option fixture legitimately drops
+        // it — so the planned disclose-version flag is asserted for PARITY with the
+        // golden's side-effect import, never as a hard-coded `true`.
         if !is_ledgered(slug, TopologyAxis::ImportPlan) {
-            assert!(
-                topo.imports.disclose_version,
-                "client default imports disclose-version for {slug}"
-            );
             assert_eq!(
                 topo.imports.runtime.module_specifier(),
                 "svelte/internal/client",
@@ -4417,9 +4540,9 @@ mod topology_oracle {
                 has_namespace,
                 "golden carries the client namespace import for {slug}"
             );
-            assert!(
-                has_disclose,
-                "golden carries the disclose-version import for {slug}"
+            assert_eq!(
+                topo.imports.disclose_version, has_disclose,
+                "the planned disclose-version import must match the golden's side-effect import for {slug}"
             );
             // The legacy flag must match the golden's `svelte/internal/flags/legacy`
             // side-effect import EXACTLY (H5).
@@ -4448,6 +4571,7 @@ mod topology_oracle {
                 matches!(
                     topo.helpers.sequence.first(),
                     Some(SvelteHelper::FromHtml)
+                        | Some(SvelteHelper::FromTree)
                         | Some(SvelteHelper::Comment)
                         | Some(SvelteHelper::Text)
                 ),
@@ -4589,6 +4713,48 @@ mod topology_oracle {
     /// matrix's tight ledger is not polluted by the broad generated long tail.
     fn full_corpus() -> Vec<String> {
         discover_fixtures(Some(GENERATED_SUBDIR_EXCLUDE))
+    }
+
+    /// The runtime compile-options a hand-vendored fixture's golden was generated under
+    /// — the Rust mirror of `gen-svelte-goldens.mjs`'s `FIXTURE_COMPILE_OPTIONS`. Only
+    /// the fixtures whose golden needs a non-default option are listed; every other
+    /// fixture keeps the default options. Keeps the topology matrix's planned output in
+    /// sync with the option the golden pins (e.g. `fragments: 'tree'`).
+    fn fixture_runtime_options(slug: &str) -> SvelteRuntimeOptions {
+        let mut opts = SvelteRuntimeOptions::default();
+        if slug.starts_with("options/fragments_tree_") {
+            opts.fragments = Some(crate::svelte::runtime::SvelteFragments::Tree);
+        }
+        // The per-option EMISSION oracle fixtures (their goldens are generated with the
+        // one non-default option they pin — see `gen-svelte-goldens.mjs`
+        // `FIXTURE_COMPILE_OPTIONS`); compile them under that option so the planned
+        // topology stays in sync with the golden the option produced.
+        match slug {
+            "options/preserve_comments_on.svelte" | "options/preserve_comments_multi.svelte" => {
+                opts.preserve_comments = Some(true)
+            }
+            "options/disclose_version_off.svelte" => opts.disclose_version = Some(false),
+            "options/name_reserved.svelte" => opts.name = Some("var".to_string()),
+            "options/name_collision.svelte" => opts.name = Some("foo".to_string()),
+            "options/name_collision_export_let.svelte"
+            | "options/name_collision_snippet.svelte"
+            | "options/name_collision_module_import.svelte"
+            | "options/name_collision_props.svelte" => opts.name = Some("Foo".to_string()),
+            "options/name_reference_collision.svelte"
+            | "options/name_script_reference_collision.svelte" => {
+                opts.name = Some("String".to_string())
+            }
+            "options/name_astral.svelte" => opts.name = Some("💩".to_string()),
+            "options/namespace_svg_inline_html_wins.svelte" => {
+                opts.namespace = Some(crate::svelte::runtime::SvelteNamespace::Svg)
+            }
+            "options/preserve_whitespace_on.svelte"
+            | "options/preserve_whitespace_inline_wins.svelte" => {
+                opts.preserve_whitespace = Some(true);
+            }
+            _ => {}
+        }
+        opts
     }
 
     /// The top-level `fixtures/` subdirectory name owned by the generated
@@ -6055,6 +6221,7 @@ mod official_whitespace_skeleton {
                 TemplateFactory::FromHtml {
                     html,
                     fragment_flag,
+                    ..
                 } => Some((html.clone(), fragment_flag.map(|f| f.literal()))),
                 TemplateFactory::TextNode { .. }
                 | TemplateFactory::CommentAnchor { .. }
@@ -6276,6 +6443,7 @@ mod official_whitespace_skeleton {
             TemplateFactory::FromHtml {
                 html,
                 fragment_flag,
+                ..
             } => {
                 assert_eq!(html, " <div></div>");
                 assert!(

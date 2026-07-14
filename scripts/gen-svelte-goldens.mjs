@@ -233,7 +233,10 @@ const EMIT_PLAN_COMMAND = [
 // `ValueWrapSurface` vocabulary plus its exhaustive per-cell observation gate.
 // The consumer contract is unchanged (the same COMPILE / `oracle-rejected:*`
 // obligations), reviewed against the v3 plan.
-const CONFORMANCE_PLAN_SCHEMA_VERSION = 3;
+// v4: the `fragments: 'tree'` compile-option carrier added — the scoped-CSS tree
+// cell rides the existing `compileOptions` passthrough (spread verbatim into
+// `compiler.compile`), so the consumer contract is unchanged.
+const CONFORMANCE_PLAN_SCHEMA_VERSION = 4;
 
 // ---------------------------------------------------------------------------
 // Destructive-path safety
@@ -469,6 +472,66 @@ const FIXTURE_COMPILE_OPTIONS = {
   // (`filename === '(unknown)' ? css : filename ?? css`) — the golden's
   // css.hash pins the fallback, discriminating it from the filename input.
   "css/scope_hash_fallback_no_filename.svelte": { filename: undefined },
+  // `fragments: 'tree'` — the CSP-safe `$.from_tree` objectified-clone factory
+  // (html namespace). svg / mathml roots are refused (a separate deferred
+  // element-emission surface), so only the html-namespace tree fixture exists.
+  "options/fragments_tree_html.svelte": { fragments: "tree" },
+  // The per-option EMISSION oracle fixtures (A#7): each pins the emitted-output
+  // difference of ONE `5m` compile option against its svelte@5.56.3 golden.
+  // `fragments: 'tree'` over the SAME source as `namespace_html_default` (the
+  // default `$.from_html` baseline) — the `$.from_html` vs `$.from_tree` diff.
+  "options/fragments_tree_pair.svelte": { fragments: "tree" },
+  // `fragments: 'tree'` COMBINED with an attributed element (scope-free static
+  // `class` → the baked attrs object) AND a control-flow `{#if}` block (a sparse
+  // objectify hole + effect anchor) — the interaction of tree objectification,
+  // attrs, and control flow in one golden.
+  "options/fragments_tree_attrs_control_flow.svelte": { fragments: "tree" },
+  // `preserveComments: true` — the interior `<!-- keep -->` is retained in the
+  // skeleton (vs dropped under the `preserve_comments_default` default).
+  "options/preserve_comments_on.svelte": { preserveComments: true },
+  // `preserveComments: true` with MULTIPLE retained comments interleaved with
+  // MULTIPLE dynamic siblings — pins the successive `$.child` / `$.sibling` offset
+  // shifts each retained comment node introduces into the DOM walk.
+  "options/preserve_comments_multi.svelte": { preserveComments: true },
+  // A compile-option `namespace: 'svg'` MASKED by an inline
+  // `<svelte:options namespace="html">` — the inline value wins the fold, so the
+  // component resolves html and emits `$.from_html` (the compile-option svg never
+  // reaches the fail-closed gate). Pins the inline-over-compile-option precedence at
+  // real emission.
+  "options/namespace_svg_inline_html_wins.svelte": { namespace: "svg" },
+  // `name: 'String'` colliding with a global (`String`) referenced in the INSTANCE
+  // SCRIPT (`$: y = String(x)`) deconflicts to `String_1` (`Scope.generate` checks
+  // the module scope's full reference set, not only template expressions).
+  "options/name_script_reference_collision.svelte": { name: "String" },
+  // `discloseVersion: false` — the `svelte/internal/disclose-version` side-effect
+  // import is dropped from the module head.
+  "options/disclose_version_off.svelte": { discloseVersion: false },
+  // `name: 'var'` — a reserved word deconflicts to `var_1` (`Scope.generate`).
+  "options/name_reserved.svelte": { name: "var" },
+  // `name: 'foo'` colliding with a declared `foo` binding deconflicts to `foo_1`.
+  "options/name_collision.svelte": { name: "foo" },
+  // Isolated per-declaration-form name collisions (`name: 'Foo'`): the declared
+  // `Foo` appears ONLY as the declaration (never template-referenced), so each
+  // pins the DECLARATION-path deconfliction to `Foo_1`, not the free-ref fold.
+  // `export let Foo` (a legacy exported prop).
+  "options/name_collision_export_let.svelte": { name: "Foo" },
+  // A `{#snippet Foo}` authored template declaration.
+  "options/name_collision_snippet.svelte": { name: "Foo" },
+  // A module-script default import `import Foo from './x.js'`.
+  "options/name_collision_module_import.svelte": { name: "Foo" },
+  // A `$props()` destructure local `let { Foo } = $props()`.
+  "options/name_collision_props.svelte": { name: "Foo" },
+  // `name: 'String'` colliding with a REFERENCED global (`String(v)`) deconflicts to
+  // `String_1` (`Scope.generate` checks references, not only declarations).
+  "options/name_reference_collision.svelte": { name: "String" },
+  // `name: '💩'` — an astral char sanitizes per UTF-16 code unit (two units → `__`).
+  "options/name_astral.svelte": { name: "💩" },
+  // `preserveWhitespace: true` compile option — the interior ` a ` is kept in the
+  // skeleton (vs trimmed to `a` under the `preserve_whitespace_default` default).
+  "options/preserve_whitespace_on.svelte": { preserveWhitespace: true },
+  // `preserveWhitespace: true` compile option MASKED by an inline
+  // `<svelte:options preserveWhitespace={false}>` — the inline value wins (trim).
+  "options/preserve_whitespace_inline_wins.svelte": { preserveWhitespace: true },
 };
 
 // ---------------------------------------------------------------------------

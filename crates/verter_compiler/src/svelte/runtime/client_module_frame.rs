@@ -63,22 +63,34 @@ pub(super) fn emit_root_hoist(
     root_var: &str,
     html: &str,
     fragment_flag: Option<TemplateFlag>,
+    tree: Option<&str>,
 ) -> bool {
-    // ONLY a `$.from_html(...)` clone factory is module-hoisted. A text-first region emits
-    // its `$.text(...)` IN-CLOSURE (it is never a hoisted clone factory — calling a text
-    // node like `root()` is the X8 bug), and a comment-anchor / standalone region creates
-    // its `$.comment()` frame in the body, so neither reaches this hoist.
-    let escaped = escape_template_literal(html);
+    // ONLY a `$.from_html` / `$.from_tree` clone factory is module-hoisted. A text-first
+    // region emits its `$.text(...)` IN-CLOSURE (it is never a hoisted clone factory —
+    // calling a text node like `root()` is the X8 bug), and a comment-anchor / standalone
+    // region creates its `$.comment()` frame in the body, so neither reaches this hoist.
+    //
+    // Under `fragments: 'tree'` the factory is `$.from_tree(<array literal>, flags?)`; the
+    // default html-fragments mode clones the backtick skeleton via `$.from_html`. Roots
+    // are always html-namespaced (a non-`html` namespace is refused at the resolver), so
+    // there is no `$.from_svg` / `$.from_mathml` factory selection here.
+    let (factory, first_arg) = match tree {
+        Some(literal) => ("$.from_tree", literal.to_string()),
+        None => (
+            "$.from_html",
+            format!("`{}`", escape_template_literal(html)),
+        ),
+    };
     match fragment_flag {
         Some(flag) => {
             out.push_str(&format!(
-                "var {root_var} = $.from_html(`{escaped}`, {});\n",
+                "var {root_var} = {factory}({first_arg}, {});\n",
                 flag.literal()
             ));
             flag.is_fragment()
         }
         None => {
-            out.push_str(&format!("var {root_var} = $.from_html(`{escaped}`);\n"));
+            out.push_str(&format!("var {root_var} = {factory}({first_arg});\n"));
             false
         }
     }

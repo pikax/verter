@@ -277,16 +277,19 @@ fn plan_json_carries_manifest_identity_and_wire_shape() {
 fn compile_options_wire_form_matches_typed_authority() {
     for custom_element in [false, true] {
         for filename_undefined in [false, true] {
-            let options = ManifestCompileOptions {
-                custom_element,
-                filename_undefined,
-            };
-            let wire = crate::generate::compile_options_wire(&options);
-            assert_eq!(
-                wire.get(),
-                options.to_json(),
-                "wire compile options must be byte-identical to the typed rendering"
-            );
+            for fragments_tree in [false, true] {
+                let options = ManifestCompileOptions {
+                    custom_element,
+                    filename_undefined,
+                    fragments_tree,
+                };
+                let wire = crate::generate::compile_options_wire(&options);
+                assert_eq!(
+                    wire.get(),
+                    options.to_json(),
+                    "wire compile options must be byte-identical to the typed rendering"
+                );
+            }
         }
     }
 }

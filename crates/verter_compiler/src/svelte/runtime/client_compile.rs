@@ -18,8 +18,9 @@ use super::official_reject;
 use super::official_rule::OfficialRejection;
 use super::parse_refusal::parse_domain_gate;
 use super::{
-    lower_parsed_svelte_to_ir, plan_client_topology, plan_static_templates, RuntimeLoweringErrors,
-    SvelteRuntimeOptions, UnsupportedSvelteRuntimeSurface,
+    lower_parsed_svelte_to_ir, plan_client_topology, plan_static_templates,
+    resolve_svelte_compile_options, RuntimeLoweringErrors, SvelteRuntimeOptions,
+    UnsupportedSvelteRuntimeSurface,
 };
 
 /// The outcome of [`compile_client`] when the client module cannot be emitted.
@@ -104,6 +105,15 @@ pub fn compile_client<'a>(
     {
         return Err(ClientCompileError::OfficialReject(rejection));
     }
+    // (1b) Resolve the compile options ONCE — the SOLE fold point of the compile-option
+    // side with the inline `<svelte:options>` attributes (INLINE WINS per admitted key).
+    // It runs AFTER the official-reject gate, so it only ever folds an already-ACCEPTED
+    // options element (every malformed form was rejected upstream with its exact code),
+    // and it fails closed (NO module) on an unsupported feature option
+    // (`compatibility.componentApi: 4` / `hmr` / `accessors` / `immutable`). The resolved
+    // object threads into the per-option codegen consumers via the IR's `root_options`.
+    let resolved = resolve_svelte_compile_options(source, parsed, opts)
+        .map_err(ClientCompileError::Unsupported)?;
     // (2) `parse_domain_gate` — refuse the PARSE-DOMAIN surfaces the runtime IR
     // does not carry (a `<style>` with an unprovable css output mode or a failed
     // css analysis — css analysis runs before template lowering, so a css
@@ -119,8 +129,20 @@ pub fn compile_client<'a>(
         parse_domain_gate(source, parsed, opts).map_err(ClientCompileError::Unsupported)?;
     // (3) Lower to the BROAD runtime IR (the shared substrate). The broad IR may
     // exist; it just never reaches emission.
-    let ir = lower_parsed_svelte_to_ir(source, parsed, opts, alloc)
+    let mut ir = lower_parsed_svelte_to_ir(source, parsed, opts, alloc)
         .map_err(ClientCompileError::Lowering)?;
+    // Thread the resolved compile-options into the IR the codegen consumers read
+    // (the fragments strategy, the whitespace + comment retention, the disclose-version
+    // import toggle). The namespace is html-only (a non-`html` namespace was refused at
+    // the resolver), so no namespace value is threaded. The component name
+    // (`derive_component_name`) and the `cssHash` override route through lowering / the
+    // style plan respectively, so they are not carried here.
+    ir.root_options = super::ir::RootCompileOptions {
+        fragments: resolved.fragments,
+        preserve_whitespace: resolved.preserve_whitespace,
+        preserve_comments: resolved.preserve_comments,
+        disclose_version: resolved.disclose_version,
+    };
     // (3b) Complete the per-`<style>` scope plan over the REAL runtime IR: the
     // selector-to-template matcher marks the used/scoped verdicts and the scoped
     // render produces the official `css.code`. The plan is PROVEN BY
@@ -135,6 +157,7 @@ pub fn compile_client<'a>(
                 source,
                 prepared.analyzed,
                 opts.filename.as_deref(),
+                opts.css_hash_override.as_deref(),
                 prepared.mode,
                 &ir,
                 want_source_map,

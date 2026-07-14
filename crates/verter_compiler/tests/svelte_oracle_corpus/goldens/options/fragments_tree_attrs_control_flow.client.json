@@ -1,0 +1,76 @@
+{
+  "slug": "options/fragments_tree_attrs_control_flow.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "fragments_tree_attrs_control_flow",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_tree",
+    "child",
+    "text",
+    "append",
+    "if",
+    "sibling",
+    "child",
+    "reset",
+    "reset",
+    "template_effect",
+    "set_text",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "from_tree",
+    "if",
+    "reset",
+    "set_text",
+    "sibling",
+    "template_effect",
+    "text"
+  ],
+  "helperCounts": {
+    "from_tree": 1,
+    "child": 2,
+    "text": 1,
+    "append": 2,
+    "if": 1,
+    "sibling": 1,
+    "reset": 2,
+    "template_effect": 1,
+    "set_text": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_tree",
+      "html": "[['div', { class: 'card' },, ['p', null, ' ']]]",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_tree([['div', {class: 'card'},, ['p', null, ' ']]]); export default function fragments_tree_attrs_control_flow($$anchor, $$props) {var div = root(); var node = $.child(div); {var consequent = ($$anchor) => {var text = $.text('a'); $.append($$anchor, text);}; $.if(node, ($$render) => {if ($$props.show) $$render(consequent);});} var p = $.sibling(node); var text_1 = $.child(p, true); $.reset(p); $.reset(div); $.template_effect(() => $.set_text(text_1, $$props.xs)); $.append($$anchor, div);}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

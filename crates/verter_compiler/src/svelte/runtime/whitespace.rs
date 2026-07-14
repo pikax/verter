@@ -47,6 +47,12 @@ pub(super) struct CleanContext<'a> {
     /// The inherited whitespace-preservation flag (`<pre>` / `<textarea>`
     /// descendant). When set, whitespace cleaning is SKIPPED.
     pub(super) preserve_ws: bool,
+    /// The resolved `preserveComments` flag (component-global, from
+    /// `ir.root_options.preserve_comments`). When set, a comment is NOT dropped from
+    /// the cleaned sequence — it occupies its own DOM position (shifting sibling
+    /// offsets), serializes into the skeleton (`<!--data-->` / `<!>`), and — as a real
+    /// rendered node — breaks an otherwise-adjacent reactive-text run.
+    pub(super) preserve_comments: bool,
     /// Whether ANY ancestor (including the parent) is an SVG `<text>` element — the
     /// official `path.some((n) => n.type === 'RegularElement' && n.name === 'text')`.
     /// Inside an SVG `<text>`, whitespace is SIGNIFICANT, so `can_remove_entirely`
@@ -56,13 +62,32 @@ pub(super) struct CleanContext<'a> {
 
 impl<'a> CleanContext<'a> {
     /// The root cleaning context for a TEMPLATE REGION's roots: HTML namespace,
-    /// no parent element, no whitespace preservation, not inside an SVG `<text>`.
-    /// (A region's roots are at the fragment level — never inside a `<pre>`.)
+    /// no parent element, no whitespace preservation, comments DROPPED (the default
+    /// `preserveComments = false`), not inside an SVG `<text>`. (A region's roots are
+    /// at the fragment level — never inside a `<pre>`.) Comment-INVARIANT callers (a
+    /// "hosts a dynamic descendant" boolean) use this; DOM-structural callers thread
+    /// the resolved flag via [`html::region_ctx`](super::html::region_ctx).
     pub(super) fn region_root() -> Self {
         Self {
             namespace: Namespace::Html,
             parent_tag: None,
             preserve_ws: false,
+            preserve_comments: false,
+            in_svg_text: false,
+        }
+    }
+
+    /// The root cleaning context for a TEMPLATE REGION's roots under the resolved
+    /// compile options: the region's inferred `namespace` (element-derived, seeded by
+    /// the `namespace` option), the `preserveWhitespace` flag, and the
+    /// `preserveComments` flag. The other axes match [`region_root`](Self::region_root)
+    /// (fragment level, no parent element, not inside an SVG `<text>`).
+    pub(super) fn region(namespace: Namespace, preserve_ws: bool, preserve_comments: bool) -> Self {
+        Self {
+            namespace,
+            parent_tag: None,
+            preserve_ws,
+            preserve_comments,
             in_svg_text: false,
         }
     }
@@ -78,6 +103,9 @@ impl<'a> CleanContext<'a> {
             namespace,
             parent_tag: Some(tag),
             preserve_ws: self.preserve_ws || preserves_whitespace(tag),
+            // `preserveComments` is a component-global constant — it propagates
+            // unchanged into every child context.
+            preserve_comments: self.preserve_comments,
             // Inside an SVG `<text>` element, whitespace is significant. Once set,
             // it stays set for the whole `<text>` subtree (the official `path.some`).
             in_svg_text: self.in_svg_text || (namespace == Namespace::Svg && tag == "text"),
@@ -207,17 +235,19 @@ pub(super) enum CleanItem {
 /// verbatim and only the run partition applies. (The `<pre>` first-newline discard
 /// is a SEPARATE rule that still applies — see step 3.)
 /// Whether a node is DROPPED from a cleaned sibling sequence (it never occupies a
-/// DOM position): a COMMENT (the default `preserve_comments = false`), a hoisted
-/// non-rendering construct (`{@const}` / `{#snippet}` declaration / `{@debug}` /
-/// `{@attach}`), or a non-body special (`<svelte:head>` / `<svelte:options>` /
-/// window / document / body — they render in their own region).
+/// DOM position): a COMMENT (ONLY when `preserve_comments = false`, the default — a
+/// retained comment occupies its own DOM position), a hoisted non-rendering construct
+/// (`{@const}` / `{#snippet}` declaration / `{@debug}` / `{@attach}`), or a non-body
+/// special (`<svelte:head>` / `<svelte:options>` / window / document / body — they
+/// render in their own region).
 ///
 /// This is the SINGLE drop-set authority both [`clean_nodes`] (the skeleton + DOM
 /// walk) and the reactive-text run reconstruction key on, so a comment cannot
 /// break a text run in one path while being dropped in the other. Mirrors the
-/// `svelte@5.56.3` `clean_nodes` step-1 filter.
-pub(super) fn is_dropped_from_clean_sequence(node: &IrNode) -> bool {
-    matches!(node, IrNode::Comment { .. })
+/// `svelte@5.56.3` `clean_nodes` step-1 filter (whose comment drop is gated on
+/// `options.preserveComments`).
+pub(super) fn is_dropped_from_clean_sequence(node: &IrNode, preserve_comments: bool) -> bool {
+    (matches!(node, IrNode::Comment { .. }) && !preserve_comments)
         || super::html::is_non_body_special(node)
         || super::html::is_non_rendering_node(node)
 }
@@ -248,7 +278,7 @@ pub(super) fn clean_nodes_indexed(
     let mut regular: Vec<NodeId> = Vec::new();
     let mut regular_orig: Vec<usize> = Vec::new();
     for (orig, &id) in children.iter().enumerate() {
-        if !is_dropped_from_clean_sequence(ir.node(id)) {
+        if !is_dropped_from_clean_sequence(ir.node(id), ctx.preserve_comments) {
             regular.push(id);
             regular_orig.push(orig);
         }
@@ -415,7 +445,7 @@ pub(super) fn cleaned_text_run_parts(
     let regular: Vec<NodeId> = children
         .iter()
         .copied()
-        .filter(|&id| !is_dropped_from_clean_sequence(ir.node(id)))
+        .filter(|&id| !is_dropped_from_clean_sequence(ir.node(id), ctx.preserve_comments))
         .collect();
 
     // (2) The same whitespace-cleaned per-node text the skeleton uses (`None` for a
@@ -579,13 +609,13 @@ fn replace_trailing_ws(s: &str, repl: &str) -> String {
 /// Whether `tag` is an SVG element name (the vendored `svelte@5.56.3` `SVG_ELEMENTS`
 /// set). Used by [`determine_namespace_for_children`] so the namespace propagates
 /// into an `<svg>` subtree for the `can_remove_entirely` whitespace rule.
-fn is_svg_element(tag: &str) -> bool {
+pub(super) fn is_svg_element(tag: &str) -> bool {
     SVG_ELEMENTS.binary_search(&tag).is_ok()
 }
 
 /// Whether `tag` is a MathML element name (the vendored `svelte@5.56.3`
 /// `MATHML_ELEMENTS` set).
-fn is_mathml_element(tag: &str) -> bool {
+pub(super) fn is_mathml_element(tag: &str) -> bool {
     MATHML_ELEMENTS.binary_search(&tag).is_ok()
 }
 
@@ -770,6 +800,7 @@ mod tests {
                 namespace: Namespace::Html,
                 parent_tag: Some(parent),
                 preserve_ws: false,
+                preserve_comments: false,
                 in_svg_text: false,
             };
             assert!(
@@ -782,6 +813,7 @@ mod tests {
             namespace: Namespace::Html,
             parent_tag: Some("div"),
             preserve_ws: false,
+            preserve_comments: false,
             in_svg_text: false,
         };
         assert!(!div_ctx.can_remove_entirely(), "<div> keeps a single space");
@@ -790,6 +822,7 @@ mod tests {
             namespace: Namespace::Svg,
             parent_tag: Some("svg"),
             preserve_ws: false,
+            preserve_comments: false,
             in_svg_text: false,
         };
         assert!(
@@ -801,6 +834,7 @@ mod tests {
             namespace: Namespace::Svg,
             parent_tag: Some("text"),
             preserve_ws: false,
+            preserve_comments: false,
             in_svg_text: false,
         };
         assert!(
@@ -813,6 +847,7 @@ mod tests {
             namespace: Namespace::Svg,
             parent_tag: Some("tspan"),
             preserve_ws: false,
+            preserve_comments: false,
             in_svg_text: true,
         };
         assert!(

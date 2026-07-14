@@ -276,6 +276,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn compile_profile_hash_folds_the_svelte_css_hash_override() {
+        // cssHash cache identity: the resolved Svelte cssHash override is a
+        // COMPILE-OUTPUT POLICY dimension, so two profiles differing ONLY in the
+        // override MUST produce different profile hashes — the session compile
+        // slot is keyed by this u64 (and the Content-mode key embeds it), so two
+        // overrides over identical source can NEVER share a cached output.
+        let base = CompileProfile::default();
+        let override_a = CompileProfile {
+            svelte_css_hash_override: Some("svelte-A".to_string()),
+            ..CompileProfile::default()
+        };
+        let override_b = CompileProfile {
+            svelte_css_hash_override: Some("svelte-B".to_string()),
+            ..CompileProfile::default()
+        };
+        let h_base = compile_profile_hash(&base);
+        let h_a = compile_profile_hash(&override_a);
+        let h_b = compile_profile_hash(&override_b);
+        assert_ne!(h_base, h_a, "a present override must move the profile hash");
+        assert_ne!(
+            h_a, h_b,
+            "distinct overrides must produce distinct profile hashes (no shared slot)"
+        );
+        // Determinism: the same override hashes identically.
+        assert_eq!(h_a, compile_profile_hash(&override_a));
+    }
+
     /// @ai-generated - style_override_hash: insertion order doesn't matter
     #[test]
     fn style_override_hash_order_independent() {

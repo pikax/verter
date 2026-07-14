@@ -34,7 +34,7 @@ fn coverage_spec_matches_the_declared_design() {
     assert_eq!(four_wise.strength, 4);
 
     assert_eq!(full_product(), 272_160, "raw candidate space");
-    assert_eq!(SCHEMA_VERSION, 3);
+    assert_eq!(SCHEMA_VERSION, 4);
 }
 
 // ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 {
-  "schemaVersion": 3,
-  "manifestHash": "fnv1a64-0a8b7b90c5b3bbf8",
+  "schemaVersion": 4,
+  "manifestHash": "fnv1a64-8faa9143878b8848",
   "cases": [
     {
       "slug": "attr-dec-eschar-cls-q-comp-ext-prune-n",

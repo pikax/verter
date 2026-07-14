@@ -2,6 +2,7 @@
 //! projection (the machine-stable diagnostic id, message, and span).
 
 use super::official_rule::OfficialRejection;
+use super::SvelteNamespace;
 use verter_span::Span;
 
 /// The closed family of Svelte runtime surfaces this backend does NOT yet emit.
@@ -221,10 +222,41 @@ pub enum UnsupportedSvelteRuntimeSurface {
         /// The source span (the `<style>` content).
         span: Span,
     },
-    /// `<svelte:options>` / a compile-option axis beyond name/runes/client.
-    OptionsAxis {
-        /// The source span.
-        span: Span,
+    /// An officially-ACCEPTED compile option (or its inline `<svelte:options>`
+    /// form) whose feature this backend deliberately does NOT support — a
+    /// fail-closed FEATURE refusal that emits NO runtime module (NOT an official
+    /// compile-error: the official `svelte@5.56.3` compiler accepts these). The
+    /// closed set is `compatibility.componentApi: 4` / `hmr` / `accessors` /
+    /// `immutable`; EXPLICIT presence rejects (including a `false` / default-
+    /// equivalent value, and a value later masked by an inline override).
+    CompileOptionUnsupported {
+        /// The unsupported option.
+        option: UnsupportedSvelteCompileOption,
+        /// Where the option was set — the compile profile or the inline
+        /// `<svelte:options>` element.
+        origin: CompileOptionOrigin,
+        /// The source span of the inline attribute carrier (the `<svelte:options>`
+        /// open tag); `None` for a compile-profile option (no source location).
+        span: Option<Span>,
+    },
+    /// A `namespace: 'svg' | 'mathml'` root selection — either the `namespace`
+    /// compile option or an inline `<svelte:options namespace="svg">`. This backend
+    /// supports the default `html` namespace ONLY; svg / mathml root element
+    /// EMISSION (the `$.from_svg` / `$.from_mathml` root-helper layer, namespaced
+    /// element cloning, recursive namespace inference) is a separate element-emission
+    /// surface this backend does not yet emit, so a non-`html` namespace fails closed
+    /// here rather than compiling a component whose namespaced elements would fail
+    /// closed one-by-one downstream. A REFUSAL, not an official compile-error (the
+    /// official `svelte@5.56.3` compiler accepts the option).
+    NamespaceUnsupported {
+        /// The requested non-`html` namespace (`svg` / `mathml`).
+        namespace: SvelteNamespace,
+        /// Where the namespace was set — the compile profile or the inline
+        /// `<svelte:options>` element.
+        origin: CompileOptionOrigin,
+        /// The source span of the inline `<svelte:options>` open tag; `None` for a
+        /// compile-profile option (no source location).
+        span: Option<Span>,
     },
     /// A reactive interpolation whose expression is NOT a bare identifier read
     /// (a binary / logical / conditional / call / optional-call / member /
@@ -370,8 +402,8 @@ pub enum UnsupportedSvelteRuntimeSurface {
     /// top-level store base. Official `svelte@5.56.3` COMPILE-ERRORS this class
     /// (`store_invalid_scoped_subscription` — "Cannot subscribe to stores that
     /// are not declared at the top level of the component"); the scope-aware
-    /// store classifier rejects it instead of subscribing over the shadowed
-    /// top-level base (the former fail-open).
+    /// store classifier rejects it rather than subscribing over the shadowed
+    /// top-level base.
     StoreScopedSubscription {
         /// The `$`-prefixed accessor name whose base is scope-shadowed (`$x`).
         name: String,
@@ -415,6 +447,58 @@ pub enum UnsupportedSvelteRuntimeSurface {
     },
 }
 
+/// The closed set of officially-ACCEPTED compile options this backend deliberately
+/// does NOT support (a fail-closed FEATURE refusal, NOT an official compile-error).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnsupportedSvelteCompileOption {
+    /// `compatibility.componentApi` — the Svelte-4 component-instance API shape.
+    /// Any explicit value other than `5` fails closed (`5` is the supported default).
+    CompatibilityComponentApi,
+    /// `hmr` — hot-module-replacement codegen.
+    Hmr,
+    /// `accessors` — the deprecated per-prop getter/setter accessors.
+    Accessors,
+    /// `immutable` — the deprecated immutable-data optimization hint.
+    Immutable,
+}
+
+/// Where an [`UnsupportedSvelteCompileOption`] was set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompileOptionOrigin {
+    /// A compile-profile option (the `SvelteRuntimeOptions` compile-option side).
+    CompileProfile,
+    /// An inline `<svelte:options>` attribute.
+    Inline,
+}
+
+impl UnsupportedSvelteCompileOption {
+    /// The distinct machine-stable diagnostic id fragment for this option.
+    #[must_use]
+    fn code(self) -> &'static str {
+        match self {
+            Self::CompatibilityComponentApi => {
+                "svelte-runtime-unsupported-compatibility-component-api"
+            }
+            Self::Hmr => "svelte-runtime-unsupported-hmr",
+            Self::Accessors => "svelte-runtime-unsupported-accessors",
+            Self::Immutable => "svelte-runtime-unsupported-immutable",
+        }
+    }
+
+    /// A human-readable label naming the option.
+    #[must_use]
+    fn label(self) -> &'static str {
+        match self {
+            Self::CompatibilityComponentApi => {
+                "the `compatibility.componentApi` option (any explicit value other than `5`)"
+            }
+            Self::Hmr => "the `hmr` option",
+            Self::Accessors => "the `accessors` option",
+            Self::Immutable => "the `immutable` option",
+        }
+    }
+}
+
 impl UnsupportedSvelteRuntimeSurface {
     /// The machine-stable diagnostic id (`svelte-runtime-unsupported-<surface>`).
     #[must_use]
@@ -443,7 +527,8 @@ impl UnsupportedSvelteRuntimeSurface {
             Self::StyleCssAnalysis { code, .. } => code,
             Self::StyleSelectorUnsupported { code, .. } => code,
             Self::StyleCssModeUnsupported { .. } => "svelte-runtime-unsupported-style-css-mode",
-            Self::OptionsAxis { .. } => "svelte-runtime-unsupported-options",
+            Self::CompileOptionUnsupported { option, .. } => option.code(),
+            Self::NamespaceUnsupported { .. } => "svelte-runtime-unsupported-namespace",
             Self::StaticInterpolation { .. } => "svelte-runtime-unsupported-static-interpolation",
             Self::DestructuringWrite { .. } => "svelte-runtime-unsupported-destructuring-write",
             Self::RootTextRegion { .. } => "svelte-runtime-unsupported-root-text-region",
@@ -533,7 +618,31 @@ impl UnsupportedSvelteRuntimeSurface {
                  the external default nor `css=\"injected\"`/custom-element injection)"
                     .to_string()
             }
-            Self::OptionsAxis { .. } => "a `<svelte:options>` / compile-option surface".to_string(),
+            Self::CompileOptionUnsupported { option, origin, .. } => {
+                let origin = match origin {
+                    CompileOptionOrigin::CompileProfile => "compile option",
+                    CompileOptionOrigin::Inline => "`<svelte:options>` attribute",
+                };
+                format!("{} (set as a {origin})", option.label())
+            }
+            Self::NamespaceUnsupported {
+                namespace, origin, ..
+            } => {
+                let ns = match namespace {
+                    SvelteNamespace::Svg => "svg",
+                    SvelteNamespace::Mathml => "mathml",
+                    SvelteNamespace::Html => "html",
+                };
+                let origin = match origin {
+                    CompileOptionOrigin::CompileProfile => "compile option",
+                    CompileOptionOrigin::Inline => "`<svelte:options>` attribute",
+                };
+                format!(
+                    "the `{ns}` namespace (set as a {origin}) — svg / mathml root element \
+                     emission is a separate deferred surface; a non-`html` namespace is refused \
+                     rather than emitted"
+                )
+            }
             Self::StaticInterpolation { .. } => {
                 "a non-reactive interpolation (the official compiler static-folds it to a \
                  `textContent` write)"
@@ -646,7 +755,6 @@ impl UnsupportedSvelteRuntimeSurface {
             | Self::StyleCssAnalysis { span, .. }
             | Self::StyleSelectorUnsupported { span, .. }
             | Self::StyleCssModeUnsupported { span }
-            | Self::OptionsAxis { span }
             | Self::StaticInterpolation { span }
             | Self::DestructuringWrite { span }
             | Self::RootTextRegion { span }
@@ -663,6 +771,10 @@ impl UnsupportedSvelteRuntimeSurface {
             | Self::StoreScopedSubscription { span, .. }
             | Self::ExpressionFactRecovery { span, .. }
             | Self::OfficialReject { span, .. } => *span,
+            // A compile-profile option / namespace has no source span; an inline one
+            // carries the `<svelte:options>` open-tag span.
+            Self::CompileOptionUnsupported { span, .. }
+            | Self::NamespaceUnsupported { span, .. } => span.unwrap_or_else(|| Span::new(0, 0)),
         }
     }
 

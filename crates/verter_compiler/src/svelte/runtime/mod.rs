@@ -70,6 +70,8 @@ mod client_svelte_boundary;
 mod client_svelte_element;
 mod client_svelte_head;
 mod client_walk;
+mod compile_options;
+mod component_scope_facts;
 /// The OPT-IN conformance-observability side channel — feature-gated so the
 /// DEFAULT build compiles it (and every producer hook referencing it) out
 /// entirely; an ungated production reference cannot compile without the
@@ -95,6 +97,7 @@ mod instance_items;
 pub mod ir;
 mod legacy_reactive;
 mod legacy_surface;
+mod lower_block;
 mod lower_component;
 mod naming;
 mod needs_context;
@@ -112,6 +115,7 @@ mod state_prep;
 mod state_scan;
 mod store_subscriptions;
 mod synthesized_value;
+mod template_serialize;
 pub mod topology;
 mod unsupported;
 mod whitespace;
@@ -151,8 +155,14 @@ use state_scan::{instance_forces_definite_legacy, script_uses_runes};
 /// through one module path. (`emit_client_module` is module-private — the client
 /// emission entry consumers use is [`compile_client`], which builds the narrow
 /// plan; the emitter never accepts the broad IR.)
-pub use client::{ClientModule, UnsupportedSvelteRuntimeSurface};
+pub use client::{
+    ClientModule, CompileOptionOrigin, UnsupportedSvelteCompileOption,
+    UnsupportedSvelteRuntimeSurface,
+};
 pub use client_compile::{compile_client, ClientCompileError};
+pub use compile_options::{
+    resolve_svelte_compile_options, ResolvedSvelteCompileOptions, SvelteFragments, SvelteNamespace,
+};
 pub use expr::StateLowering;
 pub use helpers::SvelteHelperMask;
 pub use html::{DynamicSlot, NodePathPlan, PathBase};
@@ -199,6 +209,47 @@ pub struct SvelteRuntimeOptions {
     /// `customElementOptions ?? customElement` precedence); a
     /// `customElement={null}` options value falls back to it.
     pub custom_element: bool,
+    /// The RESOLVED `cssHash` scope-class override — the official user `cssHash`
+    /// callback's already-computed result string, preserved BYTE-EXACT (no
+    /// prefix/sanitize/re-hash). When `Some`, it REPLACES the default
+    /// `svelte-<hash>` scope class in BOTH the serialized HTML skeleton and the
+    /// external/injected CSS (the SINGLE `complete_style_scope_plan` construction
+    /// point reads `override.unwrap_or_else(|| css_scope_hash(filename, css))`).
+    /// The callback itself runs OUTSIDE the compiler (at the session/API boundary);
+    /// this field carries only its resolved value. `None` uses the default djb2
+    /// derivation. NEVER overload `component_id` (a Vue explicit scope id — different
+    /// semantics).
+    pub css_hash_override: Option<String>,
+    /// The `namespace` compile option (`html` / `svg` / `mathml`) — the root
+    /// clone-factory family seed. An inline `<svelte:options namespace>` OVERRIDES
+    /// it. `None` defaults to `html`.
+    pub namespace: Option<SvelteNamespace>,
+    /// The `fragments` compile option (`html` / `tree`) — the template-instantiation
+    /// strategy. `None` defaults to `html`.
+    pub fragments: Option<SvelteFragments>,
+    /// The `preserveWhitespace` compile option. An inline
+    /// `<svelte:options preserveWhitespace>` OVERRIDES it. `None` defaults to `false`.
+    pub preserve_whitespace: Option<bool>,
+    /// The `preserveComments` compile option. `None` defaults to `false` (comments
+    /// are dropped from the static skeleton).
+    pub preserve_comments: Option<bool>,
+    /// The `discloseVersion` compile option (the `svelte/internal/disclose-version`
+    /// side-effect import toggle). `None` defaults to `true`.
+    pub disclose_version: Option<bool>,
+    /// The deprecated `accessors` compile option. ANY explicit presence (including
+    /// `false`) fails closed — an unsupported feature.
+    pub accessors: Option<bool>,
+    /// The deprecated `immutable` compile option. ANY explicit presence (including
+    /// `false`) fails closed — an unsupported feature.
+    pub immutable: Option<bool>,
+    /// The `hmr` compile option. ANY explicit presence (including `false`) fails
+    /// closed — an unsupported feature.
+    pub hmr: Option<bool>,
+    /// The `compatibility.componentApi` compile option. ANY explicit value other than
+    /// `5` fails closed — `4` is the deprecated Svelte-4 instance-API compat feature
+    /// refusal, and every other value (`0`, `6`, …) is an official
+    /// `options_invalid_value` error. The default `5` (or absent) is supported.
+    pub compatibility_component_api: Option<u32>,
 }
 
 /// A runtime-lowering diagnostic.
@@ -257,6 +308,13 @@ pub(super) struct LoweringCtx<'a> {
     patterns: Vec<PatternBindings>,
     pub(super) scopes: ScopeGraph,
     pub(super) bindings: BindingTable,
+    /// The AUTHORED template declaration names — every source-form binding a
+    /// template construct introduces (each / await / snippet / slot `let:` /
+    /// `{@const}` / `{@let}` locals), recorded as it is declared. The component
+    /// scope facts fold these into the deconfliction declaration set; they are the
+    /// template half of the canonical binder (the script half is a lexical pass over
+    /// the parsed scripts).
+    pub(super) template_declarations: rustc_hash::FxHashSet<String>,
     pub(super) errors: RuntimeLoweringErrors,
     /// Pending `{@render}` tags whose callee is resolved AFTER lowering (so a
     /// forward-referenced snippet declared later in the same scope still resolves).
@@ -369,6 +427,7 @@ impl<'a> LoweringCtx<'a> {
                 state: None,
             });
             self.scopes.declare(scope, &name, binding);
+            self.template_declarations.insert(name.clone());
             declared.push(binding);
         }
         let id = PatternId(self.patterns.len() as u32);
@@ -395,6 +454,7 @@ impl<'a> LoweringCtx<'a> {
                 state: None,
             });
             self.scopes.declare(scope, name, binding);
+            self.template_declarations.insert(name.clone());
             declared.push(binding);
         }
         let id = PatternId(self.patterns.len() as u32);
@@ -657,6 +717,7 @@ pub fn lower_parsed_svelte_to_ir<'a>(
         patterns: Vec::new(),
         scopes,
         bindings,
+        template_declarations: rustc_hash::FxHashSet::default(),
         errors,
         pending_renders: Vec::new(),
         block_rune_tracking: Vec::new(),
@@ -780,8 +841,55 @@ pub fn lower_parsed_svelte_to_ir<'a>(
         Vec::new()
     };
 
+    // The canonical component-scope facts: the OXC scope tree of the module +
+    // instance scripts contributes every runtime-surviving value binding and free
+    // reference; the template contributes its authored declarations and stored
+    // expression references into the SAME facts. It is the SOLE authority for the
+    // component-name deconfliction set AND the `is_pure` declared-root set.
+    let component_scope_facts = match component_scope_facts::build_component_scope_facts(
+        alloc,
+        module_source,
+        instance_source,
+        &script_imports,
+        &ctx.template_declarations,
+        &ctx.expressions,
+    ) {
+        Ok(facts) => facts,
+        Err(failing_slot) => {
+            // FAIL-CLOSED: a PRESENT script that failed to parse or analyze yields a
+            // refusal, never a fabricated, un-deconflicted component name (which
+            // would emit broken JS). A torn parse is already caught upstream (the
+            // parse diagnostic above); this is the defense-in-depth contract at the
+            // name deconfliction boundary (e.g. a same-scope redeclaration is
+            // parse-valid but fails semantic analysis). The span points at the
+            // FAILING script.
+            let span = match failing_slot {
+                client_imports::UserImportSlot::Module => parsed.module_content(),
+                client_imports::UserImportSlot::Instance => parsed.instance_content(),
+            }
+            .unwrap_or_default();
+            ctx.errors.push(
+                "svelte-runtime-scope-facts",
+                "could not build the component scope facts (a `<script>` failed to \
+                 parse or analyze); refusing to derive a component name from partial \
+                 facts"
+                    .to_string(),
+                span,
+            );
+            return Err(ctx.errors);
+        }
+    };
+
+    // The generated component-function name deconflicts against every declared user
+    // binding AND every free identifier referenced ANYWHERE in the component —
+    // matching svelte's `module.scope.generate` check against `references` ∪
+    // `declarations` ∪ `conflicts` over the module scope. The set is
+    // `source_declarations ∪ free_references` from the canonical binder: a source
+    // `const Foo = writable(0)` reserves the base `Foo` (never a bare `function Foo`
+    // duplicate), while the synthesized `$Foo` accessor is reserved only when the
+    // source references `$Foo`.
     let component = ComponentIr {
-        name: derive_component_name(opts),
+        name: derive_component_name(opts, &component_scope_facts.name_conflicts()),
         filename: opts.filename.clone(),
         mode,
         maybe_runes,
@@ -797,10 +905,14 @@ pub fn lower_parsed_svelte_to_ir<'a>(
         scopes: ctx.scopes,
         bindings: ctx.bindings,
         patterns: ctx.patterns,
+        component_scope_facts,
         legacy_reactive_targets,
     };
 
     Ok(SvelteRuntimeIr {
+        // The pipeline driver overrides these from the resolved compile-options fold
+        // after lowering; a directly-lowered IR keeps the defaults.
+        root_options: ir::RootCompileOptions::default(),
         component,
         analysis,
         root: root_template,
@@ -839,7 +951,7 @@ pub(super) fn lower_node(
             }))
         }
         SvelteNode::Element(el) => lower_element(ctx, el, scope),
-        SvelteNode::Block(block) => lower_block(ctx, block, scope),
+        SvelteNode::Block(block) => lower_block::lower_block(ctx, block, scope),
         SvelteNode::Tag(tag) => lower_tag(ctx, tag, scope),
     }
 }
@@ -975,243 +1087,6 @@ fn lower_element(ctx: &mut LoweringCtx, el: &SvelteElement, scope: ScopeId) -> O
     Some(node)
 }
 
-/// Lower a block construct into the IR, creating its body template scopes.
-fn lower_block(ctx: &mut LoweringCtx, block: &SvelteBlock, scope: ScopeId) -> Option<NodeId> {
-    match &block.kind {
-        SvelteBlockKind::If => Some(lower_if_block(ctx, block, scope)),
-        SvelteBlockKind::Each { item, index, key } => {
-            Some(lower_each_block(ctx, block, *item, *index, *key, scope))
-        }
-        SvelteBlockKind::Await {
-            then_binding,
-            catch_binding,
-        } => Some(lower_await_block(
-            ctx,
-            block,
-            *then_binding,
-            *catch_binding,
-            scope,
-        )),
-        SvelteBlockKind::Key => Some(lower_key_block(ctx, block, scope)),
-        SvelteBlockKind::Snippet {
-            name,
-            name_text,
-            params,
-        } => Some(lower_snippet_block(
-            ctx, block, *name, name_text, *params, scope,
-        )),
-    }
-}
-
-/// Lower an `{#if}` chain into branches (the primary branch + `{:else if}` /
-/// `{:else}` clauses).
-fn lower_if_block(ctx: &mut LoweringCtx, block: &SvelteBlock, scope: ScopeId) -> NodeId {
-    let mut branches = Vec::new();
-    // The primary `{#if expr}` branch.
-    let condition = block.head_expr.map(|s| ctx.push_expr(s, scope));
-    let body = lower_branch_body(ctx, &block.children, scope);
-    branches.push(IfBranch { condition, body });
-    // The `{:else if}` / `{:else}` clauses.
-    for clause in &block.clauses {
-        let condition = match clause.kind {
-            SvelteClauseKind::ElseIf => clause.expr.map(|s| ctx.push_expr(s, scope)),
-            SvelteClauseKind::Else => None,
-            // `{:then}` / `{:catch}` never appear on an `{#if}` — defensive skip.
-            SvelteClauseKind::Then | SvelteClauseKind::Catch => continue,
-        };
-        let body = lower_branch_body(ctx, &clause.children, scope);
-        branches.push(IfBranch { condition, body });
-    }
-    ctx.push_node(IrNode::Block(BlockIr::If { branches }))
-}
-
-/// Lower a run of children into a fresh template scope under `parent_scope`.
-fn lower_branch_body(
-    ctx: &mut LoweringCtx,
-    children: &[SvelteNode],
-    parent_scope: ScopeId,
-) -> TemplateScopeId {
-    let body_scope = ctx.scopes.push_scope(Some(parent_scope));
-    let ts = ctx.push_template_scope(body_scope);
-    let mut roots = Vec::new();
-    for child in children {
-        if let Some(id) = lower_node(ctx, child, body_scope) {
-            roots.push(id);
-        }
-    }
-    ctx.template_scopes[ts.0 as usize].roots = roots;
-    ts
-}
-
-/// Lower an `{#each}` block. The ITEM binding is a SIGNAL read (`EachSignal`),
-/// declared in the body scope so a same-name outer signal is shadowed. The INDEX
-/// binding is a signal ONLY for a KEYED each (where items reorder, so an item's
-/// index can change — official sets `EACH_INDEX_REACTIVE` and reads `$.get(i)`);
-/// for an UNKEYED each the index is positional and INERT (`PlainLocal`, read as
-/// the plain callback parameter `i`, NOT `$.get(i)`), matching the official
-/// `flags |= EACH_INDEX_REACTIVE` gate (`keyed && index`).
-fn lower_each_block(
-    ctx: &mut LoweringCtx,
-    block: &SvelteBlock,
-    item: Option<Span>,
-    index: Option<Span>,
-    key: Option<Span>,
-    scope: ScopeId,
-) -> NodeId {
-    let source = block
-        .head_expr
-        .map(|s| ctx.push_expr(s, scope))
-        .unwrap_or_else(|| ctx.push_expr(Span::new(0, 0), scope));
-    // The body scope binds the item as a signal; the index is reactive ONLY when
-    // the each is keyed (the official `keyed && index` reactivity gate).
-    let body_scope = ctx.scopes.push_scope(Some(scope));
-    let item_pat = item.map(|s| ctx.push_pattern(s, body_scope, BindingRuntimeKind::EachSignal));
-    let index_kind = if key.is_some() {
-        BindingRuntimeKind::EachSignal
-    } else {
-        BindingRuntimeKind::PlainLocal
-    };
-    let index_pat = index.map(|s| ctx.push_pattern(s, body_scope, index_kind));
-    // The KEY expression of a keyed each is rewritten in its OWN callback scope: the
-    // item / index are PLAIN callback params there (`(item) => item.id` — read plainly,
-    // shadowing any same-name OUTER signal), DISTINCT from the body scope where the item
-    // is a signal. This mirrors the official `key_state`, which deletes the item's signal
-    // transform so the key reads it directly.
-    let key_expr = key.map(|s| {
-        let key_scope = ctx.scopes.push_scope(Some(scope));
-        if let Some(item_span) = item {
-            ctx.push_pattern(item_span, key_scope, BindingRuntimeKind::PlainLocal);
-        }
-        if let Some(index_span) = index {
-            ctx.push_pattern(index_span, key_scope, BindingRuntimeKind::PlainLocal);
-        }
-        ctx.push_expr(s, key_scope)
-    });
-    let ts = ctx.push_template_scope(body_scope);
-    let mut roots = Vec::new();
-    for child in &block.children {
-        if let Some(id) = lower_node(ctx, child, body_scope) {
-            roots.push(id);
-        }
-    }
-    ctx.template_scopes[ts.0 as usize].roots = roots;
-    // An `{:else}` clause on the each block.
-    let else_body = block
-        .clauses
-        .iter()
-        .find(|c| c.kind == SvelteClauseKind::Else)
-        .map(|c| lower_branch_body(ctx, &c.children, scope));
-    ctx.push_node(IrNode::Block(BlockIr::Each {
-        source,
-        item: item_pat,
-        index: index_pat,
-        key: key_expr,
-        body: ts,
-        else_body,
-    }))
-}
-
-/// Lower an `{#await}` block. The `{:then x}` / `{:catch e}` bindings are SIGNAL
-/// reads (`AwaitSignal`), declared in their branch scope.
-fn lower_await_block(
-    ctx: &mut LoweringCtx,
-    block: &SvelteBlock,
-    then_binding: Option<Span>,
-    catch_binding: Option<Span>,
-    scope: ScopeId,
-) -> NodeId {
-    let promise = block
-        .head_expr
-        .map(|s| ctx.push_expr(s, scope))
-        .unwrap_or_else(|| ctx.push_expr(Span::new(0, 0), scope));
-
-    // The block's IMMEDIATE children belong to exactly ONE role, decided by the
-    // form. The parser promotes a `{:then v}` clause's binding onto the block
-    // kind's `then_binding`, so for the canonical CLAUSE form
-    // (`{#await p}<pending>{:then v}<then>{:catch e}<catch>{/await}`) BOTH a
-    // `then_binding` span AND a `Then` clause are present — the clause list, NOT
-    // the inline binding span, decides the form:
-    //
-    // - ANY `{:then}`/`{:catch}` clause present  ⇒ CLAUSE form: immediate children
-    //   are the PENDING body; each clause owns its branch children + binding.
-    // - else inline then (`{#await p then v}`)    ⇒ children are the THEN body,
-    //   no pending branch.
-    // - else inline catch (`{#await p catch e}`)  ⇒ children are the CATCH body,
-    //   no pending branch.
-    // - else (`{#await p}<x>{/await}`)            ⇒ children are the PENDING body.
-    let then_clause = block
-        .clauses
-        .iter()
-        .find(|c| c.kind == SvelteClauseKind::Then);
-    let catch_clause = block
-        .clauses
-        .iter()
-        .find(|c| c.kind == SvelteClauseKind::Catch);
-    let has_branch_clause = then_clause.is_some() || catch_clause.is_some();
-
-    // Resolve the role of the immediate children, plus the inline branch bodies.
-    let mut pending = None;
-    let mut then_binding_pat = None;
-    let mut then_body = None;
-    let mut catch_binding_pat = None;
-    let mut catch_body = None;
-
-    if has_branch_clause {
-        // CLAUSE form: immediate children are the pending body.
-        pending = Some(lower_branch_body(ctx, &block.children, scope));
-    } else if let Some(then_span) = then_binding {
-        // Inline then: the immediate children ARE the then body (no pending).
-        let then_scope = ctx.scopes.push_scope(Some(scope));
-        let p = ctx.push_pattern(then_span, then_scope, BindingRuntimeKind::AwaitSignal);
-        then_binding_pat = Some(p);
-        then_body = Some(lower_children_in_scope(ctx, &block.children, then_scope));
-    } else if let Some(catch_span) = catch_binding {
-        // Inline catch: the immediate children ARE the catch body (no pending).
-        let catch_scope = ctx.scopes.push_scope(Some(scope));
-        let p = ctx.push_pattern(catch_span, catch_scope, BindingRuntimeKind::AwaitSignal);
-        catch_binding_pat = Some(p);
-        catch_body = Some(lower_children_in_scope(ctx, &block.children, catch_scope));
-    } else {
-        // Plain `{#await p}<x>{/await}`: the immediate children are the pending body.
-        pending = Some(lower_branch_body(ctx, &block.children, scope));
-    }
-
-    // The `{:then}` clause (CLAUSE form) owns its own children + binding.
-    if let Some(then_clause) = then_clause {
-        let then_scope = ctx.scopes.push_scope(Some(scope));
-        then_binding_pat = then_clause
-            .expr
-            .map(|s| ctx.push_pattern(s, then_scope, BindingRuntimeKind::AwaitSignal));
-        then_body = Some(lower_children_in_scope(
-            ctx,
-            &then_clause.children,
-            then_scope,
-        ));
-    }
-
-    // The `{:catch}` clause (CLAUSE form) owns its own children + binding.
-    if let Some(catch_clause) = catch_clause {
-        let catch_scope = ctx.scopes.push_scope(Some(scope));
-        catch_binding_pat = catch_clause
-            .expr
-            .map(|s| ctx.push_pattern(s, catch_scope, BindingRuntimeKind::AwaitSignal));
-        catch_body = Some(lower_children_in_scope(
-            ctx,
-            &catch_clause.children,
-            catch_scope,
-        ));
-    }
-
-    ctx.push_node(IrNode::Block(BlockIr::Await {
-        promise,
-        pending,
-        then_binding: then_binding_pat,
-        then_body,
-        catch_binding: catch_binding_pat,
-        catch_body,
-    }))
-}
-
 /// Lower a run of children into an EXISTING scope (used by await branches that
 /// declared their binding in the scope before lowering children).
 pub(super) fn lower_children_in_scope(
@@ -1228,59 +1103,6 @@ pub(super) fn lower_children_in_scope(
     }
     ctx.template_scopes[ts.0 as usize].roots = roots;
     ts
-}
-
-/// Lower a `{#key}` block.
-fn lower_key_block(ctx: &mut LoweringCtx, block: &SvelteBlock, scope: ScopeId) -> NodeId {
-    let expr = block
-        .head_expr
-        .map(|s| ctx.push_expr(s, scope))
-        .unwrap_or_else(|| ctx.push_expr(Span::new(0, 0), scope));
-    let body = lower_branch_body(ctx, &block.children, scope);
-    ctx.push_node(IrNode::Block(BlockIr::Key { expr, body }))
-}
-
-/// Lower a `{#snippet}` block. The snippet name is a binding in the ENCLOSING
-/// scope; its params are INERT (`SnippetParam`) locals in the body scope.
-fn lower_snippet_block(
-    ctx: &mut LoweringCtx,
-    block: &SvelteBlock,
-    _name_span: Span,
-    name_text: &str,
-    params: Option<Span>,
-    scope: ScopeId,
-) -> NodeId {
-    // The snippet name binds in the enclosing scope (callable by siblings via
-    // `{@render name(...)}`).
-    let name_binding = ctx.bindings.push(BindingInfo {
-        name: name_text.to_string(),
-        scope,
-        kind: BindingRuntimeKind::SnippetName,
-        state: None,
-    });
-    ctx.scopes.declare(scope, name_text, name_binding);
-
-    let body_scope = ctx.scopes.push_scope(Some(scope));
-    let mut param_pats = Vec::new();
-    if let Some(params_span) = params {
-        let p = ctx.push_pattern(params_span, body_scope, BindingRuntimeKind::SnippetParam);
-        param_pats.push(p);
-    }
-    let ts = lower_children_in_scope(ctx, &block.children, body_scope);
-    // Record the lowered SOURCE-LEVEL DIRECT children of the snippet body: the
-    // unified slot choke-point accepts a STATIC `slot=` on these hosts (official
-    // validates a snippet direct child as component-owned placement) while rejecting
-    // the dynamic/mixed forms. Populated at the SNIPPET call site — never inside
-    // `lower_children_in_scope`, which `{#await}` bodies share (their roots are NOT
-    // snippet children).
-    let snippet_roots: Vec<NodeId> = ctx.template_scopes[ts.0 as usize].roots.clone();
-    ctx.direct_snippet_slot_attr_child_hosts
-        .extend(snippet_roots);
-    ctx.push_node(IrNode::Block(BlockIr::Snippet {
-        name: name_binding,
-        params: param_pats,
-        body: ts,
-    }))
 }
 
 /// Lower a standalone tag.

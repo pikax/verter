@@ -342,17 +342,87 @@ export function extractExportDefault(code) {
  */
 export function extractTemplates(code) {
   const out = [];
-  const re =
-    /\$\.(from_html|from_svg|from_mathml|from_tree)\(\s*`((?:\\.|[^`\\])*)`(?:\s*,\s*([^)]+?))?\s*\)/g;
+  // `$.from_html` / `$.from_svg` / `$.from_mathml` carry a BACKTICK string skeleton;
+  // `$.from_tree` carries a JS ARRAY LITERAL (`objectify`). Scan the two forms in a
+  // single left-to-right pass so their source order is preserved.
+  const re = /\$\.(from_html|from_svg|from_mathml|from_tree)\(/g;
   let m;
   while ((m = re.exec(code)) !== null) {
+    const factory = m[1];
+    let i = re.lastIndex;
+    while (i < code.length && /\s/.test(code[i])) i += 1;
+    let arg;
+    if (code[i] === "`") {
+      const end = findStringEnd(code, i, "`");
+      if (end === -1) break;
+      arg = code.slice(i + 1, end);
+      i = end + 1;
+    } else if (code[i] === "[") {
+      const end = findBalancedEnd(code, i, "[", "]");
+      if (end === -1) break;
+      arg = code.slice(i, end + 1);
+      i = end + 1;
+    } else {
+      continue;
+    }
+    while (i < code.length && /\s/.test(code[i])) i += 1;
+    let flag = null;
+    if (code[i] === ",") {
+      i += 1;
+      let f = "";
+      while (i < code.length && code[i] !== ")") {
+        f += code[i];
+        i += 1;
+      }
+      flag = f.trim();
+    }
     out.push({
-      factory: m[1],
-      html: maskScopeHash(m[2]),
-      flag: m[3] !== undefined ? m[3].trim() : null,
+      factory,
+      html: maskScopeHash(arg),
+      flag: flag && flag.length > 0 ? flag : null,
     });
+    re.lastIndex = i;
   }
   return out;
+}
+
+/**
+ * The index of the CLOSING delimiter `close` matching `code[start]`, respecting
+ * nested `open`/`close` and single-quoted string literals (an array literal's `[` /
+ * `]` inside a `'…'` string never nest). Returns -1 if unbalanced.
+ */
+function findBalancedEnd(code, start, open, close) {
+  let depth = 0;
+  let i = start;
+  while (i < code.length) {
+    const c = code[i];
+    if (c === "'" || c === '"' || c === "`") {
+      i = findStringEnd(code, i, c);
+      if (i === -1) return -1;
+    } else if (c === open) {
+      depth += 1;
+    } else if (c === close) {
+      depth -= 1;
+      if (depth === 0) return i;
+    }
+    i += 1;
+  }
+  return -1;
+}
+
+/** The index of the CLOSING `quote` for the string literal opened at `start`
+ * (skipping backslash escapes). Returns -1 if unterminated. */
+function findStringEnd(code, start, quote) {
+  let i = start + 1;
+  while (i < code.length) {
+    if (code[i] === "\\") {
+      i += 2;
+      continue;
+    }
+    if (code[i] === quote) return i;
+    i += 1;
+  }
+  return -1;
 }
 
 /** Extract the ORDERED delegated event-type set (`$.delegate([...])`). */

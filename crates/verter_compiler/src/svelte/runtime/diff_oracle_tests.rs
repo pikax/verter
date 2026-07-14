@@ -22,8 +22,9 @@
 //!   universe).
 //! - `staticHtml` — the serialized clone-template HTML bytes (factory-family
 //!   independent, so an entity-decode / serialization divergence is isolated).
-//! - `factory` — the clone-template factory family (`from_html` vs the deferred
-//!   `from_svg` / `from_mathml`).
+//! - `factory` — the clone-template factory family Verter emits (`from_html` /
+//!   `from_tree`); a svg / mathml root diverges from official's `from_svg` /
+//!   `from_mathml` (a recorded divergence — svg/mathml emission is deferred).
 //! - `decodedText` — the text-first `$.text` seed: Verter's RAW seed vs official's
 //!   entity-decoded seed.
 //! - `nodePaths` — per region, the multiset of node-path step sequences.
@@ -58,6 +59,7 @@ use super::ir::{
     TemplateScopeId,
 };
 use super::topology::plan_client_topology;
+use super::SvelteFragments;
 use super::{lower_parsed_svelte_to_ir, plan_static_templates, SvelteRuntimeOptions};
 use oxc_allocator::Allocator;
 use serde::Deserialize;
@@ -727,16 +729,14 @@ fn golden_static_html(golden: &GeneratedGolden) -> Vec<String> {
 
 /// Project the CLONE-TEMPLATE factory family of each region, in plan order, as a
 /// sorted multiset. The golden `templates` array (the official `$.from_html` /
-/// `$.from_svg` / `$.from_mathml` / `$.from_tree` clone factories) is the
-/// comparison subject, so ONLY Verter's `TemplateFactory::FromHtml` (Verter's sole
-/// clone-template family) is projected here — `text` / `comment` / `standalone`
-/// regions emit NO clone-template factory (matching official, whose `$.text` /
-/// `$.comment` / standalone-mount emit no `templates` row), so they contribute
-/// nothing on this axis. FAITHFUL: Verter emits `from_html` for an SVG / MathML
-/// root (the namespace-aware `from_svg` / `from_mathml` root-helper selection is a
-/// deferred downstream layer), so a `<svg>` / `<math>` root surfaces here as
-/// `from_html` against official's `from_svg` / `from_mathml`, and a
-/// `<svelte:element>` root (Verter clones a `<!>` `from_html`, official uses the
+/// `$.from_tree` clone factories) is the comparison subject, so ONLY Verter's
+/// `TemplateFactory::FromHtml` (Verter's sole clone-template family) is projected
+/// here — `text` / `comment` / `standalone` regions emit NO clone-template factory
+/// (matching official, whose `$.text` / `$.comment` / standalone-mount emit no
+/// `templates` row), so they contribute nothing on this axis. Roots are always
+/// html-namespaced (a non-`html` namespace is refused at the resolver, and svg /
+/// mathml elements fail closed), so the html-fragments family is always `from_html`;
+/// a `<svelte:element>` root (Verter clones a `<!>` `from_html`, official uses the
 /// `$.element` wrapper with no clone) surfaces as a `from_html` against official's
 /// empty templates.
 fn project_factory_kinds(plan: &StaticTemplatePlan) -> Vec<String> {
@@ -744,7 +744,13 @@ fn project_factory_kinds(plan: &StaticTemplatePlan) -> Vec<String> {
         .templates
         .iter()
         .filter_map(|t| match t {
-            TemplateFactory::FromHtml { .. } => Some("from_html".to_string()),
+            TemplateFactory::FromHtml { fragments, .. } => Some(
+                match fragments {
+                    SvelteFragments::Tree => "from_tree",
+                    SvelteFragments::Html => "from_html",
+                }
+                .to_string(),
+            ),
             // Not a clone-template factory — official's `templates` array likewise
             // excludes its equivalent (`$.text` / `$.comment` / standalone mount).
             TemplateFactory::TextNode { .. }

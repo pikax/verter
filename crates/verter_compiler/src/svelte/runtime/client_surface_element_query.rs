@@ -19,9 +19,9 @@ use super::whitespace::Namespace;
 /// stays in that namespace (so an svg `<a>` / `<title>` is SVG); at the HTML level,
 /// only `<svg>` / `<math>` introduce a non-HTML namespace. The overlapping
 /// `SVG_ELEMENTS` / `MATHML_ELEMENTS` names (`a` / `script` / `title` / `style`) are
-/// NOT namespace introducers at the HTML root — matching the official
-/// `from_svg` / `from_mathml` selection (a root `<a>` stays HTML; a root `<svg>` is
-/// SVG; an `<a>` inside `<svg>` is SVG by inheritance).
+/// NOT namespace introducers at the HTML root — matching the official namespace
+/// classification (a root `<a>` stays HTML; a root `<svg>` is SVG; an `<a>` inside
+/// `<svg>` is SVG by inheritance).
 pub(super) fn element_own_namespace(inherited: Namespace, tag: &str) -> Namespace {
     if inherited != Namespace::Html {
         return inherited;

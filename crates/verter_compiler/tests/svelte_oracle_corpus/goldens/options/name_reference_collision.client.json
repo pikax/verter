@@ -1,5 +1,5 @@
 {
-  "slug": "options/svelte_options_namespace.svelte",
+  "slug": "options/name_reference_collision.svelte",
   "backend": "client",
   "oracleVersion": "5.56.3",
   "imports": [
@@ -17,35 +17,39 @@
     }
   ],
   "exportDefault": {
-    "name": "svelte_options_namespace",
+    "name": "String_1",
     "params": [
-      "$$anchor"
+      "$$anchor",
+      "$$props"
     ]
   },
   "helperSequence": [
-    "from_svg",
+    "from_html",
+    "template_effect",
     "set_attribute",
     "append"
   ],
   "helperSet": [
     "append",
-    "from_svg",
-    "set_attribute"
+    "from_html",
+    "set_attribute",
+    "template_effect"
   ],
   "helperCounts": {
-    "from_svg": 1,
+    "from_html": 1,
+    "template_effect": 1,
     "set_attribute": 1,
     "append": 1
   },
   "delegatedEvents": [],
   "templates": [
     {
-      "factory": "from_svg",
-      "html": "<circle cx=\"50\" cy=\"50\"></circle>",
+      "factory": "from_html",
+      "html": "<div></div>",
       "flag": null
     }
   ],
-  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_svg(`<circle cx=\"50\" cy=\"50\"></circle>`); export default function svelte_options_namespace($$anchor) {let r = 10; var circle = root(); $.set_attribute(circle, 'r', r); $.append($$anchor, circle);}",
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div></div>`); export default function String_1($$anchor, $$props) {var div = root(); $.template_effect(($0) => $.set_attribute(div, 'title', $0), [() => String($$props.v)]); $.append($$anchor, div);}",
   "css": {
     "present": false,
     "hash": null,

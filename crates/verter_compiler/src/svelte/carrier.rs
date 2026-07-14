@@ -380,14 +380,33 @@ impl CarrierCompiler for SvelteCarrierCompiler {
             // The neutral `RuntimeCompileOptions` carries no dev-codegen request
             // distinct from the §1.2 default (`is_production == false` is the
             // canonical request shape, NOT a dev-codegen request), so the Svelte
-            // client backend always emits PRODUCTION output here. The dev-mode
-            // output axis (5k) is requested through a dedicated signal that lands
-            // with that block; until then `dev_codegen` stays false.
+            // client backend always emits PRODUCTION output here. Dev-mode output is
+            // requested through a dedicated signal the neutral carrier does not carry,
+            // so `dev_codegen` stays false.
             dev_codegen: false,
             // The neutral options carry no `customElement` compile-option axis;
             // an in-source `<svelte:options customElement>` still activates the
             // custom-element output (its value wins over the option anyway).
             custom_element: false,
+            // The RESOLVED Svelte cssHash override (from the host/session boundary,
+            // preserved byte-exact) threads verbatim into the style-plan scope class.
+            css_hash_override: opts.svelte_css_hash_override.clone(),
+            // The essential compile options resolve on the compiler surface
+            // (`SvelteRuntimeOptions`) + the inline `<svelte:options>` element. The
+            // neutral `RuntimeCompileOptions` carries no host/session channel for
+            // `namespace` / `fragments` / `preserveWhitespace` / `preserveComments` /
+            // `discloseVersion`, and the unsupported feature options are not on the
+            // neutral carrier — so they default here (an in-source `<svelte:options
+            // namespace / preserveWhitespace>` still applies via the resolver).
+            namespace: None,
+            fragments: None,
+            preserve_whitespace: None,
+            preserve_comments: None,
+            disclose_version: None,
+            accessors: None,
+            immutable: None,
+            hmr: None,
+            compatibility_component_api: None,
         };
         // `opts.source_map` is the neutral OUTPUT-axis map demand: it reaches
         // the css RENDER through `compile_client`'s `want_source_map` (never

@@ -28,9 +28,10 @@
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
     ArrowFunctionExpression, AssignmentExpression, AssignmentTarget, BindingPattern,
-    BlockStatement, CallExpression, CatchClause, ChainElement, Comment, Expression, ForInStatement,
-    ForOfStatement, ForStatement, Function, FunctionType, IdentifierReference, Program,
-    SimpleAssignmentTarget, Statement, UpdateExpression, VariableDeclarationKind,
+    BlockStatement, CallExpression, CatchClause, ChainElement, Class, Comment, Declaration,
+    Expression, ForInStatement, ForOfStatement, ForStatement, Function, FunctionType,
+    IdentifierReference, Program, SimpleAssignmentTarget, Statement, UpdateExpression,
+    VariableDeclaration, VariableDeclarationKind,
 };
 use oxc_ast_visit::{walk, Visit};
 use oxc_parser::Parser;
@@ -1519,36 +1520,74 @@ pub(super) fn block_scope_names(block: &BlockStatement<'_>) -> rustc_hash::FxHas
     names
 }
 
-/// Collect the `let`/`const`/function-declaration ids declared DIRECTLY in a
-/// statement list (NOT descending nested blocks / functions / control flow). A
-/// `var` is collected by [`collect_var_hoists`] on the function frame, not here.
+/// Collect the `let`/`const`/function-declaration/class-declaration ids declared
+/// DIRECTLY in a statement list (NOT descending nested blocks / functions / control
+/// flow), including the `export`-prefixed forms (`export let/const/function/class`).
+/// A `var` is collected by [`collect_var_hoists`] on the function frame, not here.
 pub(super) fn collect_direct_decls(
     stmts: &oxc_allocator::Vec<Statement<'_>>,
     out: &mut rustc_hash::FxHashSet<String>,
 ) {
     for stmt in stmts {
         match stmt {
-            Statement::VariableDeclaration(v)
-                if !matches!(v.kind, VariableDeclarationKind::Var) =>
-            {
-                for d in &v.declarations {
-                    let mut names = Vec::new();
-                    collect_pattern_names(&d.id, &mut names);
-                    out.extend(names);
-                }
-            }
-            Statement::FunctionDeclaration(func) => {
-                if let Some(id) = &func.id {
-                    out.insert(id.name.to_string());
-                }
-            }
-            Statement::ClassDeclaration(class) => {
-                if let Some(id) = &class.id {
-                    out.insert(id.name.to_string());
+            Statement::VariableDeclaration(v) => record_lexical_variable_names(v, out),
+            Statement::FunctionDeclaration(func) => record_function_id(func, out),
+            Statement::ClassDeclaration(class) => record_class_id(class, out),
+            // An `export`-prefixed declaration binds its inner value declaration's
+            // name(s) at this same scope. `export default` is not a component-valid
+            // form, and a type-only export (`export type` / `export interface`) binds
+            // no value name — both are erased by [`record_declaration_names`].
+            Statement::ExportNamedDeclaration(export) => {
+                if let Some(decl) = &export.declaration {
+                    record_declaration_names(decl, out);
                 }
             }
             _ => {}
         }
+    }
+}
+
+/// Record a non-`var` variable declaration's bound names (identifier + destructure
+/// patterns). A `var` hoists to the function frame ([`collect_var_hoists`]), so it is
+/// skipped here.
+fn record_lexical_variable_names(
+    v: &VariableDeclaration<'_>,
+    out: &mut rustc_hash::FxHashSet<String>,
+) {
+    if matches!(v.kind, VariableDeclarationKind::Var) {
+        return;
+    }
+    for d in &v.declarations {
+        let mut names = Vec::new();
+        collect_pattern_names(&d.id, &mut names);
+        out.extend(names);
+    }
+}
+
+/// Record a function declaration's bound id (a bodied declaration always has one).
+fn record_function_id(func: &Function<'_>, out: &mut rustc_hash::FxHashSet<String>) {
+    if let Some(id) = &func.id {
+        out.insert(id.name.to_string());
+    }
+}
+
+/// Record a class declaration's bound id (a class declaration always has one).
+fn record_class_id(class: &Class<'_>, out: &mut rustc_hash::FxHashSet<String>) {
+    if let Some(id) = &class.id {
+        out.insert(id.name.to_string());
+    }
+}
+
+/// Record the directly-bound value name(s) of a declaration (the inner declaration
+/// of an `export`): a non-`var` variable declarator's patterns, a function id, or a
+/// class id. A type-only declaration (`type` / `interface` / `enum` / `namespace`)
+/// binds no value name and contributes nothing.
+fn record_declaration_names(decl: &Declaration<'_>, out: &mut rustc_hash::FxHashSet<String>) {
+    match decl {
+        Declaration::VariableDeclaration(v) => record_lexical_variable_names(v, out),
+        Declaration::FunctionDeclaration(func) => record_function_id(func, out),
+        Declaration::ClassDeclaration(class) => record_class_id(class, out),
+        _ => {}
     }
 }
 

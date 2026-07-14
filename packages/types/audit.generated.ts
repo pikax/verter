@@ -780,7 +780,7 @@ export type DispatchKeyKind = "ResolveDecl" | "Instantiate" | "ProjectMember" | 
  * `Copy + Hash + Eq` because audit consumers may aggregate downgrade
  * counts per reason.
  */
-export type DowngradeReasonTag = "HasExternalSrc" | "HasMacroTypeDeps" | "HasWorkspaceAlias" | "HasModuleAugmentation" | "HasBlockOverride" | "HasStyleOverride" | "HasIdeOnlyAnalysis" | "HasDevLastGood";
+export type DowngradeReasonTag = "HasExternalSrc" | "HasMacroTypeDeps" | "HasWorkspaceAlias" | "HasModuleAugmentation" | "HasBlockOverride" | "HasStyleOverride" | "HasIdeOnlyAnalysis" | "HasDevLastGood" | "CssHashOverridePresent";
 
 /**
  * In-audit opaque edge id. Assigned by the miner from the sorted

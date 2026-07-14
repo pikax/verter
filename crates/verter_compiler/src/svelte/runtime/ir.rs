@@ -118,6 +118,13 @@ pub struct RuntimeAnalysis<'a> {
     /// each / await / snippet / declaration-tag [`PatternId`] after lowering
     /// returns.
     pub patterns: Vec<PatternBindings>,
+    /// The canonical component-scope binder facts — the SOLE authority for the
+    /// component-name deconfliction set AND the `is_pure` declared-root set
+    /// (`declared_roots`). Built ONCE at IR construction from a single lexical pass
+    /// over the module + instance scripts plus the template's authored declarations
+    /// and stored expression references; downstream consumers READ it rather than
+    /// reparsing the scripts.
+    pub(super) component_scope_facts: super::component_scope_facts::ComponentScopeFacts,
     /// The synthesized LEGACY `$:` assignment-target names (the implicit
     /// `$.mutable_source` declarations, source order) — the plan emits one
     /// `const <name> = $.mutable_source();` per entry. Empty for a runes
@@ -1093,6 +1100,39 @@ pub struct DebugArg {
     pub expr: ExprId,
 }
 
+/// The resolved compile-options the root template compiles under — the codegen
+/// consumers ([`plan_static_templates`](super::html::plan_static_templates), the
+/// whitespace cleaner, comment serialization, the import plan) read these instead
+/// of re-deriving them. Populated by the pipeline driver from the single
+/// [`ResolvedSvelteCompileOptions`](super::ResolvedSvelteCompileOptions) fold; a
+/// directly-lowered IR (a test harness) carries the [`Default`] (`html` fragments /
+/// no whitespace or comment preservation / disclose-version on).
+///
+/// The root namespace is always `html` (a non-`html` namespace is refused at the
+/// resolver), so it carries no namespace axis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct RootCompileOptions {
+    /// The template-instantiation strategy (`html` clone vs `tree` CSP-safe clone).
+    pub(super) fragments: super::SvelteFragments,
+    /// Whether insignificant whitespace text nodes are preserved.
+    pub(super) preserve_whitespace: bool,
+    /// Whether HTML comments are retained in the static skeleton.
+    pub(super) preserve_comments: bool,
+    /// Whether the `svelte/internal/disclose-version` side-effect import is emitted.
+    pub(super) disclose_version: bool,
+}
+
+impl Default for RootCompileOptions {
+    fn default() -> Self {
+        Self {
+            fragments: super::SvelteFragments::Html,
+            preserve_whitespace: false,
+            preserve_comments: false,
+            disclose_version: true,
+        }
+    }
+}
+
 /// The pre-lowering Svelte runtime IR.
 ///
 /// The shared substrate the client + server backends build on: the component
@@ -1101,6 +1141,9 @@ pub struct DebugArg {
 /// scope arenas owned by [`RuntimeAnalysis`]).
 #[derive(Debug)]
 pub struct SvelteRuntimeIr<'a> {
+    /// The resolved compile-options the root template compiles under (the codegen
+    /// consumers read these; a directly-lowered IR carries the [`Default`]).
+    pub(super) root_options: RootCompileOptions,
     /// The component identity + mode.
     pub component: ComponentIr,
     /// The component-wide analysis.

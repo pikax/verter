@@ -141,6 +141,15 @@ pub struct RuntimeCompileOptions {
     pub runtime_module_name: Option<String>,
     /// Explicit component / scope id for scoped-style hashing.
     pub component_id: Option<String>,
+    /// The RESOLVED Svelte `cssHash` scope-class override — the official user
+    /// `cssHash` callback's already-computed result, preserved byte-exact. When
+    /// `Some`, the Svelte carrier uses it VERBATIM as the scope class (in the
+    /// serialized HTML skeleton and the external/injected CSS) instead of the
+    /// default `svelte-<hash>` derivation. The callback runs OUTSIDE the compiler
+    /// (session/API boundary); this carries only its resolved value. Vue ignores
+    /// it. Distinct from `component_id` (a Vue explicit scope id — never overloaded
+    /// for the Svelte cssHash override).
+    pub svelte_css_hash_override: Option<String>,
     /// Force JavaScript output (strip TypeScript syntax).
     pub force_js: bool,
     /// Force Vapor-mode codegen regardless of template attributes (Vue).

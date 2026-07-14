@@ -1019,15 +1019,15 @@ fn slugs_are_stable_unique_and_path_safe() {
 // Compile options
 // ---------------------------------------------------------------------------
 
-/// The typed compile options serialize deterministically; current matrix
-/// rows all use the defaults.
+/// The typed compile options serialize deterministically; only the scoped-CSS
+/// tree cell carries a non-default option (`fragments: 'tree'`).
 #[test]
 fn compile_options_serialize_deterministically() {
     assert_eq!(ManifestCompileOptions::default().to_json(), "{}");
     assert_eq!(
         ManifestCompileOptions {
             custom_element: true,
-            filename_undefined: false,
+            ..ManifestCompileOptions::default()
         }
         .to_json(),
         "{\"customElement\":true}"
@@ -1036,13 +1036,37 @@ fn compile_options_serialize_deterministically() {
         ManifestCompileOptions {
             custom_element: true,
             filename_undefined: true,
+            ..ManifestCompileOptions::default()
         }
         .to_json(),
         "{\"customElement\":true,\"filename\":null}"
     );
     assert_eq!(
+        ManifestCompileOptions {
+            fragments_tree: true,
+            ..ManifestCompileOptions::default()
+        }
+        .to_json(),
+        "{\"fragments\":\"tree\"}"
+    );
+    // A canonical CLASS-selector scoped static cell stays html (default).
+    assert_eq!(
         compile_options(&baseline()),
         ManifestCompileOptions::default()
+    );
+    // The scoped-CSS tree cell (a plain, certainly-matching TYPE selector on a
+    // static element with an external `<style>` and a class target) flips to
+    // `fragments: 'tree'`.
+    let tree_cell = RowLevels {
+        selector_kind: SelectorKind::Type,
+        ..baseline()
+    };
+    assert_eq!(
+        compile_options(&tree_cell),
+        ManifestCompileOptions {
+            fragments_tree: true,
+            ..ManifestCompileOptions::default()
+        }
     );
 }
 

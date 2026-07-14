@@ -232,6 +232,7 @@ fn seed_all_three_sub_states(host: &super::VerterHost, canonical: &str) {
                 semantic_hash: [0u8; 16],
                 style_override_hash: 0,
                 content_override_hash: 0,
+                css_hash_override: None,
                 outputs: Default::default(),
                 diagnostics: Default::default(),
                 last_good_outputs: None,

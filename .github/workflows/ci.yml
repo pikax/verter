@@ -130,7 +130,10 @@ jobs:
             svelte_oracle:
               - 'scripts/gen-svelte-goldens.mjs'
               - 'scripts/svelte-golden-lib.mjs'
+              - 'scripts/gen-svelte-name-parity-corpus.mjs'
               - 'crates/verter_compiler/tests/svelte_oracle_corpus/**'
+              - 'crates/verter_compiler/tests/fixtures/svelte/name_parity_corpus.json'
+              - 'crates/verter_compiler/tests/fixtures/svelte/remove_typescript_nodes.5.56.3.js'
               - 'crates/verter_compiler/tests/svelte_oracle_harness.rs'
               - 'crates/verter_compiler/tests/svelte_goldens_in_sync.rs'
               - 'crates/verter_compiler/src/svelte_oracle.rs'
@@ -352,6 +355,13 @@ jobs:
       # Installs the pinned `svelte` devDependency so the feature-gated harness
       # can shell `node scripts/gen-svelte-goldens.mjs` over the live compiler.
       - run: pnpm install --frozen-lockfile
+      # The oracle-derived component-name-parity corpus in sync with the pinned
+      # compiler (the name-parity analogue of the goldens `--check`; also run via the
+      # feature-gated Rust rail `pinned_compiler_still_yields_every_committed_name_parity_row`
+      # below, this explicit step gives a fast, direct signal on a corpus / generator /
+      # vendored-source edit).
+      - name: Svelte name-parity corpus in sync with pinned compiler
+        run: node scripts/gen-svelte-name-parity-corpus.mjs --check
       # Compiles AND runs the `svelte-oracle` feature-gated harness — the live
       # golden-vs-pinned-compiler drift gate, the topology_diff engine, and the
       # NormalizedGolden schema housed in `verter_compiler::svelte_oracle`.

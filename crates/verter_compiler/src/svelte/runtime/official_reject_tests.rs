@@ -1644,15 +1644,19 @@ fn valid_module_context_is_accepted() {
 fn from_unsupported_surface_maps_only_the_official_reject_surfaces() {
     use crate::svelte::runtime::UnsupportedSvelteRuntimeSurface;
     let span = verter_span::Span::new(0, 0);
-    // OptionsAxis (a NON-duplicate unsupported options axis) maps; an unsupported FEATURE
-    // does not. (A template `attribute_duplicate` and a duplicate `<svelte:options>` are
-    // now EXACT-CODE parser facts carried by the official-reject gate, NOT mapped from an
-    // unsupported surface, so there is no `DuplicateAttribute` surface to map.)
+    // A `CompileOptionUnsupported` surface (a fail-closed FEATURE refusal the official
+    // compiler ACCEPTS) is NOT an official reject → `None`. (Every MALFORMED
+    // `<svelte:options>` form is now an EXACT-CODE parser fact carried by the
+    // official-reject gate, NOT mapped from an unsupported surface.)
     assert_eq!(
         CoreOfficialValidationRule::from_unsupported_surface(
-            &UnsupportedSvelteRuntimeSurface::OptionsAxis { span }
+            &UnsupportedSvelteRuntimeSurface::CompileOptionUnsupported {
+                option: crate::svelte::runtime::UnsupportedSvelteCompileOption::Immutable,
+                origin: crate::svelte::runtime::CompileOptionOrigin::Inline,
+                span: Some(span),
+            }
         ),
-        Some(CoreOfficialValidationRule::OptionsInvalid)
+        None
     );
     // A pure unsupported FEATURE (a `{#if}` block) is NOT an official reject.
     assert_eq!(

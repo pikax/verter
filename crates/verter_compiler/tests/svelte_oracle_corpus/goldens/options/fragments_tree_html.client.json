@@ -1,0 +1,69 @@
+{
+  "slug": "options/fragments_tree_html.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "fragments_tree_html",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_tree",
+    "sibling",
+    "child",
+    "child",
+    "reset",
+    "reset",
+    "template_effect",
+    "set_text",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "from_tree",
+    "reset",
+    "set_text",
+    "sibling",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_tree": 1,
+    "sibling": 1,
+    "child": 2,
+    "reset": 2,
+    "template_effect": 1,
+    "set_text": 1,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_tree",
+      "html": "[['div', { class: 'card' }, 'hello ', ['span', null, ' ']]]",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_tree([['div', {class: 'card'}, 'hello ', ['span', null, ' ']]]); export default function fragments_tree_html($$anchor, $$props) {var div = root(); var span = $.sibling($.child(div)); var text = $.child(span, true); $.reset(span); $.reset(div); $.template_effect(() => $.set_text(text, $$props.x)); $.append($$anchor, div);}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

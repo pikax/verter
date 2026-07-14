@@ -34,7 +34,15 @@ use crate::model::{
 /// ([`crate::value_wrap`]) — the typed `ValueWrapSurface` vocabulary, the
 /// exhaustive `classify_value_wrap` cells, and the executable per-cell
 /// observation gate (`tests/value_wrap_cells.rs`).
-pub const SCHEMA_VERSION: u32 = 3;
+/// v4: the `fragments: 'tree'` compile-option carrier added to
+/// [`ManifestCompileOptions`] (a new `to_json` shape) — the scoped-CSS tree
+/// cell pins tree-mode `$.from_tree` delivery via the manifest-cell assertion
+/// plus the committed `--conformance` golden. (The css scope token is baked
+/// identically in html and tree by the shared static-attribute authority, so
+/// the oracle differential's scope-token axis is scope-token-identical across
+/// the flip and does not itself discriminate it — see
+/// [`crate::model::compile_options`].)
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// One selected covering row, expanded into its executable conformance case.
 #[derive(Clone, Debug, Eq, PartialEq)]

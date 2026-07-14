@@ -136,6 +136,7 @@ pub fn complete_style_scope_plan(
     source: &str,
     analyzed: AnalyzedStyleBody,
     filename: Option<&str>,
+    resolved_css_hash: Option<&str>,
     mode: CssMode,
     ir: &SvelteRuntimeIr<'_>,
     want_source_map: bool,
@@ -151,7 +152,15 @@ pub fn complete_style_scope_plan(
     let css_text = source
         .get(content.start as usize..content.end as usize)
         .unwrap_or("");
-    let hash = hash::css_scope_hash(filename, css_text);
+    // The scope class: a RESOLVED `cssHash` override (the user callback's result,
+    // computed OUTSIDE the compiler and preserved byte-exact) REPLACES the default
+    // `svelte-<hash>` derivation at this SINGLE construction point; absent, the
+    // official default djb2 input rule applies. The override never re-invokes a
+    // callback and is never prefixed / re-hashed here.
+    let hash = match resolved_css_hash {
+        Some(override_class) => override_class.to_string(),
+        None => hash::css_scope_hash(filename, css_text),
+    };
     // The scoped render consumes the matcher's PROVEN used/scoped verdicts on
     // the AST metadata and produces the official `css.code`. The render is
     // MODE-FAITHFUL: the injected `$$css` payload renders the official
@@ -223,7 +232,7 @@ pub fn build_style_scope_plan(
     want_source_map: bool,
 ) -> Result<ProvenStyleScopePlan, StylePlanFailure> {
     let analyzed = analyze_style_body(source, content)?;
-    complete_style_scope_plan(source, analyzed, filename, mode, ir, want_source_map)
+    complete_style_scope_plan(source, analyzed, filename, None, mode, ir, want_source_map)
 }
 
 #[cfg(test)]
@@ -386,9 +395,16 @@ mod tests {
             };
             rule.prelude.children[1].span = Span::new(10_000, 10_002);
         }
-        let err =
-            super::complete_style_scope_plan(source, analyzed, None, CssMode::External, &ir, false)
-                .expect_err("a render refusal fails the plan");
+        let err = super::complete_style_scope_plan(
+            source,
+            analyzed,
+            None,
+            None,
+            CssMode::External,
+            &ir,
+            false,
+        )
+        .expect_err("a render refusal fails the plan");
         assert_eq!(
             err,
             StylePlanFailure {

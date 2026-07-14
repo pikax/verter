@@ -267,6 +267,10 @@ pub enum DowngradeReasonTag {
     /// The host is in dev mode with `DevServeLastKnownGood` error
     /// policy.
     HasDevLastGood,
+    /// The compile profile carries a resolved Svelte `cssHash` override — a
+    /// user-callback result the session cannot prove content-deterministic, so a
+    /// `Content` request is refused fail-closed to `Stateless`.
+    CssHashOverridePresent,
 }
 
 /// Which lane (`Semantic` or `Display`) a fact carries. Audit-side

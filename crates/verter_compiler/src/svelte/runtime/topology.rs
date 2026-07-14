@@ -79,6 +79,14 @@ pub fn plan_client_topology(
     // assertion — it would need an `OwnedHelperCounts` topology-ledger row.
     for factory in &html.templates {
         match factory {
+            // `fragments: 'tree'` clones via the CSP-safe `$.from_tree` factory; the
+            // default html-fragments mode clones the backtick skeleton via `$.from_html`.
+            // Roots are always html-namespaced (a non-`html` namespace is refused at the
+            // resolver), so there is no `$.from_svg` / `$.from_mathml` selection here.
+            TemplateFactory::FromHtml {
+                fragments: super::SvelteFragments::Tree,
+                ..
+            } => helpers.call(SvelteHelper::FromTree),
             TemplateFactory::FromHtml { .. } => helpers.call(SvelteHelper::FromHtml),
             TemplateFactory::TextNode { .. } => helpers.call(SvelteHelper::Text),
             TemplateFactory::CommentAnchor { reason } => {
@@ -123,7 +131,7 @@ pub fn plan_client_topology(
     ClientTopologyPlan {
         helpers,
         delegated_events: delegated,
-        imports: ImportPlan::client_for_mode(legacy_mode),
+        imports: ImportPlan::client_for_mode(legacy_mode, ir.root_options.disclose_version),
         templates: html.templates.clone(),
     }
 }

@@ -28,8 +28,12 @@ use rustc_hash::{FxHashMap, FxHashSet};
 /// backend emits this exact call".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum SvelteHelper {
-    /// `$.from_html` — the static-HTML template factory.
+    /// `$.from_html` — the static-HTML template factory (html namespace; a non-`html`
+    /// namespace is refused at the resolver, so there is no `$.from_svg` / `$.from_mathml`
+    /// factory family here).
     FromHtml,
+    /// `$.from_tree` — the CSP-safe objectified-template factory (`fragments: 'tree'`).
+    FromTree,
     /// `$.first_child` — descend to a fragment's first child.
     FirstChild,
     /// `$.child` — descend to an element's first child.
@@ -179,6 +183,7 @@ impl SvelteHelper {
     pub const fn ident(self) -> &'static str {
         match self {
             Self::FromHtml => "from_html",
+            Self::FromTree => "from_tree",
             Self::FirstChild => "first_child",
             Self::Child => "child",
             Self::Sibling => "sibling",
@@ -472,10 +477,15 @@ impl ImportPlan {
     /// The async / tracing flags stay false: their emission (experimental async,
     /// dev-mode `$inspect.trace`) is a later-block feature this planning foundation
     /// does not yet decide.
+    ///
+    /// `disclose_version` is the resolved `discloseVersion` compile option (default
+    /// `true`): when `false`, the leading `import 'svelte/internal/disclose-version'`
+    /// side-effect import is dropped.
     #[must_use]
-    pub const fn client_for_mode(legacy_mode: bool) -> Self {
+    pub const fn client_for_mode(legacy_mode: bool, disclose_version: bool) -> Self {
         Self {
             legacy_flag: legacy_mode,
+            disclose_version,
             ..Self::client_default()
         }
     }

@@ -19,8 +19,6 @@
 
 use std::cell::RefCell;
 
-use oxc_allocator::Allocator;
-
 use super::client::UnsupportedSvelteRuntimeSurface;
 use super::client_allowlist::{is_svelte_reserved_word, SupportedHtmlElement, SupportedStaticAttr};
 use super::client_imports::UserImport;
@@ -52,9 +50,7 @@ use super::ir::{
     AttrIr, EscapeMode, ExprId, IrNode, NodeId, SpecialKind, SvelteRuntimeIr, TagIr,
     TemplateScopeId,
 };
-use super::whitespace::{
-    clean_nodes, determine_namespace_for_children, CleanContext, CleanItem, Namespace,
-};
+use super::whitespace::{clean_nodes, determine_namespace_for_children, CleanItem, Namespace};
 use verter_span::Span;
 
 /// The TYPED accepted facts the default-deny classifier produces when (and only
@@ -227,17 +223,11 @@ impl ClientSyntaxSurface {
         // the per-node accepted event/bind/interp shape facts. Every node maps to a
         // supported `ClientNodeKind` or REFUSES (no wildcard accept).
         //
-        // The DECLARED module + instance top-level locals are computed ONCE here (they
-        // are loop-invariant — they depend only on the module/instance script source,
-        // which does not change during the walk) and threaded down to the per-attr bind
-        // classifier, rather than re-parsing the scripts per bind attribute.
-        let alloc = Allocator::default();
-        let declared_root_names = super::reactive_analysis::collect_declared_root_names(
-            &alloc,
-            ir.analysis.scripts.module_source,
-            ir.analysis.scripts.instance_source,
-            &ir.analysis.script_imports,
-        );
+        // The DECLARED module + instance top-level locals are READ from the canonical
+        // component-scope binder facts (built once at IR construction) and threaded
+        // down to the per-attr bind classifier — never re-derived by reparsing the
+        // scripts per bind attribute or per component.
+        let declared_root_names = ir.analysis.component_scope_facts.declared_roots().clone();
         // (4a) `animate:` PLACEMENT gate (pre-pass): the official `AnimateDirective`
         // analyze rules — one `animate:` per element (`animation_duplicate`), the
         // animated element the ONLY significant child of an `{#each}` body
@@ -524,7 +514,7 @@ fn refuse_unsupported_root_region(ir: &SvelteRuntimeIr) -> Option<UnsupportedSve
     // `RootTextRegion` deferral, EXACTLY as a text root without a host special) — never silently
     // accepted-and-mis-emitted through the no-DOM path.
     if root_region_has_no_body_special_host(ir)
-        && clean_nodes(ir, &scope.roots, CleanContext::region_root()).is_empty()
+        && clean_nodes(ir, &scope.roots, super::html::region_ctx(ir)).is_empty()
     {
         return None;
     }
@@ -548,6 +538,12 @@ fn refuse_unsupported_root_region(ir: &SvelteRuntimeIr) -> Option<UnsupportedSve
         // already a `FromHtml` above).
         TemplateFactory::CommentAnchor {
             reason: super::html::AnchorReason::BlockOnlyRoot,
+        } => None,
+        // A SOLE retained comment (`preserveComments`) is svelte's `$.comment()` fragment
+        // special case — a SUPPORTED root shape (`var fragment = $.comment(); var node =
+        // $.first_child(fragment); $.append($$anchor, fragment);`), not an empty-root refusal.
+        TemplateFactory::CommentAnchor {
+            reason: super::html::AnchorReason::SoleComment,
         } => None,
         // A `$.text(...)` / `$.comment()` node root (an empty / reactive-text root) —
         // refuse, carrying the span of the first interpolation when the region is a
@@ -582,7 +578,7 @@ fn root_region_has_no_body_special_host(ir: &SvelteRuntimeIr) -> bool {
 /// when the region cleans to a reactive text run (the precise reactive surface),
 /// else the first root node's span, else an empty span (an empty template).
 fn root_region_span(ir: &SvelteRuntimeIr, scope: &super::ir::TemplateScope) -> Span {
-    let items = clean_nodes(ir, &scope.roots, CleanContext::region_root());
+    let items = clean_nodes(ir, &scope.roots, super::html::region_ctx(ir));
     if let [CleanItem::TextRun { interps, .. }] = items.as_slice() {
         if let Some(&first) = interps.first() {
             if let IrNode::Interpolation { span, .. } = ir.node(first) {

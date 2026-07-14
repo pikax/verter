@@ -230,6 +230,7 @@ fn lower_slot_region(
             state: None,
         });
         ctx.scopes.declare(slot_scope, &binding.name, id);
+        ctx.template_declarations.insert(binding.name.clone());
     }
     let ts = ctx.push_template_scope(slot_scope);
     let mut roots = Vec::new();

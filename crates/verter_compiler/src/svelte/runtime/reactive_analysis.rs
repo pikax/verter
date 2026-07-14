@@ -15,12 +15,11 @@
 //! [`super::needs_context`].
 
 use oxc_allocator::Allocator;
-use oxc_ast::ast::{CallExpression, ChainElement, Expression, Program, Statement};
+use oxc_ast::ast::{CallExpression, ChainElement, Expression, Statement};
 use oxc_span::SourceType;
 
 use super::expr::{
-    collect_direct_decls, collect_pattern_names, collect_var_hoists, is_signal_kind,
-    reparse_module, BindingRuntimeKind, BindingTable, ScopeGraph, ScopeId, UnwrappedRootKind,
+    is_signal_kind, BindingRuntimeKind, BindingTable, ScopeGraph, ScopeId, UnwrappedRootKind,
 };
 
 // ---------------------------------------------------------------------------
@@ -146,60 +145,6 @@ pub fn class_value_needs_clsx(kind: UnwrappedRootKind) -> bool {
             | UnwrappedRootKind::TemplateLiteral
             | UnwrappedRootKind::BinaryExpression
     )
-}
-
-/// Collect the COMPONENT-DECLARED root names — every top-level declaration name in
-/// the module + instance scripts (imports, `let`/`const`/`var`, function / class
-/// declarations, `$props()` destructure names). A callee rooted at one of these is
-/// a DECLARED binding (impure under `is_pure`); a callee rooted at a name NOT in
-/// this set is a GLOBAL (pure). This is the `is_pure` scope-resolution input for
-/// the `has_call` decision.
-#[must_use]
-pub(super) fn collect_declared_root_names(
-    alloc: &Allocator,
-    module_source: Option<&str>,
-    instance_source: Option<&str>,
-    script_imports: &super::client_surface_imports::ClassifiedScriptImports,
-) -> rustc_hash::FxHashSet<String> {
-    let mut out = rustc_hash::FxHashSet::default();
-    // The imported-LOCAL names come from the single per-component
-    // `ClassifiedScriptImports` carrier (computed once at IR construction)
-    // through the shared `import_binding_entries` iteration — never an
-    // independent raw-AST import re-walk.
-    for slot in [
-        super::client_imports::UserImportSlot::Module,
-        super::client_imports::UserImportSlot::Instance,
-    ] {
-        for import in script_imports.admitted(slot) {
-            for (local, _kind) in super::client_surface_imports::import_binding_entries(import) {
-                out.insert(local.to_string());
-            }
-        }
-    }
-    for src in [module_source, instance_source].into_iter().flatten() {
-        if let Some(program) = reparse_module(alloc, src) {
-            collect_program_top_level_names(&program, &mut out);
-        }
-    }
-    out
-}
-
-/// Collect a program's top-level NON-IMPORT declared names into `out` (the
-/// import-local names come from the shared `ClassifiedScriptImports` carrier in
-/// [`collect_declared_root_names`]).
-fn collect_program_top_level_names(program: &Program<'_>, out: &mut rustc_hash::FxHashSet<String>) {
-    collect_direct_decls(&program.body, out);
-    collect_var_hoists(&program.body, out);
-    for stmt in &program.body {
-        let Statement::VariableDeclaration(decl) = stmt else {
-            continue;
-        };
-        for d in &decl.declarations {
-            let mut names = Vec::new();
-            collect_pattern_names(&d.id, &mut names);
-            out.extend(names);
-        }
-    }
 }
 
 /// Whether a template expression references any reactive STATE binding — a read

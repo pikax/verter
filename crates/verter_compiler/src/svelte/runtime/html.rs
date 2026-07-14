@@ -15,12 +15,13 @@
 //! `from_html`.
 
 use super::css::types::CssScopeFacts;
-use super::entity_decode::{decode_text_entities, escape_decoded_attr};
+use super::entity_decode::decode_text_entities;
 use super::ir::{
-    AttrIr, EscapeMode, ExprId, IrNode, NodeId, SpecialKind, StaticAttrValue, StyleDirectiveValue,
-    SvelteRuntimeIr, TemplateScope, TemplateScopeId,
+    AttrIr, EscapeMode, ExprId, IrNode, NodeId, SpecialKind, StyleDirectiveValue, SvelteRuntimeIr,
+    TemplateScope, TemplateScopeId,
 };
-use super::whitespace::{clean_nodes, is_html_ws, CleanContext, CleanItem};
+use super::whitespace::{clean_nodes, is_html_ws, CleanContext, CleanItem, Namespace};
+use super::SvelteFragments;
 
 /// The static-template plan for a component: the template factories, the dynamic
 /// slots, and the client-side node-path plans.
@@ -41,14 +42,26 @@ pub struct StaticTemplatePlan {
 /// A static-template factory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TemplateFactory {
-    /// A `$.from_html("…", flag)` factory — the serialized static HTML skeleton
-    /// plus the optional fragment flag.
+    /// A `$.from_html("…", flag)` / `$.from_tree` factory — the serialized static
+    /// HTML skeleton plus the optional fragment flag, and the fragments strategy that
+    /// selects the factory family. Roots are always html-namespaced (a non-`html`
+    /// namespace is refused at the resolver).
     FromHtml {
         /// The serialized static HTML (interpolation slots collapsed to a single
         /// space, dynamic attributes elided).
         html: String,
-        /// The fragment flag, `Some(FragmentOne)` for a multi-root template.
+        /// The fragment flag, `Some(...)` when the FRAGMENT (multi-root) or
+        /// import-node bit is set.
         fragment_flag: Option<TemplateFlag>,
+        /// The template-instantiation strategy — `Tree` clones via `$.from_tree`.
+        fragments: super::SvelteFragments,
+        /// The objectified `$.from_tree` structure — the JS ARRAY LITERAL the tree
+        /// factory clones (the `objectify` / `as_tree` mirror of `html`). `Some`
+        /// ONLY under `fragments: Tree` (the html-string mode leaves it `None`); the
+        /// root-hoist emits `$.from_tree(<tree>, flags?)` from it instead of the
+        /// backtick `html` string. Built from the SAME cleaned-item sequence + CSS
+        /// scope facts as `html`, so the two representations never disagree.
+        tree: Option<String>,
     },
     /// A `$.text(seed)` text-node factory — the official "text-first" region
     /// optimization (`svelte@5.56.3`): when a region's whole cleaned sequence
@@ -97,9 +110,11 @@ pub enum StandaloneKind {
 /// bitmask (`svelte@5.56.3` `src/constants.js`). A combination of:
 /// `TEMPLATE_FRAGMENT = 1` (a MULTI-ROOT fragment) and `TEMPLATE_USE_IMPORT_NODE =
 /// 1 << 1 = 2` (the template needs `importNode` — set when it contains a
-/// `<video>` or a CUSTOM element). The `SVG`/`MathML` bits (`4`/`8`) are owned by
-/// the deferred namespace-aware root-helper layer and are not produced here.
-/// A flag of value 0 is represented as `None` (no trailing argument).
+/// `<video>` or a CUSTOM element). The `SVG`/`MathML` bits (`4`/`8`) belong to the
+/// deferred svg/mathml element-emission surface and are not produced here (a
+/// non-`html` namespace is refused at the resolver, so a supported root is always
+/// html-namespaced). A flag of value 0 is represented as `None` (no trailing
+/// argument).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TemplateFlag(u8);
 
@@ -158,6 +173,12 @@ pub enum AnchorReason {
     /// () => h);`). Distinct from a block-only root so the client backend emits the
     /// supported raw-markup root frame instead of failing closed.
     RawHtmlRoot,
+    /// The region's SOLE cleaned node is a RETAINED comment (`preserveComments`) — the
+    /// official `Fragment.js` special case (`nodes.length === 1 && nodes[0].type ===
+    /// 'comment'`) emits `$.comment()` as the fragment factory instead of cloning a
+    /// `$.from_html(`<!-- … -->`)` template. Distinct from an empty root so it stays a
+    /// SUPPORTED root shape (`var fragment = $.comment(); var node = $.first_child(fragment);`).
+    SoleComment,
 }
 
 /// A dynamic slot the template region needs.
@@ -298,9 +319,9 @@ pub struct NodePathPlan {
 /// own emission is owned by a downstream layer. The `<svelte:head>` `$.head(...)` region
 /// (`client_svelte_head`), the window/document/body listener/bind wiring (the host-special
 /// op path), and the head/host no-DOM root-factory skip (`plan_static_templates`) are
-/// implemented. The `<svelte:options namespace>` root-helper selection (`from_svg` /
-/// `from_mathml`) plus the options fold is the still-deferred namespace-aware root-helper
-/// selection layer (see `runtime_tests.rs::topology_oracle::DEFERRAL_LEDGER`).
+/// implemented. A non-`html` `<svelte:options namespace>` fails closed at the resolver;
+/// svg / mathml root-helper emission (the official `from_svg` / `from_mathml` selection)
+/// is a separate deferred element-emission surface.
 pub(super) fn is_non_body_special(node: &IrNode) -> bool {
     matches!(
         node,
@@ -387,275 +408,9 @@ fn is_static_html_root(node: &IrNode) -> bool {
 // The cleaning / run-partition core (the namespace-aware `clean_nodes`, the
 // `CleanItem` partition, and the whitespace + `<pre>`-newline rules) lives in the
 // sibling [`super::whitespace`] module — the single whitespace + run-partition
-// authority the skeleton serializer and the node-path walk both key on.
-
-/// Serialize a CLEANED node sequence into the static-HTML skeleton, with NO
-/// inter-node separator (the official skeleton concatenates directly). A
-/// `TextRun` emits its skeleton text (raw cleaned text, or a single ` `
-/// placeholder for a dynamic run); a `Node` is serialized in place (an element
-/// recurses; any other rendered node — component / block / `{@html}` / renderable
-/// special / comment — is a `<!>` hydration anchor). `ctx` is the cleaning context
-/// the items were produced under (the namespace / parent / whitespace state).
-fn serialize_clean_items(
-    ir: &SvelteRuntimeIr,
-    items: &[CleanItem],
-    ctx: CleanContext,
-    css: Option<&CssScopeFacts>,
-    html: &mut String,
-) {
-    for item in items {
-        match item {
-            CleanItem::TextRun { text, .. } => html.push_str(text),
-            CleanItem::Node(id) => match ir.node(*id) {
-                IrNode::Element(el) => serialize_element(ir, el, *id, ctx, css, html),
-                // A component / renderable special / block / tag / comment at a
-                // rendered position is a `<!>` anchor the DOM walk resolves.
-                _ => html.push_str("<!>"),
-            },
-        }
-    }
-}
-
-/// Serialize an element and its children into the skeleton. `ctx` is the cleaning
-/// context the element sits in; its children are cleaned/serialized under the
-/// CHILD context ([`CleanContext::for_children_of`]) — the namespace propagates,
-/// the whitespace-preservation flag stays set once a `<pre>` / `<textarea>`
-/// ancestor turned it on, and the SVG-`<text>` flag tracks for `can_remove_entirely`.
-fn serialize_element(
-    ir: &SvelteRuntimeIr,
-    el: &crate::svelte::runtime::ir::ElementIr,
-    node: NodeId,
-    ctx: CleanContext,
-    css: Option<&CssScopeFacts>,
-    html: &mut String,
-) {
-    html.push('<');
-    html.push_str(&el.tag);
-    // A CUSTOM element sets ALL its attributes via PROPERTIES at runtime, so its
-    // static attributes are NOT serialized into the skeleton — EXCEPT the `is`
-    // attribute, which must stay in the cloned HTML for the customized-built-in
-    // upgrade (official: `is_static_element` is false for a custom element, and the
-    // `is` attribute is the one exception kept in the template). A plain element
-    // (including `<video>`, which needs `importNode` but is NOT a custom element)
-    // serializes its static attributes normally.
-    //
-    // The SCOPE HASH for THIS element — `Some` iff the selector-to-template
-    // matcher marked this NodeId scoped (the shared per-element read of the ONE
-    // scope-injection fact pair).
-    let scope_hash = css.and_then(|facts| facts.hash_for(node));
-    serialize_static_attrs(&el.attrs, is_custom_element(el), scope_hash, html);
-    if el.children.is_empty() && is_void_element(&el.tag) {
-        html.push_str("/>");
-        return;
-    }
-    html.push('>');
-    serialize_element_children(ir, &el.children, ctx.for_children_of(&el.tag), css, html);
-    html.push_str("</");
-    html.push_str(&el.tag);
-    html.push('>');
-}
-
-/// Serialize an element's children into the skeleton, via the shared
-/// [`clean_nodes`] partition (the same one a template region's roots use). `ctx`
-/// is the CHILD cleaning context (namespace / parent tag / whitespace state).
-///
-/// The official `is_controlled` optimization (`process_children`): an `{#each}`
-/// block or an `{@html}` tag that is the SOLE cleaned child of an element is
-/// CONTROLLED — the runtime walks it without a `<!>` hydration anchor, so the
-/// element body stays empty in the skeleton. Only `EachBlock` / `HtmlTag` qualify.
-fn serialize_element_children(
-    ir: &SvelteRuntimeIr,
-    children: &[NodeId],
-    ctx: CleanContext,
-    css: Option<&CssScopeFacts>,
-    html: &mut String,
-) {
-    let items = clean_nodes(ir, children, ctx);
-    if is_sole_controlled(ir, &items) {
-        return;
-    }
-    serialize_clean_items(ir, &items, ctx, css, html);
-}
-
-/// Whether a cleaned child sequence is EXACTLY one controlled `{#each}` / `{@html}`
-/// node (the official `is_controlled` case): the runtime mounts it through its own
-/// anchor with no `<!>` marker, so the element body is empty in the skeleton.
-fn is_sole_controlled(ir: &SvelteRuntimeIr, items: &[CleanItem]) -> bool {
-    let [CleanItem::Node(only)] = items else {
-        return false;
-    };
-    matches!(
-        ir.node(*only),
-        IrNode::Block(crate::svelte::runtime::ir::BlockIr::Each { .. })
-            | IrNode::Tag(crate::svelte::runtime::ir::TagIr::Html { .. })
-    )
-}
-
-/// Append the static attributes of an element to the skeleton (`class="x"`),
-/// eliding dynamic / directive attributes (resolved by the DOM walk + ops).
-///
-/// `scope_hash` is `Some(hash)` when THIS element is css-scoped: the STATIC
-/// scope-class injection site (the official `RegularElement.js` bake — one of
-/// the two must-agree injection sites). A static/valueless `class` gets the
-/// hash appended into its literal (`class="card"` → `class="card svelte-<hash>"`;
-/// an empty/valueless class becomes `class="svelte-<hash>"`), and a scoped
-/// element with NO class attribute at all synthesizes `class="svelte-<hash>"`
-/// (the official synthetic empty-class attribute the analysis pushes for a
-/// scoped element, flowing through the same bake). A DYNAMIC/mixed class or a
-/// `class:` directive routes the hash through `$.set_class` instead (the
-/// dynamic injection site); a spread routes it through `$.attribute_effect`.
-///
-/// This handles the GENERAL static-attribute case (escaping, quoting). It does
-/// NOT special-case bind-driven input-default removal: the official compiler
-/// strips a static `value` / `checked` / `group` default from the template when a
-/// `bind:value` / `bind:group` is present on the same input (emitting
-/// `$.remove_input_defaults`).
-///
-/// TODO(follow-up): bind-aware input-default removal (`$.remove_input_defaults`
-/// plus the static-template default stripping for `bind:group` / `bind:value`) is
-/// part of the dedicated bindings-breadth work and is intentionally out of scope
-/// for this serializer — the static default is preserved here, and the
-/// bind-aware stripping is owned by the bindings layer.
-fn serialize_static_attrs(
-    attrs: &[AttrIr],
-    is_custom: bool,
-    scope_hash: Option<&str>,
-    html: &mut String,
-) {
-    // A SPREAD on the element switches its WHOLE attribute strategy to the single
-    // `$.attribute_effect` fold: EVERY co-located attribute — including the static ones —
-    // moves into the runtime object literal, so NONE is baked into the cloned skeleton
-    // (the official `Element.js` spread path emits a bare `<div></div>`; the scope
-    // hash rides the fold's `css_hash` argument, never the skeleton).
-    if attrs.iter().any(|a| matches!(a, AttrIr::Spread { .. })) {
-        return;
-    }
-    // The official `RegularElement.js` rule: a static `class` / `style` stays baked
-    // into the skeleton ONLY when the element carries NO `class:` / `style:`
-    // directive — a directive pulls the attribute OUT into the merged `$.set_class`
-    // / `$.set_style` (the base value becomes the call's `value` arg). Scan once.
-    let has_class_directive = attrs.iter().any(|a| matches!(a, AttrIr::Class { .. }));
-    let has_style_directive = attrs.iter().any(|a| matches!(a, AttrIr::Style { .. }));
-    // Whether ANY `class` ATTRIBUTE exists (static / dynamic / mixed — the official
-    // synthetic-class check is over every `Attribute` named `class`): a scoped
-    // element with NO class attribute synthesizes `class="svelte-<hash>"` at the
-    // end of the attribute run; one with a DYNAMIC/mixed class leaves the hash to
-    // the `$.set_class` site.
-    let has_class_attr = attrs.iter().any(|a| {
-        matches!(
-            a,
-            AttrIr::Static { name, .. } | AttrIr::Dynamic { name, .. } | AttrIr::Mixed { name, .. }
-                if name.eq_ignore_ascii_case("class")
-        )
-    });
-    // The static-bake hash applies only on the STATIC class path (no `class:`
-    // directive — a directive routes the base through `$.set_class`) and never
-    // on a custom element (whose attributes are runtime property writes).
-    let bake_hash = scope_hash.filter(|_| !has_class_directive && !is_custom);
-    // The official `bind:group` form emits a static `value="X"` as a runtime
-    // `input.value = input.__value = 'X'` write (the group-value `__value` source),
-    // NOT a baked static `value` attr — so a `value` on a `bind:group` input is pulled
-    // OUT of the cloned skeleton (the pinned svelte@5.56.3 group template is a bare
-    // `<input type="radio"/>`).
-    let has_group_bind = attrs
-        .iter()
-        .any(|a| matches!(a, AttrIr::Bind { target, .. } if target == "group"));
-    for attr in attrs {
-        if let AttrIr::Static { name, value } = attr {
-            // A static `value` on a `bind:group` input is pulled out of the skeleton
-            // (it becomes the runtime `__value` write).
-            if name == "value" && has_group_bind {
-                continue;
-            }
-            // A "cannot be set statically" attribute (`autofocus` / `muted` /
-            // `defaultValue` / `defaultChecked`) is NEVER in the skeleton — it is
-            // applied at runtime via a property write / `$.autofocus` (the
-            // `NonStaticProperty` op the ops pass emits). The official
-            // `cannot_be_set_statically` exclusion.
-            if cannot_be_set_statically(name) {
-                continue;
-            }
-            // A static `class` / `style` whose element ALSO carries a `class:` /
-            // `style:` directive is pulled OUT of the skeleton (its value becomes the
-            // base arg to the merged `$.set_class` / `$.set_style`). The NAME matches
-            // case-insensitively — the same normalization the surface gate and the
-            // plan's base-consumption arms apply.
-            if (name.eq_ignore_ascii_case("class") && has_class_directive)
-                || (name.eq_ignore_ascii_case("style") && has_style_directive)
-            {
-                continue;
-            }
-            // A CUSTOM element's attributes are set via PROPERTIES at runtime, so
-            // they are NOT in the skeleton — EXCEPT `is`, which stays for the
-            // customized-built-in upgrade.
-            if is_custom && name != "is" {
-                continue;
-            }
-            // The STATIC scope-class bake (the official `RegularElement.js`
-            // rule over the scoped element): a valueless/empty class becomes
-            // the bare hash; a valued class appends ` <hash>` after its
-            // re-escaped value (the IR value is ALREADY decoded at the
-            // producer boundary — the serialize is ESCAPE-ONLY). The hash
-            // itself is plain ASCII (no escapable characters).
-            if let (Some(hash), true) = (bake_hash, name.eq_ignore_ascii_case("class")) {
-                html.push_str(" class=\"");
-                match value {
-                    Some(StaticAttrValue { value }) if !value.is_empty() => {
-                        html.push_str(&escape_decoded_attr(value));
-                        html.push(' ');
-                        html.push_str(hash);
-                    }
-                    _ => html.push_str(hash),
-                }
-                html.push('"');
-                continue;
-            }
-            // The official compiler DROPS a static `class` whose value is the EXACTLY
-            // EMPTY string (`<div class="">` → `<div>`) — an empty class has no
-            // effect. A valueless `class` (`<div class>`, `value: None`) is NOT this
-            // case (it serializes as `class=""`), and `class=" "` (a space) is kept.
-            if name == "class"
-                && matches!(value, Some(StaticAttrValue { value }) if value.is_empty())
-            {
-                continue;
-            }
-            html.push(' ');
-            // The official client template serializer lowercases a static attribute
-            // NAME on an HTML element (`template.js`: `is_html ? key.toLowerCase() :
-            // key`). Every element the supported client surface serializes is HTML
-            // (an SVG / MathML element fails closed at the element allowlist gate), so
-            // the name is unconditionally ASCII-lowercased — `data-FooBar` →
-            // `data-foobar`, `aria-LabelledBy` → `aria-labelledby`. The allowlisted
-            // names (`id` / `class` / `href` / `type` / …) are already lowercase, so
-            // only the case-preserving `data-*` / `aria-*` families observe a change.
-            html.push_str(&name.to_ascii_lowercase());
-            // The official skeleton emits an EMPTY double-quoted value for a
-            // valueless boolean attribute (`<input disabled>` → `disabled=""`) — the
-            // attribute is present in the cloned HTML as `name=""`, NOT bare `name`.
-            // A valued attribute serializes its (producer-decoded) value with the
-            // ESCAPE-ONLY re-escape.
-            match value {
-                Some(StaticAttrValue { value }) => {
-                    html.push_str("=\"");
-                    html.push_str(&escape_decoded_attr(value));
-                    html.push('"');
-                }
-                None => html.push_str("=\"\""),
-            }
-        }
-    }
-    // A scoped element with NO class attribute at all synthesizes the scope
-    // class at the END of the attribute run — the official synthetic empty
-    // class attribute (pushed onto `node.attributes` by the analysis) baked
-    // through the same `value === '' → value = hash` rule.
-    if let Some(hash) = bake_hash {
-        if !has_class_attr {
-            html.push_str(" class=\"");
-            html.push_str(hash);
-            html.push('"');
-        }
-    }
-}
+// authority the skeleton serializer and the node-path walk both key on. The static
+// serialization itself (skeleton string + `$.from_tree` objectifier) lives in the
+// sibling [`super::template_serialize`] module.
 
 /// Whether a node is a STANDALONE root (the official `is_standalone`): it emits NO
 /// static template and is mounted against the parent block's anchor directly.
@@ -726,7 +481,7 @@ pub(super) fn attr_is_dynamic_surface(attr: &AttrIr) -> bool {
 }
 
 /// The HTML void-element set (self-closing in the static skeleton).
-fn is_void_element(tag: &str) -> bool {
+pub(super) fn is_void_element(tag: &str) -> bool {
     matches!(
         tag,
         "area"
@@ -757,6 +512,28 @@ fn is_whitespace_text(ir: &SvelteRuntimeIr, node_id: NodeId) -> bool {
     matches!(ir.node(node_id), IrNode::Text { text, .. } if text.chars().all(is_html_ws))
 }
 
+/// The SINGLE region-root cleaning context under the resolved compile options — the
+/// ONE derivation (html namespace + `preserveWhitespace` + `preserveComments`) that
+/// the skeleton synthesis, the DOM-walk / node-path offsets, the reactive-text runs,
+/// and the emptiness check ALL key on, so their cleaned sequences can never diverge.
+///
+/// A region root is always html-namespaced (a non-`html` namespace is refused at the
+/// resolver; svg / mathml element emission is a separate deferred surface), so the
+/// namespace axis is fixed to [`Namespace::Html`] here. Threading `preserveWhitespace`
+/// AND `preserveComments` through the SAME builder is what keeps the emit-side walk
+/// aligned with the skeleton: a hardcoded `preserve_ws = false` here would re-clean the
+/// walk without the whitespace the skeleton preserved, desyncing `$.first_child` /
+/// `$.sibling` offsets under `preserveWhitespace: true`. Distinct from
+/// [`CleanContext::region_root`] (the comment/whitespace-INVARIANT boolean default),
+/// which the "hosts a dynamic descendant" probe uses.
+pub(super) fn region_ctx(ir: &SvelteRuntimeIr) -> CleanContext<'static> {
+    CleanContext::region(
+        Namespace::Html,
+        ir.root_options.preserve_whitespace,
+        ir.root_options.preserve_comments,
+    )
+}
+
 /// Synthesise the static-HTML skeleton + the fragment-flag decision for one
 /// template region's root nodes, via the SHARED [`clean_nodes`] partition (the
 /// same one element children use — the official compiler runs the same
@@ -768,10 +545,10 @@ pub(super) fn synthesize_region(
     scope: &TemplateScope,
     css: Option<&CssScopeFacts>,
 ) -> TemplateFactory {
-    // A region's roots are at the fragment level (HTML namespace, no parent
-    // element, never inside a `<pre>`), so cleaning starts from the region-root
-    // context.
-    let ctx = CleanContext::region_root();
+    // The region's roots are at the fragment level (no parent element, never inside a
+    // `<pre>`), html-namespaced, with whitespace/comment preservation following the
+    // resolved compile options — the ONE shared `region_ctx` derivation.
+    let ctx = region_ctx(ir);
     let items = clean_nodes(ir, &scope.roots, ctx);
     if items.is_empty() {
         return TemplateFactory::CommentAnchor {
@@ -828,13 +605,27 @@ pub(super) fn synthesize_region(
             return TemplateFactory::CommentAnchor { reason };
         }
     }
+    // A SOLE RETAINED comment (only present in the cleaned sequence under
+    // `preserveComments`) is svelte's `$.comment()` fragment special case
+    // (`Fragment.js`: `nodes.length === 1 && nodes[0].type === 'comment'`), NOT a
+    // `$.from_html(`<!-- … -->`)` clone. (A comment is `is_static_html_root`, so it
+    // falls through the block-only branch above — this check owns the sole-comment case.)
+    if let [CleanItem::Node(only)] = items.as_slice() {
+        if matches!(ir.node(*only), IrNode::Comment { .. }) {
+            return TemplateFactory::CommentAnchor {
+                reason: AnchorReason::SoleComment,
+            };
+        }
+    }
     let mut html = String::new();
-    serialize_clean_items(ir, &items, ctx, css, &mut html);
-    // The trailing flag is the official `from_html` bitmask: TEMPLATE_FRAGMENT (1)
-    // for a MULTI-ROOT template (2+ cleaned DOM positions), OR'd with
-    // TEMPLATE_USE_IMPORT_NODE (2) when the template contains a `<video>` or a
-    // CUSTOM element (so the runtime clones via `importNode`). A single plain-HTML
-    // root has flag 0 (no trailing argument).
+    super::template_serialize::serialize_clean_items(ir, &items, ctx, css, &mut html);
+    let fragments = ir.root_options.fragments;
+    // The trailing flag is the official `from_*` bitmask: TEMPLATE_FRAGMENT (1) for a
+    // MULTI-ROOT template (2+ cleaned DOM positions), OR'd with TEMPLATE_USE_IMPORT_NODE
+    // (2) when the template contains a `<video>` or a CUSTOM element (clones via
+    // `importNode`). The SVG (4) / MathML (8) bits belong to the deferred svg/mathml
+    // element-emission surface and are never produced here (a supported root is always
+    // html-namespaced).
     let mut bits = 0u8;
     if items.len() > 1 {
         bits |= TemplateFlag::FRAGMENT;
@@ -842,9 +633,21 @@ pub(super) fn synthesize_region(
     if items_need_import_node(ir, &items) {
         bits |= TemplateFlag::USE_IMPORT_NODE;
     }
+    // Under `fragments: 'tree'` the root-hoist clones a `$.from_tree` array literal
+    // (the `objectify` mirror of the HTML string) instead of the backtick skeleton —
+    // built from the SAME cleaned-item sequence + scope facts, so the two never disagree.
+    let tree = if fragments == SvelteFragments::Tree {
+        Some(super::template_serialize::objectify_region(
+            ir, &items, ctx, css,
+        ))
+    } else {
+        None
+    };
     TemplateFactory::FromHtml {
         html,
         fragment_flag: TemplateFlag::from_bits(bits),
+        fragments,
+        tree,
     }
 }
 
@@ -1098,9 +901,10 @@ fn build_client_paths(
 ) {
     // The cleaned DOM-position sequence (the SAME partition the skeleton emits):
     // each item is ONE DOM node, so its index IS the sibling offset. The region
-    // starts from the region-root context (a region's roots are at the fragment
-    // level, HTML namespace, never in a `<pre>`).
-    let ctx = CleanContext::region_root();
+    // context (html namespace + `preserveWhitespace` + `preserveComments`) is the ONE
+    // shared `region_ctx` derivation the skeleton synthesis uses, so the sibling
+    // offsets can never desync from the emitted template.
+    let ctx = region_ctx(ir);
     let items = clean_nodes(ir, roots, ctx);
     // The clone-root contract (`svelte@5.56.3` `Fragment.js` `is_single_element`): a
     // region whose WHOLE cleaned sequence is a SINGLE static-HTML ELEMENT is cloned
@@ -1422,7 +1226,7 @@ pub fn plan_static_templates(
         // `$.comment()` anchor to mount into. A NESTED empty branch body produces
         // no static template (an empty `{:else}` has nothing to mount). The cleaned
         // sequence is empty iff the region has no rendered DOM position.
-        let region_empty = clean_nodes(ir, &scope.roots, CleanContext::region_root()).is_empty();
+        let region_empty = clean_nodes(ir, &scope.roots, region_ctx(ir)).is_empty();
         // A NO-DOM HOST-SPECIAL-only region (`<svelte:window|document|body>` or a
         // `<svelte:head>` with no non-title body) is a no-DOM INIT-ONLY root: it clones no
         // template and mounts nothing at the region level (its events/binds emit directly in

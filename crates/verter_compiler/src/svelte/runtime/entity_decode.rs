@@ -335,8 +335,10 @@ fn validate_code(code: u32) -> u32 {
 
 /// Re-escape a DECODED attribute value for the double-quoted context, matching the
 /// official `escape_html(value, is_attr=true)` over the `ATTR_REGEX = /[&"<]/`
-/// (`&` → `&amp;`, `"` → `&quot;`, `<` → `&lt;`).
-fn escape_html_attr_context(value: &str) -> String {
+/// (`&` → `&amp;`, `"` → `&quot;`, `<` → `&lt;`). Shared by [`escape_decoded_attr`]
+/// (the `DecodedAttrValue`-typed skeleton path) and the `collect_static_attrs`
+/// resolved-value serializer (whose value is the already-decoded `as_str`).
+pub(super) fn escape_html_attr_context(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for ch in value.chars() {
         match ch {

@@ -41,6 +41,7 @@ fn value(semantic_hash: Hash16) -> CompileOutputValue {
         semantic_hash,
         0u64,
         0u64,
+        None,
         FxHashMap::default(),
         DiagnosticsSnapshot::default(),
         None,
@@ -48,6 +49,85 @@ fn value(semantic_hash: Hash16) -> CompileOutputValue {
         None,
         false,
     )
+}
+
+/// A value carrying an explicit resolved cssHash override (for the never-wrong
+/// warm-hit discriminant test).
+fn value_with_css_override(semantic_hash: Hash16, css_override: &str) -> CompileOutputValue {
+    CompileOutputValue::from_compile_record(
+        semantic_hash,
+        0u64,
+        0u64,
+        Some(Arc::from(css_override)),
+        FxHashMap::default(),
+        DiagnosticsSnapshot::default(),
+        None,
+        None,
+        None,
+        false,
+    )
+}
+
+#[test]
+fn session_lookup_misses_when_css_hash_override_differs() {
+    // The "never wrong" contract: the resolved cssHash override is folded into
+    // `profile_hash`, but the slot key is a bare u64. Simulate a `profile_hash`
+    // collision by publishing a slot under override "svelte-A" and looking it up
+    // (SAME profile_hash + semantic hash) under a DIFFERENT live override
+    // "svelte-B": the exact-string discriminant MUST miss so a collided slot can
+    // never serve a result carrying the wrong scope class.
+    let node = CompileOutputNodeFactValidatedSession::new();
+    let mut state = ProfileState::default();
+    let semantic = [0x12u8; 16];
+    let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(empty_fact_signature()));
+    node.publish(
+        &mut state,
+        42,
+        admission,
+        value_with_css_override(semantic, "svelte-A"),
+        0,
+    );
+
+    // Same profile_hash + semantic, DIFFERENT live override → miss (never wrong).
+    let hit = node.lookup(
+        &state,
+        42,
+        &semantic,
+        0,
+        0,
+        Some("svelte-B"),
+        || Some(()),
+        |_, _| true,
+    );
+    assert!(
+        hit.is_none(),
+        "a differing cssHash override MUST miss the warm slot (never-wrong contract)"
+    );
+
+    // The EXACT live override → warm hit (the discriminant is byte-exact, not a
+    // blanket reject of every override-bearing slot).
+    let hit = node.lookup(
+        &state,
+        42,
+        &semantic,
+        0,
+        0,
+        Some("svelte-A"),
+        || Some(()),
+        |_, _| true,
+    );
+    assert!(
+        hit.is_some(),
+        "the exact matching override MUST warm-hit the slot"
+    );
+
+    // A `None` live override against an override-bearing slot → miss (absence is
+    // a distinct scope-class policy).
+    let hit = node.lookup(&state, 42, &semantic, 0, 0, None, || Some(()), |_, _| true);
+    assert!(
+        hit.is_none(),
+        "an absent live override MUST miss an override-bearing slot"
+    );
 }
 
 #[test]
@@ -91,7 +171,7 @@ fn session_node_misses_when_no_slot_present() {
     let node = CompileOutputNodeFactValidatedSession::new();
     let state = ProfileState::default();
     let semantic = [0u8; 16];
-    let hit = node.lookup(&state, 42, &semantic, 0, 0, || Some(()), |_, _| true);
+    let hit = node.lookup(&state, 42, &semantic, 0, 0, None, || Some(()), |_, _| true);
     assert!(hit.is_none(), "no slot for profile_hash → no warm hit");
 }
 
@@ -103,7 +183,7 @@ fn session_publish_then_lookup_round_trips_under_matching_hashes() {
     let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(empty_fact_signature()));
     let outcome = node.publish(&mut state, 42, admission, value(semantic), 0);
     assert_eq!(outcome, SessionPublishOutcome::Admitted);
-    let hit = node.lookup(&state, 42, &semantic, 0, 0, || Some(()), |_, _| true);
+    let hit = node.lookup(&state, 42, &semantic, 0, 0, None, || Some(()), |_, _| true);
     assert!(hit.is_some(), "matching hashes → warm hit");
 }
 
@@ -116,7 +196,7 @@ fn session_lookup_misses_when_semantic_hash_differs() {
     node.publish(&mut state, 42, admission, value(semantic), 0);
     // Live semantic_hash differs → miss.
     let other = [0xFF; 16];
-    let hit = node.lookup(&state, 42, &other, 0, 0, || Some(()), |_, _| true);
+    let hit = node.lookup(&state, 42, &other, 0, 0, None, || Some(()), |_, _| true);
     assert!(
         hit.is_none(),
         "differing semantic_hash MUST miss the warm slot"
@@ -135,13 +215,31 @@ fn session_lookup_misses_when_validate_facts_returns_false() {
     let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(facts));
     node.publish(&mut state, 42, admission, value(semantic), 0);
 
-    let hit = node.lookup(&state, 42, &semantic, 0, 0, || Some(()), |_, _sig| false);
+    let hit = node.lookup(
+        &state,
+        42,
+        &semantic,
+        0,
+        0,
+        None,
+        || Some(()),
+        |_, _sig| false,
+    );
     assert!(
         hit.is_none(),
         "fact-validation closure returning false MUST miss the warm slot"
     );
 
-    let hit = node.lookup(&state, 42, &semantic, 0, 0, || Some(()), |_, _sig| true);
+    let hit = node.lookup(
+        &state,
+        42,
+        &semantic,
+        0,
+        0,
+        None,
+        || Some(()),
+        |_, _sig| true,
+    );
     assert!(
         hit.is_some(),
         "fact-validation closure returning true → warm hit"
@@ -172,6 +270,7 @@ fn session_lookup_skips_acquire_view_until_cheap_predicates_pass() {
         &semantic,
         0,
         0,
+        None,
         || {
             acquired.set(acquired.get() + 1);
             Some(())
@@ -198,6 +297,7 @@ fn session_lookup_skips_acquire_view_until_cheap_predicates_pass() {
         &other,
         0,
         0,
+        None,
         || {
             acquired.set(acquired.get() + 1);
             Some(())
@@ -221,6 +321,7 @@ fn session_lookup_skips_acquire_view_until_cheap_predicates_pass() {
         &semantic,
         0,
         0,
+        None,
         || {
             acquired.set(acquired.get() + 1);
             Some(())
@@ -244,6 +345,7 @@ fn session_lookup_skips_acquire_view_until_cheap_predicates_pass() {
         &semantic,
         0,
         0,
+        None,
         || {
             acquired.set(acquired.get() + 1);
             None::<()>
@@ -270,7 +372,7 @@ fn session_publish_non_cacheable_removes_prior_slot() {
     let admission = SignatureAdmission::Cacheable(ReadSetSignature::new(empty_fact_signature()));
     node.publish(&mut state, 42, admission, value(semantic), 0);
     assert!(node
-        .lookup(&state, 42, &semantic, 0, 0, || Some(()), |_, _| true)
+        .lookup(&state, 42, &semantic, 0, 0, None, || Some(()), |_, _| true)
         .is_some());
 
     // Second publish: NonCacheable (overflow). Must REMOVE the prior
@@ -284,7 +386,7 @@ fn session_publish_non_cacheable_removes_prior_slot() {
         other => panic!("expected Refused(SignatureOverflow), got {other:?}"),
     }
     assert!(
-        node.lookup(&state, 42, &semantic, 0, 0, || Some(()), |_, _| true)
+        node.lookup(&state, 42, &semantic, 0, 0, None, || Some(()), |_, _| true)
             .is_none(),
         "non-cacheable publish MUST drop the prior slot"
     );
@@ -374,6 +476,7 @@ fn session_peek_output_returns_per_kind_pair() {
         [0u8; 16],
         0,
         0,
+        None,
         outputs,
         DiagnosticsSnapshot::default(),
         None,

@@ -13,7 +13,7 @@ pub mod case_count;
 use std::path::{Path, PathBuf};
 
 use verter_compiler::svelte::runtime::conformance_trace::MatchCertainty;
-use verter_compiler::svelte::runtime::SvelteRuntimeOptions;
+use verter_compiler::svelte::runtime::{SvelteFragments, SvelteRuntimeOptions};
 use verter_svelte_conformance::manifest::ManifestCase;
 use verter_svelte_conformance::model::{
     MatchOutcome, SelectorKind, StructuralKind, Target, TemplateValueRepresentation,
@@ -72,6 +72,12 @@ pub fn case_runtime_options(case: &ManifestCase) -> SvelteRuntimeOptions {
         },
         name: Some(component_name_for(&case.slug)),
         custom_element: case.compile_options.custom_element,
+        // The scoped-CSS tree cell compiles under `fragments: 'tree'` (the
+        // `$.from_tree` carrier) so Verter mirrors the tree-mode golden.
+        fragments: case
+            .compile_options
+            .fragments_tree
+            .then_some(SvelteFragments::Tree),
         ..Default::default()
     }
 }

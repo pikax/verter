@@ -493,12 +493,10 @@ impl<'a> SupportedClientIr<'a> {
             .and_then(|src| super::expr::reparse_module(&alloc, src))
             .map(|program| super::state_scan::collect_proxy_inits(&program))
             .unwrap_or_default();
-        let declared_roots = super::reactive_analysis::collect_declared_root_names(
-            &alloc,
-            ir.analysis.scripts.module_source,
-            ir.analysis.scripts.instance_source,
-            &ir.analysis.script_imports,
-        );
+        // The `is_pure` declared-root set is READ from the canonical component-scope
+        // binder facts (built once at IR construction) — never re-derived by reparsing
+        // the scripts here.
+        let declared_roots = ir.analysis.component_scope_facts.declared_roots().clone();
         let mut projection = SupportedClientIr {
             ir,
             decl_plan,

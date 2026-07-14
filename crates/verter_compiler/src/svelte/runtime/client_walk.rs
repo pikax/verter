@@ -71,19 +71,52 @@ pub(super) fn sibling_descent(prev: &str, delta: usize, is_text: bool) -> String
     }
 }
 
-/// Whether a cleaned DOM position needs a named walk var (it is dynamic, or hosts
-/// a dynamic descendant).
-pub(super) fn item_needs_name(ir: &SvelteRuntimeIr, item: &CleanItem) -> bool {
+/// Whether a cleaned DOM-position sequence is WALKED — the region has a reason to
+/// descend beyond retained comments. A multi-root fragment ALWAYS walks
+/// (`is_fragment`); an element region walks only when it hosts a genuinely dynamic
+/// position (a comment alone never triggers a walk). Retained comments are bound as
+/// walk anchors ONLY inside a walked region (svelte's DOM-walk rule), so this gates
+/// their naming — it is computed WITHOUT counting comments (`region_walked = false`).
+pub(super) fn region_is_walked(
+    ir: &SvelteRuntimeIr,
+    items: &[CleanItem],
+    is_fragment: bool,
+) -> bool {
+    is_fragment || items.iter().any(|item| item_needs_name(ir, item, false))
+}
+
+/// Whether a cleaned DOM position needs a named walk var — it is dynamic, hosts a
+/// dynamic descendant, or is a retained comment inside a WALKED region
+/// (`region_walked`).
+///
+/// A retained comment gets its OWN walk anchor var, matching svelte's DOM walk: every
+/// retained comment inside a walked region is bound (`var node = $.child(parent)` /
+/// `$.sibling(prev)`), even a trailing one (whose var is then unused). A comment only
+/// reaches the cleaned sequence when `preserveComments` kept it (it is dropped upstream
+/// otherwise), so its presence here already implies retention. It NEVER forces its
+/// region to walk: `region_walked` is computed without counting comments, and
+/// `node_or_descendant_dynamic` never treats a comment as a genuine dynamic descendant,
+/// so a fully-static element / single-root region carrying only a retained comment is
+/// not walked and its comment is not bound.
+pub(super) fn item_needs_name(ir: &SvelteRuntimeIr, item: &CleanItem, region_walked: bool) -> bool {
     match item {
         CleanItem::TextRun { interps, .. } => !interps.is_empty(),
-        CleanItem::Node(node) => node_or_descendant_dynamic(ir, *node),
+        CleanItem::Node(node) => {
+            (region_walked && matches!(ir.node(*node), IrNode::Comment { .. }))
+                || node_or_descendant_dynamic(ir, *node)
+        }
     }
 }
 
 /// Whether any cleaned position in the sequence needs a named walk var (so a
 /// `$.reset(parent)` is emitted after the parent's children).
+///
+/// This is the reset gate: a retained comment never triggers a reset on its own (it is
+/// bound only inside an already-walked region, which by definition already holds a
+/// named genuinely-dynamic position), so the gate EXCLUDES comments (`region_walked =
+/// false`) — a region walked solely for a comment does not exist.
 pub(super) fn any_item_needs_name(ir: &SvelteRuntimeIr, items: &[CleanItem]) -> bool {
-    items.iter().any(|item| item_needs_name(ir, item))
+    items.iter().any(|item| item_needs_name(ir, item, false))
 }
 
 /// Whether a node is dynamic or hosts a dynamic descendant.

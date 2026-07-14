@@ -141,6 +141,15 @@ pub enum DowngradeReason {
     /// fallback path requires per-session slot state that the
     /// content-addressed cache does not carry.
     HasDevLastGood,
+    /// The compile profile carries a resolved Svelte `cssHash` override. The
+    /// override is a user callback's out-of-band result; the session cannot
+    /// prove the callback is content-deterministic across recomputes, so a
+    /// content-addressed entry is refused fail-closed (it could otherwise warm a
+    /// content-keyed slot with a scope class a later re-resolve would not
+    /// reproduce). `Session` mode stays eligible because the exact override is
+    /// folded into the profile identity and re-validated on every warm hit, so a
+    /// session warm hit can NEVER serve a different override.
+    CssHashOverridePresent,
 }
 
 /// Source-map emission policy. The hash of this value enters every
@@ -200,6 +209,7 @@ impl DowngradeReason {
             Self::HasStyleOverride => 0x05,
             Self::HasIdeOnlyAnalysis => 0x06,
             Self::HasDevLastGood => 0x07,
+            Self::CssHashOverridePresent => 0x08,
         });
         crate::hash::hash_16(&buf)
     }
@@ -216,6 +226,7 @@ impl std::fmt::Display for DowngradeReason {
             Self::HasStyleOverride => "HasStyleOverride",
             Self::HasIdeOnlyAnalysis => "HasIdeOnlyAnalysis",
             Self::HasDevLastGood => "HasDevLastGood",
+            Self::CssHashOverridePresent => "CssHashOverridePresent",
         })
     }
 }
@@ -274,6 +285,7 @@ impl From<DowngradeReason> for verter_audit::payloads::tags::DowngradeReasonTag 
             DowngradeReason::HasStyleOverride => Self::HasStyleOverride,
             DowngradeReason::HasIdeOnlyAnalysis => Self::HasIdeOnlyAnalysis,
             DowngradeReason::HasDevLastGood => Self::HasDevLastGood,
+            DowngradeReason::CssHashOverridePresent => Self::CssHashOverridePresent,
         }
     }
 }
@@ -975,6 +987,18 @@ pub struct CompileProfile {
     pub conditional_root_narrowing: bool,
     /// Experimental: strict slot children type checking.
     pub strict_slots: bool,
+    /// The RESOLVED Svelte `cssHash` scope-class override — the user `cssHash`
+    /// callback's byte-exact result, computed OUTSIDE the compiler (at this
+    /// session/API boundary) BEFORE the cache lookup, ONCE per request. It is a
+    /// COMPILE-OUTPUT POLICY dimension (not source content, not any env hash), so
+    /// it participates in the profile's exact equality/hash — folding into BOTH
+    /// the session compile-slot discriminator and the Content-mode key. When
+    /// `Some`, the Svelte carrier uses it verbatim as the scope class; Vue ignores
+    /// it. A present override makes a requested Content compile non-admissible
+    /// (fail-closed — see [`DowngradeReason::CssHashOverridePresent`]); Session
+    /// caching stays safe because the exact override is in the profile identity
+    /// and re-validated on every warm hit.
+    pub svelte_css_hash_override: Option<String>,
     /// Caller-requested compile cache mode for this request.
     ///
     /// The host classifies this against the request's eligibility
@@ -1020,6 +1044,7 @@ impl Default for CompileProfile {
             embed_ambient_types: false,
             conditional_root_narrowing: false,
             strict_slots: false,
+            svelte_css_hash_override: None,
             requested_mode: CompileCacheMode::Session,
         }
     }
@@ -1860,6 +1885,16 @@ pub(crate) struct CompileSlot {
     pub(crate) semantic_hash: Hash16,
     pub(crate) style_override_hash: u64,
     pub(crate) content_override_hash: u64,
+    /// The RESOLVED Svelte `cssHash` override captured at publish (byte-exact;
+    /// `None` for the default derivation). Compared EXACTLY on every warm hit so
+    /// a `profile_hash` u64 collision can NEVER serve a result carrying a
+    /// different scope class — the exact-override warm-hit contract. The override is
+    /// already folded into `profile_hash` (the slot key); this exact-string
+    /// discriminant hardens that folding against the u64 collision the bare-hash
+    /// slot key would otherwise admit. `None` (the default — Vue and every
+    /// un-overridden Svelte compile) is a null pointer, so the discriminant is
+    /// zero-cost off the override path.
+    pub(crate) css_hash_override: Option<Arc<str>>,
     pub(crate) outputs: FxHashMap<VirtualNodeKind, CachedVirtualFile>,
     pub(crate) diagnostics: DiagnosticsSnapshot,
     pub(crate) last_good_outputs: Option<FxHashMap<VirtualNodeKind, CachedVirtualFile>>,

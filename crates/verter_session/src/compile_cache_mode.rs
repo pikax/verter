@@ -11,8 +11,9 @@
 //! Most downgrade reasons have a small, testable eligibility predicate
 //! ([`has_external_src`], [`has_macro_type_deps`],
 //! [`has_workspace_alias`], [`has_block_override`],
-//! [`has_style_override`], [`has_ide_only_analysis`],
-//! [`has_dev_last_good`]). The module-augmentation reason is the one
+//! [`has_style_override`], [`has_css_hash_override`],
+//! [`has_ide_only_analysis`], [`has_dev_last_good`]). The
+//! module-augmentation reason is the one
 //! exception: it requires the augmentation TARGET index for every
 //! module the owner can consume, so the host computes it
 //! (`VerterHost::owner_has_module_augmentation_dependency`) and hands
@@ -31,16 +32,17 @@
 //!
 //! `HasModuleAugmentation` then `HasMacroTypeDeps` then
 //! `HasWorkspaceAlias` then `HasExternalSrc` then `HasBlockOverride`
-//! then `HasStyleOverride` then `HasIdeOnlyAnalysis` then
-//! `HasDevLastGood`.
+//! then `HasStyleOverride` then `CssHashOverridePresent` then
+//! `HasIdeOnlyAnalysis` then `HasDevLastGood`.
 //!
 //! ## Mode fold
 //!
 //! Every reason is either a cross-file dependency
 //! (`HasMacroTypeDeps` / `HasModuleAugmentation` / `HasWorkspaceAlias`
 //! / `HasExternalSrc`) or a session-scoped / IDE-shape input
-//! (`HasBlockOverride` / `HasStyleOverride` / `HasIdeOnlyAnalysis` /
-//! `HasDevLastGood`). The session cache's path-precise
+//! (`HasBlockOverride` / `HasStyleOverride` / `CssHashOverridePresent`
+//! / `HasIdeOnlyAnalysis` / `HasDevLastGood`). The session cache's
+//! path-precise
 //! [`ReadSetSignature`](crate::fact_signature_helpers::ReadSetSignature)
 //! fact rail and per-session slot state handle all of them, so:
 //!
@@ -169,6 +171,17 @@ pub(crate) fn has_style_override(input: &CompileInput) -> bool {
     input.style_override_layer.is_some()
 }
 
+/// True iff the compile profile carries a resolved Svelte `cssHash` override.
+/// The override is a user callback's out-of-band result; a content-addressed
+/// entry is refused fail-closed (the session cannot prove the callback is
+/// content-deterministic across recomputes), so a `Content` request downgrades
+/// to `Stateless`. `Session` mode stays eligible — the exact override is in the
+/// profile identity and re-validated on every warm hit.
+#[inline]
+pub(crate) fn has_css_hash_override(profile: &CompileProfile) -> bool {
+    profile.svelte_css_hash_override.is_some()
+}
+
 /// True iff the compile profile target is IDE-only analysis
 /// (`CompileTarget::TSX` set without `CompileTarget::TEMPLATE`). IDE-
 /// only analysis publishes through a different cache shape (the TSX
@@ -281,6 +294,9 @@ pub(crate) fn classify_compile_mode(
     }
     if has_style_override(inputs.input) {
         reasons.push(DowngradeReason::HasStyleOverride);
+    }
+    if has_css_hash_override(inputs.profile) {
+        reasons.push(DowngradeReason::CssHashOverridePresent);
     }
     if has_ide_only_analysis(inputs.profile) {
         reasons.push(DowngradeReason::HasIdeOnlyAnalysis);

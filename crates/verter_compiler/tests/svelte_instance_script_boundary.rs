@@ -468,10 +468,13 @@ fn negative_svelte_options_forms_fail_closed() {
             "nested",
             "<script>let c = $state(0);</script>\n<div><svelte:options runes={true} /></div>\n<button onclick={() => c++}>{c}</button>\n",
         ),
-        // Another axis (`namespace` / `customElement` / `tag` / `name` / `css`).
+        // An unsupported FEATURE axis (`immutable` / `accessors`) fails closed via the
+        // compile-options resolver. (`namespace` / `preserveWhitespace` are now SUPPORTED
+        // — their positive coverage is the namespace / whitespace goldens; `customElement`
+        // is supported; `tag` is the deprecated hard error below.)
         (
-            "namespace_axis",
-            "<svelte:options namespace=\"svg\" />\n<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n",
+            "immutable_axis",
+            "<svelte:options immutable />\n<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n",
         ),
         // (a VALID `customElement` value is SUPPORTED — the custom-element emission
         // tests + `options/` goldens own its positive coverage; the INVALID forms are
@@ -536,8 +539,8 @@ fn non_boolean_runes_options_fails_as_official_reject() {
     // A non-boolean `runes` value (`runes={foo}`) is an official EXACT-CODE parse error —
     // upstream's `read_options` `get_boolean_value` throws `svelte_options_invalid_attribute_value`
     // — minted by the parser `read_options` finalization and carried by the official-reject gate.
-    // NOT a silent accept (the lenient-options leak), and no longer a code-less OptionsAxis
-    // unsupported surface. (A DUPLICATE `<svelte:options>` is a DIFFERENT class —
+    // NOT a silent accept (the lenient-options leak), and never a code-less unsupported
+    // options surface. (A DUPLICATE `<svelte:options>` is a DIFFERENT class —
     // `svelte_meta_duplicate` — covered by `duplicate_svelte_options_fails_as_official_reject`.)
     let src = "<svelte:options runes={foo} />\n<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n";
     match compile(src) {
@@ -558,7 +561,7 @@ fn non_boolean_runes_options_fails_as_official_reject() {
 fn duplicate_svelte_options_fails_as_official_reject() {
     // A DUPLICATE `<svelte:options>` is an official EXACT-CODE parse error
     // (`svelte_meta_duplicate`) minted by the parser and carried by the official-reject gate
-    // — NOT the unsupported OptionsAxis surface, and never a silent accept.
+    // — NOT an unsupported options surface, and never a silent accept.
     let src = "<svelte:options runes={true} />\n<svelte:options runes={true} />\n<script>let c = $state(0);</script>\n<button onclick={() => c++}>{c}</button>\n";
     match compile(src) {
         Err(ClientCompileError::OfficialReject(rejection)) => {

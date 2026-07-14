@@ -32,7 +32,8 @@ use super::client_module_frame::{emit_imports, escape_template_literal};
 use super::client_plan::{ClientBlock, ClientModulePlan, ClientNode, ClientRuntimeOp};
 use super::client_shapes::GroupBindKey;
 use super::client_walk::{
-    any_item_needs_name, first_descent, item_needs_name, sibling_descent, WalkBase,
+    any_item_needs_name, first_descent, item_needs_name, region_is_walked, sibling_descent,
+    WalkBase,
 };
 use super::entity_decode::decode_text_entities;
 use super::html::StaticTemplatePlan;
@@ -42,7 +43,9 @@ use super::whitespace::{
     clean_nodes, clean_nodes_indexed, cleaned_text_run_parts, CleanContext, CleanItem, RunTextPart,
 };
 
-pub use super::unsupported::UnsupportedSvelteRuntimeSurface;
+pub use super::unsupported::{
+    CompileOptionOrigin, UnsupportedSvelteCompileOption, UnsupportedSvelteRuntimeSurface,
+};
 
 /// The component-FUNCTION-scoped `bind:group` accumulator name (`const binding_group
 /// = []`). It is declared at the TOP of the component function body (NOT module
@@ -652,7 +655,7 @@ impl<'a> ClientEmitter<'a> {
     /// text-first.
     pub(super) fn region_is_text_first(&self, scope_id: TemplateScopeId) -> bool {
         let scope = self.ir().template_scope(scope_id);
-        let ctx = CleanContext::region_root();
+        let ctx = super::html::region_ctx(self.ir());
         let items = clean_nodes(self.ir(), &scope.roots, ctx);
         matches!(items.first(), Some(CleanItem::TextRun { .. }))
     }
@@ -666,7 +669,7 @@ impl<'a> ClientEmitter<'a> {
     /// `pub(super)` `interp_var` map.
     pub(super) fn bind_text_first_run(&mut self, scope_id: TemplateScopeId, text_var: &str) {
         let scope = self.ir().template_scope(scope_id);
-        let items = clean_nodes(self.ir(), &scope.roots, CleanContext::region_root());
+        let items = clean_nodes(self.ir(), &scope.roots, super::html::region_ctx(self.ir()));
         if let [CleanItem::TextRun { interps, .. }] = items.as_slice() {
             for &interp in interps {
                 self.interp_var.insert(interp, text_var.to_string());
@@ -678,7 +681,7 @@ impl<'a> ClientEmitter<'a> {
     /// root element's tag, e.g. `button`).
     pub(super) fn single_root_var_name(&mut self, scope_id: TemplateScopeId) -> String {
         let scope = self.ir().template_scope(scope_id);
-        let ctx = CleanContext::region_root();
+        let ctx = super::html::region_ctx(self.ir());
         let items = clean_nodes(self.ir(), &scope.roots, ctx);
         if let [CleanItem::Node(only)] = items.as_slice() {
             if let ClientNode::Element { element, .. } = self.client_node(*only) {
@@ -706,7 +709,7 @@ impl<'a> ClientEmitter<'a> {
         mounts_fragment: bool,
     ) {
         let scope = self.ir().template_scope(scope_id);
-        let ctx = CleanContext::region_root();
+        let ctx = super::html::region_ctx(self.ir());
         let (items, last_indices) = clean_nodes_indexed(self.ir(), &scope.roots, ctx);
         // The region-root `{@debug}` effects, grouped by the clean-item gap they precede
         // (a `{@debug}` is non-rendering — dropped from `items` — so it rides a gap, never
@@ -835,14 +838,21 @@ impl<'a> ClientEmitter<'a> {
                 }
             }
         }
+        // Whether this region is WALKED — a multi-root fragment always is; an element
+        // region only when it hosts a genuinely dynamic position. A retained comment is
+        // bound as a walk anchor ONLY inside a walked region (svelte's DOM-walk rule), so
+        // a fully-static single-root element carrying only a comment names nothing.
+        let region_walked =
+            region_is_walked(self.ir(), items, matches!(base, WalkBase::Fragment(_)));
         for (idx, item) in items.iter().enumerate() {
             // Any `{@debug}` falling in document order BEFORE this clean position emits
             // here — at its source-order slot — before the position's own walk/getter.
             self.emit_interleaved_gap(out, &gaps[idx]);
-            // Decide whether this position needs a name (it is dynamic, or hosts a
-            // dynamic descendant we must reach). A non-named position is a STATIC
-            // skip — count it for the trailing `$.next()` cursor advance.
-            if !item_needs_name(self.ir(), item) {
+            // Decide whether this position needs a name (it is dynamic, hosts a dynamic
+            // descendant we must reach, or is a retained comment in a walked region). A
+            // non-named position is a STATIC skip — count it for the trailing `$.next()`
+            // cursor advance.
+            if !item_needs_name(self.ir(), item, region_walked) {
                 skipped += 1;
                 continue;
             }
@@ -1224,10 +1234,10 @@ impl<'a> ClientEmitter<'a> {
         }
         for scope in &self.ir().template_scopes {
             if scope.roots.contains(&interp) {
-                return (scope.roots.clone(), CleanContext::region_root());
+                return (scope.roots.clone(), super::html::region_ctx(self.ir()));
             }
         }
-        (vec![interp], CleanContext::region_root())
+        (vec![interp], super::html::region_ctx(self.ir()))
     }
 
     /// The [`CleanContext`] for the CHILDREN of element `parent` — the region-root
@@ -1249,7 +1259,9 @@ impl<'a> ClientEmitter<'a> {
             current = self.dom_parent_of(node_id);
         }
         // Fold root → parent so each element's `for_children_of` is applied in order.
-        let mut ctx = CleanContext::region_root();
+        // The BASE carries the resolved `preserveComments` flag so a folded child
+        // context drops/retains comments identically to the skeleton.
+        let mut ctx = super::html::region_ctx(self.ir());
         for tag in tags_inner_first.iter().rev() {
             ctx = ctx.for_children_of(tag);
         }

@@ -2562,3 +2562,54 @@ fn options_namespace_is_valid(text: &str, value: &Option<SvelteAttributeValue>) 
 pub(crate) fn options_css_is_injected(text: &str, value: &Option<SvelteAttributeValue>) -> bool {
     matches!(options_static_value(text, value), OptionsStaticValue::Str(s) if s == "injected")
 }
+
+/// The RESOLVED namespace of a valid `<svelte:options namespace>` value — `"html"`
+/// / `"svg"` / `"mathml"` — mirroring upstream's `get_static_value` (the bare name
+/// OR the SVG / MathML namespace URL), or `None` when the value is not a valid
+/// namespace. This is the ONE options-namespace value authority: the validity gate
+/// [`options_namespace_is_valid`] and the compile-options resolver both read it, so
+/// the accept set and the resolved value can never disagree.
+pub(crate) fn options_namespace_value(
+    text: &str,
+    value: &Option<SvelteAttributeValue>,
+) -> Option<&'static str> {
+    const NAMESPACE_SVG: &str = "http://www.w3.org/2000/svg";
+    const NAMESPACE_MATHML: &str = "http://www.w3.org/1998/Math/MathML";
+    match options_static_value(text, value) {
+        OptionsStaticValue::Str(s) => {
+            if s == "html" {
+                Some("html")
+            } else if s == "svg" || s == NAMESPACE_SVG {
+                Some("svg")
+            } else if s == "mathml" || s == NAMESPACE_MATHML {
+                Some("mathml")
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The RESOLVED boolean of a valid `<svelte:options>` boolean axis (`preserveWhitespace`
+/// / `immutable` / `accessors`) — the shorthand (no value) is `true`; `{true}` / `{false}`
+/// carry their literal — or `None` for a non-boolean value. Reads the typed value only
+/// (the same authority [`options_value_is_boolean`] validates against).
+pub(crate) fn options_boolean_value(
+    text: &str,
+    value: &Option<SvelteAttributeValue>,
+) -> Option<bool> {
+    match value {
+        // A boolean-shorthand attribute (`preserveWhitespace`) is `true`.
+        None => Some(true),
+        Some(SvelteAttributeValue::Expression(span)) => {
+            match text[span.start as usize..span.end as usize].trim() {
+                "true" => Some(true),
+                "false" => Some(false),
+                _ => None,
+            }
+        }
+        // A quoted / mixed value is not a boolean literal.
+        Some(SvelteAttributeValue::Text(_)) | Some(SvelteAttributeValue::Mixed(_)) => None,
+    }
+}

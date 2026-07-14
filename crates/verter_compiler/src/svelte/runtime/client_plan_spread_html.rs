@@ -408,10 +408,12 @@ impl<'a> SupportedClientIr<'a> {
                 continue;
             }
             // The element's cleaned children must be EXACTLY one node — this `{@html}`.
+            // A retained comment sibling breaks the sole-controlled optimization, so the
+            // clean context carries the resolved `preserveComments` flag.
             let items = super::whitespace::clean_nodes(
                 self.ir,
                 &el.children,
-                super::whitespace::CleanContext::region_root(),
+                super::html::region_ctx(self.ir),
             );
             return matches!(
                 items.as_slice(),

@@ -296,6 +296,17 @@ fn has_style_override_positive_and_negative() {
 }
 
 #[test]
+fn has_css_hash_override_positive_and_negative() {
+    let mut profile = default_profile();
+    assert!(!has_css_hash_override(&profile));
+    profile.svelte_css_hash_override = Some("svelte-custom".to_string());
+    assert!(has_css_hash_override(&profile));
+    // A present-but-empty override still counts (explicit presence).
+    profile.svelte_css_hash_override = Some(String::new());
+    assert!(has_css_hash_override(&profile));
+}
+
+#[test]
 fn has_ide_only_analysis_positive_and_negative() {
     // TSX without TEMPLATE → IDE-only.
     let ide = ide_only_profile();
@@ -541,6 +552,36 @@ fn classifier_content_with_external_src_downgrades_to_stateless() {
     assert_eq!(
         cls.downgrade_reasons.as_slice(),
         &[DowngradeReason::HasExternalSrc]
+    );
+}
+
+#[test]
+fn classifier_content_with_css_hash_override_downgrades_to_stateless() {
+    // A resolved cssHash override is a user-callback result the session cannot
+    // prove content-deterministic, so a Content request is refused fail-closed to
+    // Stateless — the sole triggering reason (production config, no dev-last-good).
+    let mut bundle = InputsBundle::empty();
+    bundle.profile.svelte_css_hash_override = Some("svelte-custom".to_string());
+    let cls = classify_compile_mode(CompileCacheMode::Content, &bundle.view());
+    assert_eq!(cls.actual_mode, CompileCacheMode::Stateless);
+    assert_eq!(
+        cls.downgrade_reasons.as_slice(),
+        &[DowngradeReason::CssHashOverridePresent]
+    );
+}
+
+#[test]
+fn classifier_session_with_css_hash_override_stays_session() {
+    // Session mode stays eligible under a cssHash override — the exact override is
+    // in the profile identity and re-validated on every warm hit (never wrong).
+    // The reason is recorded for telemetry only.
+    let mut bundle = InputsBundle::empty();
+    bundle.profile.svelte_css_hash_override = Some("svelte-custom".to_string());
+    let cls = classify_compile_mode(CompileCacheMode::Session, &bundle.view());
+    assert_eq!(cls.actual_mode, CompileCacheMode::Session);
+    assert_eq!(
+        cls.downgrade_reasons.as_slice(),
+        &[DowngradeReason::CssHashOverridePresent]
     );
 }
 

@@ -1,0 +1,74 @@
+{
+  "slug": "options/preserve_comments_multi.svelte",
+  "backend": "client",
+  "oracleVersion": "5.56.3",
+  "imports": [
+    {
+      "source": "svelte/internal/client",
+      "kind": "namespace",
+      "names": [
+        "$"
+      ]
+    },
+    {
+      "source": "svelte/internal/disclose-version",
+      "kind": "sideEffect",
+      "names": []
+    }
+  ],
+  "exportDefault": {
+    "name": "preserve_comments_multi",
+    "params": [
+      "$$anchor",
+      "$$props"
+    ]
+  },
+  "helperSequence": [
+    "from_html",
+    "child",
+    "sibling",
+    "child",
+    "reset",
+    "sibling",
+    "sibling",
+    "child",
+    "reset",
+    "reset",
+    "template_effect",
+    "set_text",
+    "set_text",
+    "append"
+  ],
+  "helperSet": [
+    "append",
+    "child",
+    "from_html",
+    "reset",
+    "set_text",
+    "sibling",
+    "template_effect"
+  ],
+  "helperCounts": {
+    "from_html": 1,
+    "child": 3,
+    "sibling": 3,
+    "reset": 3,
+    "template_effect": 1,
+    "set_text": 2,
+    "append": 1
+  },
+  "delegatedEvents": [],
+  "templates": [
+    {
+      "factory": "from_html",
+      "html": "<div><!-- c1 --><span> </span><!-- c2 --><span> </span></div>",
+      "flag": null
+    }
+  ],
+  "clientModule": "import 'svelte/internal/disclose-version'; import * as $ from 'svelte/internal/client'; var root = $.from_html(`<div><!-- c1 --><span> </span><!-- c2 --><span> </span></div>`); export default function preserve_comments_multi($$anchor, $$props) {var div = root(); var node = $.child(div); var span = $.sibling(node); var text = $.child(span, true); $.reset(span); var node_1 = $.sibling(span); var span_1 = $.sibling(node_1); var text_1 = $.child(span_1, true); $.reset(span_1); $.reset(div); $.template_effect(() => {$.set_text(text, $$props.a); $.set_text(text_1, $$props.b);}); $.append($$anchor, div);}",
+  "css": {
+    "present": false,
+    "hash": null,
+    "code": null
+  }
+}

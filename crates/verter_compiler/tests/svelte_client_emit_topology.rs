@@ -189,6 +189,12 @@ const SUPPORTED_FIXTURES: &[&str] = &[
     "runes/props_rest_member_optional",
     // 5g-e REOPEN: the whole-object equivalent — `all?.x` → `$$props?.x`.
     "runes/props_whole_object_optional",
+    // `fragments: 'tree'` (html namespace) — the CSP-safe `$.from_tree` objectified
+    // clone factory (`objectify` / `as_tree`): the region roots become a JS array
+    // literal instead of the backtick skeleton, with a byte-identical DOM walk. (The
+    // svg / mathml namespace tree goldens are asserted at the plan level — SVG/MathML
+    // element EMISSION is a separate element-breadth gate — in the resolver unit tests.)
+    "options/fragments_tree_html",
 ];
 
 /// The SUPPORTED MATRIX — the exhaustive enumeration of supported client
@@ -1239,6 +1245,78 @@ const SUPPORTED_OPTIONS: &[&str] = &[
     "options/custom_element_legacy_export",
 ];
 
+/// The per-option EMISSION oracle corpus (A#7) — one row per `5m` compile option
+/// (namespace / fragments / preserveWhitespace / preserveComments / discloseVersion
+/// / name), each a minimal component whose EMITTED module is compared full-module
+/// structurally against its svelte@5.56.3 golden. This is the authoritative
+/// emission coverage for the compile-options surface: every claimed-WORKING option
+/// rests on a real emitted-output comparison, never a plan-object / `root_factory`
+/// assertion. Options whose emitted-output difference is NOT covered here (an
+/// unsupported namespace) are fail-closed refusals, not green rows.
+const SUPPORTED_COMPILE_OPTIONS: &[&str] = &[
+    // The default html-namespace `$.from_html` baseline (multi-root fragment flag).
+    "options/namespace_html_default",
+    // `fragments: 'tree'` over the SAME source — the `$.from_tree` objectified
+    // factory diff against the `namespace_html_default` `$.from_html` baseline.
+    "options/fragments_tree_pair",
+    // `fragments: 'tree'` COMBINED with an attributed element (baked attrs object)
+    // AND a control-flow `{#if}` block (sparse objectify hole + effect anchor) — the
+    // tree-objectify × attrs × control-flow interaction in one emitted module.
+    "options/fragments_tree_attrs_control_flow",
+    // An inline `<svelte:options namespace="html">` resolves (the html-namespace
+    // inline value is the precedence winner — a real supported root).
+    "options/namespace_html_inline",
+    // A compile-option `namespace: 'svg'` MASKED by an inline `namespace="html"` — the
+    // inline value wins the fold, so the component resolves html and emits `$.from_html`
+    // (the compile-option svg never reaches the fail-closed gate). The golden-backed
+    // emitted-module proof of inline-over-compile-option namespace precedence.
+    "options/namespace_svg_inline_html_wins",
+    // `preserveWhitespace: true` (compile option) — the interior ` a ` whitespace
+    // is kept in the `$.from_html` skeleton.
+    "options/preserve_whitespace_on",
+    // `preserveWhitespace` false (default) — the interior whitespace is trimmed
+    // from the skeleton (` a ` → `a`).
+    "options/preserve_whitespace_default",
+    // `preserveWhitespace: true` compile option MASKED by an inline
+    // `preserveWhitespace={false}` — the inline value wins (trimmed skeleton).
+    "options/preserve_whitespace_inline_wins",
+    // `preserveComments: true` — the interior `<!-- keep -->` is retained in the
+    // static skeleton (vs dropped under the default).
+    "options/preserve_comments_on",
+    // `preserveComments: true` with MULTIPLE retained comments interleaved with
+    // MULTIPLE dynamic siblings — pins the successive `$.child` / `$.sibling` offset
+    // shifts each retained comment node introduces into the walk.
+    "options/preserve_comments_multi",
+    // `preserveComments` false (default) — the interior comment is dropped.
+    "options/preserve_comments_default",
+    // `discloseVersion: false` — the `svelte/internal/disclose-version` side-effect
+    // import is dropped from the module head.
+    "options/disclose_version_off",
+    // `name: 'var'` — a reserved word deconflicts to `function var_1(`.
+    "options/name_reserved",
+    // `name: 'foo'` colliding with a declared `foo` binding → `function foo_1(`.
+    "options/name_collision",
+    // `name: 'String'` colliding with a REFERENCED global (`String(v)`) →
+    // `function String_1(` (`Scope.generate` deconflicts references, not only decls).
+    "options/name_reference_collision",
+    // `name: 'String'` colliding with a global referenced in the INSTANCE SCRIPT
+    // (`$: y = String(x)`) → `function String_1(` (the deconfliction reference domain
+    // is the whole component — script references, not only template expressions).
+    "options/name_script_reference_collision",
+    // `name: '💩'` — an astral char sanitizes per UTF-16 unit → `function __(`.
+    "options/name_astral",
+    // Isolated per-declaration-form name collisions (`name: 'Foo'`, declared but
+    // NOT template-referenced) — each pins the DECLARATION-path deconfliction to
+    // `function Foo_1(`. `export let Foo` (a legacy exported prop).
+    "options/name_collision_export_let",
+    // A `{#snippet Foo}` authored template declaration.
+    "options/name_collision_snippet",
+    // A module-script default import `import Foo from './x.js'`.
+    "options/name_collision_module_import",
+    // A `$props()` destructure local `let { Foo } = $props()`.
+    "options/name_collision_props",
+];
+
 /// The `$store` auto-subscription corpus — the mode-independent client store
 /// surface: the per-store accessor thunk (`const $NAME = () => $.store_get(NAME,
 /// '$NAME', $$stores);`), the shared `const [$$stores, $$cleanup] =
@@ -1730,9 +1808,51 @@ fn compile_options_for(slug: &str) -> SvelteRuntimeOptions {
         // was generated with `filename: undefined`, so its css hash is the
         // css-TEXT fallback, not the filename hash).
         filename: (slug != "css/scope_hash_fallback_no_filename").then(|| format!("{slug}.svelte")),
-        name: Some(component_name_for(slug)),
+        // The per-option EMISSION oracle fixtures (A#7) override the slug-derived
+        // name with the exact `name` the golden was generated with, so the emitted
+        // `function <name>(` matches (reserved `var` → `var_1`, colliding `foo` →
+        // `foo_1`); every other fixture uses the slug-derived name.
+        name: Some(match slug {
+            "options/name_reserved" => "var".to_string(),
+            "options/name_collision" => "foo".to_string(),
+            "options/name_collision_export_let"
+            | "options/name_collision_snippet"
+            | "options/name_collision_module_import"
+            | "options/name_collision_props" => "Foo".to_string(),
+            "options/name_reference_collision" => "String".to_string(),
+            "options/name_script_reference_collision" => "String".to_string(),
+            "options/name_astral" => "💩".to_string(),
+            _ => component_name_for(slug),
+        }),
         // The `customElement: true` compile-option fixture.
         custom_element: slug == "options/custom_element_option_true",
+        // The `fragments: 'tree'` CSP-safe `$.from_tree` factory fixtures (the golden
+        // was generated with `fragments: 'tree'`).
+        fragments: slug
+            .starts_with("options/fragments_tree_")
+            .then_some(verter_compiler::svelte::runtime::SvelteFragments::Tree),
+        // A compile-option `namespace: 'svg'` masked by an inline `namespace="html"`
+        // (the inline value wins the fold, so the component resolves html) — the golden
+        // was generated with `{ namespace: 'svg' }`.
+        namespace: (slug == "options/namespace_svg_inline_html_wins")
+            .then_some(verter_compiler::svelte::runtime::SvelteNamespace::Svg),
+        // `preserveComments: true` — the retained-comment oracle fixtures (single
+        // interior comment + the multi-comment/multi-sibling offset-shift fixture).
+        preserve_comments: matches!(
+            slug,
+            "options/preserve_comments_on" | "options/preserve_comments_multi"
+        )
+        .then_some(true),
+        // `discloseVersion: false` — the dropped side-effect import oracle fixture.
+        disclose_version: (slug == "options/disclose_version_off").then_some(false),
+        // `preserveWhitespace: true` compile option — directly (preserve_whitespace_on)
+        // AND masked by an inline `preserveWhitespace={false}` (preserve_whitespace_inline_wins,
+        // where the inline value wins so the skeleton is trimmed).
+        preserve_whitespace: matches!(
+            slug,
+            "options/preserve_whitespace_on" | "options/preserve_whitespace_inline_wins"
+        )
+        .then_some(true),
         ..Default::default()
     }
 }
@@ -1955,23 +2075,108 @@ fn emitted_delegated(code: &str) -> Vec<String> {
 
 /// The emitted `from_html` template literals + fragment flags, as `(html, flag)`.
 fn emitted_templates(code: &str) -> Vec<(String, Option<String>)> {
+    // The Rust port of `svelte-golden-lib.mjs::extractTemplates`: a single left-to-right
+    // pass over the four factory forms. `$.from_html` / `$.from_svg` / `$.from_mathml`
+    // carry a BACKTICK skeleton; `$.from_tree` carries a JS ARRAY LITERAL (`objectify`).
+    let bytes: Vec<char> = code.chars().collect();
+    let n = bytes.len();
     let mut out = Vec::new();
-    let mut search = code;
-    while let Some(idx) = search.find("$.from_html(`") {
-        let after = &search[idx + "$.from_html(`".len()..];
-        let Some(close) = after.find('`') else { break };
-        let html = after[..close].to_string();
-        // The trailing flag (if any): between the closing backtick and the `)`.
-        let rest = &after[close + 1..];
-        let flag = rest
-            .strip_prefix(", ")
-            .and_then(|r| r.split(')').next())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty() && !s.starts_with(')'));
-        out.push((html, flag));
-        search = rest;
+    for factory in [
+        "$.from_html(",
+        "$.from_svg(",
+        "$.from_mathml(",
+        "$.from_tree(",
+    ] {
+        let mut from = 0usize;
+        while let Some(rel) = code[from..].find(factory) {
+            let call_start = from + rel;
+            // Character index just after the `(` (the scan works in char-index space,
+            // while `find` returns byte offsets — convert here).
+            let mut i = code[..call_start].chars().count() + factory.chars().count();
+            while i < n && bytes[i].is_whitespace() {
+                i += 1;
+            }
+            let arg;
+            if i < n && bytes[i] == '`' {
+                let Some(end) = find_string_end(&bytes, i, '`') else {
+                    break;
+                };
+                arg = bytes[i + 1..end].iter().collect::<String>();
+                i = end + 1;
+            } else if i < n && bytes[i] == '[' {
+                let Some(end) = find_balanced_end(&bytes, i, '[', ']') else {
+                    break;
+                };
+                arg = bytes[i..=end].iter().collect::<String>();
+                i = end + 1;
+            } else {
+                from = call_start + factory.len();
+                continue;
+            }
+            while i < n && bytes[i].is_whitespace() {
+                i += 1;
+            }
+            let mut flag = None;
+            if i < n && bytes[i] == ',' {
+                i += 1;
+                let mut f = String::new();
+                while i < n && bytes[i] != ')' {
+                    f.push(bytes[i]);
+                    i += 1;
+                }
+                let f = f.trim().to_string();
+                if !f.is_empty() {
+                    flag = Some(f);
+                }
+            }
+            out.push((call_start, arg, flag));
+            from = call_start + factory.len();
+        }
     }
-    out
+    // Restore source order across the interleaved per-factory scans.
+    out.sort_by_key(|(pos, _, _)| *pos);
+    out.into_iter()
+        .map(|(_, html, flag)| (html, flag))
+        .collect()
+}
+
+/// The index of the closing `quote` for the string literal opened at char index
+/// `start` (skipping backslash escapes). `None` if unterminated.
+fn find_string_end(chars: &[char], start: usize, quote: char) -> Option<usize> {
+    let mut i = start + 1;
+    while i < chars.len() {
+        if chars[i] == '\\' {
+            i += 2;
+            continue;
+        }
+        if chars[i] == quote {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// The index of the closing `close` matching `chars[start]`, respecting nested
+/// `open`/`close` and string literals. `None` if unbalanced.
+fn find_balanced_end(chars: &[char], start: usize, open: char, close: char) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut i = start;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\'' || c == '"' || c == '`' {
+            i = find_string_end(chars, i, c)?;
+        } else if c == open {
+            depth += 1;
+        } else if c == close {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i);
+            }
+        }
+        i += 1;
+    }
+    None
 }
 
 /// The golden's `templates` as `(html, flag)`.
@@ -6793,6 +6998,7 @@ fn all_supported_slugs() -> Vec<&'static str> {
         .chain(SUPPORTED_SPECIALS.iter())
         .chain(SUPPORTED_LIFECYCLE.iter())
         .chain(SUPPORTED_OPTIONS.iter())
+        .chain(SUPPORTED_COMPILE_OPTIONS.iter())
         .chain(SUPPORTED_STORES.iter())
         .chain(SUPPORTED_LEGACY.iter())
         .chain(SUPPORTED_CSS.iter())
@@ -6823,6 +7029,7 @@ fn all_supported_slugs_wires_every_corpus_const() {
         ("SUPPORTED_SPECIALS", SUPPORTED_SPECIALS),
         ("SUPPORTED_LIFECYCLE", SUPPORTED_LIFECYCLE),
         ("SUPPORTED_OPTIONS", SUPPORTED_OPTIONS),
+        ("SUPPORTED_COMPILE_OPTIONS", SUPPORTED_COMPILE_OPTIONS),
         ("SUPPORTED_STORES", SUPPORTED_STORES),
         ("SUPPORTED_LEGACY", SUPPORTED_LEGACY),
         ("SUPPORTED_CSS", SUPPORTED_CSS),
@@ -7359,6 +7566,52 @@ fn supported_options_cover_the_custom_element_corpus() {
         assert!(
             seen.contains(slug.as_str()),
             "options fixture {slug} is not enumerated in SUPPORTED_OPTIONS"
+        );
+    }
+}
+
+#[test]
+fn supported_compile_options_cover_the_per_option_emission_corpus() {
+    // The per-option EMISSION oracle corpus (A#7) is the authoritative emission
+    // coverage for the `5m` compile-options surface: every claimed-WORKING option
+    // has a full-module structural comparison against its svelte@5.56.3 golden. A
+    // dropped row silently removes an option's emission coverage. Every non-custom
+    // `options/*` fixture that is NOT the fail-closed vertical must be enumerated
+    // (the `fragments_tree_html` html-tree row lives in SUPPORTED_FIXTURES).
+    assert_eq!(
+        SUPPORTED_COMPILE_OPTIONS.len(),
+        21,
+        "the per-option emission corpus must enumerate all 21 compile-option fixtures"
+    );
+    let mut seen = std::collections::BTreeSet::new();
+    for &slug in SUPPORTED_COMPILE_OPTIONS {
+        assert!(
+            slug.starts_with("options/") && !slug.starts_with("options/custom_element_"),
+            "compile-option slug {slug} must be a non-custom options/* fixture"
+        );
+        assert!(seen.insert(slug), "duplicate compile-option slug {slug}");
+    }
+    // Directory coverage: every non-custom `options/*` fixture on disk is enumerated
+    // in SUPPORTED_COMPILE_OPTIONS OR is the html-tree fixture carried in
+    // SUPPORTED_FIXTURES — a new option fixture cannot silently skip the gate.
+    let in_supported_fixtures: std::collections::BTreeSet<&str> =
+        SUPPORTED_FIXTURES.iter().copied().collect();
+    let fixtures =
+        repo_root().join("crates/verter_compiler/tests/svelte_oracle_corpus/fixtures/options");
+    for entry in std::fs::read_dir(&fixtures).expect("read options fixtures") {
+        let name = entry.expect("dir entry").file_name();
+        let name = name.to_string_lossy().into_owned();
+        let Some(stem) = name.strip_suffix(".svelte") else {
+            continue;
+        };
+        if stem.starts_with("custom_element_") {
+            continue;
+        }
+        let slug = format!("options/{stem}");
+        assert!(
+            seen.contains(slug.as_str()) || in_supported_fixtures.contains(slug.as_str()),
+            "options fixture {slug} is not enumerated in SUPPORTED_COMPILE_OPTIONS \
+             (nor SUPPORTED_FIXTURES)"
         );
     }
 }

@@ -2,8 +2,8 @@
 
 Derived review artifact. The typed Rust manifest (`crates/verter_svelte_conformance`) is the sole authority; regenerate this file and the fixture corpus with `cargo run -p verter_svelte_conformance -- write`.
 
-- schema version: 3
-- manifest hash: `fnv1a64-0a8b7b90c5b3bbf8`
+- schema version: 4
+- manifest hash: `fnv1a64-8faa9143878b8848`
 - selected cases: 609 of 272160 candidate rows (0.22%)
 - fixtures: `fixtures/<slug>.svelte`, one per case; each case compiles on both backends (`client`, `server`)
 

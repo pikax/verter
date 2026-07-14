@@ -1,14 +1,18 @@
 //! Fail-closed refusal of the PARSE-DOMAIN unsupported Svelte runtime surfaces
 //! (the ones not carried on the runtime IR): a DUPLICATE attribute / directive
-//! (5a, the official `attribute_duplicate` parse error), a top-level `<style>`
+//! (the official `attribute_duplicate` parse error), a top-level `<style>`
 //! whose css output mode is unprovable or whose body fails the scoping
 //! analysis (an ACCEPTED style hands its parsed + analyzed body forward as
-//! the pre-lowering style stage), a `<svelte:options>` axis beyond `runes` /
-//! `customElement` / `css="injected"` (including `name`, which official
-//! rejects as an unknown attribute), and a dev-mode codegen request (5k). A
-//! VALID `customElement` value is supported (the lowering resolves it into
-//! the custom-element descriptor); its invalid forms are exact-code official
-//! rejects caught before this gate.
+//! the pre-lowering style stage), and a dev-mode codegen request. The
+//! `<svelte:options>` element itself carries NO parse-domain refusal here:
+//! its officially-accepted axes — `runes`, `customElement`, static
+//! `css="injected"`, `namespace`, `preserveWhitespace`, `preserveComments`,
+//! and `discloseVersion` — are folded by the shared compile-options resolver,
+//! while every malformed form (a duplicate / nested placement, a spread /
+//! directive, a non-boolean `runes`, an invalid `namespace` / `css`, an
+//! unknown attribute such as `name`, the deprecated `tag`) is an exact-code
+//! official reject caught before this gate. A VALID `customElement` value is
+//! supported (the lowering resolves it into the custom-element descriptor).
 
 use verter_span::Span;
 
@@ -34,9 +38,10 @@ pub(super) struct PreparedComponentStyle {
 
 /// The PARSE-DOMAIN gate (choke point 1 of the refuse-by-default pipeline): refuse
 /// the unsupported surfaces the runtime IR does not carry (a `<style>` css body
-/// that fails the scoping analysis or an unprovable css output mode, a
-/// `<svelte:options>` axis beyond `runes` / `customElement`, and a dev-mode
-/// codegen request (5k)) BEFORE lowering. Returns the FIRST refusal found as
+/// that fails the scoping analysis or an unprovable css output mode, and a
+/// dev-mode codegen request) BEFORE lowering. The `<svelte:options>` axes fold in
+/// the shared compile-options resolver (accepted) or reject upstream (malformed) —
+/// this gate carries no options-axis refusal. Returns the FIRST refusal found as
 /// `Err`; on acceptance returns the component's pre-lowering style stage
 /// (`Some` when a top-level `<style>` is present — its mode detection and css
 /// analysis passed; the matcher + render complete downstream over the real IR).
@@ -99,15 +104,18 @@ pub(super) fn parse_domain_gate(
         Some(style) => Some(prepare_style_surface(source, style, parsed, opts)?),
         None => None,
     };
-    // The STRICT `<svelte:options>` gate: allow ONLY an ABSENT options element, or at
-    // most ONE top-level `<svelte:options>` carrying the supported axes (a boolean
-    // `runes` literal — BOTH values are valid mode selections — and a VALID
-    // `customElement` value). Fail closed on a duplicate / nested / non-root options
-    // element, a non-boolean `runes` value, any other axis (`namespace`/…),
-    // a spread / directive, or child content.
-    if let Some(surface) = refuse_unsupported_options(source, parsed) {
-        return Err(surface);
-    }
+    // The `<svelte:options>` element itself needs no refusal here: every MALFORMED
+    // options form (a duplicate / nested / non-root placement, child content, a
+    // spread / directive, a non-boolean `runes`, an invalid `namespace` / `css`, an
+    // unknown attribute, the deprecated `tag`) is an EXACT-CODE parser fact the
+    // official-reject gate rejects BEFORE this gate. The officially-ACCEPTED axes
+    // (`runes` / `customElement` / static `css="injected"` / `namespace` /
+    // `preserveWhitespace` / `preserveComments` / `discloseVersion` / `immutable` /
+    // `accessors`) are folded by the shared compile-options resolver
+    // ([`resolve_svelte_compile_options`]), which supports `namespace` /
+    // `preserveWhitespace` / `preserveComments` / `discloseVersion` and fails closed
+    // on `immutable` / `accessors` — so the options element carries no residual
+    // parse-domain refusal.
     Ok(prepared_style)
 }
 
@@ -273,172 +281,10 @@ fn refuse_implicit_paragraph_autoclose(
     None
 }
 
-/// The STRICT `<svelte:options>` gate. Allow ONLY: (i) NO options element (mode
-/// inferred from rune usage), or (ii) at most ONE TOP-LEVEL `<svelte:options>`
-/// carrying the supported axes — a boolean `runes` literal (the shorthand `runes`
-/// is `true`; `runes={false}` forces legacy mode) and a VALID `customElement`
-/// value (resolved into the custom-element descriptor at lowering). Fail closed
-/// on EVERY other form.
-/// Returns the typed surface for the first violation, or `None` when the element
-/// is absent or carries only supported axes.
-///
-/// The strict rules (each a deliberate fail-closed):
-/// - a DUPLICATE `<svelte:options>` (two or more anywhere) — official `options_duplicate`;
-/// - a NESTED / non-root `<svelte:options>` — official `options_invalid_placement`;
-/// - a non-boolean `runes` value (`runes={foo}` / `runes={1}` / `runes="true"`) — only
-///   a boolean literal (or the shorthand) is the supported runes plumbing; BOTH
-///   boolean values are valid mode selections (`runes={false}` forces legacy mode,
-///   whose not-yet-lowered surfaces classify per surface downstream);
-/// - `tag` (always an official reject upstream; defensive here) and every OTHER
-///   axis (`namespace`, `name`, …, a spread, a directive) — `css` is supported
-///   (the injected-mode selector [`detect_css_mode`] consumes);
-/// - child content (a `<svelte:options>` is a self-closing marker; content is invalid).
-fn refuse_unsupported_options(
-    source: &str,
-    parsed: &ParsedSvelte,
-) -> Option<UnsupportedSvelteRuntimeSurface> {
-    // (1) Collect every `<svelte:options>` element with its depth (0 = top-level root,
-    // >0 = nested). Walking the WHOLE tree catches a nested options element.
-    let mut found: Vec<(&SvelteElement, usize)> = Vec::new();
-    collect_options_elements(&parsed.template, 0, &mut found);
-
-    // No options element — the supported absent case (mode inferred from rune usage).
-    let &(first, first_depth) = found.first()?;
-
-    // NOTE: a DUPLICATE `<svelte:options>` is an official EXACT-CODE parse error
-    // (`svelte_meta_duplicate`) minted by the parser and caught by the official-reject gate
-    // that runs BEFORE this gate — it is not refused here.
-
-    // (3) A NESTED / non-root options element — official `svelte_meta_invalid_placement`,
-    // now an EXACT-CODE parser fact caught by the official-reject gate BEFORE this gate, so a
-    // nested options never reaches here. The depth check stays as a defensive fail-closed.
-    if first_depth != 0 {
-        return Some(UnsupportedSvelteRuntimeSurface::OptionsAxis {
-            span: first.open_span,
-        });
-    }
-
-    // (4) Child content on the options marker is invalid (it is a self-closing axis
-    // carrier, never a container).
-    if !first.children.is_empty() {
-        return Some(UnsupportedSvelteRuntimeSurface::OptionsAxis {
-            span: first.open_span,
-        });
-    }
-
-    // (5) Classify the single root options element's attributes. By the time this gate runs the
-    // options element is official-ACCEPTED (every official-rejected options attribute / child
-    // content — `name`/an unknown attribute, a bad `namespace`/`css`, a non-boolean `runes`/`tag`,
-    // an invalid `customElement`, a spread/directive, child content — is an EXACT-CODE
-    // `OptionsInvalid` parser fact the official-reject gate caught BEFORE this gate; see
-    // `official_reject.rs` + the parser `read_options` finalization). So the only inputs reaching
-    // here are the officially-ACCEPTED options axes: a boolean `runes` literal (BOTH values —
-    // `runes={true}` forces runes mode, `runes={false}` forces legacy mode; the legacy
-    // component's unsupported surfaces are classified per surface downstream), a valid
-    // `customElement` value, and the static `css="injected"` output-mode axis are SUPPORTED;
-    // every OTHER accepted axis (a valid `namespace`,
-    // `immutable`/`accessors`/`preserveWhitespace`) is a later options vertical. The
-    // non-supported arms below stay as a defensive fail-closed for anything an upstream change
-    // might newly accept.
-    for attr in &first.attributes {
-        let name = options_attr_name(attr);
-        match name.as_deref() {
-            Some("runes") => match classify_runes_value(source, attr) {
-                // The supported runes plumbing: BOTH boolean literals are valid
-                // MODE SELECTIONS — `runes={true}` (or shorthand) forces runes
-                // mode, `runes={false}` forces legacy mode. Neither is a parse
-                // refusal; a legacy component's not-yet-lowered surfaces are
-                // classified per surface at runtime surface classification.
-                RunesValue::True | RunesValue::False => {}
-                // A non-boolean `runes` value (`runes={foo}` / `runes={1}` /
-                // `runes="true"`) — only a boolean literal is the supported axis.
-                RunesValue::NonBoolean => {
-                    return Some(UnsupportedSvelteRuntimeSurface::OptionsAxis {
-                        span: first.open_span,
-                    });
-                }
-            },
-            // A VALID `customElement` value is SUPPORTED: every invalid form
-            // (boolean shorthand, a bad tag, a malformed object, a non-object /
-            // non-`null` expression) is an EXACT-CODE `OptionsInvalid` parser fact
-            // the official-reject gate caught BEFORE this gate, so the value here
-            // is official-ACCEPTED and the lowering resolves it into the
-            // [`CustomElementDescriptor`](crate::svelte::parser::CustomElementDescriptor).
-            Some("customElement") => {}
-            // A surviving `css` axis is SUPPORTED: official accepts ONLY the
-            // static `"injected"` value on the options element (anything else —
-            // including `"external"` — is the exact-code
-            // `svelte_options_invalid_attribute_value` reject minted upstream),
-            // and [`detect_css_mode`] consumes it as the injected output mode
-            // (re-checking the static value defensively).
-            Some("css") => {}
-            // The deprecated `tag` axis is ALWAYS an official reject
-            // (`svelte_options_deprecated_tag`, minted by the parser and caught by
-            // the official-reject gate) — it never reaches this gate; the arm
-            // stays as a defensive fail-closed.
-            Some("tag") => {
-                return Some(UnsupportedSvelteRuntimeSurface::OptionsAxis {
-                    span: first.open_span,
-                });
-            }
-            _ => {
-                return Some(UnsupportedSvelteRuntimeSurface::OptionsAxis {
-                    span: first.open_span,
-                });
-            }
-        }
-    }
-    None
-}
-
-/// The classified VALUE of a `runes` `<svelte:options>` attribute.
-enum RunesValue {
-    /// `runes` (shorthand) / `runes={true}` — the supported boolean-true axis.
-    True,
-    /// `runes={false}` — selects legacy mode.
-    False,
-    /// A non-boolean value (`runes={foo}` / `runes={1}` / `runes="true"` / a mixed
-    /// value) — only a boolean literal is supported.
-    NonBoolean,
-}
-
-/// Classify a `runes` attribute's value into [`RunesValue`]. The shorthand `runes`
-/// (no value) is `True`; `runes={true}` / `runes={false}` read the boolean literal
-/// from the expression span; a STRING value (`runes="true"`), a non-literal
-/// expression (`runes={foo}` / `runes={1}`), or a mixed value is `NonBoolean`. Driven
-/// from the typed attribute value + the expression source slice, never a guess.
-fn classify_runes_value(source: &str, attr: &SvelteAttribute) -> RunesValue {
-    use crate::svelte::parser::{SvelteAttributeKind, SvelteAttributeValue};
-    let SvelteAttributeKind::Plain { value, .. } = &attr.kind else {
-        // A spread / directive never reaches here (the caller only matches a plain
-        // `runes` name); defensive non-boolean.
-        return RunesValue::NonBoolean;
-    };
-    match value {
-        // Shorthand boolean `runes` ⇒ true.
-        None => RunesValue::True,
-        // `runes={true}` / `runes={false}` — the ONLY supported expression forms are
-        // the bare boolean literals.
-        Some(SvelteAttributeValue::Expression(span)) => {
-            let text = source[span.start as usize..span.end as usize].trim();
-            match text {
-                "true" => RunesValue::True,
-                "false" => RunesValue::False,
-                _ => RunesValue::NonBoolean,
-            }
-        }
-        // A quoted string (`runes="true"`) or a mixed value is non-boolean (official
-        // requires a `{...}` boolean expression).
-        Some(SvelteAttributeValue::Text(_)) | Some(SvelteAttributeValue::Mixed(_)) => {
-            RunesValue::NonBoolean
-        }
-    }
-}
-
 /// Recursively collect every `<svelte:options>` element under `nodes`, recording its
 /// DEPTH (0 = a top-level root node, >0 = nested inside an element / block). A nested
 /// options element is an invalid placement; a second one anywhere is a duplicate.
-fn collect_options_elements<'a>(
+pub(super) fn collect_options_elements<'a>(
     nodes: &'a [SvelteNode],
     depth: usize,
     out: &mut Vec<(&'a SvelteElement, usize)>,
@@ -468,7 +314,7 @@ fn collect_options_elements<'a>(
 /// The attribute NAME of a `<svelte:options>` attribute (a plain attribute name),
 /// or `None` for a non-plain form (a spread / directive — neither is a supported
 /// name/runes axis, so the caller treats it as an unrecognised options axis).
-fn options_attr_name(attr: &SvelteAttribute) -> Option<String> {
+pub(super) fn options_attr_name(attr: &SvelteAttribute) -> Option<String> {
     use crate::svelte::parser::SvelteAttributeKind;
     match &attr.kind {
         SvelteAttributeKind::Plain { name, .. } => Some(name.clone()),

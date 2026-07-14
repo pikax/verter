@@ -1,21 +1,87 @@
 //! The component-function name derivation — the pinned official
 //! `svelte@5.56.3` `get_component_name` + `Scope.generate` rule.
 
+use rustc_hash::FxHashSet;
+
 use super::SvelteRuntimeOptions;
+
+/// The pinned official `svelte@5.56.3` reserved-word set (`RESERVED_WORDS`,
+/// `src/utils.js`) — `Scope.generate` suffixes a `_N` counter until the name is
+/// none of these. A generated component-function name equal to a reserved word is
+/// invalid JS, so `var` / `class` / `await` / … deconflict to `var_1` / ….
+const RESERVED_WORDS: &[&str] = &[
+    "arguments",
+    "await",
+    "break",
+    "case",
+    "catch",
+    "class",
+    "const",
+    "continue",
+    "debugger",
+    "default",
+    "delete",
+    "do",
+    "else",
+    "enum",
+    "eval",
+    "export",
+    "extends",
+    "false",
+    "finally",
+    "for",
+    "function",
+    "if",
+    "implements",
+    "import",
+    "in",
+    "instanceof",
+    "interface",
+    "let",
+    "new",
+    "null",
+    "package",
+    "private",
+    "protected",
+    "public",
+    "return",
+    "static",
+    "super",
+    "switch",
+    "this",
+    "throw",
+    "true",
+    "try",
+    "typeof",
+    "var",
+    "void",
+    "while",
+    "with",
+    "yield",
+];
 
 /// Derive the component-function name, matching the pinned official
 /// `svelte@5.56.3` derivation exactly (`get_component_name` then
-/// `Scope.generate`).
+/// `module.scope.generate`).
 ///
 /// Official `get_component_name(filename)`: split the filename on `/` or `\`,
 /// take the basename, drop the FIRST `.svelte` occurrence, replace an `index`
 /// stem with the parent directory name when a parent exists and is not `src`,
 /// then UPPERCASE the first character. The result (or an explicit `name` option,
 /// which skips the capitalize) is then passed through `Scope.generate`, which
-/// replaces every non-`[A-Za-z0-9_$]` character with `_` and replaces a LEADING
-/// digit with `_`. A missing filename defaults to `'(unknown)'`, which derives
-/// `_unknown_`. An explicit `name` overrides the filename WITHOUT capitalizing.
-pub(super) fn derive_component_name(opts: &SvelteRuntimeOptions) -> String {
+/// replaces every non-`[A-Za-z0-9_$]` UTF-16 code unit with `_`, replaces a LEADING
+/// digit with `_`, and then suffixes a `_N` counter until the name collides with
+/// none of: a reserved word, a declared user binding, or a referenced identifier
+/// (`conflicts` — the union of the scope graph's declared names and every free
+/// identifier referenced ANYWHERE in the component: template expressions AND the
+/// instance / module scripts, matching svelte's `module.scope.generate` check against
+/// `references` ∪ `declarations` ∪ `conflicts` over the module scope).
+/// A missing filename defaults to `'(unknown)'`, which derives `_unknown_`. An
+/// explicit `name` overrides the filename WITHOUT capitalizing.
+pub(super) fn derive_component_name(
+    opts: &SvelteRuntimeOptions,
+    conflicts: &FxHashSet<String>,
+) -> String {
     let preferred = match &opts.name {
         // An explicit `name` override is used verbatim (NOT capitalized), then
         // sanitized by `generate`.
@@ -23,17 +89,20 @@ pub(super) fn derive_component_name(opts: &SvelteRuntimeOptions) -> String {
         // Otherwise derive from the filename (default `'(unknown)'`).
         None => component_name_from_filename(opts.filename.as_deref().unwrap_or("(unknown)")),
     };
-    generate_identifier(&preferred)
+    generate_identifier(&preferred, conflicts)
 }
 
 /// The official `get_component_name(filename)` — the filename-derived component
 /// name BEFORE identifier sanitization.
 ///
-/// The carrier extension is dropped EXTENSION-AGNOSTICALLY via `Path::file_stem`
-/// (no hardcoded carrier-extension literal — the language-classification authority
-/// owns extension matching). For every real carrier filename this equals the
-/// official `basename.replace('.svelte', '')` (the stem of `App.svelte` is `App`,
-/// of `foo.bar.svelte` is `foo.bar`, of `index.svelte` is `index`).
+/// Faithful to `svelte@5.56.3` `get_component_name`: from the basename, drop the
+/// FIRST `.svelte` literal occurrence (`basename.replace('.svelte', '')` — a JS
+/// string-pattern `replace` hits the first match only), NOT the last file extension.
+/// So `App.svelte` → `App`, `foo.bar.svelte` → `foo.bar`, `index.svelte` → `index`,
+/// and `Widget.svelte.test.svelte` → `Widget.test.svelte` (the interior dots later
+/// sanitize to `_`). A non-`.svelte` carrier keeps its dots (only the literal
+/// `.svelte` is stripped). This is NOT `Path::file_stem` (which drops the LAST
+/// extension: `Widget.svelte.test.svelte` → `Widget.svelte.test`, a divergence).
 fn component_name_from_filename(filename: &str) -> String {
     // Split on `/` or `\`; the basename is the last segment, `last_dir` the one
     // before it.
@@ -44,12 +113,26 @@ fn component_name_from_filename(filename: &str) -> String {
     } else {
         None
     };
-    // The stem with its (single) extension dropped — extension-agnostic.
-    let mut name = std::path::Path::new(basename)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or(basename)
-        .to_string();
+    // Drop the FIRST carrier-suffix occurrence from the basename (the official JS
+    // strips the first match of the carrier suffix), NOT the last file extension. The
+    // carrier suffix is sourced from the language authority — the canonical `svelte`
+    // token the registry builds the carrier row from — rather than a hardcoded
+    // extension literal (the single-language-classifier rule owns extension matching);
+    // this is a plain find-and-splice of the first occurrence, not post-hoc
+    // string-munging of built codegen output.
+    let carrier_suffix = format!(
+        ".{}",
+        verter_language::FrameworkAdapterId::svelte().as_str()
+    );
+    let mut name = match basename.find(&carrier_suffix) {
+        Some(pos) => {
+            let mut stripped = String::with_capacity(basename.len() - carrier_suffix.len());
+            stripped.push_str(&basename[..pos]);
+            stripped.push_str(&basename[pos + carrier_suffix.len()..]);
+            stripped
+        }
+        None => basename.to_string(),
+    };
     // `index` → the parent directory name, unless the parent is `src`.
     if name == "index" {
         if let Some(dir) = last_dir {
@@ -104,32 +187,105 @@ fn to_base36(mut n: u32) -> String {
     String::from_utf8(buf).expect("base36 digits are ASCII")
 }
 
-/// The official `Scope.generate` identifier sanitization: replace every
-/// non-`[A-Za-z0-9_$]` character with `_`, then replace a LEADING ASCII digit
-/// with `_`.
-fn generate_identifier(preferred: &str) -> String {
-    let mut out: String = preferred
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '$' {
-                c
+/// The official `Scope.generate`: sanitize (replace every non-`[A-Za-z0-9_$]`
+/// UTF-16 code unit with `_`, then replace a LEADING ASCII digit with `_`), then
+/// suffix a `_N` counter until the name is none of a reserved word, a declared user
+/// binding, or a referenced identifier (`conflicts`). Matches svelte's
+/// `preferred.replace(…).replace(…)` + the
+/// `while (references|declarations|conflicts|is_reserved) name = ${preferred}_${n++}`
+/// loop. The sanitize runs per UTF-16 CODE UNIT (svelte's regex operates on the
+/// JS UTF-16 string, not Unicode scalars): a non-ASCII BMP char is ONE `_`, and an
+/// astral char (a surrogate PAIR) is TWO `_` (`"💩"` → `"__"`). An empty sanitized
+/// name has no conflict, so it stays empty (an anonymous
+/// `export default function ($$anchor)`), exactly as svelte's `generate('')`.
+fn generate_identifier(preferred: &str, conflicts: &FxHashSet<String>) -> String {
+    let sanitized: String = preferred
+        .encode_utf16()
+        .map(|unit| {
+            // A valid identifier char is ASCII ([A-Za-z0-9_$]) — a single UTF-16
+            // unit. Every other unit (a non-ASCII BMP char, or EITHER half of an
+            // astral surrogate pair) maps to one `_`.
+            if unit < 128 {
+                let c = unit as u8 as char;
+                if c.is_ascii_alphanumeric() || c == '_' || c == '$' {
+                    c
+                } else {
+                    '_'
+                }
             } else {
                 '_'
             }
         })
         .collect();
     // A LEADING digit is REPLACED (not prefixed) by `_`.
-    if out.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-        let mut chars = out.chars();
+    let sanitized = if sanitized.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        let mut chars = sanitized.chars();
         chars.next();
-        out = format!("_{}", chars.as_str());
+        format!("_{}", chars.as_str())
+    } else {
+        sanitized
+    };
+    // Deconflict: the sanitized name wins unless it is a reserved word, a declared
+    // user binding, or a referenced identifier, in which case `${sanitized}_${n}` is
+    // tried for n = 1, 2, ….
+    let is_conflict = |name: &str| RESERVED_WORDS.contains(&name) || conflicts.contains(name);
+    if !is_conflict(&sanitized) {
+        return sanitized;
     }
-    out
+    let mut n = 1u32;
+    loop {
+        let candidate = format!("{sanitized}_{n}");
+        if !is_conflict(&candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::svelte_hash;
+    use super::{derive_component_name, svelte_hash};
+    use crate::svelte::runtime::SvelteRuntimeOptions;
+    use rustc_hash::FxHashSet;
+
+    /// Derive the filename-fallback component name (no explicit `name`, no conflicts).
+    fn from_filename(filename: &str) -> String {
+        let opts = SvelteRuntimeOptions {
+            filename: Some(filename.to_string()),
+            ..Default::default()
+        };
+        derive_component_name(&opts, &FxHashSet::default())
+    }
+
+    #[test]
+    fn filename_fallback_matches_official_get_component_name() {
+        // svelte@5.56.3 `get_component_name` = `basename.replace('.svelte', '')` — JS
+        // string-pattern replace drops the FIRST `.svelte` occurrence, NOT the last
+        // file extension (`Path::file_stem`). Then capitalize the first char and pass
+        // through `Scope.generate` (which sanitizes non-identifier chars to `_`).
+        assert_eq!(from_filename("App.svelte"), "App");
+        // A multi-dot stem: `foo.bar` → capitalize `Foo.bar` → sanitize → `Foo_bar`.
+        assert_eq!(from_filename("foo.bar.svelte"), "Foo_bar");
+        // The DISCRIMINATOR: a `.svelte.test.svelte` carrier drops only the
+        // FIRST `.svelte` (→ `Widget.test.svelte` → sanitize → `Widget_test_svelte`),
+        // NOT the last extension (`file_stem` → `Widget.svelte.test` →
+        // `Widget_svelte_test`, the pre-fix divergence).
+        assert_eq!(
+            from_filename("Widget.svelte.test.svelte"),
+            "Widget_test_svelte"
+        );
+        // NEGATIVE: it is NOT the file_stem-derived (last-extension) spelling.
+        assert_ne!(
+            from_filename("Widget.svelte.test.svelte"),
+            "Widget_svelte_test"
+        );
+        // `index` resolves to the parent directory name unless the parent is `src`.
+        assert_eq!(from_filename("foo/index.svelte"), "Foo");
+        assert_eq!(from_filename("src/index.svelte"), "Index");
+        // A non-`.svelte` carrier keeps its extension dots (only the `.svelte` literal
+        // is stripped, per `.replace('.svelte', '')`), which then sanitize to `_`.
+        assert_eq!(from_filename("App.svg"), "App_svg");
+    }
 
     #[test]
     fn svelte_hash_matches_official_over_head_fixture_filenames() {

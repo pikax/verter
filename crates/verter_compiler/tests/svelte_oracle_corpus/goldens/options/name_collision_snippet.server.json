@@ -1,5 +1,5 @@
 {
-  "slug": "options/svelte_options_namespace.svelte",
+  "slug": "options/name_collision_snippet.svelte",
   "backend": "server",
   "oracleVersion": "5.56.3",
   "imports": [
@@ -12,20 +12,14 @@
     }
   ],
   "exportDefault": {
-    "name": "svelte_options_namespace",
+    "name": "Foo_1",
     "params": [
       "$$renderer"
     ]
   },
-  "helperSequence": [
-    "attr"
-  ],
-  "helperSet": [
-    "attr"
-  ],
-  "helperCounts": {
-    "attr": 1
-  },
+  "helperSequence": [],
+  "helperSet": [],
+  "helperCounts": {},
   "delegatedEvents": [],
   "templates": [],
   "clientModule": null,

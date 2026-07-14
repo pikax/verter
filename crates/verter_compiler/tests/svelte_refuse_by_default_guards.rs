@@ -602,19 +602,32 @@ fn guard7_discriminates_an_accept_then_drop_static_attr_arm() {
 // ── Guard: the D-47 import-local discharge — no raw ImportDeclaration.specifiers walk ──
 
 /// The verdict predicate (shared by the guard + its discrimination self-test):
-/// does `code` (comments stripped) contain a RAW OXC `ImportDeclaration` /
-/// `.specifiers` import-local walk? The D-47 discharge routes every import LOCAL
-/// through the SHARED `ClassifiedScriptImports` carrier
-/// (`script_imports.admitted(slot)` + `import_binding_entries(import)`),
-/// classified ONCE at IR construction — never a per-file re-walk of the OXC
-/// `Statement::ImportDeclaration` node's `.specifiers`. Restoring the raw walk
-/// re-introduces the OXC import-node reference (`ImportDeclaration`) and/or the
-/// specifier iteration (`specifiers`) — either is the banned shape (the two
-/// files own NO other legitimate use of the raw import node, so any reference is
-/// the dual-path regression).
+/// does `code` (comments stripped) re-walk the raw OXC import node to collect
+/// import LOCALS? The D-47 discharge routes every import LOCAL through the SHARED
+/// `ClassifiedScriptImports` carrier (`script_imports.admitted(slot)` +
+/// `import_binding_entries(import)`), classified ONCE at IR construction — never a
+/// per-file re-walk of the OXC `Statement::ImportDeclaration` node. Import
+/// bindings are reachable from the raw node by exactly TWO shapes, both banned:
+/// (1) DIRECT field access — the locals live ONLY in `ImportDeclaration.specifiers`
+/// (`ImportDeclarationSpecifier::{Import,ImportDefault,ImportNamespace}.local`), so
+/// the `specifiers` token signals a direct walk; (2) DRIVING the OXC visitor over
+/// the import node — `Visit::visit_import_declaration` / `walk_import_declaration`
+/// internally walk `.specifiers` and fire `visit_binding_identifier` on each
+/// `local`, collecting the locals WITHOUT the caller ever spelling `specifiers`,
+/// so those visitor-entry tokens are banned too. Merely NAMING the
+/// `Statement::ImportDeclaration` variant is NOT the defect: the exhaustive,
+/// no-soft-wildcard scope-view erasure classifier (`statement_is_scope_erased`)
+/// legitimately matches that arm to read `import_kind.is_type()` — a
+/// statement-level erasure decision that touches no `specifiers` and drives no
+/// import visitor, so it stays free (banning the bare variant name would
+/// false-positive on it). As a SECONDARY substring tripwire this cannot catch a
+/// walk hidden behind a cross-file helper; a PRIMARY AST-aware D-47 guard is a
+/// tracked debt-ledger follow-up, out of scope here.
 fn contains_raw_import_local_walk(code: &str) -> bool {
     let stripped = strip_comments(code);
-    stripped.contains("ImportDeclaration") || stripped.contains("specifiers")
+    stripped.contains("specifiers")
+        || stripped.contains("visit_import_declaration")
+        || stripped.contains("walk_import_declaration")
 }
 
 #[test]
@@ -622,23 +635,27 @@ fn no_raw_import_specifier_walk_in_import_local_discharge_files() {
     // The two files whose D-47 discharge reads import LOCALS from the shared
     // `ClassifiedScriptImports` carrier — neither may re-walk the raw OXC import
     // node's specifiers (a second import-classification path is the D-47 defect).
-    for name in ["needs_context.rs", "reactive_analysis.rs"] {
+    // The canonical component-scope binder (`component_scope_facts.rs`) owns the
+    // reactive/unsafe-root import-local half through the same carrier; the reactive
+    // analysis no longer discharges import locals directly.
+    for name in ["needs_context.rs", "component_scope_facts.rs"] {
         let code = read_runtime_file(name);
         assert!(
             !contains_raw_import_local_walk(&code),
-            "GUARD (D-47 discharge): `{name}` must NOT re-walk the raw OXC \
-             `Statement::ImportDeclaration` node / its `.specifiers` to collect import \
-             LOCALS — the import-local half of the unsafe-root / reactive-root set comes \
-             from the shared `ClassifiedScriptImports` carrier \
-             (`script_imports.admitted(slot)` + `import_binding_entries(import)`), \
-             classified ONCE at IR construction. A raw specifier re-walk is a second \
-             import-classification path (the exact D-47 dual-path defect); route through \
-             the carrier instead."
+            "GUARD (D-47 discharge): `{name}` must NOT re-walk the raw OXC import \
+             node's `.specifiers` to collect import LOCALS — the import-local half of \
+             the unsafe-root / reactive-root set comes from the shared \
+             `ClassifiedScriptImports` carrier (`script_imports.admitted(slot)` + \
+             `import_binding_entries(import)`), classified ONCE at IR construction. A \
+             raw specifier re-walk is a second import-classification path (the exact \
+             D-47 dual-path defect); route through the carrier instead. (Naming the \
+             `Statement::ImportDeclaration` variant to read `import_kind` for \
+             statement-level scope erasure is NOT the defect — it collects no locals.)"
         );
     }
     // POSITIVE (non-vacuous): both files DO consume the shared carrier — the guard
     // is guarding a LIVE discharge, not an absent one.
-    for name in ["needs_context.rs", "reactive_analysis.rs"] {
+    for name in ["needs_context.rs", "component_scope_facts.rs"] {
         let code = read_runtime_file(name);
         assert!(
             code.contains("ClassifiedScriptImports"),
@@ -670,5 +687,124 @@ fn import_local_discharge_guard_discriminates_a_restored_specifier_walk() {
     assert!(
         !contains_raw_import_local_walk(comment_only),
         "the guard must ignore a banned token that appears ONLY in a comment"
+    );
+    // The legitimate exhaustive-match erasure arm names the `Statement::ImportDeclaration`
+    // variant to read `import_kind` (a statement-level scope-erasure decision) but walks
+    // NO `.specifiers` and collects NO locals — it MUST NOT trip. This is the exact
+    // false-positive the `specifiers`-keyed predicate fixes: keying on the bare variant
+    // name would wrongly flag this arm, which the `statement_is_scope_erased` classifier
+    // in `component_scope_facts.rs` genuinely contains.
+    let erasure_kind_check = "Statement::ImportDeclaration(i) => i.import_kind.is_type(),";
+    assert!(
+        !contains_raw_import_local_walk(erasure_kind_check),
+        "the guard must NOT flag the statement-level `import_kind` scope-erasure arm \
+         (it names the variant but walks no `.specifiers` and collects no locals)"
+    );
+    // A VISITOR-driven raw import-local walk collects the locals by DRIVING OXC's
+    // `visit_import_declaration` over the import node (the generated walk fires
+    // `visit_binding_identifier` on each specifier `local`) WITHOUT the caller ever
+    // spelling `specifiers` — it MUST still trip. A `specifiers`-only predicate would
+    // MISS this (the exact D-47 coverage gap this strengthening closes).
+    let visitor_walk = "if let Statement::ImportDeclaration(decl) = stmt { \
+         let mut collector = ImportLocalCollector::default(); \
+         collector.visit_import_declaration(decl); \
+         unsafe_roots.extend(collector.locals); }";
+    assert!(
+        contains_raw_import_local_walk(visitor_walk),
+        "the guard must FLAG a visitor-driven raw import-local walk \
+         (`visit_import_declaration`) that never spells `specifiers`"
+    );
+    assert!(
+        !visitor_walk.contains("specifiers"),
+        "sanity: the visitor-walk fixture must NOT contain the `specifiers` token \
+         (else it would not exercise the visitor-path coverage gap)"
+    );
+}
+
+// ── Guard: the compile-options resolver has a SINGLE production call site ────────
+
+/// Count the CALL sites of `resolve_svelte_compile_options(` in `code` — occurrences
+/// of the name immediately followed by `(` that are NOT the `fn` DEFINITION. Comments
+/// are stripped first so a doc-comment mention never counts.
+fn resolver_call_sites(code: &str) -> usize {
+    let stripped = strip_comments(code);
+    let needle = "resolve_svelte_compile_options(";
+    stripped
+        .match_indices(needle)
+        .filter(|(idx, _)| {
+            // Exclude the `fn resolve_svelte_compile_options(` definition.
+            !stripped[..*idx].trim_end().ends_with("fn")
+        })
+        .count()
+}
+
+/// Every PRODUCTION runtime source file (a `.rs` under `src/svelte/runtime` that is
+/// NOT a `*_tests.rs` test module).
+fn production_runtime_files() -> Vec<String> {
+    let mut out: Vec<String> = std::fs::read_dir(runtime_dir())
+        .expect("read runtime dir")
+        .filter_map(|entry| {
+            let name = entry.ok()?.file_name().into_string().ok()?;
+            (name.ends_with(".rs") && !name.ends_with("_tests.rs")).then_some(name)
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+#[test]
+fn resolve_svelte_compile_options_has_single_production_call_site() {
+    // GUARD: the compile-options fold is a SINGLE entry — exactly ONE production call
+    // to `resolve_svelte_compile_options`, in `client_compile.rs` (the pipeline
+    // driver). A second call site would be a divergent fold path (two resolvers
+    // disagree on precedence / defaults / the fail-closed set).
+    let mut total = 0usize;
+    for name in production_runtime_files() {
+        let count = resolver_call_sites(&read_runtime_file(&name));
+        if count > 0 {
+            assert_eq!(
+                name, "client_compile.rs",
+                "GUARD: `resolve_svelte_compile_options` is called from {name} — the fold \
+                 must have a SINGLE production call site (`client_compile.rs`)."
+            );
+        }
+        total += count;
+    }
+    assert_eq!(
+        total, 1,
+        "GUARD: expected EXACTLY one production call site of \
+         `resolve_svelte_compile_options` (in `client_compile.rs`), found {total}."
+    );
+}
+
+#[test]
+fn resolver_single_entry_guard_discriminates_a_second_call_site() {
+    // DISCRIMINATION on inline strings: the predicate counts CALL sites, excludes the
+    // `fn` definition, and ignores comment mentions.
+    let definition =
+        "pub fn resolve_svelte_compile_options(source: &str) -> Result<T, E> { todo!() }";
+    assert_eq!(
+        resolver_call_sites(definition),
+        0,
+        "the definition site must NOT count as a call"
+    );
+    let one_call = "let resolved = resolve_svelte_compile_options(source, parsed, opts)?;";
+    assert_eq!(
+        resolver_call_sites(one_call),
+        1,
+        "a single call counts once"
+    );
+    let two_calls =
+        "resolve_svelte_compile_options(a, b, c); foo(); resolve_svelte_compile_options(d, e, f);";
+    assert_eq!(
+        resolver_call_sites(two_calls),
+        2,
+        "a second call site must be counted (the banned shape)"
+    );
+    let comment_only = "// the old resolve_svelte_compile_options(x) call is gone\nlet x = 1;";
+    assert_eq!(
+        resolver_call_sites(comment_only),
+        0,
+        "a comment mention must NOT count as a call"
     );
 }

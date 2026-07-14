@@ -20,7 +20,7 @@ use super::client_plan_block_types::{
 use super::client_plan_types::ClientNode;
 use super::html::{synthesize_region, TemplateFactory};
 use super::ir::{BlockIr, IrNode, NodeId, SvelteRuntimeIr, TemplateScope, TemplateScopeId};
-use super::whitespace::{clean_nodes, clean_nodes_indexed, CleanContext, CleanItem};
+use super::whitespace::{clean_nodes, clean_nodes_indexed, CleanItem};
 
 impl<'a> ClientEmitter<'a> {
     /// Plan + emit every region's module-hoisted template factory, in POST-ORDER (a block
@@ -42,9 +42,12 @@ impl<'a> ClientEmitter<'a> {
                 TemplateFactory::FromHtml {
                     html,
                     fragment_flag,
+                    tree,
+                    ..
                 } => {
                     let var = self.alloc_name("root");
-                    let mounts_fragment = emit_root_hoist(out, &var, html, *fragment_flag);
+                    let mounts_fragment =
+                        emit_root_hoist(out, &var, html, *fragment_flag, tree.as_deref());
                     RegionFrame::FromHtml {
                         hoist_var: var,
                         mounts_fragment,
@@ -271,7 +274,8 @@ impl<'a> ClientEmitter<'a> {
         // — they ARE the region roots — then the ops + the after_update; there is no
         // clone/walk/mount.
         let roots = self.ir().template_scope(scope_id).roots.clone();
-        let has_dom = !clean_nodes(self.ir(), &roots, CleanContext::region_root()).is_empty();
+        let has_dom =
+            !clean_nodes(self.ir(), &roots, super::html::region_ctx(self.ir())).is_empty();
         if !has_dom {
             let gaps = self.interleaved_gaps(&roots, &[]);
             self.emit_interleaved_gap(out, &gaps[0]);
@@ -413,7 +417,8 @@ impl<'a> ClientEmitter<'a> {
         // The interleaved `{@debug}` / `<svelte:head>` gap nodes (dropped from the clean
         // sequence) emit at their document gaps — all before the reactive ops, in source order.
         let roots = self.ir().template_scope(scope_id).roots.clone();
-        let (_, last_indices) = clean_nodes_indexed(self.ir(), &roots, CleanContext::region_root());
+        let (_, last_indices) =
+            clean_nodes_indexed(self.ir(), &roots, super::html::region_ctx(self.ir()));
         let gaps = self.interleaved_gaps(&roots, &last_indices);
         for gap in &gaps {
             self.emit_interleaved_gap(out, gap);
@@ -450,7 +455,7 @@ impl<'a> ClientEmitter<'a> {
                 return false;
             }
         }
-        clean_nodes(self.ir(), roots, CleanContext::region_root()).is_empty()
+        clean_nodes(self.ir(), roots, super::html::region_ctx(self.ir())).is_empty()
             && self.plan().ops_in(scope_id).is_empty()
     }
 
@@ -776,7 +781,7 @@ impl<'a> ClientEmitter<'a> {
 /// `None` when the region is not a single standalone node (never reached on the accept
 /// path for a `Standalone` factory).
 fn standalone_root_node(ir: &SvelteRuntimeIr, scope: &TemplateScope) -> Option<NodeId> {
-    let items = clean_nodes(ir, &scope.roots, CleanContext::region_root());
+    let items = clean_nodes(ir, &scope.roots, super::html::region_ctx(ir));
     match items.as_slice() {
         [CleanItem::Node(only)] => Some(*only),
         _ => None,

@@ -608,6 +608,7 @@ impl VerterHost {
                             &hd.parse.semantic_hash,
                             soh,
                             coh,
+                            profile.svelte_css_hash_override.as_deref(),
                             || {
                                 // Test-only: count store-view reads that
                                 // actually happened — i.e. AFTER the cheap
@@ -744,6 +745,7 @@ impl VerterHost {
                 &parse.semantic_hash,
                 soh,
                 coh,
+                profile.svelte_css_hash_override.as_deref(),
                 || {
                     #[cfg(test)]
                     crate::resolver_store::record_compile_warm_validation_view_read();
@@ -1229,6 +1231,7 @@ impl VerterHost {
                                 &parse.semantic_hash,
                                 soh,
                                 coh,
+                                profile.svelte_css_hash_override.as_deref(),
                                 || {
                                     #[cfg(test)]
                                     crate::resolver_store::record_compile_warm_validation_view_read(
@@ -1556,6 +1559,7 @@ impl VerterHost {
             captured_semantic_hash,
             style_override_hash,
             content_override_hash,
+            profile.svelte_css_hash_override.as_deref().map(Arc::from),
             compiled_outputs.clone(),
             diagnostics.clone(),
             if stale {
@@ -2271,6 +2275,9 @@ impl VerterHost {
             ssr: profile.ssr,
             runtime_module_name: profile.runtime_module_name.clone(),
             component_id: profile.component_id.clone(),
+            // The RESOLVED Svelte cssHash override (byte-exact) — a Svelte carrier
+            // scope-class input; Vue ignores it. Already in the profile identity.
+            svelte_css_hash_override: profile.svelte_css_hash_override.clone(),
             force_js: profile.force_js,
             force_vapor: profile.force_vapor,
             comments: profile.comments,
