@@ -74,14 +74,16 @@ states that limit rather than hiding it. Enumerate-and-confirm is a stopgap with
 
 ### D. The 5 pre-existing failures — but FIRST, re-establish the baseline
 
-**Do not start from `5 of 118`. Establish it.** The base tree (`verter-base-c6f5`) contains **no tsgo** — no
+**Do not start from `5 of 118`. Establish it.** The tree that number was measured on contained **no tsgo** — no
 `@typescript/native-preview` in the fixture or at root, no tsgo binary anywhere — so the claimed **54 tsgo** tests
 cannot have sourced their engine from it. They either took it from **elsewhere on the machine** (unverified, and
 if it was the Native Preview install, the baseline is entangled with the very bug under investigation) or they
 did not run. **A baseline whose engine provenance is unknown is not a baseline** — and this is the fourth time
 this number has moved. **First deliverable of this section: re-measure, and record WHERE EACH ENGINE CAME FROM.**
 It is the same class as the gitignored fixtures below, one layer down: a suite that reports a count without
-proving what it actually executed against.
+proving what it actually executed against. There is **no pre-provisioned tree** to inherit — see the provisioning
+recipe in [`README.md`](README.md), and note that a *missing* fixture makes tests silently PASS with zero
+assertions rather than failing.
 
 The base then fails some set of real-provider tests (last measured: **5** — completion ×2, hover, rename, a
 completion/edit race). Under the **STRICT** gate default (see

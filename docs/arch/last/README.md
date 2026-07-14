@@ -98,34 +98,49 @@ left live in another. **After every fix, grep the whole tree for the pattern you
   Names: completion ×2, hover, rename, a completion/edit race. **The number was quoted as 2, then 7, then 11
   before anyone measured it on a tree that could actually run the suite.** Do not quote a baseline you did not
   measure.
-- **⚠ The tsgo half of that number is NOT reproducible from the base tree, and its provenance is UNVERIFIED.**
-  `D:/dev/personal/verter-base-c6f5` (detached at `c6f50174d`) contains **no tsgo at all**:
-  `@typescript/native-preview` is absent from the `single-project` fixture *and* from root `node_modules`, and no
-  tsgo binary exists anywhere in the tree. So the 54 tsgo tests either sourced tsgo from **elsewhere on the
-  machine** — plausibly the very Native Preview install that causes the reported bug, or a `VERTER_TSGO_BIN` — or
-  they did not execute, and the count is wrong for the fourth time. **Nobody has established which.** A baseline
-  whose engine provenance is unknown is not a baseline: **re-establish it, recording where tsgo came from, before
-  trusting `5 of 118`.** This is the same defect that produced 2 → 7 → 11 → 5, one layer further down.
-- **What the base tree DOES have** (real, and expensive to recreate — keep it): a complete pnpm install (`.pnpm`,
-  1908 packages), the `single-project` fixture provisioned with `typescript@5.9.3` (which is what makes the
-  **tsserver** half non-vacuous), and incremental cargo state in `target/deps`. **What it does NOT have:** a built
-  binary (`target/debug` holds no `verter_lsp`), tsgo, and provisioning for **19 of its 20 fixtures**. It is a
-  tsserver-half baseline, not a full one.
-- **`CARGO_BUILD_JOBS=2` is mandatory** on this machine; MSVC `link.exe` dies with `0xc0000142` otherwise.
+- **⚠ The tsgo half of that number had UNVERIFIED provenance, so do not inherit it.** The tree it was measured on
+  contained **no tsgo at all** — `@typescript/native-preview` absent from the fixture *and* from root
+  `node_modules`, and no tsgo binary anywhere in it. So the 54 tsgo tests either sourced their engine from
+  **elsewhere on the machine** — plausibly the very Native Preview install that causes the reported bug, which
+  would entangle the baseline with its own subject — or they did not execute, and the count is wrong for the
+  fourth time. **Nobody established which.** A baseline whose engine provenance is unknown is not a baseline:
+  **re-measure, and record where each engine came from.** Same defect as 2 → 7 → 11 → 5, one layer down.
+
+### Provisioning — you will have to do this, and it is the thing everyone got wrong
+
+**There is no pre-provisioned tree any more; all worktrees were removed** (nothing was lost — see below). Provision
+deliberately, because a *missing* fixture does not fail the suite, it makes tests **silently return and score PASS
+with zero assertions**. That is why every baseline number was wrong.
+
+1. `pnpm install` at the root (restores the pnpm store — ~1900 packages).
+2. **The gitignored fixture `node_modules`** — `packages/vue-vscode/e2e/fixtures/single-project/node_modules`
+   (needs a real `typescript`; 5.9.3 is what the last measurement used). **This is the one that makes the
+   *tsserver* half non-vacuous.** Only 1 of the 20 fixtures was ever provisioned.
+3. **tsgo was NEVER provisioned into the tree.** Decide and RECORD where the tsgo engine comes from before you
+   quote any tsgo number.
+4. `cargo build` — **`CARGO_BUILD_JOBS=2` is mandatory** on this machine; MSVC `link.exe` dies with `0xc0000142`
+   otherwise. The last base tree had incremental state but **no built binary**.
+5. **Set `VERTER_REQUIRE_TSSERVER=1 VERTER_REQUIRE_TSGO=1`** — they turn the silent skip into a hard failure. The
+   gate should set them; that is exactly the class of hole the gate-integrity block exists to close.
+
 - **Canonical Rust gate:** `cargo nextest run --workspace` **plus** `cargo test -p verter_session --tests`. Bare
   `cargo test --workspace --tests` **silently skips ~4404 tests**.
-- **51 worktrees have accumulated, and EIGHT carry UNCOMMITTED work — a prune destroys it.** An earlier draft of
-  this file said *"cleanup is tracked, not urgent,"* which is exactly the sentence that would have caused the loss:
-  uncommitted files are not in git, so a branch does not protect them, and **two of the eight sit on DETACHED
-  HEADs** where nothing points at the work at all. The substantive ones: **`verter-e2e-ab`** (detached; +111/−16
-  across `e2e/runTests.ts`, `e2e/suite/index.ts`, `src/runSummaryOracle.ts` — **this is the block-1 harness defect,
-  already partly solved**) and **`verter-sb6c5`** (+66/−50 in `tsgo/composite.rs`, `owned_binding_gate.rs`).
-- **All of it is now ANCHORED in the object DB and recoverable — the worktrees themselves were left untouched.**
-  Tracked deltas: `preserve/verter-e2e-ab`, `preserve/verter-sb6c5`, `preserve/verter-b1a-cfm`,
-  `preserve/verter-perfbench`. Untracked source a stash cannot capture: `preserve/verter-b8-untracked`
-  (`d1a_codec_probe.rs`), `preserve/agent-ab0f09-untracked`
-  (`tsserver_auto_import_completion_payload.rs`). Recover with `git show <tag>:<path>`; inspect with
-  `git show --stat <tag>`. **Pruning the worktrees is now safe. Deleting these tags is not.**
-- Do **not** commit the worktrees' big untracked dirs — they are artifacts, not work: `.d1a-engines/` (396 MB),
-  `_bench/` (62 MB), `.review-artifacts/` (7.6 MB). `verter-base-c6f5` must stay **detached at `c6f50174d`** —
-  being exactly at that commit with `node_modules` provisioned is the whole reason it is a valid baseline tree.
+
+### The worktrees are gone, and nothing was lost
+
+51 worktrees were removed. **Removing a worktree deletes no commit and no branch** — every branch, including the
+rejected `block/1-min-repro-fix`, survives untouched. Eight of them carried **uncommitted** work (two on detached
+HEADs, where nothing in git pointed at it at all); all of it was anchored **before** deletion and is recoverable:
+
+| Tag | Holds |
+|---|---|
+| `preserve/verter-e2e-ab` | +111/−16 on `e2e/runTests.ts`, `e2e/suite/index.ts`, `src/runSummaryOracle.ts` — **the block-1 e2e-harness defect, already partly solved. Read this before rebuilding it.** |
+| `preserve/verter-sb6c5` | +66/−50 in `tsgo/composite.rs`, `owned_binding_gate.rs` |
+| `preserve/verter-b1a-cfm` | the rejected block's working delta |
+| `preserve/verter-perfbench` | bench scratch |
+| `preserve/verter-b8-untracked` | `d1a_codec_probe.rs` (368 lines) |
+| `preserve/agent-ab0f09-untracked` | `tsserver_auto_import_completion_payload.rs` (76 lines) |
+
+Recover with `git show <tag>:<path>`; inspect with `git show --stat <tag>`. **Do not delete these tags** — they are
+the only copy. Artifacts were deliberately NOT preserved (`.d1a-engines/` 396 MB, `_bench/` 62 MB,
+`.review-artifacts/` 7.6 MB); the review artifacts' findings were already salvaged into `docs/better-implementation/`.
