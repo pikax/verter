@@ -102,4 +102,18 @@ left live in another. **After every fix, grep the whole tree for the pattern you
 - **`CARGO_BUILD_JOBS=2` is mandatory** on this machine; MSVC `link.exe` dies with `0xc0000142` otherwise.
 - **Canonical Rust gate:** `cargo nextest run --workspace` **plus** `cargo test -p verter_session --tests`. Bare
   `cargo test --workspace --tests` **silently skips ~4404 tests**.
-- ~45 stale worktrees have accumulated (`git worktree list`). Cleanup is tracked, not urgent.
+- **51 worktrees have accumulated, and EIGHT carry UNCOMMITTED work — a prune destroys it.** An earlier draft of
+  this file said *"cleanup is tracked, not urgent,"* which is exactly the sentence that would have caused the loss:
+  uncommitted files are not in git, so a branch does not protect them, and **two of the eight sit on DETACHED
+  HEADs** where nothing points at the work at all. The substantive ones: **`verter-e2e-ab`** (detached; +111/−16
+  across `e2e/runTests.ts`, `e2e/suite/index.ts`, `src/runSummaryOracle.ts` — **this is the block-1 harness defect,
+  already partly solved**) and **`verter-sb6c5`** (+66/−50 in `tsgo/composite.rs`, `owned_binding_gate.rs`).
+- **All of it is now ANCHORED in the object DB and recoverable — the worktrees themselves were left untouched.**
+  Tracked deltas: `preserve/verter-e2e-ab`, `preserve/verter-sb6c5`, `preserve/verter-b1a-cfm`,
+  `preserve/verter-perfbench`. Untracked source a stash cannot capture: `preserve/verter-b8-untracked`
+  (`d1a_codec_probe.rs`), `preserve/agent-ab0f09-untracked`
+  (`tsserver_auto_import_completion_payload.rs`). Recover with `git show <tag>:<path>`; inspect with
+  `git show --stat <tag>`. **Pruning the worktrees is now safe. Deleting these tags is not.**
+- Do **not** commit the worktrees' big untracked dirs — they are artifacts, not work: `.d1a-engines/` (396 MB),
+  `_bench/` (62 MB), `.review-artifacts/` (7.6 MB). `verter-base-c6f5` must stay **detached at `c6f50174d`** —
+  being exactly at that commit with `node_modules` provisioned is the whole reason it is a valid baseline tree.
